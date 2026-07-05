@@ -28,6 +28,7 @@ The feature factory persists a per-run control plane so runs are durable, resuma
   evidence/<subject>.json
   reviews/<subject>.json
   reviews/security-reviewer.json
+  processes/<timestamp>.log
 ```
 
 Implementation worktrees live under:
@@ -225,6 +226,12 @@ For `blocked`, `partial`, or `needs-human`, set `reason` to the concise operator
 ```
 
 The dependency graph must be acyclic. A slice is eligible when every id in `depends_on` has status `merged`.
+
+## Code-Level Validation
+
+The CLI enforces this schema with `feature-factory factory validate [run-id]`. Validation covers `run.json`, gates, run slices, terminal results, and `plan/slices.json` when present. `factory status` and `factory answer` reject invalid `run.json`; `factory list` marks invalid runs instead of failing the whole listing.
+
+`factory start --detached` writes stdout/stderr logs under `.opencode/factory/processes/` for external watchers.
 
 ## evidence/<subject>.json
 

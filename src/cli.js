@@ -4,8 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
-import { listRuns, startFactory, status, watchRun, writeGateAnswer } from "./factory.js";
+import { listRuns, startFactory, status, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectProvenance } from "./provenance.js";
 
@@ -17,11 +16,12 @@ function usage() {
 Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
-  factory start [--repo PATH] [--headless|--autonomous] <prompt...>
+  factory start [--repo PATH] [--headless|--autonomous|--detached] <prompt...>
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
+  factory validate [run-id]     Validate run.json and plan/slices.json
   factory answer <run> <gate> <approve|stop|changes: ...>
-  factory watch [run-id]        Print status changes as JSON
+  factory watch [run-id] [--all] Print status changes as JSON
   factory provenance            Print detected versions, models, and capabilities
 `);
 }
@@ -63,9 +63,15 @@ async function factory(args) {
   const [sub, ...rest] = args;
   const opts = options(rest);
   const positional = positionals(rest);
-  if (sub === "start") return startFactory(positional, opts);
+  if (sub === "start") return print(startFactory(positional, opts), opts);
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
+  if (sub === "validate") {
+    const result = validateState(positional[0], opts);
+    print(result, { ...opts, json: true });
+    process.exitCode = result.ok ? 0 : 1;
+    return;
+  }
   if (sub === "provenance") return print(await collectProvenance({ cwd: opts.cwd }), { ...opts, json: true });
   if (sub === "answer") {
     const [runId, gate, ...answerParts] = positional;
@@ -86,6 +92,8 @@ function options(args) {
     profiles: args.includes("--profiles"),
     providerSmoke: args.includes("--provider-smoke"),
     autonomous: args.includes("--autonomous"),
+    detached: args.includes("--detached"),
+    all: args.includes("--all"),
     headless: args.includes("--headless") || args.includes("--detached"),
     ready: args.includes("--ready"),
   };
@@ -113,6 +121,7 @@ function positionals(args) {
 }
 
 function print(value, opts) {
+  if (value === undefined) return;
   if (opts.json || typeof value !== "object") {
     console.log(typeof value === "string" ? value : JSON.stringify(value, null, 2));
     return;

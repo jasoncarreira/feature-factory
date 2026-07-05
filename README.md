@@ -67,7 +67,8 @@ Role-based profiles:
           "planning": { "model": "openai/gpt-5.5", "variant": "xhigh" },
           "builder": { "model": "openai/gpt-5.4", "variant": "xhigh" },
           "test": { "model": "openai/gpt-5.4", "variant": "medium" },
-          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" }
+          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+          "security": { "model": "openai/gpt-5.5", "variant": "high" }
         }
       }
     ]
@@ -95,7 +96,7 @@ Exact agent profiles take precedence over role/default/top-level profiles:
 }
 ```
 
-Supported roles: `story`, `research`, `design`, `planning`, `builder`, `test`, `reviewer`. The dedicated primary orchestrator agent, `feature-factory`, is mapped to `planning`.
+Supported roles: `story`, `research`, `design`, `planning`, `builder`, `test`, `reviewer`, `security`. The dedicated primary orchestrator agent, `feature-factory`, is mapped to `planning`. `security-reviewer` uses `profiles.security` when present and falls back to `profiles.reviewer` for compatibility.
 
 Factory agents are configured with scoped non-interactive permissions (`bash`, `edit` where appropriate, `webfetch`, task delegation, and read/search tools) so `factory start --headless` cannot deadlock on opencode permission prompts. `external_directory` is explicitly denied. This permission scope applies to the factory command and factory agents, not to your global opencode sessions.
 
@@ -122,7 +123,8 @@ Recommended mapping, using OpenAI model IDs as examples. If your opencode provid
           "planning": { "model": "openai/gpt-5.5", "variant": "xhigh" },
           "builder": { "model": "openai/gpt-5.4", "variant": "xhigh" },
           "test": { "model": "openai/gpt-5.4", "variant": "medium" },
-          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" }
+          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+          "security": { "model": "openai/gpt-5.5", "variant": "high" }
         }
       }
     ]
@@ -140,12 +142,14 @@ Resolved agent profile:
 | `feature-factory`, `spec-writer`, `work-decomposer` | `gpt-5.5` | `xhigh` |
 | `backend-builder`, `frontend-builder` | `gpt-5.4` | `xhigh` |
 | `test-verifier` | `gpt-5.4` | `medium` |
-| `work-reviewer`, `implementation-validator`, `security-reviewer` | `gpt-5.5` | `xhigh` |
+| `work-reviewer`, `implementation-validator` | `gpt-5.5` | `xhigh` |
+| `security-reviewer` | `gpt-5.5` | `high` |
 
 Rationale:
 
 - Planning/decomposition needs the highest reasoning budget because it determines architecture, slice boundaries, dependencies, and merge safety.
 - Review/validation also needs the highest budget because it catches cross-slice correctness gaps before PR creation.
+- Security review is isolated as its own profile so teams can tune adversarial review cost separately. Use `high` by default and raise to `xhigh` for high-risk auth, permission, prompt-injection, shell, SQL, or dependency changes.
 - Builders benefit from high effort but can usually use a slightly cheaper model because the brief and slice spec constrain the work.
 - Story reading/writing and acceptance-test authoring are important but narrower, so medium effort is usually sufficient.
 
@@ -228,6 +232,14 @@ Run autonomously through the factory's own reviewed gates and open a draft PR wh
 feature-factory factory start --repo /path/to/repo --autonomous "APP-123 add the missing approval workflow"
 ```
 
+Run in the background for external watchers or CI-style adapters:
+
+```sh
+feature-factory factory start --repo /path/to/repo --headless --detached "APP-123 add the missing approval workflow"
+```
+
+Detached mode returns a PID and writes stdout/stderr to `.opencode/factory/processes/<timestamp>.log`.
+
 Autonomous mode is explicit opt-in. It still writes gate question files, observed evidence, reviews, and `run.json`; it records story/brief approvals only when the artifacts are complete and unambiguous, decides pre-PR from the implementation-validator/security-reviewer panel, runs bounded remediation on NO-GO, and never auto-merges.
 
 Monitor local state:
@@ -236,8 +248,12 @@ Monitor local state:
 feature-factory factory list
 feature-factory factory status <run-id> --json
 feature-factory factory watch <run-id>
+feature-factory factory watch --all
+feature-factory factory validate <run-id>
 feature-factory factory provenance
 ```
+
+`factory status`, `factory answer`, and `factory validate` apply code-level schema validation to `run.json`; `factory validate` also validates `plan/slices.json` when present. Invalid runs appear as `invalid` in `factory list` instead of crashing the whole list.
 
 When opencode is running in the TUI on a session route, the sidebar also shows a `Feature Factory` panel for runs found under `.opencode/factory/*/run.json`. It lists active runs across the repo, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden except for the most recent completed run.
 

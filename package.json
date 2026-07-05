@@ -20,7 +20,8 @@
   ],
   "scripts": {
     "doctor": "node src/cli.js doctor",
-    "check": "node src/cli.js doctor --local"
+    "test": "node --test",
+    "check": "npm test && node src/cli.js doctor --local"
   },
   "keywords": [
     "opencode",

@@ -1,7 +1,8 @@
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -12,6 +13,7 @@ export function startFactory(args, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(formatPrompt(args.join(" "), opts));
+  if (opts.detached) return startDetached(repo, commandArgs);
   const proc = spawnSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
   if (proc.status !== 0) throw new Error(`opencode exited ${proc.status ?? 1}`);
 }
@@ -23,12 +25,22 @@ export function listRuns(opts = {}) {
     .map((runId) => {
       const file = join(root, runId, "run.json");
       if (!existsSync(file)) return null;
-      const run = readRunFile(file);
+      const run = tryReadRunFile(file);
+      if (run.error) {
+        return {
+          run_id: runId,
+          status: "invalid",
+          gate: null,
+          updated_at: null,
+          path: file,
+          error: run.error,
+        };
+      }
       return {
-        run_id: run.run_id || runId,
-        status: run.status || "unknown",
-        gate: pendingGate(run),
-        updated_at: run.updated_at || null,
+        run_id: run.value.run_id || runId,
+        status: run.value.status || "unknown",
+        gate: pendingGate(run.value),
+        updated_at: run.value.updated_at || null,
         path: file,
       };
     })
@@ -79,7 +91,7 @@ export function watchRun(runId, opts = {}) {
   const intervalMs = Number(opts.intervalMs || 2000);
   let last = "";
   const print = () => {
-    const current = JSON.stringify(status(runId, opts));
+    const current = JSON.stringify(opts.all ? listRuns(opts) : status(runId, opts));
     if (current !== last) {
       last = current;
       console.log(current);
@@ -89,12 +101,27 @@ export function watchRun(runId, opts = {}) {
   return setInterval(print, intervalMs);
 }
 
+export function validateState(runId, opts = {}) {
+  const runDirs = runId ? [resolveRunDir(runId, opts)] : allRunDirs(opts);
+  const runs = runDirs.map((dir) => ({ run_dir: dir, ...validateRunDir(dir) }));
+  return { ok: runs.every((item) => item.ok), runs };
+}
+
 function loadRun(runId, opts = {}) {
   return readRunFile(join(resolveRunDir(runId, opts), "run.json"));
 }
 
 function readRunFile(file) {
-  return JSON.parse(readFileSync(file, "utf8"));
+  const run = JSON.parse(readFileSync(file, "utf8"));
+  return validateRun(run);
+}
+
+function tryReadRunFile(file) {
+  try {
+    return { value: readRunFile(file) };
+  } catch (error) {
+    return { error: error.message };
+  }
 }
 
 function resolveRunDir(runId, opts = {}) {
@@ -110,6 +137,37 @@ function resolveRunDir(runId, opts = {}) {
 
 function factoryRoot(cwd) {
   return join(repoRoot(cwd), ".opencode", "factory");
+}
+
+function allRunDirs(opts = {}) {
+  const root = factoryRoot(opts.cwd || process.cwd());
+  if (!existsSync(root)) return [];
+  return readdirSync(root)
+    .map((runId) => join(root, runId))
+    .filter((dir) => existsSync(join(dir, "run.json")));
+}
+
+function startDetached(repo, commandArgs) {
+  const processes = join(factoryRoot(repo), "processes");
+  mkdirSync(processes, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const log = join(processes, `${stamp}.log`);
+  const out = openSync(log, "a");
+  const child = spawn("opencode", commandArgs, {
+    cwd: repo,
+    detached: true,
+    stdio: ["ignore", out, out],
+  });
+  child.on("error", (error) => appendFileSync(log, `\n[feature-factory] failed to start opencode: ${error.message}\n`));
+  child.unref();
+  closeSync(out);
+  return {
+    status: "started",
+    pid: child.pid,
+    repo,
+    log,
+    command: ["opencode", ...commandArgs].join(" "),
+  };
 }
 
 function pendingGate(run) {
@@ -162,6 +220,10 @@ function formatPrompt(prompt, opts) {
 
 [Feature Factory Driver Mode]
 Run in headless scripted mode: advance the factory only until the next gate or terminal status, write the gate question file and run.json state, then exit. If an answer file already exists for the pending gate, consume it and continue to the next gate. Do not wait for interactive chat input.`;
+}
+
+export function validateSlices(plan) {
+  return validateSlicesPlan(plan);
 }
 
 function autonomousPrompt(prompt, opts) {

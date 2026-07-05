@@ -115,7 +115,7 @@ const AGENT_ROLES = {
   "test-verifier": "test",
   "work-reviewer": "reviewer",
   "implementation-validator": "reviewer",
-  "security-reviewer": "reviewer",
+  "security-reviewer": "security",
 };
 
 function applyProfileOptions(cfg, options = {}) {
@@ -125,13 +125,18 @@ function applyProfileOptions(cfg, options = {}) {
     const role = AGENT_ROLES[agentName];
     const selected =
       usableProfile(profiles[agentName]) ||
-      usableProfile(role ? profiles[role] : null) ||
+      roleProfile(profiles, role) ||
       usableProfile(profiles.default) ||
       topLevelProfile;
     if (!selected) continue;
     if (selected.model) agent.model = selected.model;
     if (selected.variant) agent.variant = selected.variant;
   }
+}
+
+function roleProfile(profiles, role) {
+  if (!role) return null;
+  return usableProfile(profiles[role]) || (role === "security" ? usableProfile(profiles.reviewer) : null);
 }
 
 function usableProfile(profile) {
