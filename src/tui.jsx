@@ -1,85 +1,8 @@
 /* @jsxImportSource @opentui/solid */
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { factoryRoots, readRuns } from "./tui-data.js";
 
 const HIDDEN_STATUSES = new Set(["completed"]);
-
-function factoryRoot(api) {
-  for (const start of [api.state.path.worktree, api.state.path.directory].filter(Boolean)) {
-    const hit = findFactoryRoot(start);
-    if (hit) return hit;
-  }
-  const base = api.state.path.worktree || api.state.path.directory;
-  return base ? join(base, ".opencode", "factory") : null;
-}
-
-function findFactoryRoot(start) {
-  let dir = resolve(start);
-  while (true) {
-    const candidate = join(dir, ".opencode", "factory");
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-
-function readRuns(root) {
-  if (!root || !existsSync(root)) return [];
-  return readdirSync(root)
-    .flatMap((runID) => {
-      const file = join(root, runID, "run.json");
-      if (!existsSync(file) || !statSync(file).isFile()) return [];
-      try {
-        const run = JSON.parse(readFileSync(file, "utf8"));
-        return [summarize(run, runID, file)];
-      } catch {
-        return [];
-      }
-    })
-    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
-}
-
-function summarize(run, fallbackID, file) {
-  return {
-    run_id: String(run.run_id || fallbackID),
-    status: String(run.status || "unknown"),
-    mode: run.mode ? String(run.mode) : null,
-    gate: pendingGate(run),
-    branch: run.branch ? String(run.branch) : null,
-    pr_url: run.pr_url ? String(run.pr_url) : null,
-    updated_at: run.updated_at ? String(run.updated_at) : null,
-    slices: sliceSummary(run),
-    panel: panelSummary(run),
-    terminal_reason: run.terminal_result?.reason ? String(run.terminal_result.reason) : null,
-    file,
-  };
-}
-
-function pendingGate(run) {
-  for (const [name, gate] of Object.entries(run.gates || {})) {
-    if (gate?.status === "pending") return name;
-  }
-  return null;
-}
-
-function sliceSummary(run) {
-  const slices = Array.isArray(run.slices) ? run.slices : [];
-  if (!slices.length) return null;
-  return {
-    merged: slices.filter((item) => item?.status === "merged").length,
-    blocked: slices.filter((item) => item?.status === "blocked").length,
-    total: slices.length,
-  };
-}
-
-function panelSummary(run) {
-  const validator = run.validator?.verdict ? String(run.validator.verdict) : null;
-  const security = run.security_review?.verdict ? String(run.security_review.verdict) : null;
-  if (!validator && !security) return null;
-  return [validator, security].filter(Boolean).join(" / ");
-}
 
 function statusColor(theme, status) {
   if (status === "completed") return theme.success;
@@ -95,8 +18,8 @@ function truncate(value, max) {
 }
 
 function View(props) {
-  const root = () => factoryRoot(props.api);
-  const [runs, setRuns] = createSignal(readRuns(root()));
+  const roots = () => factoryRoots(props.api);
+  const [runs, setRuns] = createSignal(readRuns(roots()));
   const theme = () => props.api.theme.current;
   const visible = createMemo(() => runs().length > 0);
   const active = createMemo(() => runs().filter((run) => !HIDDEN_STATUSES.has(run.status)));
@@ -107,7 +30,7 @@ function View(props) {
     if (completed && !list.some((run) => run.run_id === completed.run_id)) return [...list, completed];
     return list;
   });
-  const timer = setInterval(() => setRuns(readRuns(root())), 2000);
+  const timer = setInterval(() => setRuns(readRuns(roots())), 2000);
   onCleanup(() => clearInterval(timer));
 
   return (
