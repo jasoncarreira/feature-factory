@@ -17,7 +17,7 @@ function usage() {
 Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
-  factory start [--repo PATH] [--headless] <prompt...>
+  factory start [--repo PATH] [--headless|--autonomous] <prompt...>
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory answer <run> <gate> <approve|stop|changes: ...>
@@ -81,12 +81,15 @@ function options(args) {
     local: args.includes("--local"),
     profiles: args.includes("--profiles"),
     providerSmoke: args.includes("--provider-smoke"),
+    autonomous: args.includes("--autonomous"),
     headless: args.includes("--headless") || args.includes("--detached"),
+    ready: args.includes("--ready"),
   };
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--repo") opts.cwd = resolve(args[++index]);
     if (args[index] === "--model") opts.model = args[++index];
     if (args[index] === "--interval") opts.intervalMs = Number(args[++index]);
+    if (args[index] === "--reviewer") opts.reviewer = args[++index];
   }
   return opts;
 }
@@ -95,7 +98,7 @@ function positionals(args) {
   const output = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (["--repo", "--model", "--interval"].includes(arg)) {
+    if (["--repo", "--model", "--interval", "--reviewer"].includes(arg)) {
       index += 1;
       continue;
     }

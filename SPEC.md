@@ -6,8 +6,8 @@ Ideas to implement after reviewing `oh-my-openagent`, adapted for this package's
 
 - Preserve the factory as a generic opencode workflow, not tied to any tracker.
 - Improve installability, observability, model routing, and scripted operation.
-- Keep the core state protocol simple: `.opencode/factory/<run-id>/run.json` plus gate answer files.
-- Avoid adding autonomous loops that bypass gates, evidence, or human/script approval.
+- Keep the core state protocol simple: `.opencode/factory/<run-id>/run.json` plus gate answer files for human/headless runs and `terminal_result` for autonomous harnesses.
+- Avoid autonomous loops that bypass evidence, reviewer verdicts, security review, bounded remediation, or the human PR review boundary.
 - Fail early on missing credentials, missing CLIs, unsupported opencode surfaces, or PR prerequisites before a long build wastes time.
 
 ## 1. Category-Based Model Routing
@@ -345,16 +345,17 @@ missing: gh auth unavailable for draft PR creation
 
 If credentials are missing, fail before starting a long build.
 
-## 9. Headless Script Driver Loop
+## 9. Headless And Autonomous Driver Modes
 
 Add first-class CLI support for external drivers that want to advance the factory without an interactive terminal.
 
-Implementation status: first pass implemented. `factory start` accepts `--repo`; `--headless` / `--detached` injects driver instructions into the `/feature` invocation. The orchestrator prompt already requires stopping after pending gates in scripted mode.
+Implementation status: first pass implemented. `factory start` accepts `--repo`; `--headless` / `--detached` injects driver instructions into the `/feature` invocation. The orchestrator prompt already requires stopping after pending gates in scripted mode. `--autonomous` now injects explicit autonomous instructions so the factory can approve story/brief from its own complete artifacts, decide pre-PR from its implementation/security panel, run bounded remediation, write `terminal_result`, and open a draft PR without an external gate relay.
 
 Required behavior:
 
 - `feature-factory factory start` accepts `--repo <path>` and runs against that repo root regardless of caller cwd.
 - Add a detached/headless mode, e.g. `--headless` or `--detached`, that runs until the next gate and exits after writing the gate question file.
+- Add an autonomous mode, e.g. `--autonomous`, that runs until terminal status and writes `run.json.terminal_result`.
 - On reaching a gate, the factory writes `gates/<gate>.question.md`, marks the gate pending in `run.json`, and exits cleanly with a recognizable status/output.
 - External drivers can loop:
   1. `feature-factory factory start --repo <repo> --headless "<prompt or resume>"`
@@ -364,6 +365,15 @@ Required behavior:
   5. Resume with `feature-factory factory start --repo <repo> --headless "resume <run-id>"`.
 
 This is the generic adapter contract. External drivers should not need to parse chat output, keep an interactive session open, or mutate anything except gate answers.
+
+Autonomous adapter contract:
+
+1. `feature-factory factory start --repo <repo> --autonomous "<prompt or resume>"`.
+2. Wait for process exit.
+3. Read `.opencode/factory/<run-id>/run.json` and consume `terminal_result`.
+4. Mirror only stable terminal fields (`status`, `pr_url`, `reason`, summary/artifact refs) to the external tracker.
+
+External autonomous drivers should not parse gate internals or write answer files.
 
 ## 10. Fallback Models
 
@@ -410,7 +420,7 @@ feature-factory install --profiles-file profiles.json
 
 - No default telemetry.
 - No tracker-specific logic in core.
-- No infinite autonomous loop that bypasses gates.
+- No infinite autonomous loop that bypasses evidence, reviewer/security verdicts, remediation bounds, or PR review.
 - No direct merge to base branches.
 - No replacing opencode's edit tools or permissions model.
 - No mandatory Team Mode/tmux visualization until the core workflow is stable.

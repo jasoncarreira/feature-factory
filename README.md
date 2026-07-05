@@ -219,6 +219,14 @@ Run against a specific repo and exit at the next gate for an external driver:
 feature-factory factory start --repo /path/to/repo --headless "APP-123 add the missing approval workflow"
 ```
 
+Run autonomously through the factory's own reviewed gates and open a draft PR when safe:
+
+```sh
+feature-factory factory start --repo /path/to/repo --autonomous "APP-123 add the missing approval workflow"
+```
+
+Autonomous mode is explicit opt-in. It still writes gate question files, observed evidence, reviews, and `run.json`; it records story/brief approvals only when the artifacts are complete and unambiguous, decides pre-PR from the implementation-validator/security-reviewer panel, runs bounded remediation on NO-GO, and never auto-merges.
+
 Monitor local state:
 
 ```sh
@@ -227,6 +235,8 @@ feature-factory factory status <run-id> --json
 feature-factory factory watch <run-id>
 feature-factory factory provenance
 ```
+
+For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url`.
 
 Answer gates by writing the same files an interactive user would approve through chat:
 
@@ -271,6 +281,14 @@ External driver loop:
 5. Resume with `factory start --headless "resume <run-id>"`.
 
 This lets end users run the workflow interactively from opencode, while automated systems can monitor and drive it without the factory depending on any one tracker.
+
+Thin autonomous adapter loop:
+
+1. Claim external work.
+2. Check out the repo.
+3. Run `feature-factory factory start --repo <repo> --autonomous "<work order>"`.
+4. Read `run.json.terminal_result`.
+5. Mirror `status`, `pr_url`, and `reason` back to the external system.
 
 ## Doctor
 

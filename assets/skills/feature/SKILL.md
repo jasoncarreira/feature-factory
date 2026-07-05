@@ -31,6 +31,14 @@ Invoke subagents with the Task tool using `subagent_type` equal to the agent nam
 
 Pass prior structured outputs in each prompt. Subagents do not share memory; you are the bus between them.
 
+## Operating Modes
+
+- Interactive mode: stop at gates for the user in chat.
+- Headless scripted mode: stop after writing the next pending gate so an external driver can answer through `gates/<gate>.answer`.
+- Autonomous scripted mode: explicit operator opt-in from the CLI. The factory itself owns gate policy, records autonomous gate decisions, runs bounded remediation, and stops only at terminal status or human-required ambiguity.
+
+Autonomous mode does not remove evidence, review, security, or PR boundaries. It only removes the external gate relay when the factory already has enough evidence to decide.
+
 ## Chain
 
 ```text
@@ -42,7 +50,7 @@ INTAKE -> [GATE 1: Story] -> RESEARCH + DESIGN -> SPEC -> DECOMPOSE -> [GATE 2: 
 
 `work-reviewer` runs on high-risk steps only: spec, decomposition, each slice build, and test verification. It must return APPROVE before you accept the step. Story, research, and design are not auto-reviewed.
 
-Never skip a human/script gate. A gate means write the question/artifact, mark it pending in `run.json`, then wait for `approve`, `changes: <...>`, or `stop` through the gate-answer protocol.
+Never skip gate accounting. A gate means write the question/artifact and record the gate outcome in `run.json`. Interactive and headless modes wait for `approve`, `changes: <...>`, or `stop` through the gate-answer protocol. Autonomous mode may approve gates itself only under the rules in the Autonomous Mode section.
 
 Escalate when the work needs a decision that is not yours: product/UX ambiguity, security review, production data migration risk, generated/subtree code ownership, external-system policy, or a brief that builders report as impossible. State the question, options, and recommended owner.
 
@@ -57,6 +65,7 @@ Intent types:
 - `gate-answer`: answer the currently pending gate with `approve`, `stop`, or `changes: <...>`.
 - `status`: inspect/list/summarize current factory state without advancing the run.
 - `scripted-start`: start or resume from an externally supplied, already structured work order or headless driver prompt.
+- `autonomous-start`: start or resume from an explicit autonomous driver prompt.
 - `pr-continuation`: prepare or retry PR creation for an already-built/validated feature branch.
 
 Classification rules:
@@ -66,6 +75,7 @@ Classification rules:
 - If the input asks for status, list, summary, current gate, run state, or what is pending, classify `status`.
 - If the input references an existing `run-id` or `.opencode/factory/<run-id>`, classify `resume` unless it is clearly status-only.
 - If the input asks for PR creation/PR retry and a run already has validated evidence or a feature worktree, classify `pr-continuation`.
+- If the prompt includes autonomous driver instructions, classify `autonomous-start` or `resume` based on whether a run id exists.
 - If the prompt includes headless/scripted driver instructions, classify `scripted-start` or `resume` based on whether a run id exists.
 - Otherwise classify `new-feature`.
 
@@ -76,6 +86,7 @@ Actions by intent:
 - `gate-answer`: write the answer to `gates/<pending-gate>.answer`, consume it, update `run.json`, then continue or stop according to the answer.
 - `status`: read `run.json`/artifacts and report state. Do not dispatch agents, create worktrees, write gates, or change run status.
 - `scripted-start`: proceed like `new-feature`/`resume`, but in scripted mode stop after writing the next pending gate question if no answer file exists.
+- `autonomous-start`: proceed like `new-feature`/`resume`, set `run.json.mode = "autonomous"`, and use the Autonomous Mode rules instead of waiting for external gate answers.
 - `pr-continuation`: verify Gate 3 approval and observed evidence before pushing or creating a draft PR. If missing, return to Gate 3 instead of improvising.
 
 If classification is ambiguous, ask one short clarification question and do not mutate state until answered.
@@ -118,6 +129,22 @@ stop
 ```
 
 On `changes`, rerun the relevant producing step with the feedback and re-present the gate. On `stop`, set status `needs-human` or `blocked` with the reason.
+
+## Autonomous Mode
+
+Autonomous mode is allowed only when the invocation explicitly includes the autonomous driver instructions inserted by `factory start --autonomous`. Do not infer it from vague wording.
+
+Rules:
+
+- Keep writing `gates/<gate>.question.md` files for auditability.
+- Record autonomous approvals in `run.json.gates.<gate>` with `status: approved`, `answer: approve`, `approval_source: autonomous`, `answered_at`, and a short `decision_note` explaining the evidence used.
+- Gate 1 (story) may be autonomously approved only when the normalized story has clear acceptance criteria, scope, assumptions, and no unresolved product/UX/security/external-policy decision. If not, set `status: needs-human`, write `terminal_result`, and stop.
+- Gate 2 (technical brief and slice plan) may be autonomously approved only after `work-reviewer` approves the spec and decomposition and the plan covers all acceptance criteria with file-disjoint same-wave slices or justified serialization. If not, set `status: needs-human`, write `terminal_result`, and stop.
+- Gate 3 (pre_pr) is decided by the strictest result from the implementation-validator and security-reviewer panel. GO/PASS may approve autonomously. Any validator NO-GO or security-reviewer BLOCK is NO-GO.
+- On Gate 3 NO-GO, run the bounded remediation loop from Step 5: route top findings to the owning builder or integration/test fix path, observe evidence, and rerun the panel. Do not exceed `run.json.max_retries` or 3 attempts if unset.
+- If remediation exhausts or the fix owner is ambiguous, set `status: blocked` or `needs-human`, write `terminal_result`, and stop.
+- Never auto-merge. A draft PR is the final autonomous side effect.
+- At every terminal state, write `run.json.terminal_result` with the stable external-driver contract described in `SCHEMA.md`.
 
 ## Step 0 - Intake, Run ID, Manifest
 
@@ -371,7 +398,7 @@ Scripted runs still use the same gates, evidence, reviews, and PR approval flow.
 
 ## Guardrails
 
-- Stop at every gate.
+- Account for every gate. Interactive/headless modes stop for answers; autonomous mode may self-approve only under the Autonomous Mode rules.
 - One feature branch and one PR per run.
 - Never mutate the caller's checkout for implementation.
 - Accept build/test work only on observed evidence plus `work-reviewer` APPROVE.

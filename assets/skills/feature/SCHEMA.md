@@ -49,6 +49,7 @@ Write `run.json` atomically: write a temp file, then rename.
   "base_ref": "main",
   "branch": "app-123-short-slug",
   "worktree": "/abs/repo/.opencode/worktrees/app-123-short-slug",
+  "mode": "interactive",
   "status": "running",
   "created_at": "2026-07-04T11:45:00Z",
   "updated_at": "2026-07-04T12:00:00Z",
@@ -62,7 +63,9 @@ Write `run.json` atomically: write a temp file, then rename.
       "question_ref": "gates/story.question.md",
       "answer_ref": "gates/story.answer",
       "answered_at": null,
-      "answer": null
+      "answer": null,
+      "approval_source": null,
+      "decision_note": null
     },
     "brief": {
       "status": "pending",
@@ -70,7 +73,9 @@ Write `run.json` atomically: write a temp file, then rename.
       "question_ref": "gates/brief.question.md",
       "answer_ref": "gates/brief.answer",
       "answered_at": null,
-      "answer": null
+      "answer": null,
+      "approval_source": null,
+      "decision_note": null
     },
     "pre_pr": {
       "status": "pending",
@@ -79,6 +84,8 @@ Write `run.json` atomically: write a temp file, then rename.
       "answer_ref": "gates/pre_pr.answer",
       "answered_at": null,
       "answer": null,
+      "approval_source": null,
+      "decision_note": null,
       "override": null
     }
   },
@@ -117,11 +124,18 @@ Write `run.json` atomically: write a temp file, then rename.
     "review_ref": "reviews/security-reviewer.json",
     "loops": 0
   },
-  "pr_url": null
+  "pr_url": null,
+  "terminal_result": null
 }
 ```
 
 Run status values: `running`, `completed`, `blocked`, `partial`, `needs-human`.
+
+Run mode values: `interactive`, `headless`, `autonomous`.
+
+Gate status values: `pending`, `approved`, `changes_requested`, `stopped`.
+
+Gate `approval_source` values: `human`, `external-driver`, `autonomous`, or `override`.
 
 Slice status values: `pending`, `running`, `review`, `merged`, `blocked`.
 
@@ -148,6 +162,42 @@ changes: <specific requested change>
 The factory consumes the answer, records it in `run.json.gates.<gate>`, and continues. If the answer file is missing in scripted mode, the factory stops after writing the pending gate.
 
 One-writer rule: external drivers must not modify `run.json`, artifacts, evidence, reviews, plans, branches, or PRs.
+
+## Autonomous Mode
+
+Autonomous mode is explicit opt-in through `factory start --autonomous`. It keeps the same control plane but removes the external gate-answer relay when the factory has enough evidence to decide.
+
+Rules:
+
+- Gate question files are still written for auditability.
+- Story and brief gates may be recorded as `approved` with `answer: "approve"`, `approval_source: "autonomous"`, and a concise `decision_note` only when the artifacts are internally complete and no human product/security/UX/external-policy decision remains.
+- The pre-PR gate may be recorded as autonomously approved only when the strictest implementation-validator/security-reviewer panel verdict is clear. Validator NO-GO or security-reviewer BLOCK requires bounded remediation or terminal blocked/needs-human status.
+- Autonomous remediation loops are bounded by `max_retries` or 3 if unset.
+- Draft PR creation is allowed after autonomous pre-PR approval. Auto-merge is never allowed.
+
+## terminal_result
+
+External harnesses should read `run.json.terminal_result` instead of parsing gate internals when `status` is terminal.
+
+```json
+{
+  "status": "completed",
+  "run_id": "app-123",
+  "pr_url": "https://github.com/org/repo/pull/123",
+  "reason": null,
+  "summary": "Implemented approval workflow and opened draft PR.",
+  "artifacts": {
+    "story": "artifacts/story.md",
+    "technical_brief": "artifacts/technical-brief.md",
+    "plan": "plan/plan.md",
+    "validation_report": "artifacts/validation-report.md",
+    "security_review": "reviews/security-reviewer.json",
+    "pr_body": "artifacts/pr-body.md"
+  }
+}
+```
+
+For `blocked`, `partial`, or `needs-human`, set `reason` to the concise operator-actionable blocker and leave `pr_url` null unless a PR already exists.
 
 ## plan/slices.json
 

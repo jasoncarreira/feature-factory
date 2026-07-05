@@ -41,6 +41,7 @@ export function status(runId, opts = {}) {
   return {
     run_id: run.run_id,
     schema_version: run.schema_version || run.version || null,
+    mode: run.mode || null,
     status: run.status || "unknown",
     heartbeat_at: run.heartbeat_at || null,
     branch: run.branch || null,
@@ -48,6 +49,7 @@ export function status(runId, opts = {}) {
     pending_gate: pendingGate(run),
     gates: run.gates || {},
     pr_url: run.pr_url || null,
+    terminal_result: run.terminal_result || null,
     updated_at: run.updated_at || null,
   };
 }
@@ -154,9 +156,33 @@ function repoRoot(cwd) {
 }
 
 function formatPrompt(prompt, opts) {
+  if (opts.autonomous) return autonomousPrompt(prompt, opts);
   if (!opts.headless) return prompt;
   return `${prompt}
 
 [Feature Factory Driver Mode]
 Run in headless scripted mode: advance the factory only until the next gate or terminal status, write the gate question file and run.json state, then exit. If an answer file already exists for the pending gate, consume it and continue to the next gate. Do not wait for interactive chat input.`;
+}
+
+function autonomousPrompt(prompt, opts) {
+  const extras = [];
+  if (opts.ready) extras.push("If a draft PR is created successfully and repository policy allows, mark it ready for review after creation.");
+  if (opts.reviewer) extras.push(`After creating the PR, request review from: ${opts.reviewer}.`);
+  return `${prompt}
+
+[Feature Factory Autonomous Mode]
+Run in autonomous scripted mode. This is explicit operator opt-in.
+
+Drive the factory to a terminal state without relying on an external gate relay:
+
+- Keep the normal durable control plane under .opencode/factory/<run-id>/ and keep writing gate question files for auditability.
+- Do not stop at story or brief gates when the producing artifacts are complete, internally consistent, and no product/security/UX/external-policy ambiguity remains. Record these as approved with answer "approve", approval_source "autonomous", and a short evidence note in run.json.
+- If story or brief approval would require a human product decision, mark the run status "needs-human" with a clear reason and terminal_result, then stop.
+- At pre_pr, use the factory's own two-lens panel verdict as the gate decision. GO/PASS may approve pre_pr autonomously and proceed to draft PR creation. Any validator NO-GO or security-reviewer BLOCK is NO-GO.
+- On NO-GO, run the bounded remediation loop described by the feature skill, re-observe, and re-run the panel. Do not exceed run.json.max_retries or 3 attempts if unset.
+- If remediation is exhausted, mark status "blocked" with the top finding and terminal_result, then stop.
+- Never auto-merge. Draft PR creation is the final autonomous side effect.
+- At every terminal state, write run.json.terminal_result with status, run_id, pr_url, reason, summary, and artifact references useful to external harnesses.
+
+${extras.join("\n")}`.trim();
 }
