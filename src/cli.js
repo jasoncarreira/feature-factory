@@ -16,7 +16,7 @@ function usage() {
 
 Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
-  doctor [--local]              Check opencode/plugin/provider/tool prerequisites
+  doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--headless] <prompt...>
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
@@ -79,7 +79,7 @@ function options(args) {
     cwd: process.cwd(),
     json: args.includes("--json"),
     local: args.includes("--local"),
-    models: args.includes("--models"),
+    profiles: args.includes("--profiles"),
     providerSmoke: args.includes("--provider-smoke"),
     headless: args.includes("--headless") || args.includes("--detached"),
   };

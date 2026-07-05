@@ -27,21 +27,11 @@ Then restart opencode. Config is loaded at startup.
 /feature APP-123 add the missing approval workflow
 ```
 
-## Configure Models
+## Configure Profiles
 
-By default, agents use opencode's normal model resolution. You can override models through plugin options.
+By default, agents use opencode's normal model resolution. You can override model and variant together through plugin `profiles`.
 
-One model for all feature-factory agents:
-
-```jsonc
-{
-  "plugin": [
-    ["opencode-feature-factory", { "model": "openai/gpt-5.5" }]
-  ]
-}
-```
-
-Role-based models:
+One profile for all feature-factory agents:
 
 ```jsonc
 {
@@ -49,14 +39,9 @@ Role-based models:
     [
       "opencode-feature-factory",
       {
-        "models": {
-          "story": "openai/gpt-5.5",
-          "research": "anthropic/claude-sonnet-4-6",
-          "design": "openai/gpt-5.5",
-          "planning": "openai/gpt-5.5",
-          "builder": "anthropic/claude-sonnet-4-6",
-          "test": "anthropic/claude-sonnet-4-6",
-          "reviewer": "openai/gpt-5.5"
+        "profile": {
+          "model": "openai/gpt-5.5",
+          "variant": "xhigh"
         }
       }
     ]
@@ -64,7 +49,7 @@ Role-based models:
 }
 ```
 
-Exact agent overrides take precedence over role/default values:
+Role-based profiles:
 
 ```jsonc
 {
@@ -72,10 +57,34 @@ Exact agent overrides take precedence over role/default values:
     [
       "opencode-feature-factory",
       {
-        "models": {
-          "default": "anthropic/claude-sonnet-4-6",
-          "spec-writer": "openai/gpt-5.5",
-          "implementation-validator": "openai/gpt-5.5"
+        "profiles": {
+          "story": { "model": "openai/gpt-5.4", "variant": "medium" },
+          "research": { "model": "openai/gpt-5.5", "variant": "high" },
+          "design": { "model": "openai/gpt-5.5", "variant": "high" },
+          "planning": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+          "builder": { "model": "openai/gpt-5.4", "variant": "xhigh" },
+          "test": { "model": "openai/gpt-5.4", "variant": "medium" },
+          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" }
+        }
+      }
+    ]
+  ]
+}
+```
+
+Exact agent profiles take precedence over role/default/top-level profiles:
+
+```jsonc
+{
+  "plugin": [
+    [
+      "opencode-feature-factory",
+      {
+        "profiles": {
+          "default": { "model": "anthropic/claude-sonnet-5", "variant": "medium" },
+          "spec-writer": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+          "implementation-validator": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+          "security-reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" }
         }
       }
     ]
@@ -89,29 +98,7 @@ Factory agents are configured with scoped non-interactive permissions (`bash`, `
 
 Before each `factory start`, the CLI seeds the feature skill into the target repo at `.opencode/skills/feature/SKILL.md` and `.opencode/skills/feature/SCHEMA.md`, and adds `.opencode/skills/feature/` to the repo-local `.git/info/exclude` when available. The schema is the authoritative control-plane reference for `run.json`, `plan/slices.json`, `evidence/*`, `reviews/*`, and `factory.lock`; keeping it repo-local lets agents read it without relaxing `external_directory: deny`.
 
-You can configure opencode model variants with the same precedence: exact agent, role, default, top-level. Variants map to opencode's `variant` agent field.
-
-```jsonc
-{
-  "plugin": [
-    [
-      "opencode-feature-factory",
-      {
-        "models": {
-          "planning": "openai/gpt-5.5",
-          "builder": "anthropic/claude-sonnet-4-6"
-        },
-        "variants": {
-          "default": "medium",
-          "planning": "high",
-          "reviewer": "max",
-          "implementation-validator": "max"
-        }
-      }
-    ]
-  ]
-}
-```
+Profile precedence is exact agent, then role, then `profiles.default`, then top-level `profile`, then opencode default. A profile may contain `model`, `variant`, or both.
 
 ### Recommended Model Profile
 
@@ -125,23 +112,14 @@ Recommended mapping, using OpenAI model IDs as examples. If your opencode provid
     [
       "opencode-feature-factory",
       {
-        "models": {
-          "story": "openai/gpt-5.4",
-          "research": "openai/gpt-5.5",
-          "design": "openai/gpt-5.5",
-          "planning": "openai/gpt-5.5",
-          "builder": "openai/gpt-5.4",
-          "test": "openai/gpt-5.4",
-          "reviewer": "openai/gpt-5.5"
-        },
-        "variants": {
-          "story": "medium",
-          "research": "high",
-          "design": "high",
-          "planning": "xhigh",
-          "builder": "xhigh",
-          "test": "medium",
-          "reviewer": "xhigh"
+        "profiles": {
+          "story": { "model": "openai/gpt-5.4", "variant": "medium" },
+          "research": { "model": "openai/gpt-5.5", "variant": "high" },
+          "design": { "model": "openai/gpt-5.5", "variant": "high" },
+          "planning": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+          "builder": { "model": "openai/gpt-5.4", "variant": "xhigh" },
+          "test": { "model": "openai/gpt-5.4", "variant": "medium" },
+          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" }
         }
       }
     ]
@@ -159,7 +137,7 @@ Resolved agent profile:
 | `feature-factory`, `spec-writer`, `work-decomposer` | `gpt-5.5` | `xhigh` |
 | `backend-builder`, `frontend-builder` | `gpt-5.4` | `xhigh` |
 | `test-verifier` | `gpt-5.4` | `medium` |
-| `work-reviewer`, `implementation-validator` | `gpt-5.5` | `xhigh` |
+| `work-reviewer`, `implementation-validator`, `security-reviewer` | `gpt-5.5` | `xhigh` |
 
 Rationale:
 
@@ -180,33 +158,20 @@ Adjust model IDs to the Anthropic models available in your opencode installation
     [
       "opencode-feature-factory",
       {
-        "models": {
-          "feature-factory": "anthropic/claude-opus-4-8",
-          "story-reader": "anthropic/claude-sonnet-5",
-          "story-writer": "anthropic/claude-opus-4-8",
-          "codebase-researcher": "anthropic/claude-sonnet-5",
-          "design-interpreter": "anthropic/claude-opus-4-8",
-          "spec-writer": "anthropic/claude-opus-4-8",
-          "work-decomposer": "anthropic/claude-opus-4-8",
-          "backend-builder": "anthropic/claude-sonnet-5",
-          "frontend-builder": "anthropic/claude-sonnet-5",
-          "test-verifier": "anthropic/claude-sonnet-5",
-          "work-reviewer": "anthropic/claude-opus-4-8",
-          "implementation-validator": "anthropic/claude-opus-4-8"
-        },
-        "variants": {
-          "feature-factory": "xhigh",
-          "story-reader": "low",
-          "story-writer": "high",
-          "codebase-researcher": "medium",
-          "design-interpreter": "high",
-          "spec-writer": "xhigh",
-          "work-decomposer": "xhigh",
-          "backend-builder": "medium",
-          "frontend-builder": "medium",
-          "test-verifier": "medium",
-          "work-reviewer": "high",
-          "implementation-validator": "xhigh"
+        "profiles": {
+          "feature-factory": { "model": "anthropic/claude-opus-4-8", "variant": "xhigh" },
+          "story-reader": { "model": "anthropic/claude-sonnet-5", "variant": "low" },
+          "story-writer": { "model": "anthropic/claude-opus-4-8", "variant": "high" },
+          "codebase-researcher": { "model": "anthropic/claude-sonnet-5", "variant": "medium" },
+          "design-interpreter": { "model": "anthropic/claude-opus-4-8", "variant": "high" },
+          "spec-writer": { "model": "anthropic/claude-opus-4-8", "variant": "xhigh" },
+          "work-decomposer": { "model": "anthropic/claude-opus-4-8", "variant": "xhigh" },
+          "backend-builder": { "model": "anthropic/claude-sonnet-5", "variant": "medium" },
+          "frontend-builder": { "model": "anthropic/claude-sonnet-5", "variant": "medium" },
+          "test-verifier": { "model": "anthropic/claude-sonnet-5", "variant": "medium" },
+          "work-reviewer": { "model": "anthropic/claude-opus-4-8", "variant": "high" },
+          "implementation-validator": { "model": "anthropic/claude-opus-4-8", "variant": "xhigh" },
+          "security-reviewer": { "model": "anthropic/claude-opus-4-8", "variant": "xhigh" }
         }
       }
     ]
@@ -227,6 +192,7 @@ Resolved profile:
 | `test-verifier` | Sonnet | `medium` |
 | `work-reviewer` | Opus | `high` |
 | `implementation-validator` | Opus | `xhigh` |
+| `security-reviewer` | Opus | `xhigh` |
 
 Interactive `/feature` stores durable run state in the target repo:
 
@@ -312,7 +278,7 @@ This lets end users run the workflow interactively from opencode, while automate
 
 ```sh
 feature-factory doctor --local
-feature-factory doctor --local --models
+feature-factory doctor --local --profiles
 feature-factory doctor --local --provider-smoke
 ```
 

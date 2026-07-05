@@ -13,6 +13,7 @@ const SUBAGENTS = [
   "design-interpreter",
   "frontend-builder",
   "implementation-validator",
+  "security-reviewer",
   "spec-writer",
   "story-reader",
   "story-writer",
@@ -38,13 +39,14 @@ export async function runDoctor(options = {}) {
   add(checks, "HOME", Boolean(process.env.HOME), process.env.HOME || "unset");
   add(checks, "opencode config", existsSync(configPath), configPath);
   add(checks, "plugin configured", Boolean(pluginEntry), pluginSpec);
+  add(checks, "profile config shape", staleProfileKeys(pluginOptions).length === 0, staleProfileKeys(pluginOptions).join(", ") || "profiles", "warn");
   add(checks, "opencode CLI", provenance.capabilities.opencode, provenance.opencode_version || "opencode");
   add(checks, "opencode run --command", provenance.capabilities.opencode_run_command, "opencode run --help");
   add(checks, "opencode run --dir", provenance.capabilities.opencode_run_dir, "opencode run --help");
   add(checks, "/feature command registered", Boolean(registered.command?.feature), "command.feature");
   add(checks, "/feature command uses primary agent", registered.command?.feature?.agent === "feature-factory", registered.command?.feature?.agent || "unset");
   add(checks, "feature-factory primary agent", Boolean(registered.agent?.["feature-factory"]), "agent.feature-factory");
-  add(checks, "11 subagents registered", missingSubagents(registered.agent).length === 0, missingSubagents(registered.agent).length ? `missing ${missingSubagents(registered.agent).join(", ")}` : "11 subagents");
+  add(checks, "12 subagents registered", missingSubagents(registered.agent).length === 0, missingSubagents(registered.agent).length ? `missing ${missingSubagents(registered.agent).join(", ")}` : "12 subagents");
   add(checks, "factory permissions non-interactive", permissionFailures(registered.agent).length === 0, permissionFailures(registered.agent).join("; ") || "factory agent permissions");
   add(checks, "feature skill path", Boolean(registered.skills?.paths?.length), registered.skills?.paths?.join(", ") || "none");
   add(checks, "repo-local feature skill", existsSync(join(options.cwd || process.cwd(), ".opencode", "skills", "feature", "SKILL.md")), ".opencode/skills/feature/SKILL.md", "warn");
@@ -75,10 +77,10 @@ export async function runDoctor(options = {}) {
     add(checks, "provider smoke", false, "run with --provider-smoke before long scripted runs", "warn");
   }
 
-  if (options.models) printModelMap(provenance.resolved_models, provenance.resolved_variants);
   if (options.json) {
     console.log(JSON.stringify({ checks, provenance }, null, 2));
   } else {
+    if (options.profiles) printProfileMap(provenance.resolved_models, provenance.resolved_variants);
     for (const check of checks) console.log(`${check.level}: ${check.label} (${check.detail})`);
   }
   return checks.every((check) => check.level !== "missing");
@@ -90,6 +92,10 @@ function add(checks, label, passed, detail, failureLevel = "missing") {
 
 function missingSubagents(agents = {}) {
   return SUBAGENTS.filter((name) => !agents[name]);
+}
+
+function staleProfileKeys(options = {}) {
+  return ["model", "models", "variant", "variants"].filter((key) => Object.prototype.hasOwnProperty.call(options, key));
 }
 
 function permissionFailures(agents = {}) {
@@ -167,6 +173,8 @@ function smokeProvider(model, cwd) {
   return { ok: proc.status === 0, detail: proc.status === 0 ? "smoke passed" : output.slice(0, 300) };
 }
 
-function printModelMap(models) {
-  for (const [agent, model] of Object.entries(models)) console.log(`model: ${agent} -> ${model || "<opencode default>"}`);
+function printProfileMap(models, variants) {
+  for (const [agent, model] of Object.entries(models)) {
+    console.log(`profile: ${agent} -> model=${model || "<opencode default>"} variant=${variants[agent] || "<opencode default>"}`);
+  }
 }

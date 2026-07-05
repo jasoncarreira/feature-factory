@@ -27,6 +27,7 @@ Invoke subagents with the Task tool using `subagent_type` equal to the agent nam
 - `test-verifier`
 - `work-reviewer`
 - `implementation-validator`
+- `security-reviewer`
 
 Pass prior structured outputs in each prompt. Subagents do not share memory; you are the bus between them.
 
@@ -292,19 +293,24 @@ Run integration work against `$FEAT_WT`, not slice worktrees.
 1. Run `test-verifier` with the story ACs, technical brief, slice plan, merged builder reports, and `$FEAT_WT`. It writes/runs acceptance tests and commits test changes if needed. Write `$RUN/artifacts/test-report.md`.
 2. Observe the test step yourself by rerunning the named acceptance suite. Write `$RUN/evidence/test-verifier.json`.
 3. Run `work-reviewer` with subject `test-verifier`. It must confirm each AC maps to a real assertion.
-4. Run `implementation-validator` with story, brief, full diff, test report, builder reports, and `$FEAT_WT`. Write `$RUN/artifacts/validation-report.md` and `run.json.validator`.
+4. Run the pre-PR review PANEL — two INDEPENDENT lenses, concurrently, on `$FEAT_WT` + the full diff (each gets story, brief, full diff, test report, builder reports):
+   - `implementation-validator` — correctness / AC coverage / cross-slice integration / conventions. Write `$RUN/artifacts/validation-report.md` and `run.json.validator`.
+   - `security-reviewer` — adversarial trust-boundary / injection / forgeable-provenance / secrets lens. Write `$RUN/reviews/security-reviewer.json` and `run.json.security_review`.
+   Run them in parallel and keep them independent — do NOT let one lens's "looks fine" excuse the other. This two-lens panel is the pre-PR review; a downstream consumer (an adapter) relays this verdict rather than re-reviewing.
 
-Validator verdicts:
+Combine the panel by STRICTEST verdict — this IS the Gate 3 verdict:
 
-- GO -> proceed to Gate 3.
-- GO-WITH-NITS -> proceed to Gate 3 with callouts.
-- NO-GO -> route the top finding to the owning builder via a new fix slice worktree or, for test-only issues, a controlled integration-branch fix. Re-observe and re-validate up to `max_retries`.
+- Any NO-GO (validator) or BLOCK (security-reviewer) from EITHER lens -> NO-GO.
+- A `security-reviewer` BLOCK is ALWAYS NO-GO — never downgraded to a nit, even for default-off features.
+- Both clear (GO + PASS) -> GO, or GO-WITH-NITS if only MAJOR/NONBLOCKING findings remain.
+
+On NO-GO -> route the top finding to the owning builder via a new fix slice worktree or, for test-only issues, a controlled integration-branch fix. Re-observe and re-run the PANEL up to `max_retries`.
 
 ## Gate 3 - Pre-PR
 
 Present:
 
-- Validator verdict.
+- Panel verdict (implementation-validator + security-reviewer), with the security-reviewer's traced ingresses + any BLOCK/NONBLOCKING findings.
 - Acceptance-test table.
 - Full diff stat against base: `git -C $FEAT_WT diff --stat origin/$BASE...HEAD`.
 - Changed-file summary.
@@ -336,7 +342,7 @@ Report:
 - Story and brief one-liners.
 - Slice plan waves and per-slice merge status.
 - Risk callouts.
-- Acceptance-test table and validator verdict.
+- Acceptance-test table and pre-PR panel verdict, including security-reviewer verdict.
 - PR URL, branch, feature worktree, and run dir.
 - Any TODOs, blocked slices, overrides, missing tests, or manual follow-ups.
 

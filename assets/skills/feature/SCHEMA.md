@@ -27,6 +27,7 @@ The feature factory persists a per-run control plane so runs are durable, resuma
     plan.md
   evidence/<subject>.json
   reviews/<subject>.json
+  reviews/security-reviewer.json
 ```
 
 Implementation worktrees live under:
@@ -109,6 +110,11 @@ Write `run.json` atomically: write a temp file, then rename.
   "validator": {
     "verdict": "GO",
     "report": "artifacts/validation-report.md",
+    "loops": 0
+  },
+  "security_review": {
+    "verdict": "PASS",
+    "review_ref": "reviews/security-reviewer.json",
     "loops": 0
   },
   "pr_url": null
@@ -224,6 +230,40 @@ For slices and reviewed test steps, the orchestrator writes observed evidence:
 }
 ```
 
-Verdict values: `APPROVE`, `REJECT`.
+Verdict values for `work-reviewer` review files: `APPROVE`, `REJECT`.
 
 Severity values: `blocker`, `major`, `minor`.
+
+## reviews/security-reviewer.json
+
+The pre-PR security panel writes a separate review shape because its verdict feeds the Gate 3 panel directly rather than the normal `work-reviewer` approve/reject loop.
+
+```json
+{
+  "subject": "integrated-feature",
+  "reviewer": "security-reviewer",
+  "verdict": "PASS",
+  "attempt": 1,
+  "ingresses_reviewed": ["src/server/api/foo.ts:12 POST /foo"],
+  "findings": [
+    {
+      "severity": "block",
+      "note": "Untrusted request metadata can forge a trusted source marker",
+      "path": "src/server/api/foo.ts:42",
+      "bypass": "POST /foo with source=system bypasses server-side ownership checks",
+      "fix": "derive source from server auth context and ignore request body source"
+    }
+  ],
+  "bypass_attempts": [
+    {
+      "attempt": "Forge trusted source marker through alternate endpoint",
+      "result": "exploitable",
+      "detail": "Alternate endpoint accepts source from request body"
+    }
+  ]
+}
+```
+
+Security reviewer verdict values: `PASS`, `BLOCK`.
+
+Security reviewer severity values: `block`, `nonblocking`.

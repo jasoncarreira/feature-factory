@@ -12,9 +12,9 @@ Ideas to implement after reviewing `oh-my-openagent`, adapted for this package's
 
 ## 1. Category-Based Model Routing
 
-Current state: plugin options support `model`, `models.default`, exact agent names, role keys, plus `variant` / `variants` with the same precedence.
+Current state: plugin options support `profile` plus `profiles.default`, exact agent names, and role keys. Each profile may contain `model`, `variant`, or both.
 
-Implementation status: role/exact/default model and variant routing is implemented in `src/plugin.js`. Operator plugin options override shipped agent frontmatter defaults. Keep this invariant; it prevents package defaults from trapping operators on the wrong model or effort level.
+Implementation status: role/exact/default profile routing is implemented in `src/plugin.js`. Operator plugin options override shipped agent frontmatter defaults. Keep this invariant; it prevents package defaults from trapping operators on the wrong model or effort level.
 
 Improve the public interface by documenting roles as categories:
 
@@ -24,13 +24,13 @@ Improve the public interface by documenting roles as categories:
 - `planning`: `feature-factory`, `spec-writer`, `work-decomposer`
 - `builder`: `backend-builder`, `frontend-builder`
 - `test`: `test-verifier`
-- `reviewer`: `work-reviewer`, `implementation-validator`
+- `reviewer`: `work-reviewer`, `implementation-validator`, `security-reviewer`
 
 Implementation notes:
 
 - Keep exact-agent overrides as highest precedence.
 - Operator config must override shipped agent frontmatter defaults.
-- Add `feature-factory doctor --models` to print resolved agent -> model mapping.
+- Add `feature-factory doctor --profiles` to print resolved agent -> model/variant mapping.
 
 Future optional shape:
 
@@ -40,10 +40,10 @@ Future optional shape:
     [
       "opencode-feature-factory",
       {
-        "models": {
-          "planning": "openai/gpt-5.5",
-          "builder": "anthropic/claude-sonnet-4-6",
-          "reviewer": "openai/gpt-5.5"
+        "profiles": {
+          "planning": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+          "builder": { "model": "anthropic/claude-sonnet-5", "variant": "medium" },
+          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" }
         }
       }
     ]
@@ -61,7 +61,7 @@ Recommended production profile:
 | `feature-factory`, `spec-writer`, `work-decomposer` | `gpt-5.5` | `xhigh` |
 | `backend-builder`, `frontend-builder` | `gpt-5.4` | `xhigh` |
 | `test-verifier` | `gpt-5.4` | `medium` |
-| `work-reviewer`, `implementation-validator` | `gpt-5.5` | `xhigh` |
+| `work-reviewer`, `implementation-validator`, `security-reviewer` | `gpt-5.5` | `xhigh` |
 
 Rationale: use the highest model/variant for planning, decomposition, review, and validation; use strong but cheaper builders; keep story normalization and acceptance-test authoring at medium unless a run proves they need more.
 
@@ -78,6 +78,7 @@ Anthropic profile to document and keep supported:
 | `test-verifier` | Sonnet | `medium` |
 | `work-reviewer` | Opus | `high` |
 | `implementation-validator` | Opus | `xhigh` |
+| `security-reviewer` | Opus | `xhigh` |
 
 This profile requires exact agent overrides because `story-reader` and `story-writer` intentionally use different model/variant settings.
 
@@ -98,7 +99,7 @@ Add checks for:
 - plugin is configured.
 - plugin assets are resolvable.
 - command registration works by loading `src/plugin.js`.
-- the `feature-factory` primary agent and all 11 subagents are registered.
+- the `feature-factory` primary agent and all 12 subagents are registered.
 - feature skill path exists.
 - configured models are present and provider-prefixed.
 - configured model providers are authenticated and usable, not merely well-formed strings.
@@ -127,7 +128,7 @@ ok: opencode CLI 1.17.13
 ok: plugin configured
 ok: /feature command registered
 ok: feature-factory primary agent registered
-ok: 11 subagents registered
+ok: 12 subagents registered
 ok: provider openai authenticated for openai/gpt-5.5
 missing: provider anthropic credentials for anthropic/claude-sonnet-4-6
 warn: gh CLI missing; draft PR creation will fail
@@ -366,16 +367,16 @@ This is the generic adapter contract. External drivers should not need to parse 
 
 ## 10. Fallback Models
 
-Current config supports one model per role/agent.
+Current config supports one profile per role/agent.
 
 Future config idea:
 
 ```jsonc
 {
-  "models": {
+  "profiles": {
     "planning": {
-      "primary": "openai/gpt-5.5",
-      "fallbacks": ["anthropic/claude-sonnet-4-6"]
+      "primary": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+      "fallbacks": [{ "model": "anthropic/claude-sonnet-5", "variant": "high" }]
     }
   }
 }
@@ -396,13 +397,13 @@ Improve `feature-factory install`:
 - Preserve existing opencode config fields.
 - Validate JSONC safely.
 - Print exact restart instruction.
-- Optionally prompt for model category mappings.
+- Optionally prompt for profile category mappings.
 
 Non-interactive mode:
 
 ```sh
-feature-factory install --model openai/gpt-5.5
-feature-factory install --models-file models.json
+feature-factory install --profile '{"model":"openai/gpt-5.5","variant":"xhigh"}'
+feature-factory install --profiles-file profiles.json
 ```
 
 ## 12. Non-Goals

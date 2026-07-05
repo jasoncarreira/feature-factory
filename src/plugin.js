@@ -115,26 +115,28 @@ const AGENT_ROLES = {
   "test-verifier": "test",
   "work-reviewer": "reviewer",
   "implementation-validator": "reviewer",
+  "security-reviewer": "reviewer",
 };
 
-function applyModelOptions(cfg, options = {}) {
-  const models = options.models || {};
-  const defaultModel = models.default || options.model;
+function applyProfileOptions(cfg, options = {}) {
+  const profiles = options.profiles || {};
+  const topLevelProfile = usableProfile(options.profile);
   for (const [agentName, agent] of Object.entries(cfg.agent || {})) {
     const role = AGENT_ROLES[agentName];
-    const selected = models[agentName] || (role ? models[role] : null) || defaultModel;
-    if (selected) agent.model = selected;
+    const selected =
+      usableProfile(profiles[agentName]) ||
+      usableProfile(role ? profiles[role] : null) ||
+      usableProfile(profiles.default) ||
+      topLevelProfile;
+    if (!selected) continue;
+    if (selected.model) agent.model = selected.model;
+    if (selected.variant) agent.variant = selected.variant;
   }
 }
 
-function applyVariantOptions(cfg, options = {}) {
-  const variants = options.variants || {};
-  const defaultVariant = variants.default || options.variant;
-  for (const [agentName, agent] of Object.entries(cfg.agent || {})) {
-    const role = AGENT_ROLES[agentName];
-    const selected = variants[agentName] || (role ? variants[role] : null) || defaultVariant;
-    if (selected) agent.variant = selected;
-  }
+function usableProfile(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  return profile.model || profile.variant ? profile : null;
 }
 
 function registerSkills(cfg) {
@@ -149,8 +151,7 @@ export default async function featureFactoryPlugin(_input, options = {}) {
     config(cfg) {
       registerCommand(cfg);
       registerAgents(cfg);
-      applyModelOptions(cfg, options);
-      applyVariantOptions(cfg, options);
+      applyProfileOptions(cfg, options);
       registerSkills(cfg);
     },
   };
