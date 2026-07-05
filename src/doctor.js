@@ -28,7 +28,7 @@ const FACTORY_DENY = ["external_directory"];
 export async function runDoctor(options = {}) {
   const configPath = join(homedir(), ".config", "opencode", "opencode.jsonc");
   const cfg = readConfig(configPath);
-  const pluginSpec = options.local ? pathToFileURL(join(root, "src", "plugin.js")).href : "opencode-feature-factory";
+  const pluginSpec = options.local ? pathToFileURL(root).href : "opencode-feature-factory";
   const pluginEntry = findPluginEntry(cfg, pluginSpec, options.local);
   const pluginOptions = Array.isArray(pluginEntry) ? pluginEntry[1] || {} : {};
   const registered = await resolvePluginConfig(pluginOptions);
@@ -49,6 +49,7 @@ export async function runDoctor(options = {}) {
   add(checks, "12 subagents registered", missingSubagents(registered.agent).length === 0, missingSubagents(registered.agent).length ? `missing ${missingSubagents(registered.agent).join(", ")}` : "12 subagents");
   add(checks, "factory permissions non-interactive", permissionFailures(registered.agent).length === 0, permissionFailures(registered.agent).join("; ") || "factory agent permissions");
   add(checks, "feature skill path", Boolean(registered.skills?.paths?.length), registered.skills?.paths?.join(", ") || "none");
+  add(checks, "TUI sidebar export", hasTuiExport(), "package.json exports[\"./tui\"]", "warn");
   add(checks, "repo-local feature skill", existsSync(join(options.cwd || process.cwd(), ".opencode", "skills", "feature", "SKILL.md")), ".opencode/skills/feature/SKILL.md", "warn");
   add(checks, "repo-local feature schema", existsSync(join(options.cwd || process.cwd(), ".opencode", "skills", "feature", "SCHEMA.md")), ".opencode/skills/feature/SCHEMA.md", "warn");
   add(checks, "git CLI", provenance.capabilities.git, "git");
@@ -121,11 +122,17 @@ function readConfig(path) {
   return stripped ? JSON.parse(stripped) : {};
 }
 
+function hasTuiExport() {
+  const pkg = readConfig(join(root, "package.json"));
+  return typeof pkg.exports?.["./tui"] === "string";
+}
+
 function findPluginEntry(cfg, pluginSpec, local) {
   for (const entry of cfg.plugin || []) {
     const spec = Array.isArray(entry) ? entry[0] : entry;
     if (spec === pluginSpec) return entry;
     if (!local && spec === "opencode-feature-factory") return entry;
+    if (local && typeof spec === "string" && spec.endsWith("/opencode-feature-factory")) return entry;
     if (local && typeof spec === "string" && spec.endsWith("/opencode-feature-factory/src/plugin.js")) return entry;
   }
   return null;

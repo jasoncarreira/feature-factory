@@ -43,7 +43,11 @@ function install(args) {
   const cfg = readConfig(configPath);
   cfg.$schema ??= "https://opencode.ai/config.json";
   cfg.plugin ??= [];
-  if (!cfg.plugin.includes(pluginSpec)) cfg.plugin.push(pluginSpec);
+  const oldSpec = local ? oldLocalPluginSpec() : null;
+  const hit = cfg.plugin.findIndex((entry) => pluginEntrySpec(entry) === pluginSpec || (oldSpec && pluginEntrySpec(entry) === oldSpec));
+  if (hit === -1) cfg.plugin.push(pluginSpec);
+  if (hit !== -1 && Array.isArray(cfg.plugin[hit])) cfg.plugin[hit][0] = pluginSpec;
+  if (hit !== -1 && !Array.isArray(cfg.plugin[hit])) cfg.plugin[hit] = pluginSpec;
   writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n");
   console.log(`configured opencode plugin: ${pluginSpec}`);
   console.log(`updated: ${configPath}`);
@@ -128,7 +132,15 @@ function readConfig(path) {
 }
 
 function localPluginSpec() {
+  return pathToFileURL(root).href;
+}
+
+function oldLocalPluginSpec() {
   return pathToFileURL(join(root, "src", "plugin.js")).href;
+}
+
+function pluginEntrySpec(entry) {
+  return Array.isArray(entry) ? entry[0] : entry;
 }
 
 main(process.argv.slice(2)).catch((error) => {

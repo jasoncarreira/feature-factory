@@ -5,6 +5,7 @@ Hybrid opencode plugin plus CLI for a durable, scriptable feature workflow.
 It ships:
 
 - `/feature` command registration for opencode.
+- A TUI sidebar panel that monitors active local factory runs.
 - Feature-factory skill docs and control-plane schema.
 - Specialized subagents for story, research, spec, decomposition, build, tests, review, and validation.
 - A `feature-factory` CLI with install/doctor commands and local factory state helpers.
@@ -20,6 +21,8 @@ feature-factory doctor --local
 ```
 
 Then restart opencode. Config is loaded at startup.
+
+Local installs configure the package root, not `src/plugin.js`, so opencode can discover both the server plugin and the TUI sidebar export.
 
 ## Use In opencode
 
@@ -235,6 +238,8 @@ feature-factory factory status <run-id> --json
 feature-factory factory watch <run-id>
 feature-factory factory provenance
 ```
+
+When opencode is running in the TUI on a session route, the sidebar also shows a `Feature Factory` panel for runs found under `.opencode/factory/*/run.json`. It lists active runs across the repo, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden except for the most recent completed run.
 
 For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url`.
 
