@@ -219,7 +219,7 @@ function formatPrompt(prompt, opts) {
   return `${prompt}
 
 [Feature Factory Driver Mode]
-Run in headless scripted mode: advance the factory only until the next gate or terminal status, write the gate question file and run.json state, then exit. If an answer file already exists for the pending gate, consume it and continue to the next gate. Do not wait for interactive chat input.`;
+Run in headless scripted mode: advance the factory only until the next gate or terminal status, write the gate question file and run.json state, then exit. If an answer file already exists for the pending gate, consume it, record approved answers with approval_source "external-driver", and continue to the next gate. Do not wait for interactive chat input.`;
 }
 
 export function validateSlices(plan) {

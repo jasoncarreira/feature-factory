@@ -160,7 +160,7 @@ stop
 changes: <specific requested change>
 ```
 
-The factory consumes the answer, records it in `run.json.gates.<gate>`, and continues. If the answer file is missing in scripted mode, the factory stops after writing the pending gate.
+The factory consumes the answer, records it in `run.json.gates.<gate>`, and continues. Approved answers from gate answer files must use `approval_source: "external-driver"`; interactive chat approvals use `approval_source: "human"`; autonomous approvals use `approval_source: "autonomous"`. Do not store the answer file path in `approval_source`. If the answer file is missing in scripted mode, the factory stops after writing the pending gate.
 
 One-writer rule: external drivers must not modify `run.json`, artifacts, evidence, reviews, plans, branches, or PRs.
 

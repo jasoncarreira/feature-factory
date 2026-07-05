@@ -116,8 +116,8 @@ For every gate:
 
 1. Write a human-readable question file, e.g. `gates/story.question.md`.
 2. Mark the gate `pending` in `run.json` with `question_ref` and `answer_ref`.
-3. If `gates/<gate>.answer` already exists, consume it.
-4. Otherwise, in interactive mode ask the user in chat and write their response to the answer file.
+3. If `gates/<gate>.answer` already exists, consume it and record `approval_source: external-driver` for approved answers.
+4. Otherwise, in interactive mode ask the user in chat, write their response to the answer file, and record `approval_source: human` for approved answers.
 5. In scripted mode, stop after writing the pending gate. An external driver can write the answer file and reinvoke `/feature resume <run-id>`.
 
 Allowed answer contents:
@@ -128,7 +128,7 @@ changes: <specific requested change>
 stop
 ```
 
-On `changes`, rerun the relevant producing step with the feedback and re-present the gate. On `stop`, set status `needs-human` or `blocked` with the reason.
+On `approve`, set the gate to `approved`, copy the answer into `run.json`, set `answered_at`, and use only an allowed semantic `approval_source`: `external-driver`, `human`, `autonomous`, or `override`. Do not put the answer file path in `approval_source`. On `changes`, rerun the relevant producing step with the feedback and re-present the gate. On `stop`, set status `needs-human` or `blocked` with the reason.
 
 ## Autonomous Mode
 
