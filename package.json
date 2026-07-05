@@ -1,0 +1,31 @@
+{
+  "name": "opencode-feature-factory",
+  "version": "0.1.0",
+  "description": "Hybrid opencode plugin and scriptable feature factory workflow.",
+  "type": "module",
+  "main": "src/plugin.js",
+  "exports": {
+    ".": "./src/plugin.js",
+    "./cli": "./src/cli.js"
+  },
+  "bin": {
+    "feature-factory": "./src/cli.js"
+  },
+  "files": [
+    "assets",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "doctor": "node src/cli.js doctor",
+    "check": "node src/cli.js doctor --local"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "agent",
+    "automation",
+    "workflow"
+  ],
+  "license": "MIT"
+}

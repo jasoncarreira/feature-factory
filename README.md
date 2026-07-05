@@ -1,0 +1,342 @@
+# opencode-feature-factory
+
+Hybrid opencode plugin plus CLI for a durable, scriptable feature workflow.
+
+It ships:
+
+- `/feature` command registration for opencode.
+- Feature-factory skill docs and control-plane schema.
+- Specialized subagents for story, research, spec, decomposition, build, tests, review, and validation.
+- A `feature-factory` CLI with install/doctor commands and local factory state helpers.
+
+## Install Locally
+
+From this package directory:
+
+```sh
+npm link
+feature-factory install --local
+feature-factory doctor --local
+```
+
+Then restart opencode. Config is loaded at startup.
+
+## Use In opencode
+
+```text
+/feature APP-123 add the missing approval workflow
+```
+
+## Configure Models
+
+By default, agents use opencode's normal model resolution. You can override models through plugin options.
+
+One model for all feature-factory agents:
+
+```jsonc
+{
+  "plugin": [
+    ["opencode-feature-factory", { "model": "openai/gpt-5.5" }]
+  ]
+}
+```
+
+Role-based models:
+
+```jsonc
+{
+  "plugin": [
+    [
+      "opencode-feature-factory",
+      {
+        "models": {
+          "story": "openai/gpt-5.5",
+          "research": "anthropic/claude-sonnet-4-6",
+          "design": "openai/gpt-5.5",
+          "planning": "openai/gpt-5.5",
+          "builder": "anthropic/claude-sonnet-4-6",
+          "test": "anthropic/claude-sonnet-4-6",
+          "reviewer": "openai/gpt-5.5"
+        }
+      }
+    ]
+  ]
+}
+```
+
+Exact agent overrides take precedence over role/default values:
+
+```jsonc
+{
+  "plugin": [
+    [
+      "opencode-feature-factory",
+      {
+        "models": {
+          "default": "anthropic/claude-sonnet-4-6",
+          "spec-writer": "openai/gpt-5.5",
+          "implementation-validator": "openai/gpt-5.5"
+        }
+      }
+    ]
+  ]
+}
+```
+
+Supported roles: `story`, `research`, `design`, `planning`, `builder`, `test`, `reviewer`. The dedicated primary orchestrator agent, `feature-factory`, is mapped to `planning`.
+
+Factory agents are configured with scoped non-interactive permissions (`bash`, `edit` where appropriate, `webfetch`, task delegation, and read/search tools) so `factory start --headless` cannot deadlock on opencode permission prompts. `external_directory` is explicitly denied. This permission scope applies to the factory command and factory agents, not to your global opencode sessions.
+
+Before each `factory start`, the CLI seeds the feature skill into the target repo at `.opencode/skills/feature/SKILL.md` and `.opencode/skills/feature/SCHEMA.md`, and adds `.opencode/skills/feature/` to the repo-local `.git/info/exclude` when available. The schema is the authoritative control-plane reference for `run.json`, `plan/slices.json`, `evidence/*`, `reviews/*`, and `factory.lock`; keeping it repo-local lets agents read it without relaxing `external_directory: deny`.
+
+You can configure opencode model variants with the same precedence: exact agent, role, default, top-level. Variants map to opencode's `variant` agent field.
+
+```jsonc
+{
+  "plugin": [
+    [
+      "opencode-feature-factory",
+      {
+        "models": {
+          "planning": "openai/gpt-5.5",
+          "builder": "anthropic/claude-sonnet-4-6"
+        },
+        "variants": {
+          "default": "medium",
+          "planning": "high",
+          "reviewer": "max",
+          "implementation-validator": "max"
+        }
+      }
+    ]
+  ]
+}
+```
+
+### Recommended Model Profile
+
+For serious feature-factory runs, use the strongest model/effort where architectural mistakes are most expensive: planning, decomposition, review, and final validation. Builders should still run strong, but story normalization and acceptance-test writing can usually run lower.
+
+Recommended mapping, using OpenAI model IDs as examples. If your opencode provider ID differs, keep the same shape and adjust the model strings.
+
+```jsonc
+{
+  "plugin": [
+    [
+      "opencode-feature-factory",
+      {
+        "models": {
+          "story": "openai/gpt-5.4",
+          "research": "openai/gpt-5.5",
+          "design": "openai/gpt-5.5",
+          "planning": "openai/gpt-5.5",
+          "builder": "openai/gpt-5.4",
+          "test": "openai/gpt-5.4",
+          "reviewer": "openai/gpt-5.5"
+        },
+        "variants": {
+          "story": "medium",
+          "research": "high",
+          "design": "high",
+          "planning": "xhigh",
+          "builder": "xhigh",
+          "test": "medium",
+          "reviewer": "xhigh"
+        }
+      }
+    ]
+  ]
+}
+```
+
+Resolved agent profile:
+
+| Agents | Model | Variant |
+|---|---|---|
+| `story-reader`, `story-writer` | `gpt-5.4` | `medium` |
+| `codebase-researcher` | `gpt-5.5` | `high` |
+| `design-interpreter` | `gpt-5.5` | `high` |
+| `feature-factory`, `spec-writer`, `work-decomposer` | `gpt-5.5` | `xhigh` |
+| `backend-builder`, `frontend-builder` | `gpt-5.4` | `xhigh` |
+| `test-verifier` | `gpt-5.4` | `medium` |
+| `work-reviewer`, `implementation-validator` | `gpt-5.5` | `xhigh` |
+
+Rationale:
+
+- Planning/decomposition needs the highest reasoning budget because it determines architecture, slice boundaries, dependencies, and merge safety.
+- Review/validation also needs the highest budget because it catches cross-slice correctness gaps before PR creation.
+- Builders benefit from high effort but can usually use a slightly cheaper model because the brief and slice spec constrain the work.
+- Story reading/writing and acceptance-test authoring are important but narrower, so medium effort is usually sufficient.
+
+### Anthropic Profile
+
+This profile uses Sonnet for implementation/research/test work and Opus for high-judgment planning, decomposition, design interpretation, review, and validation. Because `story-reader` and `story-writer` use different strengths in this setup, it uses exact agent overrides instead of only role keys.
+
+Adjust model IDs to the Anthropic models available in your opencode installation.
+
+```jsonc
+{
+  "plugin": [
+    [
+      "opencode-feature-factory",
+      {
+        "models": {
+          "feature-factory": "anthropic/claude-opus-4-8",
+          "story-reader": "anthropic/claude-sonnet-5",
+          "story-writer": "anthropic/claude-opus-4-8",
+          "codebase-researcher": "anthropic/claude-sonnet-5",
+          "design-interpreter": "anthropic/claude-opus-4-8",
+          "spec-writer": "anthropic/claude-opus-4-8",
+          "work-decomposer": "anthropic/claude-opus-4-8",
+          "backend-builder": "anthropic/claude-sonnet-5",
+          "frontend-builder": "anthropic/claude-sonnet-5",
+          "test-verifier": "anthropic/claude-sonnet-5",
+          "work-reviewer": "anthropic/claude-opus-4-8",
+          "implementation-validator": "anthropic/claude-opus-4-8"
+        },
+        "variants": {
+          "feature-factory": "xhigh",
+          "story-reader": "low",
+          "story-writer": "high",
+          "codebase-researcher": "medium",
+          "design-interpreter": "high",
+          "spec-writer": "xhigh",
+          "work-decomposer": "xhigh",
+          "backend-builder": "medium",
+          "frontend-builder": "medium",
+          "test-verifier": "medium",
+          "work-reviewer": "high",
+          "implementation-validator": "xhigh"
+        }
+      }
+    ]
+  ]
+}
+```
+
+Resolved profile:
+
+| Agent | Model | Variant |
+|---|---|---|
+| `story-reader` | Sonnet | `low` |
+| `story-writer` | Opus | `high` |
+| `codebase-researcher` | Sonnet | `medium` |
+| `design-interpreter` | Opus | `high` |
+| `feature-factory`, `spec-writer`, `work-decomposer` | Opus | `xhigh` |
+| `backend-builder`, `frontend-builder` | Sonnet | `medium` |
+| `test-verifier` | Sonnet | `medium` |
+| `work-reviewer` | Opus | `high` |
+| `implementation-validator` | Opus | `xhigh` |
+
+Interactive `/feature` stores durable run state in the target repo:
+
+```text
+.opencode/factory/<run-id>/
+.opencode/worktrees/<branch>/
+```
+
+## Scripted Mode
+
+The scripted path is tracker-agnostic. Any external system can monitor the local factory state and write gate answers. The package does not know about any external queue.
+
+Every `/feature` invocation starts with an intent gate. It classifies the request as `new-feature`, `resume`, `gate-answer`, `status`, `scripted-start`, or `pr-continuation` before mutating state. This prevents accidental restarts and lets external drivers answer gates with the same protocol as interactive users.
+
+Start a run through opencode:
+
+```sh
+feature-factory factory start "APP-123 add the missing approval workflow"
+```
+
+Run against a specific repo and exit at the next gate for an external driver:
+
+```sh
+feature-factory factory start --repo /path/to/repo --headless "APP-123 add the missing approval workflow"
+```
+
+Monitor local state:
+
+```sh
+feature-factory factory list
+feature-factory factory status <run-id> --json
+feature-factory factory watch <run-id>
+feature-factory factory provenance
+```
+
+Answer gates by writing the same files an interactive user would approve through chat:
+
+```sh
+feature-factory factory answer <run-id> story approve
+feature-factory factory answer <run-id> brief "changes: split frontend and backend slices"
+feature-factory factory answer <run-id> pre_pr stop
+```
+
+The factory writes:
+
+- `.opencode/factory/<run-id>/run.json`
+- `.opencode/factory/<run-id>/gates/<gate>.question.md`
+- artifacts, plan, evidence, and review files
+
+External drivers write only:
+
+```text
+.opencode/factory/<run-id>/gates/<gate>.answer
+```
+
+Allowed answers:
+
+```text
+approve
+changes: <specific requested change>
+stop
+```
+
+After writing an answer, resume by invoking `/feature resume <run-id>` or:
+
+```sh
+feature-factory factory start --repo /path/to/repo --headless "resume <run-id>"
+```
+
+External driver loop:
+
+1. Start with `factory start --repo <repo> --headless "<prompt or resume>"`.
+2. Read `.opencode/factory/<run-id>/gates/<gate>.question.md`.
+3. Decide externally.
+4. Write the answer with `factory answer`.
+5. Resume with `factory start --headless "resume <run-id>"`.
+
+This lets end users run the workflow interactively from opencode, while automated systems can monitor and drive it without the factory depending on any one tracker.
+
+## Doctor
+
+`feature-factory doctor` checks the local opencode/plugin environment before a long run:
+
+```sh
+feature-factory doctor --local
+feature-factory doctor --local --models
+feature-factory doctor --local --provider-smoke
+```
+
+It checks opencode run support, plugin registration, command/agent/skill registration, provider auth visibility, `HOME`, `git`, `gh`, base branch detection, and whether `.opencode/factory/` / `.opencode/worktrees/` are gitignored.
+
+`--provider-smoke` runs a lightweight opencode call for each configured model provider. Use it when you want stronger credential validation and accept that it may consume model quota.
+
+## Slice Execution Model
+
+The factory decomposes an approved technical brief into a dependency DAG:
+
+```text
+.opencode/factory/<run-id>/plan/slices.json
+```
+
+Each slice records `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
+
+The orchestrator computes waves from `depends_on`:
+
+- A slice can run when all dependencies are `merged`.
+- Same-wave slices must be file-disjoint.
+- Shared hotspots are serialized into later waves.
+- Up to `max_parallel_slices` run concurrently.
+- Each slice builds in its own `.opencode/worktrees/<feature-branch>--<slice-id>` worktree.
+- The orchestrator observes diff/tests, runs `work-reviewer`, then merges approved slices serially into the feature worktree.
+
+This matches the original software-factory pattern while keeping the package tracker-agnostic.
