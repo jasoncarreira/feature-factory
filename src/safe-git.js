@@ -22,7 +22,6 @@ const SAFE_SUBCOMMANDS = new Set([
   "ls-files",
   "ls-tree",
   "merge-base",
-  "merge-tree",
   "rev-list",
   "rev-parse",
   "show-ref",

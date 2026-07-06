@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -226,6 +226,37 @@ describe("safeGit", () => {
       assert.throws(() => safeGit(repo, []), /must include a git subcommand/u);
       assert.throws(() => safeGit(repo, ["-c", "core.hooksPath=/tmp/pwn", "status"]), /global git options/u);
       assert.throws(() => safeGit(repo, ["worktree", "remove", repo]), /worktree list/u);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("rejects merge-tree before spawning git or any repo-local merge driver", () => {
+    const repo = createCommittedRepo(["tracked.txt"]);
+    const driverPath = join(repo, "evil-merge-driver.sh");
+    const sentinelPath = join(repo, "merge-driver-ran.txt");
+    let spawnCalled = false;
+
+    try {
+      writeFixture(repo, ".gitattributes", "tracked.txt merge=evil\n");
+      writeFileSync(driverPath, `#!/bin/sh\nprintf 'pwned\n' > "${sentinelPath}"\n`, "utf8");
+      chmodSync(driverPath, 0o755);
+      git(repo, ["config", "merge.evil.name", "evil merge driver"]);
+      git(repo, ["config", "merge.evil.driver", driverPath]);
+
+      assert.throws(
+        () =>
+          safeGit(repo, ["merge-tree", "HEAD", "HEAD"], {
+            spawnSync() {
+              spawnCalled = true;
+              throw new Error("safeGit should reject merge-tree before spawning git");
+            },
+          }),
+        /safeGit does not allow git merge-tree/u,
+      );
+
+      assert.equal(spawnCalled, false);
+      assert.equal(existsSync(sentinelPath), false);
     } finally {
       cleanup(repo);
     }
