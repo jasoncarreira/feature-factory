@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { heartbeatOnce, withRunJsonLock } from "./run-state.js";
-import { HEARTBEAT_PHASES, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -85,13 +85,13 @@ export function status(runId, opts = {}) {
 }
 
 export function heartbeatStatus(runId, opts = {}) {
-  const file = heartbeatPath(resolveRunDir(runId, opts));
+  const file = heartbeatPath(resolveHeartbeatRunDir(runId, opts));
   if (!existsSync(file)) return null;
   return readHeartbeatFile(file);
 }
 
 export async function startHeartbeat(runId, config = {}, opts = {}) {
-  const runDir = resolveRunDir(runId, opts);
+  const runDir = resolveHeartbeatRunDir(runId, opts);
   const heartbeatFile = heartbeatPath(runDir);
   const phase = normalizeHeartbeatPhase(config.phase);
   const intervalMs = normalizeHeartbeatInterval(config.intervalMs);
@@ -104,6 +104,10 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     const run = readRunFile(join(runDir, "run.json"));
     if (run.status !== "running") {
       throw new Error(`run '${run.run_id}' must be running to start a heartbeat`);
+    }
+    const protectedGate = pendingProtectedGate(run);
+    if (protectedGate) {
+      throw new Error(`run '${run.run_id}' is waiting at protected gate '${protectedGate}'`);
     }
 
     const current = tryReadHeartbeatFile(heartbeatFile);
@@ -143,7 +147,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 }
 
 export async function stopHeartbeat(runId, config = {}, opts = {}) {
-  const runDir = resolveRunDir(runId, opts);
+  const runDir = resolveHeartbeatRunDir(runId, opts);
   const heartbeatFile = heartbeatPath(runDir);
   const waitMs = normalizeHeartbeatWait(config.waitMs);
   const force = Boolean(config.force);
@@ -386,6 +390,19 @@ function resolveRunDir(runId, opts = {}) {
   return dir;
 }
 
+function resolveHeartbeatRunDir(runId, opts = {}) {
+  const id = runId || latestRunId(opts);
+  if (!id) throw new Error("no factory runs found");
+  const root = factoryRoot(opts.cwd || process.cwd());
+  const normalized = normalizeHeartbeatRunId(id);
+  const dir = resolve(root, normalized);
+  if (!insideDirectory(root, dir)) {
+    throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
+  }
+  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
+  return dir;
+}
+
 function factoryRoot(cwd) {
   return join(repoRoot(cwd), ".opencode", "factory");
 }
@@ -438,6 +455,15 @@ function normalizeAnswer(answer) {
   throw new Error("answer must be exactly approve, stop, or start with changes:");
 }
 
+function normalizeHeartbeatRunId(runId) {
+  if (!stringValue(runId)) throw new Error("factory heartbeat requires exactly one <run-id>");
+  const value = String(runId).trim();
+  if (isAbsolute(value) || value.includes("/") || value.includes("\\") || value === "." || value === "..") {
+    throw new Error("factory heartbeat requires a bare <run-id>, not a filesystem path");
+  }
+  return value;
+}
+
 export function assertFactoryRoot(repo) {
   const root = factoryRoot(repo);
   return existsSync(root) && statSync(root).isDirectory();
@@ -469,39 +495,22 @@ function repoRoot(cwd) {
 }
 
 function formatPrompt(prompt, opts) {
-  if (opts.autonomous) return autonomousPrompt(prompt, opts);
-  if (!opts.headless) return prompt;
-  return `${prompt}
-
-[Feature Factory Driver Mode]
-Run in headless scripted mode: advance the factory only until the next gate or terminal status, write the gate question file and run.json state, then exit. If an answer file already exists for the pending gate, consume it, record approved answers with approval_source "external-driver", and continue to the next gate. Do not wait for interactive chat input.`;
+  return JSON.stringify(featureCommandPayload(prompt, opts), null, 2);
 }
 
 export function validateSlices(plan) {
   return validateSlicesPlan(plan);
 }
 
-function autonomousPrompt(prompt, opts) {
-  const extras = [];
-  if (opts.ready) extras.push("If a draft PR is created successfully and repository policy allows, mark it ready for review after creation.");
-  if (opts.reviewer) extras.push(`After creating the PR, request review from: ${opts.reviewer}.`);
-  return `${prompt}
-
-[Feature Factory Autonomous Mode]
-Run in autonomous scripted mode. This is explicit operator opt-in.
-
-Drive the factory to a terminal state without relying on an external gate relay:
-
-- Keep the normal durable control plane under .opencode/factory/<run-id>/ and keep writing gate question files for auditability.
-- Do not stop at story or brief gates when the producing artifacts are complete, internally consistent, and no product/security/UX/external-policy ambiguity remains. Record these as approved with answer "approve", approval_source "autonomous", and a short evidence note in run.json.
-- If story or brief approval would require a human product decision, mark the run status "needs-human" with a clear reason and terminal_result, then stop.
-- At pre_pr, use the factory's own two-lens panel verdict as the gate decision. GO/PASS may approve pre_pr autonomously and proceed to draft PR creation. Any validator NO-GO or security-reviewer BLOCK is NO-GO.
-- On NO-GO, run the bounded remediation loop described by the feature skill, re-observe, and re-run the panel. Do not exceed run.json.max_retries or 3 attempts if unset.
-- If remediation is exhausted, mark status "blocked" with the top finding and terminal_result, then stop.
-- Never auto-merge. Draft PR creation is the final autonomous side effect.
-- At every terminal state, write run.json.terminal_result with status, run_id, pr_url, reason, summary, and artifact references useful to external harnesses.
-
-${extras.join("\n")}`.trim();
+function featureCommandPayload(prompt, opts) {
+  return {
+    operator_request: String(prompt),
+    driver: {
+      mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
+      ready: Boolean(opts.ready),
+      reviewer: stringValue(opts.reviewer) ? opts.reviewer : null,
+    },
+  };
 }
 
 function createHeartbeatRuntime(runDir, lease, opts) {
@@ -509,6 +518,7 @@ function createHeartbeatRuntime(runDir, lease, opts) {
     runDir,
     runId: lease.run_id,
     token: lease.token,
+    ownerPid: lease.pid,
     intervalMs: lease.interval_ms,
     tickTimeoutMs: normalizePositiveInteger(opts.tickTimeoutMs, HEARTBEAT_TICK_LOCK_TIMEOUT_MS, "tickTimeoutMs"),
     firstTick: deferred(),
@@ -560,10 +570,15 @@ async function heartbeatTick(runtime) {
     await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: `run-${run.status}` });
     return { continue: false, reason: "terminal-status" };
   }
+  const protectedGate = pendingProtectedGate(run);
+  if (protectedGate) {
+    await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: `pending-gate-${protectedGate}` });
+    return { continue: false, reason: "protected-gate-pending" };
+  }
 
   let result;
   try {
-    result = await heartbeatOnce(runtime.runDir, { token: runtime.token, now }, { timeoutMs: runtime.tickTimeoutMs });
+    result = await heartbeatOnce(runtime.runDir, { token: runtime.token, ownerPid: runtime.ownerPid, now }, { timeoutMs: runtime.tickTimeoutMs });
   } catch (error) {
     if (isRunJsonLockTimeout(error)) {
       return await stopHeartbeatLoopForError(runtime, now, error.message);
@@ -574,6 +589,11 @@ async function heartbeatTick(runtime) {
   if (!result.updated) {
     if (result.reason === "terminal-status") {
       await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: `run-${result.status}` });
+    } else if (result.reason === "protected-gate-pending") {
+      await finalizeHeartbeatStop(runtime.runDir, runtime.token, {
+        now,
+        reason: result.gate ? `pending-gate-${result.gate}` : "protected-gate-pending",
+      });
     } else if (result.reason === "heartbeat-lease-stopping") {
       await finalizeHeartbeatStop(runtime.runDir, runtime.token, {
         now,

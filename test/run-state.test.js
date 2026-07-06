@@ -140,6 +140,7 @@ describe("heartbeatOnce", () => {
     try {
       const result = await heartbeatOnce(fixture.runDir, {
         token: "lease-1",
+        ownerPid: 4242,
         now: "2026-07-06T12:00:00.000Z",
       });
 
@@ -165,6 +166,7 @@ describe("heartbeatOnce", () => {
 
         const result = await heartbeatOnce(fixture.runDir, {
           token: "lease-1",
+          ownerPid: 4242,
           now: "2026-07-06T12:10:00.000Z",
         });
 
@@ -195,9 +197,19 @@ describe("heartbeatOnce", () => {
           setup: () => writeFileSync(join(fixture.runDir, "heartbeat.json"), "{not-json\n", "utf8"),
         },
         {
-          name: "missing required sidecar fields",
+          name: "missing canonical deadline",
           reason: "invalid-heartbeat-lease",
-          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), { ...heartbeatLease(), phase: null, deadline_at: null }),
+          setup: () => {
+            const lease = heartbeatLease();
+            delete lease.deadline_at;
+            lease.expires_at = "2026-07-06T12:30:00.000Z";
+            writeJson(join(fixture.runDir, "heartbeat.json"), lease);
+          },
+        },
+        {
+          name: "unknown phase",
+          reason: "invalid-heartbeat-lease",
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ phase: "review-panel" })),
         },
         {
           name: "run id mismatch",
@@ -210,9 +222,9 @@ describe("heartbeatOnce", () => {
           setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ token: "other-token" })),
         },
         {
-          name: "inactive lease",
-          reason: "heartbeat-lease-inactive",
-          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ status: "inactive" })),
+          name: "owner mismatch",
+          reason: "heartbeat-owner-mismatch",
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ pid: 9898 })),
         },
         {
           name: "stopping lease",
@@ -233,9 +245,13 @@ describe("heartbeatOnce", () => {
             ),
         },
         {
-          name: "terminal lease",
-          reason: "heartbeat-lease-terminal",
-          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ status: "completed", stop_reason: "done" })),
+          name: "active lease with stop markers",
+          reason: "invalid-heartbeat-lease",
+          setup: () =>
+            writeJson(
+              join(fixture.runDir, "heartbeat.json"),
+              heartbeatLease({ status: "running", stop_requested_at: "2026-07-06T11:58:00.000Z", stop_reason: "handoff" }),
+            ),
         },
         {
           name: "expired lease",
@@ -249,6 +265,7 @@ describe("heartbeatOnce", () => {
 
         const result = await heartbeatOnce(fixture.runDir, {
           token: "lease-1",
+          ownerPid: 4242,
           now: "2026-07-06T12:00:00.000Z",
         });
 
@@ -256,6 +273,37 @@ describe("heartbeatOnce", () => {
         assert.equal(result.reason, scenario.reason, scenario.name);
         assert.equal(result.status, "running", scenario.name);
         assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current, scenario.name);
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses to tick while story, brief, or pre_pr gates are pending", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
+
+    try {
+      for (const gate of ["story", "brief", "pre_pr"]) {
+        const current = baseRun({
+          gates: {
+            story: { status: gate === "story" ? "pending" : "approved", artifact: "artifacts/story.md" },
+            brief: { status: gate === "brief" ? "pending" : "approved", artifact: "artifacts/brief.md" },
+            pre_pr: { status: gate === "pre_pr" ? "pending" : "approved", artifact: "artifacts/pre_pr.md" },
+          },
+        });
+        writeJson(join(fixture.runDir, "run.json"), current);
+
+        const result = await heartbeatOnce(fixture.runDir, {
+          token: "lease-1",
+          ownerPid: 4242,
+          now: "2026-07-06T12:00:00.000Z",
+        });
+
+        assert.equal(result.updated, false, gate);
+        assert.equal(result.reason, "protected-gate-pending", gate);
+        assert.equal(result.gate, gate, gate);
+        assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current, gate);
       }
     } finally {
       fixture.cleanup();
@@ -292,7 +340,7 @@ function baseRun(overrides = {}) {
     worktree: ".opencode/worktrees/heartbeat-liveness",
     gates: {
       story: {
-        status: "pending",
+        status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
         answer_ref: "gates/story.answer",
@@ -344,7 +392,7 @@ function heartbeatLease(overrides = {}) {
     schema_version: 1,
     run_id: "heartbeat-liveness",
     token: "lease-1",
-    phase: "review-panel",
+    phase: "slice-review",
     status: "running",
     pid: 4242,
     started_at: "2026-07-06T11:00:00.000Z",

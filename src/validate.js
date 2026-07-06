@@ -14,6 +14,7 @@ export const HEARTBEAT_PHASES = Object.freeze([
   "security-reviewer",
   "remediation",
 ]);
+export const HEARTBEAT_PROTECTED_GATES = Object.freeze(["story", "brief", "pre_pr"]);
 export const HEARTBEAT_ACTIVE_STATUSES = Object.freeze(["active", "running"]);
 export const HEARTBEAT_TERMINAL_STATUSES = Object.freeze(["stopped", "error"]);
 export const HEARTBEAT_STATUSES = Object.freeze([...HEARTBEAT_ACTIVE_STATUSES, "stopping", ...HEARTBEAT_TERMINAL_STATUSES]);
@@ -134,6 +135,14 @@ export function validateFile(file, validator) {
   }
 }
 
+export function pendingProtectedGate(run) {
+  if (!isRecord(run) || !isRecord(run.gates)) return null;
+  for (const gateName of HEARTBEAT_PROTECTED_GATES) {
+    if (isPendingGate(run.gates[gateName])) return gateName;
+  }
+  return null;
+}
+
 function validateGateMap(errors, gates, path) {
   if (gates === undefined || gates === null) return;
   if (!isRecord(gates)) {
@@ -184,6 +193,10 @@ function validateGate(errors, gate, path) {
   optionalString(errors, gate, "answer", `${path}.answer`);
   optionalString(errors, gate, "decision_note", `${path}.decision_note`);
   optionalEnum(errors, gate, "approval_source", APPROVAL_SOURCES, `${path}.approval_source`);
+}
+
+function isPendingGate(gate) {
+  return isRecord(gate) && gate.status === "pending";
 }
 
 function validateRunSlices(errors, slices, path) {
