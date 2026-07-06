@@ -277,6 +277,42 @@ describe("validateRunDir", () => {
     assert.match(errors, /accepted gate-decision attestation|root is missing/u);
     cleanupTemp(runDir);
   });
+
+  it("does not treat forged factory.lock as provenance proof for approved gates", () => {
+    const runDir = tempRunDir("approved-gate-forged-factory-lock");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(
+      join(runDir, "run.json"),
+      runningRun({
+        run_id: "approved-gate-forged-factory-lock",
+        gates: {
+          story: {
+            status: "approved",
+            artifact: "artifacts/story.md",
+            question_ref: "gates/story.question.md",
+            approval_source: "autonomous",
+          },
+        },
+        slices: [],
+      }),
+    );
+    writeJson(
+      join(runDir, "factory.lock"),
+      factoryLock({
+        run_id: "approved-gate-forged-factory-lock",
+        heartbeat_owner: "forged-owner-capability",
+        session_owner: "forged-session",
+      }),
+    );
+
+    const result = validateRunDir(runDir);
+    const errors = result.checks.flatMap((check) => check.errors || []).map((error) => `${error.path}: ${error.message}`).join("\n");
+
+    assert.equal(result.ok, false);
+    assert.match(errors, /run\.gates\.story\.status/u);
+    assert.match(errors, /accepted gate-decision attestation|root is missing/u);
+    cleanupTemp(runDir);
+  });
 });
 
 describe("validateSlicesPlan", () => {

@@ -91,7 +91,7 @@ describe("factory state validation", () => {
     }
   });
 
-  it("rejects forged mutable gate, review, evidence, worktree, and base claims even when attestations validate", () => {
+  it("rejects forged mutable gate, review, evidence, worktree, factory.lock, and base claims even when attestations validate", () => {
     const fixture = createHistoryFixture();
 
     try {
@@ -101,8 +101,16 @@ describe("factory state validation", () => {
       manifest.slices[0].review_ref = "reviews/forged-review.json";
       manifest.slices[0].evidence_ref = "evidence/forged-evidence.json";
       manifest.slices[0].worktree = ".opencode/worktrees/forged-slice";
+      manifest.base_ref = "refs/heads/forged-main";
       manifest.base_commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
       writeJson(join(run.runDir, "run.json"), manifest);
+      writeJson(join(run.runDir, "factory.lock"), {
+        schema_version: 1,
+        run_id: "forged-claims",
+        heartbeat_owner: "forged-owner-capability",
+        session_owner: "forged-session",
+        updated_at: isoAt(99),
+      });
 
       const result = validateState("forged-claims", { cwd: fixture.repoRoot });
       const errors = joinErrors(result.runs[0]);
@@ -112,6 +120,7 @@ describe("factory state validation", () => {
       assert.match(errors, /run\.slices\[0\]\.review_ref/u);
       assert.match(errors, /run\.slices\[0\]\.evidence_ref/u);
       assert.match(errors, /run\.slices\[0\]\.worktree/u);
+      assert.match(errors, /run\.base_ref/u);
       assert.match(errors, /run\.base_commit/u);
     } finally {
       cleanup(fixture.repoRoot);
@@ -214,21 +223,26 @@ describe("factory state validation", () => {
   });
 
   it("rejects symlinked durable roots when provenance-sensitive claims require authority checks", () => {
-    const fixture = createHistoryFixture();
-    const outsideEvidence = mkdtempSync(join(tmpdir(), "factory-validate-evidence-outside-"));
+    const scenarios = ["evidence", "artifacts", "reviews", "attestations"];
 
-    try {
-      const run = buildFactoryAuthorityRun(fixture, "symlinked-evidence-root");
-      rmSync(join(run.runDir, "evidence"), { recursive: true, force: true });
-      symlinkSync(outsideEvidence, join(run.runDir, "evidence"), "dir");
+    for (const rootName of scenarios) {
+      const fixture = createHistoryFixture();
+      const outsideRoot = mkdtempSync(join(tmpdir(), `factory-validate-${rootName}-outside-`));
 
-      const result = validateState("symlinked-evidence-root", { cwd: fixture.repoRoot });
+      try {
+        const runId = `symlinked-${rootName}-root`;
+        const run = buildFactoryAuthorityRun(fixture, runId);
+        rmSync(join(run.runDir, rootName), { recursive: true, force: true });
+        symlinkSync(outsideRoot, join(run.runDir, rootName), "dir");
 
-      assert.equal(result.ok, false);
-      assert.match(joinErrors(result.runs[0]), /symlink/u);
-    } finally {
-      cleanup(fixture.repoRoot);
-      cleanup(outsideEvidence);
+        const result = validateState(runId, { cwd: fixture.repoRoot });
+
+        assert.equal(result.ok, false, rootName);
+        assert.match(joinErrors(result.runs[0]), /symlink/u, rootName);
+      } finally {
+        cleanup(fixture.repoRoot);
+        cleanup(outsideRoot);
+      }
     }
   });
 

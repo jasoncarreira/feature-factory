@@ -232,18 +232,22 @@ describe("provenance authority", () => {
   });
 
   it("rejects symlinked durable roots", () => {
-    const root = mkdtempSync(join(tmpdir(), "prov-auth-symlink-"));
-    const outsideEvidence = mkdtempSync(join(tmpdir(), "prov-auth-evidence-outside-"));
+    const scenarios = ["evidence", "artifacts", "reviews", "attestations"];
 
-    try {
-      const runDir = createBareRunDir(root, "symlink-run");
-      cleanup(join(runDir, "evidence"));
-      symlinkSync(outsideEvidence, join(runDir, "evidence"));
+    for (const rootName of scenarios) {
+      const root = mkdtempSync(join(tmpdir(), `prov-auth-symlink-${rootName}-`));
+      const outsideRoot = mkdtempSync(join(tmpdir(), `prov-auth-outside-${rootName}-`));
 
-      assert.throws(() => resolveDurableRoots(runDir), /symlink|directory/u);
-    } finally {
-      cleanup(root);
-      cleanup(outsideEvidence);
+      try {
+        const runDir = createBareRunDir(root, `symlink-run-${rootName}`);
+        cleanup(join(runDir, rootName));
+        symlinkSync(outsideRoot, join(runDir, rootName));
+
+        assert.throws(() => resolveDurableRoots(runDir), /symlink|directory/u, rootName);
+      } finally {
+        cleanup(root);
+        cleanup(outsideRoot);
+      }
     }
   });
 
