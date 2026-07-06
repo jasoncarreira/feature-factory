@@ -58,8 +58,8 @@ describe("factory heartbeat lifecycle", () => {
       assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }).status, "stopped");
 
       const stoppedRun = readJson(join(runDir, "run.json"));
-      await sleep(1100);
-      assert.equal(readJson(join(runDir, "run.json")).heartbeat_at, stoppedRun.heartbeat_at);
+      assert.equal(stopped.last_tick_at, stoppedRun.heartbeat_at);
+      assert.equal(await waitForChange(() => readJson(join(runDir, "run.json")).heartbeat_at !== stoppedRun.heartbeat_at, { timeoutMs: 1200 }), false);
     } finally {
       await stopIfActive(repo, lease?.token);
       cleanup(repo);
@@ -77,10 +77,13 @@ describe("factory heartbeat lifecycle", () => {
       const firstHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
 
       await waitFor(() => readJson(join(runDir, "run.json")).heartbeat_at !== firstHeartbeatAt, { timeoutMs: 2500 });
+      const secondHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
+      const stopped = await stopHeartbeat(RUN_ID, { token: lease.token, waitMs: 300 }, { cwd: repo });
 
       const storedRun = readJson(join(runDir, "run.json"));
       const storedLease = readJson(join(runDir, "heartbeat.json"));
-      assert.notEqual(storedRun.heartbeat_at, firstHeartbeatAt);
+      assert.notEqual(secondHeartbeatAt, firstHeartbeatAt);
+      assert.equal(stopped.status, "stopped");
       assert.equal(storedLease.last_tick_at, storedRun.heartbeat_at);
     } finally {
       await stopIfActive(repo, lease?.token);
@@ -290,6 +293,16 @@ async function waitFor(predicate, options = {}) {
     await sleep(stepMs);
   }
   if (!predicate()) throw new Error("timed out waiting for test condition");
+}
+
+async function waitForChange(predicate, options = {}) {
+  try {
+    await waitFor(predicate, options);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message === "timed out waiting for test condition") return false;
+    throw error;
+  }
 }
 
 function sleep(ms) {

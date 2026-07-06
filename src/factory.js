@@ -633,13 +633,14 @@ async function syncHeartbeatAfterTick(runDir, runId, token, now) {
         writeHeartbeatFile(
           heartbeatPath(runDir),
           stoppedHeartbeatState(state.lease, {
+            lastTickAt: now,
             now,
             reason: state.lease?.stop_reason || "stop-requested",
             stopRequestedAt: state.lease?.stop_requested_at || now,
           }),
         );
       } else if (state.reason === "heartbeat-lease-expired") {
-        writeHeartbeatFile(heartbeatPath(runDir), stoppedHeartbeatState(state.lease, { now, reason: "max-duration-exceeded" }));
+        writeHeartbeatFile(heartbeatPath(runDir), stoppedHeartbeatState(state.lease, { lastTickAt: now, now, reason: "max-duration-exceeded" }));
       }
       return { continue: false, reason: state.reason };
     }
@@ -661,7 +662,12 @@ async function finalizeHeartbeatStop(runDir, token, { now, reason, stopRequested
     if (current.error || !current.value) return null;
     if (current.value.token !== token) return null;
     if (HEARTBEAT_TERMINAL_STATUSES.has(current.value.status)) return current.value;
-    const next = stoppedHeartbeatState(current.value, { now, reason, stopRequestedAt });
+    const next = stoppedHeartbeatState(current.value, {
+      lastTickAt: resolveStoppedHeartbeatTickAt(runDir, current.value),
+      now,
+      reason,
+      stopRequestedAt,
+    });
     writeHeartbeatFile(heartbeatPath(runDir), next);
     return next;
   });
@@ -676,6 +682,7 @@ async function markHeartbeatError(runDir, token, now, reason) {
       if (HEARTBEAT_TERMINAL_STATUSES.has(current.value.status)) return current.value;
       const next = validateHeartbeatState({
         ...current.value,
+        last_tick_at: resolveStoppedHeartbeatTickAt(runDir, current.value),
         status: "error",
         stopped_at: now,
         stop_reason: reason || current.value.stop_reason || "heartbeat-error",
@@ -772,14 +779,36 @@ function writeHeartbeatFile(file, heartbeat) {
   writeJsonAtomic(file, next);
 }
 
-function stoppedHeartbeatState(lease, { now, reason, stopRequestedAt } = {}) {
+function stoppedHeartbeatState(lease, { lastTickAt, now, reason, stopRequestedAt } = {}) {
   return validateHeartbeatState({
     ...lease,
+    last_tick_at: lastTickAt || lease.last_tick_at,
     status: "stopped",
     stop_requested_at: stopRequestedAt || lease.stop_requested_at || null,
     stopped_at: now || timestamp(),
     stop_reason: reason || lease.stop_reason || "stop-requested",
   });
+}
+
+function resolveStoppedHeartbeatTickAt(runDir, lease) {
+  const lastTickAt = stringValue(lease?.last_tick_at) ? lease.last_tick_at : null;
+  const run = tryReadRunFile(join(runDir, "run.json"));
+  const heartbeatAt = stringValue(run.value?.heartbeat_at) ? run.value.heartbeat_at : null;
+  return latestTimestamp(lastTickAt, heartbeatAt) || lastTickAt || heartbeatAt || timestamp();
+}
+
+function latestTimestamp(left, right) {
+  const leftMs = parseTimestamp(left);
+  const rightMs = parseTimestamp(right);
+  if (leftMs === null) return rightMs === null ? null : right;
+  if (rightMs === null) return left;
+  return rightMs >= leftMs ? right : left;
+}
+
+function parseTimestamp(value) {
+  if (!stringValue(value)) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 function writeJsonAtomic(file, value) {
