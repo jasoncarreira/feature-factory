@@ -216,7 +216,14 @@ Scripted-mode fallback:
 
 ## 5. Stale-Run And Watchdog Helpers
 
-Current state includes `heartbeat_at`, but no CLI helper interprets it.
+Current state now includes the internal heartbeat helper, `$RUN/heartbeat.json`, and `run-json.lock/` coordination. The helper is for long orchestrator waits only; it must not run while the factory is stopped at `story`, `brief`, or `pre_pr` gates, and it must confirm stop before terminal manifest writes.
+
+External monitoring semantics:
+
+- `heartbeat.json` + `run.json.heartbeat_at` are liveness only.
+- Pending gate waits are read from `run.json.gates.*`, not from heartbeat.
+- Terminal `completed|blocked|partial|needs-human` plus `terminal_result` are the stable outcome contract; heartbeat should already be stopped by then.
+- `feature-factory factory heartbeat <run-id> --status --json` is the supported helper/status surface for watchdog tooling.
 
 Add commands:
 

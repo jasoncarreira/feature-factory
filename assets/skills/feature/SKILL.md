@@ -159,6 +159,28 @@ One-writer rule:
 - External drivers write only `gates/<gate>.answer`.
 - The factory consumes answer files, records the result in `run.json`, and continues.
 
+## Heartbeat Protocol
+
+Use the internal heartbeat helper only for long `Task`/subagent waits that happen while `run.json.status` is still `running`.
+
+- Start heartbeat immediately before the long wait begins.
+- Stop heartbeat in a `finally`/after-return path before any foreground semantic `run.json` write. While a heartbeat is active, do not accept agent output, mutate steps/slices/gates, or write any other semantic manifest fields besides locked `heartbeat_at` ticks.
+- Do not start heartbeat while stopped at Gate 1 (`story`), Gate 2 (`brief`), or Gate 3 (`pre_pr`). Gate waits are intentionally heartbeat-free.
+- Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat with wait/force semantics and require a confirmed stopped lease.
+
+Required heartbeat phases:
+
+- `spec-review`
+- `decomposition-review`
+- `builder-wave`
+- `slice-review`
+- `test-verifier`
+- `test-rerun`
+- `test-review`
+- `implementation-validator`
+- `security-reviewer`
+- `remediation`
+
 ## Gate Protocol
 
 For every gate:
