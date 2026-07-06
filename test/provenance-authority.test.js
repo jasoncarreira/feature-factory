@@ -22,6 +22,7 @@ import {
   resolveEvidenceRef,
   resolveReviewRef,
   validateAttestationGraph,
+  validateGateDecisionAttestation,
   validateProvenanceAuthority,
   validateReviewApprovalAttestation,
   withAttestationHash,
@@ -33,6 +34,8 @@ describe("provenance authority", () => {
 
     try {
       const runDir = createBareRunDir(root, "hash-run");
+      writeFixture(runDir, "artifacts/story.md", "artifact\n");
+      writeFixture(runDir, "gates/story.question.md", "question\n");
       const runBase = createRunBaseAttestation({
         run_id: "hash-run",
         sequence: 1,
@@ -57,14 +60,17 @@ describe("provenance authority", () => {
         bindings: {
           gate: "story",
           decision: "approved",
-          approval_source: "human",
-          question_ref: "artifacts/story-question.md",
-          question_hash: hashValue("question"),
+          approval_source: "autonomous",
+          question_ref: "gates/story.question.md",
+          question_hash: hashFile(join(runDir, "gates/story.question.md")),
           artifact_ref: "artifacts/story.md",
-          artifact_hash: hashValue("artifact"),
+          artifact_hash: hashFile(join(runDir, "artifacts/story.md")),
           answer_text_hash: hashValue("yes"),
         },
       });
+
+      const gateValidation = validateGateDecisionAttestation(gateDecision, { runDir });
+      assert.equal(gateValidation.ok, true);
 
       writeAttestation(runDir, "attestations/run-base.json", runBase);
       writeAttestation(runDir, "attestations/gates/story.json", gateDecision);
@@ -100,6 +106,126 @@ describe("provenance authority", () => {
       const gap = validateAttestationGraph(runDir);
       assert.equal(gap.ok, false);
       assert.match(joinErrors(gap), /previous attestation hash/u);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("accepts gates/ question and answer refs for approved gate decisions and rejects artifact-rooted refs", () => {
+    const root = mkdtempSync(join(tmpdir(), "prov-auth-gate-refs-"));
+
+    try {
+      const runDir = createBareRunDir(root, "gate-refs");
+      writeFixture(runDir, "artifacts/story.md", "story artifact\n");
+      writeFixture(runDir, "gates/story.question.md", "story question\n");
+      writeFixture(runDir, "gates/story.answer", "approve\n");
+      writeFixture(runDir, "artifacts/story-question.md", "artifact question\n");
+      writeFixture(runDir, "artifacts/story.answer", "approve\n");
+
+      const valid = createGateDecisionAttestation({
+        run_id: "gate-refs",
+        sequence: 1,
+        prev_hash: null,
+        created_at: isoAt(1),
+        bindings: {
+          gate: "story",
+          decision: "approved",
+          approval_source: "human",
+          question_ref: "gates/story.question.md",
+          question_hash: hashFile(join(runDir, "gates/story.question.md")),
+          artifact_ref: "artifacts/story.md",
+          artifact_hash: hashFile(join(runDir, "artifacts/story.md")),
+          answer_ref: "gates/story.answer",
+          answer_hash: hashFile(join(runDir, "gates/story.answer")),
+        },
+      });
+
+      const validResult = validateGateDecisionAttestation(valid, { runDir });
+      assert.equal(validResult.ok, true);
+
+      const artifactRooted = createGateDecisionAttestation({
+        run_id: "gate-refs",
+        sequence: 2,
+        prev_hash: valid.attestation_hash,
+        created_at: isoAt(2),
+        bindings: {
+          gate: "story",
+          decision: "approved",
+          approval_source: "human",
+          question_ref: "artifacts/story-question.md",
+          question_hash: hashFile(join(runDir, "artifacts/story-question.md")),
+          artifact_ref: "artifacts/story.md",
+          artifact_hash: hashFile(join(runDir, "artifacts/story.md")),
+          answer_ref: "artifacts/story.answer",
+          answer_hash: hashFile(join(runDir, "artifacts/story.answer")),
+        },
+      });
+
+      const artifactRootedResult = validateGateDecisionAttestation(artifactRooted, { runDir });
+      assert.equal(artifactRootedResult.ok, false);
+      assert.match(joinErrors(artifactRootedResult), /artifacts\/story-question\.md must be rooted under gates\//u);
+      assert.match(joinErrors(artifactRootedResult), /artifacts\/story\.answer must be rooted under gates\//u);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("keeps escape and symlink protections for gate question and answer refs", () => {
+    const root = mkdtempSync(join(tmpdir(), "prov-auth-gate-protections-"));
+
+    try {
+      const runDir = createBareRunDir(root, "gate-protections");
+      writeFixture(runDir, "artifacts/story.md", "story artifact\n");
+      writeFixture(runDir, "gates/story.question.md", "story question\n");
+      writeFixture(runDir, "gates/story.answer", "approve\n");
+
+      const escaped = createGateDecisionAttestation({
+        run_id: "gate-protections",
+        sequence: 1,
+        prev_hash: null,
+        created_at: isoAt(1),
+        bindings: {
+          gate: "story",
+          decision: "approved",
+          approval_source: "human",
+          question_ref: "gates/../story.question.md",
+          question_hash: hashFile(join(runDir, "gates/story.question.md")),
+          artifact_ref: "artifacts/story.md",
+          artifact_hash: hashFile(join(runDir, "artifacts/story.md")),
+          answer_ref: "gates/story.answer",
+          answer_hash: hashFile(join(runDir, "gates/story.answer")),
+        },
+      });
+
+      const escapedResult = validateGateDecisionAttestation(escaped, { runDir });
+      assert.equal(escapedResult.ok, false);
+      assert.match(joinErrors(escapedResult), /must not contain empty, '\.' or '\.\.' segments/u);
+
+      cleanup(join(runDir, "gates", "story.answer"));
+      writeFixture(root, "outside-answer.txt", "approve\n");
+      symlinkSync(join(root, "outside-answer.txt"), join(runDir, "gates", "story.answer"));
+
+      const symlinked = createGateDecisionAttestation({
+        run_id: "gate-protections",
+        sequence: 2,
+        prev_hash: null,
+        created_at: isoAt(2),
+        bindings: {
+          gate: "story",
+          decision: "approved",
+          approval_source: "human",
+          question_ref: "gates/story.question.md",
+          question_hash: hashFile(join(runDir, "gates/story.question.md")),
+          artifact_ref: "artifacts/story.md",
+          artifact_hash: hashFile(join(runDir, "artifacts/story.md")),
+          answer_ref: "gates/story.answer",
+          answer_hash: hashFile(join(root, "outside-answer.txt")),
+        },
+      });
+
+      const symlinkedResult = validateGateDecisionAttestation(symlinked, { runDir });
+      assert.equal(symlinkedResult.ok, false);
+      assert.match(joinErrors(symlinkedResult), /must not traverse symlinks/u);
     } finally {
       cleanup(root);
     }
@@ -832,7 +958,7 @@ function mergeSlice(featureWorktree, sliceBranch, options = {}) {
 
 function createBareRunDir(root, runId) {
   const runDir = join(root, ".opencode", "factory", runId);
-  for (const directory of [runDir, join(runDir, "evidence"), join(runDir, "artifacts"), join(runDir, "reviews"), join(runDir, "attestations")]) {
+  for (const directory of [runDir, join(runDir, "evidence"), join(runDir, "artifacts"), join(runDir, "reviews"), join(runDir, "attestations"), join(runDir, "gates")]) {
     mkdirSync(directory, { recursive: true });
   }
   return runDir;

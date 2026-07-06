@@ -642,8 +642,8 @@ function buildFactoryAuthorityRun(fixture, runId, options = {}) {
   });
 
   const storyArtifactRef = "artifacts/story.md";
-  const storyQuestionRef = "artifacts/story-question.md";
-  const storyAnswerRef = "artifacts/story.answer";
+  const storyQuestionRef = "gates/story.question.md";
+  const storyAnswerRef = "gates/story.answer";
   writeFixture(runDir, storyArtifactRef, "story artifact\n");
   writeFixture(runDir, storyQuestionRef, "story question\n");
   writeFixture(runDir, storyAnswerRef, "approve\n");
@@ -972,7 +972,7 @@ function mergeSlice(featureWorktree, sliceBranch, options = {}) {
 
 function createBareRunDir(root, runId) {
   const runDir = join(root, ".opencode", "factory", runId);
-  for (const directory of [runDir, join(runDir, "evidence"), join(runDir, "artifacts"), join(runDir, "reviews"), join(runDir, "attestations")]) {
+  for (const directory of [runDir, join(runDir, "evidence"), join(runDir, "artifacts"), join(runDir, "reviews"), join(runDir, "attestations"), join(runDir, "gates")]) {
     mkdirSync(directory, { recursive: true });
   }
   return runDir;

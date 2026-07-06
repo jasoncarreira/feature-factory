@@ -8,6 +8,9 @@ export const AUTHORITY_MODEL = "feature-factory-provenance-v1";
 export const AUTHORITY_NAME = "feature-factory";
 export const AUTHORITY_SCHEMA_VERSION = 1;
 export const DURABLE_ROOT_NAMES = Object.freeze(["evidence", "artifacts", "reviews", "attestations"]);
+const OPTIONAL_DURABLE_ROOT_NAMES = Object.freeze(["gates"]);
+const SUPPORTED_DURABLE_ROOT_NAMES = Object.freeze([...DURABLE_ROOT_NAMES, ...OPTIONAL_DURABLE_ROOT_NAMES]);
+const OPTIONAL_DURABLE_ROOT_NAME_SET = new Set(OPTIONAL_DURABLE_ROOT_NAMES);
 export const DIRECT_REVIEWED_COMMIT_PURPOSES = Object.freeze(["test", "remediation", "validation-fix"]);
 export const ATTESTATION_TYPES = Object.freeze([
   "run-base",
@@ -134,6 +137,13 @@ export function resolveDurableRoots(runDir, options = {}) {
     roots[rootName] = realRoot;
   }
 
+  for (const rootName of OPTIONAL_DURABLE_ROOT_NAMES) {
+    const declaredPath = join(runPath, rootName);
+    if (!existsSync(declaredPath)) continue;
+    const realRoot = resolveDurableRoot(declaredPath, rootName, runRealPath, options);
+    roots[rootName] = realRoot;
+  }
+
   return roots;
 }
 
@@ -142,7 +152,7 @@ export function resolveDurableRef(runDirOrRoots, ref, options = {}) {
   const normalizedRef = requireText(ref, "ref");
   const kind = options.kind ?? detectDurableRefKind(normalizedRef);
   const { segments, rootName } = validateDurableRef(normalizedRef, kind);
-  const rootPath = roots[rootName];
+  const rootPath = resolveDurableRootPath(roots, rootName, options);
   const mustExist = options.mustExist !== false;
   const targetPath = walkDurableRef(rootPath, segments.slice(1), normalizedRef, { mustExist, options });
   return {
@@ -163,6 +173,10 @@ export function resolveReviewRef(runDirOrRoots, ref, options = {}) {
 
 export function resolveArtifactRef(runDirOrRoots, ref, options = {}) {
   return resolveDurableRef(runDirOrRoots, ref, { ...options, kind: "artifacts" });
+}
+
+export function resolveGateRef(runDirOrRoots, ref, options = {}) {
+  return resolveDurableRef(runDirOrRoots, ref, { ...options, kind: "gates" });
 }
 
 export function resolveAttestationRef(runDirOrRoots, ref, options = {}) {
@@ -751,7 +765,7 @@ export function validateGateDecisionAttestation(attestation, context = {}) {
   const roots = resolveRootsForContext(context);
 
   checks.push(runCheck("gate-decision.question-hash", () => {
-    const question = resolveArtifactRef(roots, bindings.question_ref, context);
+    const question = resolveGateRef(roots, bindings.question_ref, context);
     const observedHash = hashFile(question.path, { mode: "raw" });
     if (observedHash !== bindings.question_hash) {
       throw new Error(`question hash is ${observedHash}, expected ${bindings.question_hash}`);
@@ -770,7 +784,7 @@ export function validateGateDecisionAttestation(attestation, context = {}) {
 
   checks.push(runCheck("gate-decision.answer-binding", () => {
     if (stringValue(bindings.answer_ref)) {
-      const answer = resolveArtifactRef(roots, bindings.answer_ref, context);
+      const answer = resolveGateRef(roots, bindings.answer_ref, context);
       const observedHash = hashFile(answer.path, { mode: "raw" });
       if (observedHash !== bindings.answer_hash) {
         throw new Error(`answer hash is ${observedHash}, expected ${bindings.answer_hash}`);
@@ -1388,6 +1402,16 @@ function resolveDurableRoot(declaredPath, rootName, runRealPath, options) {
   return realRoot;
 }
 
+function resolveDurableRootPath(roots, rootName, options) {
+  if (stringValue(roots[rootName])) return roots[rootName];
+  if (!OPTIONAL_DURABLE_ROOT_NAME_SET.has(rootName)) throw new Error(`resolved durable roots missing ${rootName}`);
+
+  const runRealPath = requireText(roots.run_dir, "roots.run_dir");
+  const realRoot = resolveDurableRoot(join(runRealPath, rootName), rootName, runRealPath, options);
+  roots[rootName] = realRoot;
+  return realRoot;
+}
+
 function walkDurableRef(rootPath, relativeSegments, ref, { mustExist, options }) {
   let currentPath = rootPath;
   for (const [index, segment] of relativeSegments.entries()) {
@@ -1428,13 +1452,19 @@ function validateDurableRef(ref, kind) {
     throw new Error(`${ref} must contain an artifact path`);
   }
 
+  if (rootName === "gates" && segments.length < 2) {
+    throw new Error(`${ref} must contain a gate path`);
+  }
+
   return { segments, rootName };
 }
 
 function detectDurableRefKind(ref) {
   const segments = normalizePathLikeSegments(ref, "ref");
   const rootName = segments[0];
-  if (!DURABLE_ROOT_NAMES.includes(rootName)) throw new Error(`${ref} must begin with one of ${DURABLE_ROOT_NAMES.join(", ")}`);
+  if (!SUPPORTED_DURABLE_ROOT_NAMES.includes(rootName)) {
+    throw new Error(`${ref} must begin with one of ${SUPPORTED_DURABLE_ROOT_NAMES.join(", ")}`);
+  }
   return rootName;
 }
 
