@@ -26,7 +26,7 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.head_tree, headTree);
       assert.deepEqual(result.dirty_paths, []);
       assert.deepEqual(result.hidden_index_paths, []);
-      assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all`);
+      assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all --ignore-submodules=none`);
     } finally {
       cleanup(repo);
     }
@@ -196,6 +196,31 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("does not let submodule.<name>.ignore=all hide dirty submodule mutations", () => {
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule();
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      writeFileSync(join(submodulePath, "tracked.txt"), "changed\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, " M review-submodule\n");
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), ["review-submodule"]);
+      assert.equal(result.dirty_paths[0].raw, " M review-submodule");
+    } finally {
+      cleanup(root);
+    }
+  });
+
   it("blocks non-git worktrees as unverifiable", () => {
     const dir = mkdtempSync(join(tmpdir(), "review-guard-nongit-"));
 
@@ -265,7 +290,7 @@ describe("checkReviewedWorktreeClean", () => {
         spawnSync(file, args, options) {
           calls.push({ file, args, options });
 
-          if (args[args.length - 1] === "--untracked-files=all") {
+          if (args.includes("status") && args.includes("--ignore-submodules=none")) {
             return { status: 0, stdout: "", stderr: "" };
           }
           if (args[args.length - 1] === "--show-toplevel") {
@@ -287,9 +312,9 @@ describe("checkReviewedWorktreeClean", () => {
 
       assert.equal(result.ok, true);
       assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
-      assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all`);
+      assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all --ignore-submodules=none`);
       assert.deepEqual(calls.map((call) => call.args), [
-        expectedSafeGitArgs(repo, ["status", "--porcelain=v1", "--untracked-files=all"]),
+        expectedSafeGitArgs(repo, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]),
         expectedSafeGitArgs(repo, ["rev-parse", "--show-toplevel"]),
         expectedSafeGitArgs(repo, ["rev-parse", "HEAD", "HEAD^{tree}"]),
         expectedSafeGitArgs(repo, ["ls-files", "-v"]),
@@ -355,6 +380,28 @@ function createCommittedRepo(files = ["tracked.txt"]) {
   git(repo, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-m", "initial"]);
 
   return repo;
+}
+
+function createCommittedRepoWithSubmodule() {
+  const root = mkdtempSync(join(tmpdir(), "review-guard-submodule-"));
+  const submoduleSource = join(root, "submodule-source");
+  const repo = join(root, "super-repo");
+  const submoduleName = "review-submodule";
+  const submodulePath = join(repo, submoduleName);
+
+  mkdirSync(submoduleSource, { recursive: true });
+  mkdirSync(repo, { recursive: true });
+
+  git(submoduleSource, ["init"]);
+  writeFixture(submoduleSource, "tracked.txt", "tracked.txt\n");
+  git(submoduleSource, ["add", "."]);
+  git(submoduleSource, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-m", "initial submodule"]);
+
+  git(repo, ["init"]);
+  git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", submoduleSource, submoduleName]);
+  git(repo, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-am", "initial"]);
+
+  return { root, repo, submoduleName, submodulePath };
 }
 
 function getHeadObservation(cwd) {

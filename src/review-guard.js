@@ -2,7 +2,12 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { SAFE_GIT_POLICY, listHiddenIndexPaths, safeGit } from "./safe-git.js";
 
-const REVIEW_GUARD_ARGS = Object.freeze(["status", "--porcelain=v1", "--untracked-files=all"]);
+const REVIEW_GUARD_ARGS = Object.freeze([
+  "status",
+  "--porcelain=v1",
+  "--untracked-files=all",
+  "--ignore-submodules=none",
+]);
 const REVIEW_GUARD_IDENTITY_ARGS = Object.freeze(["rev-parse", "--show-toplevel"]);
 const REVIEW_GUARD_HEAD_ARGS = Object.freeze(["rev-parse", "HEAD", "HEAD^{tree}"]);
 const REVIEW_GUARD_HIDDEN_INDEX_ARGS = Object.freeze(["ls-files", "-v"]);
@@ -362,7 +367,7 @@ function defaultBlockReason(guard) {
 }
 
 function formatReviewGuardCommand(worktree) {
-  return `git -C ${shellQuote(worktree)} status --porcelain=v1 --untracked-files=all`;
+  return formatGitCommand(worktree, REVIEW_GUARD_ARGS);
 }
 
 function formatReviewGuardIdentityCommand(worktree) {
