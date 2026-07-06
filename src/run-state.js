@@ -7,6 +7,8 @@ import { pendingProtectedGate, validateFactoryLock, validateHeartbeatState, vali
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
 const ACTIVE_HEARTBEAT_STATUSES = new Set(["active", "running"]);
+const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
+const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
@@ -106,6 +108,9 @@ export async function heartbeatOnce(runDir, { token, ownerPid, ownerCapability, 
       if (!lease.active) {
         return { updated: false, reason: lease.reason, gate: lease.gate || null, status: current.status, run: current };
       }
+      if (!hasInFlightHeartbeatWork(current)) {
+        return { updated: false, reason: "no-in-flight-work", status: current.status, run: current };
+      }
 
       const next = validateRun({ ...current, heartbeat_at: heartbeatAt });
       await writeJsonAtomically(join(runDir, RUN_FILE), next);
@@ -134,6 +139,16 @@ export function assertHeartbeatOwnerCapability(runDir, runId, ownerCapability, c
   }
 
   return factoryLock;
+}
+
+export function hasInFlightHeartbeatWork(run) {
+  if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) {
+    return true;
+  }
+  if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) {
+    return true;
+  }
+  return false;
 }
 
 async function readRunJson(runDir) {

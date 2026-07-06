@@ -325,6 +325,34 @@ describe("heartbeatOnce", () => {
     }
   });
 
+  it("does not refresh heartbeat_at when no in-flight steps or slices remain", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun({
+      steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md" }],
+      slices: [{ id: "state-lock-core", stack: "backend", depends_on: [], status: "merged", attempts: 1 }],
+    });
+    writeJson(join(fixture.runDir, "run.json"), current);
+    writeJson(join(fixture.runDir, "factory.lock"), factoryLock());
+    writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
+
+    try {
+      const result = await heartbeatOnce(fixture.runDir, {
+        token: "lease-1",
+        ownerPid: 4242,
+        ownerCapability: HEARTBEAT_OWNER,
+        now: "2026-07-06T12:00:00.000Z",
+      });
+
+      assert.equal(result.updated, false);
+      assert.equal(result.reason, "no-in-flight-work");
+      assert.equal(result.status, "running");
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "heartbeat.json")), heartbeatLease());
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("requires the trusted heartbeat owner capability from factory.lock", async () => {
     const fixture = createRunFixture();
     const current = baseRun();
