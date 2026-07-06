@@ -1,8 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const HEARTBEAT_TERMINAL_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
-export const TERMINAL_RUN_STATUSES = HEARTBEAT_TERMINAL_STATUSES;
+export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
   "spec-review",
   "decomposition-review",
@@ -15,12 +14,16 @@ export const HEARTBEAT_PHASES = Object.freeze([
   "security-reviewer",
   "remediation",
 ]);
-export const HEARTBEAT_STATUSES = Object.freeze(["running", ...HEARTBEAT_TERMINAL_STATUSES]);
+export const HEARTBEAT_ACTIVE_STATUSES = Object.freeze(["active", "running"]);
+export const HEARTBEAT_TERMINAL_STATUSES = Object.freeze(["stopped", "error"]);
+export const HEARTBEAT_STATUSES = Object.freeze([...HEARTBEAT_ACTIVE_STATUSES, "stopping", ...HEARTBEAT_TERMINAL_STATUSES]);
 
-const RUN_STATUSES = new Set(HEARTBEAT_STATUSES);
-const TERMINAL_STATUSES = new Set(HEARTBEAT_TERMINAL_STATUSES);
+const RUN_STATUSES = new Set(["running", ...TERMINAL_RUN_STATUSES]);
+const TERMINAL_STATUSES = new Set(TERMINAL_RUN_STATUSES);
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
 const HEARTBEAT_STATUS_SET = new Set(HEARTBEAT_STATUSES);
+const HEARTBEAT_ACTIVE_STATUS_SET = new Set(HEARTBEAT_ACTIVE_STATUSES);
+const HEARTBEAT_TERMINAL_STATUS_SET = new Set(HEARTBEAT_TERMINAL_STATUSES);
 const RUN_MODES = new Set(["interactive", "headless", "autonomous"]);
 const GATE_STATUSES = new Set(["pending", "approved", "changes_requested", "stopped"]);
 const APPROVAL_SOURCES = new Set(["human", "external-driver", "autonomous", "override"]);
@@ -98,9 +101,8 @@ export function validateHeartbeatState(heartbeat) {
   requiredEnum(errors, heartbeat, "phase", HEARTBEAT_PHASE_SET, "heartbeat.phase");
   requiredEnum(errors, heartbeat, "status", HEARTBEAT_STATUS_SET, "heartbeat.status");
   requiredInteger(errors, heartbeat, "pid", "heartbeat.pid");
-  validateHeartbeatTimestamps(errors, heartbeat, "heartbeat");
+  validateHeartbeatLifecycle(errors, heartbeat, "heartbeat");
   requiredInteger(errors, heartbeat, "interval_ms", "heartbeat.interval_ms");
-  validateHeartbeatDeadline(errors, heartbeat, "heartbeat");
 
   if (errors.length) fail(errors);
   return heartbeat;
@@ -323,24 +325,26 @@ function validateTerminalResult(errors, run, path) {
   }
 }
 
-function validateHeartbeatTimestamps(errors, heartbeat, path) {
-  const started = heartbeat.created_at ?? heartbeat.started_at;
-  if (!stringValue(started)) {
-    errors.push({ path: `${path}.started_at`, message: "must be a non-empty string (or use heartbeat.created_at)" });
-  }
-  optionalNonEmptyString(errors, heartbeat, "created_at", `${path}.created_at`);
-  optionalNonEmptyString(errors, heartbeat, "started_at", `${path}.started_at`);
-  requiredString(errors, heartbeat, "updated_at", `${path}.updated_at`);
-  requiredString(errors, heartbeat, "heartbeat_at", `${path}.heartbeat_at`);
-}
+function validateHeartbeatLifecycle(errors, heartbeat, path) {
+  requiredString(errors, heartbeat, "started_at", `${path}.started_at`);
+  requiredString(errors, heartbeat, "last_tick_at", `${path}.last_tick_at`);
+  requiredString(errors, heartbeat, "deadline_at", `${path}.deadline_at`);
+  optionalNonEmptyString(errors, heartbeat, "stop_requested_at", `${path}.stop_requested_at`);
+  optionalNonEmptyString(errors, heartbeat, "stopped_at", `${path}.stopped_at`);
+  optionalNonEmptyString(errors, heartbeat, "stop_reason", `${path}.stop_reason`);
 
-function validateHeartbeatDeadline(errors, heartbeat, path) {
-  if (heartbeat.deadline_at === undefined && heartbeat.deadline_ms === undefined) {
-    errors.push({ path: `${path}.deadline_at`, message: "must be a non-empty string (or use heartbeat.deadline_ms)" });
-    return;
+  if (heartbeat.status === "stopping" && !stringValue(heartbeat.stop_requested_at)) {
+    errors.push({ path: `${path}.stop_requested_at`, message: "is required when heartbeat.status is 'stopping'" });
   }
-  optionalNonEmptyString(errors, heartbeat, "deadline_at", `${path}.deadline_at`);
-  optionalInteger(errors, heartbeat, "deadline_ms", `${path}.deadline_ms`);
+  if (HEARTBEAT_TERMINAL_STATUS_SET.has(heartbeat.status) && !stringValue(heartbeat.stopped_at)) {
+    errors.push({ path: `${path}.stopped_at`, message: `is required when heartbeat.status is '${heartbeat.status}'` });
+  }
+  if (stringValue(heartbeat.stop_requested_at) && HEARTBEAT_ACTIVE_STATUS_SET.has(heartbeat.status)) {
+    errors.push({ path: `${path}.stop_requested_at`, message: "is not allowed when heartbeat.status is active" });
+  }
+  if (stringValue(heartbeat.stopped_at) && !HEARTBEAT_TERMINAL_STATUS_SET.has(heartbeat.status)) {
+    errors.push({ path: `${path}.stopped_at`, message: "is only allowed when heartbeat.status is terminal" });
+  }
 }
 
 function validateStringMap(errors, value, path) {

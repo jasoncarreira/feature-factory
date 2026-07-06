@@ -116,7 +116,36 @@ describe("validateRun", () => {
 describe("validateHeartbeatState", () => {
   it("accepts a heartbeat sidecar with a known phase contract", () => {
     assert.equal(validateHeartbeatState(heartbeatState()).run_id, "heartbeat-liveness");
-    assert.equal(validateHeartbeatState(heartbeatState({ status: "blocked", phase: "security-reviewer" })).status, "blocked");
+    assert.equal(validateHeartbeatState(heartbeatState({ status: "running", phase: "security-reviewer" })).status, "running");
+  });
+
+  it("accepts stopping and stopped lifecycle states", () => {
+    assert.equal(
+      validateHeartbeatState(heartbeatState({ status: "stopping", stop_requested_at: "2026-07-06T00:00:06.000Z" })).status,
+      "stopping",
+    );
+    assert.equal(
+      validateHeartbeatState(
+        heartbeatState({
+          status: "stopped",
+          stop_requested_at: "2026-07-06T00:00:06.000Z",
+          stopped_at: "2026-07-06T00:00:07.000Z",
+          stop_reason: "heartbeat completed cleanly",
+        }),
+      ).status,
+      "stopped",
+    );
+  });
+
+  it("rejects stopping or stopped sidecars without lifecycle stop fields", () => {
+    assert.throws(
+      () => validateHeartbeatState(heartbeatState({ status: "stopping", stop_requested_at: undefined })),
+      (error) => error instanceof ValidationError && error.message.includes("heartbeat.stop_requested_at"),
+    );
+    assert.throws(
+      () => validateHeartbeatState(heartbeatState({ status: "stopped", stopped_at: undefined })),
+      (error) => error instanceof ValidationError && error.message.includes("heartbeat.stopped_at"),
+    );
   });
 
   it("rejects unknown phases", () => {
@@ -145,7 +174,16 @@ describe("validateRunDir", () => {
     const runDir = tempRunDir("heartbeat-liveness-terminal");
     mkdirSync(runDir, { recursive: true });
     writeJson(join(runDir, "run.json"), { ...runningRun({ run_id: "heartbeat-liveness", status: "blocked" }), terminal_result: null });
-    writeJson(join(runDir, "heartbeat.json"), heartbeatState({ status: "blocked", phase: "remediation" }));
+    writeJson(
+      join(runDir, "heartbeat.json"),
+      heartbeatState({
+        status: "stopped",
+        phase: "remediation",
+        stop_requested_at: "2026-07-06T00:00:06.000Z",
+        stopped_at: "2026-07-06T00:00:07.000Z",
+        stop_reason: "run reached a terminal state",
+      }),
+    );
 
     const result = validateRunDir(runDir);
 
@@ -214,11 +252,10 @@ function heartbeatState(overrides = {}) {
     run_id: "heartbeat-liveness",
     token: "hb-token-1",
     phase: "builder-wave",
-    status: "running",
+    status: "active",
     pid: 4242,
-    created_at: "2026-07-06T00:00:00.000Z",
-    updated_at: "2026-07-06T00:00:05.000Z",
-    heartbeat_at: "2026-07-06T00:00:05.000Z",
+    started_at: "2026-07-06T00:00:00.000Z",
+    last_tick_at: "2026-07-06T00:00:05.000Z",
     interval_ms: 5000,
     deadline_at: "2026-07-06T00:00:10.000Z",
     ...overrides,
