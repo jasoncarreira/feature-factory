@@ -11,7 +11,7 @@ const REVIEW_GUARD_ARGS = Object.freeze([
 const REVIEW_GUARD_IDENTITY_ARGS = Object.freeze(["rev-parse", "--show-toplevel"]);
 const REVIEW_GUARD_HEAD_ARGS = Object.freeze(["rev-parse", "HEAD", "HEAD^{tree}"]);
 const REVIEW_GUARD_HIDDEN_INDEX_ARGS = Object.freeze(["ls-files", "-v"]);
-const REVIEW_GUARD_IGNORED_ARGS = Object.freeze(["ls-files", "--others", "--ignored", "--exclude-standard"]);
+const REVIEW_GUARD_IGNORED_ARGS = Object.freeze(["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]);
 const REVIEW_GUARD_SUBMODULE_ARGS = Object.freeze(["ls-files", "--stage"]);
 const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
 const C_STYLE_ESCAPES = Object.freeze({
@@ -690,11 +690,20 @@ function isInitializedSubmoduleWorktree(worktree) {
 }
 
 function parseIgnoredUntrackedPaths(stdout) {
-  return String(stdout)
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => buildIgnoredDirtyPath(decodeGitPath(line), line));
+  return parseGitPathList(stdout).map((rawPath) => buildIgnoredDirtyPath(decodeGitPath(rawPath), rawPath));
+}
+
+function parseGitPathList(stdout) {
+  const text = String(stdout);
+  if (text === "") return [];
+
+  if (text.includes("\u0000")) {
+    const paths = text.split("\u0000");
+    if (paths[paths.length - 1] === "") paths.pop();
+    return paths;
+  }
+
+  return text.split(/\r?\n/u).filter((line) => line !== "");
 }
 
 function buildIgnoredDirtyPath(path, rawPath) {

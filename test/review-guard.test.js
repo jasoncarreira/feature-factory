@@ -252,6 +252,39 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("does not let submodule.<name>.ignore=all hide whitespace-only ignored submodule-local filenames", () => {
+    const whitespaceOnlyName = "   ";
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
+      submoduleFixtures: {
+        ".gitignore": "[ ][ ][ ]\n",
+        "tracked.txt": "tracked.txt\n",
+      },
+    });
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      writeFileSync(join(submodulePath, whitespaceOnlyName), "new\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), [`${submoduleName}/${whitespaceOnlyName}`]);
+      assert.equal(result.dirty_paths[0].raw, `!! ${submoduleName}/${whitespaceOnlyName}`);
+      assert.equal(result.dirty_paths[0].ignored, true);
+      assert.equal(result.dirty_paths[0].untracked, true);
+    } finally {
+      cleanup(root);
+    }
+  });
+
   it("does not let submodule.<name>.ignore=all hide submodule-local hidden index flags", () => {
     const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
       submoduleFixtures: {
@@ -376,7 +409,7 @@ describe("checkReviewedWorktreeClean", () => {
           if (args[args.length - 2] === "ls-files" && args[args.length - 1] === "-v") {
             return { status: 0, stdout: "", stderr: "" };
           }
-          if (args[args.length - 1] === "--exclude-standard") {
+          if (args.includes("-z") && args[args.length - 1] === "--exclude-standard") {
             return { status: 0, stdout: "", stderr: "" };
           }
           if (args[args.length - 1] === "--stage") {
@@ -395,7 +428,7 @@ describe("checkReviewedWorktreeClean", () => {
         expectedSafeGitArgs(repo, ["rev-parse", "--show-toplevel"]),
         expectedSafeGitArgs(repo, ["rev-parse", "HEAD", "HEAD^{tree}"]),
         expectedSafeGitArgs(repo, ["ls-files", "-v"]),
-        expectedSafeGitArgs(repo, ["ls-files", "--others", "--ignored", "--exclude-standard"]),
+        expectedSafeGitArgs(repo, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]),
         expectedSafeGitArgs(repo, ["ls-files", "--stage"]),
       ]);
       for (const call of calls) {
