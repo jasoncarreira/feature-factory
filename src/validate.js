@@ -30,6 +30,7 @@ const HEARTBEAT_TERMINAL_STATUS_SET = new Set(HEARTBEAT_TERMINAL_STATUSES);
 const RUN_MODES = new Set(["interactive", "headless", "autonomous"]);
 const GATE_STATUSES = new Set(["pending", "approved", "changes_requested", "stopped"]);
 const APPROVAL_SOURCES = new Set(["human", "external-driver", "autonomous", "override"]);
+const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SLICE_STATUSES = new Set(["pending", "running", "review", "merged", "blocked"]);
 const STEP_STATUSES = new Set(["running", "accepted", "rejected", "blocked"]);
 const REVIEW_TIERS = new Set(["light", "standard", "strict"]);
@@ -46,6 +47,7 @@ const REVIEW_TIER_RISK_REASONS = new Set([
 const PASSING_VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS"]);
 const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
 const SENSITIVE_SLICE_STATUSES = new Set(["review", "merged"]);
+const INTEGRATED_FEATURE_SUBJECT_TYPES = new Set(["integrated-feature", "integrated_feature"]);
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -153,8 +155,8 @@ export function validateRunDir(runDir, options = {}) {
 export function validateRunAuthority(runDir, run, options = {}) {
   const sensitiveClaims = collectSensitiveRunClaims(run);
   const attestationIndexPath = join(runDir, "attestations", "index.json");
-  const shouldValidateAuthority = sensitiveClaims.length > 0 || existsSync(attestationIndexPath);
-  if (!shouldValidateAuthority) return { ok: true, checks: [] };
+  const shouldValidateAuthority = sensitiveClaims.length > 0 || hasRunBaseClaims(run) || existsSync(attestationIndexPath);
+  if (!shouldValidateAuthority) return { ok: true, checks: [], acceptedAttestations: {}, orderedRefs: [] };
 
   const authority = validateProvenanceAuthority(runDir, options);
   const checks = [...authority.checks];
@@ -206,8 +208,22 @@ export function validateRunAuthority(runDir, run, options = {}) {
         compareOptionalString(errors, gate.answer_ref, bindings.answer_ref, `run.gates.${gateName}.answer_ref`, "accepted gate answer ref");
         compareOptionalString(errors, gate.approval_source, bindings.approval_source, `run.gates.${gateName}.approval_source`, "accepted gate approval source");
         compareOptionalAnswer(errors, gate.answer, bindings.answer_text_hash, `run.gates.${gateName}.answer`);
+        let prePrApprovals = null;
+        if (gateName === "pre_pr") {
+          prePrApprovals = requireCurrentPrePrApprovals(run, attestationRecords, runBaseRecord, mergeChainRecord);
+        }
         if (errors.length > 0) fail(errors);
-        return { gate: gateName, attestation_ref: record.ref };
+        return {
+          gate: gateName,
+          attestation_ref: record.ref,
+          ...(prePrApprovals
+            ? {
+                validator_attestation_ref: prePrApprovals.validatorRecord.ref,
+                security_attestation_ref: prePrApprovals.securityRecord.ref,
+                head_commit: prePrApprovals.mergeChainBindings.head_commit,
+              }
+            : {}),
+        };
       }),
     );
   }
@@ -265,7 +281,22 @@ export function validateRunAuthority(runDir, run, options = {}) {
   if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) {
     checks.push(
       validateAuthorityCheck("run.provenance.validator", () => {
-        fail([{ path: "run.validator.verdict", message: "positive validator verdict requires an accepted validator attestation" }]);
+        const approval = requireIntegratedFeatureReviewApproval({
+          reviewer: "implementation-validator",
+          attestationRecords,
+          runBaseRecord,
+          mergeChainRecord,
+          path: "run.validator.verdict",
+          label: "positive validator verdict",
+          verdict: run.validator.verdict,
+          verdictPath: "run.validator.verdict",
+          reviewRef: run.validator.review_ref,
+          reviewRefPath: "run.validator.review_ref",
+        });
+        return {
+          attestation_ref: approval.record.ref,
+          head_commit: approval.mergeChainBindings.head_commit,
+        };
       }),
     );
   }
@@ -273,28 +304,22 @@ export function validateRunAuthority(runDir, run, options = {}) {
   if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
     checks.push(
       validateAuthorityCheck("run.provenance.security-review", () => {
-        const record = findLastAttestationRecord(
+        const approval = requireIntegratedFeatureReviewApproval({
+          reviewer: "security-reviewer",
           attestationRecords,
-          (item) => item.attestation?.type === "review-approval" && item.attestation?.bindings?.reviewer === "security-reviewer",
-        );
-        if (!record) {
-          fail([{ path: "run.security_review.verdict", message: "PASS requires an accepted security-reviewer attestation" }]);
-        }
-        const errors = [];
-        if (record.attestation.bindings.verdict !== "PASS") {
-          errors.push({ path: "run.security_review.verdict", message: `must match accepted security verdict '${record.attestation.bindings.verdict}'` });
-        }
-        if (stringValue(run.security_review.review_ref)) {
-          compareOptionalString(
-            errors,
-            run.security_review.review_ref,
-            record.attestation.bindings.review_ref,
-            "run.security_review.review_ref",
-            "accepted security review ref",
-          );
-        }
-        if (errors.length > 0) fail(errors);
-        return { attestation_ref: record.ref };
+          runBaseRecord,
+          mergeChainRecord,
+          path: "run.security_review.verdict",
+          label: "security PASS verdict",
+          verdict: run.security_review.verdict,
+          verdictPath: "run.security_review.verdict",
+          reviewRef: run.security_review.review_ref,
+          reviewRefPath: "run.security_review.review_ref",
+        });
+        return {
+          attestation_ref: approval.record.ref,
+          head_commit: approval.mergeChainBindings.head_commit,
+        };
       }),
     );
   }
@@ -310,6 +335,8 @@ export function validateRunAuthority(runDir, run, options = {}) {
   return {
     ok: checks.every((item) => item.ok),
     checks,
+    acceptedAttestations: authority.acceptedAttestations,
+    orderedRefs: authority.orderedRefs,
   };
 }
 
@@ -340,7 +367,10 @@ function validateGateMap(errors, gates, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  for (const [name, gate] of Object.entries(gates)) validateGate(errors, gate, `${path}.${name}`);
+  for (const [name, gate] of Object.entries(gates)) {
+    validateGateName(errors, name, `${path}.${name}`);
+    validateGate(errors, gate, `${path}.${name}`);
+  }
 }
 
 function validateReviewTier(errors, reviewTier, path) {
@@ -685,6 +715,132 @@ function findSliceMergeEntry(entries, slice, sliceRecord) {
   }) || null;
 }
 
+function requireCurrentPrePrApprovals(run, attestationRecords, runBaseRecord, mergeChainRecord) {
+  if (stringValue(run.validator?.verdict) && !PASSING_VALIDATOR_VERDICTS.has(run.validator.verdict)) {
+    fail([{ path: "run.gates.pre_pr.status", message: `approved pre_pr gate requires a passing validator verdict, found '${run.validator.verdict}'` }]);
+  }
+  if (stringValue(run.security_review?.verdict) && !PASSING_SECURITY_VERDICTS.has(run.security_review.verdict)) {
+    fail([
+      {
+        path: "run.gates.pre_pr.status",
+        message: `approved pre_pr gate requires a passing security verdict, found '${run.security_review.verdict}'`,
+      },
+    ]);
+  }
+
+  const validatorApproval = requireIntegratedFeatureReviewApproval({
+    reviewer: "implementation-validator",
+    attestationRecords,
+    runBaseRecord,
+    mergeChainRecord,
+    path: "run.gates.pre_pr.status",
+    label: "approved pre_pr gate",
+    verdict: PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) ? run.validator.verdict : null,
+    verdictPath: "run.validator.verdict",
+    reviewRef: run.validator?.review_ref,
+    reviewRefPath: "run.validator.review_ref",
+  });
+  const securityApproval = requireIntegratedFeatureReviewApproval({
+    reviewer: "security-reviewer",
+    attestationRecords,
+    runBaseRecord,
+    mergeChainRecord,
+    path: "run.gates.pre_pr.status",
+    label: "approved pre_pr gate",
+    verdict: PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict) ? run.security_review.verdict : null,
+    verdictPath: "run.security_review.verdict",
+    reviewRef: run.security_review?.review_ref,
+    reviewRefPath: "run.security_review.review_ref",
+  });
+
+  return {
+    validatorRecord: validatorApproval.record,
+    securityRecord: securityApproval.record,
+    mergeChainBindings: validatorApproval.mergeChainBindings,
+  };
+}
+
+function requireIntegratedFeatureReviewApproval({
+  reviewer,
+  attestationRecords,
+  runBaseRecord,
+  mergeChainRecord,
+  path,
+  label,
+  verdict,
+  verdictPath,
+  reviewRef,
+  reviewRefPath,
+}) {
+  const { runBaseBindings, mergeChainBindings } = requireCurrentIntegratedFeatureBindings(runBaseRecord, mergeChainRecord, path, label);
+  const record = findLastAttestationRecord(
+    attestationRecords,
+    (item) => matchesIntegratedFeatureReviewApproval(item, reviewer, runBaseBindings, mergeChainBindings),
+  );
+
+  if (!record) {
+    fail([
+      {
+        path,
+        message: `${label} requires an accepted ${reviewer} review-approval attestation bound to the current integrated feature head`,
+      },
+    ]);
+  }
+
+  const errors = [];
+  if (stringValue(verdict) && record.attestation.bindings.verdict !== verdict) {
+    errors.push({
+      path: verdictPath || path,
+      message: `must match accepted ${reviewer} verdict '${record.attestation.bindings.verdict}'`,
+    });
+  }
+  if (stringValue(reviewRef)) {
+    compareOptionalString(
+      errors,
+      reviewRef,
+      record.attestation.bindings.review_ref,
+      reviewRefPath || path,
+      `accepted ${reviewer} review ref`,
+    );
+  }
+  if (errors.length > 0) fail(errors);
+
+  return {
+    record,
+    runBaseBindings,
+    mergeChainBindings,
+  };
+}
+
+function requireCurrentIntegratedFeatureBindings(runBaseRecord, mergeChainRecord, path, label) {
+  const runBaseBindings = runBaseRecord?.attestation?.bindings ?? null;
+  if (!isRecord(runBaseBindings)) {
+    fail([{ path, message: `${label} requires an accepted run-base attestation` }]);
+  }
+
+  const mergeChainBindings = mergeChainRecord?.attestation?.bindings ?? null;
+  if (!isRecord(mergeChainBindings)) {
+    fail([{ path, message: `${label} requires an accepted merge-chain attestation for the current feature head` }]);
+  }
+
+  return { runBaseBindings, mergeChainBindings };
+}
+
+function matchesIntegratedFeatureReviewApproval(record, reviewer, runBaseBindings, mergeChainBindings) {
+  const bindings = record?.attestation?.bindings ?? null;
+  return record?.attestation?.type === "review-approval"
+    && isRecord(bindings)
+    && bindings.reviewer === reviewer
+    && INTEGRATED_FEATURE_SUBJECT_TYPES.has(bindings.subject_type)
+    && bindings.subject === runBaseBindings.feature_branch
+    && bindings.subject_commit === mergeChainBindings.head_commit
+    && bindings.subject_tree === mergeChainBindings.head_tree
+    && isRecord(bindings.guard)
+    && bindings.guard.head_commit === mergeChainBindings.head_commit
+    && bindings.guard.head_tree === mergeChainBindings.head_tree
+    && sameAuthorityPath(bindings.guard.worktree, runBaseBindings.feature_worktree, runBaseBindings.repo_root);
+}
+
 function compareOptionalString(errors, actual, expected, path, label) {
   if (!stringValue(actual)) return;
   if (!stringValue(expected)) {
@@ -700,9 +856,7 @@ function compareOptionalPath(errors, actual, expected, baseDir, path, label) {
     errors.push({ path, message: `${label} is missing` });
     return;
   }
-  const actualPath = normalizeClaimPath(actual, baseDir);
-  const expectedPath = normalizeClaimPath(expected, baseDir);
-  if (actualPath !== expectedPath) errors.push({ path, message: `must match ${label} '${expected}'` });
+  if (!sameAuthorityPath(actual, expected, baseDir)) errors.push({ path, message: `must match ${label} '${expected}'` });
 }
 
 function compareOptionalAnswer(errors, answer, expectedHash, path) {
@@ -718,6 +872,11 @@ function normalizeClaimPath(pathValue, baseDir) {
   } catch {
     return resolvedPath;
   }
+}
+
+function sameAuthorityPath(left, right, baseDir) {
+  if (!stringValue(left) || !stringValue(right) || !stringValue(baseDir)) return false;
+  return normalizeClaimPath(left, baseDir) === normalizeClaimPath(right, baseDir);
 }
 
 function validateAuthorityCheck(name, callback) {
@@ -747,6 +906,12 @@ function normalizeAuthorityErrors(error, fallbackPath) {
 function normalizeAuthorityErrorItem(item, fallbackPath) {
   if (isRecord(item) && stringValue(item.path) && stringValue(item.message)) return item;
   return { path: fallbackPath, message: String(item) };
+}
+
+function validateGateName(errors, name, path) {
+  if (!SAFE_GATE_NAME_PATTERN.test(name)) {
+    errors.push({ path, message: "gate name must match safe pattern [a-z0-9][a-z0-9_-]*[a-z0-9]" });
+  }
 }
 
 function isRecord(value) {

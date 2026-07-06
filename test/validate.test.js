@@ -251,6 +251,33 @@ describe("validateRunDir", () => {
     cleanupTemp(runDir);
   });
 
+  it("fails run-base-only branch/worktree/base claims without an accepted run-base attestation", () => {
+    const runDir = tempRunDir("run-base-only-claims");
+    mkdirSync(join(runDir, "evidence"), { recursive: true });
+    mkdirSync(join(runDir, "artifacts"), { recursive: true });
+    mkdirSync(join(runDir, "reviews"), { recursive: true });
+    mkdirSync(join(runDir, "attestations"), { recursive: true });
+    mkdirSync(join(runDir, "gates"), { recursive: true });
+    writeJson(
+      join(runDir, "run.json"),
+      runningRun({
+        branch: "feature-branch",
+        worktree: ".opencode/worktrees/feature-branch",
+        base_ref: "refs/heads/main",
+        base_commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        gates: { story: { status: "pending" } },
+        slices: [],
+      }),
+    );
+
+    const result = validateRunDir(runDir);
+    const errors = result.checks.flatMap((check) => check.errors || []).map((error) => `${error.path}: ${error.message}`).join("\n");
+
+    assert.equal(result.ok, false);
+    assert.match(errors, /accepted run-base attestation|attestations\/index\.json/u);
+    cleanupTemp(runDir);
+  });
+
   it("fails approved gates that lack accepted provenance attestations", () => {
     const runDir = tempRunDir("approved-gate-without-attestation");
     mkdirSync(runDir, { recursive: true });

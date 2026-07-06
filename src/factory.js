@@ -20,6 +20,8 @@ const HEARTBEAT_ACTIVE_STATUSES = new Set(["active", "running"]);
 const HEARTBEAT_TERMINAL_STATUSES = new Set(["stopped", "error"]);
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
 const HEARTBEAT_OWNER_ENV = "FEATURE_FACTORY_HEARTBEAT_OWNER";
+const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
+const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const activeHeartbeatLoops = new Map();
 
 export function startFactory(args, opts = {}) {
@@ -68,7 +70,7 @@ export function listRuns(opts = {}) {
 }
 
 export function status(runId, opts = {}) {
-  const run = loadPublicRun(runId, opts);
+  const run = shouldSkipAuthorityForHeartbeatStart(opts) ? loadRun(runId, opts) : loadPublicRun(runId, opts);
   return {
     run_id: run.run_id,
     schema_version: run.schema_version || run.version || null,
@@ -225,19 +227,19 @@ export async function stopHeartbeat(runId, config = {}, opts = {}) {
 }
 
 export function writeGateAnswer(runId, gate, answer, opts = {}) {
-  if (!gate) throw new Error("gate is required");
+  const gateName = requireSafeGateName(gate, "gate");
   if (!answer) throw new Error("answer is required: approve, changes: ..., or stop");
   const runDir = resolveRunDir(runId, opts);
   const run = readRunFile(join(runDir, "run.json"));
   const pending = pendingGate(run);
-  if (pending && gate !== pending) throw new Error(`gate '${gate}' is not pending; current pending gate is '${pending}'`);
+  if (pending && gateName !== pending) throw new Error(`gate '${gateName}' is not pending; current pending gate is '${pending}'`);
   if (!pending) throw new Error("run has no pending gate");
   const gatesDir = join(runDir, "gates");
   if (!existsSync(gatesDir)) throw new Error(`missing gates directory: ${gatesDir}`);
   const normalized = normalizeAnswer(answer);
-  const answerPath = join(gatesDir, `${gate}.answer`);
+  const answerPath = resolveGateAnswerPath(gatesDir, gateName);
   writeFileSync(answerPath, normalized + "\n");
-  return { run_id: runId, gate, answer: normalized, path: answerPath };
+  return { run_id: runId, gate: gateName, answer: normalized, path: answerPath };
 }
 
 export function latestRunId(opts = {}) {
@@ -276,6 +278,7 @@ export function cleanupRun(runId, opts = {}) {
   if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
     throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
   }
+  const branchAuthority = resolveCleanupBranchAuthority(repo, runDir, run);
 
   const result = {
     run_id: run.run_id,
@@ -290,7 +293,7 @@ export function cleanupRun(runId, opts = {}) {
   };
 
   for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts);
-  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts, run.status);
+  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts, run.status, branchAuthority);
 
   if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
   result.removed_run_dir = !opts.dryRun;
@@ -325,9 +328,14 @@ function removeWorktree(repo, worktree, result, opts) {
   result.removed_worktrees.push(resolved);
 }
 
-function deleteBranch(repo, branch, result, opts, runStatus) {
+function deleteBranch(repo, branch, result, opts, runStatus, authority = null) {
   const name = String(branch).trim();
   if (!name) return;
+  const branchPermission = resolveCleanupBranchPermission(name, authority);
+  if (!branchPermission.allowed) {
+    result.skipped_branches.push({ branch: name, reason: branchPermission.reason });
+    return;
+  }
   const current = spawnSync("git", ["branch", "--show-current"], { cwd: repo, encoding: "utf8" }).stdout?.trim();
   if (current === name) {
     result.skipped_branches.push({ branch: name, reason: "current branch" });
@@ -344,7 +352,7 @@ function deleteBranch(repo, branch, result, opts, runStatus) {
     return;
   }
   if (!opts.dryRun) {
-    const proc = spawnSync("git", ["branch", deleteFlag, name], { cwd: repo, encoding: "utf8" });
+    const proc = spawnSync("git", ["branch", deleteFlag, "--", name], { cwd: repo, encoding: "utf8" });
     if (proc.status !== 0) {
       result.skipped_branches.push({ branch: name, reason: (proc.stderr || proc.stdout || "git branch delete failed").trim() });
       return;
@@ -381,7 +389,6 @@ function loadRun(runId, opts = {}) {
 function loadPublicRun(runId, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const run = readRunFile(join(runDir, "run.json"));
-  if (shouldSkipAuthorityValidation()) return run;
   const authority = validateRunAuthority(runDir, run, { ...opts, repoRoot: repoRoot(opts.cwd || process.cwd()) });
   if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
   return run;
@@ -404,7 +411,6 @@ function tryReadPublicRun(file, opts = {}) {
   try {
     const runDir = dirname(file);
     const run = readRunFile(file);
-    if (shouldSkipAuthorityValidation()) return { value: run };
     const authority = validateRunAuthority(runDir, run, opts);
     if (!authority.ok) return { error: formatValidationChecks(authority.checks) };
     return { value: run };
@@ -428,11 +434,6 @@ function formatValidationChecks(checks) {
   const errors = checks.flatMap((check) => Array.isArray(check?.errors) ? check.errors : []);
   if (errors.length === 0) return "run validation failed";
   return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
-}
-
-function shouldSkipAuthorityValidation() {
-  const argv = process.argv.slice(2);
-  return argv[0] === "factory" && argv[1] === "heartbeat";
 }
 
 function resolveHeartbeatRunDir(runId, opts = {}) {
@@ -498,6 +499,23 @@ function normalizeAnswer(answer) {
   const text = String(answer).trim();
   if (text === "approve" || text === "stop" || text.startsWith("changes:")) return text;
   throw new Error("answer must be exactly approve, stop, or start with changes:");
+}
+
+function requireSafeGateName(value, label) {
+  if (!stringValue(value)) throw new Error(`${label} is required`);
+  const gateName = String(value).trim();
+  if (!SAFE_GATE_NAME_PATTERN.test(gateName)) {
+    throw new Error(`${label} must match safe gate name pattern [a-z0-9][a-z0-9_-]*[a-z0-9]`);
+  }
+  return gateName;
+}
+
+function resolveGateAnswerPath(gatesDir, gateName) {
+  const answerPath = resolve(gatesDir, `${gateName}.answer`);
+  if (!insideDirectory(gatesDir, answerPath)) {
+    throw new Error(`gate answer path must stay inside ${gatesDir}`);
+  }
+  return answerPath;
 }
 
 function normalizeHeartbeatRunId(runId) {
@@ -587,6 +605,10 @@ function normalizeGithubAccount(value) {
   const account = String(value).trim();
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(account)) return null;
   return account;
+}
+
+function shouldSkipAuthorityForHeartbeatStart(opts = {}) {
+  return opts?.start === true && stringValue(opts.phase);
 }
 
 function resolveHeartbeatOwnerCapability(opts = {}, command = "heartbeat") {
@@ -997,6 +1019,59 @@ function deferred() {
 
 function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function resolveCleanupBranchAuthority(repo, runDir, run) {
+  const authority = validateRunAuthority(runDir, run, { repoRoot: repo });
+  const attestedBranches = new Set();
+
+  if (authority.ok) {
+    for (const record of Object.values(authority.acceptedAttestations || {})) {
+      if (record?.attestation?.type === "run-base" && stringValue(record.attestation.bindings?.feature_branch)) {
+        attestedBranches.add(record.attestation.bindings.feature_branch.trim());
+      }
+      if (record?.attestation?.type === "slice-observation" && stringValue(record.attestation.bindings?.branch)) {
+        attestedBranches.add(record.attestation.bindings.branch.trim());
+      }
+    }
+  }
+
+  return {
+    ok: authority.ok,
+    runId: run.run_id,
+    attestedBranches,
+  };
+}
+
+function resolveCleanupBranchPermission(branch, authority) {
+  if (!isSafeCleanupBranchName(branch)) {
+    return { allowed: false, reason: "unsafe branch name" };
+  }
+  if (authority?.attestedBranches?.has(branch)) {
+    return { allowed: true };
+  }
+  if (stringValue(authority?.runId) && isExpectedCleanupBranch(authority.runId, branch)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: "branch is not attested for this run and does not match the expected cleanup prefix",
+  };
+}
+
+function isSafeCleanupBranchName(branch) {
+  return SAFE_BRANCH_NAME_PATTERN.test(branch)
+    && !branch.startsWith("refs/")
+    && !branch.endsWith("/")
+    && !branch.endsWith(".lock")
+    && !branch.includes("..")
+    && !branch.includes("//")
+    && !branch.includes("@{")
+    && !/[\\~^:?*\[\]\s]/u.test(branch);
+}
+
+function isExpectedCleanupBranch(runId, branch) {
+  return branch === runId || branch.startsWith(`${runId}--`);
 }
 
 function sleep(ms) {

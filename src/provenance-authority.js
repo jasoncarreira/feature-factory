@@ -24,10 +24,12 @@ export const ATTESTATION_TYPES = Object.freeze([
 const DIRECT_REVIEWED_COMMIT_PURPOSE_SET = new Set(DIRECT_REVIEWED_COMMIT_PURPOSES);
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const OBJECT_ID_PATTERN = /^[0-9a-f]{40}$/u;
+const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const JSON_LEAF_ROOTS = new Set(["evidence", "reviews"]);
 const REVIEW_APPROVAL_RULES = Object.freeze({
-  "work-reviewer": Object.freeze({ verdict: "APPROVE" }),
-  "security-reviewer": Object.freeze({ verdict: "PASS" }),
+  "work-reviewer": Object.freeze({ verdicts: Object.freeze(["APPROVE"]) }),
+  "security-reviewer": Object.freeze({ verdicts: Object.freeze(["PASS"]) }),
+  "implementation-validator": Object.freeze({ verdicts: Object.freeze(["GO", "GO-WITH-NITS"]) }),
 });
 
 export function canonicalJson(value) {
@@ -1126,7 +1128,7 @@ function collectDirectReviewedCommitBindingErrors(bindings, path) {
 function collectGateDecisionBindingErrors(bindings, path) {
   const errors = [];
   if (!isRecord(bindings)) return [{ path, message: "must be an object" }];
-  pushRequiredString(errors, bindings, "gate", `${path}.gate`);
+  pushRequiredGateName(errors, bindings, "gate", `${path}.gate`);
   pushRequiredString(errors, bindings, "decision", `${path}.decision`);
   pushRequiredString(errors, bindings, "approval_source", `${path}.approval_source`);
   pushRequiredString(errors, bindings, "question_ref", `${path}.question_ref`);
@@ -1600,8 +1602,8 @@ function validateApprovingReviewBinding(reviewer, verdict, path) {
   if (!rule) {
     throw new Error(`${path}.reviewer ${reviewer} is not an approval-capable reviewer`);
   }
-  if (verdict !== rule.verdict) {
-    throw new Error(`${path}.verdict must equal ${rule.verdict} for reviewer ${reviewer}`);
+  if (!rule.verdicts.includes(verdict)) {
+    throw new Error(`${path}.verdict must be one of ${rule.verdicts.join(", ")} for reviewer ${reviewer}`);
   }
 }
 
@@ -1754,6 +1756,16 @@ function pushRequiredObjectId(errors, record, key, path) {
 
 function pushRequiredHash(errors, record, key, path) {
   if (!isHashString(record[key])) errors.push({ path, message: "must be a sha256 hash" });
+}
+
+function pushRequiredGateName(errors, record, key, path) {
+  if (!stringValue(record[key])) {
+    errors.push({ path, message: "must be a non-empty string" });
+    return;
+  }
+  if (!SAFE_GATE_NAME_PATTERN.test(record[key])) {
+    errors.push({ path, message: "must match safe gate name pattern [a-z0-9][a-z0-9_-]*[a-z0-9]" });
+  }
 }
 
 function pushApprovalVerdictErrors(errors, bindings, path) {

@@ -98,6 +98,32 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("does not let repo-local excludesFile hide reviewer-created untracked files", () => {
+    const repo = createCommittedRepo();
+    const localIgnore = join(repo, ".review-guard-local-ignore");
+
+    try {
+      writeFileSync(localIgnore, "hidden-reviewer-file.txt\n", "utf8");
+      git(repo, ["config", "core.excludesFile", localIgnore]);
+      writeFileSync(join(repo, "hidden-reviewer-file.txt"), "new\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "?? .review-guard-local-ignore\n");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.deepEqual(
+        result.dirty_paths.map((item) => item.path).sort(),
+        [".review-guard-local-ignore", "hidden-reviewer-file.txt"],
+      );
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("blocks non-git worktrees as unverifiable", () => {
     const dir = mkdtempSync(join(tmpdir(), "review-guard-nongit-"));
 

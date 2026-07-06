@@ -176,6 +176,30 @@ describe("safeGit", () => {
     }
   });
 
+  it("overrides hostile repo-local excludesFile config so untracked files stay visible", () => {
+    const repo = createCommittedRepo(["tracked.txt"]);
+    const localIgnorePath = join(repo, ".local-excludes");
+
+    try {
+      writeFileSync(localIgnorePath, "hidden-by-local.txt\n", "utf8");
+      git(repo, ["config", "core.excludesFile", localIgnorePath]);
+      writeFixture(repo, "hidden-by-local.txt", "hidden\n");
+
+      const unsafe = runTrustedGit(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe.status, 0);
+      assert.equal(unsafe.stdout, "?? .local-excludes\n");
+
+      const result = safeGit(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+
+      assert.equal(result.ok, true);
+      assert.equal(result.status, 0);
+      assert.deepEqual(result.stdout.trim().split(/\r?\n/u).sort(), ["?? .local-excludes", "?? hidden-by-local.txt"]);
+      assert.equal(result.stderr, "");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("returns structured failures for normal git errors instead of throwing", () => {
     const repo = createCommittedRepo(["tracked.txt"]);
 

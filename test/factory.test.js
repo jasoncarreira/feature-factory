@@ -15,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { cleanupRun, listRuns, startFactory, status, validateState, watchRun } from "../src/factory.js";
+import { cleanupRun, listRuns, startFactory, status, validateState, watchRun, writeGateAnswer } from "../src/factory.js";
 import { validateRunDir } from "../src/validate.js";
 
 describe("factory state validation", () => {
@@ -83,6 +83,27 @@ describe("factory state validation", () => {
     try {
       const run = buildFactoryAuthorityRun(fixture, "authority-valid");
       const result = validateState("authority-valid", { cwd: fixture.repoRoot });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.runs[0].ok, true);
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("passes current integrated validator/security approvals bound to the merge-chain head for approved pre_pr gates", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      buildFactoryAuthorityRun(fixture, "authority-valid-pre-pr", {
+        validator: { verdict: "GO-WITH-NITS", review_ref: "reviews/integrated-feature.implementation-validator.json", loops: 1 },
+        securityReview: { verdict: "PASS", review_ref: "reviews/integrated-feature.security-reviewer.json", loops: 1 },
+        integratedValidatorApproval: { verdict: "GO-WITH-NITS" },
+        integratedSecurityApproval: { verdict: "PASS" },
+        prePrGate: true,
+      });
+
+      const result = validateState("authority-valid-pre-pr", { cwd: fixture.repoRoot });
 
       assert.equal(result.ok, true);
       assert.equal(result.runs[0].ok, true);
@@ -222,6 +243,72 @@ describe("factory state validation", () => {
     }
   });
 
+  it("does not let heartbeat process argv bypass public authority validation", () => {
+    const fixture = createHistoryFixture();
+    const runId = "authority-invalid-heartbeat-argv";
+    const originalArgv = [...process.argv];
+    const originalLog = console.log;
+
+    try {
+      buildInvalidAuthorityRun(fixture, runId);
+      process.argv = [process.execPath, "cli.js", "factory", "heartbeat", runId, "--status"];
+
+      assert.throws(() => status(runId, { cwd: fixture.repoRoot }), /run\.gates\.story\.artifact/i);
+
+      const listed = listRuns({ cwd: fixture.repoRoot });
+      assert.equal(listed[0].status, "invalid");
+      assert.match(listed[0].error, /run\.gates\.story\.artifact/i);
+
+      const lines = [];
+      console.log = (value) => lines.push(String(value));
+      const watcher = watchRun(runId, { cwd: fixture.repoRoot, intervalMs: 10_000, all: true });
+      clearInterval(watcher);
+
+      assert.equal(lines.length > 0, true);
+      const payload = JSON.parse(lines[0]);
+      assert.equal(payload[0].status, "invalid");
+      assert.match(payload[0].error, /run\.gates\.story\.artifact/i);
+    } finally {
+      process.argv = originalArgv;
+      console.log = originalLog;
+      cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects top-level security PASS when the only accepted security-reviewer approval is slice-scoped", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      buildFactoryAuthorityRun(fixture, "slice-scoped-security-pass", {
+        securityReview: { verdict: "PASS", review_ref: "reviews/slice-1.security-reviewer.json", loops: 1 },
+        sliceSecurityApproval: { verdict: "PASS" },
+      });
+
+      const result = validateState("slice-scoped-security-pass", { cwd: fixture.repoRoot });
+
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result.runs[0]), /run\.security_review\.verdict/u);
+      assert.match(joinErrors(result.runs[0]), /current integrated feature head/u);
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects approved pre_pr gates without current validator and security panel provenance", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      buildFactoryAuthorityRun(fixture, "pre-pr-without-panel-provenance", { prePrGate: true });
+      const result = validateState("pre-pr-without-panel-provenance", { cwd: fixture.repoRoot });
+
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result.runs[0]), /run\.gates\.pre_pr\.status/u);
+      assert.match(joinErrors(result.runs[0]), /implementation-validator|security-reviewer/u);
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
   it("rejects symlinked durable roots when provenance-sensitive claims require authority checks", () => {
     const scenarios = ["evidence", "artifacts", "reviews", "attestations"];
 
@@ -313,6 +400,25 @@ describe("factory state validation", () => {
       } finally {
         cleanup(fixture.repoRoot);
       }
+    }
+  });
+});
+
+describe("factory gate answers", () => {
+  it("rejects path-traversal gate names before writing answers outside $RUN/gates", () => {
+    const repo = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "gate-answer-traversal");
+    mkdirSync(join(runDir, "gates"), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-traversal", gates: { "../escape": { status: "pending" } }, slices: [] }));
+
+    try {
+      assert.throws(
+        () => writeGateAnswer("gate-answer-traversal", "../escape", "approve", { cwd: repo }),
+        /safe gate name pattern|run\.gates/u,
+      );
+      assert.equal(existsSync(join(runDir, "escape.answer")), false);
+    } finally {
+      cleanup(repo);
     }
   });
 });
@@ -506,6 +612,23 @@ describe("factory cleanup", () => {
     assert.equal(result.skipped_branches[0].branch, "blocked-run");
     assert.match(result.skipped_branches[0].reason, /not fully merged|not deleted|not merged/i);
     assert.equal(gitStatus(repo, ["show-ref", "--verify", "refs/heads/blocked-run"]), 0);
+    cleanup(repo);
+  });
+
+  it("does not delete forged foreign branches from unauthenticated cleanup manifests", () => {
+    const repo = gitRepo();
+    const runDir = join(repo, ".opencode", "factory", "cleanup-run");
+    git(repo, ["branch", "protected-branch"]);
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), completedRun({ run_id: "cleanup-run", branch: "protected-branch", worktree: null }));
+
+    const result = cleanupRun("cleanup-run", { cwd: repo });
+
+    assert.equal(result.removed_run_dir, true);
+    assert.deepEqual(result.deleted_branches, []);
+    assert.equal(result.skipped_branches[0].branch, "protected-branch");
+    assert.match(result.skipped_branches[0].reason, /attested|expected cleanup prefix|unsafe/i);
+    assert.equal(gitStatus(repo, ["show-ref", "--verify", "refs/heads/protected-branch"]), 0);
     cleanup(repo);
   });
 
@@ -816,6 +939,109 @@ function buildFactoryAuthorityRun(fixture, runId, options = {}) {
   writtenAttestations.push({ ref: "attestations/merge-chain.json", attestation: mergeChain });
   indexRecords.push({ ref: "attestations/merge-chain.json", attestation: mergeChain });
 
+  const attestationState = {
+    sequence: sequence + 1,
+    prevHash: mergeChain.attestation_hash,
+    indexRecords,
+    writtenAttestations,
+  };
+  let integratedValidatorApproval = null;
+  let integratedSecurityApproval = null;
+  let sliceSecurityApproval = null;
+  let prePrGateDecision = null;
+
+  if (options.integratedValidatorApproval) {
+    integratedValidatorApproval = appendReviewApprovalAttestation(runDir, runId, attestationState, {
+      reviewer: "implementation-validator",
+      verdict: options.integratedValidatorApproval.verdict,
+      reviewRef: options.integratedValidatorApproval.reviewRef || "reviews/integrated-feature.implementation-validator.json",
+      evidenceRef: options.integratedValidatorApproval.evidenceRef || "evidence/integrated-feature.implementation-validator.json",
+      subjectType: "integrated-feature",
+      subject: fixture.featureBranch,
+      subjectCommit: fixture.headCommit,
+      subjectTree: fixture.headTree,
+      guard: {
+        status: "clean",
+        safe_git_policy: SAFE_GIT_POLICY,
+        worktree: fixture.featureWorktree,
+        head_commit: fixture.headCommit,
+        head_tree: fixture.headTree,
+        dirty_paths: [],
+        hidden_index_paths: [],
+      },
+      reviewBody: { subject: fixture.featureBranch, reviewer: "implementation-validator", verdict: options.integratedValidatorApproval.verdict },
+      evidenceBody: { feature_branch: fixture.featureBranch, head_commit: fixture.headCommit, head_tree: fixture.headTree },
+    });
+  }
+
+  if (options.integratedSecurityApproval) {
+    integratedSecurityApproval = appendReviewApprovalAttestation(runDir, runId, attestationState, {
+      reviewer: "security-reviewer",
+      verdict: options.integratedSecurityApproval.verdict,
+      reviewRef: options.integratedSecurityApproval.reviewRef || "reviews/integrated-feature.security-reviewer.json",
+      evidenceRef: options.integratedSecurityApproval.evidenceRef || "evidence/integrated-feature.security-reviewer.json",
+      subjectType: "integrated-feature",
+      subject: fixture.featureBranch,
+      subjectCommit: fixture.headCommit,
+      subjectTree: fixture.headTree,
+      guard: {
+        status: "clean",
+        safe_git_policy: SAFE_GIT_POLICY,
+        worktree: fixture.featureWorktree,
+        head_commit: fixture.headCommit,
+        head_tree: fixture.headTree,
+        dirty_paths: [],
+        hidden_index_paths: [],
+      },
+      reviewBody: { subject: fixture.featureBranch, reviewer: "security-reviewer", verdict: options.integratedSecurityApproval.verdict },
+      evidenceBody: { feature_branch: fixture.featureBranch, head_commit: fixture.headCommit, head_tree: fixture.headTree },
+    });
+  }
+
+  if (options.sliceSecurityApproval) {
+    const targetSlice = slices[0];
+    sliceSecurityApproval = appendReviewApprovalAttestation(runDir, runId, attestationState, {
+      reviewer: "security-reviewer",
+      verdict: options.sliceSecurityApproval.verdict,
+      reviewRef: options.sliceSecurityApproval.reviewRef || `reviews/${targetSlice.sliceBranch}.security-reviewer.json`,
+      evidenceRef: options.sliceSecurityApproval.evidenceRef || targetSlice.evidenceRef,
+      subjectType: "slice",
+      subject: targetSlice.sliceBranch,
+      subjectCommit: targetSlice.sliceCommit,
+      subjectTree: targetSlice.sliceTree,
+      guard: {
+        status: "clean",
+        safe_git_policy: SAFE_GIT_POLICY,
+        worktree: targetSlice.sliceWorktree,
+        head_commit: targetSlice.sliceCommit,
+        head_tree: targetSlice.sliceTree,
+        dirty_paths: [],
+        hidden_index_paths: [],
+      },
+      reviewBody: { subject: targetSlice.sliceBranch, reviewer: "security-reviewer", verdict: options.sliceSecurityApproval.verdict },
+      evidenceBody: readJson(join(runDir, targetSlice.evidenceRef)),
+      reuseEvidenceRef: true,
+    });
+  }
+
+  if (options.prePrGate) {
+    const prePrArtifactRef = "artifacts/pre_pr.md";
+    const prePrQuestionRef = "gates/pre_pr.question.md";
+    const prePrAnswerRef = "gates/pre_pr.answer";
+    writeFixture(runDir, prePrArtifactRef, "pre-pr artifact\n");
+    writeFixture(runDir, prePrQuestionRef, "approve pre-pr?\n");
+    writeFixture(runDir, prePrAnswerRef, "approve\n");
+    prePrGateDecision = appendGateDecisionAttestation(runDir, runId, attestationState, {
+      ref: "attestations/gates/pre_pr.json",
+      gate: "pre_pr",
+      decision: "approved",
+      approvalSource: "autonomous",
+      questionRef: prePrQuestionRef,
+      artifactRef: prePrArtifactRef,
+      answerRef: prePrAnswerRef,
+    });
+  }
+
   for (const record of writtenAttestations) writeJson(join(runDir, record.ref), record.attestation);
   writeJson(join(runDir, "attestations", "index.json"), createAttestationIndex(indexRecords));
 
@@ -825,7 +1051,7 @@ function buildFactoryAuthorityRun(fixture, runId, options = {}) {
     mode: "headless",
     status: "completed",
     created_at: isoAt(1),
-    updated_at: isoAt(sequence + 1),
+    updated_at: isoAt(attestationState.sequence + 1),
     base_ref: "refs/heads/main",
     base_commit: fixture.baseCommit,
     branch: fixture.featureBranch,
@@ -838,6 +1064,17 @@ function buildFactoryAuthorityRun(fixture, runId, options = {}) {
         answer_ref: storyAnswerRef,
         approval_source: "human",
       },
+      ...(prePrGateDecision
+        ? {
+            pre_pr: {
+              status: "approved",
+              artifact: "artifacts/pre_pr.md",
+              question_ref: "gates/pre_pr.question.md",
+              answer_ref: "gates/pre_pr.answer",
+              approval_source: "autonomous",
+            },
+          }
+        : {}),
     },
     slices: slices.map((slice) => ({
       id: slice.sliceBranch,
@@ -871,6 +1108,10 @@ function buildFactoryAuthorityRun(fixture, runId, options = {}) {
     gateDecision,
     mergeChain,
     slices,
+    integratedValidatorApproval,
+    integratedSecurityApproval,
+    sliceSecurityApproval,
+    prePrGateDecision,
   };
 }
 
@@ -880,6 +1121,80 @@ function buildInvalidAuthorityRun(fixture, runId) {
   manifest.gates.story.artifact = "artifacts/forged-story.md";
   writeJson(join(run.runDir, "run.json"), manifest);
   return run;
+}
+
+function appendReviewApprovalAttestation(runDir, runId, state, input) {
+  const reviewRef = input.reviewRef;
+  const evidenceRef = input.evidenceRef;
+  const reviewPath = join(runDir, reviewRef);
+  const evidencePath = join(runDir, evidenceRef);
+  const guard = input.guard;
+
+  writeJson(reviewPath, input.reviewBody);
+  if (!input.reuseEvidenceRef) writeJson(evidencePath, input.evidenceBody);
+
+  const reviewHash = hashFile(reviewPath);
+  const evidenceHash = hashFile(evidencePath);
+  const attestationRef = input.ref || deriveReviewApprovalAttestationRef(reviewRef);
+  const attestation = createReviewApprovalAttestation({
+    run_id: runId,
+    sequence: state.sequence,
+    prev_hash: state.prevHash,
+    created_at: isoAt(state.sequence),
+    bindings: {
+      subject_type: input.subjectType,
+      subject: input.subject,
+      reviewer: input.reviewer,
+      verdict: input.verdict,
+      review_ref: reviewRef,
+      review_hash: reviewHash,
+      evidence_ref: evidenceRef,
+      evidence_hash: evidenceHash,
+      subject_commit: input.subjectCommit,
+      subject_tree: input.subjectTree,
+      guard_result_hash: hashValue(guard),
+      guard,
+    },
+  });
+
+  state.writtenAttestations.push({ ref: attestationRef, attestation });
+  state.indexRecords.push({ ref: attestationRef, attestation });
+  state.sequence += 1;
+  state.prevHash = attestation.attestation_hash;
+
+  return { ref: attestationRef, attestation, reviewRef, evidenceRef };
+}
+
+function appendGateDecisionAttestation(runDir, runId, state, input) {
+  const attestation = createGateDecisionAttestation({
+    run_id: runId,
+    sequence: state.sequence,
+    prev_hash: state.prevHash,
+    created_at: isoAt(state.sequence),
+    bindings: {
+      gate: input.gate,
+      decision: input.decision,
+      approval_source: input.approvalSource,
+      question_ref: input.questionRef,
+      question_hash: hashFile(join(runDir, input.questionRef)),
+      artifact_ref: input.artifactRef,
+      artifact_hash: hashFile(join(runDir, input.artifactRef)),
+      answer_ref: input.answerRef,
+      answer_hash: hashFile(join(runDir, input.answerRef)),
+    },
+  });
+
+  state.writtenAttestations.push({ ref: input.ref, attestation });
+  state.indexRecords.push({ ref: input.ref, attestation });
+  state.sequence += 1;
+  state.prevHash = attestation.attestation_hash;
+  return { ref: input.ref, attestation };
+}
+
+function deriveReviewApprovalAttestationRef(reviewRef) {
+  return reviewRef
+    .replace(/^reviews\//u, "attestations/reviews/")
+    .replace(/\.json$/u, ".approval.json");
 }
 
 function createHistoryFixture(options = {}) {

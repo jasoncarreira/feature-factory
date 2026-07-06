@@ -60,6 +60,8 @@ export const SAFE_GIT_PREFIX_ARGS = Object.freeze([
   "-c",
   "core.untrackedCache=false",
   "-c",
+  `core.excludesFile=${NULL_DEVICE}`,
+  "-c",
   `core.hooksPath=${NULL_DEVICE}`,
 ]);
 
