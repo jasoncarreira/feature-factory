@@ -135,7 +135,7 @@ describe("heartbeatOnce", () => {
       terminal_result: null,
     });
     writeJson(join(fixture.runDir, "run.json"), original);
-    writeJson(join(fixture.runDir, "heartbeat.json"), activeLease());
+    writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
 
     try {
       const result = await heartbeatOnce(fixture.runDir, {
@@ -144,7 +144,7 @@ describe("heartbeatOnce", () => {
       });
 
       assert.equal(result.updated, true);
-      assert.deepEqual(readJson(join(fixture.runDir, "heartbeat.json")), activeLease());
+      assert.deepEqual(readJson(join(fixture.runDir, "heartbeat.json")), heartbeatLease());
       assert.deepEqual(readJson(join(fixture.runDir, "run.json")), {
         ...original,
         heartbeat_at: "2026-07-06T12:00:00.000Z",
@@ -156,7 +156,7 @@ describe("heartbeatOnce", () => {
 
   it("skips terminal runs without masking the terminal state", async () => {
     const fixture = createRunFixture();
-    writeJson(join(fixture.runDir, "heartbeat.json"), activeLease());
+    writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
 
     try {
       for (const status of ["completed", "blocked", "partial", "needs-human"]) {
@@ -195,14 +195,52 @@ describe("heartbeatOnce", () => {
           setup: () => writeFileSync(join(fixture.runDir, "heartbeat.json"), "{not-json\n", "utf8"),
         },
         {
+          name: "missing required sidecar fields",
+          reason: "invalid-heartbeat-lease",
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), { ...heartbeatLease(), phase: null, deadline_at: null }),
+        },
+        {
+          name: "run id mismatch",
+          reason: "heartbeat-run-id-mismatch",
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ run_id: "other-run" })),
+        },
+        {
           name: "token mismatch",
           reason: "heartbeat-token-mismatch",
-          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), activeLease({ token: "other-token" })),
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ token: "other-token" })),
+        },
+        {
+          name: "inactive lease",
+          reason: "heartbeat-lease-inactive",
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ status: "inactive" })),
+        },
+        {
+          name: "stopping lease",
+          reason: "heartbeat-lease-stopping",
+          setup: () =>
+            writeJson(
+              join(fixture.runDir, "heartbeat.json"),
+              heartbeatLease({ status: "stopping", stop_requested_at: "2026-07-06T11:58:00.000Z", stop_reason: "handoff" }),
+            ),
+        },
+        {
+          name: "stopped lease",
+          reason: "heartbeat-lease-stopped",
+          setup: () =>
+            writeJson(
+              join(fixture.runDir, "heartbeat.json"),
+              heartbeatLease({ status: "stopped", stopped_at: "2026-07-06T11:59:00.000Z", stop_reason: "completed" }),
+            ),
+        },
+        {
+          name: "terminal lease",
+          reason: "heartbeat-lease-terminal",
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ status: "completed", stop_reason: "done" })),
         },
         {
           name: "expired lease",
           reason: "heartbeat-lease-expired",
-          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), activeLease({ expires_at: "2026-07-06T11:59:59.000Z" })),
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ deadline_at: "2026-07-06T11:59:59.000Z" })),
         },
       ]) {
         const current = baseRun();
@@ -301,10 +339,21 @@ function terminalRun(status) {
   });
 }
 
-function activeLease(overrides = {}) {
+function heartbeatLease(overrides = {}) {
   return {
+    schema_version: 1,
+    run_id: "heartbeat-liveness",
     token: "lease-1",
-    expires_at: "2026-07-06T12:30:00.000Z",
+    phase: "review-panel",
+    status: "running",
+    pid: 4242,
+    started_at: "2026-07-06T11:00:00.000Z",
+    last_tick_at: "2026-07-06T11:59:30.000Z",
+    stop_requested_at: null,
+    stopped_at: null,
+    interval_ms: 5000,
+    deadline_at: "2026-07-06T12:30:00.000Z",
+    stop_reason: null,
     ...overrides,
   };
 }

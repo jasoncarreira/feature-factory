@@ -6,6 +6,8 @@ import { validateRun } from "./validate.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
+const ACTIVE_HEARTBEAT_STATUSES = new Set(["active", "running"]);
+
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
 const LOCK_DIR = "run-json.lock";
@@ -88,7 +90,7 @@ export async function heartbeatOnce(runDir, { token, now } = {}, options = {}) {
         return { updated: false, reason: "run-not-running", status: current.status, run: current };
       }
 
-      const lease = await inspectHeartbeatLease(runDir, token, heartbeatAt);
+      const lease = await inspectHeartbeatLease(runDir, current.run_id, token, heartbeatAt);
       if (!lease.active) {
         return { updated: false, reason: lease.reason, status: current.status, run: current };
       }
@@ -106,7 +108,7 @@ async function readRunJson(runDir) {
   return validateRun(run);
 }
 
-async function inspectHeartbeatLease(runDir, token, now) {
+async function inspectHeartbeatLease(runDir, runId, token, now) {
   const heartbeatPath = join(runDir, HEARTBEAT_FILE);
   if (!existsSync(heartbeatPath)) return { active: false, reason: "missing-heartbeat-lease" };
 
@@ -117,19 +119,46 @@ async function inspectHeartbeatLease(runDir, token, now) {
     return { active: false, reason: "invalid-heartbeat-lease" };
   }
 
-  if (!isRecord(lease) || !stringValue(lease.token)) {
+  if (!isRecord(lease) || !Number.isFinite(lease.schema_version)) {
     return { active: false, reason: "invalid-heartbeat-lease" };
   }
+  if (!stringValue(lease.run_id) || !stringValue(lease.token) || !stringValue(lease.status) || !stringValue(lease.phase)) {
+    return { active: false, reason: "invalid-heartbeat-lease" };
+  }
+  if (lease.run_id !== runId) return { active: false, reason: "heartbeat-run-id-mismatch" };
   if (lease.token !== token) return { active: false, reason: "heartbeat-token-mismatch" };
 
-  const expiresAt = lease.expires_at ?? lease.expiresAt ?? lease.lease_expires_at ?? lease.leaseExpiresAt;
-  if (!stringValue(expiresAt)) return { active: false, reason: "invalid-heartbeat-lease" };
+  const statusState = inspectHeartbeatLeaseStatus(lease.status, lease);
+  if (!statusState.active) return statusState;
 
-  const expiresMs = Date.parse(expiresAt);
-  if (Number.isNaN(expiresMs)) return { active: false, reason: "invalid-heartbeat-lease" };
-  if (Date.parse(now) >= expiresMs) return { active: false, reason: "heartbeat-lease-expired" };
+  const deadlineAt = lease.deadline_at ?? lease.expires_at ?? lease.expiresAt ?? lease.lease_expires_at ?? lease.leaseExpiresAt;
+  if (!stringValue(deadlineAt)) return { active: false, reason: "invalid-heartbeat-lease" };
+
+  const deadlineMs = Date.parse(deadlineAt);
+  const nowMs = Date.parse(now);
+  if (Number.isNaN(deadlineMs) || Number.isNaN(nowMs)) return { active: false, reason: "invalid-heartbeat-lease" };
+  if (nowMs >= deadlineMs) return { active: false, reason: "heartbeat-lease-expired" };
 
   return { active: true, lease };
+}
+
+function inspectHeartbeatLeaseStatus(status, lease) {
+  if (stringValue(lease.stopped_at) || status === "stopped") {
+    return { active: false, reason: "heartbeat-lease-stopped" };
+  }
+  if (stringValue(lease.stop_requested_at) || status === "stopping") {
+    return { active: false, reason: "heartbeat-lease-stopping" };
+  }
+  if (TERMINAL_RUN_STATUSES.has(status)) {
+    return { active: false, reason: "heartbeat-lease-terminal" };
+  }
+  if (status === "inactive") {
+    return { active: false, reason: "heartbeat-lease-inactive" };
+  }
+  if (!ACTIVE_HEARTBEAT_STATUSES.has(status)) {
+    return { active: false, reason: "invalid-heartbeat-lease" };
+  }
+  return { active: true };
 }
 
 async function readJson(path) {
