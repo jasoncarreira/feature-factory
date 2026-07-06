@@ -14,11 +14,17 @@ const C_STYLE_ESCAPES = Object.freeze({
   "\\": "\\",
 });
 
-export function checkReviewWorktree(worktree) {
-  const reviewedWorktree = worktree == null ? "" : String(worktree);
+export function checkReviewedWorktreeClean(worktree, options = {}) {
+  const reviewedWorktree = requireText(worktree, "worktree");
+  const run = typeof options.spawnSync === "function" ? options.spawnSync : spawnSync;
   const args = ["-C", reviewedWorktree, ...REVIEW_GUARD_ARGS];
-  const proc = spawnSync("git", args, { encoding: "utf8" });
-  const exitCode = Number.isInteger(proc.status) ? proc.status : null;
+  const proc = run("git", args, {
+    cwd: options.cwd || process.cwd(),
+    encoding: "utf8",
+    env: options.env,
+    maxBuffer: options.maxBuffer || 1024 * 1024,
+  });
+  const exitCode = Number.isInteger(proc.status) ? proc.status : 1;
   const stdout = typeof proc.stdout === "string" ? proc.stdout : "";
   const stderr = joinOutput(proc.stderr, proc.error?.message);
 
@@ -36,28 +42,74 @@ export function checkReviewWorktree(worktree) {
   }
 
   return {
-    ok: stdout === "",
-    status: stdout === "" ? "clean" : "dirty",
+    ok: stdout.length === 0,
+    status: stdout.length === 0 ? "clean" : "dirty",
     worktree: reviewedWorktree,
     command: formatReviewGuardCommand(reviewedWorktree),
     exit_code: exitCode,
     stdout,
     stderr,
-    dirty_paths: stdout === "" ? [] : parseDirtyPaths(stdout),
+    dirty_paths: stdout.length === 0 ? [] : parseDirtyPaths(stdout),
   };
 }
 
-export const checkReviewedWorktreeClean = checkReviewWorktree;
+export const checkReviewWorktree = checkReviewedWorktreeClean;
 
-export function buildReviewGuardBlockReport({ reviewer, subject, reviewed_worktree, guard, reason } = {}) {
+export function buildReviewGuardBlockReport({ reviewer, subject, reviewed_worktree, guard, attempt = 1, reason } = {}) {
+  const resolvedGuard = normalizeGuard(guard || checkReviewedWorktreeClean(reviewed_worktree), reviewed_worktree);
+  if (resolvedGuard.ok) throw new Error("guard must be blocking to build a review guard block report");
+
   return {
     status: "blocked",
-    reason: reason ?? defaultBlockReason(guard),
+    reason: reason == null ? defaultBlockReason(resolvedGuard) : String(reason),
     reviewer: reviewer ?? null,
     subject: subject ?? null,
-    reviewed_worktree: reviewed_worktree ?? guard?.worktree ?? null,
+    attempt: normalizeAttempt(attempt),
+    reviewed_worktree: resolvedGuard.worktree,
     review_output_valid: false,
-    guard: guard ?? null,
+    dirty_paths: resolvedGuard.dirty_paths,
+    guard: resolvedGuard,
+  };
+}
+
+function normalizeGuard(guard, reviewedWorktree) {
+  if (!guard || typeof guard !== "object" || Array.isArray(guard)) {
+    throw new Error("guard must be an object");
+  }
+
+  const expectedWorktree = reviewedWorktree == null ? null : requireText(reviewedWorktree, "reviewed_worktree");
+  const guardWorktree = requireText(expectedWorktree || guard.worktree, "reviewed_worktree");
+  if (expectedWorktree && guard.worktree && String(guard.worktree) !== expectedWorktree) {
+    throw new Error("guard.worktree does not match reviewed_worktree");
+  }
+
+  const exitCode = Number.isInteger(guard.exit_code)
+    ? guard.exit_code
+    : Number.isInteger(guard.exitCode)
+      ? guard.exitCode
+      : 1;
+  const stdout = typeof guard.stdout === "string" ? guard.stdout : "";
+  const status = isGuardStatus(guard.status)
+    ? guard.status
+    : exitCode !== 0
+      ? "unverifiable"
+      : stdout.length === 0
+        ? "clean"
+        : "dirty";
+
+  return {
+    ok: typeof guard.ok === "boolean" ? guard.ok : status === "clean",
+    status,
+    worktree: guardWorktree,
+    command: typeof guard.command === "string" && guard.command !== "" ? guard.command : formatReviewGuardCommand(guardWorktree),
+    exit_code: exitCode,
+    stdout,
+    stderr: typeof guard.stderr === "string" ? guard.stderr : "",
+    dirty_paths: status === "dirty"
+      ? Array.isArray(guard.dirty_paths)
+        ? guard.dirty_paths
+        : parseDirtyPaths(stdout)
+      : [],
   };
 }
 
@@ -167,13 +219,33 @@ function decodeGitPath(value) {
 }
 
 function defaultBlockReason(guard) {
-  if (guard?.status === "dirty") return "reviewer left reviewed worktree dirty";
-  if (guard?.status === "unverifiable") return "reviewed worktree dirty-state could not be verified";
+  if (guard?.status === "dirty") {
+    const count = Array.isArray(guard.dirty_paths) ? guard.dirty_paths.length : 0;
+    if (count > 0) return `reviewer left reviewed worktree dirty (${count} git-visible ${count === 1 ? "path" : "paths"})`;
+    return "reviewer left reviewed worktree dirty";
+  }
+  if (guard?.status === "unverifiable") return `reviewed worktree dirty-state could not be verified (git status exit ${guard.exit_code})`;
   return "review output blocked by review guard";
 }
 
 function formatReviewGuardCommand(worktree) {
   return `git -C ${shellQuote(worktree)} status --porcelain=v1 --untracked-files=all`;
+}
+
+function isGuardStatus(value) {
+  return value === "clean" || value === "dirty" || value === "unverifiable";
+}
+
+function normalizeAttempt(value) {
+  if (!Number.isInteger(value) || value < 1) throw new Error("attempt must be a positive integer");
+  return value;
+}
+
+function requireText(value, name) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${name} must be a non-empty string`);
+  }
+  return value;
 }
 
 function shellQuote(value) {
