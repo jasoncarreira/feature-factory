@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -531,6 +531,24 @@ describe("provenance authority", () => {
     }
   });
 
+  it("fails closed on conflict-resolved slice merges without executing repo-local merge drivers during validation", () => {
+    const fixture = createConflictingSliceMergeFixture();
+
+    try {
+      const run = buildAuthorityRun(fixture, "merge-driver-conflict");
+      assert.equal(existsSync(fixture.mergeDriverSentinelPath), true, "fixture merge should exercise the custom merge driver");
+      cleanup(fixture.mergeDriverSentinelPath);
+
+      const result = validateProvenanceAuthority(run.runDir);
+
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /driver-free validation cannot prove conflict resolution is safe/u);
+      assert.equal(existsSync(fixture.mergeDriverSentinelPath), false, "validation must not re-run repo-local merge drivers");
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
   it("rejects reviewed-looking merge commits that include extra direct tree edits", () => {
     const fixture = createHistoryFixture({ extraMergeEdit: true });
 
@@ -539,7 +557,7 @@ describe("provenance authority", () => {
       const result = validateProvenanceAuthority(run.runDir);
 
       assert.equal(result.ok, false);
-      assert.match(joinErrors(result), /merge-tree result/u);
+      assert.match(joinErrors(result), /merge-only tree edits|driver-free validation cannot prove merge-only edits are reviewed/u);
     } finally {
       cleanup(fixture.repoRoot);
     }
@@ -914,6 +932,72 @@ function createHistoryFixture(options = {}) {
     merges,
     directs,
     events,
+  };
+}
+
+function createConflictingSliceMergeFixture() {
+  const repoRoot = mkdtempSync(join(tmpdir(), "prov-auth-merge-driver-"));
+  mkdirSync(join(repoRoot, ".opencode", "worktrees"), { recursive: true });
+  mkdirSync(join(repoRoot, ".opencode", "factory"), { recursive: true });
+
+  git(repoRoot, ["init", "-b", "main"]);
+  git(repoRoot, ["config", "user.name", "Provenance Authority Test"]);
+  git(repoRoot, ["config", "user.email", "provenance-authority@example.com"]);
+
+  const mergeDriverScriptPath = join(repoRoot, "trap-merge-driver.sh");
+  const mergeDriverSentinelPath = join(repoRoot, "trap-merge-driver-sentinel.txt");
+  writeFileSync(mergeDriverScriptPath, [
+    "#!/bin/sh",
+    "set -eu",
+    'printf "merge-driver-invoked\\n" >> "$1"',
+    'cat "$4" > "$3"',
+    "",
+  ].join("\n"), { encoding: "utf8", mode: 0o755 });
+
+  writeFixture(repoRoot, ".gitattributes", "tracked.txt merge=trap\n");
+  writeFixture(repoRoot, "tracked.txt", "base\n");
+  git(repoRoot, ["add", ".gitattributes", "tracked.txt"]);
+  git(repoRoot, ["commit", "-m", "base"]);
+
+  const featureBranch = "feature-branch";
+  const featureWorktree = join(repoRoot, ".opencode", "worktrees", featureBranch);
+  git(repoRoot, ["worktree", "add", "-b", featureBranch, featureWorktree, "HEAD"]);
+  git(repoRoot, ["config", "merge.trap.name", "trap merge driver"]);
+  git(repoRoot, ["config", "merge.trap.driver", `${mergeDriverScriptPath} ${mergeDriverSentinelPath} %O %A %B %P`]);
+
+  const sliceOne = createSliceWorktree(repoRoot, featureWorktree, "slice-1", "tracked.txt", "slice one\n", "slice one");
+  const sliceTwo = createSliceWorktree(repoRoot, featureWorktree, "slice-2", "tracked.txt", "slice two\n", "slice two");
+
+  mergeSlice(featureWorktree, sliceOne.sliceBranch);
+  const mergeOne = {
+    kind: "slice_merge",
+    ...sliceOne,
+    mergeCommit: head(featureWorktree),
+    mergeTree: tree(featureWorktree, "HEAD"),
+  };
+
+  mergeSlice(featureWorktree, sliceTwo.sliceBranch);
+  const mergeTwo = {
+    kind: "slice_merge",
+    ...sliceTwo,
+    mergeCommit: head(featureWorktree),
+    mergeTree: tree(featureWorktree, "HEAD"),
+  };
+
+  return {
+    repoRoot: realpathSync.native(repoRoot),
+    featureBranch,
+    featureWorktree: realpathSync.native(featureWorktree),
+    gitCommonDir: realpathSync.native(resolve(featureWorktree, gitStdout(featureWorktree, ["rev-parse", "--git-common-dir"]).trim())),
+    baseCommit: head(repoRoot),
+    baseTree: tree(repoRoot, head(repoRoot)),
+    headCommit: head(featureWorktree),
+    headTree: tree(featureWorktree, "HEAD"),
+    merges: [mergeOne, mergeTwo],
+    directs: [],
+    events: [mergeOne, mergeTwo],
+    mergeDriverScriptPath,
+    mergeDriverSentinelPath,
   };
 }
 

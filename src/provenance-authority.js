@@ -345,24 +345,6 @@ export function gitDiffHash(cwd, parentCommit, commit, options = {}) {
   return hashText(result.stdout);
 }
 
-export function computeMergeTree(cwd, previousCommit, sliceCommit, options = {}) {
-  const base = requireObjectId(previousCommit, "previousCommit");
-  const slice = requireObjectId(sliceCommit, "sliceCommit");
-  const result = requireGitSuccess(
-    cwd,
-    ["merge-tree", "--write-tree", base, slice],
-    options,
-    `git merge-tree --write-tree ${base} ${slice}`,
-  );
-  const tree = normalizeGitStdout(result.stdout)
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .find(Boolean);
-  if (!tree) throw new Error(`git merge-tree --write-tree ${base} ${slice} returned no tree id`);
-  requireObjectId(tree, `git merge-tree --write-tree ${base} ${slice} tree`);
-  return { tree };
-}
-
 export function validateAttestationGraph(runDirOrRoots, options = {}) {
   const checks = [];
   let roots;
@@ -1219,9 +1201,52 @@ function validateSliceMergeEntry({ entry, previousCommit, commitObservation, fea
     throw new Error("review approval review_hash no longer matches the current review file");
   }
 
-  const mergeTree = computeMergeTree(featureWorktree, previousCommit, sliceBindings.slice_commit, context);
-  if (mergeTree.tree !== commitObservation.tree) {
-    throw new Error(`merge-tree result ${mergeTree.tree} does not match actual merge tree ${commitObservation.tree}`);
+  const mergeBases = listMergeBases(featureWorktree, previousCommit, sliceBindings.slice_commit, context);
+  if (mergeBases.length !== 1) {
+    throw new Error(`slice_merge commit ${entry.commit} has ${mergeBases.length} merge bases; driver-free validation cannot prove merge ancestry`);
+  }
+
+  const [mergeBase] = mergeBases;
+  if (mergeBase !== sliceBindings.base_commit) {
+    throw new Error(
+      `slice_merge commit ${entry.commit} merge base is ${mergeBase}, expected attested base ${sliceBindings.base_commit}; driver-free validation cannot prove merge ancestry`,
+    );
+  }
+
+  const featureChangedPaths = listChangedPaths(featureWorktree, mergeBase, previousCommit, context);
+  const sliceChangedPaths = listChangedPaths(featureWorktree, mergeBase, sliceBindings.slice_commit, context);
+  const mergeChangedPaths = listChangedPaths(featureWorktree, previousCommit, entry.commit, context);
+  const featureSliceCollision = findChangedPathCollision(featureChangedPaths, sliceChangedPaths);
+  if (featureSliceCollision) {
+    throw new Error(
+      `slice_merge commit ${entry.commit} has overlapping feature/slice path changes (${featureSliceCollision.left} vs ${featureSliceCollision.right}); driver-free validation cannot prove conflict resolution is safe`,
+    );
+  }
+
+  const sliceChangedPathSet = new Set(sliceChangedPaths);
+  const mergeChangedPathSet = new Set(mergeChangedPaths);
+  const unexpectedMergePath = mergeChangedPaths.find((path) => !sliceChangedPathSet.has(path)) ?? null;
+  if (unexpectedMergePath) {
+    throw new Error(
+      `slice_merge commit ${entry.commit} contains merge-only tree edits at ${unexpectedMergePath}; driver-free validation cannot prove merge-only edits are reviewed`,
+    );
+  }
+
+  const missingSlicePath = sliceChangedPaths.find((path) => !mergeChangedPathSet.has(path)) ?? null;
+  if (missingSlicePath) {
+    throw new Error(
+      `slice_merge commit ${entry.commit} is missing reviewed slice path changes at ${missingSlicePath}; driver-free validation cannot prove the recorded merge result`,
+    );
+  }
+
+  for (const path of sliceChangedPaths) {
+    const sliceEntry = readTreePathEntry(featureWorktree, sliceBindings.slice_commit, path, context);
+    const mergeEntry = readTreePathEntry(featureWorktree, entry.commit, path, context);
+    if (!sameTreeEntry(sliceEntry, mergeEntry)) {
+      throw new Error(
+        `slice_merge commit ${entry.commit} path ${path} resolves to ${formatTreeEntry(mergeEntry)}, expected reviewed slice state ${formatTreeEntry(sliceEntry)}; driver-free validation cannot prove the recorded merge result`,
+      );
+    }
   }
 
   const sliceWorktree = readRealPath(resolve(sliceBindings.worktree), "slice worktree", context);
@@ -1478,6 +1503,93 @@ function normalizePathLikeSegments(value, name) {
     throw new Error(`${name} must not contain empty, '.' or '..' segments`);
   }
   return segments;
+}
+
+function listMergeBases(cwd, leftCommit, rightCommit, options = {}) {
+  const left = requireObjectId(leftCommit, "leftCommit");
+  const right = requireObjectId(rightCommit, "rightCommit");
+  const result = requireGitSuccess(
+    cwd,
+    ["merge-base", "--all", left, right],
+    options,
+    `git merge-base --all ${left} ${right}`,
+  );
+  return normalizeGitStdout(result.stdout)
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((value) => requireObjectId(value, `git merge-base ${left} ${right}`));
+}
+
+function listChangedPaths(cwd, fromCommit, toCommit, options = {}) {
+  const from = requireObjectId(fromCommit, "fromCommit");
+  const to = requireObjectId(toCommit, "toCommit");
+  const result = requireGitSuccess(
+    cwd,
+    ["diff-tree", "-r", "--name-only", "--no-commit-id", "-z", "--no-renames", "--end-of-options", from, to],
+    options,
+    `git diff-tree -r --name-only --no-commit-id -z --no-renames --end-of-options ${from} ${to}`,
+  );
+  return normalizeGitStdout(result.stdout)
+    .split("\u0000")
+    .filter(Boolean);
+}
+
+function readTreePathEntry(cwd, commit, path, options = {}) {
+  const subject = requireObjectId(commit, "commit");
+  const targetPath = requireText(path, "path");
+  const result = requireGitSuccess(
+    cwd,
+    ["ls-tree", "-z", subject, "--", targetPath],
+    options,
+    `git ls-tree -z ${subject} -- ${targetPath}`,
+  );
+  const entries = normalizeGitStdout(result.stdout)
+    .split("\u0000")
+    .filter(Boolean)
+    .map((entry) => parseLsTreeEntry(entry, subject));
+  if (entries.length === 0) return null;
+  if (entries.length !== 1) {
+    throw new Error(`git ls-tree ${subject} -- ${targetPath} returned ${entries.length} entries`);
+  }
+  if (entries[0].path !== targetPath) {
+    throw new Error(`git ls-tree ${subject} -- ${targetPath} returned ${entries[0].path}`);
+  }
+  return entries[0];
+}
+
+function parseLsTreeEntry(entry, commit) {
+  const separatorIndex = entry.indexOf("\t");
+  if (separatorIndex === -1) throw new Error(`git ls-tree ${commit} returned an invalid entry`);
+  const metadata = entry.slice(0, separatorIndex).trim();
+  const path = entry.slice(separatorIndex + 1);
+  const [mode, type, object] = metadata.split(/\s+/u);
+  if (!mode || !type || !object) throw new Error(`git ls-tree ${commit} returned an invalid entry for ${path}`);
+  requireObjectId(object, `git ls-tree ${commit} object for ${path}`);
+  return { mode, type, object, path };
+}
+
+function findChangedPathCollision(leftPaths, rightPaths) {
+  for (const left of leftPaths) {
+    for (const right of rightPaths) {
+      if (pathsCollide(left, right)) return { left, right };
+    }
+  }
+  return null;
+}
+
+function pathsCollide(leftPath, rightPath) {
+  return leftPath === rightPath || leftPath.startsWith(`${rightPath}/`) || rightPath.startsWith(`${leftPath}/`);
+}
+
+function sameTreeEntry(left, right) {
+  if (left === null || right === null) return left === right;
+  return left.mode === right.mode && left.type === right.type && left.object === right.object;
+}
+
+function formatTreeEntry(entry) {
+  if (entry === null) return "absent";
+  return `${entry.mode} ${entry.type} ${entry.object}`;
 }
 
 function requireGitSuccess(cwd, args, options, label) {
