@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -9,6 +10,7 @@ import {
   AUTHORITY_MODEL,
   checkWorktreeIdentity,
   createAttestationIndex,
+  createDirectReviewedCommitAttestation,
   createGateDecisionAttestation,
   createMergeChainAttestation,
   createReviewApprovalAttestation,
@@ -184,12 +186,29 @@ describe("provenance authority", () => {
     }
   });
 
-  it("rejects forged review approvals whose review, evidence, or guard bindings do not match", () => {
+  it("rejects merge-chain references to attestations that exist on disk but were never accepted into the graph", () => {
     const fixture = createHistoryFixture();
 
     try {
-      const run = buildAuthorityRun(fixture, "forged-review-run");
+      const run = buildAuthorityRun(fixture, "unindexed-reference", {
+        unindexedAttestationRefs: ["attestations/reviews/slice-1.approval.json"],
+      });
+      const result = validateProvenanceAuthority(run.runDir);
+
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /accepted attestation not found/u);
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects non-approving and mismatched review approvals", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      const run = buildAuthorityRun(fixture, "review-approval-failures");
       const firstSlice = run.slices[0];
+      const reviewPath = join(run.runDir, ...firstSlice.reviewRef.split("/"));
       const context = {
         runDir: run.runDir,
         expectedWorktree: firstSlice.sliceWorktree,
@@ -199,42 +218,99 @@ describe("provenance authority", () => {
         evidenceHash: firstSlice.evidenceHash,
       };
 
-      const forgedReviewHash = withAttestationHash({
+      const nonApproving = withAttestationHash({
         ...firstSlice.reviewAttestation,
         bindings: {
           ...firstSlice.reviewAttestation.bindings,
-          review_hash: hashValue("forged-review"),
+          verdict: "REJECT",
         },
       });
-      const forgedEvidenceHash = withAttestationHash({
+      const nonApprovingResult = validateReviewApprovalAttestation(nonApproving, context);
+      assert.equal(nonApprovingResult.ok, false);
+      assert.match(joinErrors(nonApprovingResult), /APPROVE/u);
+
+      writeJson(reviewPath, {
+        subject: `${firstSlice.sliceBranch}-other`,
+        reviewer: "work-reviewer",
+        verdict: "APPROVE",
+      });
+      const subjectMismatch = withAttestationHash({
         ...firstSlice.reviewAttestation,
         bindings: {
           ...firstSlice.reviewAttestation.bindings,
-          evidence_hash: hashValue("forged-evidence"),
+          review_hash: hashFile(reviewPath),
         },
       });
-      const forgedGuardHash = withAttestationHash({
+      const subjectMismatchResult = validateReviewApprovalAttestation(subjectMismatch, context);
+      assert.equal(subjectMismatchResult.ok, false);
+      assert.match(joinErrors(subjectMismatchResult), /review subject/u);
+
+      writeJson(reviewPath, {
+        subject: firstSlice.sliceBranch,
+        reviewer: "security-reviewer",
+        verdict: "PASS",
+      });
+      const reviewerMismatch = withAttestationHash({
         ...firstSlice.reviewAttestation,
         bindings: {
           ...firstSlice.reviewAttestation.bindings,
-          guard_result_hash: hashValue("forged-guard"),
+          review_hash: hashFile(reviewPath),
         },
       });
+      const reviewerMismatchResult = validateReviewApprovalAttestation(reviewerMismatch, context);
+      assert.equal(reviewerMismatchResult.ok, false);
+      assert.match(joinErrors(reviewerMismatchResult), /review reviewer/u);
 
-      const reviewHashResult = validateReviewApprovalAttestation(forgedReviewHash, context);
-      const evidenceHashResult = validateReviewApprovalAttestation(forgedEvidenceHash, context);
-      const guardHashResult = validateReviewApprovalAttestation(forgedGuardHash, context);
-
-      assert.equal(reviewHashResult.ok, false);
-      assert.match(joinErrors(reviewHashResult), /review hash/u);
-
-      assert.equal(evidenceHashResult.ok, false);
-      assert.match(joinErrors(evidenceHashResult), /evidence hash/u);
-
-      assert.equal(guardHashResult.ok, false);
-      assert.match(joinErrors(guardHashResult), /guard hash/u);
+      writeJson(reviewPath, {
+        subject: firstSlice.sliceBranch,
+        reviewer: "work-reviewer",
+        verdict: "REJECT",
+      });
+      const verdictMismatch = withAttestationHash({
+        ...firstSlice.reviewAttestation,
+        bindings: {
+          ...firstSlice.reviewAttestation.bindings,
+          review_hash: hashFile(reviewPath),
+        },
+      });
+      const verdictMismatchResult = validateReviewApprovalAttestation(verdictMismatch, context);
+      assert.equal(verdictMismatchResult.ok, false);
+      assert.match(joinErrors(verdictMismatchResult), /review verdict/u);
     } finally {
       cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("re-observes guard cleanliness and rejects dirty or hidden-index worktrees", () => {
+    const scenarios = [
+      {
+        name: "dirty",
+        mutate(run) {
+          writeFixture(run.slices[0].sliceWorktree, "slice-one.txt", "changed after review\n");
+        },
+        error: /guard re-observation is dirty/u,
+      },
+      {
+        name: "hidden-index",
+        mutate(run) {
+          git(run.slices[0].sliceWorktree, ["update-index", "--assume-unchanged", "slice-one.txt"]);
+        },
+        error: /guard re-observation is dirty/u,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const fixture = createHistoryFixture();
+      try {
+        const run = buildAuthorityRun(fixture, `guard-${scenario.name}`);
+        scenario.mutate(run);
+        const result = validateProvenanceAuthority(run.runDir);
+
+        assert.equal(result.ok, false, `expected ${scenario.name} guard scenario to fail`);
+        assert.match(joinErrors(result), scenario.error);
+      } finally {
+        cleanup(fixture.repoRoot);
+      }
     }
   });
 
@@ -256,6 +332,38 @@ describe("provenance authority", () => {
       } finally {
         cleanup(fixture.repoRoot);
       }
+    }
+  });
+
+  it("accepts a valid direct_reviewed_commit merge-chain proof", () => {
+    const fixture = createHistoryFixture({ directAfter: true });
+
+    try {
+      const run = buildAuthorityRun(fixture, "valid-direct-reviewed-commit", { includeDirectProofs: true });
+      const result = validateProvenanceAuthority(run.runDir);
+
+      assert.equal(result.ok, true);
+      assert.equal(run.directs.length, 1);
+      assert.equal(result.acceptedAttestations[run.directs[0].directAttestationRef].attestation.type, "direct-reviewed-commit");
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects laundered direct_reviewed_commit proofs that omit review and guard bindings", () => {
+    const fixture = createHistoryFixture({ directAfter: true });
+
+    try {
+      const run = buildAuthorityRun(fixture, "laundered-direct-reviewed-commit", {
+        includeDirectProofs: true,
+        launderDirectProofs: true,
+      });
+      const result = validateProvenanceAuthority(run.runDir);
+
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /review_hash|guard_result_hash/u);
+    } finally {
+      cleanup(fixture.repoRoot);
     }
   });
 
@@ -289,7 +397,7 @@ describe("provenance authority", () => {
   });
 });
 
-function buildAuthorityRun(fixture, runId) {
+function buildAuthorityRun(fixture, runId, options = {}) {
   const runDir = createBareRunDir(fixture.repoRoot, runId);
   const runBase = createRunBaseAttestation({
     run_id: runId,
@@ -308,102 +416,233 @@ function buildAuthorityRun(fixture, runId) {
     },
   });
 
-  const records = [{ ref: "attestations/run-base.json", attestation: runBase }];
+  const indexRecords = [{ ref: "attestations/run-base.json", attestation: runBase }];
+  const writtenAttestations = [{ ref: "attestations/run-base.json", attestation: runBase }];
   const slices = [];
+  const directs = [];
+  const mergeEntries = [];
+  const includeDirectProofs = options.includeDirectProofs === true;
+  const launderDirectProofs = options.launderDirectProofs === true;
+  const unindexedAttestationRefs = new Set(options.unindexedAttestationRefs || []);
   let sequence = 2;
   let prevHash = runBase.attestation_hash;
 
-  for (const merge of fixture.merges) {
-    const evidenceRef = `evidence/${merge.sliceBranch}.json`;
-    const evidencePath = join(runDir, ...evidenceRef.split("/"));
-    writeJson(evidencePath, {
-      slice_id: merge.sliceBranch,
-      observed_commit: merge.sliceCommit,
-      base_commit: merge.sliceBaseCommit,
-    });
-    const reviewRef = `reviews/${merge.sliceBranch}.json`;
-    const reviewPath = join(runDir, ...reviewRef.split("/"));
-    writeJson(reviewPath, {
-      subject: merge.sliceBranch,
-      verdict: "approved",
-      reviewer: "work-reviewer",
-    });
+  for (const event of fixture.events) {
+    if (event.kind === "slice_merge") {
+      const evidenceRef = `evidence/${event.sliceBranch}.json`;
+      const evidencePath = join(runDir, ...evidenceRef.split("/"));
+      writeJson(evidencePath, {
+        slice_id: event.sliceBranch,
+        observed_commit: event.sliceCommit,
+        base_commit: event.sliceBaseCommit,
+      });
 
-    const evidenceHash = hashFile(evidencePath);
-    const reviewHash = hashFile(reviewPath);
-    const guard = {
-      status: "clean",
-      safe_git_policy: SAFE_GIT_POLICY,
-      worktree: merge.sliceWorktree,
-      head_commit: merge.sliceCommit,
-      head_tree: merge.sliceTree,
-      dirty_paths: [],
-      hidden_index_paths: [],
-    };
-
-    const sliceAttestationRef = `attestations/slices/${merge.sliceBranch}.observation.json`;
-    const sliceAttestation = createSliceObservationAttestation({
-      run_id: runId,
-      sequence,
-      prev_hash: prevHash,
-      created_at: isoAt(sequence),
-      bindings: {
-        slice_id: merge.sliceBranch,
-        attempt: 1,
-        branch: merge.sliceBranch,
-        worktree: merge.sliceWorktree,
-        base_commit: merge.sliceBaseCommit,
-        slice_commit: merge.sliceCommit,
-        slice_tree: merge.sliceTree,
-        evidence_ref: evidenceRef,
-        evidence_hash: evidenceHash,
-      },
-    });
-    sequence += 1;
-    prevHash = sliceAttestation.attestation_hash;
-
-    const reviewAttestationRef = `attestations/reviews/${merge.sliceBranch}.approval.json`;
-    const reviewAttestation = createReviewApprovalAttestation({
-      run_id: runId,
-      sequence,
-      prev_hash: prevHash,
-      created_at: isoAt(sequence),
-      bindings: {
-        subject_type: "slice",
-        subject: merge.sliceBranch,
+      const reviewRef = `reviews/${event.sliceBranch}.json`;
+      const reviewPath = join(runDir, ...reviewRef.split("/"));
+      writeJson(reviewPath, {
+        subject: event.sliceBranch,
         reviewer: "work-reviewer",
-        verdict: "approved",
-        review_ref: reviewRef,
-        review_hash: reviewHash,
+        verdict: "APPROVE",
+      });
+
+      const evidenceHash = hashFile(evidencePath);
+      const reviewHash = hashFile(reviewPath);
+      const guard = {
+        status: "clean",
+        safe_git_policy: SAFE_GIT_POLICY,
+        worktree: event.sliceWorktree,
+        head_commit: event.sliceCommit,
+        head_tree: event.sliceTree,
+        dirty_paths: [],
+        hidden_index_paths: [],
+      };
+
+      const sliceAttestationRef = `attestations/slices/${event.sliceBranch}.observation.json`;
+      const sliceAttestation = createSliceObservationAttestation({
+        run_id: runId,
+        sequence,
+        prev_hash: prevHash,
+        created_at: isoAt(sequence),
+        bindings: {
+          slice_id: event.sliceBranch,
+          attempt: 1,
+          branch: event.sliceBranch,
+          worktree: event.sliceWorktree,
+          base_commit: event.sliceBaseCommit,
+          slice_commit: event.sliceCommit,
+          slice_tree: event.sliceTree,
+          evidence_ref: evidenceRef,
+          evidence_hash: evidenceHash,
+        },
+      });
+      writtenAttestations.push({ ref: sliceAttestationRef, attestation: sliceAttestation });
+      indexRecords.push({ ref: sliceAttestationRef, attestation: sliceAttestation });
+      sequence += 1;
+      prevHash = sliceAttestation.attestation_hash;
+
+      const reviewAttestationRef = `attestations/reviews/${event.sliceBranch}.approval.json`;
+      const reviewAttestation = createReviewApprovalAttestation({
+        run_id: runId,
+        sequence,
+        prev_hash: prevHash,
+        created_at: isoAt(sequence),
+        bindings: {
+          subject_type: "slice",
+          subject: event.sliceBranch,
+          reviewer: "work-reviewer",
+          verdict: "APPROVE",
+          review_ref: reviewRef,
+          review_hash: reviewHash,
+          evidence_ref: evidenceRef,
+          evidence_hash: evidenceHash,
+          subject_commit: event.sliceCommit,
+          subject_tree: event.sliceTree,
+          guard_result_hash: hashValue(guard),
+          guard,
+        },
+      });
+      writtenAttestations.push({ ref: reviewAttestationRef, attestation: reviewAttestation });
+      if (!unindexedAttestationRefs.has(reviewAttestationRef)) {
+        indexRecords.push({ ref: reviewAttestationRef, attestation: reviewAttestation });
+        sequence += 1;
+        prevHash = reviewAttestation.attestation_hash;
+      }
+
+      mergeEntries.push({
+        type: "slice_merge",
+        commit: event.mergeCommit,
+        slice_commit: event.sliceCommit,
+        slice_attestation_ref: sliceAttestationRef,
+        slice_attestation_hash: sliceAttestation.attestation_hash,
+        review_attestation_ref: reviewAttestationRef,
+        review_attestation_hash: reviewAttestation.attestation_hash,
+      });
+      slices.push({
+        sliceBranch: event.sliceBranch,
+        sliceWorktree: event.sliceWorktree,
+        sliceCommit: event.sliceCommit,
+        sliceTree: event.sliceTree,
+        evidenceRef,
+        evidenceHash,
+        reviewRef,
+        reviewHash,
+        guard,
+        sliceAttestationRef,
+        sliceAttestation,
+        reviewAttestationRef,
+        reviewAttestation,
+        mergeCommit: event.mergeCommit,
+      });
+      continue;
+    }
+
+    if (event.kind === "direct_commit") {
+      if (!includeDirectProofs) continue;
+
+      const evidenceRef = `evidence/${event.entryId}.json`;
+      const evidencePath = join(runDir, ...evidenceRef.split("/"));
+      writeJson(evidencePath, {
+        entry_id: event.entryId,
+        commit: event.commit,
+        parent_commit: event.parentCommit,
+      });
+
+      const reviewRef = `reviews/${event.entryId}.json`;
+      const reviewPath = join(runDir, ...reviewRef.split("/"));
+      writeJson(reviewPath, {
+        subject: event.entryId,
+        reviewer: "work-reviewer",
+        verdict: "APPROVE",
+      });
+
+      const evidenceHash = hashFile(evidencePath);
+      const reviewHash = hashFile(reviewPath);
+      const guard = {
+        status: "clean",
+        safe_git_policy: SAFE_GIT_POLICY,
+        worktree: fixture.featureWorktree,
+        head_commit: event.commit,
+        head_tree: event.tree,
+        dirty_paths: [],
+        hidden_index_paths: [],
+      };
+
+      const directAttestationRef = `attestations/direct-commits/${event.entryId}.observation.json`;
+      const directBindings = {
+        entry_id: event.entryId,
+        purpose: event.purpose,
+        commit: event.commit,
+        parent_commit: event.parentCommit,
+        tree: event.tree,
+        diff_hash: hashDiff(fixture.featureWorktree, event.parentCommit, event.commit),
         evidence_ref: evidenceRef,
         evidence_hash: evidenceHash,
-        subject_commit: merge.sliceCommit,
-        subject_tree: merge.sliceTree,
-        guard_result_hash: hashValue(guard),
-        guard,
-      },
-    });
-    sequence += 1;
-    prevHash = reviewAttestation.attestation_hash;
+        producing_role: "feature-factory",
+      };
+      if (!launderDirectProofs) {
+        directBindings.review_hash = reviewHash;
+        directBindings.guard_result_hash = hashValue(guard);
+      }
+      const directAttestation = createDirectReviewedCommitAttestation({
+        run_id: runId,
+        sequence,
+        prev_hash: prevHash,
+        created_at: isoAt(sequence),
+        bindings: directBindings,
+      });
+      writtenAttestations.push({ ref: directAttestationRef, attestation: directAttestation });
+      indexRecords.push({ ref: directAttestationRef, attestation: directAttestation });
+      sequence += 1;
+      prevHash = directAttestation.attestation_hash;
 
-    records.push({ ref: sliceAttestationRef, attestation: sliceAttestation });
-    records.push({ ref: reviewAttestationRef, attestation: reviewAttestation });
-    slices.push({
-      sliceBranch: merge.sliceBranch,
-      sliceWorktree: merge.sliceWorktree,
-      sliceCommit: merge.sliceCommit,
-      sliceTree: merge.sliceTree,
-      evidenceRef,
-      evidenceHash,
-      reviewRef,
-      reviewHash,
-      guard,
-      sliceAttestationRef,
-      sliceAttestation,
-      reviewAttestationRef,
-      reviewAttestation,
-      mergeCommit: merge.mergeCommit,
-    });
+      const reviewAttestationRef = `attestations/reviews/${event.entryId}.approval.json`;
+      const reviewAttestation = createReviewApprovalAttestation({
+        run_id: runId,
+        sequence,
+        prev_hash: prevHash,
+        created_at: isoAt(sequence),
+        bindings: {
+          subject_type: "direct_commit",
+          subject: event.entryId,
+          reviewer: "work-reviewer",
+          verdict: "APPROVE",
+          review_ref: reviewRef,
+          review_hash: reviewHash,
+          evidence_ref: evidenceRef,
+          evidence_hash: evidenceHash,
+          subject_commit: event.commit,
+          subject_tree: event.tree,
+          guard_result_hash: hashValue(guard),
+          guard,
+        },
+      });
+      writtenAttestations.push({ ref: reviewAttestationRef, attestation: reviewAttestation });
+      indexRecords.push({ ref: reviewAttestationRef, attestation: reviewAttestation });
+      sequence += 1;
+      prevHash = reviewAttestation.attestation_hash;
+
+      mergeEntries.push({
+        type: "direct_reviewed_commit",
+        commit: event.commit,
+        direct_commit_attestation_ref: directAttestationRef,
+        direct_commit_attestation_hash: directAttestation.attestation_hash,
+        review_attestation_ref: reviewAttestationRef,
+        review_attestation_hash: reviewAttestation.attestation_hash,
+      });
+      directs.push({
+        entryId: event.entryId,
+        commit: event.commit,
+        parentCommit: event.parentCommit,
+        tree: event.tree,
+        evidenceRef,
+        reviewRef,
+        guard,
+        directAttestationRef,
+        directAttestation,
+        reviewAttestationRef,
+        reviewAttestation,
+      });
+    }
   }
 
   const mergeChain = createMergeChainAttestation({
@@ -418,27 +657,21 @@ function buildAuthorityRun(fixture, runId) {
       base_commit: fixture.baseCommit,
       head_commit: fixture.headCommit,
       head_tree: fixture.headTree,
-      entries: slices.map((slice) => ({
-        type: "slice_merge",
-        commit: slice.mergeCommit,
-        slice_commit: slice.sliceCommit,
-        slice_attestation_ref: slice.sliceAttestationRef,
-        slice_attestation_hash: slice.sliceAttestation.attestation_hash,
-        review_attestation_ref: slice.reviewAttestationRef,
-        review_attestation_hash: slice.reviewAttestation.attestation_hash,
-      })),
+      entries: mergeEntries,
     },
   });
-  records.push({ ref: "attestations/merge-chain.json", attestation: mergeChain });
+  writtenAttestations.push({ ref: "attestations/merge-chain.json", attestation: mergeChain });
+  indexRecords.push({ ref: "attestations/merge-chain.json", attestation: mergeChain });
 
-  for (const record of records) writeAttestation(runDir, record.ref, record.attestation);
-  writeJson(join(runDir, "attestations", "index.json"), createAttestationIndex(records));
+  for (const record of writtenAttestations) writeAttestation(runDir, record.ref, record.attestation);
+  writeJson(join(runDir, "attestations", "index.json"), createAttestationIndex(indexRecords));
 
   return {
     runDir,
     runBase,
     mergeChain,
     slices,
+    directs,
   };
 }
 
@@ -459,30 +692,51 @@ function createHistoryFixture(options = {}) {
   const featureWorktree = join(repoRoot, ".opencode", "worktrees", featureBranch);
   git(repoRoot, ["worktree", "add", "-b", featureBranch, featureWorktree, "HEAD"]);
 
-  if (options.directBefore) commitFile(featureWorktree, "feature-before.txt", "before\n", "feature before merge");
-
+  const events = [];
   const merges = [];
+  const directs = [];
+
+  if (options.directBefore) {
+    const directBefore = createDirectFeatureCommit(featureWorktree, "direct-before", "feature-before.txt", "before\n", "feature before merge");
+    directs.push(directBefore);
+    events.push(directBefore);
+  }
+
   const sliceOne = createSliceWorktree(repoRoot, featureWorktree, "slice-1", "slice-one.txt", "slice one\n", "slice one");
   mergeSlice(featureWorktree, sliceOne.sliceBranch, { extraMergeEdit: Boolean(options.extraMergeEdit) });
-  merges.push({
+  const mergeOne = {
+    kind: "slice_merge",
     ...sliceOne,
     mergeCommit: head(featureWorktree),
     mergeTree: tree(featureWorktree, "HEAD"),
-  });
+  };
+  merges.push(mergeOne);
+  events.push(mergeOne);
 
-  if (options.directBetween) commitFile(featureWorktree, "feature-between.txt", "between\n", "feature between merges");
+  if (options.directBetween) {
+    const directBetween = createDirectFeatureCommit(featureWorktree, "direct-between", "feature-between.txt", "between\n", "feature between merges");
+    directs.push(directBetween);
+    events.push(directBetween);
+  }
 
   if (options.secondSlice) {
     const sliceTwo = createSliceWorktree(repoRoot, featureWorktree, "slice-2", "slice-two.txt", "slice two\n", "slice two");
     mergeSlice(featureWorktree, sliceTwo.sliceBranch);
-    merges.push({
+    const mergeTwo = {
+      kind: "slice_merge",
       ...sliceTwo,
       mergeCommit: head(featureWorktree),
       mergeTree: tree(featureWorktree, "HEAD"),
-    });
+    };
+    merges.push(mergeTwo);
+    events.push(mergeTwo);
   }
 
-  if (options.directAfter) commitFile(featureWorktree, "feature-after.txt", "after\n", "feature after merge");
+  if (options.directAfter) {
+    const directAfter = createDirectFeatureCommit(featureWorktree, "direct-after", "feature-after.txt", "after\n", "feature after merge");
+    directs.push(directAfter);
+    events.push(directAfter);
+  }
 
   return {
     repoRoot: realpathSync.native(repoRoot),
@@ -494,6 +748,8 @@ function createHistoryFixture(options = {}) {
     headCommit: head(featureWorktree),
     headTree: tree(featureWorktree, "HEAD"),
     merges,
+    directs,
+    events,
   };
 }
 
@@ -511,6 +767,20 @@ function createSliceWorktree(repoRoot, featureWorktree, sliceBranch, fileName, c
     sliceWorktree: realpathSync.native(sliceWorktree),
     sliceCommit: head(sliceWorktree),
     sliceTree: tree(sliceWorktree, "HEAD"),
+  };
+}
+
+function createDirectFeatureCommit(featureWorktree, entryId, relativePath, content, commitMessage) {
+  const parentCommit = head(featureWorktree);
+  commitFile(featureWorktree, relativePath, content, commitMessage);
+
+  return {
+    kind: "direct_commit",
+    entryId,
+    purpose: "remediation",
+    parentCommit,
+    commit: head(featureWorktree),
+    tree: tree(featureWorktree, "HEAD"),
   };
 }
 
@@ -561,6 +831,10 @@ function head(cwd) {
 
 function tree(cwd, rev) {
   return gitStdout(cwd, ["rev-parse", `${rev}^{tree}`]).trim();
+}
+
+function hashDiff(cwd, parentCommit, commit) {
+  return `sha256:${createHash("sha256").update(gitStdout(cwd, ["diff-tree", "-r", "--full-index", parentCommit, commit]), "utf8").digest("hex")}`;
 }
 
 function git(cwd, args) {

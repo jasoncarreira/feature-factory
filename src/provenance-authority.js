@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
+import { checkReviewedWorktreeClean } from "./review-guard.js";
 import { SAFE_GIT_POLICY, safeGit } from "./safe-git.js";
 
 export const AUTHORITY_MODEL = "feature-factory-provenance-v1";
@@ -19,8 +20,12 @@ export const ATTESTATION_TYPES = Object.freeze([
 
 const DIRECT_REVIEWED_COMMIT_PURPOSE_SET = new Set(DIRECT_REVIEWED_COMMIT_PURPOSES);
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
+const OBJECT_ID_PATTERN = /^[0-9a-f]{40}$/u;
 const JSON_LEAF_ROOTS = new Set(["evidence", "reviews"]);
-const GIT_REV_PARSE_HEAD_ARGS = Object.freeze(["rev-parse", "HEAD", "HEAD^{tree}"]);
+const REVIEW_APPROVAL_RULES = Object.freeze({
+  "work-reviewer": Object.freeze({ verdict: "APPROVE" }),
+  "security-reviewer": Object.freeze({ verdict: "PASS" }),
+});
 
 export function canonicalJson(value) {
   return JSON.stringify(canonicalizeJsonValue(value));
@@ -279,21 +284,20 @@ export function checkWorktreeIdentity(repoRoot, branch, worktree, options = {}) 
 }
 
 export function readHeadObservation(worktree, options = {}) {
-  const result = requireGitSuccess(worktree, GIT_REV_PARSE_HEAD_ARGS, options, "git rev-parse HEAD HEAD^{tree}");
-  const lines = normalizeGitStdout(result.stdout)
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length < 2) throw new Error(`git rev-parse HEAD HEAD^{tree} returned malformed output for ${worktree}`);
   return {
-    head_commit: lines[0],
-    head_tree: lines[1],
+    head_commit: revParseSingle(worktree, "HEAD", options),
+    head_tree: revParseSingle(worktree, "HEAD^{tree}", options),
   };
 }
 
 export function readCommitObservation(cwd, commit, options = {}) {
-  const subject = requireText(commit, "commit");
-  const result = requireGitSuccess(cwd, ["cat-file", "-p", subject], options, `git cat-file -p ${subject}`);
+  const subject = requireObjectId(commit, "commit");
+  const result = requireGitSuccess(
+    cwd,
+    ["cat-file", "-p", "--end-of-options", subject],
+    options,
+    `git cat-file -p --end-of-options ${subject}`,
+  );
   const parents = [];
   let tree = null;
 
@@ -304,6 +308,8 @@ export function readCommitObservation(cwd, commit, options = {}) {
   }
 
   if (!tree) throw new Error(`git cat-file -p ${subject} did not expose a commit tree`);
+  requireObjectId(tree, `git cat-file -p ${subject} tree`);
+  parents.forEach((parent, index) => requireObjectId(parent, `git cat-file -p ${subject} parent[${index}]`));
   return {
     commit: subject,
     tree,
@@ -312,20 +318,20 @@ export function readCommitObservation(cwd, commit, options = {}) {
 }
 
 export function gitDiffHash(cwd, parentCommit, commit, options = {}) {
-  const parent = requireText(parentCommit, "parentCommit");
-  const child = requireText(commit, "commit");
+  const parent = requireObjectId(parentCommit, "parentCommit");
+  const child = requireObjectId(commit, "commit");
   const result = requireGitSuccess(
     cwd,
-    ["diff-tree", "-r", "--full-index", parent, child],
+    ["diff-tree", "-r", "--full-index", "--end-of-options", parent, child],
     options,
-    `git diff-tree -r --full-index ${parent} ${child}`,
+    `git diff-tree -r --full-index --end-of-options ${parent} ${child}`,
   );
   return hashText(result.stdout);
 }
 
 export function computeMergeTree(cwd, previousCommit, sliceCommit, options = {}) {
-  const base = requireText(previousCommit, "previousCommit");
-  const slice = requireText(sliceCommit, "sliceCommit");
+  const base = requireObjectId(previousCommit, "previousCommit");
+  const slice = requireObjectId(sliceCommit, "sliceCommit");
   const result = requireGitSuccess(
     cwd,
     ["merge-tree", "--write-tree", base, slice],
@@ -337,6 +343,7 @@ export function computeMergeTree(cwd, previousCommit, sliceCommit, options = {})
     .map((line) => line.trim())
     .find(Boolean);
   if (!tree) throw new Error(`git merge-tree --write-tree ${base} ${slice} returned no tree id`);
+  requireObjectId(tree, `git merge-tree --write-tree ${base} ${slice} tree`);
   return { tree };
 }
 
@@ -607,6 +614,8 @@ export function validateReviewApprovalAttestation(attestation, context = {}) {
     if (observedHash !== bindings.review_hash) {
       throw new Error(`review hash is ${observedHash}, expected ${bindings.review_hash}`);
     }
+    const reviewContent = readReviewApprovalArtifact(review.path, bindings.review_ref);
+    validateReviewApprovalBindingToArtifact(bindings, reviewContent);
     return { review_ref: bindings.review_ref };
   }));
 
@@ -632,20 +641,24 @@ export function validateReviewApprovalAttestation(attestation, context = {}) {
     return { worktree: bindings.guard.worktree };
   }));
 
-  checks.push(runCheck("review-approval.guard-head", () => {
-    const guardWorktree = readRealPath(resolve(bindings.guard.worktree), "review guard worktree", context);
-    const observation = readHeadObservation(guardWorktree, context);
-    if (observation.head_commit !== bindings.guard.head_commit) {
-      throw new Error(`guard head commit is ${observation.head_commit}, expected ${bindings.guard.head_commit}`);
+  checks.push(runCheck("review-approval.guard-reobserved", () => {
+    const declaredGuardWorktree = resolve(requireText(bindings.guard.worktree, "review-approval.bindings.guard.worktree"));
+    const observedGuard = checkReviewedWorktreeClean(declaredGuardWorktree, pickSafeGitOptions(context));
+    if (!observedGuard.ok) {
+      throw new Error(formatGuardObservationFailure(observedGuard));
     }
-    if (observation.head_tree !== bindings.guard.head_tree) {
-      throw new Error(`guard head tree is ${observation.head_tree}, expected ${bindings.guard.head_tree}`);
+    const guardWorktree = readRealPath(declaredGuardWorktree, "review guard worktree", context);
+    if (observedGuard.head_commit !== bindings.guard.head_commit) {
+      throw new Error(`guard head commit is ${observedGuard.head_commit}, expected ${bindings.guard.head_commit}`);
     }
-    if (bindings.subject_commit !== bindings.guard.head_commit) {
-      throw new Error(`review subject_commit ${bindings.subject_commit} does not match guard head ${bindings.guard.head_commit}`);
+    if (observedGuard.head_tree !== bindings.guard.head_tree) {
+      throw new Error(`guard head tree is ${observedGuard.head_tree}, expected ${bindings.guard.head_tree}`);
     }
-    if (bindings.subject_tree !== bindings.guard.head_tree) {
-      throw new Error(`review subject_tree ${bindings.subject_tree} does not match guard head tree ${bindings.guard.head_tree}`);
+    if (bindings.subject_commit !== observedGuard.head_commit) {
+      throw new Error(`review subject_commit ${bindings.subject_commit} does not match guard head ${observedGuard.head_commit}`);
+    }
+    if (bindings.subject_tree !== observedGuard.head_tree) {
+      throw new Error(`review subject_tree ${bindings.subject_tree} does not match guard head tree ${observedGuard.head_tree}`);
     }
     if (context.expectedWorktree) {
       const expectedWorktree = readRealPath(resolve(context.expectedWorktree), "expectedWorktree", context);
@@ -653,7 +666,11 @@ export function validateReviewApprovalAttestation(attestation, context = {}) {
         throw new Error(`guard worktree is ${guardWorktree}, expected ${expectedWorktree}`);
       }
     }
-    return observation;
+    return {
+      worktree: guardWorktree,
+      head_commit: observedGuard.head_commit,
+      head_tree: observedGuard.head_tree,
+    };
   }));
 
   checks.push(runCheck("review-approval.subject-bindings", () => {
@@ -1028,8 +1045,8 @@ function collectRunBaseBindingErrors(bindings, path) {
   pushRequiredString(errors, bindings, "feature_branch", `${path}.feature_branch`);
   pushRequiredString(errors, bindings, "feature_worktree", `${path}.feature_worktree`);
   pushRequiredString(errors, bindings, "base_ref", `${path}.base_ref`);
-  pushRequiredString(errors, bindings, "base_commit", `${path}.base_commit`);
-  pushRequiredString(errors, bindings, "base_tree", `${path}.base_tree`);
+  pushRequiredObjectId(errors, bindings, "base_commit", `${path}.base_commit`);
+  pushRequiredObjectId(errors, bindings, "base_tree", `${path}.base_tree`);
   return errors;
 }
 
@@ -1042,9 +1059,9 @@ function collectSliceObservationBindingErrors(bindings, path) {
   }
   pushRequiredString(errors, bindings, "branch", `${path}.branch`);
   pushRequiredString(errors, bindings, "worktree", `${path}.worktree`);
-  pushRequiredString(errors, bindings, "base_commit", `${path}.base_commit`);
-  pushRequiredString(errors, bindings, "slice_commit", `${path}.slice_commit`);
-  pushRequiredString(errors, bindings, "slice_tree", `${path}.slice_tree`);
+  pushRequiredObjectId(errors, bindings, "base_commit", `${path}.base_commit`);
+  pushRequiredObjectId(errors, bindings, "slice_commit", `${path}.slice_commit`);
+  pushRequiredObjectId(errors, bindings, "slice_tree", `${path}.slice_tree`);
   pushRequiredString(errors, bindings, "evidence_ref", `${path}.evidence_ref`);
   pushRequiredHash(errors, bindings, "evidence_hash", `${path}.evidence_hash`);
   return errors;
@@ -1061,10 +1078,11 @@ function collectReviewApprovalBindingErrors(bindings, path) {
   pushRequiredHash(errors, bindings, "review_hash", `${path}.review_hash`);
   pushRequiredString(errors, bindings, "evidence_ref", `${path}.evidence_ref`);
   pushRequiredHash(errors, bindings, "evidence_hash", `${path}.evidence_hash`);
-  pushRequiredString(errors, bindings, "subject_commit", `${path}.subject_commit`);
-  pushRequiredString(errors, bindings, "subject_tree", `${path}.subject_tree`);
+  pushRequiredObjectId(errors, bindings, "subject_commit", `${path}.subject_commit`);
+  pushRequiredObjectId(errors, bindings, "subject_tree", `${path}.subject_tree`);
   pushRequiredHash(errors, bindings, "guard_result_hash", `${path}.guard_result_hash`);
   if (!isRecord(bindings.guard)) errors.push({ path: `${path}.guard`, message: "must be an object" });
+  pushApprovalVerdictErrors(errors, bindings, path);
   return errors;
 }
 
@@ -1075,9 +1093,9 @@ function collectDirectReviewedCommitBindingErrors(bindings, path) {
   if (!DIRECT_REVIEWED_COMMIT_PURPOSE_SET.has(bindings.purpose)) {
     errors.push({ path: `${path}.purpose`, message: `must be one of ${DIRECT_REVIEWED_COMMIT_PURPOSES.join(", ")}` });
   }
-  pushRequiredString(errors, bindings, "commit", `${path}.commit`);
-  pushRequiredString(errors, bindings, "parent_commit", `${path}.parent_commit`);
-  pushRequiredString(errors, bindings, "tree", `${path}.tree`);
+  pushRequiredObjectId(errors, bindings, "commit", `${path}.commit`);
+  pushRequiredObjectId(errors, bindings, "parent_commit", `${path}.parent_commit`);
+  pushRequiredObjectId(errors, bindings, "tree", `${path}.tree`);
   pushRequiredHash(errors, bindings, "diff_hash", `${path}.diff_hash`);
   pushRequiredString(errors, bindings, "evidence_ref", `${path}.evidence_ref`);
   pushRequiredHash(errors, bindings, "evidence_hash", `${path}.evidence_hash`);
@@ -1115,9 +1133,9 @@ function collectMergeChainBindingErrors(bindings, path) {
   pushRequiredString(errors, bindings, "feature_branch", `${path}.feature_branch`);
   pushRequiredString(errors, bindings, "base_attestation_ref", `${path}.base_attestation_ref`);
   pushRequiredHash(errors, bindings, "base_attestation_hash", `${path}.base_attestation_hash`);
-  pushRequiredString(errors, bindings, "base_commit", `${path}.base_commit`);
-  pushRequiredString(errors, bindings, "head_commit", `${path}.head_commit`);
-  pushRequiredString(errors, bindings, "head_tree", `${path}.head_tree`);
+  pushRequiredObjectId(errors, bindings, "base_commit", `${path}.base_commit`);
+  pushRequiredObjectId(errors, bindings, "head_commit", `${path}.head_commit`);
+  pushRequiredObjectId(errors, bindings, "head_tree", `${path}.head_tree`);
   if (!Array.isArray(bindings.entries) || bindings.entries.length === 0) {
     errors.push({ path: `${path}.entries`, message: "must be a non-empty array" });
   }
@@ -1129,6 +1147,8 @@ function validateSliceMergeEntry({ entry, previousCommit, commitObservation, fea
   for (const key of required) {
     if (!stringValue(entry[key])) throw new Error(`slice_merge entry ${key} must be a non-empty string`);
   }
+  requireObjectId(entry.commit, "slice_merge entry commit");
+  requireObjectId(entry.slice_commit, "slice_merge entry slice_commit");
   if (!isHashString(entry.slice_attestation_hash)) throw new Error("slice_merge entry slice_attestation_hash must be a sha256 hash");
   if (!isHashString(entry.review_attestation_hash)) throw new Error("slice_merge entry review_attestation_hash must be a sha256 hash");
   if (commitObservation.parents.length !== 2) {
@@ -1138,8 +1158,8 @@ function validateSliceMergeEntry({ entry, previousCommit, commitObservation, fea
     throw new Error(`slice_merge commit ${entry.commit} first parent is ${commitObservation.parents[0]}, expected ${previousCommit}`);
   }
 
-  const sliceAttestationRecord = resolveAcceptedAttestation(entry.slice_attestation_ref, entry.slice_attestation_hash, acceptedAttestations, context, "slice-observation");
-  const reviewAttestationRecord = resolveAcceptedAttestation(entry.review_attestation_ref, entry.review_attestation_hash, acceptedAttestations, context, "review-approval");
+  const sliceAttestationRecord = resolveAcceptedAttestation(entry.slice_attestation_ref, entry.slice_attestation_hash, acceptedAttestations, "slice-observation");
+  const reviewAttestationRecord = resolveAcceptedAttestation(entry.review_attestation_ref, entry.review_attestation_hash, acceptedAttestations, "review-approval");
   const sliceAttestation = sliceAttestationRecord.attestation;
   const reviewAttestation = reviewAttestationRecord.attestation;
   const sliceBindings = sliceAttestation.bindings;
@@ -1199,6 +1219,7 @@ function validateDirectReviewedCommitEntry({ entry, previousCommit, commitObserv
   for (const key of required) {
     if (!stringValue(entry[key])) throw new Error(`direct_reviewed_commit entry ${key} must be a non-empty string`);
   }
+  requireObjectId(entry.commit, "direct_reviewed_commit entry commit");
   if (!isHashString(entry.direct_commit_attestation_hash)) {
     throw new Error("direct_reviewed_commit entry direct_commit_attestation_hash must be a sha256 hash");
   }
@@ -1216,14 +1237,12 @@ function validateDirectReviewedCommitEntry({ entry, previousCommit, commitObserv
     entry.direct_commit_attestation_ref,
     entry.direct_commit_attestation_hash,
     acceptedAttestations,
-    context,
     "direct-reviewed-commit",
   );
   const reviewAttestationRecord = resolveAcceptedAttestation(
     entry.review_attestation_ref,
     entry.review_attestation_hash,
     acceptedAttestations,
-    context,
     "review-approval",
   );
   const directAttestation = directAttestationRecord.attestation;
@@ -1265,10 +1284,22 @@ function validateDirectReviewedCommitEntry({ entry, previousCommit, commitObserv
   if (reviewBindings.evidence_hash !== directBindings.evidence_hash) {
     throw new Error(`review approval evidence_hash is ${reviewBindings.evidence_hash}, expected ${directBindings.evidence_hash}`);
   }
-  if (isHashString(directBindings.review_hash) && directBindings.review_hash !== reviewBindings.review_hash) {
+  if (reviewBindings.subject_type !== "direct_commit") {
+    throw new Error(`review approval subject_type is ${reviewBindings.subject_type}, expected direct_commit`);
+  }
+  if (reviewBindings.subject !== directBindings.entry_id) {
+    throw new Error(`review approval subject is ${reviewBindings.subject}, expected ${directBindings.entry_id}`);
+  }
+  if (!isHashString(directBindings.review_hash)) {
+    throw new Error("direct reviewed commit attestation must bind review_hash");
+  }
+  if (!isHashString(directBindings.guard_result_hash)) {
+    throw new Error("direct reviewed commit attestation must bind guard_result_hash");
+  }
+  if (directBindings.review_hash !== reviewBindings.review_hash) {
     throw new Error(`direct reviewed commit review_hash is ${directBindings.review_hash}, expected ${reviewBindings.review_hash}`);
   }
-  if (isHashString(directBindings.guard_result_hash) && directBindings.guard_result_hash !== reviewBindings.guard_result_hash) {
+  if (directBindings.guard_result_hash !== reviewBindings.guard_result_hash) {
     throw new Error(`direct reviewed commit guard_result_hash is ${directBindings.guard_result_hash}, expected ${reviewBindings.guard_result_hash}`);
   }
 }
@@ -1307,8 +1338,8 @@ function resolveBaseAttestationForMergeChain(bindings, context) {
   return { ok: true, attestation: record.attestation };
 }
 
-function resolveAcceptedAttestation(ref, expectedHash, acceptedAttestations, context, expectedType) {
-  const record = acceptedAttestations?.[ref] ?? loadAcceptedAttestationFromRun(ref, context);
+function resolveAcceptedAttestation(ref, expectedHash, acceptedAttestations, expectedType) {
+  const record = acceptedAttestations?.[ref];
   if (!record) throw new Error(`accepted attestation not found for ${ref}`);
   if (record.attestation_hash !== expectedHash) {
     throw new Error(`attestation hash for ${ref} is ${record.attestation_hash}, expected ${expectedHash}`);
@@ -1317,18 +1348,6 @@ function resolveAcceptedAttestation(ref, expectedHash, acceptedAttestations, con
     throw new Error(`attestation ${ref} has type ${record.attestation.type}, expected ${expectedType}`);
   }
   return record;
-}
-
-function loadAcceptedAttestationFromRun(ref, context) {
-  if (!context.runDir && !context.roots) return null;
-  const info = resolveAttestationRef(resolveRootsForContext(context), ref, context);
-  const attestation = readJsonFile(info.path, ref);
-  return {
-    ref,
-    path: info.path,
-    attestation,
-    attestation_hash: attestation.attestation_hash,
-  };
 }
 
 function resolveRootsForContext(context) {
@@ -1458,14 +1477,14 @@ function pickSafeGitOptions(options) {
 }
 
 function revParseSingle(cwd, rev, options = {}) {
-  const result = requireGitSuccess(cwd, ["rev-parse", rev], options, `git rev-parse ${rev}`);
+  const result = requireGitSuccess(cwd, ["rev-parse", "--verify", "--end-of-options", rev], options, `git rev-parse --verify --end-of-options ${rev}`);
   const value = result.stdout.trim();
   if (!value) throw new Error(`git rev-parse ${rev} returned empty output`);
-  return value;
+  return requireObjectId(value, `git rev-parse ${rev}`);
 }
 
 function tryRevParse(cwd, rev, options = {}) {
-  const result = callSafeGit(cwd, ["rev-parse", "--verify", rev], options);
+  const result = callSafeGit(cwd, ["rev-parse", "--verify", "--end-of-options", rev], options);
   if (result.status === 0 && result.ok) return result.stdout.trim() || null;
   if (result.status === 1) return null;
   if (["unknown revision", "Needed a single revision", "not a valid object name"].some((needle) => String(result.stderr || "").includes(needle))) {
@@ -1506,8 +1525,8 @@ function assertCleanGuard(guard, path) {
     throw new Error(`${path}.safe_git_policy must equal ${SAFE_GIT_POLICY}`);
   }
   if (!stringValue(guard.worktree)) throw new Error(`${path}.worktree must be a non-empty string`);
-  if (!stringValue(guard.head_commit)) throw new Error(`${path}.head_commit must be a non-empty string`);
-  if (!stringValue(guard.head_tree)) throw new Error(`${path}.head_tree must be a non-empty string`);
+  if (!isObjectId(guard.head_commit)) throw new Error(`${path}.head_commit must be a full 40-hex git object id`);
+  if (!isObjectId(guard.head_tree)) throw new Error(`${path}.head_tree must be a full 40-hex git object id`);
   if (!Array.isArray(guard.dirty_paths) || guard.dirty_paths.length !== 0) {
     throw new Error(`${path}.dirty_paths must be an empty array`);
   }
@@ -1526,6 +1545,47 @@ function readJsonFile(filePath, label) {
   } catch (error) {
     throw new Error(`could not parse ${label}: ${error.message}`);
   }
+}
+
+function readReviewApprovalArtifact(filePath, label) {
+  const review = readJsonFile(filePath, label);
+  if (!isRecord(review)) throw new Error(`${label} must be a JSON object`);
+  if (!stringValue(review.subject)) throw new Error(`${label} must contain subject`);
+  if (!stringValue(review.reviewer)) throw new Error(`${label} must contain reviewer`);
+  if (!stringValue(review.verdict)) throw new Error(`${label} must contain verdict`);
+  return review;
+}
+
+function validateReviewApprovalBindingToArtifact(bindings, review) {
+  validateApprovingReviewBinding(bindings.reviewer, bindings.verdict, "review-approval.bindings");
+  if (review.subject !== bindings.subject) {
+    throw new Error(`review subject is ${review.subject}, expected ${bindings.subject}`);
+  }
+  if (review.reviewer !== bindings.reviewer) {
+    throw new Error(`review reviewer is ${review.reviewer}, expected ${bindings.reviewer}`);
+  }
+  if (review.verdict !== bindings.verdict) {
+    throw new Error(`review verdict is ${review.verdict}, expected ${bindings.verdict}`);
+  }
+}
+
+function validateApprovingReviewBinding(reviewer, verdict, path) {
+  const rule = REVIEW_APPROVAL_RULES[reviewer] ?? null;
+  if (!rule) {
+    throw new Error(`${path}.reviewer ${reviewer} is not an approval-capable reviewer`);
+  }
+  if (verdict !== rule.verdict) {
+    throw new Error(`${path}.verdict must equal ${rule.verdict} for reviewer ${reviewer}`);
+  }
+}
+
+function formatGuardObservationFailure(guard) {
+  if (guard?.status === "dirty") {
+    const dirtyCount = Array.isArray(guard.dirty_paths) ? guard.dirty_paths.length : 0;
+    const hiddenCount = Array.isArray(guard.hidden_index_paths) ? guard.hidden_index_paths.length : 0;
+    return `guard re-observation is dirty (${dirtyCount} git-visible paths; ${hiddenCount} hidden-index paths)`;
+  }
+  return `guard re-observation is ${guard?.status ?? "unverifiable"}`;
 }
 
 function normalizeHashMode(mode, filePath) {
@@ -1662,8 +1722,21 @@ function pushRequiredString(errors, record, key, path) {
   if (!stringValue(record[key])) errors.push({ path, message: "must be a non-empty string" });
 }
 
+function pushRequiredObjectId(errors, record, key, path) {
+  if (!isObjectId(record[key])) errors.push({ path, message: "must be a full 40-hex git object id" });
+}
+
 function pushRequiredHash(errors, record, key, path) {
   if (!isHashString(record[key])) errors.push({ path, message: "must be a sha256 hash" });
+}
+
+function pushApprovalVerdictErrors(errors, bindings, path) {
+  if (!stringValue(bindings.reviewer) || !stringValue(bindings.verdict)) return;
+  try {
+    validateApprovingReviewBinding(bindings.reviewer, bindings.verdict, path);
+  } catch (error) {
+    errors.push({ path: `${path}.verdict`, message: error.message });
+  }
 }
 
 function stringValue(value) {
@@ -1674,12 +1747,21 @@ function isHashString(value) {
   return typeof value === "string" && HASH_PATTERN.test(value);
 }
 
+function isObjectId(value) {
+  return typeof value === "string" && OBJECT_ID_PATTERN.test(value);
+}
+
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function requireText(value, name) {
   if (!stringValue(value)) throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
+function requireObjectId(value, name) {
+  if (!isObjectId(value)) throw new Error(`${name} must be a full 40-hex git object id`);
   return value;
 }
 
