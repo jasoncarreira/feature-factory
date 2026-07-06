@@ -230,6 +230,8 @@ On `approve`, set the gate to `approved`, copy the answer into `run.json`, set `
 
 After every gate decision, hash the question/artifact/answer material and write `attestations/gates/<gate>.json`, updating `attestations/index.json` and the `prev_hash` chain. A gate marked `approved` in `run.json` is bookkeeping, not proof; later validators and gates must not trust status booleans alone.
 
+In gate-decision attestations, `question_ref` and `answer_ref` stay under `gates/`, while `artifact_ref` stays under `artifacts/`. Do not write gate question or answer refs under `artifacts/`.
+
 ## Autonomous Mode
 
 Autonomous mode is allowed only when the invocation explicitly includes the autonomous driver instructions inserted by `factory start --autonomous`. Do not infer it from vague wording.

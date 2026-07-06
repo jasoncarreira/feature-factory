@@ -120,6 +120,17 @@ describe("provenance authority docs contract", () => {
     assert.match(SCHEMA, /bounded local authority|local-only/i, "SCHEMA must explain local-only provenance limits");
   });
 
+  it("documents gate-decision ref roots to match the implemented authority model", () => {
+    assert.match(SCHEMA, /question_ref.*rooted under `gates\//i, "SCHEMA must require question_ref under gates/");
+    assert.match(SCHEMA, /answer_ref.*rooted under `gates\//i, "SCHEMA must require answer_ref under gates/");
+    assert.match(SCHEMA, /artifact_ref.*rooted under `artifacts\//i, "SCHEMA must require artifact_ref under artifacts/");
+
+    assert.match(SKILL, /question_ref.*`gates\/`/i, "SKILL must keep gate question refs under gates/");
+    assert.match(SKILL, /answer_ref.*`gates\/`/i, "SKILL must keep gate answer refs under gates/");
+    assert.match(SKILL, /artifact_ref.*`artifacts\/`/i, "SKILL must keep gate artifact refs under artifacts/");
+    assert.match(SKILL, /Do not write gate question or answer refs under `artifacts\//i, "SKILL must forbid artifact-rooted gate question/answer refs");
+  });
+
   it("requires the orchestrator to write attestations at each provenance boundary", () => {
     for (const phrase of [
       "attestations/index.json",

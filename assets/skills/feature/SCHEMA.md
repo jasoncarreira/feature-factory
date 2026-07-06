@@ -159,6 +159,9 @@ All provenance-sensitive Git facts must be observed through the centralized safe
 
 - Type: `gate-decision`
 - Binds `gate`, `decision`, `approval_source`, `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and either `answer_ref` + `answer_hash` or `answer_text_hash`.
+- `question_ref` must be rooted under `gates/`.
+- `answer_ref`, when present, must be rooted under `gates/`.
+- `artifact_ref` remains rooted under `artifacts/`; gate questions and answers are never laundered through `artifacts/`.
 - Gate status booleans in `run.json` are bookkeeping only. Later validation must not trust status booleans alone.
 
 ### Merge-chain attestation (`attestations/merge-chain.json`)
