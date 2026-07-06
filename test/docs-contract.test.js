@@ -63,6 +63,92 @@ describe("heartbeat docs contract", () => {
   });
 });
 
+describe("provenance authority docs contract", () => {
+  it("defines authority roles and treats mutable local state as claims only", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /untrusted caller claims/i, `${name} must define untrusted caller claims`);
+      assert.match(text, /orchestrator observations/i, `${name} must define orchestrator observations`);
+      assert.match(text, /factory-owned attestations/i, `${name} must define factory-owned attestations`);
+      assert.match(text, /status booleans.*claims only|claims only.*status booleans|must not trust status booleans alone/i, `${name} must reject status booleans as sole proof`);
+      assert.match(text, /run\.json[\s\S]*claims only|run\.json[\s\S]*not proof/i, `${name} must treat run.json as claim data, not proof`);
+    }
+  });
+
+  it("documents the attestation directory, common fields, and accepted graph semantics", () => {
+    for (const phrase of [
+      "attestations/index.json",
+      "attestations/run-base.json",
+      "attestations/gates/<gate>.json",
+      "attestations/slices/<slice-id>.observation.json",
+      "attestations/reviews/<subject>.approval.json",
+      "attestations/direct-commits/<entry-id>.observation.json",
+      "attestations/merge-chain.json",
+      "feature-factory-provenance-v1",
+      "safe-git-v1",
+      "attestation_hash",
+      "prev_hash",
+    ]) {
+      assert.match(SCHEMA, literalPattern(phrase), `SCHEMA must mention ${phrase}`);
+    }
+
+    assert.match(SCHEMA, /canonical JSON hash/i, "SCHEMA must document canonical attestation hashing");
+    assert.match(SCHEMA, /attestation graph/i, "SCHEMA must document the accepted attestation graph");
+    assert.match(SCHEMA, /index\.json[\s\S]*prev_hash/i, "SCHEMA must describe index.json and prev_hash semantics together");
+  });
+
+  it("documents attestation types, safe Git, and physical identity validation", () => {
+    for (const phrase of [
+      "run-base",
+      "slice-observation",
+      "review-approval",
+      "direct-reviewed-commit",
+      "gate-decision",
+      "merge-chain",
+      "slice_merge",
+      "direct_reviewed_commit",
+    ]) {
+      assert.match(SCHEMA, literalPattern(phrase), `SCHEMA must document ${phrase}`);
+    }
+
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /safe Git|safeGit|safe_git_policy/i, `${name} must document the safe Git policy`);
+      assert.match(text, /worktree identity/i, `${name} must document worktree identity validation`);
+      assert.match(text, /fail closed/i, `${name} must document fail-closed validation`);
+    }
+
+    assert.match(SCHEMA, /symlinked durable roots are rejected/i, "SCHEMA must reject symlinked durable roots");
+    assert.match(SCHEMA, /bounded local authority|local-only/i, "SCHEMA must explain local-only provenance limits");
+  });
+
+  it("requires the orchestrator to write attestations at each provenance boundary", () => {
+    for (const phrase of [
+      "attestations/index.json",
+      "run-base attestation",
+      "attestations/gates/<gate>.json",
+      "attestations/slices/<slice-id>.observation.json",
+      "attestations/reviews/<slice-id>.approval.json",
+      "attestations/direct-commits/<entry-id>.observation.json",
+      "attestations/merge-chain.json",
+      "direct_reviewed_commit",
+    ]) {
+      assert.match(SKILL, literalPattern(phrase), `SKILL must mention ${phrase}`);
+    }
+
+    assert.match(SKILL, /reviewer approval attestations are written only after the reviewed-worktree guard returns `clean`/i, "SKILL must bind review approvals to a clean guard");
+    assert.match(SKILL, /must not trust status booleans alone/i, "SKILL must warn against trusting status booleans alone");
+  });
+
+  it("summarizes guarantees and limits in README and SPEC", () => {
+    for (const [name, text] of documentEntries({ README, SPEC })) {
+      assert.match(text, /attestations\//i, `${name} must mention the attestation directory`);
+      assert.match(text, /safe Git|safe_git_policy/i, `${name} must mention safe Git guarantees`);
+      assert.match(text, /bounded local authority|local-only/i, `${name} must describe bounded local authority`);
+      assert.match(text, /fail closed/i, `${name} must mention fail-closed behavior`);
+      assert.match(text, /not cryptographic|not tamper-proof|coherent rewrite of local files and Git history/i, `${name} must describe local-only limits`);
+    }
+  });
+});
+
 function documentEntries(map) {
   return Object.entries(map);
 }

@@ -10,6 +10,27 @@ Ideas to implement after reviewing `oh-my-openagent`, adapted for this package's
 - Avoid autonomous loops that bypass evidence, reviewer verdicts, security review, bounded remediation, or the human PR review boundary.
 - Fail early on missing credentials, missing CLIs, unsupported opencode surfaces, or PR prerequisites before a long build wastes time.
 
+## Trust-model contract
+
+Current provenance guarantees assume three authority layers:
+
+- `untrusted caller claims`: `run.json`, gate answers, `evidence/*`, `reviews/*`, worktree path strings, status booleans, `base_ref`, and `base_commit`.
+- `orchestrator observations`: fresh safe Git/filesystem observations, physical durable-root containment, worktree identity, commit/tree/parent relationships, file hashes, and reviewed-worktree guard results.
+- `factory-owned attestations`: canonical records under `.opencode/factory/<run-id>/attestations/`.
+
+Accepted provenance requires `attestations/index.json`, canonical `attestation_hash`, an unbroken `prev_hash` chain from `run-base`, and fresh re-observation of current Git/filesystem facts. Merge history is proven by `merge-chain.json` entries of type `slice_merge` or `direct_reviewed_commit`, not by `merged`/`approved` flags alone.
+
+Expected guarantees:
+
+- bounded local authority with centralized safe Git (`safe_git_policy: "safe-git-v1"`);
+- durable-root and worktree identity validation;
+- fail closed behavior when attestation proof, worktree identity, or current observations cannot be re-verified.
+
+Explicit limits:
+
+- local-only, not cryptographic or tamper-proof;
+- a coherent rewrite of local files and Git history is outside the model.
+
 ## 1. Category-Based Model Routing
 
 Current state: plugin options support `profile` plus `profiles.default`, exact agent names, and role keys. Each profile may contain `model`, `variant`, or both.

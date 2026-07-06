@@ -1,6 +1,6 @@
 # Feature Factory Schema
 
-The feature factory persists a per-run control plane so runs are durable, resumable, observable, and externally drivable. The factory writes all files except gate answer files.
+The feature factory persists a per-run control plane so runs are durable, resumable, observable, and externally drivable. The factory writes all files except gate answer files. Under the provenance authority model, mutable local metadata is never sole trust: provenance-sensitive facts must be backed by fresh orchestrator observations and accepted factory-owned attestations.
 
 ## Directory
 
@@ -33,6 +33,14 @@ The feature factory persists a per-run control plane so runs are durable, resuma
   reviews/<subject>.json
   reviews/implementation-validator.json
   reviews/security-reviewer.json
+  attestations/
+    index.json
+    run-base.json
+    gates/<gate>.json
+    slices/<slice-id>.observation.json
+    reviews/<subject>.approval.json
+    direct-commits/<entry-id>.observation.json
+    merge-chain.json
   processes/<timestamp>.log
 ```
 
@@ -42,6 +50,143 @@ Implementation worktrees live under:
 .opencode/worktrees/<feature-branch>/
 .opencode/worktrees/<feature-branch>--<slice-id>/
 ```
+
+## Provenance authority model
+
+The feature factory uses three authority tiers:
+
+- `untrusted caller claims`: operator prompts, gate answer files, builder/reviewer text, `run.json`, `factory.lock`, `evidence/*.json`, `reviews/*.json`, worktree path strings, status booleans, `base_ref`, and `base_commit`.
+- `orchestrator observations`: fresh `safeGit()` / filesystem observations, physical durable-root containment, worktree identity, commit/tree/parent relationships, evidence/review hashes, and reviewed-worktree guard results.
+- `factory-owned attestations`: records written only by the orchestrator after the current observations and re-checks pass.
+
+Rules:
+
+- Mutable local metadata is never sole trust. `run.json`, `reviews/*.json`, `evidence/*.json`, `factory.lock`, path strings, `base_ref`, `base_commit`, and status booleans are claims only.
+- Gate, review, slice, validator, security, merge, and PR states must be backed by accepted attestations plus fresh observations.
+- The heartbeat owner capability in `factory.lock` is local runtime authority for heartbeat control only; it is not provenance proof for reviews, gates, merges, or prior Git state.
+- Validation must fail closed whenever accepted attestations, safe Git observations, durable-root containment, or worktree identity cannot be re-proved.
+
+## `attestations/`
+
+Create attestation records only under the physical `$RUN/attestations/` root:
+
+```text
+$RUN/attestations/
+  index.json
+  run-base.json
+  gates/<gate>.json
+  slices/<slice-id>.observation.json
+  reviews/<subject>.approval.json
+  direct-commits/<entry-id>.observation.json
+  merge-chain.json
+```
+
+Durable-root rules:
+
+- `evidence/`, `artifacts/`, `reviews/`, and `attestations/` must physically resolve under `$RUN`.
+- Symlinked durable roots are rejected.
+- Worktree identity must be derived from current Git/worktree metadata and physical paths, not from string containment alone.
+- Same-branch worktree records that are stale, missing, inaccessible, or resolve to a different path are conflicts unless identity is proven.
+
+### Common attestation fields
+
+Every accepted attestation uses the same common envelope and a canonical JSON hash:
+
+```json
+{
+  "schema_version": 1,
+  "authority_model": "feature-factory-provenance-v1",
+  "authority": "feature-factory",
+  "type": "run-base|slice-observation|review-approval|direct-reviewed-commit|gate-decision|merge-chain",
+  "run_id": "app-123",
+  "sequence": 1,
+  "prev_hash": null,
+  "subject": "run-base",
+  "created_at": "2026-07-06T12:00:00Z",
+  "observed_by": "feature-factory",
+  "safe_git_policy": "safe-git-v1",
+  "bindings": {},
+  "attestation_hash": "sha256:<64 hex>"
+}
+```
+
+`attestation_hash` is the canonical JSON hash of the attestation excluding `attestation_hash` itself.
+
+### Accepted attestation graph (`index.json` + `prev_hash`)
+
+Local attestation JSON is not trusted merely because it exists. An attestation is accepted only when all of the following are true:
+
+- The ref is under the physical `$RUN/attestations/` root.
+- `attestations/index.json` contains the matching `ref`, `type`, `sequence`, `prev_hash`, and `attestation_hash`.
+- The canonical JSON hash matches `attestation_hash`.
+- `prev_hash` forms an unbroken chain from `attestations/run-base.json`.
+- Every referenced artifact, evidence, and review hash still matches current file contents.
+- Every currently observable Git/filesystem fact is re-observed through safe Git/filesystem checks and still matches the attested bindings.
+
+Unknown types, hash mismatches, out-of-chain records, missing refs, stale worktrees, inaccessible worktrees, same-branch conflicts, or unverifiable observations fail closed.
+
+### Safe Git policy
+
+All provenance-sensitive Git facts must be observed through the centralized safe Git policy. Accepted attestations bind `safe_git_policy: "safe-git-v1"`. Validation re-observes commit existence, tree ids, parents, first-parent order, merge-tree results, and reviewed-worktree cleanliness through safe Git. Caller-controlled Git config, replace refs, hooks, fsmonitor, untrusted `GIT_*`, and similar environment influence are not authority.
+
+### Run-base attestation (`attestations/run-base.json`)
+
+- Type: `run-base`
+- Must be sequence `1` with `prev_hash: null`.
+- Binds `repo_root`, `run_dir`, `git_common_dir`, `feature_branch`, `feature_worktree`, `base_ref`, `base_commit`, and `base_tree`.
+- Provides bounded local authority only: validation proves `base_commit` exists, `base_tree` matches, `base_commit` is an ancestor of the current feature HEAD, and if `base_ref` currently resolves then `base_commit` is an ancestor of that ref. It does not cryptographically prove the creation-time fact.
+
+### Slice-observation attestation (`attestations/slices/<slice-id>.observation.json`)
+
+- Type: `slice-observation`
+- Binds `slice_id`, `attempt`, `branch`, physical `worktree`, `base_commit`, `slice_commit`, `slice_tree`, `evidence_ref`, and `evidence_hash`.
+- Validation re-derives the worktree path, checks same-branch worktree conflicts, verifies commit/tree existence, and hashes the current evidence file.
+
+### Review-approval attestation (`attestations/reviews/<subject>.approval.json`)
+
+- Type: `review-approval`
+- Binds `subject_type`, `subject`, `reviewer`, approving `verdict`, `review_ref`, `review_hash`, `evidence_ref`, `evidence_hash`, `subject_commit`, `subject_tree`, `guard_result_hash`, and `guard`.
+- Required guard fields include `status: "clean"`, `safe_git_policy`, `worktree`, `head_commit`, `head_tree`, `dirty_paths: []`, and `hidden_index_paths: []`.
+- Approval JSON without a matching accepted review/evidence hash, clean guard, correct subject commit/tree, or verifiable worktree/guard data is rejected.
+
+### Direct-reviewed-commit attestation (`attestations/direct-commits/<entry-id>.observation.json`)
+
+- Type: `direct-reviewed-commit`
+- Binds `entry_id`, `purpose: "test" | "remediation" | "validation-fix"`, `commit`, `parent_commit`, `tree`, `diff_hash`, `evidence_ref`, `evidence_hash`, `producing_role`, and the matching review/guard hashes when present.
+- Validation recomputes the tree, requires exactly one parent, and hashes the canonical `git diff-tree -r --full-index <parent> <commit>` output.
+
+### Gate-decision attestation (`attestations/gates/<gate>.json`)
+
+- Type: `gate-decision`
+- Binds `gate`, `decision`, `approval_source`, `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and either `answer_ref` + `answer_hash` or `answer_text_hash`.
+- Gate status booleans in `run.json` are bookkeeping only. Later validation must not trust status booleans alone.
+
+### Merge-chain attestation (`attestations/merge-chain.json`)
+
+- Type: `merge-chain`
+- Binds `feature_branch`, `base_attestation_ref`, `base_attestation_hash`, `base_commit`, `head_commit`, `head_tree`, and ordered `entries[]`.
+- Validation computes `git rev-list --first-parent --reverse <base_commit>..<head_commit>` and requires one proof entry per first-parent commit, in exact order.
+- Any first-parent commit without proof fails closed.
+
+`slice_merge` entry requirements:
+
+- `commit` is the corresponding first-parent merge commit.
+- Parents are exactly `[previous_first_parent_commit, slice_commit]`.
+- The entry must reference accepted `slice-observation` and `review-approval` attestations whose hashes, commit/tree bindings, evidence hash, review hash, and clean guard all agree.
+- `git merge-tree --write-tree <previous_first_parent_commit> <slice_commit>` must reproduce the actual merge tree.
+
+`direct_reviewed_commit` entry requirements:
+
+- `commit` is the corresponding first-parent commit.
+- The parent list is exactly `[previous_first_parent_commit]`.
+- The entry must reference accepted `direct-reviewed-commit` and `review-approval` attestations whose commit/tree/diff/evidence/review/guard bindings all agree.
+- Unknown entry types, optional proof gaps, missing refs, hash mismatches, parent mismatches, or commit/tree mismatches fail closed.
+
+### Local-only limits
+
+- This model provides bounded local authority, not cryptographic remote attestation.
+- Forged mutable local claims are rejected unless current Git/filesystem observations also match the accepted attestation graph.
+- A coherent local rewrite of both files and Git history is outside this local-only model.
 
 Write `run.json` atomically: write a temp file, then rename.
 
@@ -216,6 +361,8 @@ External monitoring semantics:
 }
 ```
 
+Authority note: this example shows bookkeeping state. `run.json` remains mutable local metadata; approved/merged/validator/security booleans, worktree paths, `base_ref`, `base_commit`, and `pr_url` require accepted attestations plus current observations before they count as provenance.
+
 Run status values: `running`, `completed`, `blocked`, `partial`, `needs-human`.
 
 Run mode values: `interactive`, `headless`, `autonomous`.
@@ -367,7 +514,7 @@ The dependency graph must be acyclic. A slice is eligible when every id in `depe
 
 ## Code-Level Validation
 
-The CLI enforces this schema with `feature-factory factory validate [run-id]`. Validation covers `run.json`, gates, run slices, terminal results, and `plan/slices.json` when present. `factory status` and `factory answer` reject invalid `run.json`; `factory list` marks invalid runs instead of failing the whole listing.
+The CLI enforces this schema with `feature-factory factory validate [run-id]`. Validation covers `run.json`, gates, run slices, terminal results, accepted attestation graph semantics, physical durable-root/worktree identity, and `plan/slices.json` when present. Provenance-sensitive states fail closed unless backed by accepted attestations plus current safe-Git/filesystem observations. `factory status` and `factory answer` reject invalid `run.json`; `factory list` marks invalid runs instead of failing the whole listing.
 
 `factory start --detached` writes stdout/stderr logs under `.opencode/factory/processes/` for external watchers.
 
