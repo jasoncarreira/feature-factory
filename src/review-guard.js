@@ -1,6 +1,8 @@
-import { spawnSync } from "node:child_process";
+import { SAFE_GIT_POLICY, listHiddenIndexPaths, safeGit } from "./safe-git.js";
 
-const REVIEW_GUARD_ARGS = ["status", "--porcelain=v1", "--untracked-files=all"];
+const REVIEW_GUARD_ARGS = Object.freeze(["status", "--porcelain=v1", "--untracked-files=all"]);
+const REVIEW_GUARD_HEAD_ARGS = Object.freeze(["rev-parse", "HEAD", "HEAD^{tree}"]);
+const REVIEW_GUARD_HIDDEN_INDEX_ARGS = Object.freeze(["ls-files", "-v"]);
 const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
 const C_STYLE_ESCAPES = Object.freeze({
   a: "\u0007",
@@ -16,41 +18,106 @@ const C_STYLE_ESCAPES = Object.freeze({
 
 export function checkReviewedWorktreeClean(worktree, options = {}) {
   const reviewedWorktree = requireText(worktree, "worktree");
-  const run = typeof options.spawnSync === "function" ? options.spawnSync : spawnSync;
-  const args = ["-C", reviewedWorktree, ...REVIEW_GUARD_ARGS];
-  const proc = run("git", args, {
-    cwd: options.cwd || process.cwd(),
-    encoding: "utf8",
-    env: options.env,
-    maxBuffer: options.maxBuffer || 1024 * 1024,
-  });
-  const exitCode = Number.isInteger(proc.status) ? proc.status : 1;
-  const stdout = typeof proc.stdout === "string" ? proc.stdout : "";
-  const stderr = joinOutput(proc.stderr, proc.error?.message);
+  const gitOptions = normalizeSafeGitOptions(options);
+  const statusResult = safeGit(reviewedWorktree, REVIEW_GUARD_ARGS, gitOptions);
+  const statusCommand = formatReviewGuardCommand(reviewedWorktree);
 
-  if (proc.error || exitCode !== 0) {
-    return {
+  if (!statusResult.ok) {
+    return buildGuardResult({
       ok: false,
       status: "unverifiable",
       worktree: reviewedWorktree,
-      command: formatReviewGuardCommand(reviewedWorktree),
-      exit_code: exitCode,
-      stdout,
-      stderr,
+      command: statusCommand,
+      exit_code: normalizeExitCode(statusResult.status),
+      stdout: statusResult.stdout,
+      stderr: statusResult.stderr,
       dirty_paths: [],
-    };
+      head_commit: null,
+      head_tree: null,
+      hidden_index_paths: [],
+    });
   }
 
-  return {
-    ok: stdout.length === 0,
-    status: stdout.length === 0 ? "clean" : "dirty",
+  const dirtyPaths = statusResult.stdout.length === 0 ? [] : parseDirtyPaths(statusResult.stdout);
+  const headResult = safeGit(reviewedWorktree, REVIEW_GUARD_HEAD_ARGS, gitOptions);
+  if (!headResult.ok) {
+    return buildGuardResult({
+      ok: false,
+      status: "unverifiable",
+      worktree: reviewedWorktree,
+      command: statusCommand,
+      exit_code: normalizeExitCode(headResult.status),
+      stdout: statusResult.stdout,
+      stderr: joinOutput(
+        statusResult.stderr,
+        formatObservationFailure("head observation", formatReviewGuardHeadCommand(reviewedWorktree), headResult.stderr),
+      ),
+      dirty_paths: dirtyPaths,
+      head_commit: null,
+      head_tree: null,
+      hidden_index_paths: [],
+    });
+  }
+
+  const headObservation = parseHeadObservation(headResult.stdout, reviewedWorktree);
+  if (!headObservation.ok) {
+    return buildGuardResult({
+      ok: false,
+      status: "unverifiable",
+      worktree: reviewedWorktree,
+      command: statusCommand,
+      exit_code: normalizeExitCode(headResult.status),
+      stdout: statusResult.stdout,
+      stderr: joinOutput(statusResult.stderr, headObservation.error),
+      dirty_paths: dirtyPaths,
+      head_commit: null,
+      head_tree: null,
+      hidden_index_paths: [],
+    });
+  }
+
+  const hiddenIndexResult = listHiddenIndexPaths(reviewedWorktree, gitOptions);
+  if (!hiddenIndexResult.ok) {
+    return buildGuardResult({
+      ok: false,
+      status: "unverifiable",
+      worktree: reviewedWorktree,
+      command: statusCommand,
+      exit_code: normalizeExitCode(hiddenIndexResult.status),
+      stdout: statusResult.stdout,
+      stderr: joinOutput(
+        statusResult.stderr,
+        formatObservationFailure(
+          "hidden-index observation",
+          formatReviewGuardHiddenIndexCommand(reviewedWorktree),
+          hiddenIndexResult.stderr,
+        ),
+      ),
+      dirty_paths: dirtyPaths,
+      head_commit: headObservation.head_commit,
+      head_tree: headObservation.head_tree,
+      hidden_index_paths: [],
+    });
+  }
+
+  const hiddenIndexPaths = Array.isArray(hiddenIndexResult.hidden_index_paths)
+    ? hiddenIndexResult.hidden_index_paths
+    : [];
+  const status = statusResult.stdout.length === 0 && hiddenIndexPaths.length === 0 ? "clean" : "dirty";
+
+  return buildGuardResult({
+    ok: status === "clean",
+    status,
     worktree: reviewedWorktree,
-    command: formatReviewGuardCommand(reviewedWorktree),
-    exit_code: exitCode,
-    stdout,
-    stderr,
-    dirty_paths: stdout.length === 0 ? [] : parseDirtyPaths(stdout),
-  };
+    command: statusCommand,
+    exit_code: normalizeExitCode(statusResult.status),
+    stdout: statusResult.stdout,
+    stderr: statusResult.stderr,
+    dirty_paths: dirtyPaths,
+    head_commit: headObservation.head_commit,
+    head_tree: headObservation.head_tree,
+    hidden_index_paths: hiddenIndexPaths,
+  });
 }
 
 export const checkReviewWorktree = checkReviewedWorktreeClean;
@@ -89,27 +156,31 @@ function normalizeGuard(guard, reviewedWorktree) {
       ? guard.exitCode
       : 1;
   const stdout = typeof guard.stdout === "string" ? guard.stdout : "";
-  const status = isGuardStatus(guard.status)
-    ? guard.status
-    : exitCode !== 0
-      ? "unverifiable"
-      : stdout.length === 0
-        ? "clean"
-        : "dirty";
+  const hiddenIndexPaths = normalizeList(guard.hidden_index_paths);
+  const status = deriveGuardStatus({
+    status: guard.status,
+    exitCode,
+    stdout,
+    hiddenIndexPaths,
+  });
 
   return {
-    ok: typeof guard.ok === "boolean" ? guard.ok : status === "clean",
+    ok: status === "clean" && guard.ok !== false,
     status,
     worktree: guardWorktree,
     command: typeof guard.command === "string" && guard.command !== "" ? guard.command : formatReviewGuardCommand(guardWorktree),
     exit_code: exitCode,
     stdout,
     stderr: typeof guard.stderr === "string" ? guard.stderr : "",
+    safe_git_policy: typeof guard.safe_git_policy === "string" && guard.safe_git_policy !== "" ? guard.safe_git_policy : SAFE_GIT_POLICY,
+    head_commit: normalizeOptionalText(guard.head_commit),
+    head_tree: normalizeOptionalText(guard.head_tree),
     dirty_paths: status === "dirty"
       ? Array.isArray(guard.dirty_paths)
         ? guard.dirty_paths
         : parseDirtyPaths(stdout)
       : [],
+    hidden_index_paths: hiddenIndexPaths,
   };
 }
 
@@ -221,15 +292,34 @@ function decodeGitPath(value) {
 function defaultBlockReason(guard) {
   if (guard?.status === "dirty") {
     const count = Array.isArray(guard.dirty_paths) ? guard.dirty_paths.length : 0;
+    const hiddenIndexCount = Array.isArray(guard.hidden_index_paths) ? guard.hidden_index_paths.length : 0;
+    if (count > 0 && hiddenIndexCount > 0) {
+      return `reviewer left reviewed worktree dirty (${count} git-visible ${count === 1 ? "path" : "paths"}; ${hiddenIndexCount} hidden-index ${hiddenIndexCount === 1 ? "path" : "paths"})`;
+    }
+    if (hiddenIndexCount > 0) {
+      return `reviewed worktree contains hidden index flags (${hiddenIndexCount} ${hiddenIndexCount === 1 ? "path" : "paths"})`;
+    }
     if (count > 0) return `reviewer left reviewed worktree dirty (${count} git-visible ${count === 1 ? "path" : "paths"})`;
     return "reviewer left reviewed worktree dirty";
   }
-  if (guard?.status === "unverifiable") return `reviewed worktree dirty-state could not be verified (git status exit ${guard.exit_code})`;
+  if (guard?.status === "unverifiable") return `reviewed worktree dirty-state could not be verified (git observation exit ${guard.exit_code})`;
   return "review output blocked by review guard";
 }
 
 function formatReviewGuardCommand(worktree) {
   return `git -C ${shellQuote(worktree)} status --porcelain=v1 --untracked-files=all`;
+}
+
+function formatReviewGuardHeadCommand(worktree) {
+  return formatGitCommand(worktree, REVIEW_GUARD_HEAD_ARGS);
+}
+
+function formatReviewGuardHiddenIndexCommand(worktree) {
+  return formatGitCommand(worktree, REVIEW_GUARD_HIDDEN_INDEX_ARGS);
+}
+
+function formatGitCommand(worktree, args) {
+  return `git -C ${shellQuote(worktree)} ${args.join(" ")}`;
 }
 
 function isGuardStatus(value) {
@@ -246,6 +336,94 @@ function requireText(value, name) {
     throw new Error(`${name} must be a non-empty string`);
   }
   return value;
+}
+
+function normalizeSafeGitOptions(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) return {};
+
+  return {
+    env: options.env,
+    maxBuffer: options.maxBuffer,
+    timeout: options.timeout,
+    spawnSync: options.spawnSync,
+  };
+}
+
+function buildGuardResult({
+  ok,
+  status,
+  worktree,
+  command,
+  exit_code,
+  stdout,
+  stderr,
+  dirty_paths,
+  head_commit,
+  head_tree,
+  hidden_index_paths,
+}) {
+  return {
+    ok,
+    status,
+    worktree,
+    command,
+    exit_code,
+    stdout,
+    stderr,
+    safe_git_policy: SAFE_GIT_POLICY,
+    head_commit,
+    head_tree,
+    dirty_paths: Array.isArray(dirty_paths) ? dirty_paths : [],
+    hidden_index_paths: Array.isArray(hidden_index_paths) ? hidden_index_paths : [],
+  };
+}
+
+function normalizeExitCode(value) {
+  return Number.isInteger(value) ? value : 1;
+}
+
+function parseHeadObservation(stdout, worktree) {
+  const [head_commit = null, head_tree = null] = String(stdout)
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!head_commit || !head_tree) {
+    return {
+      ok: false,
+      head_commit: null,
+      head_tree: null,
+      error: `head observation returned malformed output for ${formatReviewGuardHeadCommand(worktree)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    head_commit,
+    head_tree,
+  };
+}
+
+function formatObservationFailure(label, command, stderr) {
+  const detail = typeof stderr === "string" && stderr !== "" ? `\n${stderr}` : "";
+  return `${label} failed while running ${command}${detail}`;
+}
+
+function deriveGuardStatus({ status, exitCode, stdout, hiddenIndexPaths }) {
+  if (status === "unverifiable") return "unverifiable";
+  if (exitCode !== 0) return "unverifiable";
+  if (status === "dirty") return "dirty";
+  if (hiddenIndexPaths.length > 0) return "dirty";
+  if (stdout.length > 0) return "dirty";
+  return isGuardStatus(status) ? status : "clean";
+}
+
+function normalizeOptionalText(value) {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function normalizeList(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function shellQuote(value) {

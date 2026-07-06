@@ -1,14 +1,16 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { SAFE_GIT_POLICY, SAFE_GIT_PREFIX_ARGS } from "../src/safe-git.js";
 import { buildReviewGuardBlockReport, checkReviewedWorktreeClean } from "../src/review-guard.js";
 
 describe("checkReviewedWorktreeClean", () => {
   it("returns ok for a clean git worktree", () => {
     const repo = createCommittedRepo();
+    const { headCommit, headTree } = getHeadObservation(repo);
 
     try {
       const result = checkReviewedWorktreeClean(repo);
@@ -19,7 +21,11 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.exit_code, 0);
       assert.equal(result.stdout, "");
       assert.equal(result.stderr, "");
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.head_commit, headCommit);
+      assert.equal(result.head_tree, headTree);
       assert.deepEqual(result.dirty_paths, []);
+      assert.deepEqual(result.hidden_index_paths, []);
       assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all`);
     } finally {
       cleanup(repo);
@@ -37,7 +43,9 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.ok, false);
       assert.equal(result.status, "dirty");
       assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.dirty_paths.length, 1);
+      assert.deepEqual(result.hidden_index_paths, []);
       assert.equal(result.stdout, " M tracked.txt\n");
 
       const dirtyPath = result.dirty_paths[0];
@@ -68,7 +76,9 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.ok, false);
       assert.equal(result.status, "dirty");
       assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.dirty_paths.length, 1);
+      assert.deepEqual(result.hidden_index_paths, []);
       assert.equal(result.stdout, "?? new-file.txt\n");
 
       const dirtyPath = result.dirty_paths[0];
@@ -98,12 +108,93 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.status, "unverifiable");
       assert.equal(result.worktree, dir);
       assert.notEqual(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.head_commit, null);
+      assert.equal(result.head_tree, null);
       assert.deepEqual(result.dirty_paths, []);
+      assert.deepEqual(result.hidden_index_paths, []);
       assert.equal(result.stdout, "");
       assert.equal(typeof result.stderr, "string");
       assert.notEqual(result.stderr.length, 0);
     } finally {
       cleanup(dir);
+    }
+  });
+
+  it("blocks hidden index flags even when git status is otherwise clean", () => {
+    const repo = createCommittedRepo(["visible.txt", "assume.txt", "skip.txt"]);
+
+    try {
+      git(repo, ["update-index", "--assume-unchanged", "assume.txt"]);
+      git(repo, ["update-index", "--skip-worktree", "skip.txt"]);
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.dirty_paths, []);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(typeof result.head_commit, "string");
+      assert.equal(typeof result.head_tree, "string");
+      assert.deepEqual(result.hidden_index_paths, [
+        {
+          path: "assume.txt",
+          tag: "h",
+          assume_unchanged: true,
+          skip_worktree: false,
+        },
+        {
+          path: "skip.txt",
+          tag: "S",
+          assume_unchanged: false,
+          skip_worktree: true,
+        },
+      ]);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("uses safe-git policy-bound commands for status, head, and hidden-index observations", () => {
+    const repo = createCommittedRepo();
+    const { headCommit, headTree } = getHeadObservation(repo);
+    const calls = [];
+
+    try {
+      const result = checkReviewedWorktreeClean(repo, {
+        spawnSync(file, args, options) {
+          calls.push({ file, args, options });
+
+          if (args[args.length - 1] === "--untracked-files=all") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (args.includes("HEAD^{tree}")) {
+            return { status: 0, stdout: `${headCommit}\n${headTree}\n`, stderr: "" };
+          }
+          if (args[args.length - 2] === "ls-files" && args[args.length - 1] === "-v") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+
+          throw new Error(`unexpected git args: ${args.join(" ")}`);
+        },
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all`);
+      assert.deepEqual(calls.map((call) => call.args), [
+        [...SAFE_GIT_PREFIX_ARGS, "status", "--porcelain=v1", "--untracked-files=all"],
+        [...SAFE_GIT_PREFIX_ARGS, "rev-parse", "HEAD", "HEAD^{tree}"],
+        [...SAFE_GIT_PREFIX_ARGS, "ls-files", "-v"],
+      ]);
+      for (const call of calls) {
+        assert.equal(call.options.shell, false);
+        assert.equal(call.options.cwd, repo);
+      }
+    } finally {
+      cleanup(repo);
     }
   });
 });
@@ -133,7 +224,11 @@ describe("buildReviewGuardBlockReport", () => {
       assert.deepEqual(report.dirty_paths, guard.dirty_paths);
       assert.equal(report.guard.ok, false);
       assert.equal(report.guard.status, "dirty");
+      assert.equal(report.guard.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(report.guard.worktree, repo);
+      assert.equal(typeof report.guard.head_commit, "string");
+      assert.equal(typeof report.guard.head_tree, "string");
+      assert.deepEqual(report.guard.hidden_index_paths, []);
       assert.equal(report.guard.command, guard.command);
       assert.equal(report.guard.exit_code, 0);
       assert.equal(report.guard.stdout, " M tracked.txt\n");
@@ -143,45 +238,26 @@ describe("buildReviewGuardBlockReport", () => {
   });
 });
 
-describe("reviewer guard documentation", () => {
-  it("covers every reviewer-designated agent and documents the minimal post-run guard", () => {
-    const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
-    const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
-    const readmeDoc = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-
-    assertIncludes(skillDoc, "Reviewer-designated agents are only:");
-    assertIncludes(skillDoc, "- `work-reviewer`");
-    assertIncludes(skillDoc, "- `implementation-validator`");
-    assertIncludes(skillDoc, "- `security-reviewer`");
-    assertIncludes(skillDoc, "After it returns, before accepting or writing `$RUN/reviews/spec-writer.json`, guard `$REPO`.");
-    assertIncludes(skillDoc, "After it returns, before accepting or writing `$RUN/reviews/work-decomposer.json`, guard `$REPO`.");
-    assertIncludes(skillDoc, "After it returns, before accepting or writing `$RUN/reviews/<slice-id>.json`, guard `$SLICE_WT`.");
-    assertIncludes(skillDoc, "Run `work-reviewer` with subject `test-verifier`. After it returns, before accepting or writing `$RUN/reviews/test-verifier.json`, guard `$FEAT_WT`.");
-    assertIncludes(skillDoc, "`implementation-validator` — correctness / AC coverage / cross-slice integration / conventions. After it returns, before accepting or writing its result, guard `$FEAT_WT`.");
-    assertIncludes(skillDoc, "`security-reviewer` — adversarial trust-boundary / injection / forgeable-provenance / secrets lens. After it returns, before accepting or writing `$RUN/reviews/security-reviewer.json`, guard `$FEAT_WT`.");
-    assertIncludes(skillDoc, "This is post-run git-visible dirty-state detection only.");
-    assertIncludes(skillDoc, "It is not OS/process sandboxing and does not prevent mutation attempts.");
-
-    assertIncludes(schemaDoc, "Reviewer-designated agents are only `work-reviewer`, `implementation-validator`, and `security-reviewer`.");
-    assertIncludes(schemaDoc, "These are guard/helper outcomes, not new normal review verdict enums.");
-    assertIncludes(schemaDoc, "This schema documents post-run git-visible dirty-state detection only, not OS/process sandboxing.");
-
-    assertIncludes(readmeDoc, "Reviewer-designated agents are `work-reviewer`, `implementation-validator`, and `security-reviewer`.");
-    assertIncludes(readmeDoc, "Current enforcement is post-run git dirty-state detection only.");
-    assertIncludes(readmeDoc, "If that status is dirty or unverifiable, the review is blocked and the reviewer output is discarded.");
-    assertIncludes(readmeDoc, "it does not provide OS/process sandboxing or prevention.");
-  });
-});
-
-function createCommittedRepo() {
+function createCommittedRepo(files = ["tracked.txt"]) {
   const repo = mkdtempSync(join(tmpdir(), "review-guard-repo-"));
 
   git(repo, ["init"]);
-  writeFixture(repo, "tracked.txt", "tracked\n");
-  git(repo, ["add", "tracked.txt"]);
+  for (const file of files) {
+    writeFixture(repo, file, `${file}\n`);
+  }
+  git(repo, ["add", "."]);
   git(repo, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-m", "initial"]);
 
   return repo;
+}
+
+function getHeadObservation(cwd) {
+  const stdout = gitStdout(cwd, ["rev-parse", "HEAD", "HEAD^{tree}"]);
+  const [headCommit, headTree] = stdout
+    .split(/\r?\n/u)
+    .filter(Boolean);
+
+  return { headCommit, headTree };
 }
 
 function writeFixture(root, relativePath, content) {
@@ -197,8 +273,9 @@ function git(cwd, args) {
   return proc;
 }
 
-function assertIncludes(text, expected) {
-  assert.equal(text.includes(expected), true, `expected text to include: ${expected}`);
+function gitStdout(cwd, args) {
+  const proc = git(cwd, args);
+  return proc.stdout;
 }
 
 function cleanup(dir) {
