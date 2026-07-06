@@ -355,6 +355,9 @@ function validateHeartbeatLifecycle(errors, heartbeat, path) {
   if (stringValue(heartbeat.stop_requested_at) && HEARTBEAT_ACTIVE_STATUS_SET.has(heartbeat.status)) {
     errors.push({ path: `${path}.stop_requested_at`, message: "is not allowed when heartbeat.status is active" });
   }
+  if (stringValue(heartbeat.stop_reason) && HEARTBEAT_ACTIVE_STATUS_SET.has(heartbeat.status)) {
+    errors.push({ path: `${path}.stop_reason`, message: "is not allowed when heartbeat.status is active" });
+  }
   if (stringValue(heartbeat.stopped_at) && !HEARTBEAT_TERMINAL_STATUS_SET.has(heartbeat.status)) {
     errors.push({ path: `${path}.stopped_at`, message: "is only allowed when heartbeat.status is terminal" });
   }

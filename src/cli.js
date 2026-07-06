@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -296,11 +296,12 @@ function requiredHeartbeatToken(opts, command) {
 }
 
 function resolveRunDir(runId, opts = {}) {
-  const dir = resolve(factoryRoot(opts.cwd || process.cwd()), normalizeHeartbeatRunId(runId));
-  if (!insideDirectory(factoryRoot(opts.cwd || process.cwd()), dir)) {
+  const root = factoryRoot(opts.cwd || process.cwd());
+  const dir = resolve(root, normalizeHeartbeatRunId(runId));
+  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${runId}`);
+  if (!insideDirectory(root, dir)) {
     throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
   }
-  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${runId}`);
   return dir;
 }
 
@@ -329,8 +330,12 @@ function normalizeHeartbeatRunId(runId) {
 }
 
 function insideDirectory(parent, child) {
-  const rel = relative(resolve(parent), resolve(child));
+  const rel = relative(physicalPath(parent), physicalPath(child));
   return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+function physicalPath(path) {
+  return existsSync(path) ? realpathSync.native(path) : resolve(path);
 }
 
 function isProcessAlive(pid) {

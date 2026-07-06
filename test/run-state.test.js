@@ -254,6 +254,11 @@ describe("heartbeatOnce", () => {
             ),
         },
         {
+          name: "active lease with stop_reason only",
+          reason: "invalid-heartbeat-lease",
+          setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ status: "running", stop_reason: "handoff" })),
+        },
+        {
           name: "expired lease",
           reason: "heartbeat-lease-expired",
           setup: () => writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease({ deadline_at: "2026-07-06T11:59:59.000Z" })),

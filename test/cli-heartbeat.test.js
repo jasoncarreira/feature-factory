@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,6 +61,27 @@ describe("cli heartbeat routing", () => {
       assert.match(proc.stderr, /bare <run-id>|inside \.opencode\/factory/i);
     } finally {
       cleanup(repo);
+    }
+  });
+
+  it("rejects symlinked run ids that resolve outside the factory root", () => {
+    const repo = tempRepo();
+    const external = tempRepo();
+    const runDir = createRunDir(repo);
+    const escapedRun = join(external, "escaped-run");
+    mkdirSync(escapedRun, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun());
+    writeJson(join(escapedRun, "run.json"), runningRun({ run_id: "escaped-run" }));
+    rmSync(runDir, { recursive: true, force: true });
+    symlinkSync(escapedRun, runDir, "dir");
+
+    try {
+      const proc = runHeartbeatCli(repo, ["--status", "--json"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /inside \.opencode\/factory/i);
+    } finally {
+      cleanup(repo);
+      cleanup(external);
     }
   });
 

@@ -154,6 +154,9 @@ function inspectHeartbeatLeaseStatus(status, lease) {
   if (stringValue(lease.stop_requested_at) || status === "stopping") {
     return { active: false, reason: "heartbeat-lease-stopping" };
   }
+  if (stringValue(lease.stop_reason) && ACTIVE_HEARTBEAT_STATUSES.has(status)) {
+    return { active: false, reason: "invalid-heartbeat-lease" };
+  }
   if (TERMINAL_RUN_STATUSES.has(status)) {
     return { active: false, reason: "heartbeat-lease-terminal" };
   }
