@@ -45,6 +45,32 @@ describe("factory heartbeat lifecycle", () => {
     }
   });
 
+  it("fails closed on forged approved protected gate claims before writing heartbeat state", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    ensureAuthorityDirs(runDir);
+    writeJson(join(runDir, "run.json"), runningRun({
+      gates: {
+        story: {
+          status: "approved",
+          artifact: "artifacts/story.md",
+          question_ref: "gates/story.question.md",
+          answer_ref: "gates/story.answer",
+        },
+      },
+    }));
+
+    try {
+      await assert.rejects(
+        startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo)),
+        /gate-decision attestation|attestations\/index\.json/u,
+      );
+      assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }), null);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("refuses to start when the manifest shows no in-flight factory work", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
@@ -70,11 +96,7 @@ describe("factory heartbeat lifecycle", () => {
   it("performs an immediate once-equivalent tick and rejects overlapping starts", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
-    const original = runningRun({
-      validator: { verdict: "GO-WITH-NITS", report: "validator.md", loops: 1 },
-      security_review: { verdict: "PASS", report: "security.md", loops: 1 },
-      pr_url: "https://example.com/pr/1",
-    });
+    const original = runningRun({ review_tier: { selected: "standard", source: "default", risk_reasons: [], rationale: "n/a" } });
     writeJson(join(runDir, "run.json"), original);
 
     let lease;
@@ -344,16 +366,9 @@ function runningRun(overrides = {}) {
     created_at: "2026-07-06T11:00:00.000Z",
     updated_at: "2026-07-06T11:05:00.000Z",
     heartbeat_at: "2026-07-06T11:05:00.000Z",
-    branch: RUN_ID,
-    worktree: `.opencode/worktrees/${RUN_ID}`,
-    gates: {
-      story: {
-        status: "approved",
-        artifact: "artifacts/story.md",
-        question_ref: "gates/story.question.md",
-        answer_ref: "gates/story.answer",
-      },
-    },
+    branch: null,
+    worktree: null,
+    gates: {},
     steps: [
       {
         agent: "story-reader",
@@ -383,25 +398,19 @@ function runningRun(overrides = {}) {
 
 function protectedGates(pending) {
   return {
-    story: {
-      status: pending === "story" ? "pending" : "approved",
-      artifact: "artifacts/story.md",
-      question_ref: "gates/story.question.md",
-      answer_ref: "gates/story.answer",
-    },
-    brief: {
-      status: pending === "brief" ? "pending" : "approved",
-      artifact: "artifacts/brief.md",
-      question_ref: "gates/brief.question.md",
-      answer_ref: "gates/brief.answer",
-    },
-    pre_pr: {
-      status: pending === "pre_pr" ? "pending" : "approved",
-      artifact: "artifacts/pre_pr.md",
-      question_ref: "gates/pre_pr.question.md",
-      answer_ref: "gates/pre_pr.answer",
+    [pending]: {
+      status: "pending",
+      artifact: `artifacts/${pending}.md`,
+      question_ref: `gates/${pending}.question.md`,
+      answer_ref: `gates/${pending}.answer`,
     },
   };
+}
+
+function ensureAuthorityDirs(runDir) {
+  for (const directory of ["evidence", "artifacts", "reviews", "attestations", "gates"]) {
+    mkdirSync(join(runDir, directory), { recursive: true });
+  }
 }
 
 function completedRun(overrides = {}) {

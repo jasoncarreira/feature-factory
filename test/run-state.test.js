@@ -89,7 +89,9 @@ describe("mutateRunJsonLocked", () => {
           updated_at: "2026-07-06T11:45:00.000Z",
           gates: {
             story: {
-              ...baseRun().gates.story,
+              artifact: "artifacts/story.md",
+              question_ref: "gates/story.question.md",
+              answer_ref: "gates/story.answer",
               status: "approved",
               answer: "approve",
               answered_at: "2026-07-06T11:40:00.000Z",
@@ -130,12 +132,7 @@ describe("mutateRunJsonLocked", () => {
 describe("heartbeatOnce", () => {
   it("updates only heartbeat_at when the lease matches an active running run", async () => {
     const fixture = createRunFixture();
-    const original = baseRun({
-      validator: { verdict: "GO-WITH-NITS", report: "validator.md", loops: 1 },
-      security_review: { verdict: "PASS", report: "security.md", loops: 1 },
-      pr_url: "https://example.com/pr/1",
-      terminal_result: null,
-    });
+    const original = baseRun({ terminal_result: null, review_tier: { selected: "standard", source: "default", risk_reasons: [], rationale: "n/a" } });
     writeJson(join(fixture.runDir, "run.json"), original);
     writeJson(join(fixture.runDir, "factory.lock"), factoryLock());
     writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
@@ -154,6 +151,39 @@ describe("heartbeatOnce", () => {
         ...original,
         heartbeat_at: "2026-07-06T12:00:00.000Z",
       });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed on forged approved protected gates before refreshing heartbeat_at", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun({
+      gates: {
+        story: {
+          status: "approved",
+          artifact: "artifacts/story.md",
+          question_ref: "gates/story.question.md",
+          answer_ref: "gates/story.answer",
+        },
+      },
+    });
+    ensureAuthorityDirs(fixture.runDir);
+    writeJson(join(fixture.runDir, "run.json"), current);
+    writeJson(join(fixture.runDir, "factory.lock"), factoryLock());
+    writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
+
+    try {
+      await assert.rejects(
+        heartbeatOnce(fixture.runDir, {
+          token: "lease-1",
+          ownerPid: 4242,
+          ownerCapability: HEARTBEAT_OWNER,
+          now: "2026-07-06T12:00:00.000Z",
+        }),
+        /gate-decision attestation|attestations\/index\.json/u,
+      );
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
     } finally {
       fixture.cleanup();
     }
@@ -412,16 +442,9 @@ function baseRun(overrides = {}) {
     created_at: "2026-07-06T11:00:00.000Z",
     updated_at: "2026-07-06T11:05:00.000Z",
     heartbeat_at: "2026-07-06T11:05:00.000Z",
-    branch: "heartbeat-liveness",
-    worktree: ".opencode/worktrees/heartbeat-liveness",
-    gates: {
-      story: {
-        status: "approved",
-        artifact: "artifacts/story.md",
-        question_ref: "gates/story.question.md",
-        answer_ref: "gates/story.answer",
-      },
-    },
+    branch: null,
+    worktree: null,
+    gates: {},
     steps: [
       {
         agent: "story-reader",
@@ -491,6 +514,12 @@ function factoryLock(overrides = {}) {
     updated_at: "2026-07-06T11:00:00.000Z",
     ...overrides,
   };
+}
+
+function ensureAuthorityDirs(runDir) {
+  for (const directory of ["evidence", "artifacts", "reviews", "attestations", "gates"]) {
+    mkdirSync(join(runDir, directory), { recursive: true });
+  }
 }
 
 function writeJson(path, value) {

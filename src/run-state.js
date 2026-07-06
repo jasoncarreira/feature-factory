@@ -2,7 +2,7 @@ import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { pendingProtectedGate, validateFactoryLock, validateHeartbeatState, validateRun } from "./validate.js";
+import { pendingProtectedGate, validateFactoryLock, validateHeartbeatState, validateRun, validateRunAuthority } from "./validate.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -99,6 +99,10 @@ export async function heartbeatOnce(runDir, { token, ownerPid, ownerCapability, 
       if (protectedGate) {
         return { updated: false, reason: "protected-gate-pending", gate: protectedGate, status: current.status, run: current };
       }
+      if (!hasInFlightHeartbeatWork(current)) {
+        return { updated: false, reason: "no-in-flight-work", status: current.status, run: current };
+      }
+      assertRunAuthorityValid(runDir, current);
 
       const lease = await inspectHeartbeatLease(runDir, current.run_id, {
         token,
@@ -108,10 +112,6 @@ export async function heartbeatOnce(runDir, { token, ownerPid, ownerCapability, 
       if (!lease.active) {
         return { updated: false, reason: lease.reason, gate: lease.gate || null, status: current.status, run: current };
       }
-      if (!hasInFlightHeartbeatWork(current)) {
-        return { updated: false, reason: "no-in-flight-work", status: current.status, run: current };
-      }
-
       const next = validateRun({ ...current, heartbeat_at: heartbeatAt });
       await writeJsonAtomically(join(runDir, RUN_FILE), next);
       return { updated: true, status: next.status, heartbeat_at: heartbeatAt, run: next };
@@ -236,6 +236,18 @@ function formatLockTimeout(lockDir, owner) {
   const suffix = heldBy ? ` held by ${heldBy}` : "";
   const acquiredAt = stringValue(owner.acquired_at) ? ` since ${owner.acquired_at}` : "";
   return `timed out waiting for run.json lock at ${lockDir}${suffix}${acquiredAt}`;
+}
+
+function assertRunAuthorityValid(runDir, run) {
+  const authority = validateRunAuthority(runDir, run);
+  if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
+  return authority;
+}
+
+function formatValidationChecks(checks) {
+  const errors = checks.flatMap((check) => Array.isArray(check?.errors) ? check.errors : []);
+  if (errors.length === 0) return "run validation failed";
+  return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
 }
 
 function normalizeTimestamp(now) {

@@ -122,6 +122,30 @@ describe("cli heartbeat routing", () => {
     }
   });
 
+  it("fails closed on forged approved protected gate claims during heartbeat start", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    ensureAuthorityDirs(runDir);
+    writeJson(join(runDir, "run.json"), runningRun({
+      gates: {
+        story: {
+          status: "approved",
+          artifact: "artifacts/story.md",
+          question_ref: "gates/story.question.md",
+          answer_ref: "gates/story.answer",
+        },
+      },
+    }));
+
+    try {
+      const proc = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"], RUN_ID, heartbeatEnv());
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /gate-decision attestation|attestations\/index\.json/i);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("accepts each allowed heartbeat phase label", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
@@ -274,16 +298,9 @@ function runningRun(overrides = {}) {
     created_at: "2026-07-06T11:00:00.000Z",
     updated_at: "2026-07-06T11:05:00.000Z",
     heartbeat_at: "2026-07-06T11:05:00.000Z",
-    branch: RUN_ID,
-    worktree: `.opencode/worktrees/${RUN_ID}`,
-    gates: {
-      story: {
-        status: "approved",
-        artifact: "artifacts/story.md",
-        question_ref: "gates/story.question.md",
-        answer_ref: "gates/story.answer",
-      },
-    },
+    branch: null,
+    worktree: null,
+    gates: {},
     steps: [
       {
         agent: "story-reader",
@@ -313,25 +330,19 @@ function runningRun(overrides = {}) {
 
 function protectedGates(pending) {
   return {
-    story: {
-      status: pending === "story" ? "pending" : "approved",
-      artifact: "artifacts/story.md",
-      question_ref: "gates/story.question.md",
-      answer_ref: "gates/story.answer",
-    },
-    brief: {
-      status: pending === "brief" ? "pending" : "approved",
-      artifact: "artifacts/brief.md",
-      question_ref: "gates/brief.question.md",
-      answer_ref: "gates/brief.answer",
-    },
-    pre_pr: {
-      status: pending === "pre_pr" ? "pending" : "approved",
-      artifact: "artifacts/pre_pr.md",
-      question_ref: "gates/pre_pr.question.md",
-      answer_ref: "gates/pre_pr.answer",
+    [pending]: {
+      status: "pending",
+      artifact: `artifacts/${pending}.md`,
+      question_ref: `gates/${pending}.question.md`,
+      answer_ref: `gates/${pending}.answer`,
     },
   };
+}
+
+function ensureAuthorityDirs(runDir) {
+  for (const directory of ["evidence", "artifacts", "reviews", "attestations", "gates"]) {
+    mkdirSync(join(runDir, directory), { recursive: true });
+  }
 }
 
 function cleanup(dir) {

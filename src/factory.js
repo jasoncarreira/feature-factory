@@ -70,7 +70,7 @@ export function listRuns(opts = {}) {
 }
 
 export function status(runId, opts = {}) {
-  const run = shouldSkipAuthorityForHeartbeatStart(opts) ? loadRun(runId, opts) : loadPublicRun(runId, opts);
+  const run = loadPublicRun(runId, opts);
   return {
     run_id: run.run_id,
     schema_version: run.schema_version || run.version || null,
@@ -119,6 +119,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     if (!hasInFlightHeartbeatWork(run)) {
       throw new Error(`run '${run.run_id}' has no in-flight factory work for heartbeat`);
     }
+    assertRunAuthorityValid(runDir, run);
 
     const current = tryReadHeartbeatFile(heartbeatFile);
     if (current.error) throw new Error(`invalid heartbeat lease at ${heartbeatFile}: ${current.error}`);
@@ -682,6 +683,11 @@ async function heartbeatTick(runtime) {
     await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: `pending-gate-${protectedGate}` });
     return { continue: false, reason: "protected-gate-pending" };
   }
+  if (!hasInFlightHeartbeatWork(run)) {
+    await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: "no-in-flight-work" });
+    return { continue: false, reason: "no-in-flight-work" };
+  }
+  assertRunAuthorityValid(runtime.runDir, run);
 
   let result;
   try {
@@ -1050,12 +1056,9 @@ function resolveCleanupBranchPermission(branch, authority) {
   if (authority?.attestedBranches?.has(branch)) {
     return { allowed: true };
   }
-  if (stringValue(authority?.runId) && isExpectedCleanupBranch(authority.runId, branch)) {
-    return { allowed: true };
-  }
   return {
     allowed: false,
-    reason: "branch is not attested for this run and does not match the expected cleanup prefix",
+    reason: "branch deletion requires accepted branch authority",
   };
 }
 
@@ -1070,8 +1073,10 @@ function isSafeCleanupBranchName(branch) {
     && !/[\\~^:?*\[\]\s]/u.test(branch);
 }
 
-function isExpectedCleanupBranch(runId, branch) {
-  return branch === runId || branch.startsWith(`${runId}--`);
+function assertRunAuthorityValid(runDir, run) {
+  const authority = validateRunAuthority(runDir, run);
+  if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
+  return authority;
 }
 
 function sleep(ms) {
