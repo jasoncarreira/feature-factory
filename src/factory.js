@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { assertHeartbeatOwnerCapability, hasInFlightHeartbeatWork, heartbeatOnce, withRunJsonLock } from "./run-state.js";
-import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunAuthority, validateRunDir, validateSlicesPlan } from "./validate.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -36,12 +36,13 @@ export function startFactory(args, opts = {}) {
 
 export function listRuns(opts = {}) {
   const root = factoryRoot(opts.cwd || process.cwd());
+  const repo = repoRoot(opts.cwd || process.cwd());
   if (!existsSync(root)) return [];
   return readdirSync(root)
     .map((runId) => {
       const file = join(root, runId, "run.json");
       if (!existsSync(file)) return null;
-      const run = tryReadRunFile(file);
+      const run = tryReadPublicRun(file, { ...opts, repoRoot: repo });
       if (run.error) {
         return {
           run_id: runId,
@@ -67,7 +68,7 @@ export function listRuns(opts = {}) {
 }
 
 export function status(runId, opts = {}) {
-  const run = loadRun(runId, opts);
+  const run = loadPublicRun(runId, opts);
   return {
     run_id: run.run_id,
     schema_version: run.schema_version || run.version || null,
@@ -259,8 +260,9 @@ export function watchRun(runId, opts = {}) {
 }
 
 export function validateState(runId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
   const runDirs = runId ? [resolveRunDir(runId, opts)] : allRunDirs(opts);
-  const runs = runDirs.map((dir) => ({ run_dir: dir, ...validateRunDir(dir) }));
+  const runs = runDirs.map((dir) => ({ run_dir: dir, ...validateRunDir(dir, { ...opts, repoRoot: repo }) }));
   return { ok: runs.every((item) => item.ok), runs };
 }
 
@@ -376,6 +378,15 @@ function loadRun(runId, opts = {}) {
   return readRunFile(join(resolveRunDir(runId, opts), "run.json"));
 }
 
+function loadPublicRun(runId, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const run = readRunFile(join(runDir, "run.json"));
+  if (shouldSkipAuthorityValidation(opts)) return run;
+  const authority = validateRunAuthority(runDir, run, { ...opts, repoRoot: repoRoot(opts.cwd || process.cwd()) });
+  if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
+  return run;
+}
+
 function readRunFile(file) {
   const run = JSON.parse(readFileSync(file, "utf8"));
   return validateRun(run);
@@ -384,6 +395,19 @@ function readRunFile(file) {
 function tryReadRunFile(file) {
   try {
     return { value: readRunFile(file) };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+function tryReadPublicRun(file, opts = {}) {
+  try {
+    const runDir = dirname(file);
+    const run = readRunFile(file);
+    if (shouldSkipAuthorityValidation(opts)) return { value: run };
+    const authority = validateRunAuthority(runDir, run, opts);
+    if (!authority.ok) return { error: formatValidationChecks(authority.checks) };
+    return { value: run };
   } catch (error) {
     return { error: error.message };
   }
@@ -398,6 +422,16 @@ function resolveRunDir(runId, opts = {}) {
   const dir = join(factoryRoot(opts.cwd || process.cwd()), String(id));
   if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
   return dir;
+}
+
+function formatValidationChecks(checks) {
+  const errors = checks.flatMap((check) => Array.isArray(check?.errors) ? check.errors : []);
+  if (errors.length === 0) return "run validation failed";
+  return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
+}
+
+function shouldSkipAuthorityValidation(opts = {}) {
+  return Boolean(opts.skipAuthorityValidation || opts.start || opts.foreground || opts.once || opts.stop || opts.heartbeatStatus);
 }
 
 function resolveHeartbeatRunDir(runId, opts = {}) {

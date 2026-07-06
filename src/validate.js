@@ -1,5 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
+import { validateProvenanceAuthority } from "./provenance-authority.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -41,6 +43,9 @@ const REVIEW_TIER_RISK_REASONS = new Set([
   "workflow_or_release",
   "destructive_or_broad_scope",
 ]);
+const PASSING_VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS"]);
+const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
+const SENSITIVE_SLICE_STATUSES = new Set(["review", "merged"]);
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -62,6 +67,7 @@ export function validateRun(run) {
   optionalString(errors, run, "updated_at", "run.updated_at");
   optionalString(errors, run, "heartbeat_at", "run.heartbeat_at");
   optionalString(errors, run, "base_ref", "run.base_ref");
+  optionalString(errors, run, "base_commit", "run.base_commit");
   optionalString(errors, run, "branch", "run.branch");
   optionalString(errors, run, "worktree", "run.worktree");
   optionalNonEmptyString(errors, run, "github_account", "run.github_account");
@@ -124,15 +130,183 @@ export function validateFactoryLock(factoryLock) {
   return factoryLock;
 }
 
-export function validateRunDir(runDir) {
+export function validateRunDir(runDir, options = {}) {
   const checks = [];
-  checks.push(validateFile(join(runDir, "run.json"), validateRun));
+  const runFile = join(runDir, "run.json");
+  checks.push(validateFile(runFile, validateRun));
   const factoryLockPath = join(runDir, "factory.lock");
   if (existsSync(factoryLockPath)) checks.push(validateFile(factoryLockPath, validateFactoryLock));
   const heartbeatPath = join(runDir, "heartbeat.json");
   if (existsSync(heartbeatPath)) checks.push(validateFile(heartbeatPath, validateHeartbeatState));
   const slicesPath = join(runDir, "plan", "slices.json");
   if (existsSync(slicesPath)) checks.push(validateFile(slicesPath, validateSlicesPlan));
+  if (checks.every((item) => item.ok)) {
+    const authority = validateRunAuthority(runDir, readJsonFile(runFile), options);
+    checks.push(...authority.checks);
+  }
+  return {
+    ok: checks.every((item) => item.ok),
+    checks,
+  };
+}
+
+export function validateRunAuthority(runDir, run, options = {}) {
+  const sensitiveClaims = collectSensitiveRunClaims(run);
+  const attestationIndexPath = join(runDir, "attestations", "index.json");
+  const shouldValidateAuthority = sensitiveClaims.length > 0 || existsSync(attestationIndexPath);
+  if (!shouldValidateAuthority) return { ok: true, checks: [] };
+
+  const authority = validateProvenanceAuthority(runDir, options);
+  const checks = [...authority.checks];
+  const attestationRecords = acceptedAttestationRecords(authority);
+  const runBaseRecord = findLastAttestationRecord(attestationRecords, (record) => record.attestation?.type === "run-base");
+  const mergeChainRecord = findLastAttestationRecord(attestationRecords, (record) => record.attestation?.type === "merge-chain");
+
+  if (sensitiveClaims.length > 0 || hasRunBaseClaims(run)) {
+    checks.push(
+      validateAuthorityCheck("run.provenance.run-base", () => {
+        if (!runBaseRecord) {
+          fail([{ path: "run", message: "provenance-sensitive run claims require an accepted run-base attestation" }]);
+        }
+        const bindings = runBaseRecord.attestation.bindings;
+        const errors = [];
+        compareOptionalString(errors, run.branch, bindings.feature_branch, "run.branch", "accepted feature branch");
+        compareOptionalString(errors, run.base_ref, bindings.base_ref, "run.base_ref", "accepted base ref");
+        compareOptionalString(errors, run.base_commit, bindings.base_commit, "run.base_commit", "accepted base commit");
+        compareOptionalPath(errors, run.worktree, bindings.feature_worktree, bindings.repo_root, "run.worktree", "accepted feature worktree");
+        if (errors.length > 0) fail(errors);
+        return {
+          feature_branch: bindings.feature_branch,
+          feature_worktree: bindings.feature_worktree,
+          base_ref: bindings.base_ref,
+          base_commit: bindings.base_commit,
+        };
+      }),
+    );
+  }
+
+  for (const [gateName, gate] of Object.entries(run.gates || {})) {
+    if (!isRecord(gate) || gate.status !== "approved") continue;
+    checks.push(
+      validateAuthorityCheck(`run.provenance.gates.${gateName}`, () => {
+        const record = findLastAttestationRecord(
+          attestationRecords,
+          (item) => item.attestation?.type === "gate-decision" && item.attestation?.bindings?.gate === gateName,
+        );
+        if (!record) {
+          fail([{ path: `run.gates.${gateName}.status`, message: "approved gate requires an accepted gate-decision attestation" }]);
+        }
+        const bindings = record.attestation.bindings;
+        const errors = [];
+        if (bindings.decision !== "approved") {
+          errors.push({ path: `run.gates.${gateName}.status`, message: `must match accepted gate decision '${bindings.decision}'` });
+        }
+        compareOptionalString(errors, gate.artifact, bindings.artifact_ref, `run.gates.${gateName}.artifact`, "accepted gate artifact ref");
+        compareOptionalString(errors, gate.question_ref, bindings.question_ref, `run.gates.${gateName}.question_ref`, "accepted gate question ref");
+        compareOptionalString(errors, gate.answer_ref, bindings.answer_ref, `run.gates.${gateName}.answer_ref`, "accepted gate answer ref");
+        compareOptionalString(errors, gate.approval_source, bindings.approval_source, `run.gates.${gateName}.approval_source`, "accepted gate approval source");
+        compareOptionalAnswer(errors, gate.answer, bindings.answer_text_hash, `run.gates.${gateName}.answer`);
+        if (errors.length > 0) fail(errors);
+        return { gate: gateName, attestation_ref: record.ref };
+      }),
+    );
+  }
+
+  const mergeChainBindings = mergeChainRecord?.attestation?.bindings ?? null;
+  for (const [index, slice] of (Array.isArray(run.slices) ? run.slices : []).entries()) {
+    if (!isRecord(slice) || !sliceRequiresAuthority(slice)) continue;
+    checks.push(
+      validateAuthorityCheck(`run.provenance.slices[${index}]`, () => {
+        const sliceRecord = findLastAttestationRecord(
+          attestationRecords,
+          (item) => item.attestation?.type === "slice-observation" && sliceMatchesObservation(slice, item.attestation.bindings),
+        );
+        if (!sliceRecord) {
+          fail([{ path: `run.slices[${index}].status`, message: "reviewed or merged slice requires an accepted slice-observation attestation" }]);
+        }
+
+        const sliceBindings = sliceRecord.attestation.bindings;
+        const errors = [];
+        compareOptionalString(errors, slice.branch, sliceBindings.branch, `run.slices[${index}].branch`, "accepted slice branch");
+        compareOptionalPath(errors, slice.worktree, sliceBindings.worktree, runBaseRecord?.attestation?.bindings?.repo_root, `run.slices[${index}].worktree`, "accepted slice worktree");
+        compareOptionalString(errors, slice.evidence_ref, sliceBindings.evidence_ref, `run.slices[${index}].evidence_ref`, "accepted slice evidence ref");
+
+        if (slice.status === "merged" || stringValue(slice.merge_commit) || stringValue(slice.review_ref)) {
+          if (!mergeChainBindings || !Array.isArray(mergeChainBindings.entries)) {
+            errors.push({ path: `run.slices[${index}].status`, message: "merged slice requires an accepted merge-chain attestation" });
+          } else {
+            const mergeEntry = findSliceMergeEntry(mergeChainBindings.entries, slice, sliceRecord);
+            if (!mergeEntry) {
+              errors.push({ path: `run.slices[${index}].merge_commit`, message: "merged slice must match an accepted merge-chain entry" });
+            } else {
+              compareOptionalString(errors, slice.merge_commit, mergeEntry.commit, `run.slices[${index}].merge_commit`, "accepted merge commit");
+              const reviewRecord = resolveAcceptedRecord(authority.acceptedAttestations, mergeEntry.review_attestation_ref);
+              if (!reviewRecord) {
+                errors.push({ path: `run.slices[${index}].review_ref`, message: `accepted review attestation not found for ${mergeEntry.review_attestation_ref}` });
+              } else {
+                compareOptionalString(
+                  errors,
+                  slice.review_ref,
+                  reviewRecord.attestation?.bindings?.review_ref,
+                  `run.slices[${index}].review_ref`,
+                  "accepted review ref",
+                );
+              }
+            }
+          }
+        }
+
+        if (errors.length > 0) fail(errors);
+        return { slice_id: slice.id || null, attestation_ref: sliceRecord.ref };
+      }),
+    );
+  }
+
+  if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) {
+    checks.push(
+      validateAuthorityCheck("run.provenance.validator", () => {
+        fail([{ path: "run.validator.verdict", message: "positive validator verdict requires an accepted validator attestation" }]);
+      }),
+    );
+  }
+
+  if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
+    checks.push(
+      validateAuthorityCheck("run.provenance.security-review", () => {
+        const record = findLastAttestationRecord(
+          attestationRecords,
+          (item) => item.attestation?.type === "review-approval" && item.attestation?.bindings?.reviewer === "security-reviewer",
+        );
+        if (!record) {
+          fail([{ path: "run.security_review.verdict", message: "PASS requires an accepted security-reviewer attestation" }]);
+        }
+        const errors = [];
+        if (record.attestation.bindings.verdict !== "PASS") {
+          errors.push({ path: "run.security_review.verdict", message: `must match accepted security verdict '${record.attestation.bindings.verdict}'` });
+        }
+        if (stringValue(run.security_review.review_ref)) {
+          compareOptionalString(
+            errors,
+            run.security_review.review_ref,
+            record.attestation.bindings.review_ref,
+            "run.security_review.review_ref",
+            "accepted security review ref",
+          );
+        }
+        if (errors.length > 0) fail(errors);
+        return { attestation_ref: record.ref };
+      }),
+    );
+  }
+
+  if (stringValue(run.pr_url) || stringValue(run.terminal_result?.pr_url)) {
+    checks.push(
+      validateAuthorityCheck("run.provenance.pr-url", () => {
+        fail([{ path: stringValue(run.pr_url) ? "run.pr_url" : "run.terminal_result.pr_url", message: "PR URL requires an accepted attestation binding that is not present" }]);
+      }),
+    );
+  }
+
   return {
     ok: checks.every((item) => item.ok),
     checks,
@@ -446,6 +620,133 @@ function requiredInteger(errors, obj, key, path) {
 
 function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function readJsonFile(file) {
+  return JSON.parse(readFileSync(file, "utf8"));
+}
+
+function collectSensitiveRunClaims(run) {
+  const claims = [];
+  for (const [gateName, gate] of Object.entries(run.gates || {})) {
+    if (isRecord(gate) && gate.status === "approved") claims.push(`gate:${gateName}`);
+  }
+  for (const [index, slice] of (Array.isArray(run.slices) ? run.slices : []).entries()) {
+    if (isRecord(slice) && sliceRequiresAuthority(slice)) claims.push(`slice:${slice.id || index}`);
+  }
+  if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) claims.push("validator");
+  if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) claims.push("security_review");
+  if (stringValue(run.pr_url)) claims.push("pr_url");
+  if (stringValue(run.terminal_result?.pr_url)) claims.push("terminal_result.pr_url");
+  return claims;
+}
+
+function hasRunBaseClaims(run) {
+  return [run.branch, run.worktree, run.base_ref, run.base_commit].some(stringValue);
+}
+
+function sliceRequiresAuthority(slice) {
+  return SENSITIVE_SLICE_STATUSES.has(slice.status)
+    || stringValue(slice.merge_commit)
+    || (slice.status === "merged" && stringValue(slice.review_ref));
+}
+
+function sliceMatchesObservation(slice, bindings) {
+  if (!isRecord(bindings)) return false;
+  if (stringValue(slice.id) && stringValue(bindings.slice_id) && slice.id !== bindings.slice_id) return false;
+  if (stringValue(slice.branch) && stringValue(bindings.branch) && slice.branch !== bindings.branch) return false;
+  return true;
+}
+
+function acceptedAttestationRecords(authority) {
+  return (authority.orderedRefs || [])
+    .map((ref) => resolveAcceptedRecord(authority.acceptedAttestations, ref))
+    .filter(Boolean);
+}
+
+function resolveAcceptedRecord(acceptedAttestations, ref) {
+  return acceptedAttestations && ref ? acceptedAttestations[ref] || null : null;
+}
+
+function findLastAttestationRecord(records, predicate) {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    if (predicate(records[index])) return records[index];
+  }
+  return null;
+}
+
+function findSliceMergeEntry(entries, slice, sliceRecord) {
+  return [...entries].reverse().find((entry) => {
+    if (!isRecord(entry) || entry.type !== "slice_merge") return false;
+    if (stringValue(slice.merge_commit) && entry.commit === slice.merge_commit) return true;
+    if (entry.slice_attestation_ref === sliceRecord.ref) return true;
+    if (stringValue(slice.branch) && entry.slice_commit === sliceRecord.attestation?.bindings?.slice_commit && stringValue(slice.review_ref)) return true;
+    return false;
+  }) || null;
+}
+
+function compareOptionalString(errors, actual, expected, path, label) {
+  if (!stringValue(actual)) return;
+  if (!stringValue(expected)) {
+    errors.push({ path, message: `${label} is missing` });
+    return;
+  }
+  if (actual !== expected) errors.push({ path, message: `must match ${label} '${expected}'` });
+}
+
+function compareOptionalPath(errors, actual, expected, baseDir, path, label) {
+  if (!stringValue(actual)) return;
+  if (!stringValue(expected) || !stringValue(baseDir)) {
+    errors.push({ path, message: `${label} is missing` });
+    return;
+  }
+  const actualPath = normalizeClaimPath(actual, baseDir);
+  const expectedPath = normalizeClaimPath(expected, baseDir);
+  if (actualPath !== expectedPath) errors.push({ path, message: `must match ${label} '${expected}'` });
+}
+
+function compareOptionalAnswer(errors, answer, expectedHash, path) {
+  if (!stringValue(answer) || !stringValue(expectedHash)) return;
+  const actualHash = `sha256:${createHash("sha256").update(String(answer), "utf8").digest("hex")}`;
+  if (actualHash !== expectedHash) errors.push({ path, message: `must match accepted answer hash '${expectedHash}'` });
+}
+
+function normalizeClaimPath(pathValue, baseDir) {
+  const resolvedPath = isAbsolute(pathValue) ? resolve(pathValue) : resolve(baseDir, pathValue);
+  try {
+    return realpathSync.native(resolvedPath);
+  } catch {
+    return resolvedPath;
+  }
+}
+
+function validateAuthorityCheck(name, callback) {
+  try {
+    return {
+      name,
+      ok: true,
+      errors: [],
+      details: callback() || {},
+    };
+  } catch (error) {
+    return {
+      name,
+      ok: false,
+      errors: normalizeAuthorityErrors(error, name),
+    };
+  }
+}
+
+function normalizeAuthorityErrors(error, fallbackPath) {
+  if (error instanceof ValidationError) return error.errors;
+  if (Array.isArray(error)) return error.map((item) => normalizeAuthorityErrorItem(item, fallbackPath));
+  if (isRecord(error) && stringValue(error.path) && stringValue(error.message)) return [normalizeAuthorityErrorItem(error, fallbackPath)];
+  return [{ path: fallbackPath, message: error instanceof Error ? error.message : String(error) }];
+}
+
+function normalizeAuthorityErrorItem(item, fallbackPath) {
+  if (isRecord(item) && stringValue(item.path) && stringValue(item.message)) return item;
+  return { path: fallbackPath, message: String(item) };
 }
 
 function isRecord(value) {

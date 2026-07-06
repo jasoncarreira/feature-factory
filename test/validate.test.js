@@ -238,6 +238,45 @@ describe("validateRunDir", () => {
     assert.equal(result.checks[0].errors[0].path, "run.terminal_result");
     cleanupTemp(runDir);
   });
+
+  it("keeps legacy structurally readable runs valid when they assert no provenance-sensitive state", () => {
+    const runDir = tempRunDir("legacy-readable");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ gates: { story: { status: "pending" } }, slices: [] }));
+
+    const result = validateRunDir(runDir);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.checks.length, 1);
+    cleanupTemp(runDir);
+  });
+
+  it("fails approved gates that lack accepted provenance attestations", () => {
+    const runDir = tempRunDir("approved-gate-without-attestation");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(
+      join(runDir, "run.json"),
+      runningRun({
+        gates: {
+          story: {
+            status: "approved",
+            artifact: "artifacts/story.md",
+            question_ref: "artifacts/story-question.md",
+            approval_source: "autonomous",
+          },
+        },
+        slices: [],
+      }),
+    );
+
+    const result = validateRunDir(runDir);
+    const errors = result.checks.flatMap((check) => check.errors || []).map((error) => `${error.path}: ${error.message}`).join("\n");
+
+    assert.equal(result.ok, false);
+    assert.match(errors, /run\.gates\.story\.status/u);
+    assert.match(errors, /accepted gate-decision attestation|root is missing/u);
+    cleanupTemp(runDir);
+  });
 });
 
 describe("validateSlicesPlan", () => {
