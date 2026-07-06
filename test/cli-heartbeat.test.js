@@ -74,6 +74,32 @@ describe("cli heartbeat routing", () => {
     }
   });
 
+  it("keeps ticking in the detached heartbeat process without foreground progress commands", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun());
+
+    let started;
+    try {
+      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--max-duration", "4000", "--json"]));
+      const firstHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
+
+      await waitFor(() => {
+        const current = readJson(join(runDir, "run.json")).heartbeat_at;
+        return current !== firstHeartbeatAt ? current : null;
+      }, { timeoutMs: 2500 });
+
+      assert.equal(jsonOutput(runHeartbeatCli(repo, ["--status", "--json"])).token, started.token);
+
+      const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--token", started.token, "--wait-ms", "2500", "--json"]));
+      assert.equal(stopped.status, "stopped");
+      await waitFor(() => !isProcessAlive(started.pid), { timeoutMs: 1500 });
+    } finally {
+      await stopIfActive(repo, started?.token);
+      cleanup(repo);
+    }
+  });
+
   it("fails for unknown phases and invalid intervals", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);

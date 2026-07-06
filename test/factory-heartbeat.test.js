@@ -91,25 +91,51 @@ describe("factory heartbeat lifecycle", () => {
     }
   });
 
-  it("stops when the run becomes terminal without rewriting the terminal run manifest", async () => {
-    const repo = tempRepo();
-    const runDir = createRunDir(repo);
-    writeJson(join(runDir, "run.json"), runningRun());
+  it("keeps refreshing heartbeat_at for builder, reviewer, test, and remediation phases while work is in flight", async () => {
+    for (const phase of ["builder-wave", "security-reviewer", "test-verifier", "remediation"]) {
+      const repo = tempRepo();
+      const runDir = createRunDir(repo);
+      writeJson(join(runDir, "run.json"), runningRun());
 
-    let lease;
-    try {
-      lease = await startHeartbeat(RUN_ID, { phase: "security-reviewer", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+      let lease;
+      try {
+        lease = await startHeartbeat(RUN_ID, { phase, intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+        const firstHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
 
-      const terminal = completedRun({ heartbeat_at: readJson(join(runDir, "run.json")).heartbeat_at });
-      writeJson(join(runDir, "run.json"), terminal);
+        await waitFor(() => readJson(join(runDir, "run.json")).heartbeat_at !== firstHeartbeatAt, { timeoutMs: 2500 });
 
-      await waitFor(() => heartbeatStatus(RUN_ID, { cwd: repo })?.status === "stopped", { timeoutMs: 2500 });
+        const current = heartbeatStatus(RUN_ID, { cwd: repo });
+        assert.equal(current.phase, phase);
+        assert.notEqual(readJson(join(runDir, "run.json")).heartbeat_at, firstHeartbeatAt);
+      } finally {
+        await stopIfActive(repo, lease?.token);
+        cleanup(repo);
+      }
+    }
+  });
 
-      assert.deepEqual(readJson(join(runDir, "run.json")), terminal);
-      assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }).stop_reason, "run-completed");
-    } finally {
-      await stopIfActive(repo, lease?.token);
-      cleanup(repo);
+  it("stops on every terminal run status without rewriting terminal state", async () => {
+    for (const status of ["completed", "blocked", "partial", "needs-human"]) {
+      const repo = tempRepo();
+      const runDir = createRunDir(repo);
+      writeJson(join(runDir, "run.json"), runningRun());
+
+      let lease;
+      try {
+        lease = await startHeartbeat(RUN_ID, { phase: "security-reviewer", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+
+        const terminal = terminalRun(status, { heartbeat_at: readJson(join(runDir, "run.json")).heartbeat_at });
+        writeJson(join(runDir, "run.json"), terminal);
+
+        await waitFor(() => heartbeatStatus(RUN_ID, { cwd: repo })?.status === "stopped", { timeoutMs: 2500 });
+
+        assert.deepEqual(readJson(join(runDir, "run.json")), terminal, status);
+        assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }).stop_reason, `run-${status}`, status);
+        assert.equal(await waitForChange(() => readJson(join(runDir, "run.json")).heartbeat_at !== terminal.heartbeat_at, { timeoutMs: 1200 }), false, status);
+      } finally {
+        await stopIfActive(repo, lease?.token);
+        cleanup(repo);
+      }
     }
   });
 
@@ -239,13 +265,20 @@ function runningRun(overrides = {}) {
 
 function completedRun(overrides = {}) {
   return {
+    ...terminalRun("completed"),
+    ...overrides,
+  };
+}
+
+function terminalRun(status, overrides = {}) {
+  return {
     ...runningRun(),
-    status: "completed",
+    status,
     terminal_result: {
-      status: "completed",
+      status,
       run_id: RUN_ID,
       pr_url: null,
-      reason: null,
+      reason: status === "completed" ? null : `${status} run`,
       summary: "done",
       artifacts: {},
     },
