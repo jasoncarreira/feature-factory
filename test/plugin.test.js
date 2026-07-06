@@ -60,7 +60,9 @@ describe("review tier contract docs", () => {
     assert.match(skillDoc, /Resumed runs missing `review_tier` must backfill it before the next state mutation, except `status` intents\./);
     assert.match(skillDoc, /If no explicit tier is selected and risky categories are detected[\s\S]*select `strict` with `source: default`/i);
     assert.match(skillDoc, /If no explicit tier is selected and no risky category is detected, select `standard` with `source: default`/i);
-    assert.match(skillDoc, /Explicit `light` or `standard` is not automatically overwritten later\./);
+    assert.match(skillDoc, /Any selected tier, including an explicit `light` or `standard`, may be upgraded to `strict`/);
+    assert.match(skillDoc, /newly produced artifacts expose risky categories/);
+    assert.match(skillDoc, /do not automatically downgrade a tier/i);
     assert.match(skillDoc, /do not add or remove unrelated gates, agents, PR behavior, mandatory security review, or workflow redesign in v1/i);
     assert.match(skillDoc, /Existing mandatory gates, observed evidence, `work-reviewer`, `implementation-validator`, and `security-reviewer` behavior still applies\./);
 

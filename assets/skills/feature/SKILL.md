@@ -135,7 +135,7 @@ Selection and persistence rules:
 - If no explicit tier is selected and risky categories are detected in the prompt, approved story, research map, or technical brief, select `strict` with `source: default` and record matching `risk_reasons`.
 - Risky categories for strict defaulting are `security_or_auth`, `schema_or_persistence`, `generated_or_owned_code`, `external_system_policy`, `dependency_or_supply_chain`, `workflow_or_release`, and `destructive_or_broad_scope`.
 - If no explicit tier is selected and no risky category is detected, select `standard` with `source: default` and explain that default in `rationale`.
-- Explicit `light` or `standard` is not automatically overwritten later.
+- Any selected tier, including an explicit `light` or `standard`, may be upgraded to `strict` before a later non-status state mutation if newly produced artifacts expose risky categories. Record the new `selected`, `risk_reasons`, and `rationale`; do not automatically downgrade a tier.
 - Review tiers do not add or remove unrelated gates, agents, PR behavior, mandatory security review, or workflow redesign in v1. Existing mandatory gates, observed evidence, `work-reviewer`, `implementation-validator`, and `security-reviewer` behavior still applies.
 
 If classification is ambiguous, ask one short clarification question and do not mutate state until answered.

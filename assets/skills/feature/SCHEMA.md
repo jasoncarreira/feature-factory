@@ -171,6 +171,7 @@ Rules:
 - `risk_reasons`: required array when `review_tier` is present. Every entry must be one of `security_or_auth`, `schema_or_persistence`, `generated_or_owned_code`, `external_system_policy`, `dependency_or_supply_chain`, `workflow_or_release`, or `destructive_or_broad_scope`.
 - `rationale`: required non-empty string when `review_tier` is present.
 - Later factory steps should read the persisted selection from top-level `run.json.review_tier`.
+- Later factory steps may update any selected tier to `strict` before a non-status state mutation if newly produced artifacts expose risky categories. Do not automatically downgrade a tier.
 
 Gate status values: `pending`, `approved`, `changes_requested`, `stopped`.
 
