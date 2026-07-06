@@ -62,6 +62,33 @@ describe("TUI factory scanner", () => {
     assert.equal(legacyRun.review_tier_source, null);
     cleanup(repo);
   });
+
+  it("projects the current slice or step beside gate state", () => {
+    const repo = tempDir();
+    writeRun(repo, "slice-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [
+        { id: "done", status: "merged", attempts: 1 },
+        { id: "docs-authority-contract", status: "running", attempts: 2 },
+      ],
+      steps: [{ agent: "work-decomposer", status: "running", attempts: 1 }],
+    });
+    writeRun(repo, "step-run", {
+      status: "running",
+      updated_at: "2026-07-04T00:00:00Z",
+      steps: [{ agent: "spec-writer", status: "running", attempts: 2 }],
+    });
+
+    const runs = readRuns(findFactoryRoots(repo));
+    const sliceRun = runs.find((run) => run.run_id === "slice-run");
+    const stepRun = runs.find((run) => run.run_id === "step-run");
+
+    assert.equal(sliceRun.gate, "story");
+    assert.equal(sliceRun.current, "docs-authority-contract running a2");
+    assert.equal(stepRun.current, "spec-writer running a2");
+    cleanup(repo);
+  });
 });
 
 function tempDir() {
@@ -82,6 +109,8 @@ function writeRun(repo, id, input) {
     gates: { story: { status: "pending" } },
   };
   if (input.review_tier !== undefined) run.review_tier = input.review_tier;
+  if (input.slices !== undefined) run.slices = input.slices;
+  if (input.steps !== undefined) run.steps = input.steps;
   writeFileSync(
     join(dir, "run.json"),
     `${JSON.stringify(run, null, 2)}\n`,

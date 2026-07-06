@@ -55,6 +55,9 @@ function View(props) {
               <Show when={run.gate}>
                 <text fg={theme().warning}>gate: {run.gate}</text>
               </Show>
+              <Show when={run.current}>
+                <text fg={theme().textMuted}>current: {truncate(run.current, 34)}</text>
+              </Show>
               <Show when={run.slices}>
                 <text fg={theme().textMuted}>
                   slices: {run.slices.merged}/{run.slices.total}

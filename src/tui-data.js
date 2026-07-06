@@ -92,6 +92,7 @@ function summarize(run, fallbackID, file) {
     review_tier: stringOrNull(run.review_tier?.selected),
     review_tier_source: stringOrNull(run.review_tier?.source),
     updated_at: run.updated_at ? String(run.updated_at) : null,
+    current: currentSummary(run),
     slices: sliceSummary(run),
     panel: panelSummary(run),
     terminal_reason: run.terminal_result?.reason ? String(run.terminal_result.reason) : null,
@@ -114,6 +115,31 @@ function sliceSummary(run) {
     blocked: slices.filter((item) => item?.status === "blocked").length,
     total: slices.length,
   };
+}
+
+function currentSummary(run) {
+  const slice = firstByStatus(run.slices, ["blocked", "running", "review"]);
+  if (slice) return summarizeWorkItem(slice.id, slice.status, slice.attempts);
+  const step = firstByStatus(run.steps, ["blocked", "running", "review", "pending"]);
+  if (step) return summarizeWorkItem(step.agent, step.status, step.attempts);
+  return null;
+}
+
+function firstByStatus(items, statuses) {
+  if (!Array.isArray(items)) return null;
+  for (const status of statuses) {
+    const item = items.find((candidate) => candidate?.status === status);
+    if (item) return item;
+  }
+  return null;
+}
+
+function summarizeWorkItem(name, status, attempts) {
+  const label = stringOrNull(name);
+  if (!label || !status) return null;
+  const normalizedStatus = String(status);
+  const attempt = Number.isInteger(attempts) && attempts > 0 ? ` a${attempts}` : "";
+  return `${label} ${normalizedStatus}${attempt}`;
 }
 
 function panelSummary(run) {
