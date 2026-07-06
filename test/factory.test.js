@@ -15,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { cleanupRun, listRuns, startFactory, status, validateState } from "../src/factory.js";
+import { cleanupRun, listRuns, startFactory, status, validateState, watchRun } from "../src/factory.js";
 import { validateRunDir } from "../src/validate.js";
 
 describe("factory state validation", () => {
@@ -138,10 +138,7 @@ describe("factory state validation", () => {
     const fixture = createHistoryFixture();
 
     try {
-      const run = buildFactoryAuthorityRun(fixture, "authority-invalid-status-list");
-      const manifest = readJson(join(run.runDir, "run.json"));
-      manifest.gates.story.artifact = "artifacts/forged-story.md";
-      writeJson(join(run.runDir, "run.json"), manifest);
+      buildInvalidAuthorityRun(fixture, "authority-invalid-status-list");
 
       assert.throws(() => status("authority-invalid-status-list", { cwd: fixture.repoRoot }), /run\.gates\.story\.artifact/i);
 
@@ -150,6 +147,69 @@ describe("factory state validation", () => {
       assert.match(listed[0].error, /run\.gates\.story\.artifact/i);
     } finally {
       cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("does not let stray heartbeat flags bypass authority validation for public status and list reads", () => {
+    const strayHeartbeatOptions = [
+      { label: "--status", opts: { heartbeatStatus: true } },
+      { label: "--start", opts: { start: true } },
+      { label: "--stop", opts: { stop: true } },
+      { label: "--once", opts: { once: true } },
+      { label: "--foreground", opts: { foreground: true } },
+    ];
+
+    for (const { label, opts } of strayHeartbeatOptions) {
+      const fixture = createHistoryFixture();
+      try {
+        buildInvalidAuthorityRun(fixture, `authority-invalid-${label.replace(/[^a-z]/giu, "")}`);
+
+        assert.throws(
+          () => status(`authority-invalid-${label.replace(/[^a-z]/giu, "")}`, { cwd: fixture.repoRoot, ...opts }),
+          /run\.gates\.story\.artifact/i,
+          label,
+        );
+
+        const listed = listRuns({ cwd: fixture.repoRoot, ...opts });
+        assert.equal(listed[0].status, "invalid", label);
+        assert.match(listed[0].error, /run\.gates\.story\.artifact/i, label);
+      } finally {
+        cleanup(fixture.repoRoot);
+      }
+    }
+  });
+
+  it("does not let stray heartbeat flags bypass watch public reads", () => {
+    const strayHeartbeatOptions = [
+      { label: "--status", opts: { heartbeatStatus: true } },
+      { label: "--start", opts: { start: true } },
+      { label: "--stop", opts: { stop: true } },
+      { label: "--once", opts: { once: true } },
+      { label: "--foreground", opts: { foreground: true } },
+    ];
+
+    for (const { label, opts } of strayHeartbeatOptions) {
+      const fixture = createHistoryFixture();
+      const runId = `watch-invalid-${label.replace(/[^a-z]/giu, "")}`;
+      const originalLog = console.log;
+      try {
+        buildInvalidAuthorityRun(fixture, runId);
+
+        assert.throws(() => watchRun(runId, { cwd: fixture.repoRoot, intervalMs: 10_000, ...opts }), /run\.gates\.story\.artifact/i, label);
+
+        const lines = [];
+        console.log = (value) => lines.push(String(value));
+        const watcher = watchRun(runId, { cwd: fixture.repoRoot, intervalMs: 10_000, all: true, ...opts });
+        clearInterval(watcher);
+
+        assert.equal(lines.length > 0, true, label);
+        const payload = JSON.parse(lines[0]);
+        assert.equal(payload[0].status, "invalid", label);
+        assert.match(payload[0].error, /run\.gates\.story\.artifact/i, label);
+      } finally {
+        console.log = originalLog;
+        cleanup(fixture.repoRoot);
+      }
     }
   });
 
@@ -798,6 +858,14 @@ function buildFactoryAuthorityRun(fixture, runId, options = {}) {
     mergeChain,
     slices,
   };
+}
+
+function buildInvalidAuthorityRun(fixture, runId) {
+  const run = buildFactoryAuthorityRun(fixture, runId);
+  const manifest = readJson(join(run.runDir, "run.json"));
+  manifest.gates.story.artifact = "artifacts/forged-story.md";
+  writeJson(join(run.runDir, "run.json"), manifest);
+  return run;
 }
 
 function createHistoryFixture(options = {}) {

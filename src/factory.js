@@ -381,7 +381,7 @@ function loadRun(runId, opts = {}) {
 function loadPublicRun(runId, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const run = readRunFile(join(runDir, "run.json"));
-  if (shouldSkipAuthorityValidation(opts)) return run;
+  if (shouldSkipAuthorityValidation()) return run;
   const authority = validateRunAuthority(runDir, run, { ...opts, repoRoot: repoRoot(opts.cwd || process.cwd()) });
   if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
   return run;
@@ -404,7 +404,7 @@ function tryReadPublicRun(file, opts = {}) {
   try {
     const runDir = dirname(file);
     const run = readRunFile(file);
-    if (shouldSkipAuthorityValidation(opts)) return { value: run };
+    if (shouldSkipAuthorityValidation()) return { value: run };
     const authority = validateRunAuthority(runDir, run, opts);
     if (!authority.ok) return { error: formatValidationChecks(authority.checks) };
     return { value: run };
@@ -430,8 +430,9 @@ function formatValidationChecks(checks) {
   return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
 }
 
-function shouldSkipAuthorityValidation(opts = {}) {
-  return Boolean(opts.skipAuthorityValidation || opts.start || opts.foreground || opts.once || opts.stop || opts.heartbeatStatus);
+function shouldSkipAuthorityValidation() {
+  const argv = process.argv.slice(2);
+  return argv[0] === "factory" && argv[1] === "heartbeat";
 }
 
 function resolveHeartbeatRunDir(runId, opts = {}) {
