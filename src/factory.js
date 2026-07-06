@@ -32,6 +32,7 @@ export function listRuns(opts = {}) {
           run_id: runId,
           status: "invalid",
           gate: null,
+          review_tier: null,
           updated_at: null,
           path: file,
           error: run.error,
@@ -41,6 +42,7 @@ export function listRuns(opts = {}) {
         run_id: run.value.run_id || runId,
         status: run.value.status || "unknown",
         gate: pendingGate(run.value),
+        review_tier: selectedReviewTier(run.value),
         updated_at: run.value.updated_at || null,
         path: file,
       };
@@ -62,6 +64,7 @@ export function status(runId, opts = {}) {
     pending_gate: pendingGate(run),
     gates: run.gates || {},
     pr_url: run.pr_url || null,
+    review_tier: run.review_tier || null,
     terminal_result: run.terminal_result || null,
     updated_at: run.updated_at || null,
   };
@@ -284,6 +287,10 @@ function pendingGate(run) {
     if (gate && gate.status === "pending") return name;
   }
   return null;
+}
+
+function selectedReviewTier(run) {
+  return typeof run.review_tier?.selected === "string" ? run.review_tier.selected : null;
 }
 
 function normalizeAnswer(answer) {

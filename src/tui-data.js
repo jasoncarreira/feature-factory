@@ -89,6 +89,8 @@ function summarize(run, fallbackID, file) {
     gate: pendingGate(run),
     branch: run.branch ? String(run.branch) : null,
     pr_url: run.pr_url ? String(run.pr_url) : null,
+    review_tier: stringOrNull(run.review_tier?.selected),
+    review_tier_source: stringOrNull(run.review_tier?.source),
     updated_at: run.updated_at ? String(run.updated_at) : null,
     slices: sliceSummary(run),
     panel: panelSummary(run),
@@ -119,4 +121,8 @@ function panelSummary(run) {
   const security = run.security_review?.verdict ? String(run.security_review.verdict) : null;
   if (!validator && !security) return null;
   return [validator, security].filter(Boolean).join(" / ");
+}
+
+function stringOrNull(value) {
+  return typeof value === "string" ? value : null;
 }

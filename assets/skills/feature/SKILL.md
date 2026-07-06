@@ -122,6 +122,22 @@ Actions by intent:
 - `autonomous-start`: proceed like `new-feature`/`resume`, set `run.json.mode = "autonomous"`, and use the Autonomous Mode rules instead of waiting for external gate answers.
 - `pr-continuation`: verify Gate 3 approval and observed evidence before pushing or creating a draft PR. If missing, return to Gate 3 instead of improvising.
 
+## Review Tier Contract
+
+For every non-`status` intent, determine the review tier before the first `run.json` mutation and persist it at top-level `run.json.review_tier` so later steps and resumed runs read the same durable choice. `status` intents remain read-only and must not backfill or rewrite `review_tier`.
+
+Selection and persistence rules:
+
+- Explicit selection is only from prompt or work-order text shaped like `review tier: light|standard|strict` in v1. Do not invent a CLI flag.
+- New runs must initialize `run.json.review_tier` during Step 0.
+- Resumed runs missing `review_tier` must backfill it before the next state mutation, except `status` intents.
+- Persist `selected`, `source`, `risk_reasons`, and a required non-empty `rationale` exactly as documented in `SCHEMA.md`.
+- If no explicit tier is selected and risky categories are detected in the prompt, approved story, research map, or technical brief, select `strict` with `source: default` and record matching `risk_reasons`.
+- Risky categories for strict defaulting are `security_or_auth`, `schema_or_persistence`, `generated_or_owned_code`, `external_system_policy`, `dependency_or_supply_chain`, `workflow_or_release`, and `destructive_or_broad_scope`.
+- If no explicit tier is selected and no risky category is detected, select `standard` with `source: default` and explain that default in `rationale`.
+- Any selected tier, including an explicit `light` or `standard`, may be upgraded to `strict` before a later non-status state mutation if newly produced artifacts expose risky categories. Record the new `selected`, `risk_reasons`, and `rationale`; do not automatically downgrade a tier.
+- Review tiers do not add or remove unrelated gates, agents, PR behavior, mandatory security review, or workflow redesign in v1. Existing mandatory gates, observed evidence, `work-reviewer`, `implementation-validator`, and `security-reviewer` behavior still applies.
+
 If classification is ambiguous, ask one short clarification question and do not mutate state until answered.
 
 ## Control Plane
@@ -135,7 +151,7 @@ Create `$RUN=$REPO/.opencode/factory/<run-id>` with:
 - `evidence/`
 - `reviews/`
 
-Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`. Write `run.json` atomically after every state change. Include `schema_version` and refresh `heartbeat_at` whenever you make progress.
+Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`. Write `run.json` atomically after every state change. Include `schema_version`, persist the selected review tier at top-level `run.json.review_tier`, and refresh `heartbeat_at` whenever you make progress.
 
 One-writer rule:
 
@@ -195,8 +211,8 @@ Choose the story agent:
 Establish the run:
 
 - `run-id` = lowercased external ref if one exists, otherwise a short kebab slug.
-- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
-- If `run.json` exists, this is a resume. Read it and continue from the first incomplete point. Never redo side effects that `run.json` shows already happened.
+- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
+- If `run.json` exists, this is a resume. Read it, backfill top-level `review_tier` before the next non-status state mutation when it is missing, and continue from the first incomplete point. Never redo side effects that `run.json` shows already happened.
 
 Run the story agent and write `$RUN/artifacts/story.md`. If design input exists, run `design-interpreter` in parallel when useful and write `$RUN/artifacts/design-brief.md`.
 

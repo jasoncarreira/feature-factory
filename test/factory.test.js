@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupRun, startFactory, validateState } from "../src/factory.js";
+import { cleanupRun, listRuns, startFactory, status, validateState } from "../src/factory.js";
 
 describe("factory state validation", () => {
   it("validates run.json and plan/slices.json in a run directory", () => {
@@ -31,6 +31,37 @@ describe("factory state validation", () => {
 
     assert.equal(result.ok, false);
     assert.equal(result.runs[0].checks[0].errors[0].path, "run.terminal_result");
+    cleanup(repo);
+  });
+
+  it("surfaces durable review tiers through validate, status, and list reads", () => {
+    const repo = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "app-123");
+    mkdirSync(join(runDir, "plan"), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ review_tier: reviewTier() }));
+    writeJson(join(runDir, "plan", "slices.json"), slicePlan());
+
+    const validation = validateState("app-123", { cwd: repo });
+    const current = status("app-123", { cwd: repo });
+    const listed = listRuns({ cwd: repo });
+
+    assert.equal(validation.ok, true);
+    assert.deepEqual(current.review_tier, reviewTier());
+    assert.equal(listed[0].review_tier, "strict");
+    cleanup(repo);
+  });
+
+  it("returns null review tiers when run.json omits them", () => {
+    const repo = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "app-123");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun());
+
+    const current = status("app-123", { cwd: repo });
+    const listed = listRuns({ cwd: repo });
+
+    assert.equal(current.review_tier, null);
+    assert.equal(listed[0].review_tier, null);
     cleanup(repo);
   });
 });
@@ -162,7 +193,7 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function runningRun() {
+function runningRun(overrides = {}) {
   return {
     schema_version: 1,
     run_id: "app-123",
@@ -177,6 +208,16 @@ function runningRun() {
         answer_ref: "gates/story.answer",
       },
     },
+    ...overrides,
+  };
+}
+
+function reviewTier() {
+  return {
+    selected: "strict",
+    source: "default",
+    risk_reasons: ["security_or_auth"],
+    rationale: "Risky changes require stricter review.",
   };
 }
 

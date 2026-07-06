@@ -8,6 +8,17 @@ const GATE_STATUSES = new Set(["pending", "approved", "changes_requested", "stop
 const APPROVAL_SOURCES = new Set(["human", "external-driver", "autonomous", "override"]);
 const SLICE_STATUSES = new Set(["pending", "running", "review", "merged", "blocked"]);
 const STEP_STATUSES = new Set(["running", "accepted", "rejected", "blocked"]);
+const REVIEW_TIERS = new Set(["light", "standard", "strict"]);
+const REVIEW_TIER_SOURCES = new Set(["explicit", "default"]);
+const REVIEW_TIER_RISK_REASONS = new Set([
+  "security_or_auth",
+  "schema_or_persistence",
+  "generated_or_owned_code",
+  "external_system_policy",
+  "dependency_or_supply_chain",
+  "workflow_or_release",
+  "destructive_or_broad_scope",
+]);
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -34,6 +45,7 @@ export function validateRun(run) {
   optionalString(errors, run, "pr_url", "run.pr_url");
   optionalInteger(errors, run, "max_parallel_slices", "run.max_parallel_slices");
   optionalInteger(errors, run, "max_retries", "run.max_retries");
+  validateReviewTier(errors, run.review_tier, "run.review_tier");
 
   validateGateMap(errors, run.gates, "run.gates");
   validateRunSlices(errors, run.slices, "run.slices");
@@ -89,6 +101,34 @@ function validateGateMap(errors, gates, path) {
     return;
   }
   for (const [name, gate] of Object.entries(gates)) validateGate(errors, gate, `${path}.${name}`);
+}
+
+function validateReviewTier(errors, reviewTier, path) {
+  if (reviewTier === undefined) return;
+  if (!isRecord(reviewTier)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredEnum(errors, reviewTier, "selected", REVIEW_TIERS, `${path}.selected`);
+  requiredEnum(errors, reviewTier, "source", REVIEW_TIER_SOURCES, `${path}.source`);
+  validateReviewTierRiskReasons(errors, reviewTier.risk_reasons, `${path}.risk_reasons`);
+  requiredString(errors, reviewTier, "rationale", `${path}.rationale`);
+}
+
+function validateReviewTierRiskReasons(errors, riskReasons, path) {
+  if (!Array.isArray(riskReasons)) {
+    errors.push({ path, message: "must be an array" });
+    return;
+  }
+  for (const [index, reason] of riskReasons.entries()) {
+    if (!stringValue(reason)) {
+      errors.push({ path: `${path}[${index}]`, message: "must be a non-empty string" });
+      continue;
+    }
+    if (!REVIEW_TIER_RISK_REASONS.has(reason)) {
+      errors.push({ path: `${path}[${index}]`, message: `must be one of ${[...REVIEW_TIER_RISK_REASONS].join(", ")}` });
+    }
+  }
 }
 
 function validateGate(errors, gate, path) {
