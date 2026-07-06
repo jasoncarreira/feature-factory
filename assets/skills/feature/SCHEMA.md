@@ -57,6 +57,12 @@ Write `run.json` atomically: write a temp file, then rename.
   "heartbeat_at": "2026-07-04T12:00:00Z",
   "max_parallel_slices": 3,
   "max_retries": 3,
+  "review_tier": {
+    "selected": "strict",
+    "source": "default",
+    "risk_reasons": ["security_or_auth", "schema_or_persistence"],
+    "rationale": "Defaulted to strict because the run touches auth and persistence risks."
+  },
   "gates": {
     "story": {
       "status": "pending",
@@ -133,6 +139,37 @@ Write `run.json` atomically: write a temp file, then rename.
 Run status values: `running`, `completed`, `blocked`, `partial`, `needs-human`.
 
 Run mode values: `interactive`, `headless`, `autonomous`.
+
+## review_tier
+
+Top-level `run.json.review_tier` stores the selected review tier so later factory steps and resumed runs read the same durable choice without reparsing prior chat context. In v1 this metadata lives only at `run.json.review_tier`; do not mirror it into plan metadata.
+
+`review_tier` is optional for backward compatibility with older runs. Adding this optional field does not change `schema_version`; it remains `1`.
+
+```json
+"review_tier": {
+  "selected": "light|standard|strict",
+  "source": "explicit|default",
+  "risk_reasons": [
+    "security_or_auth",
+    "schema_or_persistence",
+    "generated_or_owned_code",
+    "external_system_policy",
+    "dependency_or_supply_chain",
+    "workflow_or_release",
+    "destructive_or_broad_scope"
+  ],
+  "rationale": "Non-empty explanation of why this tier was selected."
+}
+```
+
+Rules:
+
+- `selected`: required when `review_tier` is present. Allowed values: `light`, `standard`, `strict`.
+- `source`: required when `review_tier` is present. Allowed values: `explicit`, `default`.
+- `risk_reasons`: required array when `review_tier` is present. Every entry must be one of `security_or_auth`, `schema_or_persistence`, `generated_or_owned_code`, `external_system_policy`, `dependency_or_supply_chain`, `workflow_or_release`, or `destructive_or_broad_scope`.
+- `rationale`: required non-empty string when `review_tier` is present.
+- Later factory steps should read the persisted selection from top-level `run.json.review_tier`.
 
 Gate status values: `pending`, `approved`, `changes_requested`, `stopped`.
 
