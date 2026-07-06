@@ -7,6 +7,10 @@ The feature factory persists a per-run control plane so runs are durable, resuma
 ```text
 .opencode/factory/<run-id>/
   run.json
+  factory.lock
+  heartbeat.json
+  run-json.lock/
+    owner.json
   gates/
     story.question.md
     story.answer
@@ -40,6 +44,80 @@ Implementation worktrees live under:
 ```
 
 Write `run.json` atomically: write a temp file, then rename.
+
+`$RUN/run-json.lock/` is the ephemeral lock directory used by both foreground manifest writes and heartbeat ticks. `owner.json` records the current lock holder for diagnostics.
+
+`$RUN/factory.lock` is the internal owner/capability file for heartbeat authority. The factory writes a trusted heartbeat owner capability there and keeps it out of `heartbeat.json` and `factory heartbeat <run-id> --status --json`.
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "app-123",
+  "heartbeat_owner": "hb-owner-capability",
+  "session_owner": "session-route-1",
+  "updated_at": "2026-07-06T12:00:00Z"
+}
+```
+
+## heartbeat.json and locked liveness updates
+
+`$RUN/heartbeat.json` is a sidecar lease for long orchestrator waits. It is written by the internal heartbeat helper, not by external drivers.
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "app-123",
+  "token": "hb-token-1",
+  "phase": "slice-review",
+  "status": "running",
+  "pid": 4242,
+  "started_at": "2026-07-06T12:00:00Z",
+  "last_tick_at": "2026-07-06T12:00:05Z",
+  "stop_requested_at": null,
+  "stopped_at": null,
+  "interval_ms": 1000,
+  "deadline_at": "2026-07-06T12:05:00Z",
+  "stop_reason": null
+}
+```
+
+Phase enum values:
+
+- `spec-review`
+- `decomposition-review`
+- `builder-wave`
+- `slice-review`
+- `test-verifier`
+- `test-rerun`
+- `test-review`
+- `implementation-validator`
+- `security-reviewer`
+- `remediation`
+
+Heartbeat status values: `active`, `running`, `stopping`, `stopped`, `error`.
+
+Lifecycle rules:
+
+- Start heartbeat immediately before a long `Task`/subagent/review/test wait while `run.status` is still `running`.
+- Require the trusted heartbeat owner capability from `$RUN/factory.lock` for detached `--start`, internal `--foreground`, and internal `--once` paths.
+- Treat `heartbeat.json` as data, not authority. Tokens, caller PID, and sidecar contents alone never authorize a heartbeat tick or lease start.
+- Start heartbeat only when the manifest already shows real in-flight factory work via a `running` step or a `running`/`review` slice.
+- Do not start heartbeat while the run is stopped at Gate 1 (`story`), Gate 2 (`brief`), or Gate 3 (`pre_pr`). Pending gates are monitored through `run.json.gates`, not through heartbeat.
+- Stop heartbeat in a `finally`/after-return path before any foreground semantic `run.json` mutation.
+- Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat with wait/force semantics and require a confirmed stopped lease.
+
+Locked heartbeat-only manifest mutation protocol:
+
+- Both the heartbeat helper and foreground manifest writers acquire `$RUN/run-json.lock/` before touching `run.json`.
+- While heartbeat is active, the only allowed `run.json` mutation is the helper updating `heartbeat_at` under that lock.
+- Foreground semantic writes must first stop heartbeat, wait for a confirmed `stopped`/`error` lease (or force-stop on timeout), then acquire the lock and write the next semantic `run.json` state.
+- External drivers never write `factory.lock`, `heartbeat.json`, `run-json.lock/`, or `run.json`.
+
+External monitoring semantics:
+
+- Treat `heartbeat.json` plus `run.json.heartbeat_at` as liveness only. `heartbeat.json` is not authority.
+- Use pending gate status in `run.json.gates.*` for story/brief/pre-PR waits because heartbeat is intentionally absent there.
+- Use terminal `run.status` plus `terminal_result` as the durable completion/blocking signal; heartbeat must already be stopped before those terminal writes land.
 
 ## run.json
 

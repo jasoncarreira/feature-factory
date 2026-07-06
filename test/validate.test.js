@@ -1,6 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateRun, validateSlicesPlan, ValidationError } from "../src/validate.js";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { validateFactoryLock, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan, ValidationError } from "../src/validate.js";
 
 describe("validateRun", () => {
   it("accepts a running run with a pending gate", () => {
@@ -110,6 +113,120 @@ describe("validateRun", () => {
   });
 });
 
+describe("validateHeartbeatState", () => {
+  it("accepts a heartbeat sidecar with a known phase contract", () => {
+    assert.equal(validateHeartbeatState(heartbeatState()).run_id, "heartbeat-liveness");
+    assert.equal(validateHeartbeatState(heartbeatState({ status: "running", phase: "security-reviewer" })).status, "running");
+  });
+
+  it("accepts stopping and stopped lifecycle states", () => {
+    assert.equal(
+      validateHeartbeatState(heartbeatState({ status: "stopping", stop_requested_at: "2026-07-06T00:00:06.000Z" })).status,
+      "stopping",
+    );
+    assert.equal(
+      validateHeartbeatState(
+        heartbeatState({
+          status: "stopped",
+          stop_requested_at: "2026-07-06T00:00:06.000Z",
+          stopped_at: "2026-07-06T00:00:07.000Z",
+          stop_reason: "heartbeat completed cleanly",
+        }),
+      ).status,
+      "stopped",
+    );
+  });
+
+  it("rejects stopping or stopped sidecars without lifecycle stop fields", () => {
+    assert.throws(
+      () => validateHeartbeatState(heartbeatState({ status: "stopping", stop_requested_at: undefined })),
+      (error) => error instanceof ValidationError && error.message.includes("heartbeat.stop_requested_at"),
+    );
+    assert.throws(
+      () => validateHeartbeatState(heartbeatState({ status: "stopped", stopped_at: undefined })),
+      (error) => error instanceof ValidationError && error.message.includes("heartbeat.stopped_at"),
+    );
+  });
+
+  it("rejects active sidecars with stop_reason but no stop lifecycle transition", () => {
+    assert.throws(
+      () => validateHeartbeatState(heartbeatState({ status: "running", stop_reason: "handoff" })),
+      (error) => error instanceof ValidationError && error.message.includes("heartbeat.stop_reason"),
+    );
+  });
+
+  it("rejects unknown phases", () => {
+    assert.throws(
+      () => validateHeartbeatState(heartbeatState({ phase: "gate-review" })),
+      (error) => error instanceof ValidationError && error.message.includes("heartbeat.phase"),
+    );
+  });
+});
+
+describe("validateFactoryLock", () => {
+  it("accepts a factory lock with a heartbeat owner capability", () => {
+    assert.equal(validateFactoryLock(factoryLock()).heartbeat_owner, "heartbeat-owner-capability");
+  });
+
+  it("rejects factory locks without a heartbeat owner capability", () => {
+    assert.throws(
+      () => validateFactoryLock(factoryLock({ heartbeat_owner: "   " })),
+      (error) => error instanceof ValidationError && error.message.includes("factory_lock.heartbeat_owner"),
+    );
+  });
+});
+
+describe("validateRunDir", () => {
+  it("validates factory.lock when present", () => {
+    const runDir = tempRunDir("heartbeat-liveness-lock");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "heartbeat-liveness" }));
+    writeJson(join(runDir, "factory.lock"), factoryLock({ run_id: "heartbeat-liveness" }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatState());
+
+    const result = validateRunDir(runDir);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.checks.length, 3);
+    cleanupTemp(runDir);
+  });
+
+  it("validates heartbeat.json when present", () => {
+    const runDir = tempRunDir("heartbeat-liveness");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "heartbeat-liveness" }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatState());
+
+    const result = validateRunDir(runDir);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.checks.length, 2);
+    cleanupTemp(runDir);
+  });
+
+  it("still rejects terminal runs without a valid terminal_result when heartbeat.json is present", () => {
+    const runDir = tempRunDir("heartbeat-liveness-terminal");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), { ...runningRun({ run_id: "heartbeat-liveness", status: "blocked" }), terminal_result: null });
+    writeJson(
+      join(runDir, "heartbeat.json"),
+      heartbeatState({
+        status: "stopped",
+        phase: "remediation",
+        stop_requested_at: "2026-07-06T00:00:06.000Z",
+        stopped_at: "2026-07-06T00:00:07.000Z",
+        stop_reason: "run reached a terminal state",
+      }),
+    );
+
+    const result = validateRunDir(runDir);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.checks[0].errors[0].path, "run.terminal_result");
+    cleanupTemp(runDir);
+  });
+});
+
 describe("validateSlicesPlan", () => {
   it("accepts an acyclic slice plan", () => {
     assert.equal(validateSlicesPlan(slicePlan()).slices.length, 2);
@@ -136,7 +253,7 @@ describe("validateSlicesPlan", () => {
   });
 });
 
-function runningRun() {
+function runningRun(overrides = {}) {
   return {
     schema_version: 1,
     run_id: "app-123",
@@ -159,6 +276,34 @@ function runningRun() {
         status: "running",
       },
     ],
+    ...overrides,
+  };
+}
+
+function heartbeatState(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: "heartbeat-liveness",
+    token: "hb-token-1",
+    phase: "builder-wave",
+    status: "active",
+    pid: 4242,
+    started_at: "2026-07-06T00:00:00.000Z",
+    last_tick_at: "2026-07-06T00:00:05.000Z",
+    interval_ms: 5000,
+    deadline_at: "2026-07-06T00:00:10.000Z",
+    ...overrides,
+  };
+}
+
+function factoryLock(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: "heartbeat-liveness",
+    heartbeat_owner: "heartbeat-owner-capability",
+    session_owner: "session-1",
+    updated_at: "2026-07-06T00:00:00.000Z",
+    ...overrides,
   };
 }
 
@@ -193,4 +338,16 @@ function slicePlan() {
       },
     ],
   };
+}
+
+function tempRunDir(name) {
+  return join(mkdtempSync(join(tmpdir(), `${name}-`)), name);
+}
+
+function writeJson(filePath, value) {
+  writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function cleanupTemp(runDir) {
+  rmSync(join(runDir, ".."), { recursive: true, force: true });
 }

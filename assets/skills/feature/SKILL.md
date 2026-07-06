@@ -159,6 +159,31 @@ One-writer rule:
 - External drivers write only `gates/<gate>.answer`.
 - The factory consumes answer files, records the result in `run.json`, and continues.
 
+## Heartbeat Protocol
+
+Use the internal heartbeat helper only for long `Task`/subagent waits that happen while `run.json.status` is still `running`.
+
+- Start heartbeat immediately before the long wait begins.
+- Require the trusted heartbeat owner capability from `$RUN/factory.lock` for detached `--start`, internal `--foreground`, and internal `--once` paths. Do not expose that capability through `heartbeat.json` or `factory heartbeat <run-id> --status --json`.
+- Treat `heartbeat.json` as data, not authority. Token, PID, or sidecar contents alone never authorize heartbeat freshness.
+- Start heartbeat only when the manifest already shows real in-flight factory work via a `running` step or a `running`/`review` slice.
+- Stop heartbeat in a `finally`/after-return path before any foreground semantic `run.json` write. While a heartbeat is active, do not accept agent output, mutate steps/slices/gates, or write any other semantic manifest fields besides locked `heartbeat_at` ticks.
+- Do not start heartbeat while stopped at Gate 1 (`story`), Gate 2 (`brief`), or Gate 3 (`pre_pr`). Gate waits are intentionally heartbeat-free.
+- Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat with wait/force semantics and require a confirmed stopped lease.
+
+Required heartbeat phases:
+
+- `spec-review`
+- `decomposition-review`
+- `builder-wave`
+- `slice-review`
+- `test-verifier`
+- `test-rerun`
+- `test-review`
+- `implementation-validator`
+- `security-reviewer`
+- `remediation`
+
 ## Gate Protocol
 
 For every gate:
@@ -212,6 +237,7 @@ Establish the run:
 
 - `run-id` = lowercased external ref if one exists, otherwise a short kebab slug.
 - Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
+- Initialize `$RUN/factory.lock` with `schema_version`, `run_id`, and a trusted heartbeat owner capability used only by the factory lifecycle.
 - If `run.json` exists, this is a resume. Read it, backfill top-level `review_tier` before the next non-status state mutation when it is missing, and continue from the first incomplete point. Never redo side effects that `run.json` shows already happened.
 
 Run the story agent and write `$RUN/artifacts/story.md`. If design input exists, run `design-interpreter` in parallel when useful and write `$RUN/artifacts/design-brief.md`.
