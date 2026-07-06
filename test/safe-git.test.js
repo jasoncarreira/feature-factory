@@ -41,7 +41,7 @@ describe("safeGit", () => {
 
       assert.equal(result.ok, true);
       assert.equal(result.policy, SAFE_GIT_POLICY);
-      assert.deepEqual(result.command.args, [...SAFE_GIT_PREFIX_ARGS, "status", "--porcelain=v1"]);
+      assert.deepEqual(result.command.args, expectedSafeGitArgs(repo, ["status", "--porcelain=v1"]));
       assert.equal(result.command.file, getTrustedGitPath());
       assert.equal(result.command.cwd, resolve(repo));
       assert.equal(result.command.shell, false);
@@ -83,7 +83,7 @@ describe("safeGit", () => {
       assert.equal(result.status, 0);
       assert.equal(result.stdout.trim(), realpathSync.native(repo));
       assert.equal(result.stderr, "");
-      assert.deepEqual(result.command.args, [...SAFE_GIT_PREFIX_ARGS, "rev-parse", "--show-toplevel"]);
+      assert.deepEqual(result.command.args, expectedSafeGitArgs(repo, ["rev-parse", "--show-toplevel"]));
     } finally {
       cleanup(repo);
       cleanup(hostileRepo);
@@ -277,7 +277,7 @@ describe("listHiddenIndexPaths", () => {
           skip_worktree: true,
         },
       ]);
-      assert.deepEqual(result.command.args, [...SAFE_GIT_PREFIX_ARGS, "ls-files", "-v"]);
+      assert.deepEqual(result.command.args, expectedSafeGitArgs(repo, ["ls-files", "-v"]));
     } finally {
       cleanup(repo);
     }
@@ -338,6 +338,10 @@ function runTrustedGit(cwd, args, env = {}) {
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
+}
+
+function expectedSafeGitArgs(cwd, args) {
+  return [...SAFE_GIT_PREFIX_ARGS, "-c", `core.worktree=${resolve(cwd)}`, ...args];
 }
 
 function commitMessageFromCatFile(output) {

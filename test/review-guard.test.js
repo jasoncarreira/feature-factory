@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { SAFE_GIT_POLICY, SAFE_GIT_PREFIX_ARGS } from "../src/safe-git.js";
 import { buildReviewGuardBlockReport, checkReviewedWorktreeClean } from "../src/review-guard.js";
@@ -124,6 +124,78 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("does not let worktree-local core.worktree redirection hide dirty files", () => {
+    const repo = createCommittedRepo();
+    const linkedRoot = mkdtempSync(join(tmpdir(), "review-guard-linked-"));
+    const cleanRoot = mkdtempSync(join(tmpdir(), "review-guard-clean-"));
+    const worktree = join(linkedRoot, "review-worktree");
+
+    try {
+      git(repo, ["worktree", "add", "-b", "review-worktree", worktree, "HEAD"]);
+      writeFileSync(join(cleanRoot, "tracked.txt"), "tracked.txt\n", "utf8");
+      git(worktree, ["config", "extensions.worktreeConfig", "true"]);
+      git(worktree, ["config", "--worktree", "core.worktree", cleanRoot]);
+      writeFileSync(join(worktree, "tracked.txt"), "changed\n", "utf8");
+
+      const unsafe = gitStdout(worktree, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(worktree);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "unverifiable");
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.match(result.stderr, /worktree-identity observation|dirty-state could not be verified/i);
+    } finally {
+      cleanup(repo);
+      cleanup(linkedRoot);
+      cleanup(cleanRoot);
+    }
+  });
+
+  it("does not let .git/info/exclude hide reviewer-created untracked files", () => {
+    const repo = createCommittedRepo();
+
+    try {
+      appendFileSync(join(repo, ".git", "info", "exclude"), "hidden-by-info-exclude.txt\n", "utf8");
+      writeFileSync(join(repo, "hidden-by-info-exclude.txt"), "new\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), ["hidden-by-info-exclude.txt"]);
+      assert.equal(result.dirty_paths[0].ignored, true);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("does not let core.fileMode=false hide executable-bit-only changes", () => {
+    const repo = createCommittedRepo(["script.sh"]);
+
+    try {
+      git(repo, ["config", "core.fileMode", "false"]);
+      chmodSync(join(repo, "script.sh"), 0o755);
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.stdout, " M script.sh\n");
+      assert.equal(result.dirty_paths[0].path, "script.sh");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("blocks non-git worktrees as unverifiable", () => {
     const dir = mkdtempSync(join(tmpdir(), "review-guard-nongit-"));
 
@@ -196,10 +268,16 @@ describe("checkReviewedWorktreeClean", () => {
           if (args[args.length - 1] === "--untracked-files=all") {
             return { status: 0, stdout: "", stderr: "" };
           }
+          if (args[args.length - 1] === "--show-toplevel") {
+            return { status: 0, stdout: `${resolve(repo)}\n`, stderr: "" };
+          }
           if (args.includes("HEAD^{tree}")) {
             return { status: 0, stdout: `${headCommit}\n${headTree}\n`, stderr: "" };
           }
           if (args[args.length - 2] === "ls-files" && args[args.length - 1] === "-v") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (args[args.length - 1] === "--exclude-standard") {
             return { status: 0, stdout: "", stderr: "" };
           }
 
@@ -211,9 +289,11 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all`);
       assert.deepEqual(calls.map((call) => call.args), [
-        [...SAFE_GIT_PREFIX_ARGS, "status", "--porcelain=v1", "--untracked-files=all"],
-        [...SAFE_GIT_PREFIX_ARGS, "rev-parse", "HEAD", "HEAD^{tree}"],
-        [...SAFE_GIT_PREFIX_ARGS, "ls-files", "-v"],
+        expectedSafeGitArgs(repo, ["status", "--porcelain=v1", "--untracked-files=all"]),
+        expectedSafeGitArgs(repo, ["rev-parse", "--show-toplevel"]),
+        expectedSafeGitArgs(repo, ["rev-parse", "HEAD", "HEAD^{tree}"]),
+        expectedSafeGitArgs(repo, ["ls-files", "-v"]),
+        expectedSafeGitArgs(repo, ["ls-files", "--others", "--ignored", "--exclude-standard"]),
       ]);
       for (const call of calls) {
         assert.equal(call.options.shell, false);
@@ -302,6 +382,10 @@ function git(cwd, args) {
 function gitStdout(cwd, args) {
   const proc = git(cwd, args);
   return proc.stdout;
+}
+
+function expectedSafeGitArgs(cwd, args) {
+  return [...SAFE_GIT_PREFIX_ARGS, "-c", `core.worktree=${resolve(cwd)}`, ...args];
 }
 
 function cleanup(dir) {

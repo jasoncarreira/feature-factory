@@ -279,7 +279,7 @@ export function cleanupRun(runId, opts = {}) {
   if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
     throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
   }
-  const branchAuthority = resolveCleanupBranchAuthority(repo, runDir, run);
+  const cleanupAuthority = resolveCleanupAuthority(repo, runDir, run);
 
   const result = {
     run_id: run.run_id,
@@ -293,8 +293,8 @@ export function cleanupRun(runId, opts = {}) {
     run_dir: runDir,
   };
 
-  for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts);
-  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts, run.status, branchAuthority);
+  for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts, cleanupAuthority);
+  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts, run.status, cleanupAuthority);
 
   if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
   result.removed_run_dir = !opts.dryRun;
@@ -309,7 +309,7 @@ function cleanupBranches(run) {
   return [...new Set([run.branch, ...(Array.isArray(run.slices) ? run.slices.map((slice) => slice?.branch) : [])].filter(Boolean))];
 }
 
-function removeWorktree(repo, worktree, result, opts) {
+function removeWorktree(repo, worktree, result, opts, authority = null) {
   const resolved = resolve(repo, worktree);
   if (!insideWorktreeRoot(repo, resolved)) {
     result.skipped_worktrees.push({ worktree, reason: "outside .opencode/worktrees" });
@@ -319,14 +319,20 @@ function removeWorktree(repo, worktree, result, opts) {
     result.skipped_worktrees.push({ worktree: resolved, reason: "missing" });
     return;
   }
+  const physicalWorktree = physicalPath(resolved);
+  const worktreePermission = resolveCleanupWorktreePermission(physicalWorktree, authority);
+  if (!worktreePermission.allowed) {
+    result.skipped_worktrees.push({ worktree: physicalWorktree, reason: worktreePermission.reason });
+    return;
+  }
   if (!opts.dryRun) {
-    const proc = spawnSync("git", ["worktree", "remove", "--force", resolved], { cwd: repo, encoding: "utf8" });
+    const proc = spawnSync("git", ["worktree", "remove", "--force", physicalWorktree], { cwd: repo, encoding: "utf8" });
     if (proc.status !== 0) {
-      result.skipped_worktrees.push({ worktree: resolved, reason: (proc.stderr || proc.stdout || "git worktree remove failed").trim() });
+      result.skipped_worktrees.push({ worktree: physicalWorktree, reason: (proc.stderr || proc.stdout || "git worktree remove failed").trim() });
       return;
     }
   }
-  result.removed_worktrees.push(resolved);
+  result.removed_worktrees.push(physicalWorktree);
 }
 
 function deleteBranch(repo, branch, result, opts, runStatus, authority = null) {
@@ -1027,17 +1033,28 @@ function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function resolveCleanupBranchAuthority(repo, runDir, run) {
+function resolveCleanupAuthority(repo, runDir, run) {
   const authority = validateRunAuthority(runDir, run, { repoRoot: repo });
   const attestedBranches = new Set();
+  const attestedWorktrees = new Set();
 
   if (authority.ok) {
     for (const record of Object.values(authority.acceptedAttestations || {})) {
-      if (record?.attestation?.type === "run-base" && stringValue(record.attestation.bindings?.feature_branch)) {
-        attestedBranches.add(record.attestation.bindings.feature_branch.trim());
+      if (record?.attestation?.type === "run-base") {
+        if (stringValue(record.attestation.bindings?.feature_branch)) {
+          attestedBranches.add(record.attestation.bindings.feature_branch.trim());
+        }
+        if (stringValue(record.attestation.bindings?.feature_worktree)) {
+          attestedWorktrees.add(physicalPath(record.attestation.bindings.feature_worktree.trim()));
+        }
       }
-      if (record?.attestation?.type === "slice-observation" && stringValue(record.attestation.bindings?.branch)) {
-        attestedBranches.add(record.attestation.bindings.branch.trim());
+      if (record?.attestation?.type === "slice-observation") {
+        if (stringValue(record.attestation.bindings?.branch)) {
+          attestedBranches.add(record.attestation.bindings.branch.trim());
+        }
+        if (stringValue(record.attestation.bindings?.worktree)) {
+          attestedWorktrees.add(physicalPath(record.attestation.bindings.worktree.trim()));
+        }
       }
     }
   }
@@ -1046,6 +1063,7 @@ function resolveCleanupBranchAuthority(repo, runDir, run) {
     ok: authority.ok,
     runId: run.run_id,
     attestedBranches,
+    attestedWorktrees,
   };
 }
 
@@ -1059,6 +1077,16 @@ function resolveCleanupBranchPermission(branch, authority) {
   return {
     allowed: false,
     reason: "branch deletion requires accepted branch authority",
+  };
+}
+
+function resolveCleanupWorktreePermission(worktree, authority) {
+  if (authority?.attestedWorktrees?.has(physicalPath(worktree))) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: "worktree removal requires accepted worktree authority",
   };
 }
 

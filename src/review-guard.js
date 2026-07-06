@@ -1,8 +1,12 @@
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { SAFE_GIT_POLICY, listHiddenIndexPaths, safeGit } from "./safe-git.js";
 
 const REVIEW_GUARD_ARGS = Object.freeze(["status", "--porcelain=v1", "--untracked-files=all"]);
+const REVIEW_GUARD_IDENTITY_ARGS = Object.freeze(["rev-parse", "--show-toplevel"]);
 const REVIEW_GUARD_HEAD_ARGS = Object.freeze(["rev-parse", "HEAD", "HEAD^{tree}"]);
 const REVIEW_GUARD_HIDDEN_INDEX_ARGS = Object.freeze(["ls-files", "-v"]);
+const REVIEW_GUARD_IGNORED_ARGS = Object.freeze(["ls-files", "--others", "--ignored", "--exclude-standard"]);
 const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
 const C_STYLE_ESCAPES = Object.freeze({
   a: "\u0007",
@@ -39,6 +43,23 @@ export function checkReviewedWorktreeClean(worktree, options = {}) {
   }
 
   const dirtyPaths = statusResult.stdout.length === 0 ? [] : parseDirtyPaths(statusResult.stdout);
+  const identityObservation = observeReviewedWorktreeIdentity(reviewedWorktree, gitOptions);
+  if (!identityObservation.ok) {
+    return buildGuardResult({
+      ok: false,
+      status: "unverifiable",
+      worktree: reviewedWorktree,
+      command: statusCommand,
+      exit_code: normalizeExitCode(identityObservation.exit_code),
+      stdout: statusResult.stdout,
+      stderr: joinOutput(statusResult.stderr, identityObservation.error),
+      dirty_paths: dirtyPaths,
+      head_commit: null,
+      head_tree: null,
+      hidden_index_paths: [],
+    });
+  }
+
   const headResult = safeGit(reviewedWorktree, REVIEW_GUARD_HEAD_ARGS, gitOptions);
   if (!headResult.ok) {
     return buildGuardResult({
@@ -103,7 +124,35 @@ export function checkReviewedWorktreeClean(worktree, options = {}) {
   const hiddenIndexPaths = Array.isArray(hiddenIndexResult.hidden_index_paths)
     ? hiddenIndexResult.hidden_index_paths
     : [];
-  const status = statusResult.stdout.length === 0 && hiddenIndexPaths.length === 0 ? "clean" : "dirty";
+  const ignoredPathsResult = listIgnoredUntrackedPaths(reviewedWorktree, gitOptions);
+  if (!ignoredPathsResult.ok) {
+    return buildGuardResult({
+      ok: false,
+      status: "unverifiable",
+      worktree: reviewedWorktree,
+      command: statusCommand,
+      exit_code: normalizeExitCode(ignoredPathsResult.status),
+      stdout: statusResult.stdout,
+      stderr: joinOutput(
+        statusResult.stderr,
+        formatObservationFailure(
+          "ignored-path observation",
+          formatReviewGuardIgnoredCommand(reviewedWorktree),
+          ignoredPathsResult.stderr,
+        ),
+      ),
+      dirty_paths: dirtyPaths,
+      head_commit: headObservation.head_commit,
+      head_tree: headObservation.head_tree,
+      hidden_index_paths: hiddenIndexPaths,
+    });
+  }
+
+  const ignoredPaths = Array.isArray(ignoredPathsResult.ignored_paths)
+    ? ignoredPathsResult.ignored_paths
+    : [];
+  const observedDirtyPaths = mergeDirtyPaths(dirtyPaths, ignoredPaths);
+  const status = observedDirtyPaths.length === 0 && hiddenIndexPaths.length === 0 ? "clean" : "dirty";
 
   return buildGuardResult({
     ok: status === "clean",
@@ -113,7 +162,7 @@ export function checkReviewedWorktreeClean(worktree, options = {}) {
     exit_code: normalizeExitCode(statusResult.status),
     stdout: statusResult.stdout,
     stderr: statusResult.stderr,
-    dirty_paths: dirtyPaths,
+    dirty_paths: observedDirtyPaths,
     head_commit: headObservation.head_commit,
     head_tree: headObservation.head_tree,
     hidden_index_paths: hiddenIndexPaths,
@@ -157,11 +206,13 @@ function normalizeGuard(guard, reviewedWorktree) {
       : 1;
   const stdout = typeof guard.stdout === "string" ? guard.stdout : "";
   const hiddenIndexPaths = normalizeList(guard.hidden_index_paths);
+  const dirtyPaths = Array.isArray(guard.dirty_paths) ? guard.dirty_paths : parseDirtyPaths(stdout);
   const status = deriveGuardStatus({
     status: guard.status,
     exitCode,
     stdout,
     hiddenIndexPaths,
+    dirtyPaths,
   });
 
   return {
@@ -175,11 +226,7 @@ function normalizeGuard(guard, reviewedWorktree) {
     safe_git_policy: typeof guard.safe_git_policy === "string" && guard.safe_git_policy !== "" ? guard.safe_git_policy : SAFE_GIT_POLICY,
     head_commit: normalizeOptionalText(guard.head_commit),
     head_tree: normalizeOptionalText(guard.head_tree),
-    dirty_paths: status === "dirty"
-      ? Array.isArray(guard.dirty_paths)
-        ? guard.dirty_paths
-        : parseDirtyPaths(stdout)
-      : [],
+    dirty_paths: status === "dirty" ? dirtyPaths : [],
     hidden_index_paths: hiddenIndexPaths,
   };
 }
@@ -197,7 +244,8 @@ function parseDirtyPathLine(line) {
   const worktreeStatus = xy[1] || " ";
   const { path, original_path } = parsePathSpec(line.slice(3));
   const conflicted = CONFLICT_CODES.has(xy);
-  const untracked = xy === "??";
+  const ignored = xy === "!!";
+  const untracked = xy === "??" || ignored;
 
   return {
     path,
@@ -210,6 +258,7 @@ function parseDirtyPathLine(line) {
     unstaged: !untracked && !conflicted && worktreeStatus !== " ",
     deleted: indexStatus === "D" || worktreeStatus === "D",
     conflicted,
+    ignored,
     untracked,
   };
 }
@@ -293,8 +342,14 @@ function defaultBlockReason(guard) {
   if (guard?.status === "dirty") {
     const count = Array.isArray(guard.dirty_paths) ? guard.dirty_paths.length : 0;
     const hiddenIndexCount = Array.isArray(guard.hidden_index_paths) ? guard.hidden_index_paths.length : 0;
+    const ignoredCount = Array.isArray(guard.dirty_paths)
+      ? guard.dirty_paths.filter((path) => path?.ignored === true).length
+      : 0;
     if (count > 0 && hiddenIndexCount > 0) {
       return `reviewer left reviewed worktree dirty (${count} git-visible ${count === 1 ? "path" : "paths"}; ${hiddenIndexCount} hidden-index ${hiddenIndexCount === 1 ? "path" : "paths"})`;
+    }
+    if (ignoredCount > 0 && count === ignoredCount) {
+      return `reviewed worktree contains ignored untracked ${ignoredCount === 1 ? "path" : "paths"} (${ignoredCount})`;
     }
     if (hiddenIndexCount > 0) {
       return `reviewed worktree contains hidden index flags (${hiddenIndexCount} ${hiddenIndexCount === 1 ? "path" : "paths"})`;
@@ -310,12 +365,20 @@ function formatReviewGuardCommand(worktree) {
   return `git -C ${shellQuote(worktree)} status --porcelain=v1 --untracked-files=all`;
 }
 
+function formatReviewGuardIdentityCommand(worktree) {
+  return formatGitCommand(worktree, REVIEW_GUARD_IDENTITY_ARGS);
+}
+
 function formatReviewGuardHeadCommand(worktree) {
   return formatGitCommand(worktree, REVIEW_GUARD_HEAD_ARGS);
 }
 
 function formatReviewGuardHiddenIndexCommand(worktree) {
   return formatGitCommand(worktree, REVIEW_GUARD_HIDDEN_INDEX_ARGS);
+}
+
+function formatReviewGuardIgnoredCommand(worktree) {
+  return formatGitCommand(worktree, REVIEW_GUARD_IGNORED_ARGS);
 }
 
 function formatGitCommand(worktree, args) {
@@ -409,10 +472,11 @@ function formatObservationFailure(label, command, stderr) {
   return `${label} failed while running ${command}${detail}`;
 }
 
-function deriveGuardStatus({ status, exitCode, stdout, hiddenIndexPaths }) {
+function deriveGuardStatus({ status, exitCode, stdout, hiddenIndexPaths, dirtyPaths = [] }) {
   if (status === "unverifiable") return "unverifiable";
   if (exitCode !== 0) return "unverifiable";
   if (status === "dirty") return "dirty";
+  if (dirtyPaths.length > 0) return "dirty";
   if (hiddenIndexPaths.length > 0) return "dirty";
   if (stdout.length > 0) return "dirty";
   return isGuardStatus(status) ? status : "clean";
@@ -424,6 +488,113 @@ function normalizeOptionalText(value) {
 
 function normalizeList(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function observeReviewedWorktreeIdentity(worktree, gitOptions) {
+  const command = formatReviewGuardIdentityCommand(worktree);
+  const result = safeGit(worktree, REVIEW_GUARD_IDENTITY_ARGS, gitOptions);
+  if (!result.ok) {
+    return {
+      ok: false,
+      exit_code: normalizeExitCode(result.status),
+      error: formatObservationFailure("worktree-identity observation", command, result.stderr),
+    };
+  }
+
+  const observedTopLevel = normalizeObservationLine(result.stdout);
+  if (!observedTopLevel) {
+    return {
+      ok: false,
+      exit_code: normalizeExitCode(result.status),
+      error: `worktree-identity observation returned malformed output for ${command}`,
+    };
+  }
+
+  try {
+    const expectedWorktree = realpathSync.native(resolve(worktree));
+    const observedWorktree = realpathSync.native(resolve(observedTopLevel));
+    if (observedWorktree !== expectedWorktree) {
+      return {
+        ok: false,
+        exit_code: normalizeExitCode(result.status),
+        error: `worktree-identity observation reported ${observedWorktree} for ${command}, expected ${expectedWorktree}`,
+      };
+    }
+
+    return {
+      ok: true,
+      exit_code: normalizeExitCode(result.status),
+      worktree: observedWorktree,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      exit_code: normalizeExitCode(result.status),
+      error: `worktree-identity observation could not resolve paths for ${command}\n${normalizeErrorMessage(error)}`,
+    };
+  }
+}
+
+function listIgnoredUntrackedPaths(worktree, options = {}) {
+  const result = safeGit(worktree, REVIEW_GUARD_IGNORED_ARGS, options);
+  return {
+    ...result,
+    ignored_paths: result.ok ? parseIgnoredUntrackedPaths(result.stdout) : [],
+  };
+}
+
+function parseIgnoredUntrackedPaths(stdout) {
+  return String(stdout)
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => buildIgnoredDirtyPath(decodeGitPath(line), line));
+}
+
+function buildIgnoredDirtyPath(path, rawPath) {
+  return {
+    path,
+    original_path: null,
+    raw: `!! ${rawPath}`,
+    xy: "!!",
+    index_status: "!",
+    worktree_status: "!",
+    staged: false,
+    unstaged: false,
+    deleted: false,
+    conflicted: false,
+    ignored: true,
+    untracked: true,
+  };
+}
+
+function mergeDirtyPaths(...groups) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const group of groups) {
+    for (const entry of Array.isArray(group) ? group : []) {
+      const key = `${entry?.xy || ""}\u0000${entry?.path || ""}\u0000${entry?.original_path || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry);
+    }
+  }
+
+  return merged;
+}
+
+function normalizeObservationLine(stdout) {
+  return String(stdout)
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+}
+
+function normalizeErrorMessage(error) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string") return error;
+  return String(error ?? "");
 }
 
 function shellQuote(value) {

@@ -656,6 +656,31 @@ describe("factory cleanup", () => {
     cleanup(repo);
   });
 
+  it("does not remove forged worktree paths from unauthenticated cleanup manifests even when run_id and branch match", () => {
+    const repo = gitRepo();
+    const runDir = join(repo, ".opencode", "factory", "cleanup-run");
+    const worktree = join(repo, ".opencode", "worktrees", "cleanup-run");
+    mkdirSync(join(repo, ".opencode", "worktrees"), { recursive: true });
+    git(repo, ["worktree", "add", "-b", "cleanup-run", worktree, "HEAD"]);
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), completedRun({
+      run_id: "cleanup-run",
+      branch: "cleanup-run",
+      worktree: join(".opencode", "worktrees", "cleanup-run"),
+      base_ref: currentHeadRef(repo),
+      base_commit: head(repo),
+    }));
+
+    const result = cleanupRun("cleanup-run", { cwd: repo });
+
+    assert.equal(result.removed_run_dir, true);
+    assert.deepEqual(result.removed_worktrees, []);
+    assert.equal(result.skipped_worktrees[0].worktree, realpathSync.native(worktree));
+    assert.match(result.skipped_worktrees[0].reason, /authority/i);
+    assert.equal(existsSync(worktree), true);
+    cleanup(repo);
+  });
+
   it("does not delete forged branches that only match run_id or run_id--prefix without accepted authority", () => {
     const repo = gitRepo();
     const runId = "cleanup-run";

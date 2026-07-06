@@ -60,6 +60,8 @@ export const SAFE_GIT_PREFIX_ARGS = Object.freeze([
   "-c",
   "core.untrackedCache=false",
   "-c",
+  "core.fileMode=true",
+  "-c",
   `core.excludesFile=${NULL_DEVICE}`,
   "-c",
   `core.hooksPath=${NULL_DEVICE}`,
@@ -83,7 +85,7 @@ export function safeGit(cwd, args, options = {}) {
   const requestedArgs = normalizeArgs(args);
   validateSafeGitArgs(requestedArgs);
 
-  const commandArgs = [...SAFE_GIT_PREFIX_ARGS, ...requestedArgs];
+  const commandArgs = [...SAFE_GIT_PREFIX_ARGS, "-c", `core.worktree=${resolvedCwd}`, ...requestedArgs];
   const timeout = clampPositiveInteger(options.timeout, DEFAULT_SAFE_GIT_TIMEOUT_MS, MAX_SAFE_GIT_TIMEOUT_MS);
   const maxBuffer = clampPositiveInteger(options.maxBuffer, DEFAULT_SAFE_GIT_MAX_BUFFER, MAX_SAFE_GIT_MAX_BUFFER);
   let gitPath = null;
