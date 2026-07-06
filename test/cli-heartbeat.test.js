@@ -9,16 +9,39 @@ import { HEARTBEAT_PHASES } from "../src/validate.js";
 
 const RUN_ID = "heartbeat-liveness";
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const HEARTBEAT_OWNER = "heartbeat-owner-capability";
 
 describe("cli heartbeat routing", () => {
-  it("routes start, status, owner-bound once, and stop heartbeat commands", async () => {
+  it("rejects unauthorized start, foreground, and once heartbeat commands", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun());
+
+    try {
+      const start = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"]);
+      assert.notEqual(start.status, 0);
+      assert.match(start.stderr, /owner capability/i);
+
+      const foreground = runHeartbeatCli(repo, ["--foreground", "--token", "lease-1", "--phase", "builder-wave", "--json"]);
+      assert.notEqual(foreground.status, 0);
+      assert.match(foreground.stderr, /owner capability/i);
+
+      const once = runHeartbeatCli(repo, ["--once", "--token", "lease-1", "--json"]);
+      assert.notEqual(once.status, 0);
+      assert.match(once.stderr, /owner capability/i);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("routes authorized start, status, rejects public once, and stop heartbeat commands", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun());
 
     let started;
     try {
-      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--max-duration", "4000", "--json"]));
+      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--max-duration", "4000", "--json"], RUN_ID, heartbeatEnv()));
       assert.equal(started.run_id, RUN_ID);
       assert.equal(started.status, "running");
       assert.equal(started.phase, "builder-wave");
@@ -31,9 +54,9 @@ describe("cli heartbeat routing", () => {
 
       await sleep(20);
 
-      const once = jsonOutput(runHeartbeatCli(repo, ["--once", "--token", started.token, "--json"]));
-      assert.equal(once.updated, false);
-      assert.equal(once.reason, "heartbeat-owner-mismatch");
+      const once = runHeartbeatCli(repo, ["--once", "--token", started.token, "--json"]);
+      assert.notEqual(once.status, 0);
+      assert.match(once.stderr, /owner capability/i);
       assert.equal(readJson(join(runDir, "run.json")).heartbeat_at, firstRun.heartbeat_at);
 
       const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--token", started.token, "--wait-ms", "2500", "--json"]));
@@ -91,7 +114,7 @@ describe("cli heartbeat routing", () => {
     writeJson(join(runDir, "run.json"), runningRun({ gates: protectedGates("brief") }));
 
     try {
-      const proc = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"]);
+      const proc = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"], RUN_ID, heartbeatEnv());
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /protected gate 'brief'/i);
     } finally {
@@ -106,7 +129,7 @@ describe("cli heartbeat routing", () => {
 
     try {
       for (const phase of HEARTBEAT_PHASES) {
-        const started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", phase, "--interval", "1000", "--max-duration", "1000", "--json"]));
+        const started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", phase, "--interval", "1000", "--max-duration", "1000", "--json"], RUN_ID, heartbeatEnv()));
         const current = jsonOutput(runHeartbeatCli(repo, ["--status", "--json"]));
 
         assert.equal(started.phase, phase);
@@ -131,7 +154,7 @@ describe("cli heartbeat routing", () => {
 
     let started;
     try {
-      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--max-duration", "4000", "--json"]));
+      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--max-duration", "4000", "--json"], RUN_ID, heartbeatEnv()));
       const firstHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
 
       await waitFor(() => {
@@ -156,11 +179,11 @@ describe("cli heartbeat routing", () => {
     writeJson(join(runDir, "run.json"), runningRun());
 
     try {
-      const badPhase = runHeartbeatCli(repo, ["--start", "--phase", "unknown-phase", "--json"]);
+      const badPhase = runHeartbeatCli(repo, ["--start", "--phase", "unknown-phase", "--json"], RUN_ID, heartbeatEnv());
       assert.notEqual(badPhase.status, 0);
       assert.match(badPhase.stderr, /heartbeat phase must be one of/i);
 
-      const badInterval = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "0", "--json"]);
+      const badInterval = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "0", "--json"], RUN_ID, heartbeatEnv());
       assert.notEqual(badInterval.status, 0);
       assert.match(badInterval.stderr, /intervalMs must be a positive integer/i);
     } finally {
@@ -177,17 +200,23 @@ function tempRepo() {
 function createRunDir(repo) {
   const runDir = join(repo, ".opencode", "factory", RUN_ID);
   mkdirSync(runDir, { recursive: true });
+  writeJson(join(runDir, "factory.lock"), factoryLock());
   return runDir;
 }
 
-function runHeartbeatCli(repo, args, runId = RUN_ID) {
+function runHeartbeatCli(repo, args, runId = RUN_ID, env = {}) {
   const proc = spawnSync(process.execPath, [CLI, "factory", "heartbeat", runId, ...args], {
     cwd: repo,
     encoding: "utf8",
+    env: { ...process.env, ...env },
     timeout: 15000,
   });
   if (proc.error) throw proc.error;
   return proc;
+}
+
+function heartbeatEnv(overrides = {}) {
+  return { FEATURE_FACTORY_HEARTBEAT_OWNER: HEARTBEAT_OWNER, ...overrides };
 }
 
 function jsonOutput(proc) {
@@ -315,6 +344,17 @@ function readJson(path) {
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function factoryLock(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: RUN_ID,
+    heartbeat_owner: HEARTBEAT_OWNER,
+    session_owner: "session-1",
+    updated_at: "2026-07-06T11:00:00.000Z",
+    ...overrides,
+  };
 }
 
 function isProcessAlive(pid) {

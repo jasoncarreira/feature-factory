@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan, ValidationError } from "../src/validate.js";
+import { validateFactoryLock, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan, ValidationError } from "../src/validate.js";
 
 describe("validateRun", () => {
   it("accepts a running run with a pending gate", () => {
@@ -163,7 +163,34 @@ describe("validateHeartbeatState", () => {
   });
 });
 
+describe("validateFactoryLock", () => {
+  it("accepts a factory lock with a heartbeat owner capability", () => {
+    assert.equal(validateFactoryLock(factoryLock()).heartbeat_owner, "heartbeat-owner-capability");
+  });
+
+  it("rejects factory locks without a heartbeat owner capability", () => {
+    assert.throws(
+      () => validateFactoryLock(factoryLock({ heartbeat_owner: "   " })),
+      (error) => error instanceof ValidationError && error.message.includes("factory_lock.heartbeat_owner"),
+    );
+  });
+});
+
 describe("validateRunDir", () => {
+  it("validates factory.lock when present", () => {
+    const runDir = tempRunDir("heartbeat-liveness-lock");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "heartbeat-liveness" }));
+    writeJson(join(runDir, "factory.lock"), factoryLock({ run_id: "heartbeat-liveness" }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatState());
+
+    const result = validateRunDir(runDir);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.checks.length, 3);
+    cleanupTemp(runDir);
+  });
+
   it("validates heartbeat.json when present", () => {
     const runDir = tempRunDir("heartbeat-liveness");
     mkdirSync(runDir, { recursive: true });
@@ -265,6 +292,17 @@ function heartbeatState(overrides = {}) {
     last_tick_at: "2026-07-06T00:00:05.000Z",
     interval_ms: 5000,
     deadline_at: "2026-07-06T00:00:10.000Z",
+    ...overrides,
+  };
+}
+
+function factoryLock(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: "heartbeat-liveness",
+    heartbeat_owner: "heartbeat-owner-capability",
+    session_owner: "session-1",
+    updated_at: "2026-07-06T00:00:00.000Z",
     ...overrides,
   };
 }

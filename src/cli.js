@@ -9,16 +9,19 @@ import { fileURLToPath } from "node:url";
 import { cleanupRun, heartbeatStatus, listRuns, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectProvenance } from "./provenance.js";
-import { heartbeatOnce } from "./run-state.js";
-import { HEARTBEAT_PHASES, HEARTBEAT_PROTECTED_GATES } from "./validate.js";
+import { assertHeartbeatOwnerCapability, heartbeatOnce } from "./run-state.js";
+import { HEARTBEAT_PHASES, HEARTBEAT_PROTECTED_GATES, validateRun } from "./validate.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
 const HEARTBEAT_ACTIVE_STATUS_SET = new Set(["active", "running"]);
 const HEARTBEAT_PROTECTED_GATE_SET = new Set(HEARTBEAT_PROTECTED_GATES);
+const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
+const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
+const HEARTBEAT_OWNER_ENV = "FEATURE_FACTORY_HEARTBEAT_OWNER";
 
 function usage() {
   console.log(`feature-factory
@@ -30,7 +33,7 @@ Commands:
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory heartbeat <run-id> --once --token <token> [--json]  Internal owner-bound single tick
-  factory heartbeat <run-id> --start --phase <phase> [--interval MS] [--max-duration MS] [--json]
+  factory heartbeat <run-id> --start --phase <phase> [--interval MS] [--max-duration MS] [--json]  Internal owner-bound detached helper
   factory heartbeat <run-id> --stop --token <token> [--wait-ms MS] [--force] [--json]
   factory heartbeat <run-id> --status [--json]
   factory validate [run-id]     Validate run.json and plan/slices.json
@@ -114,6 +117,7 @@ async function heartbeat(args) {
       await heartbeatOnce(resolveRunDir(runId, opts), {
         token: requiredHeartbeatToken(opts, "heartbeat --once"),
         ownerPid: process.pid,
+        ownerCapability: requiredHeartbeatOwnerCapability(opts, "heartbeat --once"),
       }),
       opts,
     );
@@ -125,7 +129,11 @@ async function heartbeat(args) {
 
   if (mode === "foreground") {
     return print(
-      await startHeartbeat(runId, heartbeatStartConfig(opts), { cwd: opts.cwd, token: requiredHeartbeatToken(opts, "heartbeat --foreground") }),
+      await startHeartbeat(runId, heartbeatStartConfig(opts), {
+        cwd: opts.cwd,
+        token: requiredHeartbeatToken(opts, "heartbeat --foreground"),
+        ownerCapability: requiredHeartbeatOwnerCapability(opts, "heartbeat --foreground"),
+      }),
       opts,
     );
   }
@@ -171,6 +179,7 @@ function options(args) {
     stop: args.includes("--stop"),
     heartbeatStatus: args.includes("--status"),
     foreground: args.includes("--foreground"),
+    ownerCapability: process.env[HEARTBEAT_OWNER_ENV],
   };
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--repo") opts.cwd = resolve(args[++index]);
@@ -228,12 +237,19 @@ function heartbeatMode(opts) {
 
 async function startHeartbeatProcess(runId, opts) {
   const config = heartbeatStartConfig(opts);
+  const runDir = resolveRunDir(runId, opts);
+  const run = readHeartbeatStartRun(runDir);
   const current = status(runId, opts);
+  const ownerCapability = requiredHeartbeatOwnerCapability(opts, "heartbeat --start");
+  assertHeartbeatOwnerCapability(runDir, run.run_id, ownerCapability, "heartbeat --start");
   if (current.status !== "running") {
     throw new Error(`run '${current.run_id}' must be running to start a heartbeat`);
   }
   if (HEARTBEAT_PROTECTED_GATE_SET.has(current.pending_gate)) {
     throw new Error(`run '${current.run_id}' is waiting at protected gate '${current.pending_gate}'`);
+  }
+  if (!hasInFlightHeartbeatWork(run)) {
+    throw new Error(`run '${current.run_id}' has no in-flight factory work for heartbeat`);
   }
   const token = stringValue(opts.token) ? opts.token : randomUUID();
   const childArgs = [cliPath, "factory", "heartbeat", runId, "--foreground", "--token", token, "--phase", config.phase];
@@ -243,6 +259,7 @@ async function startHeartbeatProcess(runId, opts) {
   const child = spawn(process.execPath, childArgs, {
     cwd: opts.cwd,
     detached: true,
+    env: { ...process.env, [HEARTBEAT_OWNER_ENV]: ownerCapability },
     stdio: "ignore",
   });
   child.unref();
@@ -295,6 +312,11 @@ function requiredHeartbeatToken(opts, command) {
   return opts.token;
 }
 
+function requiredHeartbeatOwnerCapability(opts, command) {
+  if (!stringValue(opts.ownerCapability)) throw new Error(`${command} requires trusted heartbeat owner capability from factory.lock`);
+  return opts.ownerCapability.trim();
+}
+
 function resolveRunDir(runId, opts = {}) {
   const root = factoryRoot(opts.cwd || process.cwd());
   const dir = resolve(root, normalizeHeartbeatRunId(runId));
@@ -309,6 +331,20 @@ function publicHeartbeatStatus(runId, opts = {}) {
   const current = heartbeatStatus(runId, opts);
   if (!current) return null;
   return { ...current, token: null };
+}
+
+function readHeartbeatStartRun(runDir) {
+  return validateRun(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
+}
+
+function hasInFlightHeartbeatWork(run) {
+  if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) {
+    return true;
+  }
+  if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) {
+    return true;
+  }
+  return false;
 }
 
 function factoryRoot(cwd) {

@@ -38,6 +38,7 @@ describe("heartbeat docs contract", () => {
 
   it("documents the heartbeat helper, sidecar, lock, and monitoring semantics", () => {
     assert.match(SCHEMA, /heartbeat\.json/, "SCHEMA must document heartbeat.json");
+    assert.match(SCHEMA, /factory\.lock/, "SCHEMA must document factory.lock");
     assert.match(SCHEMA, /run-json\.lock\//, "SCHEMA must document run-json.lock/");
     assert.match(
       SCHEMA,
@@ -47,8 +48,17 @@ describe("heartbeat docs contract", () => {
 
     for (const [name, text] of documentEntries({ README, SPEC })) {
       assert.match(text, /feature-factory factory heartbeat <run-id> --status --json/, `${name} must document the heartbeat helper surface`);
+      assert.match(text, /factory\.lock/, `${name} must mention factory.lock`);
       assert.match(text, /heartbeat\.json/, `${name} must mention heartbeat.json monitoring`);
       assert.match(text, /terminal_result/, `${name} must explain terminal monitoring semantics`);
+    }
+  });
+
+  it("documents owner-bound heartbeat authority instead of treating heartbeat.json as authority", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /trusted heartbeat owner capability/i, `${name} must require trusted heartbeat owner capability`);
+      assert.match(text, /factory\.lock/, `${name} must source heartbeat authority from factory.lock`);
+      assert.match(text, /not.*heartbeat\.json.*authority|heartbeat\.json.*not.*authority/i, `${name} must treat heartbeat.json as data, not authority`);
     }
   });
 });
