@@ -94,6 +94,38 @@ describe("factory cleanup", () => {
     cleanup(repo);
   });
 
+  it("refuses to remove explicit run directories outside the factory root", () => {
+    const repo = tempRepo();
+    const external = tempRepo();
+    writeJson(join(external, "run.json"), completedRun({ run_id: "external-run", branch: null, worktree: null }));
+
+    assert.throws(() => cleanupRun(external, { cwd: repo }), /inside \.opencode\/factory/);
+    assert.equal(existsSync(external), true);
+    cleanup(repo);
+    cleanup(external);
+  });
+
+  it("does not force-delete unmerged branches for non-completed terminal runs", () => {
+    const repo = gitRepo();
+    const runDir = join(repo, ".opencode", "factory", "blocked-run");
+    git(repo, ["checkout", "-b", "blocked-run"]);
+    writeFileSync(join(repo, "blocked.txt"), "blocked\n", "utf8");
+    git(repo, ["add", "blocked.txt"]);
+    git(repo, ["-c", "user.name=Feature Factory Test", "-c", "user.email=factory@example.com", "commit", "-m", "blocked work"]);
+    git(repo, ["checkout", "-"]);
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), completedRun({ run_id: "blocked-run", branch: "blocked-run", worktree: null, status: "blocked" }));
+
+    const result = cleanupRun("blocked-run", { cwd: repo });
+
+    assert.equal(result.removed_run_dir, true);
+    assert.deepEqual(result.deleted_branches, []);
+    assert.equal(result.skipped_branches[0].branch, "blocked-run");
+    assert.match(result.skipped_branches[0].reason, /not fully merged|not deleted|not merged/i);
+    assert.equal(gitStatus(repo, ["show-ref", "--verify", "refs/heads/blocked-run"]), 0);
+    cleanup(repo);
+  });
+
   it("previews cleanup without removing files in dry-run mode", () => {
     const repo = tempRepo();
     const runDir = join(repo, ".opencode", "factory", "dry-run");
@@ -149,20 +181,21 @@ function runningRun() {
 }
 
 function completedRun(input) {
+  const status = input.status || "completed";
   return {
     schema_version: 1,
     run_id: input.run_id,
     mode: "headless",
-    status: "completed",
+    status,
     branch: input.branch,
     worktree: input.worktree,
     updated_at: "2026-07-05T00:00:00.000Z",
     gates: {},
     terminal_result: {
-      status: "completed",
+      status,
       run_id: input.run_id,
       pr_url: null,
-      reason: null,
+      reason: status === "completed" ? null : `${status} run`,
       summary: "done",
       artifacts: {},
     },

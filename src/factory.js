@@ -111,6 +111,9 @@ export function validateState(runId, opts = {}) {
 export function cleanupRun(runId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
+  if (!insideFactoryRoot(repo, runDir)) {
+    throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
+  }
   const run = readRunFile(join(runDir, "run.json"));
   if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
     throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
@@ -129,7 +132,7 @@ export function cleanupRun(runId, opts = {}) {
   };
 
   for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts);
-  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts);
+  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts, run.status);
 
   if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
   result.removed_run_dir = !opts.dryRun;
@@ -164,7 +167,7 @@ function removeWorktree(repo, worktree, result, opts) {
   result.removed_worktrees.push(resolved);
 }
 
-function deleteBranch(repo, branch, result, opts) {
+function deleteBranch(repo, branch, result, opts, runStatus) {
   const name = String(branch).trim();
   if (!name) return;
   const current = spawnSync("git", ["branch", "--show-current"], { cwd: repo, encoding: "utf8" }).stdout?.trim();
@@ -177,8 +180,13 @@ function deleteBranch(repo, branch, result, opts) {
     result.skipped_branches.push({ branch: name, reason: "missing" });
     return;
   }
+  const deleteFlag = runStatus === "completed" || opts.force ? "-D" : "-d";
+  if (opts.dryRun && deleteFlag === "-d" && !branchMergedIntoHead(repo, name)) {
+    result.skipped_branches.push({ branch: name, reason: "not merged; use --force to delete" });
+    return;
+  }
   if (!opts.dryRun) {
-    const proc = spawnSync("git", ["branch", "-D", name], { cwd: repo, encoding: "utf8" });
+    const proc = spawnSync("git", ["branch", deleteFlag, name], { cwd: repo, encoding: "utf8" });
     if (proc.status !== 0) {
       result.skipped_branches.push({ branch: name, reason: (proc.stderr || proc.stdout || "git branch delete failed").trim() });
       return;
@@ -187,9 +195,20 @@ function deleteBranch(repo, branch, result, opts) {
   result.deleted_branches.push(name);
 }
 
+function branchMergedIntoHead(repo, branch) {
+  return spawnSync("git", ["merge-base", "--is-ancestor", branch, "HEAD"], { cwd: repo, encoding: "utf8" }).status === 0;
+}
+
+function insideFactoryRoot(repo, runDir) {
+  return insideDirectory(resolve(repo, ".opencode", "factory"), runDir);
+}
+
 function insideWorktreeRoot(repo, worktree) {
-  const root = physicalPath(resolve(repo, ".opencode", "worktrees"));
-  const rel = relative(root, physicalPath(worktree));
+  return insideDirectory(resolve(repo, ".opencode", "worktrees"), worktree);
+}
+
+function insideDirectory(parent, child) {
+  const rel = relative(physicalPath(parent), physicalPath(child));
   return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
