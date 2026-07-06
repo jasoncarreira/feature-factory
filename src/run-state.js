@@ -1,8 +1,8 @@
 import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
+import { pendingProtectedGate, validateFactoryLock, validateHeartbeatState, validateRun } from "./validate.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -13,6 +13,7 @@ const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
 const LOCK_DIR = "run-json.lock";
 const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
+const FACTORY_LOCK_FILE = "factory.lock";
 const HEARTBEAT_FILE = "heartbeat.json";
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
@@ -75,7 +76,7 @@ export async function mutateRunJsonLocked(runDir, mutator, options = {}) {
   );
 }
 
-export async function heartbeatOnce(runDir, { token, ownerPid, now } = {}, options = {}) {
+export async function heartbeatOnce(runDir, { token, ownerPid, ownerCapability, now } = {}, options = {}) {
   if (!stringValue(token)) throw new Error("heartbeatOnce requires a token");
   const heartbeatOwnerPid = normalizeHeartbeatOwnerPid(ownerPid);
   const heartbeatAt = normalizeTimestamp(now);
@@ -84,6 +85,7 @@ export async function heartbeatOnce(runDir, { token, ownerPid, now } = {}, optio
     runDir,
     async () => {
       const current = await readRunJson(runDir);
+      assertHeartbeatOwnerCapability(runDir, current.run_id, ownerCapability, "heartbeatOnce");
       if (TERMINAL_RUN_STATUSES.has(current.status)) {
         return { updated: false, reason: "terminal-status", status: current.status, run: current };
       }
@@ -111,6 +113,27 @@ export async function heartbeatOnce(runDir, { token, ownerPid, now } = {}, optio
     },
     options,
   );
+}
+
+export function assertHeartbeatOwnerCapability(runDir, runId, ownerCapability, command = "heartbeat") {
+  const file = join(runDir, FACTORY_LOCK_FILE);
+  if (!existsSync(file)) throw new Error(`missing factory.lock for run '${runId}'`);
+
+  let factoryLock;
+  try {
+    factoryLock = validateFactoryLock(JSON.parse(readFileSync(file, "utf8")));
+  } catch (error) {
+    throw new Error(`invalid factory.lock for run '${runId}': ${error.message}`);
+  }
+
+  if (factoryLock.run_id !== runId) throw new Error(`invalid factory.lock for run '${runId}': run id mismatch`);
+
+  const capability = normalizeHeartbeatOwnerCapability(ownerCapability, command);
+  if (factoryLock.heartbeat_owner !== capability) {
+    throw new Error(`${command} requires trusted heartbeat owner capability from factory.lock`);
+  }
+
+  return factoryLock;
 }
 
 async function readRunJson(runDir) {
@@ -216,6 +239,11 @@ function normalizePositiveInteger(value, fallback) {
 function normalizeHeartbeatOwnerPid(ownerPid) {
   if (!Number.isInteger(ownerPid) || ownerPid <= 0) throw new Error("heartbeatOnce requires ownerPid");
   return ownerPid;
+}
+
+function normalizeHeartbeatOwnerCapability(ownerCapability, command) {
+  if (!stringValue(ownerCapability)) throw new Error(`${command} requires trusted heartbeat owner capability from factory.lock`);
+  return ownerCapability.trim();
 }
 
 function cloneJson(value) {

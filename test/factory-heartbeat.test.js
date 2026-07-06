@@ -7,6 +7,7 @@ import { heartbeatStatus, startHeartbeat, stopHeartbeat } from "../src/factory.j
 import { HEARTBEAT_PHASES } from "../src/validate.js";
 
 const RUN_ID = "heartbeat-liveness";
+const HEARTBEAT_OWNER = "heartbeat-owner-capability";
 
 describe("factory heartbeat lifecycle", () => {
   it("rejects path-like heartbeat run ids", async () => {
@@ -17,7 +18,7 @@ describe("factory heartbeat lifecycle", () => {
     try {
       assert.throws(() => heartbeatStatus(runDir, { cwd: repo }), /bare <run-id>|inside \.opencode\/factory/i);
       await assert.rejects(
-        startHeartbeat(runDir, { phase: "builder-wave", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo }),
+        startHeartbeat(runDir, { phase: "builder-wave", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo)),
         /bare <run-id>|inside \.opencode\/factory/i,
       );
       await assert.rejects(stopHeartbeat(runDir, { token: "lease-1", waitMs: 25 }, { cwd: repo }), /bare <run-id>|inside \.opencode\/factory/i);
@@ -34,13 +35,35 @@ describe("factory heartbeat lifecycle", () => {
 
       try {
         await assert.rejects(
-          startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo }),
+          startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo)),
           new RegExp(`protected gate '${gate}'`, "i"),
         );
         assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }), null, gate);
       } finally {
         cleanup(repo);
       }
+    }
+  });
+
+  it("refuses to start when the manifest shows no in-flight factory work", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(
+      join(runDir, "run.json"),
+      runningRun({
+        steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md" }],
+        slices: [{ id: "factory-heartbeat-lifecycle", stack: "backend", depends_on: [], status: "merged", attempts: 1 }],
+      }),
+    );
+
+    try {
+      await assert.rejects(
+        startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo)),
+        /no in-flight factory work/i,
+      );
+      assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }), null);
+    } finally {
+      cleanup(repo);
     }
   });
 
@@ -58,7 +81,7 @@ describe("factory heartbeat lifecycle", () => {
     try {
       assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }), null);
 
-      lease = await startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 25, maxDurationMs: 5000 }, { cwd: repo });
+      lease = await startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 25, maxDurationMs: 5000 }, heartbeatStartOpts(repo));
 
       const storedRun = readJson(join(runDir, "run.json"));
       const storedLease = readJson(join(runDir, "heartbeat.json"));
@@ -69,7 +92,7 @@ describe("factory heartbeat lifecycle", () => {
       assert.deepEqual(storedRun, { ...original, heartbeat_at: storedLease.last_tick_at });
 
       await assert.rejects(
-        startHeartbeat(RUN_ID, { phase: "slice-review", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo }),
+        startHeartbeat(RUN_ID, { phase: "slice-review", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo)),
         /heartbeat already active/i,
       );
     } finally {
@@ -85,7 +108,7 @@ describe("factory heartbeat lifecycle", () => {
 
     let lease;
     try {
-      lease = await startHeartbeat(RUN_ID, { phase: "slice-review", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+      lease = await startHeartbeat(RUN_ID, { phase: "slice-review", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo));
 
       const stopped = await stopHeartbeat(RUN_ID, { token: lease.token, waitMs: 300 }, { cwd: repo });
       assert.equal(stopped.status, "stopped");
@@ -108,7 +131,7 @@ describe("factory heartbeat lifecycle", () => {
 
     let lease;
     try {
-      lease = await startHeartbeat(RUN_ID, { phase: "test-verifier", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+      lease = await startHeartbeat(RUN_ID, { phase: "test-verifier", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo));
       const firstHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
 
       await waitFor(() => readJson(join(runDir, "run.json")).heartbeat_at !== firstHeartbeatAt, { timeoutMs: 2500 });
@@ -134,7 +157,7 @@ describe("factory heartbeat lifecycle", () => {
 
       let lease;
       try {
-        lease = await startHeartbeat(RUN_ID, { phase, intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+        lease = await startHeartbeat(RUN_ID, { phase, intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo));
         const firstHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
 
         await waitFor(() => readJson(join(runDir, "run.json")).heartbeat_at !== firstHeartbeatAt, { timeoutMs: 2500 });
@@ -157,7 +180,7 @@ describe("factory heartbeat lifecycle", () => {
 
       let lease;
       try {
-        lease = await startHeartbeat(RUN_ID, { phase: "security-reviewer", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+        lease = await startHeartbeat(RUN_ID, { phase: "security-reviewer", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo));
 
         const terminal = terminalRun(status, { heartbeat_at: readJson(join(runDir, "run.json")).heartbeat_at });
         writeJson(join(runDir, "run.json"), terminal);
@@ -180,7 +203,7 @@ describe("factory heartbeat lifecycle", () => {
     writeJson(join(runDir, "run.json"), runningRun());
 
     try {
-      await startHeartbeat(RUN_ID, { phase: "remediation", intervalMs: 1000, maxDurationMs: 1000 }, { cwd: repo });
+      await startHeartbeat(RUN_ID, { phase: "remediation", intervalMs: 1000, maxDurationMs: 1000 }, heartbeatStartOpts(repo));
 
       await waitFor(() => heartbeatStatus(RUN_ID, { cwd: repo })?.status === "stopped", { timeoutMs: 2500 });
 
@@ -191,13 +214,20 @@ describe("factory heartbeat lifecycle", () => {
     }
   });
 
-  it("can force stop an unresponsive lease", async () => {
+  it("requires token ownership before force stop and can force stop an unresponsive lease", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun());
     writeJson(join(runDir, "heartbeat.json"), heartbeatLease({ token: "force-lease", pid: process.pid }));
 
     try {
+      await assert.rejects(
+        stopHeartbeat(RUN_ID, { token: "forged-lease", waitMs: 25, force: true }, { cwd: repo }),
+        /heartbeat token mismatch/i,
+      );
+
+      assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }).status, "running");
+
       await assert.rejects(
         stopHeartbeat(RUN_ID, { token: "force-lease", waitMs: 25 }, { cwd: repo }),
         /timed out waiting for heartbeat/i,
@@ -221,7 +251,7 @@ describe("factory heartbeat lifecycle", () => {
 
     try {
       for (const phase of HEARTBEAT_PHASES) {
-        const lease = await startHeartbeat(RUN_ID, { phase, intervalMs: 1000, maxDurationMs: 2000 }, { cwd: repo });
+        const lease = await startHeartbeat(RUN_ID, { phase, intervalMs: 1000, maxDurationMs: 2000 }, heartbeatStartOpts(repo));
         assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }).phase, phase);
         await stopHeartbeat(RUN_ID, { token: lease.token, waitMs: 300 }, { cwd: repo });
       }
@@ -238,7 +268,7 @@ describe("factory heartbeat lifecycle", () => {
 
     let lease;
     try {
-      lease = await startHeartbeat(RUN_ID, { phase: "security-reviewer", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+      lease = await startHeartbeat(RUN_ID, { phase: "security-reviewer", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo));
       writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: readJson(join(runDir, "run.json")).heartbeat_at, gates: protectedGates("pre_pr") }));
 
       await waitFor(() => heartbeatStatus(RUN_ID, { cwd: repo })?.status === "stopped", { timeoutMs: 2500 });
@@ -258,7 +288,12 @@ function tempRepo() {
 function createRunDir(repo) {
   const runDir = join(repo, ".opencode", "factory", RUN_ID);
   mkdirSync(runDir, { recursive: true });
+  writeJson(join(runDir, "factory.lock"), factoryLock());
   return runDir;
+}
+
+function heartbeatStartOpts(repo, overrides = {}) {
+  return { cwd: repo, ownerCapability: HEARTBEAT_OWNER, ...overrides };
 }
 
 async function stopIfActive(repo, token) {
@@ -378,6 +413,17 @@ function heartbeatLease(overrides = {}) {
     interval_ms: 1000,
     deadline_at: new Date(Date.now() + 10_000).toISOString(),
     stop_reason: null,
+    ...overrides,
+  };
+}
+
+function factoryLock(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: RUN_ID,
+    heartbeat_owner: HEARTBEAT_OWNER,
+    session_owner: "session-1",
+    updated_at: new Date(Date.now() - 1000).toISOString(),
     ...overrides,
   };
 }

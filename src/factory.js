@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSyn
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
-import { heartbeatOnce, withRunJsonLock } from "./run-state.js";
+import { assertHeartbeatOwnerCapability, heartbeatOnce, withRunJsonLock } from "./run-state.js";
 import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -19,6 +19,9 @@ const HEARTBEAT_TICK_LOCK_TIMEOUT_MS = 1000;
 const HEARTBEAT_ACTIVE_STATUSES = new Set(["active", "running"]);
 const HEARTBEAT_TERMINAL_STATUSES = new Set(["stopped", "error"]);
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
+const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
+const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
+const HEARTBEAT_OWNER_ENV = "FEATURE_FACTORY_HEARTBEAT_OWNER";
 const activeHeartbeatLoops = new Map();
 
 export function startFactory(args, opts = {}) {
@@ -98,16 +101,21 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
   const maxDurationMs = normalizeHeartbeatDuration(config.maxDurationMs);
   const startedAt = timestamp(opts.now);
   const token = String(opts.token || randomUUID());
+  const ownerCapability = resolveHeartbeatOwnerCapability(opts, "startHeartbeat");
   let lease;
 
   await withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
+    assertHeartbeatOwnerCapability(runDir, run.run_id, ownerCapability, "startHeartbeat");
     if (run.status !== "running") {
       throw new Error(`run '${run.run_id}' must be running to start a heartbeat`);
     }
     const protectedGate = pendingProtectedGate(run);
     if (protectedGate) {
       throw new Error(`run '${run.run_id}' is waiting at protected gate '${protectedGate}'`);
+    }
+    if (!hasInFlightHeartbeatWork(run)) {
+      throw new Error(`run '${run.run_id}' has no in-flight factory work for heartbeat`);
     }
 
     const current = tryReadHeartbeatFile(heartbeatFile);
@@ -134,7 +142,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     writeHeartbeatFile(heartbeatFile, lease);
   });
 
-  const runtime = createHeartbeatRuntime(runDir, lease, opts);
+  const runtime = createHeartbeatRuntime(runDir, lease, { ...opts, ownerCapability });
   activeHeartbeatLoops.set(runDir, runtime);
   runtime.loopPromise = runHeartbeatLoop(runtime);
 
@@ -164,7 +172,10 @@ export async function stopHeartbeat(runId, config = {}, opts = {}) {
     }
 
     const lease = current.value;
-    if (requestedToken && lease.token !== requestedToken && !force) {
+    if (!requestedToken) {
+      throw new Error(`heartbeat token required for run '${lease.run_id}'`);
+    }
+    if (lease.token !== requestedToken) {
       throw new Error(`heartbeat token mismatch for run '${lease.run_id}'`);
     }
     if (HEARTBEAT_TERMINAL_STATUSES.has(lease.status)) {
@@ -513,12 +524,31 @@ function featureCommandPayload(prompt, opts) {
   };
 }
 
+function hasInFlightHeartbeatWork(run) {
+  if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) {
+    return true;
+  }
+  if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) {
+    return true;
+  }
+  return false;
+}
+
+function resolveHeartbeatOwnerCapability(opts = {}, command = "heartbeat") {
+  const ownerCapability = stringValue(opts.ownerCapability) ? opts.ownerCapability : process.env[HEARTBEAT_OWNER_ENV];
+  if (!stringValue(ownerCapability)) {
+    throw new Error(`${command} requires trusted heartbeat owner capability from factory.lock`);
+  }
+  return ownerCapability.trim();
+}
+
 function createHeartbeatRuntime(runDir, lease, opts) {
   return {
     runDir,
     runId: lease.run_id,
     token: lease.token,
     ownerPid: lease.pid,
+    ownerCapability: opts.ownerCapability,
     intervalMs: lease.interval_ms,
     tickTimeoutMs: normalizePositiveInteger(opts.tickTimeoutMs, HEARTBEAT_TICK_LOCK_TIMEOUT_MS, "tickTimeoutMs"),
     firstTick: deferred(),
@@ -578,7 +608,11 @@ async function heartbeatTick(runtime) {
 
   let result;
   try {
-    result = await heartbeatOnce(runtime.runDir, { token: runtime.token, ownerPid: runtime.ownerPid, now }, { timeoutMs: runtime.tickTimeoutMs });
+    result = await heartbeatOnce(
+      runtime.runDir,
+      { token: runtime.token, ownerPid: runtime.ownerPid, ownerCapability: runtime.ownerCapability, now },
+      { timeoutMs: runtime.tickTimeoutMs },
+    );
   } catch (error) {
     if (isRunJsonLockTimeout(error)) {
       return await stopHeartbeatLoopForError(runtime, now, error.message);

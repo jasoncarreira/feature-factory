@@ -109,9 +109,25 @@ export function validateHeartbeatState(heartbeat) {
   return heartbeat;
 }
 
+export function validateFactoryLock(factoryLock) {
+  const errors = [];
+  if (!isRecord(factoryLock)) return fail([{ path: "factory_lock", message: "must be an object" }]);
+
+  requiredInteger(errors, factoryLock, "schema_version", "factory_lock.schema_version");
+  requiredString(errors, factoryLock, "run_id", "factory_lock.run_id");
+  requiredString(errors, factoryLock, "heartbeat_owner", "factory_lock.heartbeat_owner");
+  optionalString(errors, factoryLock, "session_owner", "factory_lock.session_owner");
+  optionalString(errors, factoryLock, "updated_at", "factory_lock.updated_at");
+
+  if (errors.length) fail(errors);
+  return factoryLock;
+}
+
 export function validateRunDir(runDir) {
   const checks = [];
   checks.push(validateFile(join(runDir, "run.json"), validateRun));
+  const factoryLockPath = join(runDir, "factory.lock");
+  if (existsSync(factoryLockPath)) checks.push(validateFile(factoryLockPath, validateFactoryLock));
   const heartbeatPath = join(runDir, "heartbeat.json");
   if (existsSync(heartbeatPath)) checks.push(validateFile(heartbeatPath, validateHeartbeatState));
   const slicesPath = join(runDir, "plan", "slices.json");

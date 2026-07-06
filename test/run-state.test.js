@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { heartbeatOnce, mutateRunJsonLocked, withRunJsonLock } from "../src/run-state.js";
 
+const HEARTBEAT_OWNER = "heartbeat-owner-capability";
+
 describe("withRunJsonLock", () => {
   it("writes owner metadata and cleans up the lock when the callback fails", async () => {
     const fixture = createRunFixture();
@@ -135,12 +137,14 @@ describe("heartbeatOnce", () => {
       terminal_result: null,
     });
     writeJson(join(fixture.runDir, "run.json"), original);
+    writeJson(join(fixture.runDir, "factory.lock"), factoryLock());
     writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
 
     try {
       const result = await heartbeatOnce(fixture.runDir, {
         token: "lease-1",
         ownerPid: 4242,
+        ownerCapability: HEARTBEAT_OWNER,
         now: "2026-07-06T12:00:00.000Z",
       });
 
@@ -157,6 +161,7 @@ describe("heartbeatOnce", () => {
 
   it("skips terminal runs without masking the terminal state", async () => {
     const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "factory.lock"), factoryLock());
     writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
 
     try {
@@ -167,6 +172,7 @@ describe("heartbeatOnce", () => {
         const result = await heartbeatOnce(fixture.runDir, {
           token: "lease-1",
           ownerPid: 4242,
+          ownerCapability: HEARTBEAT_OWNER,
           now: "2026-07-06T12:10:00.000Z",
         });
 
@@ -183,6 +189,7 @@ describe("heartbeatOnce", () => {
 
   it("skips missing, invalid, expired, and nonmatching heartbeat leases", async () => {
     const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "factory.lock"), factoryLock());
 
     try {
       for (const scenario of [
@@ -271,6 +278,7 @@ describe("heartbeatOnce", () => {
         const result = await heartbeatOnce(fixture.runDir, {
           token: "lease-1",
           ownerPid: 4242,
+          ownerCapability: HEARTBEAT_OWNER,
           now: "2026-07-06T12:00:00.000Z",
         });
 
@@ -286,6 +294,7 @@ describe("heartbeatOnce", () => {
 
   it("refuses to tick while story, brief, or pre_pr gates are pending", async () => {
     const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "factory.lock"), factoryLock());
     writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
 
     try {
@@ -302,6 +311,7 @@ describe("heartbeatOnce", () => {
         const result = await heartbeatOnce(fixture.runDir, {
           token: "lease-1",
           ownerPid: 4242,
+          ownerCapability: HEARTBEAT_OWNER,
           now: "2026-07-06T12:00:00.000Z",
         });
 
@@ -310,6 +320,39 @@ describe("heartbeatOnce", () => {
         assert.equal(result.gate, gate, gate);
         assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current, gate);
       }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("requires the trusted heartbeat owner capability from factory.lock", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+    writeJson(join(fixture.runDir, "factory.lock"), factoryLock());
+    writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
+
+    try {
+      await assert.rejects(
+        heartbeatOnce(fixture.runDir, {
+          token: "lease-1",
+          ownerPid: 4242,
+          now: "2026-07-06T12:00:00.000Z",
+        }),
+        /owner capability/i,
+      );
+
+      await assert.rejects(
+        heartbeatOnce(fixture.runDir, {
+          token: "lease-1",
+          ownerPid: 4242,
+          ownerCapability: "forged-owner-capability",
+          now: "2026-07-06T12:00:00.000Z",
+        }),
+        /owner capability/i,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
     } finally {
       fixture.cleanup();
     }
@@ -407,6 +450,17 @@ function heartbeatLease(overrides = {}) {
     interval_ms: 5000,
     deadline_at: "2026-07-06T12:30:00.000Z",
     stop_reason: null,
+    ...overrides,
+  };
+}
+
+function factoryLock(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: "heartbeat-liveness",
+    heartbeat_owner: HEARTBEAT_OWNER,
+    session_owner: "session-1",
+    updated_at: "2026-07-06T11:00:00.000Z",
     ...overrides,
   };
 }
