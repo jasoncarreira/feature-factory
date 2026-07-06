@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -199,6 +199,40 @@ describe("provenance authority", () => {
       assert.match(joinErrors(result), /accepted attestation not found/u);
     } finally {
       cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects merge-chain base attestation refs that are unindexed or mismatched even when the hash matches the real run-base", () => {
+    const scenarios = [
+      {
+        name: "unindexed",
+        mutate(run) {
+          writeAttestation(run.runDir, "attestations/run-base-copy.json", run.runBase);
+          rewriteMergeChainBaseAttestationRef(run.runDir, "attestations/run-base-copy.json");
+        },
+        error: /accepted attestation not found/u,
+      },
+      {
+        name: "mismatched",
+        mutate(run) {
+          rewriteMergeChainBaseAttestationRef(run.runDir, run.slices[0].sliceAttestationRef);
+        },
+        error: /must match attestation|must match .*slice-1/u,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const fixture = createHistoryFixture();
+      try {
+        const run = buildAuthorityRun(fixture, `base-attestation-ref-${scenario.name}`);
+        scenario.mutate(run);
+
+        const result = validateProvenanceAuthority(run.runDir);
+        assert.equal(result.ok, false, `expected ${scenario.name} base attestation ref to fail`);
+        assert.match(joinErrors(result), scenario.error);
+      } finally {
+        cleanup(fixture.repoRoot);
+      }
     }
   });
 
@@ -806,6 +840,26 @@ function createBareRunDir(root, runId) {
 
 function writeAttestation(runDir, ref, value) {
   writeJson(join(runDir, ...ref.split("/")), value);
+}
+
+function rewriteMergeChainBaseAttestationRef(runDir, baseAttestationRef) {
+  const mergeChainPath = join(runDir, "attestations", "merge-chain.json");
+  const indexPath = join(runDir, "attestations", "index.json");
+  const mergeChain = JSON.parse(readFileSync(mergeChainPath, "utf8"));
+  const rewrittenMergeChain = withAttestationHash({
+    ...mergeChain,
+    bindings: {
+      ...mergeChain.bindings,
+      base_attestation_ref: baseAttestationRef,
+    },
+  });
+  writeJson(mergeChainPath, rewrittenMergeChain);
+
+  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+  const mergeChainEntry = index.entries.find((entry) => entry.ref === "attestations/merge-chain.json");
+  assert.ok(mergeChainEntry, "merge-chain index entry must exist");
+  mergeChainEntry.attestation_hash = rewrittenMergeChain.attestation_hash;
+  writeJson(indexPath, index);
 }
 
 function writeJson(path, value) {

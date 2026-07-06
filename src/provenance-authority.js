@@ -1306,10 +1306,6 @@ function validateDirectReviewedCommitEntry({ entry, previousCommit, commitObserv
 
 function resolveBaseAttestationForMergeChain(bindings, context) {
   const acceptedAttestations = context.acceptedAttestations || {};
-  if (context.runBase && context.runBase.attestation_hash === bindings.base_attestation_hash) {
-    return { ok: true, attestation: context.runBase };
-  }
-
   const record = acceptedAttestations[bindings.base_attestation_ref];
   if (!record) {
     return {
