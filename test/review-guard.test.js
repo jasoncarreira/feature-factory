@@ -221,6 +221,80 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("does not let submodule.<name>.ignore=all hide submodule-local ignored untracked files", () => {
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
+      submoduleFixtures: {
+        ".gitignore": "ignored-inside.txt\n",
+        "tracked.txt": "tracked.txt\n",
+      },
+    });
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      writeFileSync(join(submodulePath, "ignored-inside.txt"), "new\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), ["review-submodule/ignored-inside.txt"]);
+      assert.equal(result.dirty_paths[0].ignored, true);
+      assert.equal(result.dirty_paths[0].untracked, true);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("does not let submodule.<name>.ignore=all hide submodule-local hidden index flags", () => {
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
+      submoduleFixtures: {
+        "assume.txt": "assume.txt\n",
+        "skip.txt": "skip.txt\n",
+      },
+    });
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      git(submodulePath, ["update-index", "--assume-unchanged", "assume.txt"]);
+      git(submodulePath, ["update-index", "--skip-worktree", "skip.txt"]);
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.dirty_paths, []);
+      assert.deepEqual(result.hidden_index_paths, [
+        {
+          path: "review-submodule/assume.txt",
+          tag: "h",
+          assume_unchanged: true,
+          skip_worktree: false,
+        },
+        {
+          path: "review-submodule/skip.txt",
+          tag: "S",
+          assume_unchanged: false,
+          skip_worktree: true,
+        },
+      ]);
+    } finally {
+      cleanup(root);
+    }
+  });
+
   it("blocks non-git worktrees as unverifiable", () => {
     const dir = mkdtempSync(join(tmpdir(), "review-guard-nongit-"));
 
@@ -305,6 +379,9 @@ describe("checkReviewedWorktreeClean", () => {
           if (args[args.length - 1] === "--exclude-standard") {
             return { status: 0, stdout: "", stderr: "" };
           }
+          if (args[args.length - 1] === "--stage") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
 
           throw new Error(`unexpected git args: ${args.join(" ")}`);
         },
@@ -319,6 +396,7 @@ describe("checkReviewedWorktreeClean", () => {
         expectedSafeGitArgs(repo, ["rev-parse", "HEAD", "HEAD^{tree}"]),
         expectedSafeGitArgs(repo, ["ls-files", "-v"]),
         expectedSafeGitArgs(repo, ["ls-files", "--others", "--ignored", "--exclude-standard"]),
+        expectedSafeGitArgs(repo, ["ls-files", "--stage"]),
       ]);
       for (const call of calls) {
         assert.equal(call.options.shell, false);
@@ -382,7 +460,7 @@ function createCommittedRepo(files = ["tracked.txt"]) {
   return repo;
 }
 
-function createCommittedRepoWithSubmodule() {
+function createCommittedRepoWithSubmodule({ submoduleFixtures = { "tracked.txt": "tracked.txt\n" } } = {}) {
   const root = mkdtempSync(join(tmpdir(), "review-guard-submodule-"));
   const submoduleSource = join(root, "submodule-source");
   const repo = join(root, "super-repo");
@@ -393,7 +471,9 @@ function createCommittedRepoWithSubmodule() {
   mkdirSync(repo, { recursive: true });
 
   git(submoduleSource, ["init"]);
-  writeFixture(submoduleSource, "tracked.txt", "tracked.txt\n");
+  for (const [file, content] of Object.entries(submoduleFixtures)) {
+    writeFixture(submoduleSource, file, content);
+  }
   git(submoduleSource, ["add", "."]);
   git(submoduleSource, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-m", "initial submodule"]);
 

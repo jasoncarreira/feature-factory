@@ -12,7 +12,7 @@ import {
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { cleanupRun, listRuns, startFactory, status, validateState, watchRun, writeGateAnswer } from "../src/factory.js";
@@ -482,6 +482,44 @@ describe("factory gate answers", () => {
     } finally {
       cleanup(repo);
       cleanup(outsideRoot);
+    }
+  });
+
+  it("replaces pre-existing hardlinked answer paths without mutating outside linked files", () => {
+    const repo = tempRepo();
+    const outsideRoot = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "gate-answer-hardlink");
+    const outsideAnswerPath = join(outsideRoot, "story.answer");
+    mkdirSync(join(runDir, "gates"), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-hardlink", slices: [] }));
+    writeFileSync(outsideAnswerPath, "outside\n", "utf8");
+    linkSync(outsideAnswerPath, join(runDir, "gates", "story.answer"));
+
+    try {
+      const result = writeGateAnswer(runDir, "story", "approve", { cwd: repo });
+      const expectedAnswerPath = join(realpathSync.native(runDir), "gates", "story.answer");
+
+      assert.equal(result.path, expectedAnswerPath);
+      assert.equal(readFileSync(expectedAnswerPath, "utf8"), "approve\n");
+      assert.equal(readFileSync(outsideAnswerPath, "utf8"), "outside\n");
+    } finally {
+      cleanup(repo);
+      cleanup(outsideRoot);
+    }
+  });
+
+  it("cleans temporary gate-answer files when rename over the target fails", () => {
+    const repo = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "gate-answer-temp-cleanup");
+    const gatesDir = join(runDir, "gates");
+    mkdirSync(join(gatesDir, "story.answer"), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-temp-cleanup", slices: [] }));
+
+    try {
+      assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /rename|directory|EISDIR|ENOTDIR|ENOTEMPTY/u);
+      assert.deepEqual(readdirSync(gatesDir).sort(), ["story.answer"]);
+    } finally {
+      cleanup(repo);
     }
   });
 });

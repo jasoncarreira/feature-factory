@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
@@ -238,7 +238,7 @@ export function writeGateAnswer(runId, gate, answer, opts = {}) {
   const gatesDir = resolveGateAnswerGatesDir(runDir);
   const normalized = normalizeAnswer(answer);
   const answerPath = resolveGateAnswerPath(gatesDir, gateName);
-  writeFileSync(answerPath, normalized + "\n");
+  writeGateAnswerFileAtomically(gatesDir, answerPath, normalized + "\n");
   return { run_id: run.run_id, gate: gateName, answer: normalized, path: answerPath };
 }
 
@@ -529,15 +529,57 @@ function resolveGateAnswerGatesDir(runDir) {
 }
 
 function resolveGateAnswerPath(gatesDir, gateName) {
-  const candidate = resolve(gatesDir, `${gateName}.answer`);
-  if (existsSync(candidate) && lstatSync(candidate).isSymbolicLink()) {
-    throw new Error(`gate answer path must not be a symlink: ${candidate}`);
+  const answerPath = resolve(gatesDir, `${gateName}.answer`);
+  if (existsSync(answerPath) && lstatSync(answerPath).isSymbolicLink()) {
+    throw new Error(`gate answer path must not be a symlink: ${answerPath}`);
   }
-  const answerPath = existsSync(candidate) ? realpathSync.native(candidate) : candidate;
   if (!insideDirectory(gatesDir, answerPath)) {
     throw new Error(`gate answer path must stay inside ${gatesDir}`);
   }
   return answerPath;
+}
+
+function writeGateAnswerFileAtomically(gatesDir, answerPath, contents) {
+  const temp = createGateAnswerTempFile(gatesDir);
+
+  try {
+    try {
+      writeFileSync(temp.fd, contents, "utf8");
+    } finally {
+      closeSync(temp.fd);
+    }
+    renameSync(temp.path, answerPath);
+  } finally {
+    if (existsSync(temp.path)) rmSync(temp.path, { force: true });
+  }
+}
+
+function createGateAnswerTempFile(gatesDir) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const tempPath = join(gatesDir, `.gate-answer-${process.pid}-${randomUUID()}.tmp`);
+    try {
+      return {
+        path: tempPath,
+        fd: openSync(tempPath, gateAnswerTempOpenFlags(), 0o600),
+      };
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        lastError = error;
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error(`unable to create temporary gate answer in ${gatesDir}`);
+}
+
+function gateAnswerTempOpenFlags() {
+  let flags = FS_CONSTANTS.O_WRONLY | FS_CONSTANTS.O_CREAT | FS_CONSTANTS.O_EXCL;
+  if (typeof FS_CONSTANTS.O_NOFOLLOW === "number") flags |= FS_CONSTANTS.O_NOFOLLOW;
+  return flags;
 }
 
 function resolveExistingDirectory(path, label) {

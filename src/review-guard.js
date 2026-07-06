@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { SAFE_GIT_POLICY, listHiddenIndexPaths, safeGit } from "./safe-git.js";
 
@@ -12,6 +12,7 @@ const REVIEW_GUARD_IDENTITY_ARGS = Object.freeze(["rev-parse", "--show-toplevel"
 const REVIEW_GUARD_HEAD_ARGS = Object.freeze(["rev-parse", "HEAD", "HEAD^{tree}"]);
 const REVIEW_GUARD_HIDDEN_INDEX_ARGS = Object.freeze(["ls-files", "-v"]);
 const REVIEW_GUARD_IGNORED_ARGS = Object.freeze(["ls-files", "--others", "--ignored", "--exclude-standard"]);
+const REVIEW_GUARD_SUBMODULE_ARGS = Object.freeze(["ls-files", "--stage"]);
 const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
 const C_STYLE_ESCAPES = Object.freeze({
   a: "\u0007",
@@ -28,6 +29,105 @@ const C_STYLE_ESCAPES = Object.freeze({
 export function checkReviewedWorktreeClean(worktree, options = {}) {
   const reviewedWorktree = requireText(worktree, "worktree");
   const gitOptions = normalizeSafeGitOptions(options);
+  return observeReviewedWorktreeTree(reviewedWorktree, gitOptions);
+}
+
+export const checkReviewWorktree = checkReviewedWorktreeClean;
+
+export function buildReviewGuardBlockReport({ reviewer, subject, reviewed_worktree, guard, attempt = 1, reason } = {}) {
+  const resolvedGuard = normalizeGuard(guard || checkReviewedWorktreeClean(reviewed_worktree), reviewed_worktree);
+  if (resolvedGuard.ok) throw new Error("guard must be blocking to build a review guard block report");
+
+  return {
+    status: "blocked",
+    reason: reason == null ? defaultBlockReason(resolvedGuard) : String(reason),
+    reviewer: reviewer ?? null,
+    subject: subject ?? null,
+    attempt: normalizeAttempt(attempt),
+    reviewed_worktree: resolvedGuard.worktree,
+    review_output_valid: false,
+    dirty_paths: resolvedGuard.dirty_paths,
+    guard: resolvedGuard,
+  };
+}
+
+function observeReviewedWorktreeTree(worktree, gitOptions) {
+  const localResult = observeSingleReviewedWorktree(worktree, gitOptions);
+  if (localResult.status === "unverifiable") return localResult;
+
+  const submodulesResult = listInitializedSubmodules(worktree, gitOptions);
+  if (!submodulesResult.ok) {
+    return buildGuardResult({
+      ok: false,
+      status: "unverifiable",
+      worktree,
+      command: localResult.command,
+      exit_code: normalizeExitCode(submodulesResult.status),
+      stdout: localResult.stdout,
+      stderr: joinOutput(
+        localResult.stderr,
+        formatObservationFailure(
+          "submodule observation",
+          formatReviewGuardSubmoduleCommand(worktree),
+          submodulesResult.stderr,
+        ),
+      ),
+      dirty_paths: localResult.dirty_paths,
+      head_commit: localResult.head_commit,
+      head_tree: localResult.head_tree,
+      hidden_index_paths: localResult.hidden_index_paths,
+    });
+  }
+
+  const visibleDirtySubmodules = new Set(localResult.dirty_paths.map((entry) => entry?.path).filter(Boolean));
+  let dirtyPaths = localResult.dirty_paths;
+  let hiddenIndexPaths = localResult.hidden_index_paths;
+
+  for (const submodule of submodulesResult.initialized_submodules) {
+    const nestedResult = observeReviewedWorktreeTree(submodule.worktree, gitOptions);
+    hiddenIndexPaths = mergeHiddenIndexPaths(hiddenIndexPaths, prefixHiddenIndexPaths(submodule.path, nestedResult.hidden_index_paths));
+    dirtyPaths = mergeDirtyPaths(
+      dirtyPaths,
+      prefixDirtyPaths(
+        submodule.path,
+        nestedResult.dirty_paths.filter((entry) => shouldIncludeNestedDirtyPath(entry, visibleDirtySubmodules.has(submodule.path))),
+      ),
+    );
+
+    if (nestedResult.status === "unverifiable") {
+      return buildGuardResult({
+        ok: false,
+        status: "unverifiable",
+        worktree,
+        command: localResult.command,
+        exit_code: normalizeExitCode(nestedResult.exit_code),
+        stdout: localResult.stdout,
+        stderr: joinOutput(localResult.stderr, formatSubmoduleObservationFailure(submodule.path, nestedResult)),
+        dirty_paths: dirtyPaths,
+        head_commit: localResult.head_commit,
+        head_tree: localResult.head_tree,
+        hidden_index_paths: hiddenIndexPaths,
+      });
+    }
+  }
+
+  const status = dirtyPaths.length === 0 && hiddenIndexPaths.length === 0 ? "clean" : "dirty";
+  return buildGuardResult({
+    ok: status === "clean",
+    status,
+    worktree,
+    command: localResult.command,
+    exit_code: localResult.exit_code,
+    stdout: localResult.stdout,
+    stderr: localResult.stderr,
+    dirty_paths: dirtyPaths,
+    head_commit: localResult.head_commit,
+    head_tree: localResult.head_tree,
+    hidden_index_paths: hiddenIndexPaths,
+  });
+}
+
+function observeSingleReviewedWorktree(reviewedWorktree, gitOptions) {
   const statusResult = safeGit(reviewedWorktree, REVIEW_GUARD_ARGS, gitOptions);
   const statusCommand = formatReviewGuardCommand(reviewedWorktree);
 
@@ -172,25 +272,6 @@ export function checkReviewedWorktreeClean(worktree, options = {}) {
     head_tree: headObservation.head_tree,
     hidden_index_paths: hiddenIndexPaths,
   });
-}
-
-export const checkReviewWorktree = checkReviewedWorktreeClean;
-
-export function buildReviewGuardBlockReport({ reviewer, subject, reviewed_worktree, guard, attempt = 1, reason } = {}) {
-  const resolvedGuard = normalizeGuard(guard || checkReviewedWorktreeClean(reviewed_worktree), reviewed_worktree);
-  if (resolvedGuard.ok) throw new Error("guard must be blocking to build a review guard block report");
-
-  return {
-    status: "blocked",
-    reason: reason == null ? defaultBlockReason(resolvedGuard) : String(reason),
-    reviewer: reviewer ?? null,
-    subject: subject ?? null,
-    attempt: normalizeAttempt(attempt),
-    reviewed_worktree: resolvedGuard.worktree,
-    review_output_valid: false,
-    dirty_paths: resolvedGuard.dirty_paths,
-    guard: resolvedGuard,
-  };
 }
 
 function normalizeGuard(guard, reviewedWorktree) {
@@ -386,6 +467,10 @@ function formatReviewGuardIgnoredCommand(worktree) {
   return formatGitCommand(worktree, REVIEW_GUARD_IGNORED_ARGS);
 }
 
+function formatReviewGuardSubmoduleCommand(worktree) {
+  return formatGitCommand(worktree, REVIEW_GUARD_SUBMODULE_ARGS);
+}
+
 function formatGitCommand(worktree, args) {
   return `git -C ${shellQuote(worktree)} ${args.join(" ")}`;
 }
@@ -477,6 +562,11 @@ function formatObservationFailure(label, command, stderr) {
   return `${label} failed while running ${command}${detail}`;
 }
 
+function formatSubmoduleObservationFailure(submodulePath, guard) {
+  const detail = typeof guard?.stderr === "string" && guard.stderr !== "" ? `\n${guard.stderr}` : "";
+  return `submodule observation failed for ${submodulePath}${detail}`;
+}
+
 function deriveGuardStatus({ status, exitCode, stdout, hiddenIndexPaths, dirtyPaths = [] }) {
   if (status === "unverifiable") return "unverifiable";
   if (exitCode !== 0) return "unverifiable";
@@ -548,6 +638,57 @@ function listIgnoredUntrackedPaths(worktree, options = {}) {
   };
 }
 
+function listInitializedSubmodules(worktree, options = {}) {
+  const result = safeGit(worktree, REVIEW_GUARD_SUBMODULE_ARGS, options);
+  return {
+    ...result,
+    initialized_submodules: result.ok ? parseInitializedSubmodules(worktree, result.stdout) : [],
+  };
+}
+
+function parseInitializedSubmodules(worktree, stdout) {
+  const submodules = [];
+  const seen = new Set();
+
+  for (const line of String(stdout).split(/\r?\n/u).filter(Boolean)) {
+    const entry = parseInitializedSubmoduleEntry(worktree, line);
+    if (!entry || seen.has(entry.path)) continue;
+    seen.add(entry.path);
+    submodules.push(entry);
+  }
+
+  return submodules;
+}
+
+function parseInitializedSubmoduleEntry(worktree, line) {
+  const separator = line.indexOf("\t");
+  if (separator === -1) return null;
+
+  const metadata = line.slice(0, separator).trim().split(/\s+/u);
+  if (metadata[0] !== "160000") return null;
+
+  const submodulePath = decodeGitPath(line.slice(separator + 1));
+  if (!submodulePath) return null;
+
+  const submoduleWorktree = resolve(worktree, submodulePath);
+  if (!isInitializedSubmoduleWorktree(submoduleWorktree)) return null;
+
+  return {
+    path: submodulePath,
+    worktree: submoduleWorktree,
+  };
+}
+
+function isInitializedSubmoduleWorktree(worktree) {
+  try {
+    if (!existsSync(worktree)) return false;
+    if (!statSync(worktree).isDirectory()) return false;
+    return existsSync(resolve(worktree, ".git"));
+  } catch {
+    return false;
+  }
+}
+
 function parseIgnoredUntrackedPaths(stdout) {
   return String(stdout)
     .split(/\r?\n/u)
@@ -573,6 +714,45 @@ function buildIgnoredDirtyPath(path, rawPath) {
   };
 }
 
+function shouldIncludeNestedDirtyPath(entry, parentAlreadyMarksSubmoduleDirty) {
+  if (!entry || typeof entry !== "object") return false;
+  if (!parentAlreadyMarksSubmoduleDirty) return true;
+  return entry.ignored === true;
+}
+
+function prefixDirtyPaths(prefix, dirtyPaths) {
+  return (Array.isArray(dirtyPaths) ? dirtyPaths : []).map((entry) => prefixDirtyPath(prefix, entry));
+}
+
+function prefixDirtyPath(prefix, entry) {
+  const path = prefixGitPath(prefix, entry?.path);
+  const originalPath = entry?.original_path == null ? null : prefixGitPath(prefix, entry.original_path);
+  return {
+    ...entry,
+    path,
+    original_path: originalPath,
+    raw: buildPrefixedDirtyRaw(entry?.xy, path, originalPath),
+  };
+}
+
+function buildPrefixedDirtyRaw(xy, path, originalPath) {
+  const status = typeof xy === "string" && xy.length === 2 ? xy : "??";
+  return `${status} ${originalPath == null ? path : `${originalPath} -> ${path}`}`;
+}
+
+function prefixHiddenIndexPaths(prefix, hiddenIndexPaths) {
+  return (Array.isArray(hiddenIndexPaths) ? hiddenIndexPaths : []).map((entry) => ({
+    ...entry,
+    path: prefixGitPath(prefix, entry?.path),
+  }));
+}
+
+function prefixGitPath(prefix, path) {
+  if (!prefix) return path;
+  if (!path) return prefix;
+  return `${prefix}/${path}`;
+}
+
 function mergeDirtyPaths(...groups) {
   const merged = [];
   const seen = new Set();
@@ -580,6 +760,22 @@ function mergeDirtyPaths(...groups) {
   for (const group of groups) {
     for (const entry of Array.isArray(group) ? group : []) {
       const key = `${entry?.xy || ""}\u0000${entry?.path || ""}\u0000${entry?.original_path || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry);
+    }
+  }
+
+  return merged;
+}
+
+function mergeHiddenIndexPaths(...groups) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const group of groups) {
+    for (const entry of Array.isArray(group) ? group : []) {
+      const key = `${entry?.tag || ""}\u0000${entry?.path || ""}`;
       if (seen.has(key)) continue;
       seen.add(key);
       merged.push(entry);
