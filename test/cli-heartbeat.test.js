@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ const RUN_ID = "heartbeat-liveness";
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 describe("cli heartbeat routing", () => {
-  it("routes start, status, once, and stop heartbeat commands", async () => {
+  it("routes start, status, owner-bound once, and stop heartbeat commands", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun());
@@ -25,16 +25,16 @@ describe("cli heartbeat routing", () => {
 
       const firstRun = readJson(join(runDir, "run.json"));
       const current = jsonOutput(runHeartbeatCli(repo, ["--status", "--json"]));
-      assert.equal(current.token, started.token);
+      assert.equal(current.token, null);
       assert.equal(current.pid, started.pid);
       assert.equal(current.status, "running");
 
       await sleep(20);
 
       const once = jsonOutput(runHeartbeatCli(repo, ["--once", "--token", started.token, "--json"]));
-      assert.equal(once.updated, true);
-      assert.equal(once.status, "running");
-      assert.notEqual(once.heartbeat_at, firstRun.heartbeat_at);
+      assert.equal(once.updated, false);
+      assert.equal(once.reason, "heartbeat-owner-mismatch");
+      assert.equal(readJson(join(runDir, "run.json")).heartbeat_at, firstRun.heartbeat_at);
 
       const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--token", started.token, "--wait-ms", "2500", "--json"]));
       assert.equal(stopped.status, "stopped");
@@ -42,9 +42,59 @@ describe("cli heartbeat routing", () => {
 
       const finalStatus = jsonOutput(runHeartbeatCli(repo, ["--status", "--json"]));
       assert.equal(finalStatus.status, "stopped");
+      assert.equal(finalStatus.token, null);
       await waitFor(() => !isProcessAlive(started.pid), { timeoutMs: 1500 });
     } finally {
       await stopIfActive(repo, started?.token);
+      cleanup(repo);
+    }
+  });
+
+  it("rejects path-like run ids", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun());
+
+    try {
+      const proc = runHeartbeatCli(repo, ["--status", "--json"], runDir);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /bare <run-id>|inside \.opencode\/factory/i);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("rejects symlinked run ids that resolve outside the factory root", () => {
+    const repo = tempRepo();
+    const external = tempRepo();
+    const runDir = createRunDir(repo);
+    const escapedRun = join(external, "escaped-run");
+    mkdirSync(escapedRun, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun());
+    writeJson(join(escapedRun, "run.json"), runningRun({ run_id: "escaped-run" }));
+    rmSync(runDir, { recursive: true, force: true });
+    symlinkSync(escapedRun, runDir, "dir");
+
+    try {
+      const proc = runHeartbeatCli(repo, ["--status", "--json"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /inside \.opencode\/factory/i);
+    } finally {
+      cleanup(repo);
+      cleanup(external);
+    }
+  });
+
+  it("refuses to start while a protected gate is pending", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({ gates: protectedGates("brief") }));
+
+    try {
+      const proc = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /protected gate 'brief'/i);
+    } finally {
       cleanup(repo);
     }
   });
@@ -61,7 +111,7 @@ describe("cli heartbeat routing", () => {
 
         assert.equal(started.phase, phase);
         assert.equal(current.phase, phase);
-        assert.equal(current.token, started.token);
+        assert.equal(current.token, null);
 
         const stopped = await waitForHeartbeatStop(repo, started.token, { timeoutMs: 2500 });
         assert.equal(stopped.phase, phase);
@@ -89,7 +139,7 @@ describe("cli heartbeat routing", () => {
         return current !== firstHeartbeatAt ? current : null;
       }, { timeoutMs: 2500 });
 
-      assert.equal(jsonOutput(runHeartbeatCli(repo, ["--status", "--json"])).token, started.token);
+      assert.equal(jsonOutput(runHeartbeatCli(repo, ["--status", "--json"])).token, null);
 
       const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--token", started.token, "--wait-ms", "2500", "--json"]));
       assert.equal(stopped.status, "stopped");
@@ -130,8 +180,8 @@ function createRunDir(repo) {
   return runDir;
 }
 
-function runHeartbeatCli(repo, args) {
-  const proc = spawnSync(process.execPath, [CLI, "factory", "heartbeat", RUN_ID, ...args], {
+function runHeartbeatCli(repo, args, runId = RUN_ID) {
+  const proc = spawnSync(process.execPath, [CLI, "factory", "heartbeat", runId, ...args], {
     cwd: repo,
     encoding: "utf8",
     timeout: 15000,
@@ -199,7 +249,7 @@ function runningRun(overrides = {}) {
     worktree: `.opencode/worktrees/${RUN_ID}`,
     gates: {
       story: {
-        status: "pending",
+        status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
         answer_ref: "gates/story.answer",
@@ -229,6 +279,29 @@ function runningRun(overrides = {}) {
     pr_url: null,
     terminal_result: null,
     ...overrides,
+  };
+}
+
+function protectedGates(pending) {
+  return {
+    story: {
+      status: pending === "story" ? "pending" : "approved",
+      artifact: "artifacts/story.md",
+      question_ref: "gates/story.question.md",
+      answer_ref: "gates/story.answer",
+    },
+    brief: {
+      status: pending === "brief" ? "pending" : "approved",
+      artifact: "artifacts/brief.md",
+      question_ref: "gates/brief.question.md",
+      answer_ref: "gates/brief.answer",
+    },
+    pre_pr: {
+      status: pending === "pre_pr" ? "pending" : "approved",
+      artifact: "artifacts/pre_pr.md",
+      question_ref: "gates/pre_pr.question.md",
+      answer_ref: "gates/pre_pr.answer",
+    },
   };
 }
 

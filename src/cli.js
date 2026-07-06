@@ -1,21 +1,22 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { cleanupRun, heartbeatStatus, listRuns, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectProvenance } from "./provenance.js";
 import { heartbeatOnce } from "./run-state.js";
-import { HEARTBEAT_PHASES } from "./validate.js";
+import { HEARTBEAT_PHASES, HEARTBEAT_PROTECTED_GATES } from "./validate.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
 const HEARTBEAT_ACTIVE_STATUS_SET = new Set(["active", "running"]);
+const HEARTBEAT_PROTECTED_GATE_SET = new Set(HEARTBEAT_PROTECTED_GATES);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 
@@ -28,7 +29,7 @@ Commands:
   factory start [--repo PATH] [--headless|--autonomous|--detached] <prompt...>
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
-  factory heartbeat <run-id> --once --token <token> [--json]
+  factory heartbeat <run-id> --once --token <token> [--json]  Internal owner-bound single tick
   factory heartbeat <run-id> --start --phase <phase> [--interval MS] [--max-duration MS] [--json]
   factory heartbeat <run-id> --stop --token <token> [--wait-ms MS] [--force] [--json]
   factory heartbeat <run-id> --status [--json]
@@ -105,11 +106,17 @@ async function heartbeat(args) {
   const positional = positionals(args);
   if (positional.length !== 1) throw new Error("factory heartbeat requires exactly one <run-id>");
 
-  const runId = positional[0];
+  const runId = normalizeHeartbeatRunId(positional[0]);
   const mode = heartbeatMode(opts);
 
   if (mode === "once") {
-    return print(await heartbeatOnce(resolveRunDir(runId, opts), { token: requiredHeartbeatToken(opts, "heartbeat --once") }), opts);
+    return print(
+      await heartbeatOnce(resolveRunDir(runId, opts), {
+        token: requiredHeartbeatToken(opts, "heartbeat --once"),
+        ownerPid: process.pid,
+      }),
+      opts,
+    );
   }
 
   if (mode === "start") {
@@ -139,7 +146,7 @@ async function heartbeat(args) {
   }
 
   if (mode === "status") {
-    return print(heartbeatStatus(runId, opts), opts);
+    return print(publicHeartbeatStatus(runId, opts), opts);
   }
 
   throw new Error("factory heartbeat requires exactly one of --once, --start, --stop, --status, or internal --foreground");
@@ -225,6 +232,9 @@ async function startHeartbeatProcess(runId, opts) {
   if (current.status !== "running") {
     throw new Error(`run '${current.run_id}' must be running to start a heartbeat`);
   }
+  if (HEARTBEAT_PROTECTED_GATE_SET.has(current.pending_gate)) {
+    throw new Error(`run '${current.run_id}' is waiting at protected gate '${current.pending_gate}'`);
+  }
   const token = stringValue(opts.token) ? opts.token : randomUUID();
   const childArgs = [cliPath, "factory", "heartbeat", runId, "--foreground", "--token", token, "--phase", config.phase];
   if (config.intervalMs !== undefined) childArgs.push("--interval", String(config.intervalMs));
@@ -286,12 +296,19 @@ function requiredHeartbeatToken(opts, command) {
 }
 
 function resolveRunDir(runId, opts = {}) {
-  if (!stringValue(runId)) throw new Error("factory heartbeat requires exactly one <run-id>");
-  const asPath = resolve(String(runId));
-  if (existsSync(join(asPath, "run.json"))) return asPath;
-  const dir = join(factoryRoot(opts.cwd || process.cwd()), String(runId));
+  const root = factoryRoot(opts.cwd || process.cwd());
+  const dir = resolve(root, normalizeHeartbeatRunId(runId));
   if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${runId}`);
+  if (!insideDirectory(root, dir)) {
+    throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
+  }
   return dir;
+}
+
+function publicHeartbeatStatus(runId, opts = {}) {
+  const current = heartbeatStatus(runId, opts);
+  if (!current) return null;
+  return { ...current, token: null };
 }
 
 function factoryRoot(cwd) {
@@ -301,6 +318,24 @@ function factoryRoot(cwd) {
 function repoRoot(cwd) {
   const proc = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: resolve(cwd), encoding: "utf8" });
   return proc.status === 0 ? proc.stdout.trim() : resolve(cwd);
+}
+
+function normalizeHeartbeatRunId(runId) {
+  if (!stringValue(runId)) throw new Error("factory heartbeat requires exactly one <run-id>");
+  const value = String(runId).trim();
+  if (isAbsolute(value) || value.includes("/") || value.includes("\\") || value === "." || value === "..") {
+    throw new Error("factory heartbeat requires a bare <run-id>, not a filesystem path");
+  }
+  return value;
+}
+
+function insideDirectory(parent, child) {
+  const rel = relative(physicalPath(parent), physicalPath(child));
+  return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+function physicalPath(path) {
+  return existsSync(path) ? realpathSync.native(path) : resolve(path);
 }
 
 function isProcessAlive(pid) {

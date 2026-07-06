@@ -9,6 +9,41 @@ import { HEARTBEAT_PHASES } from "../src/validate.js";
 const RUN_ID = "heartbeat-liveness";
 
 describe("factory heartbeat lifecycle", () => {
+  it("rejects path-like heartbeat run ids", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun());
+
+    try {
+      assert.throws(() => heartbeatStatus(runDir, { cwd: repo }), /bare <run-id>|inside \.opencode\/factory/i);
+      await assert.rejects(
+        startHeartbeat(runDir, { phase: "builder-wave", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo }),
+        /bare <run-id>|inside \.opencode\/factory/i,
+      );
+      await assert.rejects(stopHeartbeat(runDir, { token: "lease-1", waitMs: 25 }, { cwd: repo }), /bare <run-id>|inside \.opencode\/factory/i);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("refuses to start while story, brief, or pre_pr gates are pending", async () => {
+    for (const gate of ["story", "brief", "pre_pr"]) {
+      const repo = tempRepo();
+      const runDir = createRunDir(repo);
+      writeJson(join(runDir, "run.json"), runningRun({ gates: protectedGates(gate) }));
+
+      try {
+        await assert.rejects(
+          startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo }),
+          new RegExp(`protected gate '${gate}'`, "i"),
+        );
+        assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }), null, gate);
+      } finally {
+        cleanup(repo);
+      }
+    }
+  });
+
   it("performs an immediate once-equivalent tick and rejects overlapping starts", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
@@ -195,6 +230,25 @@ describe("factory heartbeat lifecycle", () => {
       cleanup(repo);
     }
   });
+
+  it("stops itself when a protected gate becomes pending", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun());
+
+    let lease;
+    try {
+      lease = await startHeartbeat(RUN_ID, { phase: "security-reviewer", intervalMs: 1000, maxDurationMs: 5000 }, { cwd: repo });
+      writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: readJson(join(runDir, "run.json")).heartbeat_at, gates: protectedGates("pre_pr") }));
+
+      await waitFor(() => heartbeatStatus(RUN_ID, { cwd: repo })?.status === "stopped", { timeoutMs: 2500 });
+
+      assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }).stop_reason, "pending-gate-pre_pr");
+    } finally {
+      await stopIfActive(repo, lease?.token);
+      cleanup(repo);
+    }
+  });
 });
 
 function tempRepo() {
@@ -230,7 +284,7 @@ function runningRun(overrides = {}) {
     worktree: `.opencode/worktrees/${RUN_ID}`,
     gates: {
       story: {
-        status: "pending",
+        status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
         answer_ref: "gates/story.answer",
@@ -260,6 +314,29 @@ function runningRun(overrides = {}) {
     pr_url: null,
     terminal_result: null,
     ...overrides,
+  };
+}
+
+function protectedGates(pending) {
+  return {
+    story: {
+      status: pending === "story" ? "pending" : "approved",
+      artifact: "artifacts/story.md",
+      question_ref: "gates/story.question.md",
+      answer_ref: "gates/story.answer",
+    },
+    brief: {
+      status: pending === "brief" ? "pending" : "approved",
+      artifact: "artifacts/brief.md",
+      question_ref: "gates/brief.question.md",
+      answer_ref: "gates/brief.answer",
+    },
+    pre_pr: {
+      status: pending === "pre_pr" ? "pending" : "approved",
+      artifact: "artifacts/pre_pr.md",
+      question_ref: "gates/pre_pr.question.md",
+      answer_ref: "gates/pre_pr.answer",
+    },
   };
 }
 

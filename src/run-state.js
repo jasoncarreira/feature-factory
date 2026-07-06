@@ -2,7 +2,7 @@ import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { validateRun } from "./validate.js";
+import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -75,8 +75,9 @@ export async function mutateRunJsonLocked(runDir, mutator, options = {}) {
   );
 }
 
-export async function heartbeatOnce(runDir, { token, now } = {}, options = {}) {
+export async function heartbeatOnce(runDir, { token, ownerPid, now } = {}, options = {}) {
   if (!stringValue(token)) throw new Error("heartbeatOnce requires a token");
+  const heartbeatOwnerPid = normalizeHeartbeatOwnerPid(ownerPid);
   const heartbeatAt = normalizeTimestamp(now);
 
   return withRunJsonLock(
@@ -90,9 +91,18 @@ export async function heartbeatOnce(runDir, { token, now } = {}, options = {}) {
         return { updated: false, reason: "run-not-running", status: current.status, run: current };
       }
 
-      const lease = await inspectHeartbeatLease(runDir, current.run_id, token, heartbeatAt);
+      const protectedGate = pendingProtectedGate(current);
+      if (protectedGate) {
+        return { updated: false, reason: "protected-gate-pending", gate: protectedGate, status: current.status, run: current };
+      }
+
+      const lease = await inspectHeartbeatLease(runDir, current.run_id, {
+        token,
+        ownerPid: heartbeatOwnerPid,
+        now: heartbeatAt,
+      });
       if (!lease.active) {
-        return { updated: false, reason: lease.reason, status: current.status, run: current };
+        return { updated: false, reason: lease.reason, gate: lease.gate || null, status: current.status, run: current };
       }
 
       const next = validateRun({ ...current, heartbeat_at: heartbeatAt });
@@ -108,30 +118,25 @@ async function readRunJson(runDir) {
   return validateRun(run);
 }
 
-async function inspectHeartbeatLease(runDir, runId, token, now) {
+async function inspectHeartbeatLease(runDir, runId, { token, ownerPid, now } = {}) {
   const heartbeatPath = join(runDir, HEARTBEAT_FILE);
   if (!existsSync(heartbeatPath)) return { active: false, reason: "missing-heartbeat-lease" };
 
   let lease;
   try {
-    lease = await readJson(heartbeatPath);
+    lease = validateHeartbeatState(await readJson(heartbeatPath));
   } catch {
     return { active: false, reason: "invalid-heartbeat-lease" };
   }
 
-  if (!isRecord(lease) || !Number.isFinite(lease.schema_version)) {
-    return { active: false, reason: "invalid-heartbeat-lease" };
-  }
-  if (!stringValue(lease.run_id) || !stringValue(lease.token) || !stringValue(lease.status) || !stringValue(lease.phase)) {
-    return { active: false, reason: "invalid-heartbeat-lease" };
-  }
   if (lease.run_id !== runId) return { active: false, reason: "heartbeat-run-id-mismatch" };
   if (lease.token !== token) return { active: false, reason: "heartbeat-token-mismatch" };
+  if (lease.pid !== ownerPid) return { active: false, reason: "heartbeat-owner-mismatch" };
 
   const statusState = inspectHeartbeatLeaseStatus(lease.status, lease);
   if (!statusState.active) return statusState;
 
-  const deadlineAt = lease.deadline_at ?? lease.expires_at ?? lease.expiresAt ?? lease.lease_expires_at ?? lease.leaseExpiresAt;
+  const deadlineAt = lease.deadline_at;
   if (!stringValue(deadlineAt)) return { active: false, reason: "invalid-heartbeat-lease" };
 
   const deadlineMs = Date.parse(deadlineAt);
@@ -148,6 +153,9 @@ function inspectHeartbeatLeaseStatus(status, lease) {
   }
   if (stringValue(lease.stop_requested_at) || status === "stopping") {
     return { active: false, reason: "heartbeat-lease-stopping" };
+  }
+  if (stringValue(lease.stop_reason) && ACTIVE_HEARTBEAT_STATUSES.has(status)) {
+    return { active: false, reason: "invalid-heartbeat-lease" };
   }
   if (TERMINAL_RUN_STATUSES.has(status)) {
     return { active: false, reason: "heartbeat-lease-terminal" };
@@ -203,6 +211,11 @@ function normalizePositiveInteger(value, fallback) {
   if (value === undefined || value === null) return fallback;
   if (!Number.isInteger(value) || value <= 0) throw new Error("lock timing options must be positive integers");
   return value;
+}
+
+function normalizeHeartbeatOwnerPid(ownerPid) {
+  if (!Number.isInteger(ownerPid) || ownerPid <= 0) throw new Error("heartbeatOnce requires ownerPid");
+  return ownerPid;
 }
 
 function cloneJson(value) {

@@ -148,6 +148,13 @@ describe("validateHeartbeatState", () => {
     );
   });
 
+  it("rejects active sidecars with stop_reason but no stop lifecycle transition", () => {
+    assert.throws(
+      () => validateHeartbeatState(heartbeatState({ status: "running", stop_reason: "handoff" })),
+      (error) => error instanceof ValidationError && error.message.includes("heartbeat.stop_reason"),
+    );
+  });
+
   it("rejects unknown phases", () => {
     assert.throws(
       () => validateHeartbeatState(heartbeatState({ phase: "gate-review" })),
