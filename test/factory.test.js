@@ -423,6 +423,67 @@ describe("factory gate answers", () => {
       cleanup(repo);
     }
   });
+
+  it("writes explicit run-directory answers to the target run's real gates directory", () => {
+    const repo = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "gate-answer-explicit-run-dir");
+    const aliasDir = join(repo, "aliases", "gate-answer-explicit-run-dir");
+    mkdirSync(join(runDir, "gates"), { recursive: true });
+    mkdirSync(dirname(aliasDir), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-explicit-run-dir", slices: [] }));
+    symlinkSync(runDir, aliasDir, "dir");
+
+    try {
+      const result = writeGateAnswer(aliasDir, "story", "approve", { cwd: repo });
+      const physicalRunDir = realpathSync.native(aliasDir);
+      const expectedAnswerPath = join(physicalRunDir, "gates", "story.answer");
+
+      assert.equal(result.run_id, "gate-answer-explicit-run-dir");
+      assert.equal(result.path, expectedAnswerPath);
+      assert.notEqual(result.path, join(aliasDir, "gates", "story.answer"));
+      assert.equal(readFileSync(expectedAnswerPath, "utf8"), "approve\n");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("rejects explicit run-directory gates symlink escapes without writing outside files", () => {
+    const repo = tempRepo();
+    const outsideRoot = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "gate-answer-gates-symlink");
+    const outsideGatesDir = join(outsideRoot, "outside-gates");
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(outsideGatesDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-gates-symlink", slices: [] }));
+    symlinkSync(outsideGatesDir, join(runDir, "gates"), "dir");
+
+    try {
+      assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /gates directory must stay inside/u);
+      assert.equal(existsSync(join(outsideGatesDir, "story.answer")), false);
+    } finally {
+      cleanup(repo);
+      cleanup(outsideRoot);
+    }
+  });
+
+  it("rejects explicit run-directory answer-path symlink escapes without writing outside files", () => {
+    const repo = tempRepo();
+    const outsideRoot = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "gate-answer-path-symlink");
+    const outsideAnswerPath = join(outsideRoot, "story.answer");
+    mkdirSync(join(runDir, "gates"), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-path-symlink", slices: [] }));
+    writeFileSync(outsideAnswerPath, "outside\n", "utf8");
+    symlinkSync(outsideAnswerPath, join(runDir, "gates", "story.answer"));
+
+    try {
+      assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /gate answer path must not be a symlink/u);
+      assert.equal(readFileSync(outsideAnswerPath, "utf8"), "outside\n");
+    } finally {
+      cleanup(repo);
+      cleanup(outsideRoot);
+    }
+  });
 });
 
 describe("detached factory start", () => {

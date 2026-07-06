@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
@@ -230,17 +230,16 @@ export async function stopHeartbeat(runId, config = {}, opts = {}) {
 export function writeGateAnswer(runId, gate, answer, opts = {}) {
   const gateName = requireSafeGateName(gate, "gate");
   if (!answer) throw new Error("answer is required: approve, changes: ..., or stop");
-  const runDir = resolveRunDir(runId, opts);
+  const runDir = resolveGateAnswerRunDir(runId, opts);
   const run = readRunFile(join(runDir, "run.json"));
   const pending = pendingGate(run);
   if (pending && gateName !== pending) throw new Error(`gate '${gateName}' is not pending; current pending gate is '${pending}'`);
   if (!pending) throw new Error("run has no pending gate");
-  const gatesDir = join(runDir, "gates");
-  if (!existsSync(gatesDir)) throw new Error(`missing gates directory: ${gatesDir}`);
+  const gatesDir = resolveGateAnswerGatesDir(runDir);
   const normalized = normalizeAnswer(answer);
   const answerPath = resolveGateAnswerPath(gatesDir, gateName);
   writeFileSync(answerPath, normalized + "\n");
-  return { run_id: runId, gate: gateName, answer: normalized, path: answerPath };
+  return { run_id: run.run_id, gate: gateName, answer: normalized, path: answerPath };
 }
 
 export function latestRunId(opts = {}) {
@@ -430,7 +429,7 @@ function resolveRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
   // Trusted operator escape hatch: callers may pass an explicit run directory.
-  const asPath = resolve(String(id));
+  const asPath = resolve(opts.cwd || process.cwd(), String(id));
   if (existsSync(join(asPath, "run.json"))) return asPath;
   const dir = join(factoryRoot(opts.cwd || process.cwd()), String(id));
   if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
@@ -517,12 +516,35 @@ function requireSafeGateName(value, label) {
   return gateName;
 }
 
+function resolveGateAnswerRunDir(runId, opts = {}) {
+  return resolveExistingDirectory(resolveRunDir(runId, opts), "run directory");
+}
+
+function resolveGateAnswerGatesDir(runDir) {
+  const gatesDir = resolveExistingDirectory(join(runDir, "gates"), "gates directory");
+  if (!insideDirectory(runDir, gatesDir)) {
+    throw new Error(`gates directory must stay inside ${runDir}`);
+  }
+  return gatesDir;
+}
+
 function resolveGateAnswerPath(gatesDir, gateName) {
-  const answerPath = resolve(gatesDir, `${gateName}.answer`);
+  const candidate = resolve(gatesDir, `${gateName}.answer`);
+  if (existsSync(candidate) && lstatSync(candidate).isSymbolicLink()) {
+    throw new Error(`gate answer path must not be a symlink: ${candidate}`);
+  }
+  const answerPath = existsSync(candidate) ? realpathSync.native(candidate) : candidate;
   if (!insideDirectory(gatesDir, answerPath)) {
     throw new Error(`gate answer path must stay inside ${gatesDir}`);
   }
   return answerPath;
+}
+
+function resolveExistingDirectory(path, label) {
+  if (!existsSync(path)) throw new Error(`missing ${label}: ${path}`);
+  const physical = realpathSync.native(path);
+  if (!statSync(physical).isDirectory()) throw new Error(`${label} must be a directory: ${path}`);
+  return physical;
 }
 
 function normalizeHeartbeatRunId(runId) {
