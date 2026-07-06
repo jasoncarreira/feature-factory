@@ -31,6 +31,39 @@ Invoke subagents with the Task tool using `subagent_type` equal to the agent nam
 
 Pass prior structured outputs in each prompt. Subagents do not share memory; you are the bus between them.
 
+## Reviewer read-only guard
+
+Reviewer-designated agents are only:
+
+- `work-reviewer`
+- `implementation-validator`
+- `security-reviewer`
+
+After every reviewer-designated subagent invocation, and before accepting or writing that review result, check the reviewed worktree with `git -C <reviewed_worktree> status --porcelain=v1 --untracked-files=all` or the equivalent `src/review-guard.js` helper semantics.
+
+Guard semantics:
+
+- Exit `0` and empty stdout => clean; the reviewer output may be accepted normally.
+- Exit `0` and non-empty stdout => dirty; the reviewer output is invalid and blocking.
+- Non-zero exit => unverifiable; the reviewer output is invalid and blocking.
+
+Reviewed worktree mapping:
+
+- `work-reviewer` subject `spec-writer` -> `$REPO`
+- `work-reviewer` subject `work-decomposer` -> `$REPO`
+- `work-reviewer` subject `<slice-id>` -> `$SLICE_WT`
+- `work-reviewer` subject `test-verifier` -> `$FEAT_WT`
+- `implementation-validator` -> `$FEAT_WT`
+- `security-reviewer` -> `$FEAT_WT`
+
+If the guard is dirty or unverifiable, discard the reviewer output as invalid, write a guard-block report, and mark the relevant step, slice, or panel blocked. Do not auto-revert.
+
+Limitations:
+
+- This is post-run git-visible dirty-state detection only.
+- It is not OS/process sandboxing and does not prevent mutation attempts.
+- It does not detect ignored files, committed or reverted mutations, effects outside the reviewed worktree, or non-git-visible side effects.
+
 ## Operating Modes
 
 - Interactive mode: stop at gates for the user in chat.
@@ -189,7 +222,9 @@ Run `spec-writer` with the approved story, research map, and design brief. It pr
 Review the brief:
 
 - Run `work-reviewer` with subject `spec-writer`, the brief, and its inputs.
-- Write `$RUN/reviews/spec-writer.json`.
+- After it returns, before accepting or writing `$RUN/reviews/spec-writer.json`, guard `$REPO`.
+- If the guard is clean, write `$RUN/reviews/spec-writer.json` and continue the normal APPROVE/REJECT loop.
+- If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/spec-writer.json`, mark the spec step `blocked`, and stop. Do not auto-revert.
 - On REJECT, rerun `spec-writer` with required fixes up to `max_retries`.
 - Record attempts in `run.json.steps`.
 
@@ -223,6 +258,9 @@ Rules the plan must satisfy:
 Review the decomposition:
 
 - Run `work-reviewer` with subject `work-decomposer`.
+- After it returns, before accepting or writing `$RUN/reviews/work-decomposer.json`, guard `$REPO`.
+- If the guard is clean, write `$RUN/reviews/work-decomposer.json` and continue the normal APPROVE/REJECT loop.
+- If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/work-decomposer.json`, mark the decomposition step `blocked`, and stop. Do not auto-revert.
 - It checks output contract, AC coverage, dependency correctness, file-disjoint same waves, and hotspot serialization.
 - Loop on REJECT up to `max_retries`.
 - Seed `run.json.slices[]` from `slices.json` with `status: pending`, `attempts: 0`, branch/worktree null, evidence/review refs null, and merge commit null.
@@ -288,7 +326,10 @@ Write `$RUN/evidence/<slice-id>.json`. Reconcile the builder's claim block again
 
 ### Review Each Slice
 
-Run `work-reviewer` with subject `<slice-id>`, the builder output, observed evidence, slice spec, technical brief, story, and relevant repo rules. Write `$RUN/reviews/<slice-id>.json`.
+Run `work-reviewer` with subject `<slice-id>`, the builder output, observed evidence, slice spec, technical brief, story, and relevant repo rules.
+
+- After it returns, before accepting or writing `$RUN/reviews/<slice-id>.json`, guard `$SLICE_WT`.
+- If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/<slice-id>.json`, mark the slice `blocked`, record the blocker reason, and stop dispatching dependents. Do not auto-revert.
 
 - APPROVE -> mark slice ready to merge.
 - REJECT -> route required fixes back to the same builder in the same slice worktree, re-observe, and re-review.
@@ -319,14 +360,15 @@ Run integration work against `$FEAT_WT`, not slice worktrees.
 
 1. Run `test-verifier` with the story ACs, technical brief, slice plan, merged builder reports, and `$FEAT_WT`. It writes/runs acceptance tests and commits test changes if needed. Write `$RUN/artifacts/test-report.md`.
 2. Observe the test step yourself by rerunning the named acceptance suite. Write `$RUN/evidence/test-verifier.json`.
-3. Run `work-reviewer` with subject `test-verifier`. It must confirm each AC maps to a real assertion.
-4. Run the pre-PR review PANEL — two INDEPENDENT lenses, concurrently, on `$FEAT_WT` + the full diff (each gets story, brief, full diff, test report, builder reports):
-   - `implementation-validator` — correctness / AC coverage / cross-slice integration / conventions. Write `$RUN/artifacts/validation-report.md` and `run.json.validator`.
-   - `security-reviewer` — adversarial trust-boundary / injection / forgeable-provenance / secrets lens. Write `$RUN/reviews/security-reviewer.json` and `run.json.security_review`.
-   Run them in parallel and keep them independent — do NOT let one lens's "looks fine" excuse the other. This two-lens panel is the pre-PR review; a downstream consumer (an adapter) relays this verdict rather than re-reviewing.
+3. Run `work-reviewer` with subject `test-verifier`. After it returns, before accepting or writing `$RUN/reviews/test-verifier.json`, guard `$FEAT_WT`. If the guard is clean, write the review and continue. If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report, mark the test-verifier step `blocked`, and do not continue to the panel.
+4. Run the pre-PR review PANEL — two INDEPENDENT lenses, guard-serial on `$FEAT_WT` + the full diff (each gets story, brief, full diff, test report, builder reports):
+   - `implementation-validator` — correctness / AC coverage / cross-slice integration / conventions. After it returns, before accepting or writing its result, guard `$FEAT_WT`. If the guard is clean, write `$RUN/artifacts/validation-report.md` and `run.json.validator`. If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report, mark the panel blocked, and set `run.json.validator` to `NO-GO` with its `report` pointing at the guard-block report.
+   - `security-reviewer` — adversarial trust-boundary / injection / forgeable-provenance / secrets lens. After it returns, before accepting or writing `$RUN/reviews/security-reviewer.json`, guard `$FEAT_WT`. If the guard is clean, write `$RUN/reviews/security-reviewer.json` and `run.json.security_review`. If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report, mark the panel blocked, and set `run.json.security_review` to `BLOCK` with `review_ref` pointing at the guard-block report.
+   Run the two lenses independently but sequentially enough to guard after each invocation. Do NOT feed one lens's output into the other. This two-lens panel is the pre-PR review; a downstream consumer (an adapter) relays this verdict rather than re-reviewing.
 
 Combine the panel by STRICTEST verdict — this IS the Gate 3 verdict:
 
+- Any reviewer guard-block from either lens blocks the panel; do not accept that reviewer output.
 - Any NO-GO (validator) or BLOCK (security-reviewer) from EITHER lens -> NO-GO.
 - A `security-reviewer` BLOCK is ALWAYS NO-GO — never downgraded to a nit, even for default-off features.
 - Both clear (GO + PASS) -> GO, or GO-WITH-NITS if only MAJOR/NONBLOCKING findings remain.
@@ -402,6 +444,7 @@ Scripted runs still use the same gates, evidence, reviews, and PR approval flow.
 - One feature branch and one PR per run.
 - Never mutate the caller's checkout for implementation.
 - Accept build/test work only on observed evidence plus `work-reviewer` APPROVE.
+- Accept reviewer-designated outputs only after the reviewed-worktree guard returns clean.
 - Subagents do not push, open PRs, or edit external systems.
 - Bounded loops: `max_retries = 3` per reviewed subject/slice.
 - Draft PR only. Humans review and merge.
