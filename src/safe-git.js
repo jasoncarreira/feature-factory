@@ -1,7 +1,9 @@
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { spawnSync as defaultSpawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 const NULL_DEVICE = "/dev/null";
+const SAFE_GIT_ENV_BLOCKLIST = new Set(["PATH", "PATHEXT", "COMSPEC"]);
 const C_STYLE_ESCAPES = Object.freeze({
   a: "\u0007",
   b: "\b",
@@ -28,12 +30,24 @@ const SAFE_SUBCOMMANDS = new Set([
   "symbolic-ref",
   "worktree",
 ]);
+const SAFE_GIT_DISCOVERY_CANDIDATES = Object.freeze([
+  "/usr/bin/git",
+  "/opt/homebrew/bin/git",
+  "/usr/local/bin/git",
+  "/bin/git",
+  "/opt/local/bin/git",
+]);
+const SAFE_GIT_DISCOVERY_TOOLS = Object.freeze([
+  "/usr/bin/which",
+  "/bin/which",
+]);
 
 export const SAFE_GIT_POLICY = "safe-git-v1";
 export const DEFAULT_SAFE_GIT_TIMEOUT_MS = 10_000;
 export const MAX_SAFE_GIT_TIMEOUT_MS = 30_000;
 export const DEFAULT_SAFE_GIT_MAX_BUFFER = 1024 * 1024;
 export const MAX_SAFE_GIT_MAX_BUFFER = 8 * 1024 * 1024;
+export const SAFE_GIT_SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:/opt/local/bin";
 export const SAFE_GIT_ENV_OVERRIDES = Object.freeze({
   GIT_NO_REPLACE_OBJECTS: "1",
   GIT_CONFIG_NOSYSTEM: "1",
@@ -49,6 +63,19 @@ export const SAFE_GIT_PREFIX_ARGS = Object.freeze([
   `core.hooksPath=${NULL_DEVICE}`,
 ]);
 
+const SAFE_GIT_DISCOVERY_ENV = Object.freeze({
+  PATH: SAFE_GIT_SYSTEM_PATH,
+  ...SAFE_GIT_ENV_OVERRIDES,
+});
+
+let trustedGitPath = null;
+
+export function getTrustedGitPath() {
+  if (trustedGitPath) return trustedGitPath;
+  trustedGitPath = discoverTrustedGitPath();
+  return trustedGitPath;
+}
+
 export function safeGit(cwd, args, options = {}) {
   const resolvedCwd = resolve(requireText(cwd, "cwd"));
   const requestedArgs = normalizeArgs(args);
@@ -57,8 +84,30 @@ export function safeGit(cwd, args, options = {}) {
   const commandArgs = [...SAFE_GIT_PREFIX_ARGS, ...requestedArgs];
   const timeout = clampPositiveInteger(options.timeout, DEFAULT_SAFE_GIT_TIMEOUT_MS, MAX_SAFE_GIT_TIMEOUT_MS);
   const maxBuffer = clampPositiveInteger(options.maxBuffer, DEFAULT_SAFE_GIT_MAX_BUFFER, MAX_SAFE_GIT_MAX_BUFFER);
+  let gitPath = null;
+
+  try {
+    gitPath = getTrustedGitPath();
+  } catch (error) {
+    return buildSafeGitResult({
+      ok: false,
+      status: null,
+      stdout: "",
+      stderr: normalizeErrorMessage(error),
+      command: {
+        file: null,
+        cwd: resolvedCwd,
+        args: commandArgs,
+        shell: false,
+        timeout,
+        maxBuffer,
+      },
+      error,
+    });
+  }
+
   const command = {
-    file: "git",
+    file: gitPath,
     cwd: resolvedCwd,
     args: commandArgs,
     shell: false,
@@ -113,10 +162,15 @@ export function buildSafeGitEnv(extraEnv = {}) {
   for (const [key, value] of Object.entries({ ...process.env, ...extraEnv })) {
     if (value == null) continue;
     if (key.toUpperCase().startsWith("GIT_")) continue;
+    if (SAFE_GIT_ENV_BLOCKLIST.has(key.toUpperCase())) continue;
     env[key] = String(value);
   }
 
-  return { ...env, ...SAFE_GIT_ENV_OVERRIDES };
+  return {
+    ...env,
+    PATH: SAFE_GIT_SYSTEM_PATH,
+    ...SAFE_GIT_ENV_OVERRIDES,
+  };
 }
 
 export function listHiddenIndexPaths(worktree, options = {}) {
@@ -149,6 +203,79 @@ function parseLsFilesEntry(line) {
     assume_unchanged: assumeUnchanged,
     skip_worktree: skipWorktree,
   };
+}
+
+function discoverTrustedGitPath() {
+  for (const candidate of SAFE_GIT_DISCOVERY_CANDIDATES) {
+    const validated = validateGitBinary(candidate);
+    if (validated) return validated;
+  }
+
+  for (const tool of SAFE_GIT_DISCOVERY_TOOLS) {
+    const discovered = discoverGitWithTool(tool);
+    if (discovered) return discovered;
+  }
+
+  throw new Error(`safeGit could not locate a trusted git binary via ${SAFE_GIT_SYSTEM_PATH}`);
+}
+
+function discoverGitWithTool(tool) {
+  if (!isAbsolute(tool) || !existsSync(tool)) return null;
+
+  try {
+    if (!statSync(tool).isFile()) return null;
+  } catch {
+    return null;
+  }
+
+  const proc = defaultSpawnSync(tool, ["git"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: SAFE_GIT_DISCOVERY_ENV,
+    shell: false,
+    timeout: DEFAULT_SAFE_GIT_TIMEOUT_MS,
+    maxBuffer: DEFAULT_SAFE_GIT_MAX_BUFFER,
+    windowsHide: true,
+  });
+  if (proc.error || proc.status !== 0) return null;
+
+  const candidate = normalizeOutput(proc.stdout)
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  return validateGitBinary(candidate);
+}
+
+function validateGitBinary(candidate) {
+  if (typeof candidate !== "string" || candidate.trim() === "") return null;
+  if (!isAbsolute(candidate)) return null;
+
+  const normalized = resolve(candidate);
+  let realCandidate;
+
+  try {
+    if (!existsSync(normalized)) return null;
+    realCandidate = realpathSync.native(normalized);
+    if (!statSync(realCandidate).isFile()) return null;
+  } catch {
+    return null;
+  }
+
+  const proc = defaultSpawnSync(realCandidate, ["--version"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: SAFE_GIT_DISCOVERY_ENV,
+    shell: false,
+    timeout: DEFAULT_SAFE_GIT_TIMEOUT_MS,
+    maxBuffer: DEFAULT_SAFE_GIT_MAX_BUFFER,
+    windowsHide: true,
+  });
+  if (proc.error || proc.status !== 0) return null;
+
+  const version = normalizeOutput(proc.stdout || proc.stderr).trim();
+  if (!version.startsWith("git version ")) return null;
+  return realCandidate;
 }
 
 function validateSafeGitArgs(args) {
