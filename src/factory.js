@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSyn
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
-import { assertHeartbeatOwnerCapability, heartbeatOnce, withRunJsonLock } from "./run-state.js";
+import { assertHeartbeatOwnerCapability, hasInFlightHeartbeatWork, heartbeatOnce, withRunJsonLock } from "./run-state.js";
 import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -19,8 +19,6 @@ const HEARTBEAT_TICK_LOCK_TIMEOUT_MS = 1000;
 const HEARTBEAT_ACTIVE_STATUSES = new Set(["active", "running"]);
 const HEARTBEAT_TERMINAL_STATUSES = new Set(["stopped", "error"]);
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
-const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
-const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_OWNER_ENV = "FEATURE_FACTORY_HEARTBEAT_OWNER";
 const activeHeartbeatLoops = new Map();
 
@@ -524,16 +522,6 @@ function featureCommandPayload(prompt, opts) {
   };
 }
 
-function hasInFlightHeartbeatWork(run) {
-  if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) {
-    return true;
-  }
-  if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) {
-    return true;
-  }
-  return false;
-}
-
 function resolveHeartbeatOwnerCapability(opts = {}, command = "heartbeat") {
   const ownerCapability = stringValue(opts.ownerCapability) ? opts.ownerCapability : process.env[HEARTBEAT_OWNER_ENV];
   if (!stringValue(ownerCapability)) {
@@ -628,6 +616,8 @@ async function heartbeatTick(runtime) {
         now,
         reason: result.gate ? `pending-gate-${result.gate}` : "protected-gate-pending",
       });
+    } else if (result.reason === "no-in-flight-work") {
+      await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: "no-in-flight-work" });
     } else if (result.reason === "heartbeat-lease-stopping") {
       await finalizeHeartbeatStop(runtime.runDir, runtime.token, {
         now,

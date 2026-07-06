@@ -172,6 +172,35 @@ describe("factory heartbeat lifecycle", () => {
     }
   });
 
+  it("stops itself when no in-flight steps or slices remain and freezes heartbeat_at", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun());
+
+    let lease;
+    try {
+      lease = await startHeartbeat(RUN_ID, { phase: "security-reviewer", intervalMs: 1000, maxDurationMs: 5000 }, heartbeatStartOpts(repo));
+      const frozenHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
+      writeJson(
+        join(runDir, "run.json"),
+        runningRun({
+          heartbeat_at: frozenHeartbeatAt,
+          steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md" }],
+          slices: [{ id: "factory-heartbeat-lifecycle", stack: "backend", depends_on: [], status: "merged", attempts: 1 }],
+        }),
+      );
+
+      await waitFor(() => heartbeatStatus(RUN_ID, { cwd: repo })?.status === "stopped", { timeoutMs: 2500 });
+
+      assert.equal(heartbeatStatus(RUN_ID, { cwd: repo }).stop_reason, "no-in-flight-work");
+      assert.equal(readJson(join(runDir, "run.json")).heartbeat_at, frozenHeartbeatAt);
+      assert.equal(await waitForChange(() => readJson(join(runDir, "run.json")).heartbeat_at !== frozenHeartbeatAt, { timeoutMs: 1200 }), false);
+    } finally {
+      await stopIfActive(repo, lease?.token);
+      cleanup(repo);
+    }
+  });
+
   it("stops on every terminal run status without rewriting terminal state", async () => {
     for (const status of ["completed", "blocked", "partial", "needs-human"]) {
       const repo = tempRepo();
