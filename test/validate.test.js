@@ -7,6 +7,36 @@ describe("validateRun", () => {
     assert.equal(validateRun(runningRun()).run_id, "app-123");
   });
 
+  it("accepts runs without review_tier for backward compatibility", () => {
+    assert.equal(validateRun(runningRun()).status, "running");
+  });
+
+  it("accepts valid review_tier metadata and tolerates extra fields", () => {
+    const run = validateRun({
+      ...runningRun(),
+      review_tier: {
+        ...reviewTier(),
+        extra_field: { ignored: true },
+      },
+    });
+
+    assert.equal(run.review_tier.selected, "standard");
+  });
+
+  it("accepts an explicit light review tier", () => {
+    const run = validateRun({
+      ...runningRun(),
+      review_tier: reviewTier({
+        selected: "light",
+        source: "explicit",
+        risk_reasons: [],
+        rationale: "User explicitly selected the light tier for a low-risk change.",
+      }),
+    });
+
+    assert.equal(run.review_tier.selected, "light");
+  });
+
   it("requires terminal_result for terminal statuses", () => {
     assert.throws(
       () => validateRun({ ...runningRun(), status: "blocked", terminal_result: null }),
@@ -34,6 +64,48 @@ describe("validateRun", () => {
     assert.throws(
       () => validateRun({ ...runningRun(), gates: { story: { status: "waiting" } } }),
       (error) => error instanceof ValidationError && error.message.includes("run.gates.story.status"),
+    );
+  });
+
+  it("rejects non-object review_tier values", () => {
+    assert.throws(
+      () => validateRun({ ...runningRun(), review_tier: "light" }),
+      (error) => error instanceof ValidationError && error.message.includes("run.review_tier: must be an object"),
+    );
+  });
+
+  it("rejects invalid review_tier selected, source, and risk values", () => {
+    assert.throws(
+      () =>
+        validateRun({
+          ...runningRun(),
+          review_tier: reviewTier({
+            selected: "fast",
+            source: "manual",
+            risk_reasons: ["unknown_reason"],
+          }),
+        }),
+      (error) =>
+        error instanceof ValidationError &&
+        error.message.includes("run.review_tier.selected") &&
+        error.message.includes("run.review_tier.source") &&
+        error.message.includes("run.review_tier.risk_reasons[0]"),
+    );
+  });
+
+  it("rejects missing review_tier rationale", () => {
+    const { rationale, ...reviewTierWithoutRationale } = reviewTier();
+
+    assert.throws(
+      () => validateRun({ ...runningRun(), review_tier: reviewTierWithoutRationale }),
+      (error) => error instanceof ValidationError && error.message.includes("run.review_tier.rationale"),
+    );
+  });
+
+  it("rejects empty review_tier rationale", () => {
+    assert.throws(
+      () => validateRun({ ...runningRun(), review_tier: reviewTier({ rationale: "   " }) }),
+      (error) => error instanceof ValidationError && error.message.includes("run.review_tier.rationale"),
     );
   });
 });
@@ -87,6 +159,16 @@ function runningRun() {
         status: "running",
       },
     ],
+  };
+}
+
+function reviewTier(overrides = {}) {
+  return {
+    selected: "standard",
+    source: "default",
+    risk_reasons: ["workflow_or_release"],
+    rationale: "Workflow changes default to the standard tier unless riskier signals are present.",
+    ...overrides,
   };
 }
 
