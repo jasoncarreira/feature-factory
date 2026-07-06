@@ -33,6 +33,7 @@ describe("plugin profiles", () => {
 describe("review tier contract docs", () => {
   it("documents top-level run.json.review_tier in the schema", () => {
     assert.match(schemaDoc, /Top-level `run\.json\.review_tier` stores the selected review tier/i);
+    assert.match(schemaDoc, /In v1 this metadata lives only at `run\.json\.review_tier`; do not mirror it into plan metadata\./i);
     assert.match(schemaDoc, /optional for backward compatibility/i);
     assert.match(schemaDoc, /schema_version`; it remains `1`/i);
     assert.match(schemaDoc, /`selected`: required when `review_tier` is present\. Allowed values: `light`, `standard`, `strict`\./);
