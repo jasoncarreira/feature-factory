@@ -147,6 +147,7 @@ describe("reviewer guard documentation", () => {
   it("covers every reviewer-designated agent and documents the minimal post-run guard", () => {
     const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
     const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
+    const readmeDoc = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
     assertIncludes(skillDoc, "Reviewer-designated agents are only:");
     assertIncludes(skillDoc, "- `work-reviewer`");
@@ -164,6 +165,11 @@ describe("reviewer guard documentation", () => {
     assertIncludes(schemaDoc, "Reviewer-designated agents are only `work-reviewer`, `implementation-validator`, and `security-reviewer`.");
     assertIncludes(schemaDoc, "These are guard/helper outcomes, not new normal review verdict enums.");
     assertIncludes(schemaDoc, "This schema documents post-run git-visible dirty-state detection only, not OS/process sandboxing.");
+
+    assertIncludes(readmeDoc, "Reviewer-designated agents are `work-reviewer`, `implementation-validator`, and `security-reviewer`.");
+    assertIncludes(readmeDoc, "Current enforcement is post-run git dirty-state detection only.");
+    assertIncludes(readmeDoc, "If that status is dirty or unverifiable, the review is blocked and the reviewer output is discarded.");
+    assertIncludes(readmeDoc, "it does not provide OS/process sandboxing or prevention.");
   });
 });
 
