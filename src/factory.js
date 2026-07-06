@@ -1,10 +1,11 @@
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
 export function startFactory(args, opts = {}) {
   if (!args.length) throw new Error("factory start requires a feature prompt");
@@ -108,6 +109,95 @@ export function validateState(runId, opts = {}) {
   const runDirs = runId ? [resolveRunDir(runId, opts)] : allRunDirs(opts);
   const runs = runDirs.map((dir) => ({ run_dir: dir, ...validateRunDir(dir) }));
   return { ok: runs.every((item) => item.ok), runs };
+}
+
+export function cleanupRun(runId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
+  const run = readRunFile(join(runDir, "run.json"));
+  if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
+    throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
+  }
+
+  const result = {
+    run_id: run.run_id,
+    status: run.status,
+    dry_run: Boolean(opts.dryRun),
+    removed_worktrees: [],
+    skipped_worktrees: [],
+    deleted_branches: [],
+    skipped_branches: [],
+    removed_run_dir: false,
+    run_dir: runDir,
+  };
+
+  for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts);
+  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts);
+
+  if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
+  result.removed_run_dir = !opts.dryRun;
+  return result;
+}
+
+function cleanupWorktrees(run) {
+  return [...new Set([run.worktree, ...(Array.isArray(run.slices) ? run.slices.map((slice) => slice?.worktree) : [])].filter(Boolean))];
+}
+
+function cleanupBranches(run) {
+  return [...new Set([run.branch, ...(Array.isArray(run.slices) ? run.slices.map((slice) => slice?.branch) : [])].filter(Boolean))];
+}
+
+function removeWorktree(repo, worktree, result, opts) {
+  const resolved = resolve(repo, worktree);
+  if (!insideWorktreeRoot(repo, resolved)) {
+    result.skipped_worktrees.push({ worktree, reason: "outside .opencode/worktrees" });
+    return;
+  }
+  if (!existsSync(resolved)) {
+    result.skipped_worktrees.push({ worktree: resolved, reason: "missing" });
+    return;
+  }
+  if (!opts.dryRun) {
+    const proc = spawnSync("git", ["worktree", "remove", "--force", resolved], { cwd: repo, encoding: "utf8" });
+    if (proc.status !== 0) {
+      result.skipped_worktrees.push({ worktree: resolved, reason: (proc.stderr || proc.stdout || "git worktree remove failed").trim() });
+      return;
+    }
+  }
+  result.removed_worktrees.push(resolved);
+}
+
+function deleteBranch(repo, branch, result, opts) {
+  const name = String(branch).trim();
+  if (!name) return;
+  const current = spawnSync("git", ["branch", "--show-current"], { cwd: repo, encoding: "utf8" }).stdout?.trim();
+  if (current === name) {
+    result.skipped_branches.push({ branch: name, reason: "current branch" });
+    return;
+  }
+  const exists = spawnSync("git", ["show-ref", "--verify", `refs/heads/${name}`], { cwd: repo, encoding: "utf8" });
+  if (exists.status !== 0) {
+    result.skipped_branches.push({ branch: name, reason: "missing" });
+    return;
+  }
+  if (!opts.dryRun) {
+    const proc = spawnSync("git", ["branch", "-D", name], { cwd: repo, encoding: "utf8" });
+    if (proc.status !== 0) {
+      result.skipped_branches.push({ branch: name, reason: (proc.stderr || proc.stdout || "git branch delete failed").trim() });
+      return;
+    }
+  }
+  result.deleted_branches.push(name);
+}
+
+function insideWorktreeRoot(repo, worktree) {
+  const root = physicalPath(resolve(repo, ".opencode", "worktrees"));
+  const rel = relative(root, physicalPath(worktree));
+  return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+function physicalPath(path) {
+  return existsSync(path) ? realpathSync.native(path) : resolve(path);
 }
 
 function loadRun(runId, opts = {}) {

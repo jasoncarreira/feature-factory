@@ -104,6 +104,14 @@ Before each `factory start`, the CLI seeds the feature skill into the target rep
 
 Profile precedence is exact agent, then role, then `profiles.default`, then top-level `profile`, then opencode default. A profile may contain `model`, `variant`, or both.
 
+### Reviewer Read-Only Guard
+
+Reviewer-designated agents are `work-reviewer`, `implementation-validator`, and `security-reviewer`. They run with `edit: deny`, but that is not a runtime sandbox: they may still mutate through allowed `bash` or other tool paths.
+
+Current enforcement is post-run git dirty-state detection only. After one of those agents returns, the orchestrator checks the reviewed worktree with `git -C <reviewed_worktree> status --porcelain=v1 --untracked-files=all` before accepting the result. If that status is dirty or unverifiable, the review is blocked and the reviewer output is discarded.
+
+Limitations: this catches only git-visible changes in the reviewed worktree after the reviewer returns. It does not catch ignored files, committed or reverted changes, non-git-visible effects, or effects outside the reviewed worktree, and it does not provide OS/process sandboxing or prevention.
+
 ### Recommended Model Profile
 
 For serious feature-factory runs, use the strongest model/effort where architectural mistakes are most expensive: planning, decomposition, review, and final validation. Builders should still run strong, but story normalization and acceptance-test writing can usually run lower.
@@ -254,6 +262,15 @@ feature-factory factory provenance
 ```
 
 `factory status`, `factory answer`, and `factory validate` apply code-level schema validation to `run.json`; `factory validate` also validates `plan/slices.json` when present. Invalid runs appear as `invalid` in `factory list` instead of crashing the whole list.
+
+Clean up terminal runs after their PRs are merged or their artifacts are no longer needed:
+
+```sh
+feature-factory factory cleanup <run-id> --dry-run
+feature-factory factory cleanup <run-id>
+```
+
+Cleanup removes `.opencode/factory/<run-id>`, recorded worktrees under `.opencode/worktrees/`, and recorded local branches. It only runs for terminal statuses (`completed`, `blocked`, `partial`, or `needs-human`) unless `--force` is supplied. Use `--dry-run` first when you want to preview what would be removed.
 
 When opencode is running in the TUI on a session route, the sidebar also shows a `Feature Factory` panel for runs found under `.opencode/factory/*/run.json` in the current session directory or any nested repo below it. It lists active runs across those repos, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden except for the most recent completed run.
 

@@ -27,6 +27,7 @@ The feature factory persists a per-run control plane so runs are durable, resuma
     plan.md
   evidence/<subject>.json
   reviews/<subject>.json
+  reviews/implementation-validator.json
   reviews/security-reviewer.json
   processes/<timestamp>.log
 ```
@@ -179,6 +180,16 @@ Slice status values: `pending`, `running`, `review`, `merged`, `blocked`.
 
 Step status values: `running`, `accepted`, `rejected`, `blocked`.
 
+Reviewer-designated agents are only `work-reviewer`, `implementation-validator`, and `security-reviewer`. After each invocation, before accepting or writing the reviewer result, check the reviewed worktree with `git -C <reviewed_worktree> status --porcelain=v1 --untracked-files=all` or equivalent `src/review-guard.js` semantics:
+
+- `clean`: exit `0` and empty stdout
+- `dirty`: exit `0` and non-empty stdout
+- `unverifiable`: non-zero exit
+
+These are guard/helper outcomes, not new normal review verdict enums. If the guard is `dirty` or `unverifiable`, discard the reviewer output and write a separate blocked report shape.
+
+This schema documents post-run git-visible dirty-state detection only, not OS/process sandboxing. Ignored files, committed or reverted mutations, effects outside the reviewed worktree, and non-git-visible side effects remain out of scope.
+
 ## Gate Protocol
 
 The factory writes question files and records pending gates in `run.json`. External drivers write only answer files.
@@ -236,6 +247,8 @@ External harnesses should read `run.json.terminal_result` instead of parsing gat
 ```
 
 For `blocked`, `partial`, or `needs-human`, set `reason` to the concise operator-actionable blocker and leave `pr_url` null unless a PR already exists.
+
+If a reviewer guard block causes a terminal stop, use existing `run.status = "blocked"` and copy the guard-block `reason` into `terminal_result.reason`.
 
 ## plan/slices.json
 
@@ -328,6 +341,69 @@ Verdict values for `work-reviewer` review files: `APPROVE`, `REJECT`.
 
 Severity values: `blocker`, `major`, `minor`.
 
+### Guard-block review report
+
+Use a separate blocked report shape when a reviewer-designated agent returns but the reviewed worktree guard is `dirty` or `unverifiable`. Do not add new normal verdict enum values for this case.
+
+```json
+{
+  "status": "blocked",
+  "reason": "reviewer left reviewed worktree dirty (1 git-visible path)",
+  "reviewer": "work-reviewer",
+  "subject": "be-api",
+  "attempt": 1,
+  "reviewed_worktree": ".opencode/worktrees/app-123-short-slug--be-api",
+  "review_output_valid": false,
+  "dirty_paths": [
+    {
+      "path": "src/server/api/foo.ts",
+      "original_path": null,
+      "raw": " M src/server/api/foo.ts",
+      "xy": " M",
+      "index_status": " ",
+      "worktree_status": "M",
+      "staged": false,
+      "unstaged": true,
+      "deleted": false,
+      "conflicted": false,
+      "untracked": false
+    }
+  ],
+  "guard": {
+    "ok": false,
+    "status": "dirty",
+    "worktree": ".opencode/worktrees/app-123-short-slug--be-api",
+    "command": "git -C .opencode/worktrees/app-123-short-slug--be-api status --porcelain=v1 --untracked-files=all",
+    "exit_code": 0,
+    "stdout": " M src/server/api/foo.ts\n",
+    "stderr": "",
+    "dirty_paths": [
+      {
+        "path": "src/server/api/foo.ts",
+        "original_path": null,
+        "raw": " M src/server/api/foo.ts",
+        "xy": " M",
+        "index_status": " ",
+        "worktree_status": "M",
+        "staged": false,
+        "unstaged": true,
+        "deleted": false,
+        "conflicted": false,
+        "untracked": false
+      }
+    ]
+  }
+}
+```
+
+Write the guard-block report at the relevant review ref (`reviews/<subject>.json`, `reviews/security-reviewer.json`, or `reviews/implementation-validator.json`). State updates use existing statuses:
+
+- Reviewed step blocked (`spec-writer`, `work-decomposer`, or `test-verifier` via `work-reviewer`): set `run.json.steps[].status = "blocked"` and point `review_ref` at the guard-block report.
+- Slice review blocked: set `slice.status = "blocked"`, set `slice.blocked_reason` from the guard-block `reason`, and point `slice.review_ref` at the guard-block report.
+- `implementation-validator` guard block: set `run.json.validator.verdict = "NO-GO"` and point `run.json.validator.report` at the guard-block report.
+- `security-reviewer` guard block: set `run.json.security_review.verdict = "BLOCK"` and point `run.json.security_review.review_ref` at the guard-block report.
+- If the guard block stops the run, use existing `run.status = "blocked"` and `run.json.terminal_result.reason`.
+
 ## reviews/security-reviewer.json
 
 The pre-PR security panel writes a separate review shape because its verdict feeds the Gate 3 panel directly rather than the normal `work-reviewer` approve/reject loop.
@@ -361,3 +437,5 @@ The pre-PR security panel writes a separate review shape because its verdict fee
 Security reviewer verdict values: `PASS`, `BLOCK`.
 
 Security reviewer severity values: `block`, `nonblocking`.
+
+When `security-reviewer` leaves `$FEAT_WT` dirty or unverifiable, discard its reviewer output and use the guard-block review report shape instead of this normal PASS/BLOCK payload.

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { listRuns, startFactory, status, validateState, watchRun, writeGateAnswer } from "./factory.js";
+import { cleanupRun, listRuns, startFactory, status, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectProvenance } from "./provenance.js";
 
@@ -20,6 +20,7 @@ Commands:
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory validate [run-id]     Validate run.json and plan/slices.json
+  factory cleanup <run-id>      Remove terminal run state, worktrees, and branches
   factory answer <run> <gate> <approve|stop|changes: ...>
   factory watch [run-id] [--all] Print status changes as JSON
   factory provenance            Print detected versions, models, and capabilities
@@ -66,6 +67,7 @@ async function factory(args) {
   if (sub === "start") return print(startFactory(positional, opts), opts);
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
+  if (sub === "cleanup") return print(cleanupRun(positional[0], opts), opts);
   if (sub === "validate") {
     const result = validateState(positional[0], opts);
     print(result, { ...opts, json: true });
@@ -96,6 +98,8 @@ function options(args) {
     all: args.includes("--all"),
     headless: args.includes("--headless") || args.includes("--detached"),
     ready: args.includes("--ready"),
+    force: args.includes("--force"),
+    dryRun: args.includes("--dry-run"),
   };
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--repo") opts.cwd = resolve(args[++index]);
