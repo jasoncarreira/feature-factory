@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { cleanupRun, heartbeatStatus, listRuns, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectProvenance } from "./provenance.js";
+import { readJsoncConfig } from "./config.js";
 import { assertHeartbeatOwnerCapability, heartbeatOnce, transitionGateDecision } from "./run-state.js";
 import { HEARTBEAT_PHASES, HEARTBEAT_PROTECTED_GATES, validateRun } from "./validate.js";
 
@@ -60,7 +61,7 @@ function install(args) {
   const configPath = join(home, ".config", "opencode", "opencode.jsonc");
   mkdirSync(dirname(configPath), { recursive: true });
   const pluginSpec = local ? localPluginSpec() : "opencode-feature-factory";
-  const cfg = readConfig(configPath);
+  const cfg = readJsoncConfig(configPath);
   cfg.$schema ??= "https://opencode.ai/config.json";
   cfg.plugin ??= [];
   const oldSpec = local ? oldLocalPluginSpec() : null;
@@ -453,13 +454,6 @@ function stringValue(value) {
 
 function sleep(ms) {
   return new Promise((nextResolve) => setTimeout(nextResolve, ms));
-}
-
-function readConfig(path) {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, "utf8");
-  const stripped = raw.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim();
-  return stripped ? JSON.parse(stripped) : {};
 }
 
 function localPluginSpec() {
