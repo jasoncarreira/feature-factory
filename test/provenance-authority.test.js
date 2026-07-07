@@ -81,6 +81,10 @@ describe("provenance authority", () => {
 
       const valid = validateAttestationGraph(runDir);
       assert.equal(valid.ok, true);
+      assert.deepEqual(valid.orderedRefs, [
+        "attestations/run-base.json",
+        "attestations/gates/story.json",
+      ]);
 
       const tamperedRunBase = { ...runBase, bindings: { ...runBase.bindings, base_commit: "tampered-base" } };
       writeAttestation(runDir, "attestations/run-base.json", tamperedRunBase);
@@ -106,6 +110,132 @@ describe("provenance authority", () => {
       const gap = validateAttestationGraph(runDir);
       assert.equal(gap.ok, false);
       assert.match(joinErrors(gap), /previous attestation hash/u);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("fails closed when attestations/index.json is empty even if gate attestations exist on disk", () => {
+    const root = mkdtempSync(join(tmpdir(), "prov-auth-empty-index-"));
+
+    try {
+      const runDir = createBareRunDir(root, "empty-index");
+      writeFixture(runDir, "artifacts/story.md", "story artifact\n");
+      writeFixture(runDir, "gates/story.question.md", "story question\n");
+      const runBase = createRunBaseAttestation({
+        run_id: "empty-index",
+        sequence: 1,
+        prev_hash: null,
+        created_at: isoAt(1),
+        bindings: {
+          repo_root: root,
+          run_dir: runDir,
+          git_common_dir: root,
+          feature_branch: "feature-branch",
+          feature_worktree: root,
+          base_ref: "refs/heads/main",
+          base_commit: "base-commit",
+          base_tree: "base-tree",
+        },
+      });
+      const gateDecision = createGateDecisionAttestation({
+        run_id: "empty-index",
+        sequence: 2,
+        prev_hash: runBase.attestation_hash,
+        created_at: isoAt(2),
+        bindings: {
+          gate: "story",
+          decision: "approved",
+          approval_source: "autonomous",
+          question_ref: "gates/story.question.md",
+          question_hash: hashFile(join(runDir, "gates/story.question.md")),
+          artifact_ref: "artifacts/story.md",
+          artifact_hash: hashFile(join(runDir, "artifacts/story.md")),
+          answer_text_hash: hashValue("yes"),
+        },
+      });
+
+      const gateValidation = validateGateDecisionAttestation(gateDecision, { runDir });
+      assert.equal(gateValidation.ok, true);
+
+      writeAttestation(runDir, "attestations/run-base.json", runBase);
+      writeAttestation(runDir, "attestations/gates/story.json", gateDecision);
+      writeJson(join(runDir, "attestations", "index.json"), createAttestationIndex([]));
+
+      const graph = validateAttestationGraph(runDir);
+      assert.equal(graph.ok, false);
+      assert.deepEqual(graph.orderedRefs, []);
+      assert.deepEqual(Object.keys(graph.acceptedAttestations), []);
+      assert.match(joinErrors(graph), /attestations\/index\.json\.entries: must be a non-empty array/u);
+
+      const authority = validateProvenanceAuthority(runDir);
+      assert.equal(authority.ok, false);
+      assert.deepEqual(authority.orderedRefs, []);
+      assert.deepEqual(Object.keys(authority.acceptedAttestations), []);
+      assert.match(joinErrors(authority), /attestations\/index\.json\.entries: must be a non-empty array/u);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("rejects attestation graphs that place gate decisions before run-base", () => {
+    const root = mkdtempSync(join(tmpdir(), "prov-auth-gate-order-"));
+
+    try {
+      const runDir = createBareRunDir(root, "gate-order");
+      writeFixture(runDir, "artifacts/story.md", "story artifact\n");
+      writeFixture(runDir, "gates/story.question.md", "story question\n");
+
+      const gateDecision = createGateDecisionAttestation({
+        run_id: "gate-order",
+        sequence: 1,
+        prev_hash: null,
+        created_at: isoAt(1),
+        bindings: {
+          gate: "story",
+          decision: "approved",
+          approval_source: "autonomous",
+          question_ref: "gates/story.question.md",
+          question_hash: hashFile(join(runDir, "gates/story.question.md")),
+          artifact_ref: "artifacts/story.md",
+          artifact_hash: hashFile(join(runDir, "artifacts/story.md")),
+          answer_text_hash: hashValue("yes"),
+        },
+      });
+      const runBase = createRunBaseAttestation({
+        run_id: "gate-order",
+        sequence: 2,
+        prev_hash: gateDecision.attestation_hash,
+        created_at: isoAt(2),
+        bindings: {
+          repo_root: root,
+          run_dir: runDir,
+          git_common_dir: root,
+          feature_branch: "feature-branch",
+          feature_worktree: root,
+          base_ref: "refs/heads/main",
+          base_commit: "base-commit",
+          base_tree: "base-tree",
+        },
+      });
+
+      const gateValidation = validateGateDecisionAttestation(gateDecision, { runDir });
+      assert.equal(gateValidation.ok, true);
+
+      writeAttestation(runDir, "attestations/gates/story.json", gateDecision);
+      writeAttestation(runDir, "attestations/run-base.json", runBase);
+      writeJson(join(runDir, "attestations", "index.json"), createAttestationIndex([
+        { ref: "attestations/gates/story.json", attestation: gateDecision },
+        { ref: "attestations/run-base.json", attestation: runBase },
+      ]));
+
+      const result = validateAttestationGraph(runDir);
+      assert.equal(result.ok, false);
+      assert.deepEqual(result.orderedRefs, [
+        "attestations/gates/story.json",
+        "attestations/run-base.json",
+      ]);
+      assert.match(joinErrors(result), /attestations\/gates\/story\.json: the first attestation in the graph must be run-base/u);
     } finally {
       cleanup(root);
     }
