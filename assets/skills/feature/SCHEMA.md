@@ -66,6 +66,21 @@ Rules:
 - The heartbeat owner capability in `factory.lock` is local runtime authority for heartbeat control only; it is not provenance proof for reviews, gates, merges, or prior Git state.
 - Validation must fail closed whenever accepted attestations, safe Git observations, durable-root containment, or worktree identity cannot be re-proved.
 
+## Run-state transition API (`src/run-state.js`)
+
+All semantic `run.json` writes go through the transition helpers:
+
+- `hashRunState(run)` returns the canonical run hash used for optimistic `expectedCurrentHash` stale-write detection.
+- `transitionRunJson(runDir, mutator, options)` is the default semantic writer. It acquires `run-json.lock/`, validates current authority, rejects foreground semantic writes while heartbeat is active unless explicitly allowed, validates the next run, then commits atomically.
+- `transitionLifecycleRun(runDir, mutator, options)` uses the same transition contract. `allowActiveHeartbeat: true` is reserved for controlled lifecycle paths and is not a general bypass.
+- `transitionRunStep(runDir, stepSelector, updater, options)` seeds or updates `steps[]` entries by stable `agent` identity.
+- `transitionRunSlice(runDir, sliceId, updater, options)` seeds or updates `slices[]` entries by stable `id` identity.
+- `transitionTerminalResult(runDir, terminalResult, options)` keeps top-level `run.json.status` and `run.json.terminal_result` consistent and normalizes `terminal_result.run_id` to the durable run id.
+- `transitionGateDecision(runDir, gateName, gate, options)` is the only approved-gate writer. For `status: "approved"` it requires an already accepted non-empty `attestations/index.json`, stages `attestations/gates/<gate>.json` plus the updated `attestations/index.json`, validates that material, and commits those accepted attestation records before the approved gate state is written to `run.json`. If the next state fails validation, it rolls back the staged gate attestation/index files and leaves `run.json` unchanged.
+- `mutateRunJsonLocked(runDir, mutator, options)` is compatibility-only when `attestations/index.json` is absent. It may write bootstrap-safe non-provenance-sensitive state only. It must fail closed if the current or next state claims approved gates, review-approved or merged slices, passing validator/security verdicts, PR URLs, or run-base fields without accepted attestations.
+
+These helpers do not change heartbeat or external-driver semantics: `heartbeat.json` remains liveness-only, and external drivers still write only `gates/<gate>.answer`; approved file-sourced answers still record `approval_source: "external-driver"`.
+
 ## `attestations/`
 
 Create attestation records only under the physical `$RUN/attestations/` root:
@@ -116,6 +131,7 @@ Every accepted attestation uses the same common envelope and a canonical JSON ha
 
 Local attestation JSON is not trusted merely because it exists. An attestation is accepted only when all of the following are true:
 
+- `attestations/index.json` is created only with the first accepted attestation and must never be a placeholder-empty file.
 - The ref is under the physical `$RUN/attestations/` root.
 - `attestations/index.json` contains the matching `ref`, `type`, `sequence`, `prev_hash`, and `attestation_hash`.
 - The canonical JSON hash matches `attestation_hash`.
@@ -124,6 +140,12 @@ Local attestation JSON is not trusted merely because it exists. An attestation i
 - Every currently observable Git/filesystem fact is re-observed through safe Git/filesystem checks and still matches the attested bindings.
 
 Unknown types, hash mismatches, out-of-chain records, missing refs, stale worktrees, inaccessible worktrees, same-branch conflicts, or unverifiable observations fail closed.
+
+Bootstrapping rules:
+
+- `attestations/index.json.entries` must be a non-empty array whenever the file exists.
+- The first accepted attestation in the graph must be the sequence-1 `attestations/run-base.json` with `prev_hash: null`.
+- Approved gate decisions require that accepted run-base anchor already exist; gate decisions cannot bootstrap or precede the graph root.
 
 ### Safe Git policy
 
@@ -162,6 +184,8 @@ All provenance-sensitive Git facts must be observed through the centralized safe
 - `question_ref` must be rooted under `gates/`.
 - `answer_ref`, when present, must be rooted under `gates/`.
 - `artifact_ref` remains rooted under `artifacts/`; gate questions and answers are never laundered through `artifacts/`.
+- Approved gate state in `run.json` is committed only after `transitionGateDecision()` writes and validates `attestations/gates/<gate>.json` plus the updated accepted `attestations/index.json` chain under the same transition lock; those accepted attestation records land before the approved gate state becomes durable.
+- If approved-gate validation fails after staging those files, `transitionGateDecision()` must roll back the staged gate attestation/index files and leave `run.json` unchanged.
 - Gate status booleans in `run.json` are bookkeeping only. Later validation must not trust status booleans alone.
 
 ### Merge-chain attestation (`attestations/merge-chain.json`)
