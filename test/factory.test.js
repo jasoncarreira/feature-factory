@@ -15,8 +15,30 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { cleanupRun, listRuns, startFactory, status, validateState, watchRun, writeGateAnswer } from "../src/factory.js";
+import { cleanupRun, listRuns, persistFactoryRunCreatedProvenance, persistFactoryRunResumeProvenance, startFactory, status, validateState, watchRun, writeGateAnswer } from "../src/factory.js";
+import { REDACTED_PROVENANCE_VALUE, collectRunProvenanceSnapshot } from "../src/provenance.js";
 import { validateRunDir } from "../src/validate.js";
+
+const TOKEN_FIXTURES = [
+  ["github classic ghp", "ghp_abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"],
+  ["github fine-grained", "github_pat_11ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890"],
+  ["github oauth", "gho_abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"],
+  ["github user-to-server", "ghu_abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"],
+  ["github server-to-server", "ghs_abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"],
+  ["github refresh", "ghr_abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"],
+  ["openai secret", "sk-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdef"],
+  ["openai project", "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdef"],
+  ["slack bot", "xoxb_123456789012-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"],
+  ["slack user", "xoxp_123456789012-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"],
+  ["slack app", "xoxa_123456789012-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"],
+  ["gitlab", "glpat-AbCdEfGhIjKlMnOpQrStUvWxYz012345"],
+  ["bearer", "Bearer abcdefghijklmnopqrstuvwxyzABCDE1234567890"],
+  ["jwt", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.aBcdEf1234567890_-signature"],
+  ["aws access key", "AKIAIOSFODNN7EXAMPLE"],
+  ["aws temporary access key", "ASIAIOSFODNN7EXAMPLE"],
+  ["credential url", "https://oauth2:credential-value@example.com/owner/repo.git"],
+  ["high entropy single token", "AbCDefGhIJklMNOpQRstUVwxYZ0123456789_-+=AbCdEf"],
+];
 
 describe("factory state validation", () => {
   it("validates run.json and plan/slices.json in a run directory", () => {
@@ -426,11 +448,9 @@ describe("factory gate answers", () => {
 
   it("writes explicit run-directory answers to the target run's real gates directory", () => {
     const repo = tempRepo();
-    const runDir = join(repo, ".opencode", "factory", "gate-answer-explicit-run-dir");
+    const { runDir } = writePendingGateRun(repo, "gate-answer-explicit-run-dir");
     const aliasDir = join(repo, "aliases", "gate-answer-explicit-run-dir");
-    mkdirSync(join(runDir, "gates"), { recursive: true });
     mkdirSync(dirname(aliasDir), { recursive: true });
-    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-explicit-run-dir", slices: [] }));
     symlinkSync(runDir, aliasDir, "dir");
 
     try {
@@ -452,13 +472,19 @@ describe("factory gate answers", () => {
     const outsideRoot = tempRepo();
     const runDir = join(repo, ".opencode", "factory", "gate-answer-gates-symlink");
     const outsideGatesDir = join(outsideRoot, "outside-gates");
-    mkdirSync(runDir, { recursive: true });
+    mkdirSync(join(runDir, "artifacts"), { recursive: true });
     mkdirSync(outsideGatesDir, { recursive: true });
-    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-gates-symlink", slices: [] }));
+    writeFixture(runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(outsideGatesDir, "story.question.md", "story question\n");
+    writeJson(join(runDir, "run.json"), runningRun({
+      run_id: "gate-answer-gates-symlink",
+      gates: { story: pendingGateFixture(runDir, { questionHash: hashFile(join(outsideGatesDir, "story.question.md"), { mode: "raw" }) }) },
+      slices: [],
+    }));
     symlinkSync(outsideGatesDir, join(runDir, "gates"), "dir");
 
     try {
-      assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /gates directory must stay inside/u);
+      assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /gates directory must (?:stay inside|not be a symlink)/u);
       assert.equal(existsSync(join(outsideGatesDir, "story.answer")), false);
     } finally {
       cleanup(repo);
@@ -466,18 +492,39 @@ describe("factory gate answers", () => {
     }
   });
 
+  it("rejects inside-run symlinked artifact durable roots", () => {
+    const repo = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "gate-answer-artifact-root-symlink");
+    const realArtifactsDir = join(runDir, "real-artifacts");
+    mkdirSync(join(runDir, "gates"), { recursive: true });
+    mkdirSync(realArtifactsDir, { recursive: true });
+    writeFixture(runDir, "gates/story.question.md", "story question\n");
+    writeFixture(runDir, "real-artifacts/story.md", "story artifact\n");
+    symlinkSync(realArtifactsDir, join(runDir, "artifacts"), "dir");
+    writeJson(join(runDir, "run.json"), runningRun({
+      run_id: "gate-answer-artifact-root-symlink",
+      gates: { story: pendingGateFixture(runDir, { artifactHash: hashFile(join(realArtifactsDir, "story.md"), { mode: "raw" }) }) },
+      slices: [],
+    }));
+
+    try {
+      assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /artifacts directory must not be a symlink/u);
+      assert.equal(existsSync(join(runDir, "gates", "story.answer")), false);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("rejects explicit run-directory answer-path symlink escapes without writing outside files", () => {
     const repo = tempRepo();
     const outsideRoot = tempRepo();
-    const runDir = join(repo, ".opencode", "factory", "gate-answer-path-symlink");
+    const { runDir } = writePendingGateRun(repo, "gate-answer-path-symlink");
     const outsideAnswerPath = join(outsideRoot, "story.answer");
-    mkdirSync(join(runDir, "gates"), { recursive: true });
-    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-path-symlink", slices: [] }));
     writeFileSync(outsideAnswerPath, "outside\n", "utf8");
     symlinkSync(outsideAnswerPath, join(runDir, "gates", "story.answer"));
 
     try {
-      assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /gate answer path must not be a symlink/u);
+      assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /gate answer path must not be a symlink|must not traverse symlinks/u);
       assert.equal(readFileSync(outsideAnswerPath, "utf8"), "outside\n");
     } finally {
       cleanup(repo);
@@ -488,10 +535,8 @@ describe("factory gate answers", () => {
   it("replaces pre-existing hardlinked answer paths without mutating outside linked files", () => {
     const repo = tempRepo();
     const outsideRoot = tempRepo();
-    const runDir = join(repo, ".opencode", "factory", "gate-answer-hardlink");
+    const { runDir } = writePendingGateRun(repo, "gate-answer-hardlink");
     const outsideAnswerPath = join(outsideRoot, "story.answer");
-    mkdirSync(join(runDir, "gates"), { recursive: true });
-    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-hardlink", slices: [] }));
     writeFileSync(outsideAnswerPath, "outside\n", "utf8");
     linkSync(outsideAnswerPath, join(runDir, "gates", "story.answer"));
 
@@ -510,14 +555,202 @@ describe("factory gate answers", () => {
 
   it("cleans temporary gate-answer files when rename over the target fails", () => {
     const repo = tempRepo();
-    const runDir = join(repo, ".opencode", "factory", "gate-answer-temp-cleanup");
+    const { runDir } = writePendingGateRun(repo, "gate-answer-temp-cleanup");
     const gatesDir = join(runDir, "gates");
     mkdirSync(join(gatesDir, "story.answer"), { recursive: true });
-    writeJson(join(runDir, "run.json"), runningRun({ run_id: "gate-answer-temp-cleanup", slices: [] }));
 
     try {
       assert.throws(() => writeGateAnswer(runDir, "story", "approve", { cwd: repo }), /rename|directory|EISDIR|ENOTDIR|ENOTEMPTY/u);
-      assert.deepEqual(readdirSync(gatesDir).sort(), ["story.answer"]);
+      assert.deepEqual(readdirSync(gatesDir).sort(), ["story.answer", "story.question.md"]);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("writes valid pending-snapshot answers to the pending gate answer_ref", () => {
+    const repo = tempRepo();
+    const { runDir } = writePendingGateRun(repo, "gate-answer-valid-snapshot", { answerRef: "gates/story.external.answer" });
+
+    try {
+      const result = writeGateAnswer("gate-answer-valid-snapshot", "story", "approve", { cwd: repo });
+
+      assert.equal(result.path, join(realpathSync.native(runDir), "gates", "story.external.answer"));
+      assert.equal(readFileSync(join(runDir, "gates", "story.external.answer"), "utf8"), "approve\n");
+      assert.equal(existsSync(join(runDir, "gates", "story.answer")), false);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("allows canonical answer_ref when older pending snapshots omit answer_ref", () => {
+    const repo = tempRepo();
+    const { runDir } = writePendingGateRun(repo, "gate-answer-canonical-without-snapshot-answer-ref", { bindAnswerRef: false });
+
+    try {
+      const result = writeGateAnswer("gate-answer-canonical-without-snapshot-answer-ref", "story", "approve", { cwd: repo });
+
+      assert.equal(result.path, join(realpathSync.native(runDir), "gates", "story.answer"));
+      assert.equal(readFileSync(join(runDir, "gates", "story.answer"), "utf8"), "approve\n");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("rejects non-canonical answer_ref when pending_snapshot omits answer_ref", () => {
+    const repo = tempRepo();
+    const { runDir } = writePendingGateRun(repo, "gate-answer-custom-without-snapshot-answer-ref", {
+      answerRef: "gates/custom.answer",
+      bindAnswerRef: false,
+    });
+
+    try {
+      assert.throws(
+        () => writeGateAnswer("gate-answer-custom-without-snapshot-answer-ref", "story", "approve", { cwd: repo }),
+        /requires pending_snapshot\.answer_ref/u,
+      );
+      assert.equal(existsSync(join(runDir, "gates", "custom.answer")), false);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("rejects missing and escaped pending artifact, question, and answer refs", () => {
+    const scenarios = [
+      { name: "missing-artifact", mutate: (gate) => { delete gate.artifact; }, error: /artifact ref/u },
+      { name: "missing-question", mutate: (gate) => { delete gate.question_ref; }, error: /question_ref/u },
+      { name: "missing-answer", mutate: (gate) => { delete gate.answer_ref; }, error: /answer_ref/u },
+      { name: "escaped-artifact", mutate: (gate) => { gate.artifact = "artifacts/../story.md"; gate.pending_snapshot.artifact_ref = gate.artifact; }, error: /must not contain/u },
+      { name: "escaped-question", mutate: (gate) => { gate.question_ref = "gates/../story.question.md"; gate.pending_snapshot.question_ref = gate.question_ref; }, error: /must not contain/u },
+      { name: "escaped-answer", mutate: (gate) => { gate.answer_ref = "gates/../story.answer"; }, error: /must not contain|stale answer_ref/u },
+    ];
+
+    for (const scenario of scenarios) {
+      const repo = tempRepo();
+      try {
+        const { runDir } = writePendingGateRun(repo, `gate-answer-${scenario.name}`);
+        const manifest = readJson(join(runDir, "run.json"));
+        scenario.mutate(manifest.gates.story);
+        writeJson(join(runDir, "run.json"), manifest);
+
+        assert.throws(() => writeGateAnswer(`gate-answer-${scenario.name}`, "story", "approve", { cwd: repo }), scenario.error, scenario.name);
+        assert.equal(existsSync(join(runDir, "gates", "story.answer")), false, scenario.name);
+      } finally {
+        cleanup(repo);
+      }
+    }
+  });
+
+  it("rejects stale pending snapshot refs and hashes before writing answers", () => {
+    const scenarios = [
+      { name: "artifact-ref", mutate: (runDir, gate) => { gate.artifact = "artifacts/other.md"; writeFixture(runDir, "artifacts/other.md", "story artifact\n"); }, error: /stale artifact ref/u },
+      { name: "question-ref", mutate: (runDir, gate) => { gate.question_ref = "gates/other.question.md"; writeFixture(runDir, "gates/other.question.md", "story question\n"); }, error: /stale question_ref/u },
+      { name: "answer-ref", mutate: (runDir, gate) => { gate.answer_ref = "gates/other.answer"; }, error: /stale answer_ref/u },
+      { name: "answer-question-overlap", mutate: (runDir, gate) => { gate.answer_ref = gate.question_ref; gate.pending_snapshot.answer_ref = gate.question_ref; }, error: /answer_ref must not overlap question_ref/u },
+      { name: "artifact-hash", mutate: (runDir) => { writeFixture(runDir, "artifacts/story.md", "changed artifact\n"); }, error: /artifact_hash is stale/u },
+      { name: "question-hash", mutate: (runDir) => { writeFixture(runDir, "gates/story.question.md", "changed question\n"); }, error: /question_hash is stale/u },
+    ];
+
+    for (const scenario of scenarios) {
+      const repo = tempRepo();
+      try {
+        const { runDir } = writePendingGateRun(repo, `gate-answer-stale-${scenario.name}`);
+        const manifest = readJson(join(runDir, "run.json"));
+        scenario.mutate(runDir, manifest.gates.story);
+        writeJson(join(runDir, "run.json"), manifest);
+
+        assert.throws(() => writeGateAnswer(`gate-answer-stale-${scenario.name}`, "story", "approve", { cwd: repo }), scenario.error, scenario.name);
+        assert.equal(existsSync(join(runDir, "gates", "story.answer")), false, scenario.name);
+      } finally {
+        cleanup(repo);
+      }
+    }
+  });
+
+  it("requires valid current run authority before accepting external gate answers", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      const { runDir } = buildFactoryAuthorityRun(fixture, "gate-answer-invalid-authority");
+      const manifest = readJson(join(runDir, "run.json"));
+      manifest.status = "running";
+      manifest.branch = "forged-branch";
+      manifest.terminal_result = null;
+      writeFixture(runDir, "artifacts/story.md", "story artifact\n");
+      writeFixture(runDir, "gates/story.question.md", "story question\n");
+      manifest.gates.story = pendingGateFixture(runDir);
+      writeJson(join(runDir, "run.json"), manifest);
+
+      assert.throws(() => writeGateAnswer("gate-answer-invalid-authority", "story", "approve", { cwd: fixture.repoRoot }), /run\.branch|accepted feature branch/u);
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+});
+
+describe("factory provenance snapshots", () => {
+  it("collects diagnostic run provenance snapshots without secret-shaped keys", async () => {
+    const repo = tempRepo();
+
+    try {
+      const snapshot = await collectRunProvenanceSnapshot({
+        cwd: repo,
+        driverKind: "cli-test",
+        pluginSpec: "test-plugin",
+        event: "run-created",
+        now: "2026-07-05T12:00:00.000Z",
+      });
+
+      assert.equal(snapshot.collected_at, "2026-07-05T12:00:00.000Z");
+      assert.equal(snapshot.event, "run-created");
+      assert.equal(snapshot.diagnostic_only, true);
+      assert.equal(snapshot.provenance.plugin_spec, "test-plugin");
+      assert.equal(snapshot.provenance.driver.kind, "cli-test");
+      assert.doesNotMatch(JSON.stringify(snapshot), /token|password|secret|api_key/iu);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("persists created and resumed factory provenance with non-negative resume counts", async () => {
+    const repo = tempRepo();
+    const { runDir } = writePendingGateRun(repo, "factory-provenance-persist");
+
+    try {
+      await persistFactoryRunCreatedProvenance("factory-provenance-persist", { cwd: repo, now: "2026-07-05T12:00:00.000Z" });
+      let manifest = readJson(join(runDir, "run.json"));
+      assert.equal(manifest.factory_provenance.created_with.event, "run-created");
+      assert.equal(manifest.factory_provenance.last_resumed_with, null);
+      assert.equal(manifest.factory_provenance.resume_count, 0);
+
+      await persistFactoryRunResumeProvenance("factory-provenance-persist", { cwd: repo, now: "2026-07-05T13:00:00.000Z" });
+      manifest = readJson(join(runDir, "run.json"));
+      assert.equal(manifest.factory_provenance.last_resumed_with.event, "run-resumed");
+      assert.equal(manifest.factory_provenance.resume_count, 1);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("persists only redacted diagnostic provenance for credential-bearing and token-shaped inputs", async () => {
+    const repo = tempRepo();
+
+    try {
+      for (const [index, [name, value]] of TOKEN_FIXTURES.entries()) {
+        const runId = `factory-provenance-redacts-input-values-${index}`;
+        const { runDir } = writePendingGateRun(repo, runId);
+        await persistFactoryRunCreatedProvenance(runId, {
+          cwd: repo,
+          pluginSpec: value,
+          driverKind: value,
+          now: "2026-07-05T12:00:00.000Z",
+        });
+        const manifestText = readFileSync(join(runDir, "run.json"), "utf8");
+        const manifest = JSON.parse(manifestText);
+
+        assert.equal(manifest.factory_provenance.created_with.provenance.plugin_spec, REDACTED_PROVENANCE_VALUE, name);
+        assert.equal(manifest.factory_provenance.created_with.provenance.driver.kind, REDACTED_PROVENANCE_VALUE, name);
+        assert.equal(manifestText.includes(value), false, `raw token leaked for ${name}: ${value}`);
+      }
     } finally {
       cleanup(repo);
     }
@@ -821,6 +1054,44 @@ describe("factory cleanup", () => {
 
 function tempRepo() {
   return mkdtempSync(join(tmpdir(), "feature-factory-"));
+}
+
+function writePendingGateRun(repo, runId, options = {}) {
+  const runDir = join(repo, ".opencode", "factory", runId);
+  for (const directory of ["artifacts", "gates", "evidence", "reviews", "attestations"]) {
+    mkdirSync(join(runDir, directory), { recursive: true });
+  }
+  writeFixture(runDir, options.artifactRef || "artifacts/story.md", options.artifactText || "story artifact\n");
+  writeFixture(runDir, options.questionRef || "gates/story.question.md", options.questionText || "story question\n");
+  writeJson(join(runDir, "run.json"), runningRun({
+    run_id: runId,
+    gates: {
+      story: pendingGateFixture(runDir, options),
+    },
+    slices: [],
+  }));
+  return { runDir };
+}
+
+function pendingGateFixture(runDir, options = {}) {
+  const artifactRef = options.artifactRef || "artifacts/story.md";
+  const questionRef = options.questionRef || "gates/story.question.md";
+  const answerRef = options.answerRef || "gates/story.answer";
+  const pendingSnapshot = {
+    question_ref: questionRef,
+    question_hash: options.questionHash || hashFile(join(runDir, questionRef), { mode: "raw" }),
+    artifact_ref: artifactRef,
+    artifact_hash: options.artifactHash || hashFile(join(runDir, artifactRef), { mode: "raw" }),
+    created_at: options.createdAt || "2026-07-05T00:00:00.000Z",
+  };
+  if (options.bindAnswerRef !== false) pendingSnapshot.answer_ref = answerRef;
+  return {
+    status: "pending",
+    artifact: artifactRef,
+    question_ref: questionRef,
+    answer_ref: answerRef,
+    pending_snapshot: pendingSnapshot,
+  };
 }
 
 function gitRepo() {
