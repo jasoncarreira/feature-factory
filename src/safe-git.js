@@ -17,6 +17,7 @@ const C_STYLE_ESCAPES = Object.freeze({
 });
 const SAFE_SUBCOMMANDS = new Set([
   "cat-file",
+  "config",
   "check-ignore",
   "diff-tree",
   "ls-files",
@@ -294,6 +295,12 @@ function validateSafeGitArgs(args) {
   if (args[0] === "cat-file") {
     rejectForbiddenArg(args, "--filters");
     rejectForbiddenArg(args, "--textconv");
+  }
+
+  if (args[0] === "config") {
+    if (args.length !== 3 || args[1] !== "--null" || args[2] !== "--list") {
+      throw new Error("safeGit only allows git config --null --list");
+    }
   }
 
   if (args[0] === "diff-tree") {

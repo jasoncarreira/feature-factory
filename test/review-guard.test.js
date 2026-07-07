@@ -32,6 +32,32 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("fails closed before status when clean filters are configured", () => {
+    const repo = createCommittedRepo();
+    const calls = [];
+
+    try {
+      const result = checkReviewedWorktreeClean(repo, {
+        spawnSync(file, args, options) {
+          calls.push({ file, args, options });
+          if (args.includes("config") && args.includes("--null") && args.includes("--list")) {
+            return { status: 0, stdout: "filter.evil.clean\nsh -c pwn\0", stderr: "" };
+          }
+          throw new Error(`unexpected git args after unsafe config: ${args.join(" ")}`);
+        },
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "unverifiable");
+      assert.equal(result.command, `git -C ${repo} config --null --list`);
+      assert.match(result.stderr, /unsafe git config/u);
+      assert.match(result.stderr, /filter\.evil\.clean/u);
+      assert.deepEqual(calls.map((call) => call.args), [expectedSafeGitArgs(repo, ["config", "--null", "--list"])]);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("blocks tracked dirty modifications and reports path metadata", () => {
     const repo = createCommittedRepo();
 
@@ -364,6 +390,24 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("fails closed before recursive submodule status when a submodule has clean filters configured", () => {
+    const { root, repo, submodulePath } = createCommittedRepoWithSubmodule();
+
+    try {
+      git(submodulePath, ["config", "filter.evil.clean", "sh -c pwn"]);
+      writeFileSync(join(submodulePath, ".gitattributes"), "* filter=evil\n", "utf8");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "unverifiable");
+      assert.match(result.stderr, /submodule observation failed for review-submodule/u);
+      assert.match(result.stderr, /filter\.evil\.clean/u);
+    } finally {
+      cleanup(root);
+    }
+  });
+
   it("blocks non-git worktrees as unverifiable", () => {
     const dir = mkdtempSync(join(tmpdir(), "review-guard-nongit-"));
 
@@ -433,6 +477,9 @@ describe("checkReviewedWorktreeClean", () => {
         spawnSync(file, args, options) {
           calls.push({ file, args, options });
 
+          if (args.includes("config") && args.includes("--null") && args.includes("--list")) {
+            return { status: 0, stdout: "", stderr: "" };
+          }
           if (args.includes("status") && args.includes("--ignore-submodules=none")) {
             return { status: 0, stdout: "", stderr: "" };
           }
@@ -460,6 +507,7 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all --ignore-submodules=none`);
       assert.deepEqual(calls.map((call) => call.args), [
+        expectedSafeGitArgs(repo, ["config", "--null", "--list"]),
         expectedSafeGitArgs(repo, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]),
         expectedSafeGitArgs(repo, ["rev-parse", "--show-toplevel"]),
         expectedSafeGitArgs(repo, ["rev-parse", "HEAD", "HEAD^{tree}"]),

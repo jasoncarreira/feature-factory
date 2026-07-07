@@ -226,6 +226,27 @@ describe("safeGit", () => {
       assert.throws(() => safeGit(repo, []), /must include a git subcommand/u);
       assert.throws(() => safeGit(repo, ["-c", "core.hooksPath=/tmp/pwn", "status"]), /global git options/u);
       assert.throws(() => safeGit(repo, ["worktree", "remove", repo]), /worktree list/u);
+      assert.throws(() => safeGit(repo, ["config", "--global", "--list"]), /git config --null --list/u);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("allows only null-delimited config listing for driver-safety inspection", () => {
+    const repo = createCommittedRepo(["tracked.txt"]);
+    let call = null;
+
+    try {
+      const result = safeGit(repo, ["config", "--null", "--list"], {
+        spawnSync(file, args, options) {
+          call = { file, args, options };
+          return { status: 0, stdout: "filter.evil.clean\nsh -c pwn\0", stderr: "" };
+        },
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.stdout, "filter.evil.clean\nsh -c pwn\0");
+      assert.deepEqual(call.args, expectedSafeGitArgs(repo, ["config", "--null", "--list"]));
     } finally {
       cleanup(repo);
     }

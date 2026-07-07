@@ -641,11 +641,12 @@ export function validateReviewApprovalAttestation(attestation, context = {}) {
 
   checks.push(runCheck("review-approval.guard-reobserved", () => {
     const declaredGuardWorktree = resolve(requireText(bindings.guard.worktree, "review-approval.bindings.guard.worktree"));
-    const observedGuard = checkReviewedWorktreeClean(declaredGuardWorktree, pickSafeGitOptions(context));
+    const guardWorktree = readRealPath(declaredGuardWorktree, "review guard worktree", context);
+    assertReviewGuardWorktreeContained(guardWorktree, context);
+    const observedGuard = checkReviewedWorktreeClean(guardWorktree, pickSafeGitOptions(context));
     if (!observedGuard.ok) {
       throw new Error(formatGuardObservationFailure(observedGuard));
     }
-    const guardWorktree = readRealPath(declaredGuardWorktree, "review guard worktree", context);
     if (observedGuard.head_commit !== bindings.guard.head_commit) {
       throw new Error(`guard head commit is ${observedGuard.head_commit}, expected ${bindings.guard.head_commit}`);
     }
@@ -1398,6 +1399,26 @@ function resolveRepoRootFromContext(context, errorMessage) {
   const repoRoot = context.repoRoot ?? context.runBase?.bindings?.repo_root;
   if (!repoRoot) throw new Error(errorMessage);
   return readRealPath(resolve(repoRoot), "repoRoot", context);
+}
+
+function assertReviewGuardWorktreeContained(guardWorktree, context = {}) {
+  const normalizedGuardWorktree = requireText(guardWorktree, "review guard worktree");
+  if (context.expectedWorktree) {
+    const expectedWorktree = readRealPath(resolve(context.expectedWorktree), "expectedWorktree", context);
+    if (normalizedGuardWorktree !== expectedWorktree) {
+      throw new Error(`guard worktree is ${normalizedGuardWorktree}, expected ${expectedWorktree}`);
+    }
+    return;
+  }
+
+  const repoRoot = context.repoRoot ?? context.runBase?.bindings?.repo_root;
+  if (!repoRoot) return;
+
+  const repoRealPath = readRealPath(resolve(repoRoot), "repoRoot", context);
+  const worktreeRoot = join(repoRealPath, ".opencode", "worktrees");
+  if (!isContainedPath(worktreeRoot, normalizedGuardWorktree)) {
+    throw new Error(`guard worktree must be physically contained under ${worktreeRoot}`);
+  }
 }
 
 function resolveGitCwdFromContext(context) {

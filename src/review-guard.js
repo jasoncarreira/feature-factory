@@ -10,9 +10,11 @@ const REVIEW_GUARD_ARGS = Object.freeze([
 ]);
 const REVIEW_GUARD_IDENTITY_ARGS = Object.freeze(["rev-parse", "--show-toplevel"]);
 const REVIEW_GUARD_HEAD_ARGS = Object.freeze(["rev-parse", "HEAD", "HEAD^{tree}"]);
+const REVIEW_GUARD_CONFIG_ARGS = Object.freeze(["config", "--null", "--list"]);
 const REVIEW_GUARD_HIDDEN_INDEX_ARGS = Object.freeze(["ls-files", "-v"]);
 const REVIEW_GUARD_IGNORED_ARGS = Object.freeze(["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]);
 const REVIEW_GUARD_SUBMODULE_ARGS = Object.freeze(["ls-files", "--stage"]);
+const UNSAFE_CONFIG_KEY_PATTERN = /^(?:filter\..*\.(?:clean|smudge|process)|diff\..*\.textconv)$/iu;
 const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
 const C_STYLE_ESCAPES = Object.freeze({
   a: "\u0007",
@@ -128,6 +130,23 @@ function observeReviewedWorktreeTree(worktree, gitOptions) {
 }
 
 function observeSingleReviewedWorktree(reviewedWorktree, gitOptions) {
+  const configResult = listUnsafeGitConfig(reviewedWorktree, gitOptions);
+  if (!configResult.ok || configResult.unsafe_config_entries.length > 0) {
+    return buildGuardResult({
+      ok: false,
+      status: "unverifiable",
+      worktree: reviewedWorktree,
+      command: formatReviewGuardConfigCommand(reviewedWorktree),
+      exit_code: normalizeExitCode(configResult.status),
+      stdout: configResult.stdout,
+      stderr: configResult.ok ? formatUnsafeConfigFailure(configResult.unsafe_config_entries) : configResult.stderr,
+      dirty_paths: [],
+      head_commit: null,
+      head_tree: null,
+      hidden_index_paths: [],
+    });
+  }
+
   const statusResult = safeGit(reviewedWorktree, REVIEW_GUARD_ARGS, gitOptions);
   const statusCommand = formatReviewGuardCommand(reviewedWorktree);
 
@@ -459,6 +478,10 @@ function formatReviewGuardHeadCommand(worktree) {
   return formatGitCommand(worktree, REVIEW_GUARD_HEAD_ARGS);
 }
 
+function formatReviewGuardConfigCommand(worktree) {
+  return formatGitCommand(worktree, REVIEW_GUARD_CONFIG_ARGS);
+}
+
 function formatReviewGuardHiddenIndexCommand(worktree) {
   return formatGitCommand(worktree, REVIEW_GUARD_HIDDEN_INDEX_ARGS);
 }
@@ -500,6 +523,38 @@ function normalizeSafeGitOptions(options) {
     timeout: options.timeout,
     spawnSync: options.spawnSync,
   };
+}
+
+function listUnsafeGitConfig(worktree, gitOptions) {
+  const result = safeGit(worktree, REVIEW_GUARD_CONFIG_ARGS, gitOptions);
+  return {
+    ...result,
+    unsafe_config_entries: result.ok ? parseUnsafeConfigEntries(result.stdout) : [],
+  };
+}
+
+function parseUnsafeConfigEntries(stdout) {
+  return String(stdout || "")
+    .split("\0")
+    .map(parseConfigEntry)
+    .filter((entry) => entry && UNSAFE_CONFIG_KEY_PATTERN.test(entry.key));
+}
+
+function parseConfigEntry(raw) {
+  if (typeof raw !== "string" || raw === "") return null;
+  const separator = raw.indexOf("\n");
+  const key = (separator === -1 ? raw : raw.slice(0, separator)).trim();
+  if (!key) return null;
+  return {
+    key,
+    value: separator === -1 ? "" : raw.slice(separator + 1),
+    raw,
+  };
+}
+
+function formatUnsafeConfigFailure(entries) {
+  const keys = entries.map((entry) => entry.key).join(", ");
+  return `reviewed worktree has unsafe git config that can execute code during status observation: ${keys}`;
 }
 
 function buildGuardResult({

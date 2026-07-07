@@ -478,6 +478,39 @@ describe("provenance authority", () => {
     }
   });
 
+  it("checks review guard worktree containment before re-observing guard cleanliness", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      const run = buildAuthorityRun(fixture, "guard-containment-before-observation");
+      const firstSlice = run.slices[0];
+      git(fixture.repoRoot, ["config", "filter.evil.clean", "sh -c pwn"]);
+      const forgedGuard = {
+        ...firstSlice.reviewAttestation.bindings.guard,
+        worktree: fixture.repoRoot,
+      };
+      const forgedReviewApproval = withAttestationHash({
+        ...firstSlice.reviewAttestation,
+        bindings: {
+          ...firstSlice.reviewAttestation.bindings,
+          guard: forgedGuard,
+          guard_result_hash: hashValue(forgedGuard),
+        },
+      });
+
+      const result = validateReviewApprovalAttestation(forgedReviewApproval, {
+        runDir: run.runDir,
+        runBase: run.runBase,
+      });
+
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /guard worktree must be physically contained/u);
+      assert.doesNotMatch(joinErrors(result), /unsafe git config/u);
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
   it("rejects direct commits before, between, or after reviewed slice merges when no direct-reviewed-commit proof exists", () => {
     const scenarios = [
       { name: "before", options: { directBefore: true } },
