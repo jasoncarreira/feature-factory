@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { REDACTED_PROVENANCE_VALUE, isSensitiveProvenanceKey, isSensitiveProvenanceValue } from "./provenance.js";
 import { validateProvenanceAuthority } from "./provenance-authority.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
@@ -48,6 +49,9 @@ const PASSING_VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS"]);
 const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
 const SENSITIVE_SLICE_STATUSES = new Set(["review", "merged"]);
 const INTEGRATED_FEATURE_SUBJECT_TYPES = new Set(["integrated-feature", "integrated_feature"]);
+const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
+const FACTORY_PROVENANCE_KEYS = new Set(["created_with", "last_resumed_with", "resume_count"]);
+const DIAGNOSTIC_PROVENANCE_SNAPSHOT_KEYS = new Set(["collected_at", "event", "diagnostic_only", "provenance"]);
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -77,6 +81,7 @@ export function validateRun(run) {
   optionalInteger(errors, run, "max_parallel_slices", "run.max_parallel_slices");
   optionalInteger(errors, run, "max_retries", "run.max_retries");
   validateReviewTier(errors, run.review_tier, "run.review_tier");
+  validateFactoryProvenance(errors, run.factory_provenance, "run.factory_provenance");
 
   validateGateMap(errors, run.gates, "run.gates");
   validateRunSlices(errors, run.slices, "run.slices");
@@ -154,8 +159,9 @@ export function validateRunDir(runDir, options = {}) {
 
 export function validateRunAuthority(runDir, run, options = {}) {
   const sensitiveClaims = collectSensitiveRunClaims(run);
+  const prUrlClaims = collectPrUrlClaims(run);
   const attestationIndexPath = join(runDir, "attestations", "index.json");
-  const shouldValidateAuthority = sensitiveClaims.length > 0 || hasRunBaseClaims(run) || existsSync(attestationIndexPath);
+  const shouldValidateAuthority = sensitiveClaims.length > 0 || prUrlClaims.length > 0 || hasRunBaseClaims(run) || existsSync(attestationIndexPath);
   if (!shouldValidateAuthority) return { ok: true, checks: [], acceptedAttestations: {}, orderedRefs: [] };
 
   const authority = validateProvenanceAuthority(runDir, options);
@@ -163,6 +169,7 @@ export function validateRunAuthority(runDir, run, options = {}) {
   const attestationRecords = acceptedAttestationRecords(authority);
   const runBaseRecord = findLastAttestationRecord(attestationRecords, (record) => record.attestation?.type === "run-base");
   const mergeChainRecord = findLastAttestationRecord(attestationRecords, (record) => record.attestation?.type === "merge-chain");
+  const prCreatedRecord = findLastAttestationRecord(attestationRecords, (record) => record.attestation?.type === "pr-created");
 
   if (sensitiveClaims.length > 0 || hasRunBaseClaims(run)) {
     checks.push(
@@ -182,6 +189,26 @@ export function validateRunAuthority(runDir, run, options = {}) {
           feature_worktree: bindings.feature_worktree,
           base_ref: bindings.base_ref,
           base_commit: bindings.base_commit,
+        };
+      }),
+    );
+  }
+
+  if (prUrlClaims.length > 0) {
+    checks.push(
+      validateAuthorityCheck("run.provenance.pr-created", () => {
+        if (!prCreatedRecord) {
+          fail([{ path: prUrlClaims[0].path, message: "PR URL requires an accepted pr-created attestation" }]);
+        }
+        const bindings = prCreatedRecord.attestation.bindings;
+        const errors = [];
+        compareOptionalString(errors, run.pr_url, bindings.pr_url, "run.pr_url", "accepted PR URL");
+        compareOptionalString(errors, run.terminal_result?.pr_url, bindings.pr_url, "run.terminal_result.pr_url", "accepted PR URL");
+        compareOptionalString(errors, run.github_account, bindings.github_account, "run.github_account", "accepted GitHub account");
+        if (errors.length > 0) fail(errors);
+        return {
+          attestation_ref: prCreatedRecord.ref,
+          pr_url: bindings.pr_url,
         };
       }),
     );
@@ -392,6 +419,59 @@ function validateReviewTierRiskReasons(errors, riskReasons, path) {
   }
 }
 
+function validateFactoryProvenance(errors, factoryProvenance, path) {
+  if (factoryProvenance === undefined || factoryProvenance === null) return;
+  if (!isRecord(factoryProvenance)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  for (const key of Object.keys(factoryProvenance)) {
+    if (!FACTORY_PROVENANCE_KEYS.has(key)) errors.push({ path: `${path}.${key}`, message: "is not allowed" });
+  }
+  validateDiagnosticProvenanceSnapshot(errors, factoryProvenance.created_with, `${path}.created_with`);
+  if (factoryProvenance.last_resumed_with !== undefined && factoryProvenance.last_resumed_with !== null) {
+    validateDiagnosticProvenanceSnapshot(errors, factoryProvenance.last_resumed_with, `${path}.last_resumed_with`);
+  }
+  requiredInteger(errors, factoryProvenance, "resume_count", `${path}.resume_count`);
+}
+
+function validateDiagnosticProvenanceSnapshot(errors, snapshot, path) {
+  if (!isRecord(snapshot)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  for (const key of Object.keys(snapshot)) {
+    if (!DIAGNOSTIC_PROVENANCE_SNAPSHOT_KEYS.has(key)) errors.push({ path: `${path}.${key}`, message: "is not allowed" });
+  }
+  requiredString(errors, snapshot, "collected_at", `${path}.collected_at`);
+  requiredString(errors, snapshot, "event", `${path}.event`);
+  if (snapshot.diagnostic_only !== true) errors.push({ path: `${path}.diagnostic_only`, message: "must equal true" });
+  if (!isRecord(snapshot.provenance)) {
+    errors.push({ path: `${path}.provenance`, message: "must be an object" });
+    return;
+  }
+  validateRedactedDiagnosticProvenance(errors, snapshot.provenance, `${path}.provenance`);
+}
+
+function validateRedactedDiagnosticProvenance(errors, value, path) {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) validateRedactedDiagnosticProvenance(errors, item, `${path}[${index}]`);
+    return;
+  }
+  if (typeof value === "string") {
+    if (value !== REDACTED_PROVENANCE_VALUE && isSensitiveProvenanceValue(value)) {
+      errors.push({ path, message: "must be redacted in diagnostic provenance" });
+    }
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const [key, item] of Object.entries(value)) {
+    const itemPath = `${path}.${key}`;
+    if (isSensitiveProvenanceKey(key)) errors.push({ path: itemPath, message: "is not allowed in diagnostic provenance" });
+    validateRedactedDiagnosticProvenance(errors, item, itemPath);
+  }
+}
+
 function validateGate(errors, gate, path) {
   if (!isRecord(gate)) {
     errors.push({ path, message: "must be an object" });
@@ -405,6 +485,20 @@ function validateGate(errors, gate, path) {
   optionalString(errors, gate, "answer", `${path}.answer`);
   optionalString(errors, gate, "decision_note", `${path}.decision_note`);
   optionalEnum(errors, gate, "approval_source", APPROVAL_SOURCES, `${path}.approval_source`);
+  validatePendingSnapshot(errors, gate.pending_snapshot, `${path}.pending_snapshot`);
+}
+
+function validatePendingSnapshot(errors, pendingSnapshot, path) {
+  if (pendingSnapshot === undefined || pendingSnapshot === null) return;
+  if (!isRecord(pendingSnapshot)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredString(errors, pendingSnapshot, "question_ref", `${path}.question_ref`);
+  requiredHash(errors, pendingSnapshot, "question_hash", `${path}.question_hash`);
+  requiredString(errors, pendingSnapshot, "artifact_ref", `${path}.artifact_ref`);
+  requiredHash(errors, pendingSnapshot, "artifact_hash", `${path}.artifact_hash`);
+  requiredString(errors, pendingSnapshot, "created_at", `${path}.created_at`);
 }
 
 function isPendingGate(gate) {
@@ -639,6 +733,10 @@ function requiredInteger(errors, obj, key, path) {
   if (!Number.isInteger(obj[key]) || obj[key] < 0) errors.push({ path, message: "must be a non-negative integer" });
 }
 
+function requiredHash(errors, obj, key, path) {
+  if (typeof obj[key] !== "string" || !HASH_PATTERN.test(obj[key])) errors.push({ path, message: "must be a sha256 hash" });
+}
+
 function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -657,6 +755,13 @@ function collectSensitiveRunClaims(run) {
   }
   if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) claims.push("validator");
   if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) claims.push("security_review");
+  return claims;
+}
+
+function collectPrUrlClaims(run) {
+  const claims = [];
+  if (stringValue(run.pr_url)) claims.push({ path: "run.pr_url", value: run.pr_url });
+  if (stringValue(run.terminal_result?.pr_url)) claims.push({ path: "run.terminal_result.pr_url", value: run.terminal_result.pr_url });
   return claims;
 }
 
