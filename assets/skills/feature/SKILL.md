@@ -151,7 +151,7 @@ Create `$RUN=$REPO/.opencode/factory/<run-id>` with:
 - `evidence/`
 - `reviews/`
 
-Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`. Write `run.json` atomically after every state change. Include `schema_version`, persist the selected review tier at top-level `run.json.review_tier`, and refresh `heartbeat_at` whenever you make progress.
+Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`. Write `run.json` atomically after every state change. Include `schema_version`, persist the selected review tier at top-level `run.json.review_tier`, persist non-empty `driver.github_account` at top-level `run.json.github_account`, and refresh `heartbeat_at` whenever you make progress.
 
 One-writer rule:
 
@@ -236,7 +236,7 @@ Choose the story agent:
 Establish the run:
 
 - `run-id` = lowercased external ref if one exists, otherwise a short kebab slug.
-- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
+- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, top-level `github_account` when provided by the driver, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
 - Initialize `$RUN/factory.lock` with `schema_version`, `run_id`, and a trusted heartbeat owner capability used only by the factory lifecycle.
 - If `run.json` exists, this is a resume. Read it, backfill top-level `review_tier` before the next non-status state mutation when it is missing, and continue from the first incomplete point. Never redo side effects that `run.json` shows already happened.
 
@@ -437,11 +437,13 @@ On `changes`, route fixes to the appropriate slice/builder, re-observe, re-revie
 
 After Gate 3 approval only:
 
-1. Push the feature branch from `$FEAT_WT`: `git -C "$FEAT_WT" push -u origin HEAD`.
-2. Build PR metadata from repo conventions and changed paths.
-3. Write PR body to `$RUN/artifacts/pr-body.md`.
-4. Create a draft PR with the repository's CLI conventions, preferably `gh pr create --draft --body-file`.
-5. Record `pr_url` in `run.json` and set `status: completed`.
+1. If `run.json.github_account` is non-empty, run `gh auth switch -h github.com -u "$GITHUB_ACCOUNT"` before any `gh` or authenticated GitHub remote command. If the account is unavailable or cannot access `origin`, stop with `status: partial` after preserving all validated implementation evidence and report the account/remote mismatch in `terminal_result.reason`.
+2. Verify the selected account can see the repository before pushing: `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name` or `git -C "$FEAT_WT" ls-remote --heads origin "$BASE"`.
+3. Push the feature branch from `$FEAT_WT`: `git -C "$FEAT_WT" push -u origin HEAD`.
+4. Build PR metadata from repo conventions and changed paths.
+5. Write PR body to `$RUN/artifacts/pr-body.md`.
+6. Create a draft PR with the repository's CLI conventions, preferably `gh pr create --draft --body-file`.
+7. Record `pr_url` in `run.json` and set `status: completed`.
 
 Never merge the PR. Never force-push unless the user explicitly approves.
 

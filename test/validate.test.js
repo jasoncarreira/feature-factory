@@ -26,6 +26,19 @@ describe("validateRun", () => {
     assert.equal(run.review_tier.selected, "standard");
   });
 
+  it("accepts optional GitHub account metadata", () => {
+    const run = validateRun({ ...runningRun(), github_account: "jasoncarreira" });
+
+    assert.equal(run.github_account, "jasoncarreira");
+  });
+
+  it("rejects empty GitHub account metadata", () => {
+    assert.throws(
+      () => validateRun({ ...runningRun(), github_account: "   " }),
+      (error) => error instanceof ValidationError && error.message.includes("run.github_account"),
+    );
+  });
+
   it("accepts an explicit light review tier", () => {
     const run = validateRun({
       ...runningRun(),
