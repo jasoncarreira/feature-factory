@@ -135,7 +135,7 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
               await writeJsonAtomically(gateAttestationPath, staged.attestation);
               await writeJsonAtomically(indexPath, staged.index);
             },
-            ...(nextGate.status === "approved" ? { [APPROVED_GATE_TRANSITION_HOOK]: gateName } : {}),
+            [APPROVED_GATE_TRANSITION_HOOK]: gateName,
           },
         );
         committed = true;
@@ -365,7 +365,7 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
     await hooks.beforeValidateNext({ authority, current, next, runDir });
   }
   const nextAuthority = assertRunAuthorityValid(runDir, next, options);
-  assertApprovedGateTransitions(current, next, nextAuthority, hooks);
+  assertGateDecisionTransitions(current, next, nextAuthority, hooks);
   if (typeof hooks.beforeCommit === "function") {
     await hooks.beforeCommit({ authority, current, next, runDir });
   }
@@ -601,14 +601,39 @@ function acceptedAttestationEntries(authority) {
     .filter(Boolean);
 }
 
-function assertApprovedGateTransitions(current, next, authority, hooks = {}) {
+function assertGateDecisionTransitions(current, next, authority, hooks = {}) {
   const errors = [];
   const authorizedGate = stringValue(hooks[APPROVED_GATE_TRANSITION_HOOK]) ? hooks[APPROVED_GATE_TRANSITION_HOOK] : null;
+  const currentGates = isRecord(current.gates) ? current.gates : {};
+  const nextGates = isRecord(next.gates) ? next.gates : {};
 
-  for (const [gateName, gate] of Object.entries(next.gates || {})) {
+  for (const [gateName, currentGate] of Object.entries(currentGates)) {
+    if (!isRecord(currentGate) || currentGate.status !== "approved") continue;
+
+    const nextGate = nextGates[gateName];
+    if (nextGate?.status === "approved") continue;
+
+    if (gateName !== authorizedGate) {
+      errors.push({
+        path: `run.gates.${gateName}.status`,
+        message: "approved gate transitions must use transitionGateDecision",
+      });
+      continue;
+    }
+
+    const record = findAcceptedGateDecisionRecord(authority, gateName);
+    if (record?.attestation?.bindings?.decision !== nextGate?.status) {
+      errors.push({
+        path: `run.gates.${gateName}.status`,
+        message: "approved gate transitions must use transitionGateDecision",
+      });
+    }
+  }
+
+  for (const [gateName, gate] of Object.entries(nextGates)) {
     if (!isRecord(gate) || gate.status !== "approved") continue;
 
-    const currentGate = isRecord(current.gates) ? current.gates[gateName] : null;
+    const currentGate = currentGates[gateName];
     if (currentGate?.status !== "approved" && gateName !== authorizedGate) {
       errors.push({
         path: `run.gates.${gateName}.status`,
