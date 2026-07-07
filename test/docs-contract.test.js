@@ -160,6 +160,60 @@ describe("provenance authority docs contract", () => {
   });
 });
 
+describe("run-state transition docs contract", () => {
+  it("documents the run-state helpers and their semantic roles", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      for (const helper of [
+        "hashRunState",
+        "transitionRunJson",
+        "transitionGateDecision",
+        "transitionTerminalResult",
+        "transitionRunStep",
+        "transitionRunSlice",
+        "transitionLifecycleRun",
+        "mutateRunJsonLocked",
+      ]) {
+        assert.match(text, helperNamePattern(helper), `${name} must mention ${helper}`);
+      }
+
+      assert.match(text, /expectedCurrentHash|current-state hash|stale `run\.json` transition|stale-write detection/i, `${name} must document stale transition protection`);
+      assert.match(text, /transitionRunStep[\s\S]*steps\[\]/i, `${name} must document step transitions`);
+      assert.match(text, /transitionRunSlice[\s\S]*slices\[\]/i, `${name} must document slice transitions`);
+      assert.match(text, /transitionTerminalResult[\s\S]*terminal_result/i, `${name} must document terminal result synchronization`);
+    }
+  });
+
+  it("documents fail-closed no-index bootstrap rules and non-empty attestation indexes", () => {
+    assert.match(SKILL, /Do not create placeholder\/empty `attestations\/index\.json`/i, "SKILL must forbid placeholder empty attestation indexes");
+    assert.match(SKILL, /first accepted attestation[\s\S]*sequence-1 `attestations\/run-base\.json`/i, "SKILL must require run-base to anchor the accepted graph");
+    assert.match(SKILL, /gate decisions cannot bootstrap[\s\S]*before run-base exists/i, "SKILL must forbid gate-decision bootstrap before run-base");
+    assert.match(SKILL, /mutateRunJsonLocked[\s\S]*compatibility-only[\s\S]*fail closed/i, "SKILL must document fail-closed no-index compatibility mode");
+
+    assert.match(SCHEMA, /must never be a placeholder-empty file/i, "SCHEMA must reject placeholder empty attestation indexes");
+    assert.match(SCHEMA, /entries` must be a non-empty array|entries must be a non-empty array/i, "SCHEMA must require non-empty attestation index entries");
+    assert.match(SCHEMA, /first accepted attestation[\s\S]*sequence-1 `attestations\/run-base\.json`/i, "SCHEMA must require run-base first");
+    assert.match(SCHEMA, /gate decisions cannot bootstrap|cannot bootstrap or precede the graph root/i, "SCHEMA must forbid gate-decision bootstrap before run-base");
+    assert.match(SCHEMA, /mutateRunJsonLocked[\s\S]*compatibility-only[\s\S]*fail closed/i, "SCHEMA must document fail-closed no-index compatibility mode");
+  });
+
+  it("documents approved gate ordering through transitionGateDecision", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /transitionGateDecision[\s\S]*only (path|approved-gate writer)/i, `${name} must reserve approved gates for transitionGateDecision`);
+      assert.match(text, /transitionGateDecision[\s\S]*attestations\/gates\/<gate>\.json[\s\S]*attestations\/index\.json[\s\S]*before the approved gate state/i, `${name} must document gate attestation ordering`);
+      assert.match(text, /roll back the staged gate attestation\/index files and leave `run\.json` unchanged/i, `${name} must document rollback on approved gate validation failure`);
+    }
+  });
+
+  it("states that transition helpers do not change heartbeat or external-driver authority", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /do not change heartbeat or external-driver semantics/i, `${name} must preserve heartbeat and external-driver semantics`);
+      assert.match(text, /`heartbeat\.json` remains liveness-only/i, `${name} must keep heartbeat as liveness-only`);
+      assert.match(text, /external drivers still write only `gates\/<gate>\.answer`/i, `${name} must keep gate answers external-driver-only`);
+      assert.match(text, /approval_source: `?"?external-driver"?`?/i, `${name} must keep approved file answers labeled external-driver`);
+    }
+  });
+});
+
 function documentEntries(map) {
   return Object.entries(map);
 }
@@ -170,6 +224,10 @@ function readDoc(relativePath) {
 
 function literalPattern(value) {
   return new RegExp(escapeRegExp(value));
+}
+
+function helperNamePattern(name) {
+  return new RegExp(`\\b${escapeRegExp(name)}(?:\\([^)]*\\))?\\b`);
 }
 
 function escapeRegExp(value) {
