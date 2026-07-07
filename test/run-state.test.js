@@ -1148,13 +1148,30 @@ function collectCheckErrors(result) {
 
 function repoContext() {
   if (repoContextCache) return repoContextCache;
-  const featureWorktree = realpathSync(process.cwd());
+  // Worktree identity checks require the attested feature worktree to live
+  // under <repo>/.opencode/worktrees, so build a hermetic repo instead of
+  // deriving authority bindings from wherever the tests happen to run.
+  const repo = join(tmpdir(), `heartbeat-liveness-repo-${process.pid}`);
+  rmSync(repo, { recursive: true, force: true });
+  mkdirSync(repo, { recursive: true });
+  gitStdout(repo, ["init", "-b", "main"]);
+  gitStdout(repo, ["config", "user.name", "Run State Fixture"]);
+  gitStdout(repo, ["config", "user.email", "run-state-fixture@example.com"]);
+  writeFileSync(join(repo, "tracked.txt"), "base\n", "utf8");
+  gitStdout(repo, ["add", "."]);
+  gitStdout(repo, ["commit", "-m", "base"]);
+  const branch = "heartbeat-liveness-branch";
+  const worktreePath = join(repo, ".opencode", "worktrees", branch);
+  mkdirSync(dirname(worktreePath), { recursive: true });
+  gitStdout(repo, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+  process.on("exit", () => rmSync(repo, { recursive: true, force: true }));
+  const featureWorktree = realpathSync(worktreePath);
   const gitCommonDir = realpathSync(resolve(featureWorktree, gitStdout(featureWorktree, ["rev-parse", "--git-common-dir"])));
   repoContextCache = {
     featureWorktree,
     gitCommonDir,
     repoRoot: dirname(gitCommonDir),
-    branch: gitStdout(featureWorktree, ["symbolic-ref", "--short", "HEAD"]),
+    branch,
     headCommit: gitStdout(featureWorktree, ["rev-parse", "HEAD"]),
     headTree: gitStdout(featureWorktree, ["rev-parse", "HEAD^{tree}"]),
   };
