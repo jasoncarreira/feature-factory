@@ -60,13 +60,15 @@ Reviewer-designated agents are only:
 - `implementation-validator`
 - `security-reviewer`
 
+Every reviewer prompt must explicitly say the reviewed worktree is read-only: do not edit files, run package normalization commands, update lockfiles, format, generate, install with write side effects, update snapshots, stage files, commit, or otherwise mutate the worktree. If a reviewer needs command output that may write files, it must ask the orchestrator instead of running it.
+
 After every reviewer-designated subagent invocation, and before accepting or writing that review result, check the reviewed worktree with `git -C <reviewed_worktree> status --porcelain=v1 --untracked-files=all` or the equivalent `src/review-guard.js` helper semantics.
 
 Guard semantics:
 
 - Exit `0` and empty stdout => clean; the reviewer output may be accepted normally.
-- Exit `0` and non-empty stdout => dirty; the reviewer output is invalid and blocking.
-- Non-zero exit => unverifiable; the reviewer output is invalid and blocking.
+- Exit `0` and non-empty stdout => dirty; the reviewer output is invalid. Prefer bounded recovery and retry before blocking.
+- Non-zero exit => unverifiable; the reviewer output is invalid and blocking unless re-observation can prove the issue was transient.
 
 Reviewed worktree mapping:
 
@@ -77,7 +79,7 @@ Reviewed worktree mapping:
 - `implementation-validator` -> `$FEAT_WT`
 - `security-reviewer` -> `$FEAT_WT`
 
-If the guard is dirty or unverifiable, discard the reviewer output as invalid, write a guard-block report, and mark the relevant step, slice, or panel blocked. Do not auto-revert.
+If the guard is dirty, discard the reviewer output as invalid, capture the dirty diff/status in a guard report, then attempt bounded recovery when the dirt is clearly reviewer-created and the reviewed worktree has an attested or observed clean HEAD to restore to. Restore only the reviewed worktree back to the observed commit/tree, recheck the guard, and rerun the same reviewer once with a stronger read-only warning. If recovery cannot be proven safe, the guard remains dirty after recovery, or the retry dirties the worktree again, write the guard-block report and mark the relevant step, slice, or panel blocked. If the guard is unverifiable, block unless a fresh re-observation proves the worktree is clean.
 
 Limitations:
 
@@ -311,7 +313,7 @@ Review the brief:
 - Run `work-reviewer` with subject `spec-writer`, the brief, and its inputs.
 - After it returns, before accepting or writing `$RUN/reviews/spec-writer.json`, guard `$FEAT_WT`.
 - If the guard is clean, write `$RUN/reviews/spec-writer.json` and continue the normal APPROVE/REJECT loop.
-- If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/spec-writer.json`, mark the spec step `blocked`, and stop. Do not auto-revert.
+- If the guard is dirty, discard the reviewer output, capture the guard report, recover the feature worktree to the observed clean head only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report to `$RUN/reviews/spec-writer.json`, mark the spec step `blocked`, and stop.
 - On REJECT, rerun `spec-writer` with required fixes up to `max_retries`.
 - Record attempts in `run.json.steps`.
 
@@ -347,7 +349,7 @@ Review the decomposition:
 - Run `work-reviewer` with subject `work-decomposer`.
 - After it returns, before accepting or writing `$RUN/reviews/work-decomposer.json`, guard `$FEAT_WT`.
 - If the guard is clean, write `$RUN/reviews/work-decomposer.json` and continue the normal APPROVE/REJECT loop.
-- If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/work-decomposer.json`, mark the decomposition step `blocked`, and stop. Do not auto-revert.
+- If the guard is dirty, discard the reviewer output, capture the guard report, recover the feature worktree to the observed clean head only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report to `$RUN/reviews/work-decomposer.json`, mark the decomposition step `blocked`, and stop.
 - It checks output contract, AC coverage, dependency correctness, file-disjoint same waves, and hotspot serialization.
 - Loop on REJECT up to `max_retries`.
 - Seed `run.json.slices[]` from `slices.json` with `status: pending`, `attempts: 0`, branch/worktree null, evidence/review refs null, and merge commit null.
@@ -416,10 +418,10 @@ After safe Git re-derives the diff, commit, tree, evidence hash, and physical sl
 
 ### Review Each Slice
 
-Run `work-reviewer` with subject `<slice-id>`, the builder output, observed evidence, slice spec, technical brief, story, and relevant repo rules.
+Run `work-reviewer` with subject `<slice-id>`, the builder output, observed evidence, slice spec, technical brief, story, and relevant repo rules. Tell the reviewer the slice worktree is read-only and must not be modified.
 
 - After it returns, before accepting or writing `$RUN/reviews/<slice-id>.json`, guard `$SLICE_WT`.
-- If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/<slice-id>.json`, mark the slice `blocked`, record the blocker reason, and stop dispatching dependents. Do not auto-revert.
+- If the guard is dirty, discard the reviewer output, capture the guard report, recover the slice worktree to the observed slice commit/tree only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report to `$RUN/reviews/<slice-id>.json`, mark the slice `blocked`, record the blocker reason, and stop dispatching dependents.
 - If the guard is clean and the review verdict is accepted, hash the review output, evidence, subject commit/tree, and clean guard result, then write `attestations/reviews/<slice-id>.approval.json` before treating the slice as approved.
 
 - APPROVE -> mark slice ready to merge.
