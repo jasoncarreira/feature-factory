@@ -426,6 +426,51 @@ describe("transition helpers", () => {
     }
   });
 
+  it("rejects generic gate reopen from approved status without transitionGateDecision", async () => {
+    const fixture = createRunFixture();
+    const approvedGate = {
+      status: "approved",
+      artifact: "artifacts/story.md",
+      question_ref: "gates/story.question.md",
+      answer_ref: "gates/story.answer",
+      approval_source: "human",
+    };
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+
+    try {
+      await transitionGateDecision(fixture.runDir, "story", approvedGate);
+      const current = readJson(join(fixture.runDir, "run.json"));
+      const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+
+      await assert.rejects(
+        transitionRunJson(fixture.runDir, (run) => {
+          run.gates.story = { status: "pending" };
+        }),
+        /approved gate transitions must use transitionGateDecision/u,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+
+      await assert.rejects(
+        mutateRunJsonLocked(fixture.runDir, (run) => {
+          run.gates.story = { status: "pending" };
+        }),
+        /approved gate transitions must use transitionGateDecision/u,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+      assert.equal(validateRunDir(fixture.runDir).ok, true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("rejects generic gate re-approval after a gate is reopened", async () => {
     const fixture = createRunFixture();
     const approvedGate = {
