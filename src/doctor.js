@@ -1,9 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { readJsoncConfig, readStrictJsonConfig } from "./config.js";
 import { collectProvenance, resolvePluginConfig } from "./provenance.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -27,7 +28,7 @@ const FACTORY_DENY = ["external_directory"];
 
 export async function runDoctor(options = {}) {
   const configPath = join(homedir(), ".config", "opencode", "opencode.jsonc");
-  const cfg = readConfig(configPath);
+  const cfg = readOpencodeConfig(configPath);
   const pluginSpec = options.local ? pathToFileURL(root).href : "opencode-feature-factory";
   const pluginEntry = findPluginEntry(cfg, pluginSpec, options.local);
   const pluginOptions = Array.isArray(pluginEntry) ? pluginEntry[1] || {} : {};
@@ -87,6 +88,10 @@ export async function runDoctor(options = {}) {
   return checks.every((check) => check.level !== "missing");
 }
 
+export function readOpencodeConfig(configPath = join(homedir(), ".config", "opencode", "opencode.jsonc")) {
+  return readJsoncConfig(configPath, { label: "opencode.jsonc" });
+}
+
 function add(checks, label, passed, detail, failureLevel = "missing") {
   checks.push({ label, level: passed ? "ok" : failureLevel, detail: String(detail ?? "") });
 }
@@ -115,16 +120,22 @@ function permissionFailures(agents = {}) {
   return failures;
 }
 
-function readConfig(path) {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, "utf8");
-  const stripped = raw.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim();
-  return stripped ? JSON.parse(stripped) : {};
+export function hasTuiExport(packageJsonPath = join(root, "package.json")) {
+  const pkg = readPackageJson(packageJsonPath);
+  return typeof pkg.exports?.["./tui"] === "string";
 }
 
-function hasTuiExport() {
-  const pkg = readConfig(join(root, "package.json"));
-  return typeof pkg.exports?.["./tui"] === "string";
+function readPackageJson(packageJsonPath) {
+  try {
+    return readStrictJsonConfig(packageJsonPath, { label: "package.json" });
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      const detail = String(error.message || "invalid JSON syntax").replace(/^package\.json:\s*/u, "");
+      throw new SyntaxError(`Invalid JSON in package.json: ${detail}`);
+    }
+
+    throw error;
+  }
 }
 
 function findPluginEntry(cfg, pluginSpec, local) {
