@@ -16,6 +16,7 @@ import {
   hashFile,
   hashValue,
 } from "../src/provenance-authority.js";
+import { REDACTED_PROVENANCE_VALUE, isSensitiveProvenanceKey, isSensitiveProvenanceValue } from "../src/provenance.js";
 import { SAFE_GIT_POLICY } from "../src/safe-git.js";
 import { validateRunDir } from "../src/validate.js";
 
@@ -128,6 +129,51 @@ describe("cli pr-created routing", () => {
       fixture.cleanup();
     }
   });
+
+  it("records creation provenance through the CLI and persists redacted valid run state", () => {
+    const fixture = createPrFixture("cli-provenance-record-created", { includePrerequisites: false });
+
+    try {
+      const proc = runProvenance(fixture, "record-created");
+
+      assert.equal(proc.status, 0, proc.stderr);
+      const output = JSON.parse(proc.stdout);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.deepEqual(output, run.factory_provenance);
+      assert.equal(run.factory_provenance.resume_count, 0);
+      assert.equal(run.factory_provenance.last_resumed_with, null);
+      assertDiagnosticSnapshot(run.factory_provenance.created_with, "run-created");
+      assertNoUnredactedSensitiveProvenance(run.factory_provenance);
+      assert.equal(validateRunDir(fixture.runDir, { repoRoot: fixture.repo }).ok, true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("records resume provenance through the CLI while preserving creation state and incrementing resume count", () => {
+    const fixture = createPrFixture("cli-provenance-record-resume", { includePrerequisites: false });
+
+    try {
+      const created = runProvenance(fixture, "record-created");
+      assert.equal(created.status, 0, created.stderr);
+      const createdProvenance = JSON.parse(created.stdout);
+
+      const resumed = runProvenance(fixture, "record-resume");
+
+      assert.equal(resumed.status, 0, resumed.stderr);
+      const output = JSON.parse(resumed.stdout);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.deepEqual(output, run.factory_provenance);
+      assert.deepEqual(run.factory_provenance.created_with, createdProvenance.created_with);
+      assert.equal(run.factory_provenance.resume_count, 1);
+      assertDiagnosticSnapshot(run.factory_provenance.created_with, "run-created");
+      assertDiagnosticSnapshot(run.factory_provenance.last_resumed_with, "run-resumed");
+      assertNoUnredactedSensitiveProvenance(run.factory_provenance);
+      assert.equal(validateRunDir(fixture.runDir, { repoRoot: fixture.repo }).ok, true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });
 
 function runPrCreated(fixture, overrides = {}) {
@@ -163,6 +209,45 @@ function runPrCreated(fixture, overrides = {}) {
     "--json",
   );
   return spawnSync(process.execPath, args, { cwd: fixture.repo, encoding: "utf8" });
+}
+
+function runProvenance(fixture, action) {
+  return spawnSync(process.execPath, [CLI, "factory", "provenance", action, fixture.runId, "--json"], {
+    cwd: fixture.repo,
+    encoding: "utf8",
+  });
+}
+
+function assertDiagnosticSnapshot(snapshot, event) {
+  assert.equal(typeof snapshot, "object");
+  assert.notEqual(snapshot, null);
+  assert.equal(snapshot.event, event);
+  assert.equal(snapshot.diagnostic_only, true);
+  assert.match(snapshot.collected_at, /^\d{4}-\d{2}-\d{2}T/u);
+  assert.equal(typeof snapshot.provenance, "object");
+  assert.notEqual(snapshot.provenance, null);
+  assert.equal(snapshot.provenance.driver.kind, "cli");
+}
+
+function assertNoUnredactedSensitiveProvenance(value, path = "factory_provenance") {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) assertNoUnredactedSensitiveProvenance(item, `${path}[${index}]`);
+    return;
+  }
+  if (typeof value === "string") {
+    assert.equal(
+      value === REDACTED_PROVENANCE_VALUE || !isSensitiveProvenanceValue(value),
+      true,
+      `${path} contains unredacted sensitive provenance`,
+    );
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value)) {
+    const itemPath = `${path}.${key}`;
+    assert.equal(isSensitiveProvenanceKey(key), false, `${itemPath} contains a sensitive provenance key`);
+    assertNoUnredactedSensitiveProvenance(item, itemPath);
+  }
 }
 
 function createPrFixture(runId, { includePrerequisites }) {
