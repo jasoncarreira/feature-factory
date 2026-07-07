@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -133,7 +133,11 @@ function verifyInstalledPlugin(consumer, home) {
         assert.default.ok(cfg.agent[agent], agent);
       }
       assert.default.equal(Object.keys(cfg.agent).length, 13);
-      assert.default.ok(cfg.skills.paths.some((path) => path.endsWith("assets/skills")));
+      const expectedSkillsPath = ${JSON.stringify(realpathSync(resolve(consumer, "node_modules", "opencode-feature-factory", "assets", "skills")))};
+      assert.default.ok(
+        cfg.skills.paths.includes(expectedSkillsPath),
+        "expected cfg.skills.paths to include installed package skills path " + expectedSkillsPath,
+      );
 
       const registrations = [];
       await tui.tui({
