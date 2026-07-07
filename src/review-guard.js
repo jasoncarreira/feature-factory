@@ -690,20 +690,29 @@ function isInitializedSubmoduleWorktree(worktree) {
 }
 
 function parseIgnoredUntrackedPaths(stdout) {
-  return parseGitPathList(stdout).map((rawPath) => buildIgnoredDirtyPath(decodeGitPath(rawPath), rawPath));
+  return parseGitPathEntries(stdout).map(({ path, rawPath }) => buildIgnoredDirtyPath(path, rawPath));
 }
 
-function parseGitPathList(stdout) {
+function parseGitPathEntries(stdout) {
   const text = String(stdout);
   if (text === "") return [];
 
   if (text.includes("\u0000")) {
     const paths = text.split("\u0000");
     if (paths[paths.length - 1] === "") paths.pop();
-    return paths;
+    return paths.map((rawPath) => ({
+      path: rawPath,
+      rawPath,
+    }));
   }
 
-  return text.split(/\r?\n/u).filter((line) => line !== "");
+  return text
+    .split(/\r?\n/u)
+    .filter((line) => line !== "")
+    .map((rawPath) => ({
+      path: decodeGitPath(rawPath),
+      rawPath,
+    }));
 }
 
 function buildIgnoredDirtyPath(path, rawPath) {

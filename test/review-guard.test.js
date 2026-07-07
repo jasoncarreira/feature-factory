@@ -285,6 +285,42 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("does not let submodule.<name>.ignore=all strip literal quotes from ignored submodule-local filenames", () => {
+    const quoteWrappedName = '"quoted"';
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
+      submoduleFixtures: {
+        ".gitignore": '"quoted"\n',
+        "tracked.txt": "tracked.txt\n",
+      },
+    });
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      writeFileSync(join(submodulePath, quoteWrappedName), "new\n", "utf8");
+
+      const ignored = gitStdout(submodulePath, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]);
+      assert.equal(ignored, `${quoteWrappedName}\u0000`);
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), [`${submoduleName}/${quoteWrappedName}`]);
+      assert.equal(result.dirty_paths[0].raw, `!! ${submoduleName}/${quoteWrappedName}`);
+      assert.equal(result.dirty_paths[0].ignored, true);
+      assert.equal(result.dirty_paths[0].untracked, true);
+    } finally {
+      cleanup(root);
+    }
+  });
+
   it("does not let submodule.<name>.ignore=all hide submodule-local hidden index flags", () => {
     const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
       submoduleFixtures: {
