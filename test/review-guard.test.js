@@ -124,6 +124,33 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("allows normal gitignored artifacts while still blocking git-visible changes", () => {
+    const repo = createCommittedRepo();
+
+    try {
+      writeFixture(repo, ".gitignore", ".opencode/\nnode_modules/\n");
+      git(repo, ["add", ".gitignore"]);
+      git(repo, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-m", "ignore local artifacts"]);
+      writeFixture(repo, ".opencode/factory/example/run.json", "{}\n");
+      writeFixture(repo, "node_modules/pkg/index.js", "module.exports = {};\n");
+
+      const ignoredOnly = checkReviewedWorktreeClean(repo);
+
+      assert.equal(ignoredOnly.ok, true);
+      assert.equal(ignoredOnly.status, "clean");
+      assert.deepEqual(ignoredOnly.dirty_paths, []);
+
+      writeFileSync(join(repo, "visible.txt"), "visible\n", "utf8");
+      const visibleDirty = checkReviewedWorktreeClean(repo);
+
+      assert.equal(visibleDirty.ok, false);
+      assert.equal(visibleDirty.status, "dirty");
+      assert.deepEqual(visibleDirty.dirty_paths.map((item) => item.path), ["visible.txt"]);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("does not let repo-local excludesFile hide reviewer-created untracked files", () => {
     const repo = createCommittedRepo();
     const localIgnore = join(repo, ".review-guard-local-ignore");
@@ -179,7 +206,7 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
-  it("does not let .git/info/exclude hide reviewer-created untracked files", () => {
+  it("does not report files ignored by .git/info/exclude as dirty", () => {
     const repo = createCommittedRepo();
 
     try {
@@ -191,11 +218,10 @@ describe("checkReviewedWorktreeClean", () => {
 
       const result = checkReviewedWorktreeClean(repo);
 
-      assert.equal(result.ok, false);
-      assert.equal(result.status, "dirty");
+      assert.equal(result.ok, true);
+      assert.equal(result.status, "clean");
       assert.equal(result.stdout, "");
-      assert.deepEqual(result.dirty_paths.map((item) => item.path), ["hidden-by-info-exclude.txt"]);
-      assert.equal(result.dirty_paths[0].ignored, true);
+      assert.deepEqual(result.dirty_paths, []);
     } finally {
       cleanup(repo);
     }
@@ -247,7 +273,7 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
-  it("does not let submodule.<name>.ignore=all hide submodule-local ignored untracked files", () => {
+  it("does not report submodule-local ignored untracked files as dirty", () => {
     const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
       submoduleFixtures: {
         ".gitignore": "ignored-inside.txt\n",
@@ -264,21 +290,19 @@ describe("checkReviewedWorktreeClean", () => {
 
       const result = checkReviewedWorktreeClean(repo);
 
-      assert.equal(result.ok, false);
-      assert.equal(result.status, "dirty");
+      assert.equal(result.ok, true);
+      assert.equal(result.status, "clean");
       assert.equal(result.exit_code, 0);
       assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.stdout, "");
       assert.deepEqual(result.hidden_index_paths, []);
-      assert.deepEqual(result.dirty_paths.map((item) => item.path), ["review-submodule/ignored-inside.txt"]);
-      assert.equal(result.dirty_paths[0].ignored, true);
-      assert.equal(result.dirty_paths[0].untracked, true);
+      assert.deepEqual(result.dirty_paths, []);
     } finally {
       cleanup(root);
     }
   });
 
-  it("does not let submodule.<name>.ignore=all hide whitespace-only ignored submodule-local filenames", () => {
+  it("does not report whitespace-only ignored submodule-local filenames as dirty", () => {
     const whitespaceOnlyName = "   ";
     const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
       submoduleFixtures: {
@@ -296,22 +320,19 @@ describe("checkReviewedWorktreeClean", () => {
 
       const result = checkReviewedWorktreeClean(repo);
 
-      assert.equal(result.ok, false);
-      assert.equal(result.status, "dirty");
+      assert.equal(result.ok, true);
+      assert.equal(result.status, "clean");
       assert.equal(result.exit_code, 0);
       assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.stdout, "");
       assert.deepEqual(result.hidden_index_paths, []);
-      assert.deepEqual(result.dirty_paths.map((item) => item.path), [`${submoduleName}/${whitespaceOnlyName}`]);
-      assert.equal(result.dirty_paths[0].raw, `!! ${submoduleName}/${whitespaceOnlyName}`);
-      assert.equal(result.dirty_paths[0].ignored, true);
-      assert.equal(result.dirty_paths[0].untracked, true);
+      assert.deepEqual(result.dirty_paths, []);
     } finally {
       cleanup(root);
     }
   });
 
-  it("does not let submodule.<name>.ignore=all strip literal quotes from ignored submodule-local filenames", () => {
+  it("does not report quote-wrapped ignored submodule-local filenames as dirty", () => {
     const quoteWrappedName = '"quoted"';
     const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
       submoduleFixtures: {
@@ -332,16 +353,13 @@ describe("checkReviewedWorktreeClean", () => {
 
       const result = checkReviewedWorktreeClean(repo);
 
-      assert.equal(result.ok, false);
-      assert.equal(result.status, "dirty");
+      assert.equal(result.ok, true);
+      assert.equal(result.status, "clean");
       assert.equal(result.exit_code, 0);
       assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.stdout, "");
       assert.deepEqual(result.hidden_index_paths, []);
-      assert.deepEqual(result.dirty_paths.map((item) => item.path), [`${submoduleName}/${quoteWrappedName}`]);
-      assert.equal(result.dirty_paths[0].raw, `!! ${submoduleName}/${quoteWrappedName}`);
-      assert.equal(result.dirty_paths[0].ignored, true);
-      assert.equal(result.dirty_paths[0].untracked, true);
+      assert.deepEqual(result.dirty_paths, []);
     } finally {
       cleanup(root);
     }
@@ -492,9 +510,6 @@ describe("checkReviewedWorktreeClean", () => {
           if (args[args.length - 2] === "ls-files" && args[args.length - 1] === "-v") {
             return { status: 0, stdout: "", stderr: "" };
           }
-          if (args.includes("-z") && args[args.length - 1] === "--exclude-standard") {
-            return { status: 0, stdout: "", stderr: "" };
-          }
           if (args[args.length - 1] === "--stage") {
             return { status: 0, stdout: "", stderr: "" };
           }
@@ -512,7 +527,6 @@ describe("checkReviewedWorktreeClean", () => {
         expectedSafeGitArgs(repo, ["rev-parse", "--show-toplevel"]),
         expectedSafeGitArgs(repo, ["rev-parse", "HEAD", "HEAD^{tree}"]),
         expectedSafeGitArgs(repo, ["ls-files", "-v"]),
-        expectedSafeGitArgs(repo, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]),
         expectedSafeGitArgs(repo, ["ls-files", "--stage"]),
       ]);
       for (const call of calls) {

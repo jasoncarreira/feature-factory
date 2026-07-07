@@ -12,7 +12,6 @@ const REVIEW_GUARD_IDENTITY_ARGS = Object.freeze(["rev-parse", "--show-toplevel"
 const REVIEW_GUARD_HEAD_ARGS = Object.freeze(["rev-parse", "HEAD", "HEAD^{tree}"]);
 const REVIEW_GUARD_CONFIG_ARGS = Object.freeze(["config", "--null", "--list"]);
 const REVIEW_GUARD_HIDDEN_INDEX_ARGS = Object.freeze(["ls-files", "-v"]);
-const REVIEW_GUARD_IGNORED_ARGS = Object.freeze(["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]);
 const REVIEW_GUARD_SUBMODULE_ARGS = Object.freeze(["ls-files", "--stage"]);
 const UNSAFE_CONFIG_KEY_PATTERN = /^(?:filter\..*\.(?:clean|smudge|process)|diff\..*\.textconv)$/iu;
 const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
@@ -248,35 +247,7 @@ function observeSingleReviewedWorktree(reviewedWorktree, gitOptions) {
   const hiddenIndexPaths = Array.isArray(hiddenIndexResult.hidden_index_paths)
     ? hiddenIndexResult.hidden_index_paths
     : [];
-  const ignoredPathsResult = listIgnoredUntrackedPaths(reviewedWorktree, gitOptions);
-  if (!ignoredPathsResult.ok) {
-    return buildGuardResult({
-      ok: false,
-      status: "unverifiable",
-      worktree: reviewedWorktree,
-      command: statusCommand,
-      exit_code: normalizeExitCode(ignoredPathsResult.status),
-      stdout: statusResult.stdout,
-      stderr: joinOutput(
-        statusResult.stderr,
-        formatObservationFailure(
-          "ignored-path observation",
-          formatReviewGuardIgnoredCommand(reviewedWorktree),
-          ignoredPathsResult.stderr,
-        ),
-      ),
-      dirty_paths: dirtyPaths,
-      head_commit: headObservation.head_commit,
-      head_tree: headObservation.head_tree,
-      hidden_index_paths: hiddenIndexPaths,
-    });
-  }
-
-  const ignoredPaths = Array.isArray(ignoredPathsResult.ignored_paths)
-    ? ignoredPathsResult.ignored_paths
-    : [];
-  const observedDirtyPaths = mergeDirtyPaths(dirtyPaths, ignoredPaths);
-  const status = observedDirtyPaths.length === 0 && hiddenIndexPaths.length === 0 ? "clean" : "dirty";
+  const status = dirtyPaths.length === 0 && hiddenIndexPaths.length === 0 ? "clean" : "dirty";
 
   return buildGuardResult({
     ok: status === "clean",
@@ -286,7 +257,7 @@ function observeSingleReviewedWorktree(reviewedWorktree, gitOptions) {
     exit_code: normalizeExitCode(statusResult.status),
     stdout: statusResult.stdout,
     stderr: statusResult.stderr,
-    dirty_paths: observedDirtyPaths,
+    dirty_paths: dirtyPaths,
     head_commit: headObservation.head_commit,
     head_tree: headObservation.head_tree,
     hidden_index_paths: hiddenIndexPaths,
@@ -486,10 +457,6 @@ function formatReviewGuardHiddenIndexCommand(worktree) {
   return formatGitCommand(worktree, REVIEW_GUARD_HIDDEN_INDEX_ARGS);
 }
 
-function formatReviewGuardIgnoredCommand(worktree) {
-  return formatGitCommand(worktree, REVIEW_GUARD_IGNORED_ARGS);
-}
-
 function formatReviewGuardSubmoduleCommand(worktree) {
   return formatGitCommand(worktree, REVIEW_GUARD_SUBMODULE_ARGS);
 }
@@ -685,14 +652,6 @@ function observeReviewedWorktreeIdentity(worktree, gitOptions) {
   }
 }
 
-function listIgnoredUntrackedPaths(worktree, options = {}) {
-  const result = safeGit(worktree, REVIEW_GUARD_IGNORED_ARGS, options);
-  return {
-    ...result,
-    ignored_paths: result.ok ? parseIgnoredUntrackedPaths(result.stdout) : [],
-  };
-}
-
 function listInitializedSubmodules(worktree, options = {}) {
   const result = safeGit(worktree, REVIEW_GUARD_SUBMODULE_ARGS, options);
   return {
@@ -742,49 +701,6 @@ function isInitializedSubmoduleWorktree(worktree) {
   } catch {
     return false;
   }
-}
-
-function parseIgnoredUntrackedPaths(stdout) {
-  return parseGitPathEntries(stdout).map(({ path, rawPath }) => buildIgnoredDirtyPath(path, rawPath));
-}
-
-function parseGitPathEntries(stdout) {
-  const text = String(stdout);
-  if (text === "") return [];
-
-  if (text.includes("\u0000")) {
-    const paths = text.split("\u0000");
-    if (paths[paths.length - 1] === "") paths.pop();
-    return paths.map((rawPath) => ({
-      path: rawPath,
-      rawPath,
-    }));
-  }
-
-  return text
-    .split(/\r?\n/u)
-    .filter((line) => line !== "")
-    .map((rawPath) => ({
-      path: decodeGitPath(rawPath),
-      rawPath,
-    }));
-}
-
-function buildIgnoredDirtyPath(path, rawPath) {
-  return {
-    path,
-    original_path: null,
-    raw: `!! ${rawPath}`,
-    xy: "!!",
-    index_status: "!",
-    worktree_status: "!",
-    staged: false,
-    unstaged: false,
-    deleted: false,
-    conflicted: false,
-    ignored: true,
-    untracked: true,
-  };
 }
 
 function shouldIncludeNestedDirtyPath(entry, parentAlreadyMarksSubmoduleDirty) {
