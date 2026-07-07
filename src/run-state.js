@@ -88,50 +88,46 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
   assertSafeGateName(gateName);
   const nextGate = normalizeGateDecision(gateName, gate);
 
-  if (nextGate.status !== "approved") {
-    const result = await transitionRunJson(
-      runDir,
-      (draft) => {
-        draft.gates = normalizeGateMap(draft.gates);
-        draft.gates[gateName] = cloneJson(nextGate);
-      },
-      options,
-    );
-    return { ...result, gate: gateName, attestation_ref: null };
-  }
-
-  assertApprovedGateDecisionShape(gateName, nextGate);
-  const attestationRef = gateAttestationRef(gateName);
-
   return withRunJsonLock(
     runDir,
     async () => {
-      const gateAttestationPath = await resolveAttestationWritePath(runDir, attestationRef, { createParents: true });
-      const indexPath = await resolveAttestationWritePath(runDir, ATTESTATIONS_INDEX_REF, { createParents: true });
-      const gateSnapshot = await snapshotFile(gateAttestationPath);
-      const indexSnapshot = await snapshotFile(indexPath);
+      let stagedAttestationRef = null;
+      let stagedSnapshots = [];
+      let shouldStageAttestation = false;
+      let forceTransition = false;
       let committed = false;
 
       try {
         const result = await transitionRunJsonLocked(
           runDir,
-          (draft) => {
+          (draft, { authority }) => {
             draft.gates = normalizeGateMap(draft.gates);
             draft.gates[gateName] = cloneJson(nextGate);
+
+            const latestGateDecision = findAcceptedGateDecisionRecord(authority, gateName);
+            shouldStageAttestation = shouldStageGateDecisionAttestation(latestGateDecision, nextGate);
+            forceTransition = shouldStageAttestation && nextGate.status !== "approved";
+
+            if (forceTransition) return draft;
           },
           options,
           {
             beforeValidateNext: async ({ current, next }) => {
+              if (!shouldStageAttestation) return;
+
               const graph = assertProvenanceGraphValid(runDir, options);
               const records = acceptedAttestationEntries(graph);
-              const nextGateDecision = next.gates?.[gateName];
-              const staged = createApprovedGateDecisionState({
+              const staged = createGateDecisionState({
                 runDir,
                 current,
                 gateName,
-                gate: nextGateDecision,
+                gate: next.gates?.[gateName],
                 records,
               });
+              const gateAttestationPath = await resolveAttestationWritePath(runDir, staged.ref, { createParents: true });
+              const indexPath = await resolveAttestationWritePath(runDir, ATTESTATIONS_INDEX_REF, { createParents: true });
+              stagedSnapshots = [await snapshotFile(gateAttestationPath), await snapshotFile(indexPath)];
+              stagedAttestationRef = staged.ref;
 
               const attestationValidation = validateGateDecisionAttestation(staged.attestation, { ...options, runDir });
               assertValidationChecksValid(attestationValidation, "gate-decision validation failed");
@@ -139,16 +135,15 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
               await writeJsonAtomically(gateAttestationPath, staged.attestation);
               await writeJsonAtomically(indexPath, staged.index);
             },
-            [APPROVED_GATE_TRANSITION_HOOK]: gateName,
+            ...(nextGate.status === "approved" ? { [APPROVED_GATE_TRANSITION_HOOK]: gateName } : {}),
           },
         );
         committed = true;
-        return { ...result, gate: gateName, attestation_ref: attestationRef };
+        return { ...result, gate: gateName, attestation_ref: stagedAttestationRef };
       } catch (error) {
-        if (!committed) {
+        if (!committed && stagedSnapshots.length > 0) {
           try {
-            await restoreSnapshot(gateSnapshot);
-            await restoreSnapshot(indexSnapshot);
+            for (const snapshot of stagedSnapshots) await restoreSnapshot(snapshot);
           } catch (restoreError) {
             throw rollbackError(error, restoreError);
           }
@@ -485,54 +480,112 @@ function assertValidationChecksValid(result, fallbackMessage = "validation faile
   throw new Error(message === "run validation failed" ? fallbackMessage : message);
 }
 
-function createApprovedGateDecisionState({ runDir, current, gateName, gate, records }) {
+function createGateDecisionState({ runDir, current, gateName, gate, records }) {
   if (!Array.isArray(records) || records.length === 0) {
-    throw new Error("approved gate decisions require a non-empty accepted attestation index");
+    throw new Error("gate decisions require a non-empty accepted attestation index");
   }
 
-  const ref = gateAttestationRef(gateName);
-  const existingIndex = records.findIndex((record) => record.ref === ref);
-  if (existingIndex !== -1 && existingIndex !== records.length - 1) {
-    throw new Error(`approved gate '${gateName}' cannot update ${ref} after newer accepted attestations`);
-  }
+  if (gate?.status === "approved") assertApprovedGateDecisionShape(gateName, gate);
 
-  const replacingLastRecord = existingIndex === records.length - 1;
-  const previousRecord = replacingLastRecord ? records[records.length - 2] ?? null : records[records.length - 1] ?? null;
-  const artifact = resolveArtifactRef(runDir, gate.artifact);
-  const question = resolveGateRef(runDir, gate.question_ref);
-  const answer = stringValue(gate.answer_ref) ? resolveGateRef(runDir, gate.answer_ref) : null;
+  const latestGateRecord = findAcceptedGateDecisionEntry(records, gateName);
+  const previousRecord = records.at(-1) ?? null;
+  const sequence = (previousRecord?.attestation?.sequence ?? 0) + 1;
+  const ref = latestGateRecord ? gateAttestationHistoryRef(gateName, sequence) : gateAttestationRef(gateName);
+  const bindings = createGateDecisionBindings({
+    runDir,
+    currentGate: current.gates?.[gateName],
+    gateName,
+    gate,
+    previousBindings: latestGateRecord?.attestation?.bindings,
+  });
   const attestation = createGateDecisionAttestation({
     run_id: current.run_id,
-    sequence: replacingLastRecord ? records[existingIndex].attestation.sequence : (records.at(-1)?.attestation?.sequence ?? 0) + 1,
+    sequence,
     prev_hash: previousRecord?.attestation?.attestation_hash ?? null,
-    bindings: {
-      gate: gateName,
-      decision: gate.status,
-      approval_source: gate.approval_source,
-      question_ref: gate.question_ref,
-      question_hash: hashFile(question.path),
-      artifact_ref: gate.artifact,
-      artifact_hash: hashFile(artifact.path),
-      ...(answer
-        ? {
-            answer_ref: gate.answer_ref,
-            answer_hash: hashFile(answer.path),
-          }
-        : {
-            answer_text_hash: hashTextClaim(gate.answer),
-          }),
-    },
+    bindings,
   });
-  const nextRecords = replacingLastRecord
-    ? [...records.slice(0, -1), { ref, attestation }]
-    : [...records, { ref, attestation }];
+  const nextRecords = [...records, { ref, attestation }];
   const index = createAttestationIndex(nextRecords);
 
   if (!Array.isArray(index.entries) || index.entries.length === 0) {
-    throw new Error("approved gate decisions require a non-empty attestation index");
+    throw new Error("gate decisions require a non-empty attestation index");
   }
 
   return { ref, attestation, index };
+}
+
+function createGateDecisionBindings({ runDir, currentGate, gateName, gate, previousBindings }) {
+  const artifactRef = firstNonEmptyString(gate?.artifact, currentGate?.artifact, previousBindings?.artifact_ref);
+  const questionRef = firstNonEmptyString(gate?.question_ref, currentGate?.question_ref, previousBindings?.question_ref);
+  const approvalSource = firstNonEmptyString(gate?.approval_source, currentGate?.approval_source, previousBindings?.approval_source);
+
+  const missingFields = [];
+  if (!stringValue(artifactRef)) missingFields.push("artifact");
+  if (!stringValue(questionRef)) missingFields.push("question_ref");
+  if (!stringValue(approvalSource)) missingFields.push("approval_source");
+  if (missingFields.length > 0) {
+    throw new Error(`gate decision '${gateName}' requires ${missingFields.join(", ")}`);
+  }
+
+  const artifact = resolveArtifactRef(runDir, artifactRef);
+  const question = resolveGateRef(runDir, questionRef);
+  const answerBindings = createGateDecisionAnswerBindings({ runDir, currentGate, gateName, gate, previousBindings });
+
+  return {
+    gate: gateName,
+    decision: gate.status,
+    approval_source: approvalSource,
+    question_ref: questionRef,
+    question_hash: hashFile(question.path),
+    artifact_ref: artifactRef,
+    artifact_hash: hashFile(artifact.path),
+    ...answerBindings,
+  };
+}
+
+function createGateDecisionAnswerBindings({ runDir, currentGate, gateName, gate, previousBindings }) {
+  if (stringValue(gate?.answer_ref)) {
+    const answer = resolveGateRef(runDir, gate.answer_ref);
+    return {
+      answer_ref: gate.answer_ref,
+      answer_hash: hashFile(answer.path),
+    };
+  }
+
+  if (stringValue(gate?.answer)) {
+    return { answer_text_hash: hashTextClaim(gate.answer) };
+  }
+
+  if (stringValue(currentGate?.answer_ref)) {
+    const answer = resolveGateRef(runDir, currentGate.answer_ref);
+    return {
+      answer_ref: currentGate.answer_ref,
+      answer_hash: hashFile(answer.path),
+    };
+  }
+
+  if (stringValue(currentGate?.answer)) {
+    return { answer_text_hash: hashTextClaim(currentGate.answer) };
+  }
+
+  if (stringValue(previousBindings?.answer_ref)) {
+    const answer = resolveGateRef(runDir, previousBindings.answer_ref);
+    return {
+      answer_ref: previousBindings.answer_ref,
+      answer_hash: hashFile(answer.path),
+    };
+  }
+
+  if (stringValue(previousBindings?.answer_text_hash)) {
+    return { answer_text_hash: previousBindings.answer_text_hash };
+  }
+
+  throw new Error(`gate decision '${gateName}' requires answer_ref or answer`);
+}
+
+function shouldStageGateDecisionAttestation(latestGateDecision, gate) {
+  if (gate?.status === "approved") return true;
+  return latestGateDecision?.attestation?.bindings?.decision === "approved";
 }
 
 function acceptedAttestationEntries(authority) {
@@ -572,10 +625,12 @@ function assertApprovedGateTransitions(current, next, authority, hooks = {}) {
 }
 
 function findAcceptedGateDecisionRecord(authority, gateName) {
-  const orderedRefs = Array.isArray(authority?.orderedRefs) ? authority.orderedRefs : [];
-  for (let index = orderedRefs.length - 1; index >= 0; index -= 1) {
-    const ref = orderedRefs[index];
-    const record = authority?.acceptedAttestations?.[ref];
+  return findAcceptedGateDecisionEntry(acceptedAttestationEntries(authority), gateName);
+}
+
+function findAcceptedGateDecisionEntry(records, gateName) {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
     if (record?.attestation?.type !== "gate-decision") continue;
     if (record.attestation?.bindings?.gate !== gateName) continue;
     return record;
@@ -676,6 +731,12 @@ function gateAttestationRef(gateName) {
   return `${ATTESTATIONS_DIR}/${ATTESTATIONS_GATES_DIR}/${gateName}.json`;
 }
 
+function gateAttestationHistoryRef(gateName, sequence) {
+  assertSafeGateName(gateName);
+  if (!Number.isInteger(sequence) || sequence < 1) throw new Error(`invalid gate attestation sequence for '${gateName}'`);
+  return `${ATTESTATIONS_DIR}/${ATTESTATIONS_GATES_DIR}/${gateName}/${sequence}.json`;
+}
+
 function assertSafeGateName(gateName) {
   if (!SAFE_GATE_NAME_PATTERN.test(gateName)) {
     throw new Error(`invalid gate name '${gateName}': must match safe pattern [a-z0-9][a-z0-9_-]*[a-z0-9]`);
@@ -688,6 +749,13 @@ function assertLegacyNoIndexCompatibleRun(run, label) {
   throw new Error(
     `mutateRunJsonLocked compatibility mode requires no provenance-sensitive ${label} claims when attestations/index.json is absent: ${claims.join(", ")}`,
   );
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (stringValue(value)) return value;
+  }
+  return null;
 }
 
 function collectProvenanceSensitiveClaims(run) {

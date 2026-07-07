@@ -17,6 +17,7 @@ import {
   transitionTerminalResult,
   withRunJsonLock,
 } from "../src/run-state.js";
+import { validateRunAuthority, validateRunDir } from "../src/validate.js";
 
 const HEARTBEAT_OWNER = "heartbeat-owner-capability";
 
@@ -442,7 +443,12 @@ describe("transition helpers", () => {
 
     try {
       await transitionGateDecision(fixture.runDir, "story", approvedGate);
-      await transitionGateDecision(fixture.runDir, "story", { status: "pending" });
+      const reopened = await transitionGateDecision(fixture.runDir, "story", { status: "pending" });
+      const index = readJson(join(fixture.runDir, "attestations", "index.json"));
+      const latest = readJson(join(fixture.runDir, index.entries.at(-1).ref));
+
+      assert.match(reopened.attestation_ref, /^attestations\/gates\/story\/\d+\.json$/u);
+      assert.equal(latest.bindings.decision, "pending");
 
       const current = readJson(join(fixture.runDir, "run.json"));
       const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
@@ -451,14 +457,14 @@ describe("transition helpers", () => {
         transitionRunJson(fixture.runDir, (run) => {
           run.gates.story = { status: "approved" };
         }),
-        /transitionGateDecision/u,
+        /latest accepted gate decision 'pending'/u,
       );
 
       await assert.rejects(
         mutateRunJsonLocked(fixture.runDir, (run) => {
           run.gates.story = { ...approvedGate };
         }),
-        /transitionGateDecision/u,
+        /latest accepted gate decision 'pending'/u,
       );
 
       assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
@@ -497,6 +503,68 @@ describe("transition helpers", () => {
 
       assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
       assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails public validation for sparse approved replays and reopened stale approvals until re-approved", async () => {
+    const fixture = createRunFixture();
+    const approvedGate = {
+      status: "approved",
+      artifact: "artifacts/story.md",
+      question_ref: "gates/story.question.md",
+      answer_ref: "gates/story.answer",
+      approval_source: "human",
+    };
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+
+    try {
+      await transitionGateDecision(fixture.runDir, "story", approvedGate);
+      const approvedRun = readJson(join(fixture.runDir, "run.json"));
+
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...approvedRun,
+        gates: { story: { status: "approved" } },
+      });
+
+      let authority = validateRunAuthority(fixture.runDir, readJson(join(fixture.runDir, "run.json")));
+      assert.equal(authority.ok, false);
+      assert.match(collectCheckErrors(authority), /accepted gate artifact ref is missing/u);
+      assert.equal(validateRunDir(fixture.runDir).ok, false);
+
+      writeJson(join(fixture.runDir, "run.json"), approvedRun);
+      await transitionGateDecision(fixture.runDir, "story", { status: "pending" });
+      const reopenedRun = readJson(join(fixture.runDir, "run.json"));
+
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...reopenedRun,
+        gates: { story: { status: "approved" } },
+      });
+      authority = validateRunAuthority(fixture.runDir, readJson(join(fixture.runDir, "run.json")));
+      assert.equal(authority.ok, false);
+      assert.match(collectCheckErrors(authority), /latest accepted gate decision 'pending'/u);
+      assert.equal(validateRunDir(fixture.runDir).ok, false);
+
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...reopenedRun,
+        gates: { story: { ...approvedGate } },
+      });
+      authority = validateRunAuthority(fixture.runDir, readJson(join(fixture.runDir, "run.json")));
+      assert.equal(authority.ok, false);
+      assert.match(collectCheckErrors(authority), /latest accepted gate decision 'pending'/u);
+      assert.equal(validateRunDir(fixture.runDir).ok, false);
+
+      writeJson(join(fixture.runDir, "run.json"), reopenedRun);
+      await transitionGateDecision(fixture.runDir, "story", approvedGate);
+
+      authority = validateRunAuthority(fixture.runDir, readJson(join(fixture.runDir, "run.json")));
+      assert.equal(authority.ok, true);
+      assert.equal(validateRunDir(fixture.runDir).ok, true);
     } finally {
       fixture.cleanup();
     }
@@ -999,6 +1067,13 @@ function writeJson(path, value) {
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function collectCheckErrors(result) {
+  return (Array.isArray(result?.checks) ? result.checks : [])
+    .flatMap((check) => Array.isArray(check?.errors) ? check.errors : [])
+    .map((error) => `${error.path}: ${error.message}`)
+    .join("\n");
 }
 
 function repoContext() {
