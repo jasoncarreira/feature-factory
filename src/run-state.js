@@ -20,6 +20,10 @@ export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial",
 const ACTIVE_HEARTBEAT_STATUSES = new Set(["active", "running"]);
 const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
 const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
+const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
+const SENSITIVE_SLICE_STATUSES = new Set(["review", "merged"]);
+const PASSING_VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS"]);
+const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
 
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
@@ -79,6 +83,7 @@ export async function transitionRunJson(runDir, mutator, options = {}) {
 
 export async function transitionGateDecision(runDir, gateName, gate, options = {}) {
   if (!stringValue(gateName)) throw new Error("transitionGateDecision requires a gate name");
+  assertSafeGateName(gateName);
   const nextGate = normalizeGateDecision(gateName, gate);
 
   if (nextGate.status !== "approved") {
@@ -247,6 +252,7 @@ export async function mutateRunJsonLocked(runDir, mutator, options = {}) {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     await assertSemanticTransitionHeartbeatState(runDir, options);
+    assertLegacyNoIndexCompatibleRun(current, "current");
 
     const draft = cloneJson(current);
     let nextValue = await mutator(draft, { current, runDir });
@@ -258,6 +264,7 @@ export async function mutateRunJsonLocked(runDir, mutator, options = {}) {
     }
 
     const next = validateRun(nextValue);
+    assertLegacyNoIndexCompatibleRun(next, "next");
     await writeJsonAtomically(join(runDir, RUN_FILE), next);
     return { updated: true, status: next.status, run: next };
   }, options);
@@ -557,7 +564,50 @@ function assertApprovedGateDecisionShape(gateName, gate) {
 }
 
 function gateAttestationRef(gateName) {
+  assertSafeGateName(gateName);
   return join(ATTESTATIONS_DIR, ATTESTATIONS_GATES_DIR, `${gateName}.json`);
+}
+
+function assertSafeGateName(gateName) {
+  if (!SAFE_GATE_NAME_PATTERN.test(gateName)) {
+    throw new Error(`invalid gate name '${gateName}': must match safe pattern [a-z0-9][a-z0-9_-]*[a-z0-9]`);
+  }
+}
+
+function assertLegacyNoIndexCompatibleRun(run, label) {
+  const claims = collectProvenanceSensitiveClaims(run);
+  if (claims.length === 0) return;
+  throw new Error(
+    `mutateRunJsonLocked compatibility mode requires no provenance-sensitive ${label} claims when attestations/index.json is absent: ${claims.join(", ")}`,
+  );
+}
+
+function collectProvenanceSensitiveClaims(run) {
+  const claims = [];
+  if (!isRecord(run)) return claims;
+
+  for (const [gateName, gate] of Object.entries(run.gates || {})) {
+    if (isRecord(gate) && gate.status === "approved") claims.push(`gate:${gateName}`);
+  }
+
+  for (const [index, slice] of (Array.isArray(run.slices) ? run.slices : []).entries()) {
+    if (sliceRequiresAuthority(slice)) claims.push(`slice:${slice?.id || index}`);
+  }
+
+  if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) claims.push("validator");
+  if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) claims.push("security_review");
+  if (stringValue(run.pr_url)) claims.push("pr_url");
+  if (stringValue(run.terminal_result?.pr_url)) claims.push("terminal_result.pr_url");
+  if ([run.branch, run.worktree, run.base_ref, run.base_commit].some(stringValue)) claims.push("run_base");
+
+  return claims;
+}
+
+function sliceRequiresAuthority(slice) {
+  return isRecord(slice)
+    && (SENSITIVE_SLICE_STATUSES.has(slice.status)
+      || stringValue(slice.merge_commit)
+      || (slice.status === "merged" && stringValue(slice.review_ref)));
 }
 
 function normalizeTerminalResult(terminalResult) {
