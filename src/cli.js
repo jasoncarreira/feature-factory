@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { cleanupRun, heartbeatStatus, listRuns, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectProvenance } from "./provenance.js";
-import { assertHeartbeatOwnerCapability, heartbeatOnce } from "./run-state.js";
+import { assertHeartbeatOwnerCapability, heartbeatOnce, transitionGateDecision } from "./run-state.js";
 import { HEARTBEAT_PHASES, HEARTBEAT_PROTECTED_GATES, validateRun } from "./validate.js";
 
 const cliPath = fileURLToPath(import.meta.url);
@@ -39,6 +39,7 @@ Commands:
   factory validate [run-id]     Validate run.json and plan/slices.json
   factory cleanup <run-id>      Remove terminal run state, worktrees, and branches
   factory answer <run> <gate> <approve|stop|changes: ...>
+  factory gate-decision <run> <gate> <pending|approved|changes_requested|stopped> [--artifact REF] [--question-ref REF] [--answer-ref REF|--answer TEXT] [--approval-source SOURCE]
   factory watch [run-id] [--all] Print status changes as JSON
   factory provenance            Print detected versions, models, and capabilities
 `);
@@ -97,6 +98,7 @@ async function factory(args) {
     const [runId, gate, ...answerParts] = positional;
     return print(writeGateAnswer(runId, gate, answerParts.join(" "), opts), opts);
   }
+  if (sub === "gate-decision") return gateDecision(rest);
   if (sub === "watch") {
     watchRun(positional[0], opts);
     return;
@@ -191,6 +193,13 @@ function options(args) {
     if (args[index] === "--phase") opts.phase = args[++index];
     if (args[index] === "--token") opts.token = args[++index];
     if (args[index] === "--reviewer") opts.reviewer = args[++index];
+    if (args[index] === "--artifact") opts.artifact = args[++index];
+    if (args[index] === "--question-ref") opts.questionRef = args[++index];
+    if (args[index] === "--answer-ref") opts.answerRef = args[++index];
+    if (args[index] === "--answer") opts.answer = args[++index];
+    if (args[index] === "--approval-source") opts.approvalSource = args[++index];
+    if (args[index] === "--decision-note") opts.decisionNote = args[++index];
+    if (args[index] === "--answered-at") opts.answeredAt = args[++index];
   }
   return opts;
 }
@@ -199,7 +208,7 @@ function positionals(args) {
   const output = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (["--repo", "--gh-account", "--model", "--interval", "--max-duration", "--wait-ms", "--phase", "--token", "--reviewer"].includes(arg)) {
+    if (["--repo", "--gh-account", "--model", "--interval", "--max-duration", "--wait-ms", "--phase", "--token", "--reviewer", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at"].includes(arg)) {
       index += 1;
       continue;
     }
@@ -207,6 +216,35 @@ function positionals(args) {
     output.push(arg);
   }
   return output;
+}
+
+async function gateDecision(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId, gate, statusValue] = positional;
+  if (!stringValue(runId) || !stringValue(gate) || !stringValue(statusValue)) {
+    throw new Error("factory gate-decision requires <run> <gate> <pending|approved|changes_requested|stopped>");
+  }
+
+  const decision = { status: normalizeGateDecisionStatus(statusValue) };
+  if (stringValue(opts.artifact)) decision.artifact = opts.artifact;
+  if (stringValue(opts.questionRef)) decision.question_ref = opts.questionRef;
+  if (stringValue(opts.answerRef)) decision.answer_ref = opts.answerRef;
+  if (stringValue(opts.answer)) decision.answer = opts.answer;
+  if (stringValue(opts.approvalSource)) decision.approval_source = opts.approvalSource;
+  if (stringValue(opts.decisionNote)) decision.decision_note = opts.decisionNote;
+  if (stringValue(opts.answeredAt)) decision.answered_at = opts.answeredAt;
+
+  return print(await transitionGateDecision(resolveRunDir(runId, opts), gate, decision), opts);
+}
+
+function normalizeGateDecisionStatus(value) {
+  const status = String(value).trim();
+  if (["pending", "approved", "changes_requested", "stopped"].includes(status)) return status;
+  if (status === "approve") return "approved";
+  if (status === "changes") return "changes_requested";
+  if (status === "stop") return "stopped";
+  throw new Error("gate decision status must be pending, approved, changes_requested, or stopped");
 }
 
 function print(value, opts) {

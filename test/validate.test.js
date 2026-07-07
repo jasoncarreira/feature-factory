@@ -251,6 +251,28 @@ describe("validateRunDir", () => {
     cleanupTemp(runDir);
   });
 
+  it("keeps PR URLs as terminal bookkeeping until PR URL attestations exist", () => {
+    const runDir = tempRunDir("terminal-pr-url-bookkeeping");
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), {
+      ...runningRun({ status: "completed" }),
+      pr_url: "https://github.com/example/repo/pull/123",
+      terminal_result: {
+        status: "completed",
+        run_id: "app-123",
+        pr_url: "https://github.com/example/repo/pull/123",
+        reason: null,
+        summary: "Draft PR created.",
+        artifacts: {},
+      },
+    });
+
+    const result = validateRunDir(runDir);
+
+    assert.equal(result.ok, true);
+    cleanupTemp(runDir);
+  });
+
   it("fails run-base-only branch/worktree/base claims without an accepted run-base attestation", () => {
     const runDir = tempRunDir("run-base-only-claims");
     mkdirSync(join(runDir, "evidence"), { recursive: true });

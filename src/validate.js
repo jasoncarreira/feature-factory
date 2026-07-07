@@ -201,13 +201,12 @@ export function validateRunAuthority(runDir, run, options = {}) {
         const bindings = record.attestation.bindings;
         const errors = [];
         if (bindings.decision !== "approved") {
-          errors.push({ path: `run.gates.${gateName}.status`, message: `must match accepted gate decision '${bindings.decision}'` });
+          errors.push({ path: `run.gates.${gateName}.status`, message: `must match latest accepted gate decision '${bindings.decision}'` });
         }
-        compareOptionalString(errors, gate.artifact, bindings.artifact_ref, `run.gates.${gateName}.artifact`, "accepted gate artifact ref");
-        compareOptionalString(errors, gate.question_ref, bindings.question_ref, `run.gates.${gateName}.question_ref`, "accepted gate question ref");
-        compareOptionalString(errors, gate.answer_ref, bindings.answer_ref, `run.gates.${gateName}.answer_ref`, "accepted gate answer ref");
-        compareOptionalString(errors, gate.approval_source, bindings.approval_source, `run.gates.${gateName}.approval_source`, "accepted gate approval source");
-        compareOptionalAnswer(errors, gate.answer, bindings.answer_text_hash, `run.gates.${gateName}.answer`);
+        compareRequiredString(errors, gate.artifact, bindings.artifact_ref, `run.gates.${gateName}.artifact`, "accepted gate artifact ref");
+        compareRequiredString(errors, gate.question_ref, bindings.question_ref, `run.gates.${gateName}.question_ref`, "accepted gate question ref");
+        compareRequiredString(errors, gate.approval_source, bindings.approval_source, `run.gates.${gateName}.approval_source`, "accepted gate approval source");
+        compareRequiredAnswerBinding(errors, gate, bindings, gateName);
         let prePrApprovals = null;
         if (gateName === "pre_pr") {
           prePrApprovals = requireCurrentPrePrApprovals(run, attestationRecords, runBaseRecord, mergeChainRecord);
@@ -320,14 +319,6 @@ export function validateRunAuthority(runDir, run, options = {}) {
           attestation_ref: approval.record.ref,
           head_commit: approval.mergeChainBindings.head_commit,
         };
-      }),
-    );
-  }
-
-  if (stringValue(run.pr_url) || stringValue(run.terminal_result?.pr_url)) {
-    checks.push(
-      validateAuthorityCheck("run.provenance.pr-url", () => {
-        fail([{ path: stringValue(run.pr_url) ? "run.pr_url" : "run.terminal_result.pr_url", message: "PR URL requires an accepted attestation binding that is not present" }]);
       }),
     );
   }
@@ -666,8 +657,6 @@ function collectSensitiveRunClaims(run) {
   }
   if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) claims.push("validator");
   if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) claims.push("security_review");
-  if (stringValue(run.pr_url)) claims.push("pr_url");
-  if (stringValue(run.terminal_result?.pr_url)) claims.push("terminal_result.pr_url");
   return claims;
 }
 
@@ -859,10 +848,53 @@ function compareOptionalPath(errors, actual, expected, baseDir, path, label) {
   if (!sameAuthorityPath(actual, expected, baseDir)) errors.push({ path, message: `must match ${label} '${expected}'` });
 }
 
+function compareRequiredString(errors, actual, expected, path, label) {
+  if (!stringValue(actual)) {
+    errors.push({ path, message: `${label} is missing` });
+    return;
+  }
+  if (!stringValue(expected)) {
+    errors.push({ path, message: `${label} is missing` });
+    return;
+  }
+  if (actual !== expected) errors.push({ path, message: `must match ${label} '${expected}'` });
+}
+
 function compareOptionalAnswer(errors, answer, expectedHash, path) {
   if (!stringValue(answer) || !stringValue(expectedHash)) return;
   const actualHash = `sha256:${createHash("sha256").update(String(answer), "utf8").digest("hex")}`;
   if (actualHash !== expectedHash) errors.push({ path, message: `must match accepted answer hash '${expectedHash}'` });
+}
+
+function compareRequiredAnswerBinding(errors, gate, bindings, gateName) {
+  if (stringValue(bindings?.answer_ref)) {
+    compareRequiredString(
+      errors,
+      gate?.answer_ref,
+      bindings.answer_ref,
+      `run.gates.${gateName}.answer_ref`,
+      "accepted gate answer ref",
+    );
+    return;
+  }
+
+  if (!stringValue(bindings?.answer_text_hash)) {
+    errors.push({
+      path: `run.gates.${gateName}.answer`,
+      message: "accepted gate decision is missing an answer binding",
+    });
+    return;
+  }
+
+  if (!stringValue(gate?.answer)) {
+    errors.push({
+      path: `run.gates.${gateName}.answer`,
+      message: `must carry accepted answer hash '${bindings.answer_text_hash}'`,
+    });
+    return;
+  }
+
+  compareOptionalAnswer(errors, gate.answer, bindings.answer_text_hash, `run.gates.${gateName}.answer`);
 }
 
 function normalizeClaimPath(pathValue, baseDir) {

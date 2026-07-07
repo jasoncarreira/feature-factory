@@ -173,9 +173,21 @@ Create `$RUN=$REPO/.opencode/factory/<run-id>` with:
 - `reviews/`
 - `attestations/`
 
-Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`. Write `run.json` atomically after every state change. Include `schema_version`, persist the selected review tier at top-level `run.json.review_tier`, persist non-empty `driver.github_account` at top-level `run.json.github_account`, and refresh `heartbeat_at` whenever you make progress.
+Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`. Write `run.json` atomically after every state change through the transition helpers in `src/run-state.js`: `hashRunState`, `transitionRunJson`, `transitionGateDecision`, `transitionTerminalResult`, `transitionRunStep`, `transitionRunSlice`, and `transitionLifecycleRun`. Keep `mutateRunJsonLocked` only as the legacy compatibility path for no-index bootstrap-safe writes. Include `schema_version`, persist the selected review tier at top-level `run.json.review_tier`, persist non-empty `driver.github_account` at top-level `run.json.github_account`, and refresh `heartbeat_at` whenever you make progress.
 
-At run creation, initialize `attestations/index.json`. When the run's feature branch/worktree is first materialized, re-observe the branch, worktree identity, base commit, and base tree through safe Git/filesystem checks and write the sequence-1 run-base attestation. Resume paths validate existing attestations instead of blindly rewriting them.
+Transition contract:
+
+- `hashRunState` provides the canonical current-state hash for optimistic `expectedCurrentHash` compare-and-swap checks. If another writer wins the lock first, the semantic transition must fail closed as a stale `run.json` transition instead of overwriting newer state.
+- `transitionRunJson` is the default semantic writer: take `run-json.lock/`, validate current authority, require heartbeat to be stopped for foreground semantic writes, validate the next state, then commit atomically.
+- `transitionLifecycleRun` uses the same validation path. `allowActiveHeartbeat: true` is a narrow lifecycle escape hatch, not a general bypass for normal semantic writes.
+- `transitionRunStep` and `transitionRunSlice` seed/update `steps[]` and `slices[]` by stable identity (`agent` / `id`) so resumed runs do not depend on hand-maintained array positions.
+- `transitionTerminalResult` keeps top-level `run.json.status` and `run.json.terminal_result` consistent and rewrites `terminal_result.run_id` to the durable run id.
+- `transitionGateDecision` is the only approved-gate writer. The CLI exposes it through `feature-factory factory gate-decision <run-id> <gate> <status> ...` for scripted harnesses. For `status: approved`, it must write and validate `attestations/gates/<gate>.json` plus the updated accepted `attestations/index.json` chain before the approved gate state becomes durable; if later validation fails, roll back the staged gate attestation/index files and leave `run.json` unchanged.
+- `mutateRunJsonLocked` remains compatibility-only when `attestations/index.json` is absent and the current/next state has no provenance-sensitive claims. It must fail closed for approved gates, review-approved or merged slices, passing validator/security verdicts, and run-base fields without accepted attestations. PR URLs remain terminal bookkeeping until a dedicated PR-created attestation type exists.
+
+At run creation, create `attestations/` but do not create placeholder/empty `attestations/index.json`. Create `attestations/index.json` only with the first accepted attestation and non-empty entries. The first accepted attestation must be the sequence-1 `attestations/run-base.json`; gate decisions cannot bootstrap the accepted graph before run-base exists. When the run's feature branch/worktree is first materialized, re-observe the branch, worktree identity, base commit, and base tree through safe Git/filesystem checks and write that run-base attestation. Resume paths validate existing attestations instead of blindly rewriting them.
+
+These transition helpers do not change heartbeat or external-driver semantics: `heartbeat.json` remains liveness-only bookkeeping, and external drivers still write only `gates/<gate>.answer`; approved answers sourced from that file still record `approval_source: external-driver`.
 
 One-writer rule:
 
