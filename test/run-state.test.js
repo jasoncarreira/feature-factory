@@ -426,6 +426,31 @@ describe("transition helpers", () => {
     }
   });
 
+  it("records approved gates whose artifact, question, and answer refs are json files", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.json", "{\n  \"title\": \"Story\"\n}\n");
+    writeFixture(fixture.runDir, "gates/story.question.json", "{\n  \"question\": \"Approve?\"\n}\n");
+    writeFixture(fixture.runDir, "gates/story.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
+
+    try {
+      const result = await transitionGateDecision(fixture.runDir, "story", {
+        status: "approved",
+        artifact: "artifacts/story.json",
+        question_ref: "gates/story.question.json",
+        answer_ref: "gates/story.answer.json",
+        approval_source: "human",
+      });
+
+      assert.equal(result.updated, true);
+      assert.equal(result.attestation_ref, "attestations/gates/story.json");
+      assert.equal(validateRunDir(fixture.runDir).ok, true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("rejects generic gate reopen from approved status without transitionGateDecision", async () => {
     const fixture = createRunFixture();
     const approvedGate = {

@@ -76,8 +76,8 @@ All semantic `run.json` writes go through the transition helpers:
 - `transitionRunStep(runDir, stepSelector, updater, options)` seeds or updates `steps[]` entries by stable `agent` identity.
 - `transitionRunSlice(runDir, sliceId, updater, options)` seeds or updates `slices[]` entries by stable `id` identity.
 - `transitionTerminalResult(runDir, terminalResult, options)` keeps top-level `run.json.status` and `run.json.terminal_result` consistent and normalizes `terminal_result.run_id` to the durable run id.
-- `transitionGateDecision(runDir, gateName, gate, options)` is the only approved-gate writer. For `status: "approved"` it requires an already accepted non-empty `attestations/index.json`, stages `attestations/gates/<gate>.json` plus the updated `attestations/index.json`, validates that material, and commits those accepted attestation records before the approved gate state is written to `run.json`. If the next state fails validation, it rolls back the staged gate attestation/index files and leaves `run.json` unchanged.
-- `mutateRunJsonLocked(runDir, mutator, options)` is compatibility-only when `attestations/index.json` is absent. It may write bootstrap-safe non-provenance-sensitive state only. It must fail closed if the current or next state claims approved gates, review-approved or merged slices, passing validator/security verdicts, PR URLs, or run-base fields without accepted attestations.
+- `transitionGateDecision(runDir, gateName, gate, options)` is the only approved-gate writer. Scripted harnesses can invoke it through `feature-factory factory gate-decision <run-id> <gate> <status> ...`. For `status: "approved"` it requires an already accepted non-empty `attestations/index.json`, stages `attestations/gates/<gate>.json` plus the updated `attestations/index.json`, validates that material, and commits those accepted attestation records before the approved gate state is written to `run.json`. If the next state fails validation, it rolls back the staged gate attestation/index files and leaves `run.json` unchanged.
+- `mutateRunJsonLocked(runDir, mutator, options)` is compatibility-only when `attestations/index.json` is absent. It may write bootstrap-safe non-provenance-sensitive state only. It must fail closed if the current or next state claims approved gates, review-approved or merged slices, passing validator/security verdicts, or run-base fields without accepted attestations. PR URLs are terminal bookkeeping until a dedicated PR-created attestation type exists.
 
 These helpers do not change heartbeat or external-driver semantics: `heartbeat.json` remains liveness-only, and external drivers still write only `gates/<gate>.answer`; approved file-sourced answers still record `approval_source: "external-driver"`.
 
@@ -388,7 +388,7 @@ External monitoring semantics:
 }
 ```
 
-Authority note: this example shows bookkeeping state. `run.json` remains mutable local metadata; approved/merged/validator/security booleans, worktree paths, `base_ref`, `base_commit`, and `pr_url` require accepted attestations plus current observations before they count as provenance.
+Authority note: this example shows bookkeeping state. `run.json` remains mutable local metadata; approved/merged/validator/security booleans, worktree paths, `base_ref`, and `base_commit` require accepted attestations plus current observations before they count as provenance. PR URLs are terminal bookkeeping until a dedicated PR-created attestation type exists.
 
 Run status values: `running`, `completed`, `blocked`, `partial`, `needs-human`.
 

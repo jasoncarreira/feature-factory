@@ -323,14 +323,6 @@ export function validateRunAuthority(runDir, run, options = {}) {
     );
   }
 
-  if (stringValue(run.pr_url) || stringValue(run.terminal_result?.pr_url)) {
-    checks.push(
-      validateAuthorityCheck("run.provenance.pr-url", () => {
-        fail([{ path: stringValue(run.pr_url) ? "run.pr_url" : "run.terminal_result.pr_url", message: "PR URL requires an accepted attestation binding that is not present" }]);
-      }),
-    );
-  }
-
   return {
     ok: checks.every((item) => item.ok),
     checks,
@@ -665,8 +657,6 @@ function collectSensitiveRunClaims(run) {
   }
   if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) claims.push("validator");
   if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) claims.push("security_review");
-  if (stringValue(run.pr_url)) claims.push("pr_url");
-  if (stringValue(run.terminal_result?.pr_url)) claims.push("terminal_result.pr_url");
   return claims;
 }
 

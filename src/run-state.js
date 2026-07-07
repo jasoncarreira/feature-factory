@@ -536,9 +536,9 @@ function createGateDecisionBindings({ runDir, currentGate, gateName, gate, previ
     decision: gate.status,
     approval_source: approvalSource,
     question_ref: questionRef,
-    question_hash: hashFile(question.path),
+    question_hash: hashFile(question.path, { mode: "raw" }),
     artifact_ref: artifactRef,
-    artifact_hash: hashFile(artifact.path),
+    artifact_hash: hashFile(artifact.path, { mode: "raw" }),
     ...answerBindings,
   };
 }
@@ -548,7 +548,7 @@ function createGateDecisionAnswerBindings({ runDir, currentGate, gateName, gate,
     const answer = resolveGateRef(runDir, gate.answer_ref);
     return {
       answer_ref: gate.answer_ref,
-      answer_hash: hashFile(answer.path),
+      answer_hash: hashFile(answer.path, { mode: "raw" }),
     };
   }
 
@@ -560,7 +560,7 @@ function createGateDecisionAnswerBindings({ runDir, currentGate, gateName, gate,
     const answer = resolveGateRef(runDir, currentGate.answer_ref);
     return {
       answer_ref: currentGate.answer_ref,
-      answer_hash: hashFile(answer.path),
+      answer_hash: hashFile(answer.path, { mode: "raw" }),
     };
   }
 
@@ -572,7 +572,7 @@ function createGateDecisionAnswerBindings({ runDir, currentGate, gateName, gate,
     const answer = resolveGateRef(runDir, previousBindings.answer_ref);
     return {
       answer_ref: previousBindings.answer_ref,
-      answer_hash: hashFile(answer.path),
+      answer_hash: hashFile(answer.path, { mode: "raw" }),
     };
   }
 
@@ -797,8 +797,6 @@ function collectProvenanceSensitiveClaims(run) {
 
   if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) claims.push("validator");
   if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) claims.push("security_review");
-  if (stringValue(run.pr_url)) claims.push("pr_url");
-  if (stringValue(run.terminal_result?.pr_url)) claims.push("terminal_result.pr_url");
   if ([run.branch, run.worktree, run.base_ref, run.base_commit].some(stringValue)) claims.push("run_base");
 
   return claims;
