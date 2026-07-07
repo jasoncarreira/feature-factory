@@ -204,6 +204,17 @@ describe("run-state transition docs contract", () => {
     }
   });
 
+  it("requires feature worktree and run-base bootstrap before story gate approval", () => {
+    assert.match(SKILL, /Step 0[\s\S]*create the feature branch\/worktree immediately/i, "SKILL must create the feature worktree during Step 0");
+    assert.match(SKILL, /Before Gate 1[\s\S]*attestations\/run-base\.json[\s\S]*attestations\/index\.json/i, "SKILL must write run-base/index before story gate approval");
+    assert.match(SKILL, /caller checkout[\s\S]*launcher\/control-plane[\s\S]*clean `\$FEAT_WT`/i, "SKILL must isolate factory work from caller checkout dirt");
+    assert.match(SKILL, /work-reviewer` subject `spec-writer` -> `\$FEAT_WT`/i, "SKILL must guard spec review against FEAT_WT");
+    assert.match(SKILL, /work-reviewer` subject `work-decomposer` -> `\$FEAT_WT`/i, "SKILL must guard decomposition review against FEAT_WT");
+    assert.match(SKILL, /codebase-researcher[\s\S]*`\$FEAT_WT` as the repository context/i, "SKILL must research the clean feature worktree");
+    assert.match(SCHEMA, /New runs create the feature branch\/worktree during Step 0[\s\S]*before story Gate 1/i, "SCHEMA must document early feature worktree bootstrap");
+    assert.match(SCHEMA, /Spec and decomposition reviews guard the clean feature worktree \(`\$FEAT_WT`\), not the caller checkout/i, "SCHEMA must keep planning guards on FEAT_WT");
+  });
+
   it("states that transition helpers do not change heartbeat or external-driver authority", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
       assert.match(text, /do not change heartbeat or external-driver semantics/i, `${name} must preserve heartbeat and external-driver semantics`);

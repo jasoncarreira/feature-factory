@@ -2,72 +2,106 @@
 
 ## Active Runs
 
-- `reviewer-sandboxing`
-  - Status: `completed`; PR merged.
-  - Goal: enforce read-only reviewer behavior with post-review dirty-state detection.
-  - Next: run `factory cleanup reviewer-sandboxing` after the cleanup command is committed.
+- `jsonc-config-parsing`
+  - Status: `running`; autonomous factory run paused after Gate 1.
+  - Goal: replace hand-rolled JSONC config stripping with a real parser or explicit JSON-only contract.
+  - Current gate: story approved autonomously; brief gate pending.
+  - Next: resume from a clean checkout after the review-guard fix is committed.
 
-- `conservative-review-tiers`
-  - Status: `running`
-  - Current gate: `brief`; decomposition attempt 1 rejected.
-  - Goal: add minimal review-tier metadata and conservative defaults for risky changes.
-  - Next: fix slice decomposition so `review-tier-contract` owns AC2 coverage and `SKILL.md` initialization/backfill assertions.
+## Wrapper Epics
 
-## Feature Factory Hardening Backlog
+### Release Readiness And Packaging
 
-- Reviewer sandboxing
-  - Add a minimal enforceable guard after every reviewer-designated subagent invocation.
-  - Check the reviewed worktree with `git status --porcelain=v1 --untracked-files=all`.
-  - Block/fail the review if the worktree is dirty or cleanliness cannot be verified.
-  - Document that this is post-run dirty-state detection, not OS/process sandboxing.
-  - Add tests for clean reviewer output, dirty reviewer output, and blocked reporting.
+- Package/TUI export compatibility
+  - `npm pack` + fresh install currently leaves `import('opencode-feature-factory/tui')` failing with `ERR_UNKNOWN_FILE_EXTENSION .jsx`.
+  - Add a JS wrapper/build output for TUI, or remove the export until OpenCode consumes it safely.
+  - Include packed-install coverage for `opencode-feature-factory`, `/server`, and `/tui` imports.
+
+- Fresh consumer install smoke
+  - Current install/release path is local-dev shaped (`npm link` + `feature-factory install --local`).
+  - Add a true pack/install tarball smoke in a scratch project.
+  - Verify CLI, plugin config install, OpenCode debug/restart behavior, `/feature`, agents, and TUI registration.
+  - Investigate why bare-package plugin config did not register commands/agents while file-url local install did.
+
+- Portable CI/check scripts
+  - `npm run check` currently includes `doctor --local`, which fails in environments without user OpenCode config.
+  - Split deterministic package gates from local environment diagnostics.
+  - Suggested scripts: `test`, `pack-smoke`, `doctor`, and `doctor:local`.
+
+- License hygiene
+  - `package.json` declares MIT but the tarball has no `LICENSE` file.
+  - Add `LICENSE` and ensure it is included in packed releases.
+
+### Provenance And Terminal State Authority
+
+- PR URL authority for completed runs
+  - Completed PR runs currently treat `run.pr_url` and `terminal_result.pr_url` as terminal bookkeeping, not provenance proof.
+  - Future hardening: add a dedicated PR-created/opened attestation and validate PR URL bindings against it.
+  - Keep successful PR creation valid while this authority path is absent.
+
+- Persist factory provenance at run creation/resume
+  - Helper exists, but SPEC notes orchestrator does not yet persist factory provenance.
+  - Persist enough factory/plugin/driver provenance in `run.json` for debugging and reproducibility.
+  - Keep this as diagnostic metadata, not proof, unless backed by accepted attestations.
+
+- Tighten gate answer preconditions
+  - Before accepting gate answers, verify pending gate question and artifact refs exist.
+  - Verify refs are physically contained under durable roots.
+  - Do not accept answers for missing, escaped, or stale gate refs.
+
+### Factory Robustness And Durability
+
+- Factory stale/recovery diagnostics
+  - Add diagnostics before relying heavily on detached runs.
+  - Surface stale heartbeat, missing process, missing worktree, invalid run state, and recoverable vs terminal conditions clearly.
+  - Prefer explicit `blocked`/`needs-human` terminal state over zombie or silently restarted runs.
+
+- Non-destructive disrupted-worktree recovery
+  - Make the factory robust when its working directory/worktree disappears or becomes inaccessible mid-run.
+  - Do not silently re-scaffold an empty run control plane if `.opencode/factory/<run-id>` or the active worktree is missing/disrupted.
+  - If prior durable state is available, recover from it and reconcile with git branch/commit evidence.
+  - If prior durable state cannot be recovered, fail loudly with terminal `blocked` or `needs-human` plus clear `terminal_result.reason`.
+
+- Crash-durability for atomic writes
+  - Consider fsync-on-rename for `run.json` and heartbeat writes if crash durability is required.
+  - Current atomic rename gives atomic visibility, not necessarily durable persistence across power loss.
+
+### Config And User Environment Compatibility
+
+- JSONC config parsing
+  - Replace hand-rolled JSONC config stripping with a real JSONC parser, or document strict JSON-only support.
+  - Inline comments and trailing commas are common in OpenCode-shaped config files.
+
+### Build And Review Workflow Hardening
 
 - Slice commit contract enforcement
   - Builders must commit their slice changes on the slice branch.
   - Builders must leave the slice worktree clean and report the commit SHA.
   - Orchestrator prompts must not tell builders to leave changes uncommitted unless intentionally running a patch-only workflow.
   - Review/merge must reject dirty or uncommitted builder worktrees.
-  - Slice state must not advance to `review` or `merged` without an observed branch diff, clean worktree, test/evidence output, and commit SHA.
+  - Slice state must not advance to `review` or `merged` without observed branch diff, clean worktree, test/evidence output, and commit SHA.
   - If a builder returns dirty/uncommitted changes, route back to the builder for remediation instead of reviewing or merging.
-
-- Long-running phase heartbeat liveness
-  - Keep `run.json.heartbeat_at` fresh while the factory is blocked waiting on long-running reviewer subagents, builders, tests, or remediation slices.
-  - Known quiet stages include the `pre_pr` review panel and remediation work such as `fix-panel-*`, where the primary loop may be busy but not writing `run.json`.
-  - Add a background heartbeat ticker or equivalent run-dir activity while panel/build/remediation tasks are in flight.
-  - This complements the Mimir adapter-side fix that now treats stale heartbeat as a probe instead of an auto-fail.
-  - Goal: avoid false stuck detection during legitimate long-running work, without relying on a broad external 4h timeout for normal liveness.
-
-- Non-destructive disrupted-worktree recovery
-  - Make the factory robust when its working directory/worktree disappears or becomes inaccessible mid-run.
-  - Do not silently re-scaffold an empty run control plane if `.opencode/factory/<run-id>` or the active worktree is missing/disrupted.
-  - If prior durable state is available, recover from it and reconcile with git branch/commit evidence.
-  - If prior durable state cannot be recovered, fail loudly with a terminal `blocked` or `needs-human` status and a clear `terminal_result.reason`.
-  - A run whose control plane vanishes should be observably dead or explicitly recoverable, not invisibly restarted as an empty/zombie run.
-  - Frame this as robustness to external worktree disruption; do not assume opencode deleted the directory.
-
-- Conservative review tiers
-  - Define the initial tier vocabulary and semantics.
-  - Persist selected tier in durable run state or plan metadata.
-  - Apply conservative defaults when no explicit tier is selected for risky changes.
-  - Keep lower-risk/lighter-tier runs from inheriting unrelated strict behavior.
 
 - Interrupt, steer, and resume
   - Add a correction-file or command contract for redirecting running factory work.
   - Ensure resumed runs consume steering input without losing durable state.
   - Avoid restarting from scratch when only direction changes.
 
-- Cost attribution
-  - Record per-agent and per-slice token/cost usage.
-  - Persist cost data in durable run artifacts.
-  - Surface cost summaries in CLI/status and eventually TUI.
-
 - Remediation context reuse
   - Reuse implementer context across remediation loops where safe.
   - Keep reviewers fresh and read-only.
   - Feed reviewers prior findings as input without preserving reviewer execution context.
+
+### Observability And Cost
+
+- Cost attribution
+  - Record per-agent and per-slice token/cost usage.
+  - Persist cost data in durable run artifacts.
+  - Surface cost summaries in CLI/status and eventually TUI.
 
 ## Operational Notes
 
 - TUI sidebar requires the TUI plugin config in `~/.config/opencode/tui.json`.
 - Server plugin config remains in `~/.config/opencode/opencode.jsonc`.
 - The sidebar only renders on session routes and needs enough terminal width to show the right panel.
+- `mimirbot` is expected to review PRs on this repo; treat requested changes as normal PR feedback before merge.
