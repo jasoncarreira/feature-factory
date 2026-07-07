@@ -70,8 +70,8 @@ Guard semantics:
 
 Reviewed worktree mapping:
 
-- `work-reviewer` subject `spec-writer` -> `$REPO`
-- `work-reviewer` subject `work-decomposer` -> `$REPO`
+- `work-reviewer` subject `spec-writer` -> `$FEAT_WT`
+- `work-reviewer` subject `work-decomposer` -> `$FEAT_WT`
 - `work-reviewer` subject `<slice-id>` -> `$SLICE_WT`
 - `work-reviewer` subject `test-verifier` -> `$FEAT_WT`
 - `implementation-validator` -> `$FEAT_WT`
@@ -185,7 +185,7 @@ Transition contract:
 - `transitionGateDecision` is the only approved-gate writer. The CLI exposes it through `feature-factory factory gate-decision <run-id> <gate> <status> ...` for scripted harnesses. For `status: approved`, it must write and validate `attestations/gates/<gate>.json` plus the updated accepted `attestations/index.json` chain before the approved gate state becomes durable; if later validation fails, roll back the staged gate attestation/index files and leave `run.json` unchanged.
 - `mutateRunJsonLocked` remains compatibility-only when `attestations/index.json` is absent and the current/next state has no provenance-sensitive claims. It must fail closed for approved gates, review-approved or merged slices, passing validator/security verdicts, and run-base fields without accepted attestations. PR URLs remain terminal bookkeeping until a dedicated PR-created attestation type exists.
 
-At run creation, create `attestations/` but do not create placeholder/empty `attestations/index.json`. Create `attestations/index.json` only with the first accepted attestation and non-empty entries. The first accepted attestation must be the sequence-1 `attestations/run-base.json`; gate decisions cannot bootstrap the accepted graph before run-base exists. When the run's feature branch/worktree is first materialized, re-observe the branch, worktree identity, base commit, and base tree through safe Git/filesystem checks and write that run-base attestation. Resume paths validate existing attestations instead of blindly rewriting them.
+At run creation, create `attestations/` but do not create placeholder/empty `attestations/index.json`. Create `attestations/index.json` only with the first accepted attestation and non-empty entries. The first accepted attestation must be the sequence-1 `attestations/run-base.json`; gate decisions cannot bootstrap the accepted graph before run-base exists. New runs materialize the feature branch/worktree during Step 0 before Gate 1, then re-observe the branch, worktree identity, base commit, and base tree through safe Git/filesystem checks and write that run-base attestation. Resume paths validate existing attestations instead of blindly rewriting them.
 
 These transition helpers do not change heartbeat or external-driver semantics: `heartbeat.json` remains liveness-only bookkeeping, and external drivers still write only `gates/<gate>.answer`; approved answers sourced from that file still record `approval_source: external-driver`.
 
@@ -276,9 +276,14 @@ Choose the story agent:
 Establish the run:
 
 - `run-id` = lowercased external ref if one exists, otherwise a short kebab slug.
-- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, top-level `github_account` when provided by the driver, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
+- Determine `BASE` from the repo default branch (usually `main`), `BRANCH=<run-id>-<short-slug>`, and `FEAT_WT=$REPO/.opencode/worktrees/$BRANCH`.
+- Fetch `origin/$BASE` and create the feature branch/worktree immediately: `git -C "$REPO" worktree add -b "$BRANCH" "$FEAT_WT" "origin/$BASE"`. If it already exists on resume, reuse it only after validating identity.
+- Before Gate 1 or any approved gate decision, re-observe `repo_root`, `run_dir`, `git_common_dir`, feature branch/worktree identity, `base_ref`, `base_commit`, and `base_tree` through safe Git/filesystem checks. Write `attestations/run-base.json`, create non-empty `attestations/index.json`, and treat that accepted run-base as the graph root.
+- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `base_ref`, `branch`, `worktree`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, top-level `github_account` when provided by the driver, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
 - Initialize `$RUN/factory.lock` with `schema_version`, `run_id`, and a trusted heartbeat owner capability used only by the factory lifecycle.
 - If `run.json` exists, this is a resume. Read it, backfill top-level `review_tier` before the next non-status state mutation when it is missing, and continue from the first incomplete point. Never redo side effects that `run.json` shows already happened.
+
+The caller checkout is only the launcher/control-plane location. All code-reading, planning, spec/decomposition review guards, implementation, test, validation, and PR work uses the clean `$FEAT_WT` created here so uncommitted caller-checkout edits do not block factory runs.
 
 Run the story agent and write `$RUN/artifacts/story.md`. If design input exists, run `design-interpreter` in parallel when useful and write `$RUN/artifacts/design-brief.md`.
 
@@ -292,7 +297,7 @@ On approval, record `gates.story.status = approved`. Do not create or mutate ext
 
 Fan out in parallel when possible:
 
-- `codebase-researcher` with the approved story. Write `$RUN/artifacts/research-map.md`.
+- `codebase-researcher` with the approved story and `$FEAT_WT` as the repository context. Write `$RUN/artifacts/research-map.md`.
 - `design-interpreter` with design input if not already complete. Write `$RUN/artifacts/design-brief.md`.
 
 The research map must identify real files, patterns, tests, integration hotspots, generated code, migration/schema risks, and open questions. Do not proceed to spec from guessed paths.
@@ -304,7 +309,7 @@ Run `spec-writer` with the approved story, research map, and design brief. It pr
 Review the brief:
 
 - Run `work-reviewer` with subject `spec-writer`, the brief, and its inputs.
-- After it returns, before accepting or writing `$RUN/reviews/spec-writer.json`, guard `$REPO`.
+- After it returns, before accepting or writing `$RUN/reviews/spec-writer.json`, guard `$FEAT_WT`.
 - If the guard is clean, write `$RUN/reviews/spec-writer.json` and continue the normal APPROVE/REJECT loop.
 - If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/spec-writer.json`, mark the spec step `blocked`, and stop. Do not auto-revert.
 - On REJECT, rerun `spec-writer` with required fixes up to `max_retries`.
@@ -340,7 +345,7 @@ Rules the plan must satisfy:
 Review the decomposition:
 
 - Run `work-reviewer` with subject `work-decomposer`.
-- After it returns, before accepting or writing `$RUN/reviews/work-decomposer.json`, guard `$REPO`.
+- After it returns, before accepting or writing `$RUN/reviews/work-decomposer.json`, guard `$FEAT_WT`.
 - If the guard is clean, write `$RUN/reviews/work-decomposer.json` and continue the normal APPROVE/REJECT loop.
 - If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/work-decomposer.json`, mark the decomposition step `blocked`, and stop. Do not auto-revert.
 - It checks output contract, AC coverage, dependency correctness, file-disjoint same waves, and hotspot serialization.
@@ -355,18 +360,17 @@ On `changes`, rerun `spec-writer`, `work-decomposer`, or both depending on feedb
 
 ## Step 4 - Build Slices In Dependency Order
 
-Create one feature branch/worktree. This is the single integration branch and final PR branch:
+Reuse the feature branch/worktree created during Step 0. This is the single integration branch and final PR branch:
 
 ```sh
 REPO=$(git rev-parse --show-toplevel)
 BASE=<repo default base branch, e.g. main or development>
 BRANCH=<run-id>-<short-slug>
 FEAT_WT=$REPO/.opencode/worktrees/$BRANCH
-git -C "$REPO" fetch origin "$BASE"
-git -C "$REPO" worktree add -b "$BRANCH" "$FEAT_WT" "origin/$BASE"
+git -C "$FEAT_WT" rev-parse --show-toplevel
 ```
 
-If the branch/worktree already exists on resume, reuse it. Record `branch`, `base_ref`, and `worktree` in `run.json`. Keep the caller's checkout untouched. Do not `cd`; use `git -C` and absolute paths.
+If the branch/worktree already exists on resume, reuse it. `branch`, `base_ref`, and `worktree` must already be recorded in `run.json` from Step 0. Keep the caller's checkout untouched. Do not `cd`; use `git -C` and absolute paths.
 
 Before treating the feature branch as authoritative, re-observe `repo_root`, `run_dir`, `git_common_dir`, feature branch/worktree identity, `base_ref`, `base_commit`, and `base_tree` through safe Git/filesystem checks and ensure the run-base attestation is present and accepted.
 

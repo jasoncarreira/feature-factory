@@ -146,6 +146,8 @@ Bootstrapping rules:
 - `attestations/index.json.entries` must be a non-empty array whenever the file exists.
 - The first accepted attestation in the graph must be the sequence-1 `attestations/run-base.json` with `prev_hash: null`.
 - Approved gate decisions require that accepted run-base anchor already exist; gate decisions cannot bootstrap or precede the graph root.
+- New runs create the feature branch/worktree during Step 0, before story Gate 1, so `attestations/run-base.json` and `attestations/index.json` exist before any approved gate decision.
+- Spec and decomposition reviews guard the clean feature worktree (`$FEAT_WT`), not the caller checkout (`$REPO`), so git-visible local edits in the launcher checkout do not block factory planning reviews.
 
 ### Safe Git policy
 
@@ -156,6 +158,7 @@ All provenance-sensitive Git facts must be observed through the centralized safe
 - Type: `run-base`
 - Must be sequence `1` with `prev_hash: null`.
 - Binds `repo_root`, `run_dir`, `git_common_dir`, `feature_branch`, `feature_worktree`, `base_ref`, `base_commit`, and `base_tree`.
+- Is written during Step 0 immediately after creating or reusing the feature branch/worktree under `.opencode/worktrees/`, before Gate 1 can be approved.
 - Provides bounded local authority only: validation proves `base_commit` exists, `base_tree` matches, `base_commit` is an ancestor of the current feature HEAD, and if `base_ref` currently resolves then `base_commit` is an ancestor of that ref. It does not cryptographically prove the creation-time fact.
 
 ### Slice-observation attestation (`attestations/slices/<slice-id>.observation.json`)
