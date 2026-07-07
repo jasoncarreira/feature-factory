@@ -105,11 +105,12 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
           runDir,
           (draft, { authority }) => {
             draft.gates = normalizeGateMap(draft.gates);
-            draft.gates[gateName] = cloneJson(nextGate);
+            const preparedGate = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate);
+            draft.gates[gateName] = preparedGate;
 
             const latestGateDecision = findAcceptedGateDecisionRecord(authority, gateName);
-            shouldStageAttestation = shouldStageGateDecisionAttestation(latestGateDecision, nextGate);
-            forceTransition = shouldStageAttestation && nextGate.status !== "approved";
+            shouldStageAttestation = shouldStageGateDecisionAttestation(latestGateDecision, preparedGate);
+            forceTransition = shouldStageAttestation && preparedGate.status !== "approved";
 
             if (forceTransition) return draft;
           },
@@ -559,7 +560,7 @@ function createGateDecisionState({ runDir, current, gateName, gate, records }) {
     throw new Error("gate decisions require a non-empty accepted attestation index");
   }
 
-  if (gate?.status === "approved") assertApprovedGateDecisionShape(gateName, gate);
+  assertFinalGateDecisionShape(gateName, gate);
 
   const latestGateRecord = findAcceptedGateDecisionEntry(records, gateName);
   const previousRecord = records.at(-1) ?? null;
@@ -570,7 +571,6 @@ function createGateDecisionState({ runDir, current, gateName, gate, records }) {
     currentGate: current.gates?.[gateName],
     gateName,
     gate,
-    previousBindings: latestGateRecord?.attestation?.bindings,
   });
   const attestation = createGateDecisionAttestation({
     run_id: current.run_id,
@@ -585,7 +585,7 @@ function createGateDecisionState({ runDir, current, gateName, gate, records }) {
     throw new Error("gate decisions require a non-empty attestation index");
   }
 
-  return { ref, attestation, index };
+  return { ref, attestation, index, records: nextRecords };
 }
 
 function createPrCreatedState({ runDir, current, next, records, request }) {
@@ -670,10 +670,11 @@ function createPrCreatedState({ runDir, current, next, records, request }) {
   return { ref, attestation, index, records: nextRecords };
 }
 
-function createGateDecisionBindings({ runDir, currentGate, gateName, gate, previousBindings }) {
-  const artifactRef = firstNonEmptyString(gate?.artifact, currentGate?.artifact, previousBindings?.artifact_ref);
-  const questionRef = firstNonEmptyString(gate?.question_ref, currentGate?.question_ref, previousBindings?.question_ref);
-  const approvalSource = firstNonEmptyString(gate?.approval_source, currentGate?.approval_source, previousBindings?.approval_source);
+function createGateDecisionBindings({ runDir, currentGate, gateName, gate }) {
+  if (gate?.status !== "pending") assertPendingGateMaterialFresh(runDir, gateName, currentGate, gate);
+  const artifactRef = gate.artifact;
+  const questionRef = gate.question_ref;
+  const approvalSource = gate.approval_source;
 
   const missingFields = [];
   if (!stringValue(artifactRef)) missingFields.push("artifact");
@@ -685,7 +686,7 @@ function createGateDecisionBindings({ runDir, currentGate, gateName, gate, previ
 
   const artifact = resolveArtifactRef(runDir, artifactRef);
   const question = resolveGateRef(runDir, questionRef);
-  const answerBindings = createGateDecisionAnswerBindings({ runDir, currentGate, gateName, gate, previousBindings });
+  const answerBindings = createGateDecisionAnswerBindings({ runDir, gateName, gate });
 
   return {
     gate: gateName,
@@ -699,7 +700,7 @@ function createGateDecisionBindings({ runDir, currentGate, gateName, gate, previ
   };
 }
 
-function createGateDecisionAnswerBindings({ runDir, currentGate, gateName, gate, previousBindings }) {
+function createGateDecisionAnswerBindings({ runDir, gateName, gate }) {
   if (stringValue(gate?.answer_ref)) {
     const answer = resolveGateRef(runDir, gate.answer_ref);
     return {
@@ -712,35 +713,11 @@ function createGateDecisionAnswerBindings({ runDir, currentGate, gateName, gate,
     return { answer_text_hash: hashTextClaim(gate.answer) };
   }
 
-  if (stringValue(currentGate?.answer_ref)) {
-    const answer = resolveGateRef(runDir, currentGate.answer_ref);
-    return {
-      answer_ref: currentGate.answer_ref,
-      answer_hash: hashFile(answer.path, { mode: "raw" }),
-    };
-  }
-
-  if (stringValue(currentGate?.answer)) {
-    return { answer_text_hash: hashTextClaim(currentGate.answer) };
-  }
-
-  if (stringValue(previousBindings?.answer_ref)) {
-    const answer = resolveGateRef(runDir, previousBindings.answer_ref);
-    return {
-      answer_ref: previousBindings.answer_ref,
-      answer_hash: hashFile(answer.path, { mode: "raw" }),
-    };
-  }
-
-  if (stringValue(previousBindings?.answer_text_hash)) {
-    return { answer_text_hash: previousBindings.answer_text_hash };
-  }
-
   throw new Error(`gate decision '${gateName}' requires answer_ref or answer`);
 }
 
 function shouldStageGateDecisionAttestation(latestGateDecision, gate) {
-  if (gate?.status === "approved") return true;
+  if (gate?.status && gate.status !== "pending") return true;
   return latestGateDecision?.attestation?.bindings?.decision === "approved";
 }
 
@@ -865,6 +842,88 @@ function findLastAcceptedAttestationEntry(records, predicate) {
   return null;
 }
 
+function prepareGateDecisionTransition(runDir, gateName, currentGate, gate) {
+  const nextGate = cloneJson(gate);
+  if (nextGate.status === "pending") {
+    return preparePendingGateDecision(runDir, gateName, nextGate);
+  }
+  assertPendingGateMaterialFresh(runDir, gateName, currentGate, nextGate);
+  return {
+    ...nextGate,
+    pending_snapshot: cloneJson(currentGate.pending_snapshot),
+  };
+}
+
+function preparePendingGateDecision(runDir, gateName, gate) {
+  const missingFields = [];
+  if (!stringValue(gate.artifact)) missingFields.push("artifact");
+  if (!stringValue(gate.question_ref)) missingFields.push("question_ref");
+  if (missingFields.length > 0) {
+    throw new Error(`pending gate '${gateName}' requires ${missingFields.join(", ")}`);
+  }
+
+  const snapshot = createPendingGateSnapshot(runDir, gateName, gate.artifact, gate.question_ref, gate.pending_snapshot?.created_at);
+  if (gate.pending_snapshot !== undefined && gate.pending_snapshot !== null) {
+    assertPendingSnapshotMatches(gateName, gate.pending_snapshot, snapshot, "supplied pending snapshot");
+  }
+  return {
+    ...gate,
+    pending_snapshot: snapshot,
+  };
+}
+
+function assertPendingGateMaterialFresh(runDir, gateName, currentGate, gate) {
+  if (!isRecord(currentGate) || currentGate.status !== "pending") {
+    throw new Error(`gate decision '${gateName}' requires current gate status pending`);
+  }
+  if (!isRecord(currentGate.pending_snapshot)) {
+    throw new Error(`gate decision '${gateName}' requires current pending material snapshot`);
+  }
+  if (!stringValue(gate?.artifact)) throw new Error(`gate decision '${gateName}' requires artifact`);
+  if (!stringValue(gate?.question_ref)) throw new Error(`gate decision '${gateName}' requires question_ref`);
+  const freshSnapshot = createPendingGateSnapshot(
+    runDir,
+    gateName,
+    currentGate.pending_snapshot.artifact_ref,
+    currentGate.pending_snapshot.question_ref,
+    currentGate.pending_snapshot.created_at,
+  );
+  assertPendingSnapshotMatches(gateName, currentGate.pending_snapshot, freshSnapshot, "current pending snapshot");
+  if (gate.artifact !== currentGate.pending_snapshot.artifact_ref) {
+    throw new Error(`gate decision '${gateName}' artifact must match pending artifact '${currentGate.pending_snapshot.artifact_ref}'`);
+  }
+  if (gate.question_ref !== currentGate.pending_snapshot.question_ref) {
+    throw new Error(`gate decision '${gateName}' question_ref must match pending question_ref '${currentGate.pending_snapshot.question_ref}'`);
+  }
+}
+
+function createPendingGateSnapshot(runDir, gateName, artifactRef, questionRef, createdAt) {
+  const artifact = resolveArtifactRef(runDir, artifactRef);
+  const question = resolveGateRef(runDir, questionRef);
+  return {
+    question_ref: questionRef,
+    question_hash: hashFile(question.path, { mode: "raw" }),
+    artifact_ref: artifactRef,
+    artifact_hash: hashFile(artifact.path, { mode: "raw" }),
+    created_at: stringValue(createdAt) ? createdAt : new Date().toISOString(),
+  };
+}
+
+function assertPendingSnapshotMatches(gateName, actual, expected, label) {
+  const checks = [
+    ["question_ref", actual?.question_ref, expected.question_ref],
+    ["question_hash", actual?.question_hash, expected.question_hash],
+    ["artifact_ref", actual?.artifact_ref, expected.artifact_ref],
+    ["artifact_hash", actual?.artifact_hash, expected.artifact_hash],
+  ];
+  for (const [field, actualValue, expectedValue] of checks) {
+    if (actualValue !== expectedValue) {
+      throw new Error(`gate '${gateName}' ${label} ${field} is stale or mismatched`);
+    }
+  }
+  if (!stringValue(actual?.created_at)) throw new Error(`gate '${gateName}' ${label} created_at is missing`);
+}
+
 function pushApprovedGateBindingErrors(errors, gateName, gate, bindings) {
   pushRequiredStringMatch(
     errors,
@@ -938,6 +997,11 @@ function pushRequiredStringMatch(errors, actual, expected, path, label) {
 function normalizeGateDecision(gateName, gate) {
   if (!isRecord(gate)) throw new Error(`transitionGateDecision requires a gate object for '${gateName}'`);
   return cloneJson(gate);
+}
+
+function assertFinalGateDecisionShape(gateName, gate) {
+  if (gate?.status === "pending") return;
+  assertApprovedGateDecisionShape(gateName, gate);
 }
 
 function assertApprovedGateDecisionShape(gateName, gate) {
