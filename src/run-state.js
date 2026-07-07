@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   createAttestationIndex,
   createGateDecisionAttestation,
@@ -34,7 +34,9 @@ const FACTORY_LOCK_FILE = "factory.lock";
 const HEARTBEAT_FILE = "heartbeat.json";
 const ATTESTATIONS_DIR = "attestations";
 const ATTESTATIONS_INDEX_FILE = "index.json";
+const ATTESTATIONS_INDEX_REF = `${ATTESTATIONS_DIR}/${ATTESTATIONS_INDEX_FILE}`;
 const ATTESTATIONS_GATES_DIR = "gates";
+const APPROVED_GATE_TRANSITION_HOOK = Symbol("approvedGateTransition");
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
@@ -100,12 +102,12 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
 
   assertApprovedGateDecisionShape(gateName, nextGate);
   const attestationRef = gateAttestationRef(gateName);
-  const gateAttestationPath = join(runDir, attestationRef);
-  const indexPath = join(runDir, ATTESTATIONS_DIR, ATTESTATIONS_INDEX_FILE);
 
   return withRunJsonLock(
     runDir,
     async () => {
+      const gateAttestationPath = await resolveAttestationWritePath(runDir, attestationRef, { createParents: true });
+      const indexPath = await resolveAttestationWritePath(runDir, ATTESTATIONS_INDEX_REF, { createParents: true });
       const gateSnapshot = await snapshotFile(gateAttestationPath);
       const indexSnapshot = await snapshotFile(indexPath);
       let committed = false;
@@ -134,10 +136,10 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
               const attestationValidation = validateGateDecisionAttestation(staged.attestation, { ...options, runDir });
               assertValidationChecksValid(attestationValidation, "gate-decision validation failed");
 
-              await mkdir(join(runDir, ATTESTATIONS_DIR, ATTESTATIONS_GATES_DIR), { recursive: true });
               await writeJsonAtomically(gateAttestationPath, staged.attestation);
               await writeJsonAtomically(indexPath, staged.index);
             },
+            [APPROVED_GATE_TRANSITION_HOOK]: gateName,
           },
         );
         committed = true;
@@ -367,7 +369,8 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   if (typeof hooks.beforeValidateNext === "function") {
     await hooks.beforeValidateNext({ authority, current, next, runDir });
   }
-  assertRunAuthorityValid(runDir, next, options);
+  const nextAuthority = assertRunAuthorityValid(runDir, next, options);
+  assertApprovedGateTransitions(current, next, nextAuthority, hooks);
   if (typeof hooks.beforeCommit === "function") {
     await hooks.beforeCommit({ authority, current, next, runDir });
   }
@@ -545,6 +548,111 @@ function acceptedAttestationEntries(authority) {
     .filter(Boolean);
 }
 
+function assertApprovedGateTransitions(current, next, authority, hooks = {}) {
+  const errors = [];
+  const authorizedGate = stringValue(hooks[APPROVED_GATE_TRANSITION_HOOK]) ? hooks[APPROVED_GATE_TRANSITION_HOOK] : null;
+
+  for (const [gateName, gate] of Object.entries(next.gates || {})) {
+    if (!isRecord(gate) || gate.status !== "approved") continue;
+
+    const currentGate = isRecord(current.gates) ? current.gates[gateName] : null;
+    if (currentGate?.status !== "approved" && gateName !== authorizedGate) {
+      errors.push({
+        path: `run.gates.${gateName}.status`,
+        message: "approved gate transitions must use transitionGateDecision",
+      });
+    }
+
+    const record = findAcceptedGateDecisionRecord(authority, gateName);
+    if (!record) continue;
+    pushApprovedGateBindingErrors(errors, gateName, gate, record.attestation.bindings || {});
+  }
+
+  if (errors.length > 0) throw new Error(formatErrorItems(errors));
+}
+
+function findAcceptedGateDecisionRecord(authority, gateName) {
+  const orderedRefs = Array.isArray(authority?.orderedRefs) ? authority.orderedRefs : [];
+  for (let index = orderedRefs.length - 1; index >= 0; index -= 1) {
+    const ref = orderedRefs[index];
+    const record = authority?.acceptedAttestations?.[ref];
+    if (record?.attestation?.type !== "gate-decision") continue;
+    if (record.attestation?.bindings?.gate !== gateName) continue;
+    return record;
+  }
+  return null;
+}
+
+function pushApprovedGateBindingErrors(errors, gateName, gate, bindings) {
+  pushRequiredStringMatch(
+    errors,
+    gate?.artifact,
+    bindings.artifact_ref,
+    `run.gates.${gateName}.artifact`,
+    "accepted gate artifact ref",
+  );
+  pushRequiredStringMatch(
+    errors,
+    gate?.question_ref,
+    bindings.question_ref,
+    `run.gates.${gateName}.question_ref`,
+    "accepted gate question ref",
+  );
+  pushRequiredStringMatch(
+    errors,
+    gate?.approval_source,
+    bindings.approval_source,
+    `run.gates.${gateName}.approval_source`,
+    "accepted gate approval source",
+  );
+
+  if (stringValue(bindings.answer_ref)) {
+    pushRequiredStringMatch(
+      errors,
+      gate?.answer_ref,
+      bindings.answer_ref,
+      `run.gates.${gateName}.answer_ref`,
+      "accepted gate answer ref",
+    );
+    return;
+  }
+
+  if (!stringValue(bindings.answer_text_hash)) {
+    errors.push({
+      path: `run.gates.${gateName}.answer`,
+      message: "accepted gate decision is missing an answer binding",
+    });
+    return;
+  }
+
+  if (!stringValue(gate?.answer)) {
+    errors.push({
+      path: `run.gates.${gateName}.answer`,
+      message: `must carry accepted answer hash '${bindings.answer_text_hash}'`,
+    });
+    return;
+  }
+
+  if (hashTextClaim(gate.answer) !== bindings.answer_text_hash) {
+    errors.push({
+      path: `run.gates.${gateName}.answer`,
+      message: `must match accepted answer hash '${bindings.answer_text_hash}'`,
+    });
+  }
+}
+
+function pushRequiredStringMatch(errors, actual, expected, path, label) {
+  if (!stringValue(actual)) {
+    errors.push({ path, message: `${label} is missing` });
+    return;
+  }
+  if (!stringValue(expected)) {
+    errors.push({ path, message: `${label} is missing` });
+    return;
+  }
+  if (actual !== expected) errors.push({ path, message: `must match ${label} '${expected}'` });
+}
+
 function normalizeGateDecision(gateName, gate) {
   if (!isRecord(gate)) throw new Error(`transitionGateDecision requires a gate object for '${gateName}'`);
   return cloneJson(gate);
@@ -565,7 +673,7 @@ function assertApprovedGateDecisionShape(gateName, gate) {
 
 function gateAttestationRef(gateName) {
   assertSafeGateName(gateName);
-  return join(ATTESTATIONS_DIR, ATTESTATIONS_GATES_DIR, `${gateName}.json`);
+  return `${ATTESTATIONS_DIR}/${ATTESTATIONS_GATES_DIR}/${gateName}.json`;
 }
 
 function assertSafeGateName(gateName) {
@@ -727,6 +835,75 @@ async function snapshotFile(path) {
   };
 }
 
+async function resolveAttestationWritePath(runDir, ref, { createParents = false } = {}) {
+  const { attestationRootRealPath } = resolveAttestationRoot(runDir);
+  const segments = normalizeAttestationRefSegments(ref);
+  let currentPath = attestationRootRealPath;
+
+  for (const segment of segments.slice(1, -1)) {
+    const nextPath = join(currentPath, segment);
+    if (!existsSync(nextPath)) {
+      if (createParents) await mkdir(nextPath);
+      currentPath = createParents ? readRealPath(nextPath, `${ref} parent`) : nextPath;
+      assertContainedAttestationPath(ref, attestationRootRealPath, currentPath, "parent");
+      continue;
+    }
+
+    const stats = lstatSync(nextPath);
+    if (stats.isSymbolicLink()) throw new Error(`${ref} must not traverse symlinked attestation parents`);
+    if (!stats.isDirectory()) throw new Error(`${ref} parent must be a directory: ${nextPath}`);
+    currentPath = readRealPath(nextPath, `${ref} parent`);
+    assertContainedAttestationPath(ref, attestationRootRealPath, currentPath, "parent");
+  }
+
+  const candidatePath = resolve(join(currentPath, segments.at(-1)));
+  assertContainedAttestationPath(ref, attestationRootRealPath, candidatePath, "target");
+  if (!existsSync(candidatePath)) return candidatePath;
+
+  const stats = lstatSync(candidatePath);
+  if (stats.isSymbolicLink()) throw new Error(`${ref} must not be a symlink`);
+  if (stats.isDirectory()) throw new Error(`${ref} must be a file path`);
+  const realPath = readRealPath(candidatePath, ref);
+  assertContainedAttestationPath(ref, attestationRootRealPath, realPath, "target");
+  return realPath;
+}
+
+function resolveAttestationRoot(runDir) {
+  const runPath = resolve(requireNonEmptyString(runDir, "runDir"));
+  const runRealPath = readRealPath(runPath, "runDir");
+  const attestationRootPath = join(runPath, ATTESTATIONS_DIR);
+  if (!existsSync(attestationRootPath)) {
+    throw new Error(`attestations root is missing: ${attestationRootPath}`);
+  }
+
+  const stats = lstatSync(attestationRootPath);
+  if (stats.isSymbolicLink()) throw new Error(`attestations root must not be a symlink: ${attestationRootPath}`);
+  if (!stats.isDirectory()) throw new Error(`attestations root must be a directory: ${attestationRootPath}`);
+
+  const attestationRootRealPath = readRealPath(attestationRootPath, "attestations root");
+  if (!isContainedPath(runRealPath, attestationRootRealPath)) {
+    throw new Error(`attestations root must be physically contained under ${runRealPath}`);
+  }
+
+  return { runRealPath, attestationRootRealPath };
+}
+
+function normalizeAttestationRefSegments(ref) {
+  const normalizedRef = requireNonEmptyString(ref, "attestation ref");
+  if (normalizedRef.includes("\\")) throw new Error(`${normalizedRef} must use forward slashes`);
+  const segments = normalizedRef.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`${normalizedRef} must not contain empty, '.' or '..' segments`);
+  }
+  if (segments[0] !== ATTESTATIONS_DIR) throw new Error(`${normalizedRef} must be rooted under ${ATTESTATIONS_DIR}/`);
+  return segments;
+}
+
+function assertContainedAttestationPath(ref, attestationRootRealPath, candidatePath, label) {
+  if (isContainedPath(attestationRootRealPath, candidatePath)) return;
+  throw new Error(`${ref} ${label} must remain physically contained under ${attestationRootRealPath}`);
+}
+
 async function restoreSnapshot(snapshot) {
   if (!snapshot) return;
   if (snapshot.exists) {
@@ -767,7 +944,36 @@ function formatLockTimeout(lockDir, owner) {
 function formatValidationChecks(checks) {
   const errors = (Array.isArray(checks) ? checks : []).flatMap((check) => Array.isArray(check?.errors) ? check.errors : []);
   if (errors.length === 0) return "run validation failed";
+  return formatErrorItems(errors);
+}
+
+function formatErrorItems(errors) {
   return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
+}
+
+function readRealPath(pathValue, label) {
+  try {
+    return realpathSync.native(pathValue);
+  } catch (error) {
+    const reason = classifyRealPathFailure(error);
+    throw new Error(`${label} is ${reason}: ${pathValue}`);
+  }
+}
+
+function classifyRealPathFailure(error) {
+  if (error?.code === "ENOENT") return "missing";
+  if (error?.code === "EACCES" || error?.code === "EPERM") return "inaccessible";
+  return "unresolvable";
+}
+
+function isContainedPath(parentPath, childPath) {
+  const rel = relative(parentPath, childPath);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function requireNonEmptyString(value, label) {
+  if (!stringValue(value)) throw new Error(`${label} must be a non-empty string`);
+  return value;
 }
 
 function normalizeTimestamp(now) {

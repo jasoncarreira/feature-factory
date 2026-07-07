@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createAttestationIndex, createRunBaseAttestation } from "../src/provenance-authority.js";
@@ -420,6 +420,118 @@ describe("transition helpers", () => {
       assert.equal(index.entries.length, 2);
       assert.equal(index.entries[1].ref, "attestations/gates/story.json");
       assert.equal(index.entries[1].type, "gate-decision");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects generic gate re-approval after a gate is reopened", async () => {
+    const fixture = createRunFixture();
+    const approvedGate = {
+      status: "approved",
+      artifact: "artifacts/story.md",
+      question_ref: "gates/story.question.md",
+      answer_ref: "gates/story.answer",
+      approval_source: "human",
+    };
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+
+    try {
+      await transitionGateDecision(fixture.runDir, "story", approvedGate);
+      await transitionGateDecision(fixture.runDir, "story", { status: "pending" });
+
+      const current = readJson(join(fixture.runDir, "run.json"));
+      const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+
+      await assert.rejects(
+        transitionRunJson(fixture.runDir, (run) => {
+          run.gates.story = { status: "approved" };
+        }),
+        /transitionGateDecision/u,
+      );
+
+      await assert.rejects(
+        mutateRunJsonLocked(fixture.runDir, (run) => {
+          run.gates.story = { ...approvedGate };
+        }),
+        /transitionGateDecision/u,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("requires approved gates to keep all attested binding fields", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+
+    try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "approved",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer_ref: "gates/story.answer",
+        approval_source: "human",
+      });
+
+      const current = readJson(join(fixture.runDir, "run.json"));
+      const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+
+      await assert.rejects(
+        transitionRunJson(fixture.runDir, (run) => {
+          run.gates.story = { status: "approved" };
+        }),
+        /accepted gate artifact ref is missing/u,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects symlinked attestation gate parents without writing outside the run", async () => {
+    const fixture = createRunFixture();
+    const outsideAttestations = join(fixture.root, "outside-attestations");
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+    mkdirSync(outsideAttestations, { recursive: true });
+    rmSync(join(fixture.runDir, "attestations", "gates"), { recursive: true, force: true });
+    symlinkSync(outsideAttestations, join(fixture.runDir, "attestations", "gates"), "dir");
+
+    const current = readJson(join(fixture.runDir, "run.json"));
+    const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+
+    try {
+      await assert.rejects(
+        transitionGateDecision(fixture.runDir, "story", {
+          status: "approved",
+          artifact: "artifacts/story.md",
+          question_ref: "gates/story.question.md",
+          answer_ref: "gates/story.answer",
+          approval_source: "human",
+        }),
+        /symlink/u,
+      );
+
+      assert.equal(existsSync(join(outsideAttestations, "story.json")), false);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
     } finally {
       fixture.cleanup();
     }
