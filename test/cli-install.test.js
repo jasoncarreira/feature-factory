@@ -2,10 +2,11 @@ import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
+import { pathToFileURL } from "node:url";
 
-const repo = new URL("..", import.meta.url).pathname;
+const repo = resolve(new URL("..", import.meta.url).pathname);
 const cli = join(repo, "src", "cli.js");
 
 describe("feature-factory install", () => {
@@ -19,7 +20,8 @@ describe("feature-factory install", () => {
       assert.match(proc.stdout, /configured opencode plugin:/);
       assert.match(proc.stdout, /restart opencode for plugin changes to take effect/);
       assert.equal(proc.stderr, "");
-      assert.match(readFileSync(join(home, ".config", "opencode", "opencode.jsonc"), "utf8"), /opencode-feature-factory/);
+      const config = JSON.parse(readFileSync(join(home, ".config", "opencode", "opencode.jsonc"), "utf8"));
+      assert.deepEqual(config.plugin, [pathToFileURL(repo).href]);
     } finally {
       cleanup(home);
     }
