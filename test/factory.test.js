@@ -117,7 +117,58 @@ describe("detached factory start", () => {
         mode: "autonomous",
         ready: true,
         reviewer: "security-reviewer",
+        github_account: null,
       });
+    } finally {
+      process.env.PATH = oldPath;
+      cleanup(repo);
+    }
+  });
+
+  it("derives the GitHub account from the origin remote", async () => {
+    const repo = gitRepo();
+    git(repo, ["remote", "add", "origin", "https://github.com/jasoncarreira/opencode-feature-factory.git"]);
+    const bin = join(repo, "bin");
+    const payloadFile = join(repo, "feature-payload.json");
+    mkdirSync(bin, { recursive: true });
+    const fake = join(bin, "opencode");
+    writeFileSync(fake, `#!/bin/sh\nfor last_arg in "$@"; do :; done\nprintf '%s' "$last_arg" > "${payloadFile}"\n`, "utf8");
+    chmodSync(fake, 0o755);
+
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath}`;
+    try {
+      startFactory(["APP-123", "do", "work"], { cwd: repo, detached: true, autonomous: true });
+
+      await waitFor(() => existsSync(payloadFile));
+      const payload = JSON.parse(readFileSync(payloadFile, "utf8"));
+
+      assert.equal(payload.driver.github_account, "jasoncarreira");
+    } finally {
+      process.env.PATH = oldPath;
+      cleanup(repo);
+    }
+  });
+
+  it("prefers an explicit GitHub account over the origin owner", async () => {
+    const repo = gitRepo();
+    git(repo, ["remote", "add", "origin", "git@github.com:repo-owner/project.git"]);
+    const bin = join(repo, "bin");
+    const payloadFile = join(repo, "feature-payload.json");
+    mkdirSync(bin, { recursive: true });
+    const fake = join(bin, "opencode");
+    writeFileSync(fake, `#!/bin/sh\nfor last_arg in "$@"; do :; done\nprintf '%s' "$last_arg" > "${payloadFile}"\n`, "utf8");
+    chmodSync(fake, 0o755);
+
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath}`;
+    try {
+      startFactory(["APP-123", "do", "work"], { cwd: repo, detached: true, autonomous: true, ghAccount: "jasoncarreira" });
+
+      await waitFor(() => existsSync(payloadFile));
+      const payload = JSON.parse(readFileSync(payloadFile, "utf8"));
+
+      assert.equal(payload.driver.github_account, "jasoncarreira");
     } finally {
       process.env.PATH = oldPath;
       cleanup(repo);

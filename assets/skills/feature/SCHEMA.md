@@ -129,6 +129,7 @@ External monitoring semantics:
   "base_ref": "main",
   "branch": "app-123-short-slug",
   "worktree": "/abs/repo/.opencode/worktrees/app-123-short-slug",
+  "github_account": "repo-owner-or-account",
   "mode": "interactive",
   "status": "running",
   "created_at": "2026-07-04T11:45:00Z",
@@ -250,6 +251,14 @@ Rules:
 - `rationale`: required non-empty string when `review_tier` is present.
 - Later factory steps should read the persisted selection from top-level `run.json.review_tier`.
 - Later factory steps may update any selected tier to `strict` before a non-status state mutation if newly produced artifacts expose risky categories. Do not automatically downgrade a tier.
+
+## github_account
+
+Top-level `run.json.github_account` stores the GitHub account the factory should select before authenticated GitHub remote access and draft PR creation. The factory CLI derives it from `remote.origin.url` when the remote is hosted on GitHub, or from explicit `factory start --gh-account <account>`.
+
+`github_account` is optional for backward compatibility with older runs and non-GitHub remotes. Adding this optional field does not change `schema_version`; it remains `1`.
+
+Before pushing or creating a PR, run `gh auth switch -h github.com -u <github_account>` when this field is present. If that account is unavailable or cannot access `origin`, stop with `status: partial` and write a clear `terminal_result.reason` instead of trying another active account implicitly.
 
 Gate status values: `pending`, `approved`, `changes_requested`, `stopped`.
 

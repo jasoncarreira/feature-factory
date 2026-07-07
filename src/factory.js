@@ -28,7 +28,7 @@ export function startFactory(args, opts = {}) {
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
-  commandArgs.push(formatPrompt(args.join(" "), opts));
+  commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo }));
   if (opts.detached) return startDetached(repo, commandArgs);
   const proc = spawnSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
   if (proc.status !== 0) throw new Error(`opencode exited ${proc.status ?? 1}`);
@@ -76,6 +76,7 @@ export function status(runId, opts = {}) {
     heartbeat_at: run.heartbeat_at || null,
     branch: run.branch || null,
     worktree: run.worktree || null,
+    github_account: run.github_account || null,
     pending_gate: pendingGate(run),
     gates: run.gates || {},
     pr_url: run.pr_url || null,
@@ -512,14 +513,45 @@ export function validateSlices(plan) {
 }
 
 function featureCommandPayload(prompt, opts) {
+  const githubAccount = resolveGithubAccount(opts);
   return {
     operator_request: String(prompt),
     driver: {
       mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
       ready: Boolean(opts.ready),
       reviewer: stringValue(opts.reviewer) ? opts.reviewer : null,
+      github_account: githubAccount,
     },
   };
+}
+
+function resolveGithubAccount(opts) {
+  if (opts.ghAccount !== undefined && opts.ghAccount !== null) {
+    const account = normalizeGithubAccount(opts.ghAccount);
+    if (!account) throw new Error("--gh-account must be a valid GitHub account name");
+    return account;
+  }
+  return detectGithubRemoteOwner(opts.repo || opts.cwd || process.cwd());
+}
+
+function detectGithubRemoteOwner(repo) {
+  const proc = spawnSync("git", ["config", "--get", "remote.origin.url"], { cwd: repo, encoding: "utf8" });
+  if (proc.status !== 0) return null;
+  return githubOwnerFromRemote(proc.stdout.trim());
+}
+
+function githubOwnerFromRemote(remote) {
+  const text = String(remote || "").trim();
+  if (!text) return null;
+  const match = text.match(/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/.:]+)\//);
+  return match ? normalizeGithubAccount(match[1]) : null;
+}
+
+function normalizeGithubAccount(value) {
+  if (!stringValue(value)) return null;
+  const account = String(value).trim();
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(account)) return null;
+  return account;
 }
 
 function resolveHeartbeatOwnerCapability(opts = {}, command = "heartbeat") {

@@ -64,6 +64,7 @@ export function validateRun(run) {
   optionalString(errors, run, "base_ref", "run.base_ref");
   optionalString(errors, run, "branch", "run.branch");
   optionalString(errors, run, "worktree", "run.worktree");
+  optionalNonEmptyString(errors, run, "github_account", "run.github_account");
   optionalString(errors, run, "pr_url", "run.pr_url");
   optionalInteger(errors, run, "max_parallel_slices", "run.max_parallel_slices");
   optionalInteger(errors, run, "max_retries", "run.max_retries");

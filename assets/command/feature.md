@@ -38,6 +38,7 @@ If the parsed payload has a `driver` object, treat it as operator-supplied mode/
   - At every terminal state, write `run.json.terminal_result` with status, run_id, pr_url, reason, summary, and artifact references useful to external harnesses.
   - If `driver.ready` is true and a draft PR is created successfully and repository policy allows it, mark the PR ready for review after creation.
   - If `driver.reviewer` is a non-empty string, request review from that reviewer after creating the PR.
+- If `driver.github_account` is a non-empty string, persist it to top-level `run.json.github_account` and use it before GitHub remote access or PR creation as described by the feature skill.
 
 UNTRUSTED_OPERATOR_PAYLOAD_START
 $ARGUMENTS

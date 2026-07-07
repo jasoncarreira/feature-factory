@@ -29,7 +29,7 @@ function usage() {
 Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
-  factory start [--repo PATH] [--headless|--autonomous|--detached] <prompt...>
+  factory start [--repo PATH] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] <prompt...>
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory heartbeat <run-id> --once --token <token> [--json]  Internal owner-bound single tick
@@ -183,6 +183,7 @@ function options(args) {
   };
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--repo") opts.cwd = resolve(args[++index]);
+    if (args[index] === "--gh-account") opts.ghAccount = args[++index];
     if (args[index] === "--model") opts.model = args[++index];
     if (args[index] === "--interval") opts.intervalMs = Number(args[++index]);
     if (args[index] === "--max-duration") opts.maxDurationMs = Number(args[++index]);
@@ -198,7 +199,7 @@ function positionals(args) {
   const output = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (["--repo", "--model", "--interval", "--max-duration", "--wait-ms", "--phase", "--token", "--reviewer"].includes(arg)) {
+    if (["--repo", "--gh-account", "--model", "--interval", "--max-duration", "--wait-ms", "--phase", "--token", "--reviewer"].includes(arg)) {
       index += 1;
       continue;
     }
