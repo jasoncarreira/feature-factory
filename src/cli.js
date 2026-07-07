@@ -56,7 +56,8 @@ async function main(argv) {
 
 function install(args) {
   const local = args.includes("--local");
-  const configPath = join(homedir(), ".config", "opencode", "opencode.jsonc");
+  const home = homedir();
+  const configPath = join(home, ".config", "opencode", "opencode.jsonc");
   mkdirSync(dirname(configPath), { recursive: true });
   const pluginSpec = local ? localPluginSpec() : "opencode-feature-factory";
   const cfg = readConfig(configPath);
@@ -71,6 +72,28 @@ function install(args) {
   console.log(`configured opencode plugin: ${pluginSpec}`);
   console.log(`updated: ${configPath}`);
   console.log("restart opencode for plugin changes to take effect");
+  warnGlobalFeatureSkillConflicts(findGlobalFeatureSkillConflicts(home));
+}
+
+function findGlobalFeatureSkillConflicts(home) {
+  return [
+    join(home, ".config", "opencode", "skills", "feature", "SKILL.md"),
+    join(home, ".config", "opencode", "skill", "feature", "SKILL.md"),
+    join(home, ".claude", "skills", "feature", "SKILL.md"),
+    join(home, ".agents", "skills", "feature", "SKILL.md"),
+  ].filter((path) => existsSync(path));
+}
+
+function warnGlobalFeatureSkillConflicts(paths) {
+  if (!paths.length) return;
+  console.warn([
+    "",
+    "WARNING: existing global feature skill detected.",
+    "These files are not installed or managed by opencode-feature-factory and can shadow or conflict with the plugin's current feature workflow:",
+    ...paths.map((path) => `- ${path}`),
+    "Remove stale files, or replace them with a delegator that reads the repo-seeded .opencode/skills/feature/SKILL.md before mutating factory state.",
+    "Restart opencode after changing skill files.",
+  ].join("\n"));
 }
 
 async function doctor(args) {
