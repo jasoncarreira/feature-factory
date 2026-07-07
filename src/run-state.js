@@ -1,7 +1,18 @@
-import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import {
+  createAttestationIndex,
+  createGateDecisionAttestation,
+  hashFile,
+  hashValue,
+  resolveArtifactRef,
+  resolveGateRef,
+  validateGateDecisionAttestation,
+  validateProvenanceAuthority,
+} from "./provenance-authority.js";
 import { pendingProtectedGate, validateFactoryLock, validateHeartbeatState, validateRun, validateRunAuthority } from "./validate.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -17,6 +28,9 @@ const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
 const FACTORY_LOCK_FILE = "factory.lock";
 const HEARTBEAT_FILE = "heartbeat.json";
+const ATTESTATIONS_DIR = "attestations";
+const ATTESTATIONS_INDEX_FILE = "index.json";
+const ATTESTATIONS_GATES_DIR = "gates";
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
@@ -54,28 +68,199 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
   }
 }
 
-export async function mutateRunJsonLocked(runDir, mutator, options = {}) {
-  if (typeof mutator !== "function") throw new Error("mutateRunJsonLocked requires a mutator");
+export function hashRunState(run) {
+  return hashValue(validateRun(cloneJson(run)));
+}
+
+export async function transitionRunJson(runDir, mutator, options = {}) {
+  if (typeof mutator !== "function") throw new Error("transitionRunJson requires a mutator");
+  return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, mutator, options), options);
+}
+
+export async function transitionGateDecision(runDir, gateName, gate, options = {}) {
+  if (!stringValue(gateName)) throw new Error("transitionGateDecision requires a gate name");
+  const nextGate = normalizeGateDecision(gateName, gate);
+
+  if (nextGate.status !== "approved") {
+    const result = await transitionRunJson(
+      runDir,
+      (draft) => {
+        draft.gates = normalizeGateMap(draft.gates);
+        draft.gates[gateName] = cloneJson(nextGate);
+      },
+      options,
+    );
+    return { ...result, gate: gateName, attestation_ref: null };
+  }
+
+  assertApprovedGateDecisionShape(gateName, nextGate);
+  const attestationRef = gateAttestationRef(gateName);
+  const gateAttestationPath = join(runDir, attestationRef);
+  const indexPath = join(runDir, ATTESTATIONS_DIR, ATTESTATIONS_INDEX_FILE);
 
   return withRunJsonLock(
     runDir,
     async () => {
-      const current = await readRunJson(runDir);
-      const draft = cloneJson(current);
-      let nextValue = await mutator(draft);
-      if (nextValue === undefined) {
-        if (sameJson(current, draft)) {
-          return { updated: false, reason: "mutator-skip", status: current.status, run: current };
-        }
-        nextValue = draft;
-      }
+      const gateSnapshot = await snapshotFile(gateAttestationPath);
+      const indexSnapshot = await snapshotFile(indexPath);
+      let committed = false;
 
-      const next = validateRun(nextValue);
-      await writeJsonAtomically(join(runDir, RUN_FILE), next);
-      return { updated: true, status: next.status, run: next };
+      try {
+        const result = await transitionRunJsonLocked(
+          runDir,
+          (draft) => {
+            draft.gates = normalizeGateMap(draft.gates);
+            draft.gates[gateName] = cloneJson(nextGate);
+          },
+          options,
+          {
+            beforeValidateNext: async ({ current, next }) => {
+              const graph = assertProvenanceGraphValid(runDir, options);
+              const records = acceptedAttestationEntries(graph);
+              const nextGateDecision = next.gates?.[gateName];
+              const staged = createApprovedGateDecisionState({
+                runDir,
+                current,
+                gateName,
+                gate: nextGateDecision,
+                records,
+              });
+
+              const attestationValidation = validateGateDecisionAttestation(staged.attestation, { ...options, runDir });
+              assertValidationChecksValid(attestationValidation, "gate-decision validation failed");
+
+              await mkdir(join(runDir, ATTESTATIONS_DIR, ATTESTATIONS_GATES_DIR), { recursive: true });
+              await writeJsonAtomically(gateAttestationPath, staged.attestation);
+              await writeJsonAtomically(indexPath, staged.index);
+            },
+          },
+        );
+        committed = true;
+        return { ...result, gate: gateName, attestation_ref: attestationRef };
+      } catch (error) {
+        if (!committed) {
+          try {
+            await restoreSnapshot(gateSnapshot);
+            await restoreSnapshot(indexSnapshot);
+          } catch (restoreError) {
+            throw rollbackError(error, restoreError);
+          }
+        }
+        throw error;
+      }
     },
     options,
   );
+}
+
+export async function transitionTerminalResult(runDir, terminalResult, options = {}) {
+  const nextTerminalResult = normalizeTerminalResult(terminalResult);
+  const result = await transitionLifecycleRun(
+    runDir,
+    (draft) => {
+      const next = {
+        ...cloneJson(nextTerminalResult),
+        run_id: draft.run_id,
+        status: nextTerminalResult.status,
+      };
+      draft.status = next.status;
+      draft.terminal_result = next;
+    },
+    options,
+  );
+  return { ...result, terminal_result: result.run.terminal_result };
+}
+
+export async function transitionRunStep(runDir, stepSelector, updater, options = {}) {
+  assertCollectionUpdater(updater, "transitionRunStep");
+  let stepIndex = -1;
+
+  const result = await transitionRunJson(
+    runDir,
+    async (draft) => {
+      const hadSteps = Array.isArray(draft.steps);
+      const steps = hadSteps ? draft.steps : [];
+      const update = await applyCollectionItemUpdate({
+        items: steps,
+        selector: stepSelector,
+        updater,
+        selectorLabel: "step selector",
+        seed: seedRunStep(stepSelector),
+        identityKey: "agent",
+      });
+      stepIndex = update.index;
+      if (!update.changed) return;
+      if (!hadSteps) draft.steps = steps;
+    },
+    options,
+  );
+
+  return {
+    ...result,
+    step_index: stepIndex,
+    step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null,
+  };
+}
+
+export async function transitionRunSlice(runDir, sliceId, updater, options = {}) {
+  assertCollectionUpdater(updater, "transitionRunSlice");
+  let sliceIndex = -1;
+
+  const result = await transitionRunJson(
+    runDir,
+    async (draft) => {
+      const hadSlices = Array.isArray(draft.slices);
+      const slices = hadSlices ? draft.slices : [];
+      const update = await applyCollectionItemUpdate({
+        items: slices,
+        selector: sliceId,
+        updater,
+        selectorLabel: "slice selector",
+        seed: seedRunSlice(sliceId),
+        identityKey: "id",
+      });
+      sliceIndex = update.index;
+      if (!update.changed) return;
+      if (!hadSlices) draft.slices = slices;
+    },
+    options,
+  );
+
+  return {
+    ...result,
+    slice_index: sliceIndex,
+    slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null,
+  };
+}
+
+export async function transitionLifecycleRun(runDir, mutator, options = {}) {
+  return transitionRunJson(runDir, mutator, options);
+}
+
+export async function mutateRunJsonLocked(runDir, mutator, options = {}) {
+  if (typeof mutator !== "function") throw new Error("mutateRunJsonLocked requires a mutator");
+  if (existsSync(join(runDir, ATTESTATIONS_DIR, ATTESTATIONS_INDEX_FILE))) {
+    return transitionRunJson(runDir, mutator, options);
+  }
+
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    await assertSemanticTransitionHeartbeatState(runDir, options);
+
+    const draft = cloneJson(current);
+    let nextValue = await mutator(draft, { current, runDir });
+    if (nextValue === undefined) {
+      if (sameJson(current, draft)) {
+        return { updated: false, reason: "mutator-skip", status: current.status, run: current };
+      }
+      nextValue = draft;
+    }
+
+    const next = validateRun(nextValue);
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next };
+  }, options);
 }
 
 export async function heartbeatOnce(runDir, { token, ownerPid, ownerCapability, now } = {}, options = {}) {
@@ -102,7 +287,7 @@ export async function heartbeatOnce(runDir, { token, ownerPid, ownerCapability, 
       if (!hasInFlightHeartbeatWork(current)) {
         return { updated: false, reason: "no-in-flight-work", status: current.status, run: current };
       }
-      assertRunAuthorityValid(runDir, current);
+      assertRunAuthorityValid(runDir, current, options);
 
       const lease = await inspectHeartbeatLease(runDir, current.run_id, {
         token,
@@ -149,6 +334,41 @@ export function hasInFlightHeartbeatWork(run) {
     return true;
   }
   return false;
+}
+
+async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}) {
+  const current = await readRunJson(runDir);
+  const authority = assertRunAuthorityValid(runDir, current, options);
+  assertExpectedCurrentHash(current, options.expectedCurrentHash);
+  await assertSemanticTransitionHeartbeatState(runDir, options);
+
+  const draft = cloneJson(current);
+  let nextValue = await mutator(draft, {
+    authority,
+    current,
+    runDir,
+  });
+
+  if (nextValue === undefined) {
+    if (sameJson(current, draft)) {
+      return { updated: false, reason: "mutator-skip", status: current.status, run: current };
+    }
+    nextValue = draft;
+  }
+
+  const next = validateRun(nextValue);
+  if (typeof hooks.beforeValidateNext === "function") {
+    await hooks.beforeValidateNext({ authority, current, next, runDir });
+  }
+  assertRunAuthorityValid(runDir, next, options);
+  if (typeof hooks.beforeCommit === "function") {
+    await hooks.beforeCommit({ authority, current, next, runDir });
+  }
+  await writeJsonAtomically(join(runDir, RUN_FILE), next);
+  if (typeof hooks.afterCommit === "function") {
+    await hooks.afterCommit({ authority, current, next, runDir });
+  }
+  return { updated: true, status: next.status, run: next };
 }
 
 async function readRunJson(runDir) {
@@ -207,6 +427,227 @@ function inspectHeartbeatLeaseStatus(status, lease) {
   return { active: true };
 }
 
+async function assertSemanticTransitionHeartbeatState(runDir, options = {}) {
+  if (options.allowActiveHeartbeat === true) return null;
+  const heartbeatPath = join(runDir, HEARTBEAT_FILE);
+  if (!existsSync(heartbeatPath)) return null;
+
+  let lease;
+  try {
+    lease = validateHeartbeatState(await readJson(heartbeatPath));
+  } catch (error) {
+    throw new Error(`invalid heartbeat lease at ${heartbeatPath}: ${error.message}`);
+  }
+
+  if (lease.status === "stopped" || lease.status === "error") return lease;
+  if (lease.status === "stopping") {
+    throw new Error("foreground semantic run.json writes require a confirmed stopped heartbeat lease");
+  }
+  if (ACTIVE_HEARTBEAT_STATUSES.has(lease.status)) {
+    throw new Error("stop heartbeat before foreground semantic run.json writes");
+  }
+
+  throw new Error(`invalid heartbeat lease at ${heartbeatPath}: unsupported status '${lease.status}'`);
+}
+
+function assertExpectedCurrentHash(run, expectedCurrentHash) {
+  if (expectedCurrentHash === undefined || expectedCurrentHash === null) return;
+  if (!stringValue(expectedCurrentHash)) throw new Error("expectedCurrentHash must be a non-empty string");
+  const actualCurrentHash = hashRunState(run);
+  if (actualCurrentHash !== expectedCurrentHash) {
+    throw new Error(`stale run.json transition: expected current hash ${expectedCurrentHash}, found ${actualCurrentHash}`);
+  }
+}
+
+function assertRunAuthorityValid(runDir, run, options = {}) {
+  const authority = validateRunAuthority(runDir, run, options);
+  return assertValidationChecksValid(authority, "run authority validation failed");
+}
+
+function assertProvenanceGraphValid(runDir, options = {}) {
+  const graph = validateProvenanceAuthority(runDir, options);
+  return assertValidationChecksValid(graph, "provenance authority validation failed");
+}
+
+function assertValidationChecksValid(result, fallbackMessage = "validation failed") {
+  if (result?.ok) return result;
+  const message = formatValidationChecks(result?.checks);
+  throw new Error(message === "run validation failed" ? fallbackMessage : message);
+}
+
+function createApprovedGateDecisionState({ runDir, current, gateName, gate, records }) {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error("approved gate decisions require a non-empty accepted attestation index");
+  }
+
+  const ref = gateAttestationRef(gateName);
+  const existingIndex = records.findIndex((record) => record.ref === ref);
+  if (existingIndex !== -1 && existingIndex !== records.length - 1) {
+    throw new Error(`approved gate '${gateName}' cannot update ${ref} after newer accepted attestations`);
+  }
+
+  const replacingLastRecord = existingIndex === records.length - 1;
+  const previousRecord = replacingLastRecord ? records[records.length - 2] ?? null : records[records.length - 1] ?? null;
+  const artifact = resolveArtifactRef(runDir, gate.artifact);
+  const question = resolveGateRef(runDir, gate.question_ref);
+  const answer = stringValue(gate.answer_ref) ? resolveGateRef(runDir, gate.answer_ref) : null;
+  const attestation = createGateDecisionAttestation({
+    run_id: current.run_id,
+    sequence: replacingLastRecord ? records[existingIndex].attestation.sequence : (records.at(-1)?.attestation?.sequence ?? 0) + 1,
+    prev_hash: previousRecord?.attestation?.attestation_hash ?? null,
+    bindings: {
+      gate: gateName,
+      decision: gate.status,
+      approval_source: gate.approval_source,
+      question_ref: gate.question_ref,
+      question_hash: hashFile(question.path),
+      artifact_ref: gate.artifact,
+      artifact_hash: hashFile(artifact.path),
+      ...(answer
+        ? {
+            answer_ref: gate.answer_ref,
+            answer_hash: hashFile(answer.path),
+          }
+        : {
+            answer_text_hash: hashTextClaim(gate.answer),
+          }),
+    },
+  });
+  const nextRecords = replacingLastRecord
+    ? [...records.slice(0, -1), { ref, attestation }]
+    : [...records, { ref, attestation }];
+  const index = createAttestationIndex(nextRecords);
+
+  if (!Array.isArray(index.entries) || index.entries.length === 0) {
+    throw new Error("approved gate decisions require a non-empty attestation index");
+  }
+
+  return { ref, attestation, index };
+}
+
+function acceptedAttestationEntries(authority) {
+  return (authority.orderedRefs || [])
+    .map((ref) => {
+      const record = authority.acceptedAttestations?.[ref];
+      if (!record?.attestation) return null;
+      return {
+        ref,
+        attestation: cloneJson(record.attestation),
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeGateDecision(gateName, gate) {
+  if (!isRecord(gate)) throw new Error(`transitionGateDecision requires a gate object for '${gateName}'`);
+  return cloneJson(gate);
+}
+
+function assertApprovedGateDecisionShape(gateName, gate) {
+  const missingFields = [];
+  if (!stringValue(gate.artifact)) missingFields.push("artifact");
+  if (!stringValue(gate.question_ref)) missingFields.push("question_ref");
+  if (!stringValue(gate.approval_source)) missingFields.push("approval_source");
+  if (!stringValue(gate.answer_ref) && !stringValue(gate.answer)) {
+    missingFields.push("answer_ref or answer");
+  }
+  if (missingFields.length > 0) {
+    throw new Error(`approved gate '${gateName}' requires ${missingFields.join(", ")}`);
+  }
+}
+
+function gateAttestationRef(gateName) {
+  return join(ATTESTATIONS_DIR, ATTESTATIONS_GATES_DIR, `${gateName}.json`);
+}
+
+function normalizeTerminalResult(terminalResult) {
+  if (typeof terminalResult === "string") return { status: terminalResult };
+  if (!isRecord(terminalResult)) throw new Error("transitionTerminalResult requires a terminal result object");
+  return cloneJson(terminalResult);
+}
+
+function normalizeGateMap(gates) {
+  return isRecord(gates) ? gates : {};
+}
+
+function assertCollectionUpdater(updater, label) {
+  if (typeof updater === "function" || isRecord(updater)) return;
+  throw new Error(`${label} requires an updater function or object`);
+}
+
+async function applyCollectionItemUpdate({ items, selector, updater, selectorLabel, seed, identityKey }) {
+  const index = selectCollectionItemIndex(items, selector, selectorLabel, identityKey);
+  const hasExisting = index >= 0;
+  const original = hasExisting ? items[index] : undefined;
+  const base = hasExisting ? cloneJson(original) : cloneJson(seed);
+  let nextValue;
+
+  if (typeof updater === "function") {
+    nextValue = await updater(base, {
+      current: hasExisting ? cloneJson(original) : null,
+      index,
+      selector,
+    });
+  } else {
+    nextValue = updater;
+  }
+
+  if (nextValue === undefined) {
+    if (hasExisting) {
+      if (sameJson(original, base)) return { changed: false, index };
+      items[index] = base;
+      return { changed: true, index };
+    }
+    if (sameJson(seed, base)) return { changed: false, index: -1 };
+    items.push(base);
+    return { changed: true, index: items.length - 1 };
+  }
+
+  const replacement = isRecord(base) && isRecord(nextValue)
+    ? { ...base, ...cloneJson(nextValue) }
+    : cloneJson(nextValue);
+
+  if (hasExisting) {
+    if (sameJson(original, replacement)) return { changed: false, index };
+    items[index] = replacement;
+    return { changed: true, index };
+  }
+  if (sameJson(seed, replacement)) return { changed: false, index: -1 };
+  items.push(replacement);
+  return { changed: true, index: items.length - 1 };
+}
+
+function selectCollectionItemIndex(items, selector, selectorLabel, identityKey) {
+  if (typeof selector === "function") return items.findIndex((item, index) => selector(item, index));
+  if (Number.isInteger(selector)) {
+    if (selector < 0) throw new Error(`${selectorLabel} index must be non-negative`);
+    return selector < items.length ? selector : -1;
+  }
+  if (stringValue(selector)) return items.findIndex((item) => item?.[identityKey] === selector);
+  if (isRecord(selector)) {
+    if (Number.isInteger(selector.index)) {
+      if (selector.index < 0) throw new Error(`${selectorLabel} index must be non-negative`);
+      return selector.index < items.length ? selector.index : -1;
+    }
+    const entries = Object.entries(selector);
+    if (entries.length === 0) return -1;
+    return items.findIndex((item) => entries.every(([key, value]) => item?.[key] === value));
+  }
+  throw new Error(`invalid ${selectorLabel}`);
+}
+
+function seedRunStep(stepSelector) {
+  if (stringValue(stepSelector)) return { agent: stepSelector };
+  if (isRecord(stepSelector) && stringValue(stepSelector.agent)) return { agent: stepSelector.agent };
+  return {};
+}
+
+function seedRunSlice(sliceSelector) {
+  if (stringValue(sliceSelector)) return { id: sliceSelector };
+  if (isRecord(sliceSelector) && stringValue(sliceSelector.id)) return { id: sliceSelector.id };
+  return {};
+}
+
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
@@ -220,14 +661,49 @@ async function readJsonIfExists(path) {
   }
 }
 
+async function snapshotFile(path) {
+  if (!existsSync(path)) {
+    return {
+      exists: false,
+      path,
+      contents: null,
+    };
+  }
+
+  return {
+    exists: true,
+    path,
+    contents: await readFile(path, "utf8"),
+  };
+}
+
+async function restoreSnapshot(snapshot) {
+  if (!snapshot) return;
+  if (snapshot.exists) {
+    await writeTextAtomically(snapshot.path, snapshot.contents);
+    return;
+  }
+  await rm(snapshot.path, { force: true });
+}
+
 async function writeJsonAtomically(path, value) {
+  await writeTextAtomically(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function writeTextAtomically(path, contents) {
   const tempPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   try {
-    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await writeFile(tempPath, contents, "utf8");
     await rename(tempPath, path);
   } finally {
     if (existsSync(tempPath)) await rm(tempPath, { force: true });
   }
+}
+
+function rollbackError(error, restoreError) {
+  const primary = error instanceof Error ? error.message : String(error);
+  const rollback = restoreError instanceof Error ? restoreError.message : String(restoreError);
+  return new Error(`${primary}; failed to restore prior gate-decision state: ${rollback}`);
 }
 
 function formatLockTimeout(lockDir, owner) {
@@ -238,14 +714,8 @@ function formatLockTimeout(lockDir, owner) {
   return `timed out waiting for run.json lock at ${lockDir}${suffix}${acquiredAt}`;
 }
 
-function assertRunAuthorityValid(runDir, run) {
-  const authority = validateRunAuthority(runDir, run);
-  if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
-  return authority;
-}
-
 function formatValidationChecks(checks) {
-  const errors = checks.flatMap((check) => Array.isArray(check?.errors) ? check.errors : []);
+  const errors = (Array.isArray(checks) ? checks : []).flatMap((check) => Array.isArray(check?.errors) ? check.errors : []);
   if (errors.length === 0) return "run validation failed";
   return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
 }
@@ -279,6 +749,10 @@ function cloneJson(value) {
 
 function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function hashTextClaim(value) {
+  return `sha256:${createHash("sha256").update(String(value), "utf8").digest("hex")}`;
 }
 
 function isRecord(value) {
