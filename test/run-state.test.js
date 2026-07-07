@@ -1,9 +1,22 @@
+import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { heartbeatOnce, mutateRunJsonLocked, withRunJsonLock } from "../src/run-state.js";
+import { dirname, join, resolve } from "node:path";
+import { createAttestationIndex, createRunBaseAttestation } from "../src/provenance-authority.js";
+import {
+  hashRunState,
+  heartbeatOnce,
+  mutateRunJsonLocked,
+  transitionGateDecision,
+  transitionLifecycleRun,
+  transitionRunJson,
+  transitionRunSlice,
+  transitionRunStep,
+  transitionTerminalResult,
+  withRunJsonLock,
+} from "../src/run-state.js";
 
 const HEARTBEAT_OWNER = "heartbeat-owner-capability";
 
@@ -54,50 +67,54 @@ describe("withRunJsonLock", () => {
 });
 
 describe("mutateRunJsonLocked", () => {
-  it("updates run.json under the lock and leaves no temp files behind", async () => {
+  it("fails closed on provenance-sensitive no-index writes and leaves run.json untouched", async () => {
     const fixture = createRunFixture();
-    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
 
     try {
-      const result = await mutateRunJsonLocked(fixture.runDir, (run) => {
-        run.updated_at = "2026-07-06T11:30:00.000Z";
-        run.gates.brief = {
-          status: "approved",
-          artifact: "artifacts/brief.md",
-        };
-      });
+      await assert.rejects(
+        mutateRunJsonLocked(fixture.runDir, (run) => {
+          run.updated_at = "2026-07-06T11:30:00.000Z";
+          run.gates.brief = {
+            status: "approved",
+            artifact: "artifacts/brief.md",
+          };
+        }),
+        /no provenance-sensitive next claims.*gate:brief/u,
+      );
 
       const stored = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(result.updated, true);
-      assert.equal(stored.updated_at, "2026-07-06T11:30:00.000Z");
-      assert.equal(stored.gates.brief.status, "approved");
+      assert.deepEqual(stored, current);
       assert.deepEqual(readdirSync(fixture.runDir).sort(), ["run.json"]);
     } finally {
       fixture.cleanup();
     }
   });
 
-  it("reads the latest run.json after acquiring the lock to avoid lost updates", async () => {
+  it("rejects provenance-sensitive current claims after acquiring the lock", async () => {
     const fixture = createRunFixture();
     writeJson(join(fixture.runDir, "run.json"), baseRun());
     const hold = deferred();
+    let mutatorCalled = false;
+    const latestCurrent = {
+      ...baseRun(),
+      updated_at: "2026-07-06T11:45:00.000Z",
+      gates: {
+        story: {
+          artifact: "artifacts/story.md",
+          question_ref: "gates/story.question.md",
+          answer_ref: "gates/story.answer",
+          status: "approved",
+          answer: "approve",
+          answered_at: "2026-07-06T11:40:00.000Z",
+        },
+      },
+    };
 
     try {
       const owner = withRunJsonLock(fixture.runDir, async () => {
-        writeJson(join(fixture.runDir, "run.json"), {
-          ...baseRun(),
-          updated_at: "2026-07-06T11:45:00.000Z",
-          gates: {
-            story: {
-              artifact: "artifacts/story.md",
-              question_ref: "gates/story.question.md",
-              answer_ref: "gates/story.answer",
-              status: "approved",
-              answer: "approve",
-              answered_at: "2026-07-06T11:40:00.000Z",
-            },
-          },
-        });
+        writeJson(join(fixture.runDir, "run.json"), latestCurrent);
         await hold.promise;
       });
 
@@ -105,8 +122,7 @@ describe("mutateRunJsonLocked", () => {
       const mutation = mutateRunJsonLocked(
         fixture.runDir,
         (run) => {
-          assert.equal(run.updated_at, "2026-07-06T11:45:00.000Z");
-          assert.equal(run.gates.story.status, "approved");
+          mutatorCalled = true;
           return { ...run, heartbeat_at: "2026-07-06T11:50:00.000Z" };
         },
         { timeoutMs: 200, retryDelayMs: 5 },
@@ -116,14 +132,324 @@ describe("mutateRunJsonLocked", () => {
       hold.resolve();
       await owner;
 
-      const result = await mutation;
+      await assert.rejects(mutation, /no provenance-sensitive current claims.*gate:story/u);
       const stored = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(result.updated, true);
-      assert.equal(stored.updated_at, "2026-07-06T11:45:00.000Z");
-      assert.equal(stored.gates.story.status, "approved");
-      assert.equal(stored.heartbeat_at, "2026-07-06T11:50:00.000Z");
+      assert.equal(mutatorCalled, false);
+      assert.deepEqual(stored, latestCurrent);
     } finally {
       hold.resolve();
+      fixture.cleanup();
+    }
+  });
+
+  it("still allows non-sensitive no-index mutations", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+
+    try {
+      const result = await mutateRunJsonLocked(fixture.runDir, (run) => {
+        run.updated_at = "2026-07-06T11:35:00.000Z";
+        run.gates.brief = {
+          status: "pending",
+          artifact: "artifacts/brief.md",
+        };
+      });
+
+      const stored = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(result.updated, true);
+      assert.equal(stored.updated_at, "2026-07-06T11:35:00.000Z");
+      assert.equal(stored.gates.brief.status, "pending");
+      assert.deepEqual(readdirSync(fixture.runDir).sort(), ["run.json"]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+});
+
+describe("transition helpers", () => {
+  it("rejects stale expectedCurrentHash after another writer wins the lock", async () => {
+    const fixture = createRunFixture();
+    const initial = baseRun();
+    const latestCurrent = {
+      ...baseRun(),
+      updated_at: "2026-07-06T11:45:00.000Z",
+    };
+    writeJson(join(fixture.runDir, "run.json"), initial);
+    const hold = deferred();
+    let mutatorCalled = false;
+
+    try {
+      const owner = withRunJsonLock(fixture.runDir, async () => {
+        writeJson(join(fixture.runDir, "run.json"), latestCurrent);
+        await hold.promise;
+      });
+
+      await waitFor(() => existsSync(join(fixture.runDir, "run-json.lock")));
+      const mutation = transitionRunJson(
+        fixture.runDir,
+        (run) => {
+          mutatorCalled = true;
+          run.updated_at = "2026-07-06T11:50:00.000Z";
+        },
+        {
+          expectedCurrentHash: hashRunState(initial),
+          timeoutMs: 200,
+          retryDelayMs: 5,
+        },
+      );
+
+      await sleep(20);
+      hold.resolve();
+      await owner;
+
+      await assert.rejects(
+        mutation,
+        /stale run\.json transition: expected current hash .* found .*/u,
+      );
+      assert.equal(mutatorCalled, false);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), latestCurrent);
+    } finally {
+      hold.resolve();
+      fixture.cleanup();
+    }
+  });
+
+  it("lets transitionLifecycleRun bypass active heartbeat checks only when explicitly allowed", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+    writeJson(join(fixture.runDir, "heartbeat.json"), heartbeatLease());
+
+    try {
+      await assert.rejects(
+        transitionLifecycleRun(fixture.runDir, (run) => {
+          run.updated_at = "2026-07-06T11:55:00.000Z";
+        }),
+        /stop heartbeat before foreground semantic run\.json writes/u,
+      );
+
+      const result = await transitionLifecycleRun(
+        fixture.runDir,
+        (run) => {
+          run.updated_at = "2026-07-06T11:55:00.000Z";
+        },
+        { allowActiveHeartbeat: true },
+      );
+
+      assert.equal(result.updated, true);
+      assert.equal(result.run.updated_at, "2026-07-06T11:55:00.000Z");
+      assert.equal(readJson(join(fixture.runDir, "run.json")).updated_at, "2026-07-06T11:55:00.000Z");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("keeps terminal_result and run status consistent", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+
+    try {
+      const result = await transitionTerminalResult(fixture.runDir, {
+        status: "blocked",
+        run_id: "other-run",
+        reason: "waiting for approval",
+        summary: "halted",
+        artifacts: { notes: "artifacts/blocked.md" },
+      });
+
+      const stored = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(result.updated, true);
+      assert.equal(result.status, "blocked");
+      assert.equal(result.terminal_result.status, "blocked");
+      assert.equal(result.terminal_result.run_id, "heartbeat-liveness");
+      assert.equal(stored.status, "blocked");
+      assert.equal(stored.terminal_result.status, "blocked");
+      assert.equal(stored.terminal_result.run_id, "heartbeat-liveness");
+      assert.equal(stored.terminal_result.reason, "waiting for approval");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("updates and seeds run steps through transitionRunStep", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+
+    try {
+      const updated = await transitionRunStep(fixture.runDir, "story-reader", (step, context) => {
+        assert.equal(context.index, 0);
+        assert.equal(context.current.status, "accepted");
+        step.status = "blocked";
+        step.attempts = 2;
+      });
+      assert.equal(updated.step_index, 0);
+      assert.equal(updated.step.agent, "story-reader");
+      assert.equal(updated.step.status, "blocked");
+      assert.equal(updated.step.attempts, 2);
+
+      const added = await transitionRunStep(fixture.runDir, "spec-writer", {
+        status: "running",
+        attempts: 1,
+        artifact_ref: "artifacts/spec.md",
+      });
+      assert.equal(added.step_index, 1);
+      assert.deepEqual(added.step, {
+        agent: "spec-writer",
+        status: "running",
+        attempts: 1,
+        artifact_ref: "artifacts/spec.md",
+      });
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")).steps, [
+        {
+          agent: "story-reader",
+          status: "blocked",
+          attempts: 2,
+          artifact_ref: "artifacts/story.md",
+        },
+        {
+          agent: "spec-writer",
+          status: "running",
+          attempts: 1,
+          artifact_ref: "artifacts/spec.md",
+        },
+      ]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("updates and seeds run slices through transitionRunSlice", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+
+    try {
+      const updated = await transitionRunSlice(fixture.runDir, "state-lock-core", (slice, context) => {
+        assert.equal(context.index, 0);
+        assert.equal(context.current.status, "running");
+        slice.status = "blocked";
+        slice.attempts = 2;
+        slice.blocked_reason = "waiting for review";
+      });
+      assert.equal(updated.slice_index, 0);
+      assert.equal(updated.slice.id, "state-lock-core");
+      assert.equal(updated.slice.status, "blocked");
+      assert.equal(updated.slice.attempts, 2);
+      assert.equal(updated.slice.blocked_reason, "waiting for review");
+
+      const added = await transitionRunSlice(fixture.runDir, "run-state-tests", {
+        stack: "backend",
+        depends_on: ["state-lock-core"],
+        status: "pending",
+      });
+      assert.equal(added.slice_index, 1);
+      assert.deepEqual(added.slice, {
+        id: "run-state-tests",
+        stack: "backend",
+        depends_on: ["state-lock-core"],
+        status: "pending",
+      });
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")).slices, [
+        {
+          id: "state-lock-core",
+          stack: "backend",
+          depends_on: [],
+          status: "blocked",
+          branch: "heartbeat-liveness--state-lock-core",
+          worktree: ".opencode/worktrees/heartbeat-liveness--state-lock-core",
+          attempts: 2,
+          blocked_reason: "waiting for review",
+        },
+        {
+          id: "run-state-tests",
+          stack: "backend",
+          depends_on: ["state-lock-core"],
+          status: "pending",
+        },
+      ]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("cannot approve a story gate directly without an accepted gate-decision attestation", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+    const originalIndex = writeRunBaseAuthority(fixture.runDir).index;
+
+    try {
+      await assert.rejects(
+        transitionRunJson(fixture.runDir, (run) => {
+          run.gates.story = { status: "approved" };
+        }),
+        /approved gate requires an accepted gate-decision attestation/u,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("records an approved story gate through transitionGateDecision", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+
+    try {
+      const result = await transitionGateDecision(fixture.runDir, "story", {
+        status: "approved",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer_ref: "gates/story.answer",
+        approval_source: "human",
+      });
+
+      const stored = readJson(join(fixture.runDir, "run.json"));
+      const index = readJson(join(fixture.runDir, "attestations", "index.json"));
+      assert.equal(result.updated, true);
+      assert.equal(result.gate, "story");
+      assert.equal(result.attestation_ref, "attestations/gates/story.json");
+      assert.equal(stored.gates.story.status, "approved");
+      assert.equal(index.entries.length, 2);
+      assert.equal(index.entries[1].ref, "attestations/gates/story.json");
+      assert.equal(index.entries[1].type, "gate-decision");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rolls back staged gate-decision files when the next state fails validation", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+    const originalIndex = writeRunBaseAuthority(fixture.runDir).index;
+    writeFixture(fixture.runDir, "artifacts/pre_pr.md", "pre-pr artifact\n");
+    writeFixture(fixture.runDir, "gates/pre_pr.question.md", "approve pre-pr?\n");
+    writeFixture(fixture.runDir, "gates/pre_pr.answer", "approve\n");
+
+    try {
+      await assert.rejects(
+        transitionGateDecision(fixture.runDir, "pre_pr", {
+          status: "approved",
+          artifact: "artifacts/pre_pr.md",
+          question_ref: "gates/pre_pr.question.md",
+          answer_ref: "gates/pre_pr.answer",
+          approval_source: "autonomous",
+        }),
+        /run\.gates\.pre_pr\.status: approved pre_pr gate requires/u,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+      assert.equal(existsSync(join(fixture.runDir, "attestations", "gates", "pre_pr.json")), false);
+    } finally {
       fixture.cleanup();
     }
   });
@@ -418,6 +744,7 @@ describe("heartbeatOnce", () => {
 });
 
 let tempCounter = 0;
+let repoContextCache = null;
 
 function createRunFixture() {
   const root = join(tmpdir(), `heartbeat-liveness-${process.pid}-${tempCounter++}`);
@@ -522,12 +849,67 @@ function ensureAuthorityDirs(runDir) {
   }
 }
 
+function writeRunBaseAuthority(runDir) {
+  ensureAuthorityDirs(runDir);
+  const context = repoContext();
+  const runBase = createRunBaseAttestation({
+    run_id: "heartbeat-liveness",
+    sequence: 1,
+    prev_hash: null,
+    created_at: "2026-07-06T11:00:00.000Z",
+    bindings: {
+      repo_root: context.repoRoot,
+      run_dir: runDir,
+      git_common_dir: context.gitCommonDir,
+      feature_branch: context.branch,
+      feature_worktree: context.featureWorktree,
+      base_ref: "HEAD",
+      base_commit: context.headCommit,
+      base_tree: context.headTree,
+    },
+  });
+  writeJson(join(runDir, "attestations", "run-base.json"), runBase);
+  const index = createAttestationIndex([{ ref: "attestations/run-base.json", attestation: runBase }]);
+  writeJson(join(runDir, "attestations", "index.json"), index);
+  return { runBase, index };
+}
+
+function writeFixture(runDir, ref, contents) {
+  const path = join(runDir, ref);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents, "utf8");
+  return path;
+}
+
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function repoContext() {
+  if (repoContextCache) return repoContextCache;
+  const featureWorktree = realpathSync(process.cwd());
+  const gitCommonDir = realpathSync(resolve(featureWorktree, gitStdout(featureWorktree, ["rev-parse", "--git-common-dir"])));
+  repoContextCache = {
+    featureWorktree,
+    gitCommonDir,
+    repoRoot: dirname(gitCommonDir),
+    branch: gitStdout(featureWorktree, ["symbolic-ref", "--short", "HEAD"]),
+    headCommit: gitStdout(featureWorktree, ["rev-parse", "HEAD"]),
+    headTree: gitStdout(featureWorktree, ["rev-parse", "HEAD^{tree}"]),
+  };
+  return repoContextCache;
+}
+
+function gitStdout(cwd, args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+  }
+  return result.stdout.trim();
 }
 
 function deferred() {
