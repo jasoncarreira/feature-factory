@@ -837,8 +837,7 @@ describe("detached factory start", () => {
     try {
       startFactory(["APP-123", "do", "work"], { cwd: repo, detached: true, autonomous: true });
 
-      await waitFor(() => existsSync(payloadFile));
-      const payload = JSON.parse(readFileSync(payloadFile, "utf8"));
+      const payload = await waitForJsonFile(payloadFile);
 
       assert.equal(payload.driver.github_account, "jasoncarreira");
     } finally {
@@ -862,8 +861,7 @@ describe("detached factory start", () => {
     try {
       startFactory(["APP-123", "do", "work"], { cwd: repo, detached: true, autonomous: true, ghAccount: "jasoncarreira" });
 
-      await waitFor(() => existsSync(payloadFile));
-      const payload = JSON.parse(readFileSync(payloadFile, "utf8"));
+      const payload = await waitForJsonFile(payloadFile);
 
       assert.equal(payload.driver.github_account, "jasoncarreira");
     } finally {
@@ -1189,6 +1187,19 @@ async function waitFor(predicate, { timeoutMs = 1000, intervalMs = 25 } = {}) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, Math.max(1, deadline - Date.now()))));
   }
   throw new Error(`timed out after ${timeoutMs}ms`);
+}
+
+async function waitForJsonFile(file, options = {}) {
+  return waitFor(() => {
+    if (!existsSync(file)) return null;
+    const content = readFileSync(file, "utf8");
+    if (!content.trim()) return null;
+    try {
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
+  }, options);
 }
 
 function slicePlan() {
