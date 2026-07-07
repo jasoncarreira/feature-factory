@@ -10,6 +10,27 @@ It ships:
 - Specialized subagents for story, research, spec, decomposition, build, tests, review, and validation.
 - A `feature-factory` CLI with install/doctor commands and local factory state helpers.
 
+## Trust model and provenance authority
+
+The factory uses three authority layers:
+
+- `untrusted caller claims`: `run.json`, gate answers, `evidence/*`, `reviews/*`, worktree path strings, status booleans, `base_ref`, and `base_commit`.
+- `orchestrator observations`: fresh safe Git/filesystem observations, physical durable-root containment, worktree identity, commit/tree/parent relationships, file hashes, and reviewed-worktree guard results.
+- `factory-owned attestations`: canonical records under `.opencode/factory/<run-id>/attestations/`.
+
+Accepted provenance requires `attestations/index.json`, canonical `attestation_hash` values, an unbroken `prev_hash` chain from `run-base`, and fresh re-observation of current Git/filesystem facts. Merge history is proven by `merge-chain.json` entries of type `slice_merge` or `direct_reviewed_commit`, not by `merged` / `approved` booleans alone.
+
+Guarantees:
+
+- bounded local authority with centralized safe Git (`safe_git_policy: "safe-git-v1"`);
+- durable-root and worktree identity validation;
+- fail closed behavior when proof is missing, hash-mismatched, or unverifiable.
+
+Limits:
+
+- local-only, not cryptographic or tamper-proof;
+- a coherent rewrite of local files and Git history is outside the model.
+
 ## Install Locally
 
 From this package directory:

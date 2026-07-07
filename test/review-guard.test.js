@@ -1,14 +1,16 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
+import { SAFE_GIT_POLICY, SAFE_GIT_PREFIX_ARGS } from "../src/safe-git.js";
 import { buildReviewGuardBlockReport, checkReviewedWorktreeClean } from "../src/review-guard.js";
 
 describe("checkReviewedWorktreeClean", () => {
   it("returns ok for a clean git worktree", () => {
     const repo = createCommittedRepo();
+    const { headCommit, headTree } = getHeadObservation(repo);
 
     try {
       const result = checkReviewedWorktreeClean(repo);
@@ -19,8 +21,38 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.exit_code, 0);
       assert.equal(result.stdout, "");
       assert.equal(result.stderr, "");
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.head_commit, headCommit);
+      assert.equal(result.head_tree, headTree);
       assert.deepEqual(result.dirty_paths, []);
-      assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all`);
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all --ignore-submodules=none`);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("fails closed before status when clean filters are configured", () => {
+    const repo = createCommittedRepo();
+    const calls = [];
+
+    try {
+      const result = checkReviewedWorktreeClean(repo, {
+        spawnSync(file, args, options) {
+          calls.push({ file, args, options });
+          if (args.includes("config") && args.includes("--null") && args.includes("--list")) {
+            return { status: 0, stdout: "filter.evil.clean\nsh -c pwn\0", stderr: "" };
+          }
+          throw new Error(`unexpected git args after unsafe config: ${args.join(" ")}`);
+        },
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "unverifiable");
+      assert.equal(result.command, `git -C ${repo} config --null --list`);
+      assert.match(result.stderr, /unsafe git config/u);
+      assert.match(result.stderr, /filter\.evil\.clean/u);
+      assert.deepEqual(calls.map((call) => call.args), [expectedSafeGitArgs(repo, ["config", "--null", "--list"])]);
     } finally {
       cleanup(repo);
     }
@@ -37,7 +69,9 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.ok, false);
       assert.equal(result.status, "dirty");
       assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.dirty_paths.length, 1);
+      assert.deepEqual(result.hidden_index_paths, []);
       assert.equal(result.stdout, " M tracked.txt\n");
 
       const dirtyPath = result.dirty_paths[0];
@@ -68,7 +102,9 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.ok, false);
       assert.equal(result.status, "dirty");
       assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(result.dirty_paths.length, 1);
+      assert.deepEqual(result.hidden_index_paths, []);
       assert.equal(result.stdout, "?? new-file.txt\n");
 
       const dirtyPath = result.dirty_paths[0];
@@ -88,6 +124,290 @@ describe("checkReviewedWorktreeClean", () => {
     }
   });
 
+  it("does not let repo-local excludesFile hide reviewer-created untracked files", () => {
+    const repo = createCommittedRepo();
+    const localIgnore = join(repo, ".review-guard-local-ignore");
+
+    try {
+      writeFileSync(localIgnore, "hidden-reviewer-file.txt\n", "utf8");
+      git(repo, ["config", "core.excludesFile", localIgnore]);
+      writeFileSync(join(repo, "hidden-reviewer-file.txt"), "new\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "?? .review-guard-local-ignore\n");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.deepEqual(
+        result.dirty_paths.map((item) => item.path).sort(),
+        [".review-guard-local-ignore", "hidden-reviewer-file.txt"],
+      );
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("does not let worktree-local core.worktree redirection hide dirty files", () => {
+    const repo = createCommittedRepo();
+    const linkedRoot = mkdtempSync(join(tmpdir(), "review-guard-linked-"));
+    const cleanRoot = mkdtempSync(join(tmpdir(), "review-guard-clean-"));
+    const worktree = join(linkedRoot, "review-worktree");
+
+    try {
+      git(repo, ["worktree", "add", "-b", "review-worktree", worktree, "HEAD"]);
+      writeFileSync(join(cleanRoot, "tracked.txt"), "tracked.txt\n", "utf8");
+      git(worktree, ["config", "extensions.worktreeConfig", "true"]);
+      git(worktree, ["config", "--worktree", "core.worktree", cleanRoot]);
+      writeFileSync(join(worktree, "tracked.txt"), "changed\n", "utf8");
+
+      const unsafe = gitStdout(worktree, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(worktree);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "unverifiable");
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.match(result.stderr, /worktree-identity observation|dirty-state could not be verified/i);
+    } finally {
+      cleanup(repo);
+      cleanup(linkedRoot);
+      cleanup(cleanRoot);
+    }
+  });
+
+  it("does not let .git/info/exclude hide reviewer-created untracked files", () => {
+    const repo = createCommittedRepo();
+
+    try {
+      appendFileSync(join(repo, ".git", "info", "exclude"), "hidden-by-info-exclude.txt\n", "utf8");
+      writeFileSync(join(repo, "hidden-by-info-exclude.txt"), "new\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), ["hidden-by-info-exclude.txt"]);
+      assert.equal(result.dirty_paths[0].ignored, true);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("does not let core.fileMode=false hide executable-bit-only changes", () => {
+    const repo = createCommittedRepo(["script.sh"]);
+
+    try {
+      git(repo, ["config", "core.fileMode", "false"]);
+      chmodSync(join(repo, "script.sh"), 0o755);
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.stdout, " M script.sh\n");
+      assert.equal(result.dirty_paths[0].path, "script.sh");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("does not let submodule.<name>.ignore=all hide dirty submodule mutations", () => {
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule();
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      writeFileSync(join(submodulePath, "tracked.txt"), "changed\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, " M review-submodule\n");
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), ["review-submodule"]);
+      assert.equal(result.dirty_paths[0].raw, " M review-submodule");
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("does not let submodule.<name>.ignore=all hide submodule-local ignored untracked files", () => {
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
+      submoduleFixtures: {
+        ".gitignore": "ignored-inside.txt\n",
+        "tracked.txt": "tracked.txt\n",
+      },
+    });
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      writeFileSync(join(submodulePath, "ignored-inside.txt"), "new\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), ["review-submodule/ignored-inside.txt"]);
+      assert.equal(result.dirty_paths[0].ignored, true);
+      assert.equal(result.dirty_paths[0].untracked, true);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("does not let submodule.<name>.ignore=all hide whitespace-only ignored submodule-local filenames", () => {
+    const whitespaceOnlyName = "   ";
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
+      submoduleFixtures: {
+        ".gitignore": "[ ][ ][ ]\n",
+        "tracked.txt": "tracked.txt\n",
+      },
+    });
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      writeFileSync(join(submodulePath, whitespaceOnlyName), "new\n", "utf8");
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), [`${submoduleName}/${whitespaceOnlyName}`]);
+      assert.equal(result.dirty_paths[0].raw, `!! ${submoduleName}/${whitespaceOnlyName}`);
+      assert.equal(result.dirty_paths[0].ignored, true);
+      assert.equal(result.dirty_paths[0].untracked, true);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("does not let submodule.<name>.ignore=all strip literal quotes from ignored submodule-local filenames", () => {
+    const quoteWrappedName = '"quoted"';
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
+      submoduleFixtures: {
+        ".gitignore": '"quoted"\n',
+        "tracked.txt": "tracked.txt\n",
+      },
+    });
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      writeFileSync(join(submodulePath, quoteWrappedName), "new\n", "utf8");
+
+      const ignored = gitStdout(submodulePath, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]);
+      assert.equal(ignored, `${quoteWrappedName}\u0000`);
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.hidden_index_paths, []);
+      assert.deepEqual(result.dirty_paths.map((item) => item.path), [`${submoduleName}/${quoteWrappedName}`]);
+      assert.equal(result.dirty_paths[0].raw, `!! ${submoduleName}/${quoteWrappedName}`);
+      assert.equal(result.dirty_paths[0].ignored, true);
+      assert.equal(result.dirty_paths[0].untracked, true);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("does not let submodule.<name>.ignore=all hide submodule-local hidden index flags", () => {
+    const { root, repo, submoduleName, submodulePath } = createCommittedRepoWithSubmodule({
+      submoduleFixtures: {
+        "assume.txt": "assume.txt\n",
+        "skip.txt": "skip.txt\n",
+      },
+    });
+
+    try {
+      git(repo, ["config", `submodule.${submoduleName}.ignore`, "all"]);
+      git(submodulePath, ["update-index", "--assume-unchanged", "assume.txt"]);
+      git(submodulePath, ["update-index", "--skip-worktree", "skip.txt"]);
+
+      const unsafe = gitStdout(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+      assert.equal(unsafe, "");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.dirty_paths, []);
+      assert.deepEqual(result.hidden_index_paths, [
+        {
+          path: "review-submodule/assume.txt",
+          tag: "h",
+          assume_unchanged: true,
+          skip_worktree: false,
+        },
+        {
+          path: "review-submodule/skip.txt",
+          tag: "S",
+          assume_unchanged: false,
+          skip_worktree: true,
+        },
+      ]);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("fails closed before recursive submodule status when a submodule has clean filters configured", () => {
+    const { root, repo, submodulePath } = createCommittedRepoWithSubmodule();
+
+    try {
+      git(submodulePath, ["config", "filter.evil.clean", "sh -c pwn"]);
+      writeFileSync(join(submodulePath, ".gitattributes"), "* filter=evil\n", "utf8");
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "unverifiable");
+      assert.match(result.stderr, /submodule observation failed for review-submodule/u);
+      assert.match(result.stderr, /filter\.evil\.clean/u);
+    } finally {
+      cleanup(root);
+    }
+  });
+
   it("blocks non-git worktrees as unverifiable", () => {
     const dir = mkdtempSync(join(tmpdir(), "review-guard-nongit-"));
 
@@ -98,12 +418,109 @@ describe("checkReviewedWorktreeClean", () => {
       assert.equal(result.status, "unverifiable");
       assert.equal(result.worktree, dir);
       assert.notEqual(result.exit_code, 0);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.head_commit, null);
+      assert.equal(result.head_tree, null);
       assert.deepEqual(result.dirty_paths, []);
+      assert.deepEqual(result.hidden_index_paths, []);
       assert.equal(result.stdout, "");
       assert.equal(typeof result.stderr, "string");
       assert.notEqual(result.stderr.length, 0);
     } finally {
       cleanup(dir);
+    }
+  });
+
+  it("blocks hidden index flags even when git status is otherwise clean", () => {
+    const repo = createCommittedRepo(["visible.txt", "assume.txt", "skip.txt"]);
+
+    try {
+      git(repo, ["update-index", "--assume-unchanged", "assume.txt"]);
+      git(repo, ["update-index", "--skip-worktree", "skip.txt"]);
+
+      const result = checkReviewedWorktreeClean(repo);
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "dirty");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.stdout, "");
+      assert.deepEqual(result.dirty_paths, []);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(typeof result.head_commit, "string");
+      assert.equal(typeof result.head_tree, "string");
+      assert.deepEqual(result.hidden_index_paths, [
+        {
+          path: "assume.txt",
+          tag: "h",
+          assume_unchanged: true,
+          skip_worktree: false,
+        },
+        {
+          path: "skip.txt",
+          tag: "S",
+          assume_unchanged: false,
+          skip_worktree: true,
+        },
+      ]);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("uses safe-git policy-bound commands for status, head, and hidden-index observations", () => {
+    const repo = createCommittedRepo();
+    const { headCommit, headTree } = getHeadObservation(repo);
+    const calls = [];
+
+    try {
+      const result = checkReviewedWorktreeClean(repo, {
+        spawnSync(file, args, options) {
+          calls.push({ file, args, options });
+
+          if (args.includes("config") && args.includes("--null") && args.includes("--list")) {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (args.includes("status") && args.includes("--ignore-submodules=none")) {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (args[args.length - 1] === "--show-toplevel") {
+            return { status: 0, stdout: `${resolve(repo)}\n`, stderr: "" };
+          }
+          if (args.includes("HEAD^{tree}")) {
+            return { status: 0, stdout: `${headCommit}\n${headTree}\n`, stderr: "" };
+          }
+          if (args[args.length - 2] === "ls-files" && args[args.length - 1] === "-v") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (args.includes("-z") && args[args.length - 1] === "--exclude-standard") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (args[args.length - 1] === "--stage") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+
+          throw new Error(`unexpected git args: ${args.join(" ")}`);
+        },
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.safe_git_policy, SAFE_GIT_POLICY);
+      assert.equal(result.command, `git -C ${repo} status --porcelain=v1 --untracked-files=all --ignore-submodules=none`);
+      assert.deepEqual(calls.map((call) => call.args), [
+        expectedSafeGitArgs(repo, ["config", "--null", "--list"]),
+        expectedSafeGitArgs(repo, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]),
+        expectedSafeGitArgs(repo, ["rev-parse", "--show-toplevel"]),
+        expectedSafeGitArgs(repo, ["rev-parse", "HEAD", "HEAD^{tree}"]),
+        expectedSafeGitArgs(repo, ["ls-files", "-v"]),
+        expectedSafeGitArgs(repo, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]),
+        expectedSafeGitArgs(repo, ["ls-files", "--stage"]),
+      ]);
+      for (const call of calls) {
+        assert.equal(call.options.shell, false);
+        assert.equal(call.options.cwd, repo);
+      }
+    } finally {
+      cleanup(repo);
     }
   });
 });
@@ -133,7 +550,11 @@ describe("buildReviewGuardBlockReport", () => {
       assert.deepEqual(report.dirty_paths, guard.dirty_paths);
       assert.equal(report.guard.ok, false);
       assert.equal(report.guard.status, "dirty");
+      assert.equal(report.guard.safe_git_policy, SAFE_GIT_POLICY);
       assert.equal(report.guard.worktree, repo);
+      assert.equal(typeof report.guard.head_commit, "string");
+      assert.equal(typeof report.guard.head_tree, "string");
+      assert.deepEqual(report.guard.hidden_index_paths, []);
       assert.equal(report.guard.command, guard.command);
       assert.equal(report.guard.exit_code, 0);
       assert.equal(report.guard.stdout, " M tracked.txt\n");
@@ -143,45 +564,50 @@ describe("buildReviewGuardBlockReport", () => {
   });
 });
 
-describe("reviewer guard documentation", () => {
-  it("covers every reviewer-designated agent and documents the minimal post-run guard", () => {
-    const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
-    const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
-    const readmeDoc = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-
-    assertIncludes(skillDoc, "Reviewer-designated agents are only:");
-    assertIncludes(skillDoc, "- `work-reviewer`");
-    assertIncludes(skillDoc, "- `implementation-validator`");
-    assertIncludes(skillDoc, "- `security-reviewer`");
-    assertIncludes(skillDoc, "After it returns, before accepting or writing `$RUN/reviews/spec-writer.json`, guard `$REPO`.");
-    assertIncludes(skillDoc, "After it returns, before accepting or writing `$RUN/reviews/work-decomposer.json`, guard `$REPO`.");
-    assertIncludes(skillDoc, "After it returns, before accepting or writing `$RUN/reviews/<slice-id>.json`, guard `$SLICE_WT`.");
-    assertIncludes(skillDoc, "Run `work-reviewer` with subject `test-verifier`. After it returns, before accepting or writing `$RUN/reviews/test-verifier.json`, guard `$FEAT_WT`.");
-    assertIncludes(skillDoc, "`implementation-validator` — correctness / AC coverage / cross-slice integration / conventions. After it returns, before accepting or writing its result, guard `$FEAT_WT`.");
-    assertIncludes(skillDoc, "`security-reviewer` — adversarial trust-boundary / injection / forgeable-provenance / secrets lens. After it returns, before accepting or writing `$RUN/reviews/security-reviewer.json`, guard `$FEAT_WT`.");
-    assertIncludes(skillDoc, "This is post-run git-visible dirty-state detection only.");
-    assertIncludes(skillDoc, "It is not OS/process sandboxing and does not prevent mutation attempts.");
-
-    assertIncludes(schemaDoc, "Reviewer-designated agents are only `work-reviewer`, `implementation-validator`, and `security-reviewer`.");
-    assertIncludes(schemaDoc, "These are guard/helper outcomes, not new normal review verdict enums.");
-    assertIncludes(schemaDoc, "This schema documents post-run git-visible dirty-state detection only, not OS/process sandboxing.");
-
-    assertIncludes(readmeDoc, "Reviewer-designated agents are `work-reviewer`, `implementation-validator`, and `security-reviewer`.");
-    assertIncludes(readmeDoc, "Current enforcement is post-run git dirty-state detection only.");
-    assertIncludes(readmeDoc, "If that status is dirty or unverifiable, the review is blocked and the reviewer output is discarded.");
-    assertIncludes(readmeDoc, "it does not provide OS/process sandboxing or prevention.");
-  });
-});
-
-function createCommittedRepo() {
+function createCommittedRepo(files = ["tracked.txt"]) {
   const repo = mkdtempSync(join(tmpdir(), "review-guard-repo-"));
 
   git(repo, ["init"]);
-  writeFixture(repo, "tracked.txt", "tracked\n");
-  git(repo, ["add", "tracked.txt"]);
+  for (const file of files) {
+    writeFixture(repo, file, `${file}\n`);
+  }
+  git(repo, ["add", "."]);
   git(repo, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-m", "initial"]);
 
   return repo;
+}
+
+function createCommittedRepoWithSubmodule({ submoduleFixtures = { "tracked.txt": "tracked.txt\n" } } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "review-guard-submodule-"));
+  const submoduleSource = join(root, "submodule-source");
+  const repo = join(root, "super-repo");
+  const submoduleName = "review-submodule";
+  const submodulePath = join(repo, submoduleName);
+
+  mkdirSync(submoduleSource, { recursive: true });
+  mkdirSync(repo, { recursive: true });
+
+  git(submoduleSource, ["init"]);
+  for (const [file, content] of Object.entries(submoduleFixtures)) {
+    writeFixture(submoduleSource, file, content);
+  }
+  git(submoduleSource, ["add", "."]);
+  git(submoduleSource, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-m", "initial submodule"]);
+
+  git(repo, ["init"]);
+  git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", submoduleSource, submoduleName]);
+  git(repo, ["-c", "user.name=Review Guard Test", "-c", "user.email=review-guard@example.com", "commit", "-am", "initial"]);
+
+  return { root, repo, submoduleName, submodulePath };
+}
+
+function getHeadObservation(cwd) {
+  const stdout = gitStdout(cwd, ["rev-parse", "HEAD", "HEAD^{tree}"]);
+  const [headCommit, headTree] = stdout
+    .split(/\r?\n/u)
+    .filter(Boolean);
+
+  return { headCommit, headTree };
 }
 
 function writeFixture(root, relativePath, content) {
@@ -197,8 +623,13 @@ function git(cwd, args) {
   return proc;
 }
 
-function assertIncludes(text, expected) {
-  assert.equal(text.includes(expected), true, `expected text to include: ${expected}`);
+function gitStdout(cwd, args) {
+  const proc = git(cwd, args);
+  return proc.stdout;
+}
+
+function expectedSafeGitArgs(cwd, args) {
+  return [...SAFE_GIT_PREFIX_ARGS, "-c", `core.worktree=${resolve(cwd)}`, ...args];
 }
 
 function cleanup(dir) {

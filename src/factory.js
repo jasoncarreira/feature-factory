@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { assertHeartbeatOwnerCapability, hasInFlightHeartbeatWork, heartbeatOnce, withRunJsonLock } from "./run-state.js";
-import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunAuthority, validateRunDir, validateSlicesPlan } from "./validate.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -20,6 +20,8 @@ const HEARTBEAT_ACTIVE_STATUSES = new Set(["active", "running"]);
 const HEARTBEAT_TERMINAL_STATUSES = new Set(["stopped", "error"]);
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
 const HEARTBEAT_OWNER_ENV = "FEATURE_FACTORY_HEARTBEAT_OWNER";
+const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
+const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const activeHeartbeatLoops = new Map();
 
 export function startFactory(args, opts = {}) {
@@ -36,12 +38,13 @@ export function startFactory(args, opts = {}) {
 
 export function listRuns(opts = {}) {
   const root = factoryRoot(opts.cwd || process.cwd());
+  const repo = repoRoot(opts.cwd || process.cwd());
   if (!existsSync(root)) return [];
   return readdirSync(root)
     .map((runId) => {
       const file = join(root, runId, "run.json");
       if (!existsSync(file)) return null;
-      const run = tryReadRunFile(file);
+      const run = tryReadPublicRun(file, { ...opts, repoRoot: repo });
       if (run.error) {
         return {
           run_id: runId,
@@ -67,7 +70,7 @@ export function listRuns(opts = {}) {
 }
 
 export function status(runId, opts = {}) {
-  const run = loadRun(runId, opts);
+  const run = loadPublicRun(runId, opts);
   return {
     run_id: run.run_id,
     schema_version: run.schema_version || run.version || null,
@@ -116,6 +119,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     if (!hasInFlightHeartbeatWork(run)) {
       throw new Error(`run '${run.run_id}' has no in-flight factory work for heartbeat`);
     }
+    assertRunAuthorityValid(runDir, run);
 
     const current = tryReadHeartbeatFile(heartbeatFile);
     if (current.error) throw new Error(`invalid heartbeat lease at ${heartbeatFile}: ${current.error}`);
@@ -224,19 +228,18 @@ export async function stopHeartbeat(runId, config = {}, opts = {}) {
 }
 
 export function writeGateAnswer(runId, gate, answer, opts = {}) {
-  if (!gate) throw new Error("gate is required");
+  const gateName = requireSafeGateName(gate, "gate");
   if (!answer) throw new Error("answer is required: approve, changes: ..., or stop");
-  const runDir = resolveRunDir(runId, opts);
+  const runDir = resolveGateAnswerRunDir(runId, opts);
   const run = readRunFile(join(runDir, "run.json"));
   const pending = pendingGate(run);
-  if (pending && gate !== pending) throw new Error(`gate '${gate}' is not pending; current pending gate is '${pending}'`);
+  if (pending && gateName !== pending) throw new Error(`gate '${gateName}' is not pending; current pending gate is '${pending}'`);
   if (!pending) throw new Error("run has no pending gate");
-  const gatesDir = join(runDir, "gates");
-  if (!existsSync(gatesDir)) throw new Error(`missing gates directory: ${gatesDir}`);
+  const gatesDir = resolveGateAnswerGatesDir(runDir);
   const normalized = normalizeAnswer(answer);
-  const answerPath = join(gatesDir, `${gate}.answer`);
-  writeFileSync(answerPath, normalized + "\n");
-  return { run_id: runId, gate, answer: normalized, path: answerPath };
+  const answerPath = resolveGateAnswerPath(gatesDir, gateName);
+  writeGateAnswerFileAtomically(gatesDir, answerPath, normalized + "\n");
+  return { run_id: run.run_id, gate: gateName, answer: normalized, path: answerPath };
 }
 
 export function latestRunId(opts = {}) {
@@ -259,8 +262,9 @@ export function watchRun(runId, opts = {}) {
 }
 
 export function validateState(runId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
   const runDirs = runId ? [resolveRunDir(runId, opts)] : allRunDirs(opts);
-  const runs = runDirs.map((dir) => ({ run_dir: dir, ...validateRunDir(dir) }));
+  const runs = runDirs.map((dir) => ({ run_dir: dir, ...validateRunDir(dir, { ...opts, repoRoot: repo }) }));
   return { ok: runs.every((item) => item.ok), runs };
 }
 
@@ -274,6 +278,7 @@ export function cleanupRun(runId, opts = {}) {
   if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
     throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
   }
+  const cleanupAuthority = resolveCleanupAuthority(repo, runDir, run);
 
   const result = {
     run_id: run.run_id,
@@ -287,8 +292,8 @@ export function cleanupRun(runId, opts = {}) {
     run_dir: runDir,
   };
 
-  for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts);
-  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts, run.status);
+  for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts, cleanupAuthority);
+  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts, run.status, cleanupAuthority);
 
   if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
   result.removed_run_dir = !opts.dryRun;
@@ -303,7 +308,7 @@ function cleanupBranches(run) {
   return [...new Set([run.branch, ...(Array.isArray(run.slices) ? run.slices.map((slice) => slice?.branch) : [])].filter(Boolean))];
 }
 
-function removeWorktree(repo, worktree, result, opts) {
+function removeWorktree(repo, worktree, result, opts, authority = null) {
   const resolved = resolve(repo, worktree);
   if (!insideWorktreeRoot(repo, resolved)) {
     result.skipped_worktrees.push({ worktree, reason: "outside .opencode/worktrees" });
@@ -313,19 +318,30 @@ function removeWorktree(repo, worktree, result, opts) {
     result.skipped_worktrees.push({ worktree: resolved, reason: "missing" });
     return;
   }
+  const physicalWorktree = physicalPath(resolved);
+  const worktreePermission = resolveCleanupWorktreePermission(physicalWorktree, authority);
+  if (!worktreePermission.allowed) {
+    result.skipped_worktrees.push({ worktree: physicalWorktree, reason: worktreePermission.reason });
+    return;
+  }
   if (!opts.dryRun) {
-    const proc = spawnSync("git", ["worktree", "remove", "--force", resolved], { cwd: repo, encoding: "utf8" });
+    const proc = spawnSync("git", ["worktree", "remove", "--force", physicalWorktree], { cwd: repo, encoding: "utf8" });
     if (proc.status !== 0) {
-      result.skipped_worktrees.push({ worktree: resolved, reason: (proc.stderr || proc.stdout || "git worktree remove failed").trim() });
+      result.skipped_worktrees.push({ worktree: physicalWorktree, reason: (proc.stderr || proc.stdout || "git worktree remove failed").trim() });
       return;
     }
   }
-  result.removed_worktrees.push(resolved);
+  result.removed_worktrees.push(physicalWorktree);
 }
 
-function deleteBranch(repo, branch, result, opts, runStatus) {
+function deleteBranch(repo, branch, result, opts, runStatus, authority = null) {
   const name = String(branch).trim();
   if (!name) return;
+  const branchPermission = resolveCleanupBranchPermission(name, authority);
+  if (!branchPermission.allowed) {
+    result.skipped_branches.push({ branch: name, reason: branchPermission.reason });
+    return;
+  }
   const current = spawnSync("git", ["branch", "--show-current"], { cwd: repo, encoding: "utf8" }).stdout?.trim();
   if (current === name) {
     result.skipped_branches.push({ branch: name, reason: "current branch" });
@@ -342,7 +358,7 @@ function deleteBranch(repo, branch, result, opts, runStatus) {
     return;
   }
   if (!opts.dryRun) {
-    const proc = spawnSync("git", ["branch", deleteFlag, name], { cwd: repo, encoding: "utf8" });
+    const proc = spawnSync("git", ["branch", deleteFlag, "--", name], { cwd: repo, encoding: "utf8" });
     if (proc.status !== 0) {
       result.skipped_branches.push({ branch: name, reason: (proc.stderr || proc.stdout || "git branch delete failed").trim() });
       return;
@@ -376,6 +392,14 @@ function loadRun(runId, opts = {}) {
   return readRunFile(join(resolveRunDir(runId, opts), "run.json"));
 }
 
+function loadPublicRun(runId, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const run = readRunFile(join(runDir, "run.json"));
+  const authority = validateRunAuthority(runDir, run, { ...opts, repoRoot: repoRoot(opts.cwd || process.cwd()) });
+  if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
+  return run;
+}
+
 function readRunFile(file) {
   const run = JSON.parse(readFileSync(file, "utf8"));
   return validateRun(run);
@@ -389,15 +413,33 @@ function tryReadRunFile(file) {
   }
 }
 
+function tryReadPublicRun(file, opts = {}) {
+  try {
+    const runDir = dirname(file);
+    const run = readRunFile(file);
+    const authority = validateRunAuthority(runDir, run, opts);
+    if (!authority.ok) return { error: formatValidationChecks(authority.checks) };
+    return { value: run };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
 function resolveRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
   // Trusted operator escape hatch: callers may pass an explicit run directory.
-  const asPath = resolve(String(id));
+  const asPath = resolve(opts.cwd || process.cwd(), String(id));
   if (existsSync(join(asPath, "run.json"))) return asPath;
   const dir = join(factoryRoot(opts.cwd || process.cwd()), String(id));
   if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
   return dir;
+}
+
+function formatValidationChecks(checks) {
+  const errors = checks.flatMap((check) => Array.isArray(check?.errors) ? check.errors : []);
+  if (errors.length === 0) return "run validation failed";
+  return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
 }
 
 function resolveHeartbeatRunDir(runId, opts = {}) {
@@ -463,6 +505,88 @@ function normalizeAnswer(answer) {
   const text = String(answer).trim();
   if (text === "approve" || text === "stop" || text.startsWith("changes:")) return text;
   throw new Error("answer must be exactly approve, stop, or start with changes:");
+}
+
+function requireSafeGateName(value, label) {
+  if (!stringValue(value)) throw new Error(`${label} is required`);
+  const gateName = String(value).trim();
+  if (!SAFE_GATE_NAME_PATTERN.test(gateName)) {
+    throw new Error(`${label} must match safe gate name pattern [a-z0-9][a-z0-9_-]*[a-z0-9]`);
+  }
+  return gateName;
+}
+
+function resolveGateAnswerRunDir(runId, opts = {}) {
+  return resolveExistingDirectory(resolveRunDir(runId, opts), "run directory");
+}
+
+function resolveGateAnswerGatesDir(runDir) {
+  const gatesDir = resolveExistingDirectory(join(runDir, "gates"), "gates directory");
+  if (!insideDirectory(runDir, gatesDir)) {
+    throw new Error(`gates directory must stay inside ${runDir}`);
+  }
+  return gatesDir;
+}
+
+function resolveGateAnswerPath(gatesDir, gateName) {
+  const answerPath = resolve(gatesDir, `${gateName}.answer`);
+  if (existsSync(answerPath) && lstatSync(answerPath).isSymbolicLink()) {
+    throw new Error(`gate answer path must not be a symlink: ${answerPath}`);
+  }
+  if (!insideDirectory(gatesDir, answerPath)) {
+    throw new Error(`gate answer path must stay inside ${gatesDir}`);
+  }
+  return answerPath;
+}
+
+function writeGateAnswerFileAtomically(gatesDir, answerPath, contents) {
+  const temp = createGateAnswerTempFile(gatesDir);
+
+  try {
+    try {
+      writeFileSync(temp.fd, contents, "utf8");
+    } finally {
+      closeSync(temp.fd);
+    }
+    renameSync(temp.path, answerPath);
+  } finally {
+    if (existsSync(temp.path)) rmSync(temp.path, { force: true });
+  }
+}
+
+function createGateAnswerTempFile(gatesDir) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const tempPath = join(gatesDir, `.gate-answer-${process.pid}-${randomUUID()}.tmp`);
+    try {
+      return {
+        path: tempPath,
+        fd: openSync(tempPath, gateAnswerTempOpenFlags(), 0o600),
+      };
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        lastError = error;
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error(`unable to create temporary gate answer in ${gatesDir}`);
+}
+
+function gateAnswerTempOpenFlags() {
+  let flags = FS_CONSTANTS.O_WRONLY | FS_CONSTANTS.O_CREAT | FS_CONSTANTS.O_EXCL;
+  if (typeof FS_CONSTANTS.O_NOFOLLOW === "number") flags |= FS_CONSTANTS.O_NOFOLLOW;
+  return flags;
+}
+
+function resolveExistingDirectory(path, label) {
+  if (!existsSync(path)) throw new Error(`missing ${label}: ${path}`);
+  const physical = realpathSync.native(path);
+  if (!statSync(physical).isDirectory()) throw new Error(`${label} must be a directory: ${path}`);
+  return physical;
 }
 
 function normalizeHeartbeatRunId(runId) {
@@ -554,6 +678,10 @@ function normalizeGithubAccount(value) {
   return account;
 }
 
+function shouldSkipAuthorityForHeartbeatStart(opts = {}) {
+  return opts?.start === true && stringValue(opts.phase);
+}
+
 function resolveHeartbeatOwnerCapability(opts = {}, command = "heartbeat") {
   const ownerCapability = stringValue(opts.ownerCapability) ? opts.ownerCapability : process.env[HEARTBEAT_OWNER_ENV];
   if (!stringValue(ownerCapability)) {
@@ -625,6 +753,11 @@ async function heartbeatTick(runtime) {
     await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: `pending-gate-${protectedGate}` });
     return { continue: false, reason: "protected-gate-pending" };
   }
+  if (!hasInFlightHeartbeatWork(run)) {
+    await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: "no-in-flight-work" });
+    return { continue: false, reason: "no-in-flight-work" };
+  }
+  assertRunAuthorityValid(runtime.runDir, run);
 
   let result;
   try {
@@ -962,6 +1095,80 @@ function deferred() {
 
 function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function resolveCleanupAuthority(repo, runDir, run) {
+  const authority = validateRunAuthority(runDir, run, { repoRoot: repo });
+  const attestedBranches = new Set();
+  const attestedWorktrees = new Set();
+
+  if (authority.ok) {
+    for (const record of Object.values(authority.acceptedAttestations || {})) {
+      if (record?.attestation?.type === "run-base") {
+        if (stringValue(record.attestation.bindings?.feature_branch)) {
+          attestedBranches.add(record.attestation.bindings.feature_branch.trim());
+        }
+        if (stringValue(record.attestation.bindings?.feature_worktree)) {
+          attestedWorktrees.add(physicalPath(record.attestation.bindings.feature_worktree.trim()));
+        }
+      }
+      if (record?.attestation?.type === "slice-observation") {
+        if (stringValue(record.attestation.bindings?.branch)) {
+          attestedBranches.add(record.attestation.bindings.branch.trim());
+        }
+        if (stringValue(record.attestation.bindings?.worktree)) {
+          attestedWorktrees.add(physicalPath(record.attestation.bindings.worktree.trim()));
+        }
+      }
+    }
+  }
+
+  return {
+    ok: authority.ok,
+    runId: run.run_id,
+    attestedBranches,
+    attestedWorktrees,
+  };
+}
+
+function resolveCleanupBranchPermission(branch, authority) {
+  if (!isSafeCleanupBranchName(branch)) {
+    return { allowed: false, reason: "unsafe branch name" };
+  }
+  if (authority?.attestedBranches?.has(branch)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: "branch deletion requires accepted branch authority",
+  };
+}
+
+function resolveCleanupWorktreePermission(worktree, authority) {
+  if (authority?.attestedWorktrees?.has(physicalPath(worktree))) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: "worktree removal requires accepted worktree authority",
+  };
+}
+
+function isSafeCleanupBranchName(branch) {
+  return SAFE_BRANCH_NAME_PATTERN.test(branch)
+    && !branch.startsWith("refs/")
+    && !branch.endsWith("/")
+    && !branch.endsWith(".lock")
+    && !branch.includes("..")
+    && !branch.includes("//")
+    && !branch.includes("@{")
+    && !/[\\~^:?*\[\]\s]/u.test(branch);
+}
+
+function assertRunAuthorityValid(runDir, run) {
+  const authority = validateRunAuthority(runDir, run);
+  if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
+  return authority;
 }
 
 function sleep(ms) {

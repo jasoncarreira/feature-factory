@@ -12,6 +12,14 @@ Two principles make this a durable factory rather than a freeform session:
 - State lives in files. Every run has a control plane at `$REPO/.opencode/factory/<run-id>/`: manifest, gates, plan, artifacts, observed evidence, and reviews. A dead session or next-day return resumes from `run.json`.
 - Observe, do not trust. A subagent report is a claim. Before accepting build or test work, re-derive the diff and run the named checks yourself. Write observed evidence, then have `work-reviewer` judge that evidence.
 
+For provenance-sensitive state, use this authority ladder:
+
+- `untrusted caller claims`: prompts, gate answers, builder/reviewer text, `run.json`, `evidence/*`, `reviews/*`, worktree path strings, status booleans, `base_ref`, and `base_commit`.
+- `orchestrator observations`: fresh safe Git/filesystem observations, physical durable-root containment, worktree identity, commit/tree/parent relationships, file hashes, and reviewed-worktree guard results.
+- `factory-owned attestations`: records written only after the current observations and re-checks pass.
+
+`run.json` and gate/review/evidence files are bookkeeping or claim inputs, not proof. Gates, merges, validator/security pass, and PR readiness must not trust status booleans alone.
+
 ## Agents
 
 Invoke subagents with the Task tool using `subagent_type` equal to the agent name:
@@ -30,6 +38,19 @@ Invoke subagents with the Task tool using `subagent_type` equal to the agent nam
 - `security-reviewer`
 
 Pass prior structured outputs in each prompt. Subagents do not share memory; you are the bus between them.
+
+## Provenance authority contract
+
+Create and maintain `$RUN/attestations/` alongside the manifest, evidence, and review files. The orchestrator is the only writer for factory-owned attestations.
+
+Rules:
+
+- All provenance-sensitive Git observations and reviewed-worktree guards must use the centralized safe Git policy (`safe_git_policy: "safe-git-v1"`) or equivalent `safeGit()` semantics.
+- Re-derive physical worktree identity and durable-root containment before writing or accepting attestations.
+- Treat `run.json`, `reviews/*.json`, `evidence/*.json`, `factory.lock`, worktree strings, `base_ref`, `base_commit`, and status booleans as claims only.
+- If safe Git, worktree identity, durable-root containment, attestation hashes, or referenced file hashes cannot be re-proved, fail closed.
+- Reviewer approval attestations are written only after the reviewed-worktree guard returns `clean`.
+- Merge provenance is accepted only from the attested first-parent chain, not from `merged` or `approved` flags alone.
 
 ## Reviewer read-only guard
 
@@ -150,8 +171,11 @@ Create `$RUN=$REPO/.opencode/factory/<run-id>` with:
 - `plan/`
 - `evidence/`
 - `reviews/`
+- `attestations/`
 
 Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`. Write `run.json` atomically after every state change. Include `schema_version`, persist the selected review tier at top-level `run.json.review_tier`, persist non-empty `driver.github_account` at top-level `run.json.github_account`, and refresh `heartbeat_at` whenever you make progress.
+
+At run creation, initialize `attestations/index.json`. When the run's feature branch/worktree is first materialized, re-observe the branch, worktree identity, base commit, and base tree through safe Git/filesystem checks and write the sequence-1 run-base attestation. Resume paths validate existing attestations instead of blindly rewriting them.
 
 One-writer rule:
 
@@ -203,6 +227,10 @@ stop
 ```
 
 On `approve`, set the gate to `approved`, copy the answer into `run.json`, set `answered_at`, and use only an allowed semantic `approval_source`: `external-driver`, `human`, `autonomous`, or `override`. Do not put the answer file path in `approval_source`. On `changes`, rerun the relevant producing step with the feedback and re-present the gate. On `stop`, set status `needs-human` or `blocked` with the reason.
+
+After every gate decision, hash the question/artifact/answer material and write `attestations/gates/<gate>.json`, updating `attestations/index.json` and the `prev_hash` chain. A gate marked `approved` in `run.json` is bookkeeping, not proof; later validators and gates must not trust status booleans alone.
+
+In gate-decision attestations, `question_ref` and `answer_ref` stay under `gates/`, while `artifact_ref` stays under `artifacts/`. Do not write gate question or answer refs under `artifacts/`.
 
 ## Autonomous Mode
 
@@ -328,6 +356,8 @@ git -C "$REPO" worktree add -b "$BRANCH" "$FEAT_WT" "origin/$BASE"
 
 If the branch/worktree already exists on resume, reuse it. Record `branch`, `base_ref`, and `worktree` in `run.json`. Keep the caller's checkout untouched. Do not `cd`; use `git -C` and absolute paths.
 
+Before treating the feature branch as authoritative, re-observe `repo_root`, `run_dir`, `git_common_dir`, feature branch/worktree identity, `base_ref`, `base_commit`, and `base_tree` through safe Git/filesystem checks and ensure the run-base attestation is present and accepted.
+
 If a fresh worktree needs shared dependencies, generated hooks, or package caches, link or install them only after verifying repo conventions. Record any setup in evidence or notes.
 
 ### Wave Scheduling
@@ -366,12 +396,15 @@ When a builder returns, re-derive evidence yourself in the slice worktree:
 
 Write `$RUN/evidence/<slice-id>.json`. Reconcile the builder's claim block against observed evidence. `review_ready` requires non-empty observed diff, diff observed successfully, and tests observed passing or explicitly skipped with a reason.
 
+After safe Git re-derives the diff, commit, tree, evidence hash, and physical slice worktree identity, write `attestations/slices/<slice-id>.observation.json` and append it to `attestations/index.json`.
+
 ### Review Each Slice
 
 Run `work-reviewer` with subject `<slice-id>`, the builder output, observed evidence, slice spec, technical brief, story, and relevant repo rules.
 
 - After it returns, before accepting or writing `$RUN/reviews/<slice-id>.json`, guard `$SLICE_WT`.
 - If the guard is dirty or unverifiable, discard the reviewer output, write a guard-block report to `$RUN/reviews/<slice-id>.json`, mark the slice `blocked`, record the blocker reason, and stop dispatching dependents. Do not auto-revert.
+- If the guard is clean and the review verdict is accepted, hash the review output, evidence, subject commit/tree, and clean guard result, then write `attestations/reviews/<slice-id>.approval.json` before treating the slice as approved.
 
 - APPROVE -> mark slice ready to merge.
 - REJECT -> route required fixes back to the same builder in the same slice worktree, re-observe, and re-review.
@@ -391,6 +424,8 @@ Record `merge_commit`, mark slice `merged`, refresh heartbeat, and clean up succ
 git -C "$REPO" worktree remove "$SLICE_WT" --force
 git -C "$REPO" branch -D "$SLICE_BRANCH"
 ```
+
+After each merge, re-observe `head_commit`, `head_tree`, parents, and first-parent order through safe Git, then update `attestations/merge-chain.json`. Every first-parent commit after `base_commit` needs exactly one proof entry: `slice_merge` or `direct_reviewed_commit`. Missing proof, parent mismatches, or unverifiable `git merge-tree --write-tree` output fail closed.
 
 If a merge conflict occurs, mark the slice `blocked`, leave the worktree for inspection, and surface it as a decomposition/coordination bug. Do not silently resolve conflicts.
 
@@ -416,6 +451,8 @@ Combine the panel by STRICTEST verdict — this IS the Gate 3 verdict:
 - Both clear (GO + PASS) -> GO, or GO-WITH-NITS if only MAJOR/NONBLOCKING findings remain.
 
 On NO-GO -> route the top finding to the owning builder via a new fix slice worktree or, for test-only issues, a controlled integration-branch fix. Re-observe and re-run the PANEL up to `max_retries`.
+
+If a test-only or remediation fix lands directly on `$FEAT_WT` instead of through a slice merge, treat it as a controlled direct-reviewed-commit event. Re-observe the exact parent, commit, tree, and canonical diff hash through safe Git; require a clean reviewed-worktree guard; write `attestations/direct-commits/<entry-id>.observation.json` plus the matching review-approval attestation; then append a `direct_reviewed_commit` entry to `attestations/merge-chain.json`.
 
 ## Gate 3 - Pre-PR
 
@@ -489,6 +526,7 @@ Scripted runs still use the same gates, evidence, reviews, and PR approval flow.
 - Never mutate the caller's checkout for implementation.
 - Accept build/test work only on observed evidence plus `work-reviewer` APPROVE.
 - Accept reviewer-designated outputs only after the reviewed-worktree guard returns clean.
+- Do not trust gate, review, validator, security, merge, or PR status booleans alone; provenance-sensitive decisions require accepted attestations plus fresh observations.
 - Subagents do not push, open PRs, or edit external systems.
 - Bounded loops: `max_retries = 3` per reviewed subject/slice.
 - Draft PR only. Humans review and merge.
