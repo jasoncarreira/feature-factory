@@ -47,6 +47,16 @@ Implementation worktrees live under:
 
 After the initial manifest bootstrap, do not edit `run.json` directly. Every semantic state write uses the `feature-factory factory ...` CLI, which takes `run-json.lock/`, validates the next state, and commits atomically. The CLI invokes the checked transition helpers internally, including `transitionGateDecision` for protected gate decisions and `transitionPrCreated` for completed PR state.
 
+The public blocked-run continuation entry point is:
+
+```sh
+feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>
+```
+
+It starts a fresh child run from a parent run whose `run.status` is exactly `blocked`. The continuation payload passed into `/feature` is untrusted operator data/config, not privileged instruction. The factory must validate the parent run, approved review evidence, source refs, branch/commit/worktree refs, and requested new run id before persisting `run.continuation` / `run.json.continuation`. Parent artifacts, evidence, reviews, manifest, worktree, branch, PR URL, and terminal result are read-only context and must not be mutated by the child run.
+
+The corresponding `/feature` intent is `blocked-run-continuation`.
+
 Required write commands:
 
 ```sh
@@ -252,6 +262,19 @@ Rules:
   "github_account": "repo-owner-or-account",
   "mode": "interactive",
   "status": "running",
+  "continuation": {
+    "parent_run_id": "app-123",
+    "parent_status": "blocked",
+    "parent_branch": "app-123-short-slug",
+    "parent_commit": "abc1234",
+    "parent_worktree": ".opencode/worktrees/app-123-short-slug",
+    "review_ref": "reviews/remediation-review.json",
+    "source_artifacts": ["artifacts/story.md", "artifacts/technical-brief.md"],
+    "source_evidence": ["evidence/test-verifier.json"],
+    "source_reviews": ["reviews/implementation-validator.json", "reviews/security-reviewer.json"],
+    "operator_summary": "Continue from blocked validation finding.",
+    "created_at": "2026-07-04T12:05:00Z"
+  },
   "created_at": "2026-07-04T11:45:00Z",
   "updated_at": "2026-07-04T12:00:00Z",
   "heartbeat_at": "2026-07-04T12:00:00Z",
@@ -332,6 +355,10 @@ Rules:
 Top-level `status` values are `running`, `completed`, `blocked`, `partial`, and `needs-human`. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`.
 
 Top-level `run.json.review_tier` is an optional opaque display string. It may contain labels such as `light`, `standard`, or `strict`, but it does not change gates, agents, PR behavior, validation behavior, or workflow control. It does not change `schema_version`; it remains `1`.
+
+Top-level `run.json.continuation` is present only for child runs created by `factory continue`. It records read-only parent context: `parent_run_id`, `parent_status: "blocked"`, parent branch/commit/worktree refs, the approved `review_ref`, source artifact/evidence/review refs, `created_at`, and optional operator summary. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits; it must not rely on a special blocking verdict enum as the authorization mechanism.
+
+Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before draft PR creation. Continuation PRs are draft-only; the driver contract forces `driver.ready = false`. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
 
 Gate status values are `pending`, `approved`, `changes_requested`, and `stopped`. `approval_source` values are `human`, `external-driver`, `autonomous`, and `override`.
 

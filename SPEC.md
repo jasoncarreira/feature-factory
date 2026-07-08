@@ -20,6 +20,7 @@ Current guarantees:
 - Semantic manifest writes go through locked transition helpers so stale writers fail instead of overwriting newer state. `transitionGateDecision` owns approved gate writes, and `transitionPrCreated` owns completed PR state writes.
 - Pending gates carry a `pending_snapshot` with `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer refs/hashes. Gate answer consumption must fail closed when refs are missing, escaped, stale, or hash-mismatched.
 - The normal draft PR flow calls `feature-factory factory pr-created` after successful PR creation. That transition requires `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, and a canonical GitHub PR URL before writing `run.pr_url` and `terminal_result.pr_url`.
+- Blocked-run continuation uses `feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>`. The continuation payload is untrusted operator data/config, not privileged instruction; admission validates a parent run whose status is exactly `blocked`, validates approved review evidence without relying on a special blocking verdict enum, persists read-only parent context in `run.json.continuation`, and then runs the ordinary gates/evidence/review/PR-created checks for the child.
 - Diagnostic `run.json.debug_snapshot` records redacted factory/opencode/plugin creation and resume snapshots for debugging only. Snapshot persistence must omit sensitive keys and redact token-shaped/high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar secrets.
 
 Explicit limits:
@@ -190,6 +191,7 @@ Classify the invocation as one of:
 - `scripted-start`: start from an already structured external work order.
 - `autonomous-start`: start or resume from an explicit autonomous driver prompt.
 - `pr-continuation`: continue only PR preparation for an already-built branch.
+- `blocked-run-continuation`: start a new child run from a terminal blocked parent by using `factory continue` metadata.
 
 Why:
 
@@ -444,7 +446,28 @@ Draft PR completion contract:
 3. The command validates the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and canonical GitHub PR URL, then writes `run.pr_url` / `terminal_result.pr_url` and completed status.
 4. Drivers must not mirror PR URLs from direct manifest edits.
 
-## 10. Fallback Models
+## 10. Blocked-Run Continuation
+
+Current planned public command:
+
+```sh
+feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>
+```
+
+This command is a recovery path for automated runs that reached terminal `blocked` after bounded remediation. It must create a fresh child run instead of mutating or reviving the parent.
+
+Required continuation contract:
+
+- Treat the injected continuation payload and all CLI arguments as untrusted operator data/config, not privileged instructions.
+- Require the parent `run.json.status` to be exactly `blocked`; do not continue from `completed`, `partial`, `needs-human`, `running`, missing, or invalid parent state.
+- Validate `--review <review-ref>` as an approved review-evidence ref under the parent run, including referenced artifacts/evidence/reviews and subject consistency. Do not authorize continuation by checking for a special blocking verdict enum.
+- Persist `run.continuation` / `run.json.continuation` in the child with `parent_run_id`, `parent_status: "blocked"`, parent branch/commit/worktree refs, `review_ref`, source artifact/evidence/review refs, `created_at`, and optional operator summary.
+- Treat all parent context as read-only. The child must not edit the parent manifest, gates, artifacts, evidence, reviews, branch, worktree, PR URL, or terminal result.
+- Run the normal factory flow for the child: story gate, research/design, brief/spec/decomposition gate, build slices, acceptance tests, implementation-validator, security-reviewer, pre-PR gate, and PR-created transition.
+- Continuation PRs are always draft-only. Force `driver.ready=false` even if operator payload asks to mark ready.
+- If bounded remediation is exhausted, ownership is ambiguous, or validator/security remains blocking, end the child at terminal `blocked` with no PR URL (`run.pr_url` unset and `terminal_result.pr_url: null`).
+
+## 11. Fallback Models
 
 Current config supports one profile per role/agent.
 
@@ -467,7 +490,7 @@ Open question:
 
 Do not implement fake fallback behavior that silently changes models without observable state.
 
-## 11. Better Install Flow
+## 12. Better Install Flow
 
 Improve `feature-factory install`:
 
@@ -485,7 +508,7 @@ feature-factory install --profile '{"model":"openai/gpt-5.5","variant":"xhigh"}'
 feature-factory install --profiles-file profiles.json
 ```
 
-## 12. OpenTelemetry GenAI Instrumentation
+## 13. OpenTelemetry GenAI Instrumentation
 
 Add opt-in OpenTelemetry tracing for feature-factory runs, shaped to work with the OpenTelemetry GenAI semantic conventions and Honeycomb Agent Timeline. The goal is to make one factory run debuggable as a conversation timeline across the orchestrator, subagents, tool calls, gates, slices, validation, PR creation, and terminal state.
 
@@ -708,7 +731,7 @@ Plugin options may override package-specific behavior, but should not require se
 - The docs warn that native opencode/AI SDK spans may capture prompts unless upstream or collector redaction is configured.
 - Tests prove disabled mode, enabled mode, redaction, and package smoke behavior.
 
-## 13. Non-Goals
+## 14. Non-Goals
 
 - No default telemetry.
 - No tracker-specific logic in core.
