@@ -20,6 +20,8 @@ For provenance-sensitive state, use this authority ladder:
 
 `run.json` and gate/review/evidence files are bookkeeping or claim inputs, not proof. Gates, merges, validator/security pass, and PR readiness must not trust status booleans alone.
 
+Diagnostic provenance is different from authority provenance. `run.json.factory_provenance` records redacted, diagnostic-only snapshots of the factory/opencode/plugin environment at run creation and resume. It is useful for debugging version/model/capability skew, but it is never proof for gates, reviews, merges, or PR URLs. The snapshot redactor must omit sensitive keys and replace token-shaped or high-entropy credential values with `[redacted]`, including `ghp_*`, `github_pat_*`, `gho_*`/`ghu_*`/`ghs_*`/`ghr_*`, `sk-proj_*`, `sk-*`, `xoxb_*`/`xoxp_*`/`xoxa_*`, `glpat-*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and single-token high-entropy strings. Do not persist raw API keys, OAuth tokens, PATs, bearer headers, or credential URLs in `factory_provenance`, evidence, reviews, or logs.
+
 ## Agents
 
 Invoke subagents with the Task tool using `subagent_type` equal to the agent name:
@@ -183,7 +185,8 @@ Transition contract:
 - `transitionRunStep` and `transitionRunSlice` seed/update `steps[]` and `slices[]` by stable identity (`agent` / `id`) so resumed runs do not depend on hand-maintained array positions.
 - `transitionTerminalResult` keeps top-level `run.json.status` and `run.json.terminal_result` consistent and rewrites `terminal_result.run_id` to the durable run id.
 - `transitionGateDecision` is the only approved-gate writer. The CLI exposes it through `feature-factory factory gate-decision <run-id> <gate> <status> ...` for scripted harnesses. For `status: approved`, it must write and validate `attestations/gates/<gate>.json` plus the updated accepted `attestations/index.json` chain before the approved gate state becomes durable; if later validation fails, roll back the staged gate attestation/index files and leave `run.json` unchanged.
-- `mutateRunJsonLocked` remains compatibility-only when `attestations/index.json` is absent and the current/next state has no provenance-sensitive claims. It must fail closed for approved gates, review-approved or merged slices, passing validator/security verdicts, and run-base fields without accepted attestations. PR URLs remain terminal bookkeeping until a dedicated PR-created attestation type exists.
+- `transitionPrCreated` is the only trusted PR-created terminal writer. The CLI exposes it through `feature-factory factory pr-created <run-id> ...`. It stages and validates `attestations/pr-created.json` plus `attestations/index.json` before writing `run.pr_url`, `status: completed`, or `terminal_result.pr_url`; if validation fails, it rolls back staged PR attestation/index files and leaves `run.json` unchanged.
+- `mutateRunJsonLocked` remains compatibility-only when `attestations/index.json` is absent and the current/next state has no provenance-sensitive claims. It must fail closed for approved gates, review-approved or merged slices, passing validator/security verdicts, run-base fields, and PR URL claims without accepted attestations.
 
 At run creation, create `attestations/` but do not create placeholder/empty `attestations/index.json`. Create `attestations/index.json` only with the first accepted attestation and non-empty entries. The first accepted attestation must be the sequence-1 `attestations/run-base.json`; gate decisions cannot bootstrap the accepted graph before run-base exists. New runs materialize the feature branch/worktree during Step 0 before Gate 1, then re-observe the branch, worktree identity, base commit, and base tree through safe Git/filesystem checks and write that run-base attestation. Resume paths validate existing attestations instead of blindly rewriting them.
 
@@ -226,6 +229,8 @@ For every gate:
 
 1. Write a human-readable question file, e.g. `gates/story.question.md`.
 2. Mark the gate `pending` in `run.json` with `question_ref` and `answer_ref`.
+   - Pending gates must carry `pending_snapshot` with `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, `created_at`, and `answer_ref`/`answer_hash` when an answer target exists.
+   - Gate answer consumption is fail closed: before accepting any external answer, re-read the current question/artifact/answer refs and hashes and reject missing, escaped, stale, or mismatched material.
 3. If `gates/<gate>.answer` already exists, consume it and record `approval_source: external-driver` for approved answers.
 4. Otherwise, in interactive mode ask the user in chat, write their response to the answer file, and record `approval_source: human` for approved answers.
 5. In scripted mode, stop after writing the pending gate. An external driver can write the answer file and reinvoke `/feature resume <run-id>`.
@@ -279,9 +284,21 @@ Establish the run:
 - Determine `BASE` from the repo default branch (usually `main`), `BRANCH=<run-id>-<short-slug>`, and `FEAT_WT=$REPO/.opencode/worktrees/$BRANCH`.
 - Fetch `origin/$BASE` and create the feature branch/worktree immediately: `git -C "$REPO" worktree add -b "$BRANCH" "$FEAT_WT" "origin/$BASE"`. If it already exists on resume, reuse it only after validating identity.
 - Before Gate 1 or any approved gate decision, re-observe `repo_root`, `run_dir`, `git_common_dir`, feature branch/worktree identity, `base_ref`, `base_commit`, and `base_tree` through safe Git/filesystem checks. Write `attestations/run-base.json`, create non-empty `attestations/index.json`, and treat that accepted run-base as the graph root.
-- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `base_ref`, `branch`, `worktree`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, top-level `github_account` when provided by the driver, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
+- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `base_ref`, `branch`, `worktree`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, top-level `github_account` when provided by the driver, redacted diagnostic `factory_provenance`, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
 - Initialize `$RUN/factory.lock` with `schema_version`, `run_id`, and a trusted heartbeat owner capability used only by the factory lifecycle.
 - If `run.json` exists, this is a resume. Read it, backfill top-level `review_tier` before the next non-status state mutation when it is missing, and continue from the first incomplete point. Never redo side effects that `run.json` shows already happened.
+
+After the initial manifest exists, record creation diagnostics with:
+
+```sh
+feature-factory factory provenance record-created <run-id> --json
+```
+
+On resume paths that will mutate state, refresh only the redacted diagnostic resume snapshot with:
+
+```sh
+feature-factory factory provenance record-resume <run-id> --json
+```
 
 The caller checkout is only the launcher/control-plane location. All code-reading, planning, spec/decomposition review guards, implementation, test, validation, and PR work uses the clean `$FEAT_WT` created here so uncommitted caller-checkout edits do not block factory runs.
 
@@ -496,7 +513,24 @@ After Gate 3 approval only:
 4. Build PR metadata from repo conventions and changed paths.
 5. Write PR body to `$RUN/artifacts/pr-body.md`.
 6. Create a draft PR with the repository's CLI conventions, preferably `gh pr create --draft --body-file`.
-7. Record `pr_url` in `run.json` and set `status: completed`.
+7. Immediately after successful draft PR creation, call the provenanced PR-created transition. Do not directly edit or persist `run.json.pr_url` yourself:
+   ```sh
+   feature-factory factory pr-created <run-id> \
+     --pr-url <url> \
+     --pr-number <number> \
+     --pr-body-ref artifacts/pr-body.md \
+     --provider github \
+     --repository <owner/repo> \
+     --remote origin \
+     --github-account <account> \
+     --head-branch <branch> \
+     --head-commit <sha> \
+     --base-ref <base-ref> \
+     --base-commit <sha> \
+     --draft \
+     --json
+   ```
+   The helper writes `attestations/pr-created.json`, appends the accepted `pr-created` entry to `attestations/index.json`, validates the remote observation, PR body hash, run-base, merge-chain, pre-PR gate, local HEAD/base bindings, and only then writes trusted `run.pr_url`, `status: completed`, and `terminal_result.pr_url`. Without the accepted `pr-created` attestation, PR URL claims fail closed.
 
 Never merge the PR. Never force-push unless the user explicitly approves.
 
@@ -525,7 +559,7 @@ On `/feature resume <run-id>` or a run with existing `run.json`, continue from t
 - Running/review slice -> re-observe and re-review before rebuilding.
 - Pending slice -> wait on dependencies, then dispatch in the next eligible wave.
 - Blocked slice -> surface for decision.
-- Existing PR URL -> do not recreate PR.
+- Existing PR URL -> verify it matches the latest accepted `pr-created` attestation before treating it as trusted; if the attestation is missing or mismatched, fail closed instead of recreating or trusting the claim.
 
 Never redo side effects that the manifest shows already happened.
 

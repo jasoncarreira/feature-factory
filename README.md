@@ -20,6 +20,12 @@ The factory uses three authority layers:
 
 Accepted provenance requires `attestations/index.json`, canonical `attestation_hash` values, an unbroken `prev_hash` chain from `run-base`, and fresh re-observation of current Git/filesystem facts. Merge history is proven by `merge-chain.json` entries of type `slice_merge` or `direct_reviewed_commit`, not by `merged` / `approved` booleans alone.
 
+`run.json.factory_provenance` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
+
+Pending gates include `pending_snapshot` entries for `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer material. Gate answer consumption fails closed if current refs are missing, escaped, stale, or hash-mismatched.
+
+PR URLs become trusted only through the provenanced `pr-created` flow. After a draft PR is created, the factory records `attestations/pr-created.json` with `feature-factory factory pr-created ...`; `run.pr_url` and `terminal_result.pr_url` must match that accepted attestation.
+
 Guarantees:
 
 - bounded local authority with centralized safe Git (`safe_git_policy: "safe-git-v1"`);
@@ -280,6 +286,9 @@ feature-factory factory watch <run-id>
 feature-factory factory watch --all
 feature-factory factory validate <run-id>
 feature-factory factory provenance
+feature-factory factory provenance record-created <run-id> --json
+feature-factory factory provenance record-resume <run-id> --json
+feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref artifacts/pr-body.md --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA --draft --json
 ```
 
 `factory status`, `factory answer`, and `factory validate` apply code-level schema validation to `run.json`; `factory validate` also validates `plan/slices.json` when present. Invalid runs appear as `invalid` in `factory list` instead of crashing the whole list.
@@ -295,7 +304,39 @@ Cleanup removes `.opencode/factory/<run-id>`, recorded worktrees under `.opencod
 
 When opencode is running in the TUI on a session route, the sidebar also shows a `Feature Factory` panel for runs found under `.opencode/factory/*/run.json` in the current session directory or any nested repo below it. It lists active runs across those repos, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden except for the most recent completed run.
 
-For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url`.
+For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records trusted `pr_url` only after the `pr-created` attestation validates.
+
+### Provenance and draft PR recording
+
+The factory records diagnostic substrate provenance explicitly:
+
+```sh
+feature-factory factory provenance record-created <run-id> --json
+feature-factory factory provenance record-resume <run-id> --json
+```
+
+These commands update `run.json.factory_provenance.created_with`, `last_resumed_with`, and `resume_count` using redacted snapshots. They must not persist raw token-shaped or high-entropy credentials.
+
+After Gate 3 and successful draft PR creation, the normal flow is to record the PR through the attested transition instead of editing the manifest directly:
+
+```sh
+feature-factory factory pr-created <run-id> \
+  --pr-url URL \
+  --pr-number N \
+  --pr-body-ref artifacts/pr-body.md \
+  --provider github \
+  --repository OWNER/REPO \
+  --remote origin \
+  --github-account ACCOUNT \
+  --head-branch BRANCH \
+  --head-commit SHA \
+  --base-ref REF \
+  --base-commit SHA \
+  --draft \
+  --json
+```
+
+The command writes and validates `attestations/pr-created.json` plus `attestations/index.json` first. Only then can `run.pr_url`, `status: completed`, and `terminal_result.pr_url` be trusted. Missing or mismatched PR-created authority fails closed.
 
 ## Heartbeat helper and monitoring
 
@@ -327,7 +368,7 @@ The factory writes:
 
 - `.opencode/factory/<run-id>/run.json`
 - `.opencode/factory/<run-id>/gates/<gate>.question.md`
-- artifacts, plan, evidence, and review files
+- artifacts, plan, evidence, review files, gate `pending_snapshot` state, and accepted attestations
 
 External drivers write only:
 

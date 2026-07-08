@@ -20,6 +20,12 @@ Current provenance guarantees assume three authority layers:
 
 Accepted provenance requires `attestations/index.json`, canonical `attestation_hash`, an unbroken `prev_hash` chain from `run-base`, and fresh re-observation of current Git/filesystem facts. Merge history is proven by `merge-chain.json` entries of type `slice_merge` or `direct_reviewed_commit`, not by `merged`/`approved` flags alone.
 
+Diagnostic `run.json.factory_provenance` is not authority. It records redacted factory/opencode/plugin creation and resume snapshots for debugging only. Snapshot persistence must omit sensitive keys and redact token-shaped/high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar secrets.
+
+Pending gates carry a `pending_snapshot` with `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer refs/hashes. Gate answer consumption must fail closed when refs are missing, escaped, stale, or hash-mismatched.
+
+PR URL claims require a dedicated `pr-created` attestation. The normal draft PR flow calls `feature-factory factory pr-created` after successful PR creation; `run.pr_url` and `terminal_result.pr_url` are trusted only when they match the latest accepted `attestations/pr-created.json` binding.
+
 Expected guarantees:
 
 - bounded local authority with centralized safe Git (`safe_git_policy: "safe-git-v1"`);
@@ -309,7 +315,7 @@ Do this after there is enough code to justify the split. Premature layering is a
 
 Add a provenance block to `run.json` and relevant evidence records.
 
-Implementation status: helper implemented as `collectProvenance()` and exposed through `feature-factory factory provenance`. It is not yet written into `run.json` by the orchestrator.
+Implementation status: helper implemented as `collectProvenance()` and exposed through `feature-factory factory provenance`. Run creation/resume recording is exposed as `feature-factory factory provenance record-created <run-id> --json` and `feature-factory factory provenance record-resume <run-id> --json`, storing redacted diagnostic snapshots under `run.json.factory_provenance`.
 
 Why:
 
@@ -344,11 +350,35 @@ Suggested shape:
 }
 ```
 
+Implemented `run.json.factory_provenance` shape:
+
+```json
+{
+  "factory_provenance": {
+    "created_with": {
+      "collected_at": "2026-07-06T12:00:00Z",
+      "event": "created",
+      "diagnostic_only": true,
+      "provenance": {
+        "feature_factory_version": "0.1.0",
+        "opencode_version": "1.17.13",
+        "resolved_models": {},
+        "capabilities": {"git": true, "gh": true}
+      }
+    },
+    "last_resumed_with": null,
+    "resume_count": 0
+  }
+}
+```
+
 Rules:
 
 - Do not record secret values.
+- Omit sensitive keys and redact token-shaped or high-entropy credential values, including `ghp_*`, `github_pat_*`, `gho_*`/`ghu_*`/`ghs_*`/`ghr_*`, `sk-proj_*`, `sk-*`, `xoxb_*`/`xoxp_*`/`xoxa_*`, `glpat-*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and single-token high-entropy strings.
 - Record provider/model ids, not API keys.
 - Refresh provenance on resume if the driver/opencode/plugin version changed, while preserving original `created_with` if useful.
+- Treat `factory_provenance` as diagnostic-only. It must never be used as authority for gates, merges, reviews, or PR URL trust.
 
 ## 8. Scripted Environment And Credential Contract
 
@@ -403,6 +433,13 @@ Autonomous adapter contract:
 4. Mirror only stable terminal fields (`status`, `pr_url`, `reason`, summary/artifact refs) to the external tracker.
 
 External autonomous drivers should not parse gate internals or write answer files.
+
+Draft PR completion contract:
+
+1. Gate 3 must be approved through the same provenance-gated path as interactive runs.
+2. After `gh pr create --draft` or equivalent succeeds, call `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref artifacts/pr-body.md --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA --draft --json`.
+3. The command writes `attestations/pr-created.json`, appends it to `attestations/index.json`, validates run-base, merge-chain, pre-PR gate, PR body, local HEAD/base, and remote observation bindings, then writes trusted `run.pr_url` / `terminal_result.pr_url` and completed status.
+4. Missing or mismatched `pr-created` authority fails closed; drivers must not mirror PR URLs from direct manifest edits.
 
 ## 10. Fallback Models
 

@@ -5,8 +5,10 @@ import { HEARTBEAT_PHASES, TERMINAL_RUN_STATUSES } from "../src/validate.js";
 
 const SKILL = readDoc("../assets/skills/feature/SKILL.md");
 const SCHEMA = readDoc("../assets/skills/feature/SCHEMA.md");
+const COMMAND = readDoc("../assets/command/feature.md");
 const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
+const TODO = readDoc("../TODO.md");
 
 describe("heartbeat docs contract", () => {
   it("lists every required heartbeat phase in the skill and schema", () => {
@@ -222,6 +224,70 @@ describe("run-state transition docs contract", () => {
       assert.match(text, /external drivers still write only `gates\/<gate>\.answer`/i, `${name} must keep gate answers external-driver-only`);
       assert.match(text, /approval_source: `?"?external-driver"?`?/i, `${name} must keep approved file answers labeled external-driver`);
     }
+  });
+});
+
+describe("provenance redaction and pr-created docs contract", () => {
+  it("documents diagnostic factory_provenance and credential redaction guarantees", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
+      assert.match(text, /factory_provenance/i, `${name} must document factory_provenance`);
+    }
+
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
+      assert.match(text, /diagnostic-only|diagnostic only/i, `${name} must mark factory provenance diagnostic-only`);
+      assert.match(text, /redact|omit/i, `${name} must document redaction/omission`);
+      for (const tokenShape of ["ghp_*", "github_pat_*", "gho_*", "sk-proj_*", "sk-*", "xoxb_*"]) {
+        assert.match(text, literalPattern(tokenShape), `${name} must mention token shape ${tokenShape}`);
+      }
+      assert.match(text, /high-entropy/i, `${name} must mention high-entropy credential redaction`);
+    }
+  });
+
+  it("documents pending_snapshot gate freshness and fail-closed answer behavior", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
+      assert.match(text, /pending_snapshot/i, `${name} must document pending_snapshot`);
+    }
+
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
+      assert.match(text, /question_ref/i, `${name} must document pending question refs`);
+      assert.match(text, /artifact_ref|artifact/i, `${name} must document pending artifact refs`);
+      assert.match(text, /question_hash/i, `${name} must document question hashes`);
+      assert.match(text, /artifact_hash/i, `${name} must document artifact hashes`);
+      assert.match(text, /fail closed|fails closed/i, `${name} must document fail-closed stale gate behavior`);
+      assert.match(text, /stale|hash-mismatched|mismatched/i, `${name} must document stale/mismatched pending material`);
+    }
+  });
+
+  it("documents provenanced pr-created CLI flow and trusted PR URL requirements", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
+      assert.match(text, /pr-created/i, `${name} must document pr-created`);
+    }
+
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
+      assert.match(text, /feature-factory factory pr-created <run-id>/i, `${name} must document factory pr-created CLI`);
+      assert.match(text, /attestations\/pr-created\.json/i, `${name} must document pr-created attestation path`);
+      assert.match(text, /run\.pr_url/i, `${name} must document run.pr_url authority`);
+      assert.match(text, /terminal_result\.pr_url/i, `${name} must document terminal_result.pr_url authority`);
+      assert.match(text, /trusted only|only then|only after/i, `${name} must require attestation before PR URL trust`);
+      assert.match(text, /fail closed|fails closed/i, `${name} must document fail-closed PR URL behavior`);
+    }
+  });
+
+  it("documents provenance recording commands", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
+      assert.match(text, /feature-factory factory provenance record-created <run-id> --json/i, `${name} must document record-created`);
+      assert.match(text, /feature-factory factory provenance record-resume <run-id> --json/i, `${name} must document record-resume`);
+    }
+  });
+
+  it("does not instruct direct PR URL bookkeeping after draft PR creation", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
+      assert.doesNotMatch(text, /PR URLs (?:are|remain) terminal bookkeeping/i, `${name} must not describe PR URLs as terminal bookkeeping`);
+      assert.doesNotMatch(text, /Record `pr_url` in `run\.json` and set `status: completed`/i, `${name} must not instruct direct PR URL persistence`);
+    }
+
+    assert.match(SKILL, /Do not directly edit or persist `run\.json\.pr_url`/i, "SKILL must explicitly forbid direct PR URL persistence");
+    assert.match(COMMAND, /Do not directly persist `run\.json\.pr_url`/i, "command must explicitly forbid direct PR URL persistence");
   });
 });
 
