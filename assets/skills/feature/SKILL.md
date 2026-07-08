@@ -9,18 +9,12 @@ You are the orchestrator. Run in the main conversation, not as a subagent, so yo
 
 Two principles make this a durable factory rather than a freeform session:
 
-- State lives in files. Every run has a control plane at `$REPO/.opencode/factory/<run-id>/`: manifest, gates, plan, artifacts, observed evidence, and reviews. A dead session or next-day return resumes from `run.json`.
-- Observe, do not trust. A subagent report is a claim. Before accepting build or test work, re-derive the diff and run the named checks yourself. Write observed evidence, then have `work-reviewer` judge that evidence.
+- State lives in files. Every run has a control plane at `$REPO/.opencode/factory/<run-id>/`: manifest, gates, plan, artifacts, observed evidence, reviews, heartbeat state, and process logs. A dead session or next-day return resumes from `run.json`.
+- Observe, do not trust agent text. A subagent report is a claim. Before accepting build or test work, re-derive the diff and run the named checks yourself. Write observed evidence, then have `work-reviewer` judge that evidence.
 
-For provenance-sensitive state, use this authority ladder:
+The proof layer removed in this simplified factory. Do not create or depend on proof-chain files. `run.json`, evidence, reviews, gate answers, and PR URLs are durable local state, not cryptographic or tamper-proof authority.
 
-- `untrusted caller claims`: prompts, gate answers, builder/reviewer text, `run.json`, `evidence/*`, `reviews/*`, worktree path strings, status booleans, `base_ref`, and `base_commit`.
-- `orchestrator observations`: fresh safe Git/filesystem observations, physical durable-root containment, worktree identity, commit/tree/parent relationships, file hashes, and reviewed-worktree guard results.
-- `factory-owned attestations`: records written only after the current observations and re-checks pass.
-
-`run.json` and gate/review/evidence files are bookkeeping or claim inputs, not proof. Gates, merges, validator/security pass, and PR readiness must not trust status booleans alone.
-
-Diagnostic provenance is different from authority provenance. `run.json.factory_provenance` records redacted, diagnostic-only snapshots of the factory/opencode/plugin environment at run creation and resume. It is useful for debugging version/model/capability skew, but it is never proof for gates, reviews, merges, or PR URLs. The snapshot redactor must omit sensitive keys and replace token-shaped or high-entropy credential values with `[redacted]`, including `ghp_*`, `github_pat_*`, `gho_*`/`ghu_*`/`ghs_*`/`ghr_*`, `sk-proj_*`, `sk-*`, `xoxb_*`/`xoxp_*`/`xoxa_*`, `glpat-*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and single-token high-entropy strings. Do not persist raw API keys, OAuth tokens, PATs, bearer headers, or credential URLs in `factory_provenance`, evidence, reviews, or logs.
+`run.json.debug_snapshot` records redacted diagnostic-only snapshots of the factory/opencode/plugin environment at run creation and resume. It is useful for debugging version/model/capability skew, but it is never authority for gates, reviews, merges, or PR URLs. Redaction must omit sensitive keys and replace token-shaped or high-entropy credential values with `[redacted]`, including `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, and `xoxb_*`.
 
 ## Agents
 
@@ -40,54 +34,6 @@ Invoke subagents with the Task tool using `subagent_type` equal to the agent nam
 - `security-reviewer`
 
 Pass prior structured outputs in each prompt. Subagents do not share memory; you are the bus between them.
-
-## Provenance authority contract
-
-Create and maintain `$RUN/attestations/` alongside the manifest, evidence, and review files. The orchestrator is the only writer for factory-owned attestations.
-
-Rules:
-
-- All provenance-sensitive Git observations and reviewed-worktree guards must use the centralized safe Git policy (`safe_git_policy: "safe-git-v1"`) or equivalent `safeGit()` semantics.
-- Re-derive physical worktree identity and durable-root containment before writing or accepting attestations.
-- Treat `run.json`, `reviews/*.json`, `evidence/*.json`, `factory.lock`, worktree strings, `base_ref`, `base_commit`, and status booleans as claims only.
-- If safe Git, worktree identity, durable-root containment, attestation hashes, or referenced file hashes cannot be re-proved, fail closed.
-- Reviewer approval attestations are written only after the reviewed-worktree guard returns `clean`.
-- Merge provenance is accepted only from the attested first-parent chain, not from `merged` or `approved` flags alone.
-
-## Reviewer read-only guard
-
-Reviewer-designated agents are only:
-
-- `work-reviewer`
-- `implementation-validator`
-- `security-reviewer`
-
-Every reviewer prompt must explicitly say the reviewed worktree is read-only: do not edit files, run package normalization commands, update lockfiles, format, generate, install with write side effects, update snapshots, stage files, commit, or otherwise mutate the worktree. If a reviewer needs command output that may write files, it must ask the orchestrator instead of running it.
-
-After every reviewer-designated subagent invocation, and before accepting or writing that review result, check the reviewed worktree with `git -C <reviewed_worktree> status --porcelain=v1 --untracked-files=all` or the equivalent `src/review-guard.js` helper semantics.
-
-Guard semantics:
-
-- Exit `0` and empty stdout => clean; the reviewer output may be accepted normally.
-- Exit `0` and non-empty stdout => dirty; the reviewer output is invalid. Prefer bounded recovery and retry before blocking.
-- Non-zero exit => unverifiable; the reviewer output is invalid and blocking unless re-observation can prove the issue was transient.
-
-Reviewed worktree mapping:
-
-- `work-reviewer` subject `spec-writer` -> `$FEAT_WT`
-- `work-reviewer` subject `work-decomposer` -> `$FEAT_WT`
-- `work-reviewer` subject `<slice-id>` -> `$SLICE_WT`
-- `work-reviewer` subject `test-verifier` -> `$FEAT_WT`
-- `implementation-validator` -> `$FEAT_WT`
-- `security-reviewer` -> `$FEAT_WT`
-
-If the guard is dirty, discard the reviewer output as invalid, capture the dirty diff/status in a guard report, then attempt bounded recovery when the dirt is clearly reviewer-created and the reviewed worktree has an attested or observed clean HEAD to restore to. Restore only the reviewed worktree back to the observed commit/tree, recheck the guard, and rerun the same reviewer once with a stronger read-only warning. If recovery cannot be proven safe, the guard remains dirty after recovery, or the retry dirties the worktree again, write the guard-block report and mark the relevant step, slice, or panel blocked. If the guard is unverifiable, block unless a fresh re-observation proves the worktree is clean.
-
-Limitations:
-
-- This is post-run git-visible dirty-state detection only.
-- It is not OS/process sandboxing and does not prevent mutation attempts.
-- It does not detect ignored files, committed or reverted mutations, effects outside the reviewed worktree, or non-git-visible side effects.
 
 ## Operating Modes
 
@@ -114,7 +60,7 @@ Escalate when the work needs a decision that is not yours: product/UX ambiguity,
 
 ## Intent Gate
 
-Classify every `/feature` invocation before Step 0 and before mutating any run state. The goal is to avoid accidental restarts, treating status requests as implementation, or missing a pending gate answer.
+Classify every `/feature` invocation before Step 0 and before mutating any run state.
 
 Intent types:
 
@@ -126,42 +72,15 @@ Intent types:
 - `autonomous-start`: start or resume from an explicit autonomous driver prompt.
 - `pr-continuation`: prepare or retry PR creation for an already-built/validated feature branch.
 
-Classification rules:
-
-- If the input starts with `resume`, classify `resume`.
-- If the input is exactly `approve`, exactly `stop`, or starts with `changes:`, classify `gate-answer` only when exactly one run has a pending gate. If multiple runs have pending gates, ask which run/gate it applies to. If no run has a pending gate, ask for the target run/gate or explain there is nothing to answer.
-- If the input asks for status, list, summary, current gate, run state, or what is pending, classify `status`.
-- If the input references an existing `run-id` or `.opencode/factory/<run-id>`, classify `resume` unless it is clearly status-only.
-- If the input asks for PR creation/PR retry and a run already has validated evidence or a feature worktree, classify `pr-continuation`.
-- If the prompt includes autonomous driver instructions, classify `autonomous-start` or `resume` based on whether a run id exists.
-- If the prompt includes headless/scripted driver instructions, classify `scripted-start` or `resume` based on whether a run id exists.
-- Otherwise classify `new-feature`.
-
 Actions by intent:
 
 - `new-feature`: proceed to Step 0.
 - `resume`: load `run.json` and continue from the first incomplete point.
-- `gate-answer`: write the answer to `gates/<pending-gate>.answer`, consume it, update `run.json`, then continue or stop according to the answer.
-- `status`: read `run.json`/artifacts and report state. Do not dispatch agents, create worktrees, write gates, or change run status.
+- `gate-answer`: write the answer to `gates/<pending-gate>.answer`, consume it through `transitionGateDecision`, then continue or stop according to the answer.
+- `status`: read state and report. Do not dispatch agents, create worktrees, write gates, or change run status.
 - `scripted-start`: proceed like `new-feature`/`resume`, but in scripted mode stop after writing the next pending gate question if no answer file exists.
-- `autonomous-start`: proceed like `new-feature`/`resume`, set `run.json.mode = "autonomous"`, and use the Autonomous Mode rules instead of waiting for external gate answers.
-- `pr-continuation`: verify Gate 3 approval and observed evidence before pushing or creating a draft PR. If missing, return to Gate 3 instead of improvising.
-
-## Review Tier Contract
-
-For every non-`status` intent, determine the review tier before the first `run.json` mutation and persist it at top-level `run.json.review_tier` so later steps and resumed runs read the same durable choice. `status` intents remain read-only and must not backfill or rewrite `review_tier`.
-
-Selection and persistence rules:
-
-- Explicit selection is only from prompt or work-order text shaped like `review tier: light|standard|strict` in v1. Do not invent a CLI flag.
-- New runs must initialize `run.json.review_tier` during Step 0.
-- Resumed runs missing `review_tier` must backfill it before the next state mutation, except `status` intents.
-- Persist `selected`, `source`, `risk_reasons`, and a required non-empty `rationale` exactly as documented in `SCHEMA.md`.
-- If no explicit tier is selected and risky categories are detected in the prompt, approved story, research map, or technical brief, select `strict` with `source: default` and record matching `risk_reasons`.
-- Risky categories for strict defaulting are `security_or_auth`, `schema_or_persistence`, `generated_or_owned_code`, `external_system_policy`, `dependency_or_supply_chain`, `workflow_or_release`, and `destructive_or_broad_scope`.
-- If no explicit tier is selected and no risky category is detected, select `standard` with `source: default` and explain that default in `rationale`.
-- Any selected tier, including an explicit `light` or `standard`, may be upgraded to `strict` before a later non-status state mutation if newly produced artifacts expose risky categories. Record the new `selected`, `risk_reasons`, and `rationale`; do not automatically downgrade a tier.
-- Review tiers do not add or remove unrelated gates, agents, PR behavior, mandatory security review, or workflow redesign in v1. Existing mandatory gates, observed evidence, `work-reviewer`, `implementation-validator`, and `security-reviewer` behavior still applies.
+- `autonomous-start`: proceed like `new-feature`/`resume`, set `run.json.mode = "autonomous"`, and use Autonomous Mode rules instead of waiting for external gate answers.
+- `pr-continuation`: verify Gate 3 approval, validator verdict, security verdict, and observed evidence before pushing or creating a draft PR.
 
 If classification is ambiguous, ask one short clarification question and do not mutate state until answered.
 
@@ -170,29 +89,46 @@ If classification is ambiguous, ask one short clarification question and do not 
 Create `$RUN=$REPO/.opencode/factory/<run-id>` with:
 
 - `run.json`
+- `factory.lock`
+- `heartbeat.json`
+- `run-json.lock/`
 - `gates/`
 - `artifacts/`
 - `plan/`
 - `evidence/`
 - `reviews/`
-- `attestations/`
 
-Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`. Write `run.json` atomically after every state change through the transition helpers in `src/run-state.js`: `hashRunState`, `transitionRunJson`, `transitionGateDecision`, `transitionTerminalResult`, `transitionRunStep`, `transitionRunSlice`, and `transitionLifecycleRun`. Keep `mutateRunJsonLocked` only as the legacy compatibility path for no-index bootstrap-safe writes. Include `schema_version`, persist the selected review tier at top-level `run.json.review_tier`, persist non-empty `driver.github_account` at top-level `run.json.github_account`, and refresh `heartbeat_at` whenever you make progress.
+Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The factory CLI seeds this file before starting a run so the workflow stays self-contained under `external_directory: deny`.
 
-Transition contract:
+After the initial manifest bootstrap, do not edit `run.json` directly. Write durable state through the CLI verbs below; they acquire `run-json.lock/`, run validation, and call the checked transition helpers internally. `factory gate-decision` is the reachable wrapper for `transitionGateDecision`, and `factory pr-created` is the reachable wrapper for `transitionPrCreated`.
 
-- `hashRunState` provides the canonical current-state hash for optimistic `expectedCurrentHash` compare-and-swap checks. If another writer wins the lock first, the semantic transition must fail closed as a stale `run.json` transition instead of overwriting newer state.
-- `transitionRunJson` is the default semantic writer: take `run-json.lock/`, validate current authority, require heartbeat to be stopped for foreground semantic writes, validate the next state, then commit atomically.
-- `transitionLifecycleRun` uses the same validation path. `allowActiveHeartbeat: true` is a narrow lifecycle escape hatch, not a general bypass for normal semantic writes.
-- `transitionRunStep` and `transitionRunSlice` seed/update `steps[]` and `slices[]` by stable identity (`agent` / `id`) so resumed runs do not depend on hand-maintained array positions.
-- `transitionTerminalResult` keeps top-level `run.json.status` and `run.json.terminal_result` consistent and rewrites `terminal_result.run_id` to the durable run id.
-- `transitionGateDecision` is the only approved-gate writer. The CLI exposes it through `feature-factory factory gate-decision <run-id> <gate> <status> ...` for scripted harnesses. For `status: approved`, it must write and validate `attestations/gates/<gate>.json` plus the updated accepted `attestations/index.json` chain before the approved gate state becomes durable; if later validation fails, roll back the staged gate attestation/index files and leave `run.json` unchanged.
-- `transitionPrCreated` is the only trusted PR-created terminal writer. The CLI exposes it through `feature-factory factory pr-created <run-id> ...`. It stages and validates `attestations/pr-created.json` plus `attestations/index.json` before writing `run.pr_url`, `status: completed`, or `terminal_result.pr_url`; if validation fails, it rolls back staged PR attestation/index files and leaves `run.json` unchanged.
-- `mutateRunJsonLocked` remains compatibility-only when `attestations/index.json` is absent and the current/next state has no provenance-sensitive claims. It must fail closed for approved gates, review-approved or merged slices, passing validator/security verdicts, run-base fields, and PR URL claims without accepted attestations.
+Required state-write commands:
 
-At run creation, create `attestations/` but do not create placeholder/empty `attestations/index.json`. Create `attestations/index.json` only with the first accepted attestation and non-empty entries. The first accepted attestation must be the sequence-1 `attestations/run-base.json`; gate decisions cannot bootstrap the accepted graph before run-base exists. New runs materialize the feature branch/worktree during Step 0 before Gate 1, then re-observe the branch, worktree identity, base commit, and base tree through safe Git/filesystem checks and write that run-base attestation. Resume paths validate existing attestations instead of blindly rewriting them.
+```sh
+feature-factory factory env record-created <run-id> --json
+feature-factory factory env record-resume <run-id> --json
+feature-factory factory answer --json <run-id> <gate> approve
+feature-factory factory recover <run-id> --reason TEXT --json
+feature-factory factory gate-decision <run-id> <gate> pending --artifact artifacts/<file> --question-ref gates/<gate>.question.md --answer-ref gates/<gate>.answer --json
+feature-factory factory gate-decision <run-id> <gate> approved --artifact artifacts/<file> --question-ref gates/<gate>.question.md --answer-ref gates/<gate>.answer --approval-source external-driver --json
+feature-factory factory slices-seed <run-id> --from plan/slices.json --json
+feature-factory factory slice-status <run-id> <slice-id> running --branch <branch> --worktree <path> --attempts N --json
+feature-factory factory slice-status <run-id> <slice-id> review --evidence-ref evidence/<slice-id>.json --review-ref reviews/<slice-id>.json --attempts N --json
+feature-factory factory slice-status <run-id> <slice-id> blocked --reason TEXT --json
+feature-factory factory step <run-id> <known-agent> running --attempts N --json
+feature-factory factory step <run-id> <known-agent> accepted --artifact-ref artifacts/<file> --review-ref reviews/<agent>.json --json
+feature-factory factory step <run-id> <known-agent> rejected --review-ref reviews/<agent>.json --json
+feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json
+feature-factory factory terminal <run-id> blocked --reason TEXT --json
+feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json
+feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
+```
 
-These transition helpers do not change heartbeat or external-driver semantics: `heartbeat.json` remains liveness-only bookkeeping, and external drivers still write only `gates/<gate>.answer`; approved answers sourced from that file still record `approval_source: external-driver`.
+External drivers write only `gates/<gate>.answer`; they may use `feature-factory factory answer --json <run-id> <gate> approve` or write the answer file directly. The factory consumes answer files through `factory gate-decision`; approved file-sourced answers record `approval_source: external-driver`, and consumed answer files are archived away from the canonical answer path.
+
+`factory recover` is operator recovery for orphaned/stale running runs; do not use it to bypass active in-flight work or protected gates.
+
+Review tier is optional display-only metadata. If present, `run.json.review_tier` is a non-empty opaque string such as `light`, `standard`, or `strict`, but do not branch workflow behavior on it. Existing mandatory gates, observed evidence, `work-reviewer`, `implementation-validator`, and `security-reviewer` behavior still applies.
 
 One-writer rule:
 
@@ -204,19 +140,13 @@ One-writer rule:
 
 Use the internal heartbeat helper only for long `Task`/subagent waits that happen while `run.json.status` is still `running`.
 
-- Start heartbeat immediately before the long wait begins.
-- Require the trusted heartbeat owner capability from `$RUN/factory.lock` for detached `--start`, internal `--foreground`, and internal `--once` paths. Do not expose that capability through `heartbeat.json` or `factory heartbeat <run-id> --status --json`.
-- Treat `heartbeat.json` as data, not authority. Token, PID, or sidecar contents alone never authorize heartbeat freshness.
+- Start heartbeat immediately before the long `Task` wait begins.
+- Start with `feature-factory factory heartbeat <run-id> --start --phase <phase> --json`, inspect with `feature-factory factory heartbeat <run-id> --status --json`, and stop with `feature-factory factory heartbeat <run-id> --stop --json`.
+- Treat `heartbeat.json` as liveness-only data, not authority. PID or sidecar contents alone never authorize heartbeat freshness or workflow writes.
 - Start heartbeat only when the manifest already shows real in-flight factory work via a `running` step or a `running`/`review` slice.
-- Stop heartbeat in a `finally`/after-return path before any foreground semantic `run.json` write. While a heartbeat is active, do not accept agent output, mutate steps/slices/gates, or write any other semantic manifest fields besides locked `heartbeat_at` ticks.
-- Do not start heartbeat while stopped at Gate 1 (`story`), Gate 2 (`brief`), or Gate 3 (`pre_pr`). Gate waits are intentionally heartbeat-free.
-- Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat with wait/force semantics and require a confirmed stopped lease.
-
-Detached-run diagnostics for `factory status/list/validate/watch` and the TUI are read-only observations, not recovery actions. Their envelope fields are `schema_version`, `checked_at`, `authoritative`, `status`, `severity`, `classification`, `summary`, and `items[]`; item fields are `condition`, `classification`, `severity`, `status`, `message`, `action`, `authoritative`, `checked_at`, and `evidence`. Conditions are `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `invalid-authority`, `unverifiable-authority`, `protected-gate`, and `terminal-run`. Classifications are `healthy`, `recoverable`, `blocked`, `needs-human`, `terminal`, and first-class `invalid`; statuses are `ok`, `warning`, `error`; severities are `info`, `warning`, `error`, `critical`.
-
-Diagnostic aggregation priority is classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`, severity `critical` > `error` > `warning` > `info`, status `error` > `warning` > `ok`, condition `invalid-run-state` > `invalid-authority` > `unverifiable-authority` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`, then original detection order. Operator actions must be explicit: inspect stale or missing-helper liveness before resuming and do not restart blindly; restore a missing trusted worktree or recover from validated durable state; inspect accepted attestations for invalid authority; restore missing proof for unverifiable authority; answer or stop a protected gate; read `terminal_result` for terminal runs.
-
-Heartbeat diagnostic evidence is liveness-only. `missing-heartbeat-process` means the heartbeat helper PID in `heartbeat.json` is not alive; it is not a detached opencode process, and there is no durable run-id-to-opencode-PID registry. Mark heartbeat/PID/process evidence `authoritative: false` with `evidence.liveness_only: true`. Protected `story`, `brief`, and `pre_pr` gates use exactly `needs-human` / `warning` / `warning` and suppress stale-heartbeat and missing-heartbeat-process alarms. Valid terminal runs suppress heartbeat/worktree liveness alarms. Diagnostics fail closed: only after `run.json` schema and run-authority checks pass may a run set `diagnostics.authoritative: true`; heartbeat/PID/process evidence, mutable `run.json` claims, status booleans, and worktree strings cannot prove health or infer a healthy run. Invalid/unverifiable envelopes must not trust PR, gate, branch, or worktree claims unless accepted attestations plus fresh observations verify them.
+- Stop heartbeat in a `finally`/after-return path. Stop is best-effort; the run-json lock, not heartbeat, serializes semantic writes.
+- Do not start heartbeat while stopped at protected gates `story`, `brief`, or `pre_pr`. Gate waits are intentionally heartbeat-free.
+- Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat if it is active and then use the appropriate CLI state writer.
 
 Required heartbeat phases:
 
@@ -231,17 +161,33 @@ Required heartbeat phases:
 - `security-reviewer`
 - `remediation`
 
+`heartbeat.json` shape is `{ schema_version, run_id, phase, pid, interval_ms, last_tick_at }`. Freshness is derived at read time: `age(last_tick_at) <= max(2 * interval_ms, 120000ms)` and the recorded PID is alive. A stopped helper writes `pid: null`.
+
+## Detached-Run Diagnostics
+
+Detached-run diagnostics for `factory status/list/validate/watch` and the TUI are read-only observations, not recovery actions. Their envelope fields are `schema_version`, `checked_at`, `authoritative`, `status`, `severity`, `classification`, `summary`, and `items[]`; item fields are `condition`, `classification`, `severity`, `status`, `message`, `action`, `authoritative`, `checked_at`, and `evidence`.
+
+Conditions are `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `protected-gate`, and `terminal-run`. Classifications are `healthy`, `recoverable`, `blocked`, `needs-human`, `terminal`, and first-class `invalid`; statuses are `ok`, `warning`, `error`; severities are `info`, `warning`, `error`, `critical`.
+
+Diagnostic aggregation priority is classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`, severity `critical` > `error` > `warning` > `info`, status `error` > `warning` > `ok`, condition `invalid-run-state` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`, then original detection order.
+
+Operator actions must be explicit: inspect stale or missing-helper liveness before resuming and do not restart blindly; restore the worktree or recover from durable state; answer the pending protected gate or stop; read `terminal_result` for terminal runs.
+
+Heartbeat diagnostic evidence is liveness-only. `missing-heartbeat-process` means the heartbeat helper PID in `heartbeat.json` is not alive; it is not a detached opencode process, and there is no durable run-id-to-opencode-PID registry. Mark heartbeat/PID/process evidence `authoritative: false` with `evidence.liveness_only: true`.
+
+Protected `story`, `brief`, and `pre_pr` gates use exactly `needs-human` / `warning` / `warning` and suppress stale-heartbeat and missing-heartbeat-process alarms. Valid terminal runs suppress heartbeat/worktree liveness alarms.
+
 ## Gate Protocol
 
 For every gate:
 
 1. Write a human-readable question file, e.g. `gates/story.question.md`.
-2. Mark the gate `pending` in `run.json` with `question_ref` and `answer_ref`.
-   - Pending gates must carry `pending_snapshot` with `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, `created_at`, and `answer_ref`/`answer_hash` when an answer target exists.
-   - Gate answer consumption is fail closed: before accepting any external answer, re-read the current question/artifact/answer refs and hashes and reject missing, escaped, stale, or mismatched material.
-3. If `gates/<gate>.answer` already exists, consume it and record `approval_source: external-driver` for approved answers.
-4. Otherwise, in interactive mode ask the user in chat, write their response to the answer file, and record `approval_source: human` for approved answers.
-5. In scripted mode, stop after writing the pending gate. An external driver can write the answer file and reinvoke `/feature resume <run-id>`.
+2. Mark the gate `pending` in `run.json` with `question_ref`, `answer_ref`, and `pending_snapshot`.
+3. `pending_snapshot` must include `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, `created_at`, and `answer_ref`/`answer_hash` when an answer target exists.
+4. Gate answer consumption fails closed: before accepting any external answer, re-read the current question/artifact/answer refs and hashes and reject missing, escaped, stale, or mismatched material.
+5. If `gates/<gate>.answer` already exists, consume it and record `approval_source: external-driver` for approved answers.
+6. Otherwise, in interactive mode ask the user in chat, write their response to the answer file, and record `approval_source: human` for approved answers.
+7. In scripted mode, stop after writing the pending gate. An external driver can write the answer file and reinvoke `/feature resume <run-id>`.
 
 Allowed answer contents:
 
@@ -253,9 +199,7 @@ stop
 
 On `approve`, set the gate to `approved`, copy the answer into `run.json`, set `answered_at`, and use only an allowed semantic `approval_source`: `external-driver`, `human`, `autonomous`, or `override`. Do not put the answer file path in `approval_source`. On `changes`, rerun the relevant producing step with the feedback and re-present the gate. On `stop`, set status `needs-human` or `blocked` with the reason.
 
-After every gate decision, hash the question/artifact/answer material and write `attestations/gates/<gate>.json`, updating `attestations/index.json` and the `prev_hash` chain. A gate marked `approved` in `run.json` is bookkeeping, not proof; later validators and gates must not trust status booleans alone.
-
-In gate-decision attestations, `question_ref` and `answer_ref` stay under `gates/`, while `artifact_ref` stays under `artifacts/`. Do not write gate question or answer refs under `artifacts/`.
+`question_ref` and `answer_ref` stay under `gates/`. `artifact_ref` stays under `artifacts/`. Do not write gate question or answer refs under `artifacts/`.
 
 ## Autonomous Mode
 
@@ -275,233 +219,99 @@ Rules:
 
 ## Step 0 - Intake, Run ID, Manifest
 
-Parse the invocation and determine:
-
-1. Existing work item: a ticket key, issue URL, branch reference, or external ref in the input.
-2. No existing work item: raw feature idea.
-3. Design input: Figma/design URL, screenshot path, design doc, or visual requirements.
-
-Choose the story agent:
-
-- Existing work item with accessible details -> `story-reader`.
-- Raw idea -> `story-writer`.
+Parse the invocation and determine whether the input is an existing work item, raw feature idea, or design input.
 
 Establish the run:
 
 - `run-id` = lowercased external ref if one exists, otherwise a short kebab slug.
-- Determine `BASE` from the repo default branch (usually `main`), `BRANCH=<run-id>-<short-slug>`, and `FEAT_WT=$REPO/.opencode/worktrees/$BRANCH`.
-- Fetch `origin/$BASE` and create the feature branch/worktree immediately: `git -C "$REPO" worktree add -b "$BRANCH" "$FEAT_WT" "origin/$BASE"`. If it already exists on resume, reuse it only after validating identity.
-- Before Gate 1 or any approved gate decision, re-observe `repo_root`, `run_dir`, `git_common_dir`, feature branch/worktree identity, `base_ref`, `base_commit`, and `base_tree` through safe Git/filesystem checks. Write `attestations/run-base.json`, create non-empty `attestations/index.json`, and treat that accepted run-base as the graph root.
-- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `base_ref`, `branch`, `worktree`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, top-level `review_tier`, top-level `github_account` when provided by the driver, redacted diagnostic `factory_provenance`, empty `steps`, empty `slices`, gate refs, and null `validator`/`pr_url`.
-- Initialize `$RUN/factory.lock` with `schema_version`, `run_id`, and a trusted heartbeat owner capability used only by the factory lifecycle.
-- If `run.json` exists, this is a resume. Read it, backfill top-level `review_tier` before the next non-status state mutation when it is missing, and continue from the first incomplete point. Never redo side effects that `run.json` shows already happened.
+- Determine `BASE` from the repo default branch, `BRANCH=<run-id>-<short-slug>`, and `FEAT_WT=$REPO/.opencode/worktrees/$BRANCH`.
+- Fetch `origin/$BASE` when available and create or reuse the feature branch/worktree. Reuse existing paths only after checking they point at the intended branch.
+- Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `base_ref`, `base_commit`, `branch`, `worktree`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, optional top-level `review_tier`, top-level `github_account` when provided by the driver, `debug_snapshot`, expected step placeholders, empty `slices`, gate refs, and null `validator`/`pr_url`.
+- Initialize `$RUN/factory.lock` with `schema_version`, `run_id`, and `session_owner` diagnostic data.
+- If `run.json` exists, this is a resume. Read it and continue from the first incomplete point. Never redo side effects that `run.json` shows already happened.
 
 After the initial manifest exists, record creation diagnostics with:
 
 ```sh
-feature-factory factory provenance record-created <run-id> --json
+feature-factory factory env record-created <run-id> --json
 ```
 
 On resume paths that will mutate state, refresh only the redacted diagnostic resume snapshot with:
 
 ```sh
-feature-factory factory provenance record-resume <run-id> --json
+feature-factory factory env record-resume <run-id> --json
 ```
 
-The caller checkout is only the launcher/control-plane location. All code-reading, planning, spec/decomposition review guards, implementation, test, validation, and PR work uses the clean `$FEAT_WT` created here so uncommitted caller-checkout edits do not block factory runs.
+The caller checkout is only the launcher/control-plane location. All code-reading, planning, implementation, test, validation, and PR work uses the clean `$FEAT_WT` created here so uncommitted caller-checkout edits do not block factory runs.
 
 Run the story agent and write `$RUN/artifacts/story.md`. If design input exists, run `design-interpreter` in parallel when useful and write `$RUN/artifacts/design-brief.md`.
 
-### Gate 1 - Story
-
-Present the normalized story, acceptance criteria, scope, assumptions, and any design summary. Write `gates/story.question.md`, mark the gate pending, and wait for an answer.
-
-On approval, record `gates.story.status = approved`. Do not create or mutate external tickets unless the user explicitly asks in the interactive run.
-
 ## Step 1 - Research And Design
 
-Fan out in parallel when possible:
-
-- `codebase-researcher` with the approved story and `$FEAT_WT` as the repository context. Write `$RUN/artifacts/research-map.md`.
-- `design-interpreter` with design input if not already complete. Write `$RUN/artifacts/design-brief.md`.
+Run `codebase-researcher` with the approved story and `$FEAT_WT` as the repository context. Write `$RUN/artifacts/research-map.md`. If design input exists, run or finish `design-interpreter` and write `$RUN/artifacts/design-brief.md`.
 
 The research map must identify real files, patterns, tests, integration hotspots, generated code, migration/schema risks, and open questions. Do not proceed to spec from guessed paths.
 
-## Step 2 - Spec (Reviewed)
+## Step 2 - Spec And Decomposition
 
-Run `spec-writer` with the approved story, research map, and design brief. It produces a decision-complete technical brief. Write `$RUN/artifacts/technical-brief.md`.
+Run `spec-writer` with the approved story, research map, and design brief. Mark it running with `feature-factory factory step <run-id> spec-writer running --attempts N --json`. It produces `$RUN/artifacts/technical-brief.md`; after review acceptance, record the accepted step with `feature-factory factory step <run-id> spec-writer accepted --artifact-ref artifacts/technical-brief.md --review-ref reviews/spec-writer.json --json`.
 
-Review the brief:
+Run `work-reviewer` on the brief. Tell the reviewer the reviewed worktree is read-only and must not be modified. After it returns, check `git -C "$FEAT_WT" status --porcelain=v1 --untracked-files=all`. If dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, write a blocker review, and re-run it once with a stronger read-only instruction before stopping.
 
-- Run `work-reviewer` with subject `spec-writer`, the brief, and its inputs.
-- After it returns, before accepting or writing `$RUN/reviews/spec-writer.json`, guard `$FEAT_WT`.
-- If the guard is clean, write `$RUN/reviews/spec-writer.json` and continue the normal APPROVE/REJECT loop.
-- If the guard is dirty, discard the reviewer output, capture the guard report, recover the feature worktree to the observed clean head only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report to `$RUN/reviews/spec-writer.json`, mark the spec step `blocked`, and stop.
-- On REJECT, rerun `spec-writer` with required fixes up to `max_retries`.
-- Record attempts in `run.json.steps`.
+Run `work-decomposer` with the accepted story, research map, technical brief, and design brief. Mark it running with `feature-factory factory step <run-id> work-decomposer running --attempts N --json`. It produces `$RUN/plan/slices.json` and `$RUN/plan/plan.md`; after review acceptance, record the accepted step with `feature-factory factory step <run-id> work-decomposer accepted --review-ref reviews/work-decomposer.json --json`, then seed durable slices with `feature-factory factory slices-seed <run-id> --from plan/slices.json --json`.
 
-Do not decompose until the spec is accepted.
+Review the decomposition the same way. The plan must cover every acceptance criterion, keep same-wave slices file-disjoint, serialize shared hotspots, and explain dependencies.
 
-## Step 3 - Decompose Into Slices (Reviewed)
+## Gate 1 And Gate 2
 
-Run `work-decomposer` with the accepted story, research map, technical brief, and design brief. It produces:
+Gate 1 presents the normalized story, acceptance criteria, scope, assumptions, and design summary.
 
-- `$RUN/plan/slices.json`: a dependency DAG.
-- `$RUN/plan/plan.md`: human-readable waves and rationale.
+Gate 2 presents the technical brief and slice plan: waves, slice paths, acceptance coverage, dependency edges, tests, and serialized hotspots.
 
-Each slice must include:
+On approval, record the approved gate with `feature-factory factory gate-decision <run-id> <gate> approved --artifact artifacts/<file> --question-ref gates/<gate>.question.md --answer-ref gates/<gate>.answer --approval-source external-driver --json`. On `changes`, rerun the producing step with the feedback. On `stop`, write a terminal result with `feature-factory factory terminal <run-id> needs-human --reason TEXT --json` or `feature-factory factory terminal <run-id> blocked --reason TEXT --json`.
 
-- `id`
-- `stack`: backend | frontend | fullstack | test | docs | other
-- `paths`: files/directories the slice owns
-- `depends_on`: slice ids that must merge before this slice can run
-- `acceptance`: acceptance criteria covered by the slice
-- `test_plan`: commands/assertions proving the slice
+## Step 4 - Build Slices
 
-Rules the plan must satisfy:
-
-- Every acceptance criterion maps to at least one slice.
-- Same-wave slices are file-disjoint.
-- Dependencies are real consumption dependencies, not blanket ordering.
-- Shared hotspots are serialized into different waves.
-- Generated files have a single owning slice.
-- If a feature is indivisible, emit one slice and say why.
-
-Review the decomposition:
-
-- Run `work-reviewer` with subject `work-decomposer`.
-- After it returns, before accepting or writing `$RUN/reviews/work-decomposer.json`, guard `$FEAT_WT`.
-- If the guard is clean, write `$RUN/reviews/work-decomposer.json` and continue the normal APPROVE/REJECT loop.
-- If the guard is dirty, discard the reviewer output, capture the guard report, recover the feature worktree to the observed clean head only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report to `$RUN/reviews/work-decomposer.json`, mark the decomposition step `blocked`, and stop.
-- It checks output contract, AC coverage, dependency correctness, file-disjoint same waves, and hotspot serialization.
-- Loop on REJECT up to `max_retries`.
-- Seed `run.json.slices[]` from `slices.json` with `status: pending`, `attempts: 0`, branch/worktree null, evidence/review refs null, and merge commit null.
-
-### Gate 2 - Technical Brief And Slice Plan
-
-Present the technical brief and the slice plan: waves, each slice's paths, acceptance coverage, dependency edges, tests, and serialized hotspots. The gate approves both implementation approach and parallelization plan.
-
-On `changes`, rerun `spec-writer`, `work-decomposer`, or both depending on feedback, then re-present.
-
-## Step 4 - Build Slices In Dependency Order
-
-Reuse the feature branch/worktree created during Step 0. This is the single integration branch and final PR branch:
-
-```sh
-REPO=$(git rev-parse --show-toplevel)
-BASE=<repo default base branch, e.g. main or development>
-BRANCH=<run-id>-<short-slug>
-FEAT_WT=$REPO/.opencode/worktrees/$BRANCH
-git -C "$FEAT_WT" rev-parse --show-toplevel
-```
-
-If the branch/worktree already exists on resume, reuse it. `branch`, `base_ref`, and `worktree` must already be recorded in `run.json` from Step 0. Keep the caller's checkout untouched. Do not `cd`; use `git -C` and absolute paths.
-
-Before treating the feature branch as authoritative, re-observe `repo_root`, `run_dir`, `git_common_dir`, feature branch/worktree identity, `base_ref`, `base_commit`, and `base_tree` through safe Git/filesystem checks and ensure the run-base attestation is present and accepted.
-
-If a fresh worktree needs shared dependencies, generated hooks, or package caches, link or install them only after verifying repo conventions. Record any setup in evidence or notes.
-
-### Wave Scheduling
-
-Compute waves by topological sort of `depends_on`:
+Reuse the feature branch/worktree created during Step 0. Compute waves by topological sort of `depends_on`:
 
 - A wave is every `pending` slice whose dependencies are all `merged`.
 - Cap concurrent slices at `run.json.max_parallel_slices`.
-- Same-wave slices should already be file-disjoint by plan. If you discover overlap, stop and treat it as a decomposition bug.
+- Same-wave slices should already be file-disjoint. If you discover overlap, stop and treat it as a decomposition bug.
 - If any slice becomes `blocked`, do not dispatch dependents.
 
-For each slice in a wave:
-
-1. Isolate it in a slice worktree from the current feature branch HEAD:
-   ```sh
-   SLICE_BRANCH=$BRANCH--<slice-id>
-   SLICE_WT=$REPO/.opencode/worktrees/$SLICE_BRANCH
-   git -C "$REPO" worktree add -b "$SLICE_BRANCH" "$SLICE_WT" "$BRANCH"
-   ```
-2. Mark the slice `running` in `run.json`, set branch/worktree, increment attempts, and refresh heartbeat.
-3. Dispatch the builder in parallel for all eligible slices in the wave:
-   - backend/fullstack backend-heavy -> `backend-builder`
-   - frontend -> `frontend-builder`
-   - test/docs/other -> use the most appropriate builder or ask if ambiguous
-4. Give each builder exactly one slice spec, `$SLICE_WT`, branch, story, research map, technical brief, design brief if relevant, dependency outputs it consumes, and test plan.
-5. Builders may edit only inside `$SLICE_WT`, only in slice paths plus directly required test paths, and must commit their changes on the slice branch.
-
-### Observe Each Slice
-
-When a builder returns, re-derive evidence yourself in the slice worktree:
+For each slice, create a slice worktree from the current feature branch HEAD, mark the slice `running` with `feature-factory factory slice-status <run-id> <slice-id> running --branch <branch> --worktree <path> --attempts N --json`, dispatch the appropriate builder, then observe the result yourself:
 
 - `git -C $SLICE_WT diff --stat $BRANCH...HEAD`
 - `git -C $SLICE_WT diff --name-only $BRANCH...HEAD`
 - `git -C $SLICE_WT rev-parse HEAD`
 - Run the slice's named test command(s) from `test_plan`.
 
-Write `$RUN/evidence/<slice-id>.json`. Reconcile the builder's claim block against observed evidence. `review_ready` requires non-empty observed diff, diff observed successfully, and tests observed passing or explicitly skipped with a reason.
+Write `$RUN/evidence/<slice-id>.json`. `review_ready` requires non-empty observed diff, diff observed successfully, and tests observed passing or explicitly skipped with a reason. After review output is written to `$RUN/reviews/<slice-id>.json`, record review state with `feature-factory factory slice-status <run-id> <slice-id> review --evidence-ref evidence/<slice-id>.json --review-ref reviews/<slice-id>.json --attempts N --json`.
 
-After safe Git re-derives the diff, commit, tree, evidence hash, and physical slice worktree identity, write `attestations/slices/<slice-id>.observation.json` and append it to `attestations/index.json`.
+Run `work-reviewer` on each slice, with the slice worktree read-only. For every re-review, pass `attempt: <n>` and the prior review's `required_fixes` list so the reviewer applies the delta rule. After it returns, check `git -C "$SLICE_WT" status --porcelain=v1 --untracked-files=all`; if dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, and re-run it once with a stronger read-only instruction before blocking the slice. APPROVE marks the slice ready to merge; REJECT routes fixes back to the builder; repeated failure marks the slice blocked with `feature-factory factory slice-status <run-id> <slice-id> blocked --reason TEXT --json`.
 
-### Review Each Slice
+Merge approved slices into the feature worktree one at a time with a normal no-ff merge or the repo's expected merge command. After the merge commit exists, record it through `feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json`; do not mark slices merged by editing `run.json` directly. Then refresh heartbeat and clean up successful slice worktrees/branches. If a merge conflict occurs, mark the slice `blocked`, leave the worktree for inspection, and surface it as a decomposition/coordination bug.
 
-Run `work-reviewer` with subject `<slice-id>`, the builder output, observed evidence, slice spec, technical brief, story, and relevant repo rules. Tell the reviewer the slice worktree is read-only and must not be modified.
-
-- After it returns, before accepting or writing `$RUN/reviews/<slice-id>.json`, guard `$SLICE_WT`.
-- If the guard is dirty, discard the reviewer output, capture the guard report, recover the slice worktree to the observed slice commit/tree only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report to `$RUN/reviews/<slice-id>.json`, mark the slice `blocked`, record the blocker reason, and stop dispatching dependents.
-- If the guard is clean and the review verdict is accepted, hash the review output, evidence, subject commit/tree, and clean guard result, then write `attestations/reviews/<slice-id>.approval.json` before treating the slice as approved.
-
-- APPROVE -> mark slice ready to merge.
-- REJECT -> route required fixes back to the same builder in the same slice worktree, re-observe, and re-review.
-- After `max_retries`, mark the slice `blocked`, record reason, and stop dispatching dependents.
-
-### Merge Approved Slices Serially
-
-Merge approved slices into the feature worktree one at a time:
-
-```sh
-git -C "$FEAT_WT" merge --no-ff "$SLICE_BRANCH" -m "<run-id>: <slice-id>"
-```
-
-Record `merge_commit`, mark slice `merged`, refresh heartbeat, and clean up successful slice worktrees/branches if repo policy allows:
-
-```sh
-git -C "$REPO" worktree remove "$SLICE_WT" --force
-git -C "$REPO" branch -D "$SLICE_BRANCH"
-```
-
-After each merge, re-observe `head_commit`, `head_tree`, parents, and first-parent order through safe Git, then update `attestations/merge-chain.json`. Every first-parent commit after `base_commit` needs exactly one proof entry: `slice_merge` or `direct_reviewed_commit`. Missing proof, parent mismatches, or unverifiable `git merge-tree --write-tree` output fail closed.
-
-If a merge conflict occurs, mark the slice `blocked`, leave the worktree for inspection, and surface it as a decomposition/coordination bug. Do not silently resolve conflicts.
-
-Advance waves until every slice is `merged` or some slice is `blocked`. If some merged and others blocked, set status `partial` and surface it at the next gate or immediately if dependents cannot proceed.
-
-## Step 5 - Integrate: Acceptance Tests And Validation
+## Step 5 - Integrate And Validate
 
 Run integration work against `$FEAT_WT`, not slice worktrees.
 
 1. Run `test-verifier` with the story ACs, technical brief, slice plan, merged builder reports, and `$FEAT_WT`. It writes/runs acceptance tests and commits test changes if needed. Write `$RUN/artifacts/test-report.md`.
 2. Observe the test step yourself by rerunning the named acceptance suite. Write `$RUN/evidence/test-verifier.json`.
-3. Run `work-reviewer` with subject `test-verifier`. Tell the reviewer `$FEAT_WT` is read-only and must not be modified. After it returns, before accepting or writing `$RUN/reviews/test-verifier.json`, guard `$FEAT_WT`. If the guard is clean, write the review and continue. If the guard is dirty, discard the reviewer output, capture the guard report, recover `$FEAT_WT` to the observed clean head only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report, mark the test-verifier step `blocked`, and do not continue to the panel.
-4. Run the pre-PR review PANEL — two INDEPENDENT lenses, guard-serial on `$FEAT_WT` + the full diff (each gets story, brief, full diff, test report, builder reports):
-   - `implementation-validator` — correctness / AC coverage / cross-slice integration / conventions. Tell the reviewer `$FEAT_WT` is read-only and must not be modified. After it returns, before accepting or writing its result, guard `$FEAT_WT`. If the guard is clean, write `$RUN/artifacts/validation-report.md` and `run.json.validator`. If the guard is dirty, discard the reviewer output, capture the guard report, recover `$FEAT_WT` to the observed clean head only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report, mark the panel blocked, and set `run.json.validator` to `NO-GO` with its `report` pointing at the guard-block report.
-   - `security-reviewer` — adversarial trust-boundary / injection / forgeable-provenance / secrets lens. Tell the reviewer `$FEAT_WT` is read-only and must not be modified. After it returns, before accepting or writing `$RUN/reviews/security-reviewer.json`, guard `$FEAT_WT`. If the guard is clean, write `$RUN/reviews/security-reviewer.json` and `run.json.security_review`. If the guard is dirty, discard the reviewer output, capture the guard report, recover `$FEAT_WT` to the observed clean head only if safe, then retry the reviewer once with an explicit read-only warning. If recovery/retry fails or the guard is unverifiable, write the guard-block report, mark the panel blocked, and set `run.json.security_review` to `BLOCK` with `review_ref` pointing at the guard-block report.
-   Run the two lenses independently but sequentially enough to guard after each invocation. Do NOT feed one lens's output into the other. This two-lens panel is the pre-PR review; a downstream consumer (an adapter) relays this verdict rather than re-reviewing.
+3. Run `work-reviewer` with subject `test-verifier`. Use the same read-only reviewer check before accepting the result.
+4. Run the pre-PR panel with two independent lenses on `$FEAT_WT` and the full diff:
+   - `implementation-validator` for correctness, AC coverage, cross-slice integration, conventions. Accept only `GO` or `GO-WITH-NITS`.
+   - `security-reviewer` for adversarial trust-boundary, injection, secrets, auth, and data risks. Accept only `PASS`.
 
-Combine the panel by STRICTEST verdict — this IS the Gate 3 verdict:
-
-- Any reviewer guard-block from either lens blocks the panel; do not accept that reviewer output.
-- Any NO-GO (validator) or BLOCK (security-reviewer) from EITHER lens -> NO-GO.
-- A `security-reviewer` BLOCK is ALWAYS NO-GO — never downgraded to a nit, even for default-off features.
-- Both clear (GO + PASS) -> GO, or GO-WITH-NITS if only MAJOR/NONBLOCKING findings remain.
-
-On NO-GO -> route the top finding to the owning builder via a new fix slice worktree or, for test-only issues, a controlled integration-branch fix. Re-observe and re-run the PANEL up to `max_retries`.
-
-If a test-only or remediation fix lands directly on `$FEAT_WT` instead of through a slice merge, treat it as a controlled direct-reviewed-commit event. Re-observe the exact parent, commit, tree, and canonical diff hash through safe Git; require a clean reviewed-worktree guard; write `attestations/direct-commits/<entry-id>.observation.json` plus the matching review-approval attestation; then append a `direct_reviewed_commit` entry to `attestations/merge-chain.json`.
+After writing `reviews/implementation-validator.json`, `reviews/security-reviewer.json`, and `artifacts/validation-report.md`, record panel verdicts with `feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json`. Combine by strictest verdict. Any validator `NO-GO` or security `BLOCK` is NO-GO. On NO-GO, route the top finding to the owning builder or integration/test fix path, observe evidence, and rerun the panel up to `max_retries`. For every panel re-run, pass `attempt: <n>` and the prior validator/security `required_fixes` list into the re-review prompt.
 
 ## Gate 3 - Pre-PR
 
 Present:
 
-- Panel verdict (implementation-validator + security-reviewer), with the security-reviewer's traced ingresses + any BLOCK/NONBLOCKING findings.
+- Panel verdict from implementation-validator and security-reviewer.
 - Acceptance-test table.
-- Full diff stat against base: `git -C $FEAT_WT diff --stat origin/$BASE...HEAD`.
+- Full diff stat against base.
 - Changed-file summary.
 - Migration/schema/security/feature-flag/generated-code risk callouts.
 - PR title/body preview.
@@ -509,52 +319,24 @@ Present:
 
 Do not offer normal approval if observed integrated evidence is missing, empty, or red. A human can explicitly override; record the override in `run.json`.
 
-On `changes`, route fixes to the appropriate slice/builder, re-observe, re-review, re-validate, and re-present.
-
 ## Step 6 - Draft PR
 
 After Gate 3 approval only:
 
-1. If `run.json.github_account` is non-empty, run `gh auth switch -h github.com -u "$GITHUB_ACCOUNT"` before any `gh` or authenticated GitHub remote command. If the account is unavailable or cannot access `origin`, stop with `status: partial` after preserving all validated implementation evidence and report the account/remote mismatch in `terminal_result.reason`.
-2. Verify the selected account can see the repository before pushing: `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name` or `git -C "$FEAT_WT" ls-remote --heads origin "$BASE"`.
-3. Push the feature branch from `$FEAT_WT`: `git -C "$FEAT_WT" push -u origin HEAD`.
+1. If `run.json.github_account` is non-empty, run `gh auth switch -h github.com -u "$GITHUB_ACCOUNT"` before any `gh` or authenticated GitHub remote command.
+2. Verify the selected account can see the repository before pushing.
+3. Push the feature branch from `$FEAT_WT`.
 4. Build PR metadata from repo conventions and changed paths.
 5. Write PR body to `$RUN/artifacts/pr-body.md`.
 6. Create a draft PR with the repository's CLI conventions, preferably `gh pr create --draft --body-file`.
-7. Immediately after successful draft PR creation, call the provenanced PR-created transition. Do not directly edit or persist `run.json.pr_url` yourself:
+7. Immediately after successful draft PR creation, call the PR-created transition. Do not directly edit or persist `run.json.pr_url` yourself:
    ```sh
-   feature-factory factory pr-created <run-id> \
-     --pr-url <url> \
-     --pr-number <number> \
-     --pr-body-ref artifacts/pr-body.md \
-     --provider github \
-     --repository <owner/repo> \
-     --remote origin \
-     --github-account <account> \
-     --head-branch <branch> \
-     --head-commit <sha> \
-     --base-ref <base-ref> \
-     --base-commit <sha> \
-     --draft \
-     --json
+   gh pr view <url>
+   feature-factory factory pr-created <run-id> --pr-url <url> --pr-number <number> --repository <owner/repo> --json
    ```
-   The helper writes `attestations/pr-created.json`, appends the accepted `pr-created` entry to `attestations/index.json`, validates the remote observation, PR body hash, run-base, merge-chain, pre-PR gate, local HEAD/base bindings, and only then writes trusted `run.pr_url`, `status: completed`, and `terminal_result.pr_url`. Without the accepted `pr-created` attestation, PR URL claims fail closed.
+   The helper validates `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, and the canonical GitHub PR URL before writing `run.pr_url`, `status: completed`, and `terminal_result.pr_url`.
 
 Never merge the PR. Never force-push unless the user explicitly approves.
-
-## Step 7 - Final Summary
-
-Report:
-
-- Run id and external ref.
-- Story and brief one-liners.
-- Slice plan waves and per-slice merge status.
-- Risk callouts.
-- Acceptance-test table and pre-PR panel verdict, including security-reviewer verdict.
-- PR URL, branch, feature worktree, and run dir.
-- Any TODOs, blocked slices, overrides, missing tests, or manual follow-ups.
-
-Do not auto-remove the feature worktree after PR creation; tell the engineer where it is.
 
 ## Resuming
 
@@ -567,15 +349,9 @@ On `/feature resume <run-id>` or a run with existing `run.json`, continue from t
 - Running/review slice -> re-observe and re-review before rebuilding.
 - Pending slice -> wait on dependencies, then dispatch in the next eligible wave.
 - Blocked slice -> surface for decision.
-- Existing PR URL -> verify it matches the latest accepted `pr-created` attestation before treating it as trusted; if the attestation is missing or mismatched, fail closed instead of recreating or trusting the claim.
+- Existing PR URL -> report it from `run.json` only after validating the current schema and terminal state.
 
 Never redo side effects that the manifest shows already happened.
-
-## Scripted Mode
-
-The factory is tracker-agnostic. External automation can monitor `run.json`, read artifacts, write gate answers, and mirror state elsewhere. The factory does not depend on any external queue.
-
-Scripted runs still use the same gates, evidence, reviews, and PR approval flow. A script can pre-answer gates by writing answer files, but the factory must still record the gate outcomes and observed evidence.
 
 ## Guardrails
 
@@ -583,8 +359,7 @@ Scripted runs still use the same gates, evidence, reviews, and PR approval flow.
 - One feature branch and one PR per run.
 - Never mutate the caller's checkout for implementation.
 - Accept build/test work only on observed evidence plus `work-reviewer` APPROVE.
-- Accept reviewer-designated outputs only after the reviewed-worktree guard returns clean.
-- Do not trust gate, review, validator, security, merge, or PR status booleans alone; provenance-sensitive decisions require accepted attestations plus fresh observations.
+- Treat reviewer-designated worktrees as read-only; if post-review git status is dirty or unverifiable, restore the worktree, discard that reviewer output, and retry once before blocking.
 - Subagents do not push, open PRs, or edit external systems.
 - Bounded loops: `max_retries = 3` per reviewed subject/slice.
 - Draft PR only. Humans review and merge.

@@ -40,13 +40,13 @@ If the parsed payload has a `driver` object, treat it as operator-supplied mode/
   - If `driver.reviewer` is a non-empty string, request review from that reviewer after creating the PR.
 - If `driver.github_account` is a non-empty string, persist it to top-level `run.json.github_account` and use it before GitHub remote access or PR creation as described by the feature skill.
 
-Provenance and PR authority requirements from the feature skill are mandatory for all modes:
+Environment snapshots from the feature skill are mandatory for all modes:
 
-- At run creation, persist only redacted diagnostic environment state through `feature-factory factory provenance record-created <run-id> --json` so `run.json.factory_provenance.created_with` contains no token-shaped or high-entropy credentials such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, or `xoxb_*`.
-- Before the first mutating resume step, refresh only redacted diagnostic resume state through `feature-factory factory provenance record-resume <run-id> --json`; `factory_provenance` is diagnostic-only and is not authority for gates, reviews, merges, or PR URLs.
-- Pending gates must carry `pending_snapshot` with `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer material; gate answers must fail closed when the current question, artifact, or answer material is missing, escaped, or hash-stale.
-- Status/list/validate/watch requests are read-only diagnostic surfaces. Report detached-run diagnostics when present, including `invalid` classifications, liveness-only heartbeat/PID evidence, protected-gate `needs-human` / `warning` / `warning`, and fail-closed invalid/unverifiable envelopes; protected gates suppress stale-heartbeat and missing-heartbeat-process alarms. Do not restart or repair a run implicitly.
-- After a successful draft PR creation, call `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref artifacts/pr-body.md --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA --draft --json`. Do not directly persist `run.json.pr_url`; `run.pr_url` and `terminal_result.pr_url` are trusted only after the accepted `attestations/pr-created.json` record validates.
+- At run creation, persist only redacted diagnostic environment state through `feature-factory factory env record-created <run-id> --json` so `run.json.debug_snapshot.created_with` contains no token-shaped or high-entropy credentials such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, or `xoxb_*`.
+- Before the first mutating resume step, refresh only redacted diagnostic resume state through `feature-factory factory env record-resume <run-id> --json`; `debug_snapshot` is diagnostic-only and is not authority for gates, reviews, merges, or PR URLs.
+- Status/list/validate/watch requests are read-only diagnostic surfaces. Report detached-run diagnostics when present, including `invalid` classifications, liveness-only heartbeat/PID evidence, protected-gate `needs-human` / `warning` / `warning`, and fail-closed invalid run-state envelopes; protected gates suppress stale-heartbeat and missing-heartbeat-process alarms. Do not restart or repair a run implicitly.
+- After creating a draft PR, verify it with `gh pr view <url>`, then record its canonical GitHub PR URL with `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json`.
+- Never write `run.json.pr_url` directly.
 
 UNTRUSTED_OPERATOR_PAYLOAD_START
 $ARGUMENTS

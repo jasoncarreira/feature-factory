@@ -20,6 +20,10 @@ cannot rule out a bypass, treat it as a finding and **default to blocking**. A
 past run shipped a `/event` forgery bypass and an args prompt-injection through a
 generic "looks fine" pass — that must not recur.
 
+Trust-model rubric: findings that require capabilities outside the factory trust model are NONBLOCKING notes, never BLOCK reasons. Examples: a malicious local operator manipulating `PATH`, rewriting Git history, hand-editing run state files, or tampering across runs. Cite the README trust statement when applying this carve-out.
+
+Delta rule: when the input marks `attempt > 1`, judge only whether each prior `required_fixes` item landed and whether the fix diff introduced regressions. New-scope observations on unchanged code go in notes as NONBLOCKING.
+
 ## Inputs
 - Integrated feature worktree `$WT` and the full diff against the base ref.
 - Story / technical brief (for the intended trust model).
@@ -35,7 +39,7 @@ generic "looks fine" pass — that must not recur.
    Untrusted text in a privileged region must be parameterized or rendered as
    clearly-labeled untrusted data (JSON-encoded / fenced / escaped), never as
    instructions or code.
-3. **Forgeable provenance / authz** — can a server-owned marker (an
+3. **Forgeable identity / authz** — can a server-owned marker (an
    author/identity/source field, a role/permission flag, a "trusted"
    invocation) be forged via an alternate endpoint or by setting request fields
    directly? Is authz enforced server-side on **every** path, and in the right
@@ -56,6 +60,9 @@ generic "looks fine" pass — that must not recur.
 - Otherwise → **PASS** (note lower-severity hardening as NONBLOCKING).
 
 ## Output — return exactly this
+
+The orchestrator records the machine-readable verdict JSON at `reviews/security-reviewer.json` with `subject` equal to the integrated feature branch name. `run.json.security_review.review_ref` must point to `reviews/security-reviewer.json`.
+
 ```markdown
 ## Security review
 **Verdict:** PASS | BLOCK

@@ -1,123 +1,36 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
-  HEARTBEAT_ACTIVE_STATUSES,
   TERMINAL_RUN_STATUSES,
   pendingProtectedGate,
   validateFactoryLock,
   validateHeartbeatState,
   validateRun,
-  validateRunAuthority,
   validateSlicesPlan,
 } from "./validate.js";
-import { scrubSecretProvenance } from "./provenance.js";
+import { physicalPath, timestamp } from "./utils.js";
 
 export const DIAGNOSTIC_SCHEMA_VERSION = 1;
 export const HEARTBEAT_FILE = "heartbeat.json";
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
 export const MIN_STALE_HEARTBEAT_MS = 120000;
 
-export const DIAGNOSTIC_CONDITIONS = Object.freeze([
-  "stale-heartbeat",
-  "missing-heartbeat-process",
-  "missing-worktree",
-  "invalid-run-state",
-  "invalid-authority",
-  "unverifiable-authority",
-  "protected-gate",
-  "terminal-run",
+const CONDITIONS = Object.freeze([
+  Object.freeze({ condition: "invalid-run-state", classification: "invalid", severity: "critical", status: "error", message: "Factory run state is invalid or cannot be parsed.", action: "Treat the run as untrusted until run.json and required sidecars validate." }),
+  Object.freeze({ condition: "missing-worktree", classification: "blocked", severity: "error", status: "error", message: "A recorded worktree path is missing or inaccessible.", action: "Restore the worktree or complete cleanup/recovery from durable state." }),
+  Object.freeze({ condition: "missing-heartbeat-process", classification: "recoverable", severity: "warning", status: "warning", message: "The heartbeat helper process recorded in heartbeat.json is not alive.", action: "Inspect the run log and validate durable state before resuming; do not infer run failure from PID liveness alone." }),
+  Object.freeze({ condition: "stale-heartbeat", classification: "recoverable", severity: "warning", status: "warning", message: "Heartbeat has not advanced within the stale threshold.", action: "Inspect the run log and validate durable state before resuming; do not restart blindly." }),
+  Object.freeze({ condition: "protected-gate", classification: "needs-human", severity: "warning", status: "warning", message: "Run is waiting at a protected human gate.", action: "Answer the pending protected gate or stop the run; heartbeat liveness alarms are suppressed while waiting." }),
+  Object.freeze({ condition: "terminal-run", classification: "terminal", severity: "info", status: "ok", message: "Run is terminal.", action: "Read terminal_result for the durable outcome." }),
 ]);
 
+export const DIAGNOSTIC_CONDITIONS = Object.freeze(CONDITIONS.map((item) => item.condition));
 export const DIAGNOSTIC_CLASSIFICATIONS = Object.freeze(["healthy", "recoverable", "blocked", "needs-human", "terminal", "invalid"]);
 export const DIAGNOSTIC_STATUSES = Object.freeze(["ok", "warning", "error"]);
 export const DIAGNOSTIC_SEVERITIES = Object.freeze(["info", "warning", "error", "critical"]);
 
-export const CLASSIFICATION_PRIORITY = Object.freeze({
-  invalid: 5,
-  blocked: 4,
-  "needs-human": 3,
-  recoverable: 2,
-  terminal: 1,
-  healthy: 0,
-});
-
-export const SEVERITY_PRIORITY = Object.freeze({
-  critical: 3,
-  error: 2,
-  warning: 1,
-  info: 0,
-});
-
-export const STATUS_PRIORITY = Object.freeze({
-  error: 2,
-  warning: 1,
-  ok: 0,
-});
-
-export const CONDITION_PRIORITY = Object.freeze({
-  "invalid-run-state": 7,
-  "invalid-authority": 6,
-  "unverifiable-authority": 5,
-  "missing-worktree": 4,
-  "missing-heartbeat-process": 3,
-  "stale-heartbeat": 2,
-  "protected-gate": 1,
-  "terminal-run": 0,
-});
-
-const CONDITION_DEFINITIONS = Object.freeze({
-  "stale-heartbeat": Object.freeze({
-    classification: "recoverable",
-    severity: "warning",
-    status: "warning",
-    message: "Heartbeat has not advanced within the stale threshold.",
-    action: "Inspect the run log and validate durable state before resuming; do not restart blindly.",
-  }),
-  "missing-heartbeat-process": Object.freeze({
-    classification: "recoverable",
-    severity: "warning",
-    status: "warning",
-    message: "The heartbeat helper process recorded in heartbeat.json is not alive.",
-    action: "Inspect the run log and validate durable state before resuming; do not infer run failure from PID liveness alone.",
-  }),
-  "missing-worktree": Object.freeze({
-    classification: "blocked",
-    severity: "error",
-    status: "error",
-    message: "A provenance-validated worktree path is missing or inaccessible.",
-    action: "Restore the trusted worktree or complete cleanup/recovery from validated durable state.",
-  }),
-  "invalid-run-state": Object.freeze({
-    classification: "invalid",
-    severity: "critical",
-    status: "error",
-    message: "Factory run state is invalid or cannot be parsed.",
-    action: "Treat the run as untrusted until run.json and required sidecars validate.",
-  }),
-  "invalid-authority": Object.freeze({
-    classification: "invalid",
-    severity: "critical",
-    status: "error",
-    message: "Factory run state contradicts accepted provenance authority.",
-    action: "Do not trust mutable run claims; inspect accepted attestations and durable artifacts.",
-  }),
-  "unverifiable-authority": Object.freeze({
-    classification: "blocked",
-    severity: "critical",
-    status: "error",
-    message: "Factory run authority cannot be verified from local proofs.",
-    action: "Restore or inspect missing provenance proofs before trusting status, branch, PR, gate, or worktree claims.",
-  }),
-  "protected-gate": Object.freeze({
-    classification: "needs-human",
-    severity: "warning",
-    status: "warning",
-    message: "Run is waiting at a protected human gate.",
-    action: "Answer the pending protected gate or stop the run; heartbeat liveness alarms are suppressed while waiting.",
-  }),
-});
-
-const TERMINAL_DEFINITIONS = Object.freeze({
+const CONDITION_BY_NAME = new Map(CONDITIONS.map((item, index) => [item.condition, { ...item, index }]));
+const TERMINAL_OVERRIDES = Object.freeze({
   completed: Object.freeze({ classification: "terminal", severity: "info", status: "ok" }),
   partial: Object.freeze({ classification: "terminal", severity: "info", status: "ok" }),
   blocked: Object.freeze({ classification: "blocked", severity: "error", status: "error" }),
@@ -125,7 +38,6 @@ const TERMINAL_DEFINITIONS = Object.freeze({
 });
 
 const TERMINAL_STATUSES = new Set(TERMINAL_RUN_STATUSES);
-const HEARTBEAT_ACTIVE_STATUS_SET = new Set(HEARTBEAT_ACTIVE_STATUSES);
 
 export function diagnoseRunDir(runDir, options = {}) {
   return diagnoseRunFile(join(runDir, "run.json"), { ...options, runDir });
@@ -188,28 +100,19 @@ export function diagnoseRunObject(input, options = {}) {
     return diagnosticEnvelope([invalidSidecar], { checkedAt, authoritative: false });
   }
 
-  const authority = runDir ? validateAuthority(runDir, run, options) : { ok: true, authoritative: false };
-  if (!authority.ok) {
-    items.push(authorityItem(authority, { checkedAt, runDir, runFile }));
-    return diagnosticEnvelope(items, { checkedAt, authoritative: false });
-  }
-
   const terminal = TERMINAL_STATUSES.has(run.status);
-  const authoritative = Boolean(runDir && authority.authoritative !== false);
-  const acceptedAuthority = hasAcceptedRunAuthority(authority, options);
-  const trustedAuthoritative = authoritative && acceptedAuthority;
+  const authoritative = Boolean(runDir);
   const protectedGate = pendingProtectedGate(run);
 
   if (terminal) {
-    if (runDir && !acceptedAuthority) items.push(unverifiableRunAuthorityItem({ checkedAt, runDir, runFile, terminal: true }));
-    items.push(terminalRunItem(run, { checkedAt, runDir, runFile, authoritative: trustedAuthoritative }));
-    return diagnosticEnvelope(items, { checkedAt, authoritative: trustedAuthoritative && !hasUntrustedAuthorityItem(items) });
+    items.push(terminalRunItem(run, { checkedAt, runDir, runFile, authoritative }));
+    return diagnosticEnvelope(items, { checkedAt, authoritative });
   }
 
   if (protectedGate) {
     items.push(diagnosticItem("protected-gate", {
       checkedAt,
-      authoritative: trustedAuthoritative,
+      authoritative,
       message: `Run is waiting at protected gate '${protectedGate}'.`,
       evidence: { source: "run.json", run_dir: runDir, run_path: runFile, gate: protectedGate },
     }));
@@ -228,14 +131,10 @@ export function diagnoseRunObject(input, options = {}) {
     }
   }
 
-  const missingWorktree = inspectWorktree(run, { ...options, checkedAt, runDir, authoritative: trustedAuthoritative });
+  const missingWorktree = inspectWorktree(run, { ...options, checkedAt, runDir, authoritative });
   if (missingWorktree) items.push(missingWorktree);
 
-  if (runDir && !acceptedAuthority && items.length === 0) {
-    items.push(unverifiableRunAuthorityItem({ checkedAt, runDir, runFile }));
-  }
-
-  return diagnosticEnvelope(items, { checkedAt, authoritative: trustedAuthoritative && !hasUntrustedAuthorityItem(items) });
+  return diagnosticEnvelope(items, { checkedAt, authoritative });
 }
 
 export function diagnosticEnvelope(items = [], options = {}) {
@@ -260,7 +159,7 @@ export function aggregateDiagnostics(items = []) {
   }
   const primary = items
     .map((item, index) => ({ item, index }))
-    .sort((left, right) => compareDiagnosticItems(left.item, right.item) || left.index - right.index)[0].item;
+    .sort((left, right) => conditionOrder(left.item.condition) - conditionOrder(right.item.condition) || left.index - right.index)[0].item;
   return {
     classification: primary.classification,
     status: primary.status,
@@ -270,19 +169,10 @@ export function aggregateDiagnostics(items = []) {
   };
 }
 
-export function compareDiagnosticItems(left, right) {
-  return (
-    priority(right.classification, CLASSIFICATION_PRIORITY) - priority(left.classification, CLASSIFICATION_PRIORITY)
-    || priority(right.severity, SEVERITY_PRIORITY) - priority(left.severity, SEVERITY_PRIORITY)
-    || priority(right.status, STATUS_PRIORITY) - priority(left.status, STATUS_PRIORITY)
-    || priority(right.condition, CONDITION_PRIORITY) - priority(left.condition, CONDITION_PRIORITY)
-  );
-}
-
 export function diagnosticItem(condition, options = {}) {
   const definition = condition === "terminal-run"
     ? terminalDefinition(options.terminalStatus)
-    : CONDITION_DEFINITIONS[condition];
+    : CONDITION_BY_NAME.get(condition);
   if (!definition) throw new Error(`unknown diagnostic condition: ${condition}`);
   const checkedAt = options.checkedAt || timestamp(options.now);
   return normalizeDiagnosticItem({
@@ -312,58 +202,6 @@ function normalizeDiagnosticItem(item, checkedAt) {
   };
 }
 
-function validateAuthority(runDir, run, options) {
-  const authority = typeof options.validateRunAuthorityFn === "function"
-    ? options.validateRunAuthorityFn(runDir, run, options)
-    : validateRunAuthority(runDir, run, options);
-  if (authority.ok) return { ...authority, authoritative: true };
-  const errors = validationErrors(authority.checks);
-  return {
-    ...authority,
-    errors: sanitizeAuthorityErrors(errors),
-    condition: classifyAuthorityFailure(errors),
-  };
-}
-
-function hasAcceptedRunAuthority(authority, options = {}) {
-  if (typeof options.validateRunAuthorityFn === "function") return authority?.authoritative !== false;
-  if (authority?.authoritative === false) return false;
-  return Array.isArray(authority?.orderedRefs) && authority.orderedRefs.length > 0;
-}
-
-function unverifiableRunAuthorityItem({ checkedAt, runDir, runFile, terminal = false }) {
-  return diagnosticItem("unverifiable-authority", {
-    checkedAt,
-    authoritative: false,
-    message: `${terminal ? "Terminal" : "Active"} factory run authority cannot be verified from accepted run-base or attestation proofs.`,
-    evidence: {
-      source: "provenance-authority",
-      run_dir: runDir,
-      run_path: runFile,
-      errors: [{ path: "attestations/index.json", message: `${terminal ? "terminal" : "active"} run requires an accepted run-base attestation or authority proof` }],
-    },
-  });
-}
-
-function hasUntrustedAuthorityItem(items) {
-  return items.some((item) => item.condition === "invalid-run-state" || item.condition === "unverifiable-authority");
-}
-
-function authorityItem(authority, { checkedAt, runDir, runFile }) {
-  const message = formatValidationErrors(authority.errors) || CONDITION_DEFINITIONS[authority.condition].message;
-  return diagnosticItem(authority.condition, {
-    checkedAt,
-    authoritative: false,
-    message,
-    evidence: {
-      source: "provenance-authority",
-      run_dir: runDir,
-      run_path: runFile,
-      errors: authority.errors,
-    },
-  });
-}
-
 function terminalRunItem(run, options) {
   return diagnosticItem("terminal-run", {
     ...options,
@@ -383,18 +221,18 @@ function inspectSidecars(runDir, checkedAt, run) {
     if (!existsSync(check.path)) continue;
     try {
       const sidecar = check.validator(JSON.parse(readFileSync(check.path, "utf8")));
-      if (check.source === HEARTBEAT_FILE && sidecar.run_id !== run.run_id) {
+      if ((check.source === HEARTBEAT_FILE || check.source === "factory.lock") && sidecar.run_id !== run.run_id) {
         return diagnosticItem("invalid-run-state", {
           checkedAt,
           authoritative: false,
-          message: "Factory sidecar state contradicts run.json: heartbeat.run_id does not match run.run_id.",
+          message: `Factory sidecar state contradicts run.json: ${check.source}.run_id does not match run.run_id.`,
           evidence: {
             source: check.source,
             run_dir: runDir,
             path: check.path,
-            error: "heartbeat.run_id does not match run.run_id",
+            error: `${check.source}.run_id does not match run.run_id`,
             run_id: run.run_id,
-            heartbeat_run_id: sidecar.run_id,
+            sidecar_run_id: sidecar.run_id,
           },
         });
       }
@@ -440,7 +278,6 @@ function inspectHeartbeat(run, options) {
     liveness_only: true,
     run_dir: runDir,
     heartbeat_path: heartbeatPath,
-    heartbeat_status: heartbeat?.status || null,
     heartbeat_phase: heartbeat?.phase || null,
     pid: heartbeat?.pid || null,
     process_alive: null,
@@ -451,15 +288,13 @@ function inspectHeartbeat(run, options) {
   };
 
   const result = {};
-  if (heartbeat && HEARTBEAT_ACTIVE_STATUS_SET.has(heartbeat.status)) {
+  if (heartbeat) {
     evidence.process_alive = processAlive(heartbeat.pid, options);
-    if (!evidence.process_alive) {
-      result.missingProcess = diagnosticItem("missing-heartbeat-process", {
-        checkedAt,
-        authoritative: false,
-        evidence: { ...evidence },
-      });
-    }
+    if (!evidence.process_alive) result.missingProcess = diagnosticItem("missing-heartbeat-process", {
+      checkedAt,
+      authoritative: false,
+      evidence: { ...evidence },
+    });
   }
 
   if (ageMs !== null && ageMs > staleMs) {
@@ -502,17 +337,17 @@ function processAlive(pid, options = {}) {
     return true;
   } catch (error) {
     if (error?.code === "ESRCH") return false;
-    return error?.code === "EPERM";
+    return false;
   }
 }
 
 function realpath(options, path) {
   if (typeof options.realpathFn === "function") return options.realpathFn(path);
-  return realpathSync.native(path);
+  return physicalPath(path, "worktree", { mustExist: true });
 }
 
 function terminalDefinition(status) {
-  return TERMINAL_DEFINITIONS[status] || TERMINAL_DEFINITIONS.completed;
+  return { ...CONDITION_BY_NAME.get("terminal-run"), ...(TERMINAL_OVERRIDES[status] || TERMINAL_OVERRIDES.completed) };
 }
 
 function terminalMessage(status) {
@@ -529,49 +364,12 @@ function terminalAction(status) {
   return "Inspect the terminal result and provide the required human input.";
 }
 
-function classifyAuthorityFailure(errors) {
-  return errors.length > 0 && errors.every(isUnverifiableAuthorityError) ? "unverifiable-authority" : "invalid-authority";
-}
-
-function isUnverifiableAuthorityError(error) {
-  const text = `${error.path || ""} ${error.message || ""}`;
-  if (/does not match|mismatch|stale|contradict|forged|current integrated feature head|must equal|differs from|outside trusted|unexpected/i.test(text)) {
-    return false;
-  }
-  return /missing|not found|no such file|ENOENT|EACCES|EPERM|inaccessible|requires? an accepted|accepted attestation not found|attestations\/index\.json|proof/i.test(text);
-}
-
-function validationErrors(checks = []) {
-  return checks.flatMap((check) => (Array.isArray(check?.errors) ? check.errors : [])).map((error) => ({
-    path: error.path || "authority",
-    message: error.message || String(error),
-  }));
-}
-
-function sanitizeAuthorityErrors(errors = []) {
-  return errors.map((error) => ({
-    path: stringValue(error.path) ? String(scrubSecretProvenance(error.path)) : "authority",
-    message: stringValue(error.message) ? String(scrubSecretProvenance(error.message)) : String(scrubSecretProvenance(String(error))),
-  }));
-}
-
-function formatValidationErrors(errors = []) {
-  return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
-}
-
-function priority(value, table) {
-  return Number.isInteger(table[value]) ? table[value] : -1;
+function conditionOrder(condition) {
+  return CONDITION_BY_NAME.get(condition)?.index ?? Number.MAX_SAFE_INTEGER;
 }
 
 function positiveInteger(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
-}
-
-function timestamp(value) {
-  if (value === undefined || value === null) return new Date().toISOString();
-  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
-  if (!Number.isFinite(parsed)) throw new Error("invalid diagnostic timestamp");
-  return new Date(parsed).toISOString();
 }
 
 function stringValue(value) {

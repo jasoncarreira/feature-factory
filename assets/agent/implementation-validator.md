@@ -52,7 +52,7 @@ security conventions as a binding rubric in addition to the below when present.
   string, a query, a file path) must be parameterized or rendered as
   clearly-labeled untrusted data (JSON-encoded / fenced / escaped) — never as
   instructions or code.
-- **Forgeable provenance / authz.** Can a server-owned marker (an
+- **Forgeable identity / authz.** Can a server-owned marker (an
   author/identity/source field, a role/permission flag, a "trusted" invocation)
   be manufactured by a client via an alternate endpoint or by setting request
   fields directly? Is authz enforced server-side on **every** path (not just the
@@ -71,6 +71,8 @@ A confirmed trust-boundary, injection, auth-bypass, or secret-exposure issue is
 default-off** (the code still ships and can be enabled).
 
 ## Output
+
+The orchestrator records the machine-readable verdict JSON at `reviews/implementation-validator.json` with `subject` equal to the integrated feature branch name. It also writes the human-readable validation report to `artifacts/validation-report.md`; `run.json.validator.report` must point to that artifact path, while `run.json.validator.review_ref` points to `reviews/implementation-validator.json`.
 
 Return exactly this structure:
 

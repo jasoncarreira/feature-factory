@@ -10,11 +10,12 @@ const JSONC_PARSE_OPTIONS = {
 
 export function parseJsoncConfig(raw, { label = "opencode.jsonc" } = {}) {
   const errors = [];
-  const value = parse(String(raw), errors, JSONC_PARSE_OPTIONS);
+  const input = stripBom(raw);
+  const value = parse(input, errors, JSONC_PARSE_OPTIONS);
   const safeLabel = sanitizeLabel(label, "opencode.jsonc");
 
   if (errors.length > 0) {
-    throw new SyntaxError(formatJsoncParseError(String(raw), errors, safeLabel));
+    throw new SyntaxError(formatJsoncParseError(input, errors, safeLabel));
   }
 
   if (value === undefined) return {};
@@ -36,12 +37,13 @@ export function readJsoncConfig(path, opts = {}) {
 
 export function parseStrictJsonConfig(raw, { label = "opencode.json" } = {}) {
   const safeLabel = sanitizeLabel(label, "opencode.json");
+  const input = stripBom(raw);
   let value;
 
   try {
-    value = JSON.parse(String(raw));
+    value = JSON.parse(input);
   } catch (error) {
-    throw new SyntaxError(formatStrictJsonParseError(String(raw), error, safeLabel));
+    throw new SyntaxError(formatStrictJsonParseError(input, error, safeLabel));
   }
 
   assertConfigObject(value, safeLabel);
@@ -117,4 +119,9 @@ function sanitizeLabel(label, fallback) {
   const raw = String(label ?? fallback);
   const withoutAbsolutePath = isAbsolute(raw) ? basename(raw) : win32.isAbsolute(raw) ? win32.basename(raw) : raw;
   return withoutAbsolutePath.replace(/[\r\n\t]+/gu, " ").trim() || fallback;
+}
+
+function stripBom(raw) {
+  const text = String(raw);
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }

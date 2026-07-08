@@ -20,6 +20,10 @@ Review one subject at a time. Producer reports are claims; orchestrator-observed
 
 Reject if the producer claim and observed evidence disagree. Never approve a build or test step based only on prose.
 
+Trust-model rubric: findings that require capabilities outside the factory trust model are NONBLOCKING notes, never REJECT reasons. Examples: a malicious local operator manipulating `PATH`, rewriting Git history, hand-editing run state files, or tampering across runs. Cite the README trust statement when applying this carve-out.
+
+Delta rule: when the input marks `attempt > 1`, judge only whether each prior `required_fixes` item landed and whether the fix diff introduced regressions. New-scope observations on unchanged code go in notes as NONBLOCKING.
+
 Reject on:
 
 - Claim/evidence mismatch.
@@ -46,7 +50,7 @@ Enumerate **every** path the diff touches, not only the one the slice is "about"
 - **Injection** — SQL / command / path-traversal / template / **LLM-prompt**;
   untrusted text must be parameterized or rendered as clearly-labeled untrusted
   data (JSON-encoded / fenced / escaped), never as instructions.
-- **Forgeable provenance / authz** — a server-owned marker (author/identity/
+- **Forgeable identity / authz** — a server-owned marker (author/identity/
   source field, permission flag, "trusted" invocation) manufacturable by a
   client via an alternate endpoint; authz not enforced server-side on every path.
 - **Secrets** — logged, echoed, or written to artifacts.

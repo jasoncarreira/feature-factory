@@ -1,6 +1,6 @@
 # Feature Factory Schema
 
-The feature factory persists a per-run control plane so runs are durable, resumable, observable, and externally drivable. The factory writes all files except gate answer files. Under the provenance authority model, mutable local metadata is never sole trust: provenance-sensitive facts must be backed by fresh orchestrator observations and accepted factory-owned attestations.
+The feature factory persists a per-run control plane so runs are durable, resumable, observable, and externally drivable. The factory writes all files except gate answer files. The proof layer removed in the simplified factory; local files are durable state and diagnostics, not cryptographic authority.
 
 ## Directory
 
@@ -33,15 +33,6 @@ The feature factory persists a per-run control plane so runs are durable, resuma
   reviews/<subject>.json
   reviews/implementation-validator.json
   reviews/security-reviewer.json
-  attestations/
-    index.json
-    run-base.json
-    gates/<gate>.json
-    slices/<slice-id>.observation.json
-    reviews/<subject>.approval.json
-    direct-commits/<entry-id>.observation.json
-    merge-chain.json
-    pr-created.json
   processes/<timestamp>.log
 ```
 
@@ -52,226 +43,65 @@ Implementation worktrees live under:
 .opencode/worktrees/<feature-branch>--<slice-id>/
 ```
 
-## Provenance authority model
+## CLI State Write Surface
 
-The feature factory uses three authority tiers:
+After the initial manifest bootstrap, do not edit `run.json` directly. Every semantic state write uses the `feature-factory factory ...` CLI, which takes `run-json.lock/`, validates the next state, and commits atomically. The CLI invokes the checked transition helpers internally, including `transitionGateDecision` for protected gate decisions and `transitionPrCreated` for completed PR state.
 
-- `untrusted caller claims`: operator prompts, gate answer files, builder/reviewer text, `run.json`, `factory.lock`, `evidence/*.json`, `reviews/*.json`, worktree path strings, status booleans, `base_ref`, and `base_commit`.
-- `orchestrator observations`: fresh `safeGit()` / filesystem observations, physical durable-root containment, worktree identity, commit/tree/parent relationships, evidence/review hashes, and reviewed-worktree guard results.
-- `factory-owned attestations`: records written only by the orchestrator after the current observations and re-checks pass.
+Required write commands:
 
-Rules:
-
-- Mutable local metadata is never sole trust. `run.json`, `reviews/*.json`, `evidence/*.json`, `factory.lock`, path strings, `base_ref`, `base_commit`, and status booleans are claims only.
-- Gate, review, slice, validator, security, merge, and PR states must be backed by accepted attestations plus fresh observations.
-- `run.json.factory_provenance` is diagnostic-only metadata collected at run creation/resume; it is useful for debugging but is never authority proof.
-- Diagnostic provenance must omit sensitive keys and redact token-shaped or high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`/`ghu_*`/`ghs_*`/`ghr_*`, `sk-proj_*`, `sk-*`, `xoxb_*`/`xoxp_*`/`xoxa_*`, `glpat-*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and single-token high-entropy strings.
-- The heartbeat owner capability in `factory.lock` is local runtime authority for heartbeat control only; it is not provenance proof for reviews, gates, merges, or prior Git state.
-- Validation must fail closed whenever accepted attestations, safe Git observations, durable-root containment, or worktree identity cannot be re-proved.
-
-## Run-state transition API (`src/run-state.js`)
-
-All semantic `run.json` writes go through the transition helpers:
-
-- `hashRunState(run)` returns the canonical run hash used for optimistic `expectedCurrentHash` stale-write detection.
-- `transitionRunJson(runDir, mutator, options)` is the default semantic writer. It acquires `run-json.lock/`, validates current authority, rejects foreground semantic writes while heartbeat is active unless explicitly allowed, validates the next run, then commits atomically.
-- `transitionLifecycleRun(runDir, mutator, options)` uses the same transition contract. `allowActiveHeartbeat: true` is reserved for controlled lifecycle paths and is not a general bypass.
-- `transitionRunStep(runDir, stepSelector, updater, options)` seeds or updates `steps[]` entries by stable `agent` identity.
-- `transitionRunSlice(runDir, sliceId, updater, options)` seeds or updates `slices[]` entries by stable `id` identity.
-- `transitionTerminalResult(runDir, terminalResult, options)` keeps top-level `run.json.status` and `run.json.terminal_result` consistent and normalizes `terminal_result.run_id` to the durable run id.
-- `transitionGateDecision(runDir, gateName, gate, options)` is the only approved-gate writer. Scripted harnesses can invoke it through `feature-factory factory gate-decision <run-id> <gate> <status> ...`. For `status: "approved"` it requires an already accepted non-empty `attestations/index.json`, stages `attestations/gates/<gate>.json` plus the updated `attestations/index.json`, validates that material, and commits those accepted attestation records before the approved gate state is written to `run.json`. If the next state fails validation, it rolls back the staged gate attestation/index files and leaves `run.json` unchanged.
-- `transitionPrCreated(runDir, prCreatedInput, options)` is the only trusted PR-created terminal writer. Scripted harnesses invoke it through `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref REF --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA [--draft|--no-draft] [--json]`. It stages and validates `attestations/pr-created.json` plus the updated `attestations/index.json` before writing `run.pr_url`, `status: "completed"`, or `terminal_result.pr_url`; rollback leaves `run.json` unchanged.
-- `mutateRunJsonLocked(runDir, mutator, options)` is compatibility-only when `attestations/index.json` is absent. It may write bootstrap-safe non-provenance-sensitive state only. It must fail closed if the current or next state claims approved gates, review-approved or merged slices, passing validator/security verdicts, run-base fields, or PR URL claims without accepted attestations.
-
-These helpers do not change heartbeat or external-driver semantics: `heartbeat.json` remains liveness-only, and external drivers still write only `gates/<gate>.answer`; approved file-sourced answers still record `approval_source: "external-driver"`.
-
-## `attestations/`
-
-Create attestation records only under the physical `$RUN/attestations/` root:
-
-```text
-$RUN/attestations/
-  index.json
-  run-base.json
-  gates/<gate>.json
-  slices/<slice-id>.observation.json
-  reviews/<subject>.approval.json
-  direct-commits/<entry-id>.observation.json
-  merge-chain.json
-  pr-created.json
+```sh
+feature-factory factory env record-created <run-id> --json
+feature-factory factory env record-resume <run-id> --json
+feature-factory factory answer --json <run-id> <gate> approve
+feature-factory factory recover <run-id> --reason TEXT --json
+feature-factory factory gate-decision <run-id> <gate> pending --artifact artifacts/<file> --question-ref gates/<gate>.question.md --answer-ref gates/<gate>.answer --json
+feature-factory factory gate-decision <run-id> <gate> approved --artifact artifacts/<file> --question-ref gates/<gate>.question.md --answer-ref gates/<gate>.answer --approval-source external-driver --json
+feature-factory factory slices-seed <run-id> --from plan/slices.json --json
+feature-factory factory slice-status <run-id> <slice-id> running --branch <branch> --worktree <path> --attempts N --json
+feature-factory factory slice-status <run-id> <slice-id> review --evidence-ref evidence/<slice-id>.json --review-ref reviews/<slice-id>.json --attempts N --json
+feature-factory factory slice-status <run-id> <slice-id> blocked --reason TEXT --json
+feature-factory factory step <run-id> <known-agent> running --attempts N --json
+feature-factory factory step <run-id> <known-agent> accepted --artifact-ref artifacts/<file> --review-ref reviews/<agent>.json --json
+feature-factory factory step <run-id> <known-agent> rejected --review-ref reviews/<agent>.json --json
+feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json
+feature-factory factory terminal <run-id> blocked --reason TEXT --json
+feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json
+feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
 ```
 
-Durable-root rules:
+External drivers write only `gates/<gate>.answer`; they may use `feature-factory factory answer --json <run-id> <gate> approve` or write the answer file directly. The factory consumes answer files through `factory gate-decision`; approved file-sourced answers record `approval_source: "external-driver"` and consumed answer files are archived away from the canonical `gates/<gate>.answer` path.
 
-- `evidence/`, `artifacts/`, `reviews/`, and `attestations/` must physically resolve under `$RUN`.
-- Symlinked durable roots are rejected.
-- Worktree identity must be derived from current Git/worktree metadata and physical paths, not from string containment alone.
-- Same-branch worktree records that are stale, missing, inaccessible, or resolve to a different path are conflicts unless identity is proven.
+`factory recover` is operator recovery for orphaned/stale running runs; do not use it to bypass active in-flight work or protected gates.
 
-### Common attestation fields
+`factory slice-status` updates only slices that already exist in `run.json.slices[]`; use `factory slices-seed` to create slices from `plan/slices.json`. `factory step` updates only step placeholders bootstrapped in the initial manifest.
 
-Every accepted attestation uses the same common envelope and a canonical JSON hash:
-
-```json
-{
-  "schema_version": 1,
-  "authority_model": "feature-factory-provenance-v1",
-  "authority": "feature-factory",
-  "type": "run-base|slice-observation|review-approval|direct-reviewed-commit|gate-decision|merge-chain|pr-created",
-  "run_id": "app-123",
-  "sequence": 1,
-  "prev_hash": null,
-  "subject": "run-base",
-  "created_at": "2026-07-06T12:00:00Z",
-  "observed_by": "feature-factory",
-  "safe_git_policy": "safe-git-v1",
-  "bindings": {},
-  "attestation_hash": "sha256:<64 hex>"
-}
-```
-
-`attestation_hash` is the canonical JSON hash of the attestation excluding `attestation_hash` itself.
-
-### Accepted attestation graph (`index.json` + `prev_hash`)
-
-Local attestation JSON is not trusted merely because it exists. An attestation is accepted only when all of the following are true:
-
-- `attestations/index.json` is created only with the first accepted attestation and must never be a placeholder-empty file.
-- The ref is under the physical `$RUN/attestations/` root.
-- `attestations/index.json` contains the matching `ref`, `type`, `sequence`, `prev_hash`, and `attestation_hash`.
-- The canonical JSON hash matches `attestation_hash`.
-- `prev_hash` forms an unbroken chain from `attestations/run-base.json`.
-- Every referenced artifact, evidence, and review hash still matches current file contents.
-- Every currently observable Git/filesystem fact is re-observed through safe Git/filesystem checks and still matches the attested bindings.
-
-Unknown types, hash mismatches, out-of-chain records, missing refs, stale worktrees, inaccessible worktrees, same-branch conflicts, or unverifiable observations fail closed.
-
-Bootstrapping rules:
-
-- `attestations/index.json.entries` must be a non-empty array whenever the file exists.
-- The first accepted attestation in the graph must be the sequence-1 `attestations/run-base.json` with `prev_hash: null`.
-- Approved gate decisions require that accepted run-base anchor already exist; gate decisions cannot bootstrap or precede the graph root.
-- New runs create the feature branch/worktree during Step 0, before story Gate 1, so `attestations/run-base.json` and `attestations/index.json` exist before any approved gate decision.
-- Spec and decomposition reviews guard the clean feature worktree (`$FEAT_WT`), not the caller checkout (`$REPO`), so git-visible local edits in the launcher checkout do not block factory planning reviews.
-
-### Safe Git policy
-
-All provenance-sensitive Git facts must be observed through the centralized safe Git policy. Accepted attestations bind `safe_git_policy: "safe-git-v1"`. Validation re-observes commit existence, tree ids, parents, first-parent order, merge-tree results, and reviewed-worktree cleanliness through safe Git. Caller-controlled Git config, replace refs, hooks, fsmonitor, untrusted `GIT_*`, and similar environment influence are not authority.
-
-### Run-base attestation (`attestations/run-base.json`)
-
-- Type: `run-base`
-- Must be sequence `1` with `prev_hash: null`.
-- Binds `repo_root`, `run_dir`, `git_common_dir`, `feature_branch`, `feature_worktree`, `base_ref`, `base_commit`, and `base_tree`.
-- Is written during Step 0 immediately after creating or reusing the feature branch/worktree under `.opencode/worktrees/`, before Gate 1 can be approved.
-- Provides bounded local authority only: validation proves `base_commit` exists, `base_tree` matches, `base_commit` is an ancestor of the current feature HEAD, and if `base_ref` currently resolves then `base_commit` is an ancestor of that ref. It does not cryptographically prove the creation-time fact.
-
-### Slice-observation attestation (`attestations/slices/<slice-id>.observation.json`)
-
-- Type: `slice-observation`
-- Binds `slice_id`, `attempt`, `branch`, physical `worktree`, `base_commit`, `slice_commit`, `slice_tree`, `evidence_ref`, and `evidence_hash`.
-- Validation re-derives the worktree path, checks same-branch worktree conflicts, verifies commit/tree existence, and hashes the current evidence file.
-
-### Review-approval attestation (`attestations/reviews/<subject>.approval.json`)
-
-- Type: `review-approval`
-- Binds `subject_type`, `subject`, `reviewer`, approving `verdict`, `review_ref`, `review_hash`, `evidence_ref`, `evidence_hash`, `subject_commit`, `subject_tree`, `guard_result_hash`, and `guard`.
-- Required guard fields include `status: "clean"`, `safe_git_policy`, `worktree`, `head_commit`, `head_tree`, `dirty_paths: []`, and `hidden_index_paths: []`.
-- Approval JSON without a matching accepted review/evidence hash, clean guard, correct subject commit/tree, or verifiable worktree/guard data is rejected.
-
-### Direct-reviewed-commit attestation (`attestations/direct-commits/<entry-id>.observation.json`)
-
-- Type: `direct-reviewed-commit`
-- Binds `entry_id`, `purpose: "test" | "remediation" | "validation-fix"`, `commit`, `parent_commit`, `tree`, `diff_hash`, `evidence_ref`, `evidence_hash`, `producing_role`, and the matching review/guard hashes when present.
-- Validation recomputes the tree, requires exactly one parent, and hashes the canonical `git diff-tree -r --full-index <parent> <commit>` output.
-
-### Gate-decision attestation (`attestations/gates/<gate>.json`)
-
-- Type: `gate-decision`
-- Binds `gate`, `decision`, `approval_source`, `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and either `answer_ref` + `answer_hash` or `answer_text_hash`.
-- Pending gates in `run.json.gates.<gate>.pending_snapshot` record the exact pending material the answer is allowed to consume: `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, `created_at`, and optional `answer_ref`/`answer_hash`.
-- Before an approved or stopped gate decision consumes an external answer, the factory re-hashes the current pending question, artifact, and answer material. Missing files, escaped refs, stale hashes, question/answer overlap, or mismatched `pending_snapshot` fields fail closed.
-- `question_ref` must be rooted under `gates/`.
-- `answer_ref`, when present, must be rooted under `gates/`.
-- `artifact_ref` remains rooted under `artifacts/`; gate questions and answers are never laundered through `artifacts/`.
-- Approved gate state in `run.json` is committed only after `transitionGateDecision()` writes and validates `attestations/gates/<gate>.json` plus the updated accepted `attestations/index.json` chain under the same transition lock; those accepted attestation records land before the approved gate state becomes durable.
-- If approved-gate validation fails after staging those files, `transitionGateDecision()` must roll back the staged gate attestation/index files and leave `run.json` unchanged.
-- Gate status booleans in `run.json` are bookkeeping only. Later validation must not trust status booleans alone.
-
-### Merge-chain attestation (`attestations/merge-chain.json`)
-
-- Type: `merge-chain`
-- Binds `feature_branch`, `base_attestation_ref`, `base_attestation_hash`, `base_commit`, `head_commit`, `head_tree`, and ordered `entries[]`.
-- Validation computes `git rev-list --first-parent --reverse <base_commit>..<head_commit>` and requires one proof entry per first-parent commit, in exact order.
-- Any first-parent commit without proof fails closed.
-
-`slice_merge` entry requirements:
-
-- `commit` is the corresponding first-parent merge commit.
-- Parents are exactly `[previous_first_parent_commit, slice_commit]`.
-- The entry must reference accepted `slice-observation` and `review-approval` attestations whose hashes, commit/tree bindings, evidence hash, review hash, and clean guard all agree.
-- `git merge-tree --write-tree <previous_first_parent_commit> <slice_commit>` must reproduce the actual merge tree.
-
-`direct_reviewed_commit` entry requirements:
-
-- `commit` is the corresponding first-parent commit.
-- The parent list is exactly `[previous_first_parent_commit]`.
-- The entry must reference accepted `direct-reviewed-commit` and `review-approval` attestations whose commit/tree/diff/evidence/review/guard bindings all agree.
-- Unknown entry types, optional proof gaps, missing refs, hash mismatches, parent mismatches, or commit/tree mismatches fail closed.
-
-### PR-created attestation (`attestations/pr-created.json`)
-
-- Type: `pr-created`
-- Written only by `transitionPrCreated()` after the draft PR exists and the orchestrator has fresh local/remote observations.
-- The normal CLI surface is:
-  ```sh
-  feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref artifacts/pr-body.md --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA [--draft|--no-draft] [--json]
-  ```
-- Binds `pr_url`, `pr_number`, `provider`, `repository`, `remote`, `github_account`, `draft`, `pr_body_ref`, `pr_body_hash`, remote observation (`head_branch`, `head_commit`, `head_tree`, `base_ref`, `base_commit`, `base_tree`), the accepted run-base attestation, merge-chain attestation, and pre-PR gate attestation.
-- Validation re-observes local HEAD/base tree bindings, verifies the PR body hash, checks that the remote observation matches the claimed URL/number/repository/branch/base, and requires accepted run-base, merge-chain, and pre-PR gate attestations.
-- `run.pr_url` and `run.terminal_result.pr_url` are provenance-sensitive claims. They are trusted only when they match the latest accepted `pr-created` attestation binding. Missing or mismatched PR-created authority fails closed and must not emit trusted `completed` state.
-
-### Local-only limits
-
-- This model provides bounded local authority, not cryptographic remote attestation.
-- Forged mutable local claims are rejected unless current Git/filesystem observations also match the accepted attestation graph.
-- A coherent local rewrite of both files and Git history is outside this local-only model.
-
-Write `run.json` atomically: write a temp file, then rename.
+Write `run.json` atomically: write a temp file, then rename. The current writer does not fsync the temp file or containing directory before rename; this is a conscious portability/speed tradeoff, so sudden power loss can still lose the most recent write even though readers never observe a partial JSON file.
 
 `$RUN/run-json.lock/` is the ephemeral lock directory used by both foreground manifest writes and heartbeat ticks. `owner.json` records the current lock holder for diagnostics.
 
-`$RUN/factory.lock` is the internal owner/capability file for heartbeat authority. The factory writes a trusted heartbeat owner capability there and keeps it out of `heartbeat.json` and `factory heartbeat <run-id> --status --json`.
+`$RUN/factory.lock` records the local factory session owner for diagnostics. It is not a heartbeat credential and it does not authorize `run.json` writes.
 
 ```json
 {
   "schema_version": 1,
   "run_id": "app-123",
-  "heartbeat_owner": "hb-owner-capability",
   "session_owner": "session-route-1",
   "updated_at": "2026-07-06T12:00:00Z"
 }
 ```
 
-## heartbeat.json and locked liveness updates
+## heartbeat.json And Locked Liveness Updates
 
-`$RUN/heartbeat.json` is a sidecar lease for long orchestrator waits. It is written by the internal heartbeat helper, not by external drivers.
+`$RUN/heartbeat.json` is liveness-only display/recovery data for long orchestrator waits. It is written by the heartbeat helper, not by external drivers, and it does not authorize workflow state.
 
 ```json
 {
   "schema_version": 1,
   "run_id": "app-123",
-  "token": "hb-token-1",
   "phase": "slice-review",
-  "status": "running",
   "pid": 4242,
-  "started_at": "2026-07-06T12:00:00Z",
-  "last_tick_at": "2026-07-06T12:00:05Z",
-  "stop_requested_at": null,
-  "stopped_at": null,
-  "interval_ms": 1000,
-  "deadline_at": "2026-07-06T12:05:00Z",
-  "stop_reason": null
+  "interval_ms": 30000,
+  "last_tick_at": "2026-07-06T12:00:05Z"
 }
 ```
 
@@ -288,34 +118,34 @@ Phase enum values:
 - `security-reviewer`
 - `remediation`
 
-Heartbeat status values: `active`, `running`, `stopping`, `stopped`, `error`.
+`phase` is opaque display data. Use the enum above for consistency, but schema validation accepts any non-empty string.
 
 Lifecycle rules:
 
 - Start heartbeat immediately before a long `Task`/subagent/review/test wait while `run.status` is still `running`.
-- Require the trusted heartbeat owner capability from `$RUN/factory.lock` for detached `--start`, internal `--foreground`, and internal `--once` paths.
-- Treat `heartbeat.json` as data, not authority. Tokens, caller PID, and sidecar contents alone never authorize a heartbeat tick or lease start.
+- Start it with `feature-factory factory heartbeat <run-id> --start --phase <phase> --json` and inspect it with `feature-factory factory heartbeat <run-id> --status --json`.
+- Treat `heartbeat.json` as data, not authority. PID and sidecar contents alone never authorize freshness or workflow writes.
 - Start heartbeat only when the manifest already shows real in-flight factory work via a `running` step or a `running`/`review` slice.
-- Do not start heartbeat while the run is stopped at Gate 1 (`story`), Gate 2 (`brief`), or Gate 3 (`pre_pr`). Pending gates are monitored through `run.json.gates`, not through heartbeat.
-- Stop heartbeat in a `finally`/after-return path before any foreground semantic `run.json` mutation.
-- Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat with wait/force semantics and require a confirmed stopped lease.
+- Do not start heartbeat while the run is stopped at protected gates `story`, `brief`, or `pre_pr`. Pending gates are monitored through `run.json.gates`, not through heartbeat.
+- Stop heartbeat in a `finally`/after-return path with `feature-factory factory heartbeat <run-id> --stop --json`. Stop is best-effort: it sends SIGTERM to a live recorded PID and writes a liveness stamp with `pid: null`.
+- Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat if it is active. The durable terminal write is still controlled by the run-json lock and transition preconditions, not heartbeat state.
 
 Locked heartbeat-only manifest mutation protocol:
 
 - Both the heartbeat helper and foreground manifest writers acquire `$RUN/run-json.lock/` before touching `run.json`.
-- While heartbeat is active, the only allowed `run.json` mutation is the helper updating `heartbeat_at` under that lock.
-- Foreground semantic writes must first stop heartbeat, wait for a confirmed `stopped`/`error` lease (or force-stop on timeout), then acquire the lock and write the next semantic `run.json` state.
+- While heartbeat is active, the helper updates only `heartbeat_at` under that lock.
+- Foreground semantic writes acquire the same lock and are serialized with heartbeat ticks.
 - External drivers never write `factory.lock`, `heartbeat.json`, `run-json.lock/`, or `run.json`.
 
 External monitoring semantics:
 
-- Treat `heartbeat.json` plus `run.json.heartbeat_at` as liveness only. `heartbeat.json` is not authority.
+- Treat `heartbeat.json` plus `run.json.heartbeat_at` as liveness-only. Freshness is derived from `last_tick_at`, `interval_ms`, and whether the recorded PID is alive. A fresh heartbeat has age <= `max(2 * interval_ms, 120000ms)` and a live PID.
 - Use pending gate status in `run.json.gates.*` for story/brief/pre-PR waits because heartbeat is intentionally absent there.
-- Use terminal `run.status` plus `terminal_result` as the durable completion/blocking signal; heartbeat must already be stopped before those terminal writes land.
+- Use terminal `run.status` plus `terminal_result` as the durable completion/blocking signal.
 
-## Detached run diagnostics (output-only)
+## Detached Run Diagnostics (Output-Only)
 
-Diagnostics are emitted by `factory status`, `factory list`, `factory validate`, `factory watch`, and TUI data. They are output-only and do not change persisted `run.json`, `heartbeat.json`, gate, or attestation schemas.
+Diagnostics are emitted by `factory status`, `factory list`, `factory validate`, `factory watch`, and TUI data. They are output-only and do not change persisted `run.json`, `heartbeat.json`, or gate schemas.
 
 Envelope shape:
 
@@ -351,7 +181,7 @@ Envelope shape:
 
 Enums:
 
-- `condition`: `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `invalid-authority`, `unverifiable-authority`, `protected-gate`, `terminal-run`.
+- `condition`: `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `protected-gate`, `terminal-run`.
 - `classification`: `healthy`, `recoverable`, `blocked`, `needs-human`, `terminal`, `invalid`. `invalid` is first-class.
 - `status`: `ok`, `warning`, `error`.
 - `severity`: `info`, `warning`, `error`, `critical`.
@@ -359,37 +189,33 @@ Enums:
 Aggregation:
 
 - No items yields `classification: "healthy"`, `status: "ok"`, `severity: "info"`, and `summary: "No diagnostics"`.
-- Primary item priority is classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`, severity `critical` > `error` > `warning` > `info`, status `error` > `warning` > `ok`, condition `invalid-run-state` > `invalid-authority` > `unverifiable-authority` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`, then original detection order.
+- Primary item priority is classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`, severity `critical` > `error` > `warning` > `info`, status `error` > `warning` > `ok`, condition `invalid-run-state` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`, then original detection order.
 - Top-level `classification`, `status`, `severity`, and `summary` come from the primary item.
 
 Condition mappings and operator actions:
 
 - `stale-heartbeat` -> `recoverable` / `warning` / `warning`; liveness-only; threshold `max(2 * interval_ms, 120000ms)`; inspect logs and validate durable state before resuming, do not restart blindly.
 - `missing-heartbeat-process` -> `recoverable` / `warning` / `warning`; heartbeat-helper PID only; liveness-only; the PID is not a detached opencode process.
-- `missing-worktree` -> `blocked` / `error` / `error`; based on validated worktree identity checks; restore the trusted worktree or recover from validated durable state.
+- `missing-worktree` -> `blocked` / `error` / `error`; restore the worktree or recover from durable state.
 - `invalid-run-state` -> `invalid` / `error` / `critical`; invalid JSON/schema/required sidecars; treat as untrusted until validation passes.
-- `invalid-authority` -> `invalid` / `error` / `critical`; contradictory provenance or accepted attestation claims; inspect accepted attestations and current observations.
-- `unverifiable-authority` -> `blocked` / `error` / `critical`; missing/inaccessible proof; restore proof before trusting status, branch, PR, gate, or worktree claims.
-- `protected-gate` -> exactly `needs-human` / `warning` / `warning`; answer the pending protected `story`, `brief`, or `pre_pr` gate or stop the run.
+- `protected-gate` -> exactly `needs-human` / `warning` / `warning`; answer the pending protected gate (`story`, `brief`, or `pre_pr`) or stop the run.
 - `terminal-run`: `completed`/`partial` -> `terminal` / `ok` / `info`; `blocked` -> `blocked` / `error` / `error`; `needs-human` -> `needs-human` / `warning` / `warning`; read `terminal_result`.
 
 Heartbeat/PID/process semantics are liveness-only. `missing-heartbeat-process` refers to the heartbeat helper process recorded in `heartbeat.json`, not to a detached opencode process; no durable run-id-to-opencode-PID registry exists. Heartbeat evidence is always `authoritative: false` with `evidence.liveness_only: true`; PID liveness, process existence, `heartbeat.json`, and mutable `run.json` heartbeat fields cannot prove health or ownership.
 
 Protected gates suppress stale-heartbeat and missing-heartbeat-process diagnostics because `story`, `brief`, and `pre_pr` waits are intentionally heartbeat-free. Valid terminal states suppress heartbeat/worktree liveness alarms.
 
-Provenance fail-closed policy: `diagnostics.authoritative` is true only when `run.json` schema and run-authority checks required for emitted trusted fields pass. Invalid or unverifiable state must not be treated as healthy, silently restarted, or inferred from heartbeat/PID/process evidence, status booleans, worktree strings, or mutable `run.json` claims. Fail-closed envelopes omit trusted PR, gate, branch, and worktree claims unless accepted attestations plus fresh observations verify them.
+## debug_snapshot Diagnostic State
 
-## factory_provenance diagnostic state
-
-`run.json.factory_provenance` stores redacted diagnostic snapshots for debugging factory environment drift. It is optional for backward compatibility and diagnostic-only; accepted attestations and fresh observations remain the authority for gates, reviews, merges, and PR URLs.
+`run.json.debug_snapshot` stores redacted diagnostic snapshots for debugging factory environment drift. It is optional and diagnostic-only. Older snapshot keys may still validate for old runs, but new writes use `debug_snapshot`.
 
 ```json
-"factory_provenance": {
+"debug_snapshot": {
   "created_with": {
     "collected_at": "2026-07-06T12:00:00Z",
     "event": "created",
     "diagnostic_only": true,
-    "provenance": {
+    "env": {
       "feature_factory_version": "0.1.0",
       "opencode_version": "1.17.13",
       "plugin_spec": "opencode-feature-factory",
@@ -405,12 +231,12 @@ Provenance fail-closed policy: `diagnostics.authoritative` is true only when `ru
 
 Rules:
 
-- `created_with` and `last_resumed_with` snapshots have `diagnostic_only: true`, `collected_at`, `event`, and a `provenance` object.
+- `created_with` and `last_resumed_with` snapshots have `diagnostic_only: true`, `collected_at`, `event`, and a diagnostic environment object.
 - `resume_count` is a non-negative integer incremented by resume recording.
-- Use `feature-factory factory provenance record-created <run-id> --json` after initial manifest creation.
-- Use `feature-factory factory provenance record-resume <run-id> --json` before a mutating resume step.
-- Sensitive keys are omitted. Token-shaped or high-entropy credential values are replaced with `[redacted]`; raw `ghp_*`, `github_pat_*`, `gho_*`/`ghu_*`/`ghs_*`/`ghr_*`, `sk-proj_*`, `sk-*`, `xoxb_*`/`xoxp_*`/`xoxa_*`, `glpat-*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and single-token high-entropy strings are invalid in persisted factory provenance.
-- If provenance collection or validation fails, do not persist raw diagnostics. Continue only with a valid redacted snapshot or fail the state mutation closed according to the caller path.
+- Use `feature-factory factory env record-created <run-id> --json` after initial manifest creation.
+- Use `feature-factory factory env record-resume <run-id> --json` before a mutating resume step.
+- Sensitive keys are omitted. Token-shaped or high-entropy credential values are replaced with `[redacted]`; raw `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, and `xoxb_*` values are invalid in persisted diagnostic state.
+- If snapshot collection or validation fails, do not persist raw diagnostics.
 
 ## run.json
 
@@ -420,6 +246,7 @@ Rules:
   "run_id": "app-123",
   "external_ref": "APP-123",
   "base_ref": "main",
+  "base_commit": "0123456789abcdef",
   "branch": "app-123-short-slug",
   "worktree": "/abs/repo/.opencode/worktrees/app-123-short-slug",
   "github_account": "repo-owner-or-account",
@@ -430,18 +257,13 @@ Rules:
   "heartbeat_at": "2026-07-04T12:00:00Z",
   "max_parallel_slices": 3,
   "max_retries": 3,
-  "review_tier": {
-    "selected": "strict",
-    "source": "default",
-    "risk_reasons": ["security_or_auth", "schema_or_persistence"],
-    "rationale": "Defaulted to strict because the run touches auth and persistence risks."
-  },
-  "factory_provenance": {
+  "review_tier": "strict",
+  "debug_snapshot": {
     "created_with": {
       "collected_at": "2026-07-04T11:45:00Z",
       "event": "created",
       "diagnostic_only": true,
-      "provenance": {"feature_factory_version": "0.1.0", "capabilities": {"git": true}}
+      "env": {"feature_factory_version": "0.1.0", "capabilities": {"git": true}}
     },
     "last_resumed_with": null,
     "resume_count": 0
@@ -465,29 +287,6 @@ Rules:
       "answer": null,
       "approval_source": null,
       "decision_note": null
-    },
-    "brief": {
-      "status": "pending",
-      "artifact": "artifacts/technical-brief.md",
-      "question_ref": "gates/brief.question.md",
-      "answer_ref": "gates/brief.answer",
-      "pending_snapshot": null,
-      "answered_at": null,
-      "answer": null,
-      "approval_source": null,
-      "decision_note": null
-    },
-    "pre_pr": {
-      "status": "pending",
-      "artifact": "artifacts/validation-report.md",
-      "question_ref": "gates/pre_pr.question.md",
-      "answer_ref": "gates/pre_pr.answer",
-      "pending_snapshot": null,
-      "answered_at": null,
-      "answer": null,
-      "approval_source": null,
-      "decision_note": null,
-      "override": null
     }
   },
   "steps": [
@@ -518,141 +317,137 @@ Rules:
   "validator": {
     "verdict": "GO",
     "report": "artifacts/validation-report.md",
-    "loops": 0
+    "summary": "All acceptance criteria covered."
   },
   "security_review": {
     "verdict": "PASS",
     "review_ref": "reviews/security-reviewer.json",
-    "loops": 0
+    "summary": "No blocking findings."
   },
   "pr_url": null,
   "terminal_result": null
 }
 ```
 
-Authority note: this example shows bookkeeping state. `run.json` remains mutable local metadata; approved/merged/validator/security booleans, worktree paths, `base_ref`, `base_commit`, and PR URLs require accepted attestations plus current observations before they count as provenance. `factory_provenance` is diagnostic-only, and `run.pr_url` / `terminal_result.pr_url` require the latest accepted `pr-created` attestation.
+Top-level `status` values are `running`, `completed`, `blocked`, `partial`, and `needs-human`. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`.
 
-Run status values: `running`, `completed`, `blocked`, `partial`, `needs-human`.
+Top-level `run.json.review_tier` is an optional opaque display string. It may contain labels such as `light`, `standard`, or `strict`, but it does not change gates, agents, PR behavior, validation behavior, or workflow control. It does not change `schema_version`; it remains `1`.
 
-Run mode values: `interactive`, `headless`, `autonomous`.
+Gate status values are `pending`, `approved`, `changes_requested`, and `stopped`. `approval_source` values are `human`, `external-driver`, `autonomous`, and `override`.
 
-## review_tier
+Validator verdicts are `GO`, `GO-WITH-NITS`, and `NO-GO`. Security verdicts are `PASS` and `BLOCK`.
 
-Top-level `run.json.review_tier` stores the selected review tier so later factory steps and resumed runs read the same durable choice without reparsing prior chat context. In v1 this metadata lives only at `run.json.review_tier`; do not mirror it into plan metadata.
+Slice status values are `pending`, `running`, `review`, `merged`, and `blocked`. Step status values are `running`, `accepted`, `rejected`, and `blocked`.
 
-`review_tier` is optional for backward compatibility with older runs. Adding this optional field does not change `schema_version`; it remains `1`.
-
-```json
-"review_tier": {
-  "selected": "light|standard|strict",
-  "source": "explicit|default",
-  "risk_reasons": [
-    "security_or_auth",
-    "schema_or_persistence",
-    "generated_or_owned_code",
-    "external_system_policy",
-    "dependency_or_supply_chain",
-    "workflow_or_release",
-    "destructive_or_broad_scope"
-  ],
-  "rationale": "Non-empty explanation of why this tier was selected."
-}
-```
-
-Rules:
-
-- `selected`: required when `review_tier` is present. Allowed values: `light`, `standard`, `strict`.
-- `source`: required when `review_tier` is present. Allowed values: `explicit`, `default`.
-- `risk_reasons`: required array when `review_tier` is present. Every entry must be one of `security_or_auth`, `schema_or_persistence`, `generated_or_owned_code`, `external_system_policy`, `dependency_or_supply_chain`, `workflow_or_release`, or `destructive_or_broad_scope`.
-- `rationale`: required non-empty string when `review_tier` is present.
-- Later factory steps should read the persisted selection from top-level `run.json.review_tier`.
-- Later factory steps may update any selected tier to `strict` before a non-status state mutation if newly produced artifacts expose risky categories. Do not automatically downgrade a tier.
-
-## github_account
-
-Top-level `run.json.github_account` stores the GitHub account the factory should select before authenticated GitHub remote access and draft PR creation. The factory CLI derives it from `remote.origin.url` when the remote is hosted on GitHub, or from explicit `factory start --gh-account <account>`.
-
-`github_account` is optional for backward compatibility with older runs and non-GitHub remotes. Adding this optional field does not change `schema_version`; it remains `1`.
-
-Before pushing or creating a PR, run `gh auth switch -h github.com -u <github_account>` when this field is present. If that account is unavailable or cannot access `origin`, stop with `status: partial` and write a clear `terminal_result.reason` instead of trying another active account implicitly.
-
-Gate status values: `pending`, `approved`, `changes_requested`, `stopped`.
-
-Gate `approval_source` values: `human`, `external-driver`, `autonomous`, or `override`.
-
-Slice status values: `pending`, `running`, `review`, `merged`, `blocked`.
-
-Step status values: `running`, `accepted`, `rejected`, `blocked`.
-
-Reviewer-designated agents are only `work-reviewer`, `implementation-validator`, and `security-reviewer`. Reviewer prompts must state that the reviewed worktree is read-only and must not be modified. After each invocation, before accepting or writing the reviewer result, check the reviewed worktree with `git -C <reviewed_worktree> status --porcelain=v1 --untracked-files=all` or equivalent `src/review-guard.js` semantics:
-
-- `clean`: exit `0` and empty stdout
-- `dirty`: exit `0` and non-empty stdout
-- `unverifiable`: non-zero exit
-
-These are guard/helper outcomes, not new normal review verdict enums. If the guard is `dirty`, discard the reviewer output, capture the dirty state, and prefer a bounded recovery/retry when the dirty changes are safely attributable to the reviewer and the worktree can be restored to the observed clean commit/tree. If recovery is unsafe, retry fails, or the guard is `unverifiable`, write a separate blocked report shape.
-
-This schema documents post-run git-visible dirty-state detection only, not OS/process sandboxing. Ignored files, committed or reverted mutations, effects outside the reviewed worktree, and non-git-visible side effects remain out of scope.
-
-## Gate Protocol
-
-The factory writes question files and records pending gates in `run.json`. Every pending gate stores a `pending_snapshot` of the exact question/artifact/answer material that may be consumed later. External drivers write only answer files.
-
-Allowed answer file contents:
-
-```text
-approve
-```
-
-```text
-stop
-```
-
-```text
-changes: <specific requested change>
-```
-
-The factory consumes the answer only after re-hashing the current refs against `pending_snapshot`, records it in `run.json.gates.<gate>`, and continues. Approved answers from gate answer files must use `approval_source: "external-driver"`; interactive chat approvals use `approval_source: "human"`; autonomous approvals use `approval_source: "autonomous"`. Do not store the answer file path in `approval_source`. If the answer file is missing in scripted mode, the factory stops after writing the pending gate. Stale or missing pending material fails closed.
-
-One-writer rule: external drivers must not modify `run.json`, artifacts, evidence, reviews, plans, branches, or PRs.
-
-## Autonomous Mode
-
-Autonomous mode is explicit opt-in through `factory start --autonomous`. It keeps the same control plane but removes the external gate-answer relay when the factory has enough evidence to decide.
-
-Rules:
-
-- Gate question files are still written for auditability.
-- Story and brief gates may be recorded as `approved` with `answer: "approve"`, `approval_source: "autonomous"`, and a concise `decision_note` only when the artifacts are internally complete and no human product/security/UX/external-policy decision remains.
-- The pre-PR gate may be recorded as autonomously approved only when the strictest implementation-validator/security-reviewer panel verdict is clear. Validator NO-GO or security-reviewer BLOCK requires bounded remediation or terminal blocked/needs-human status.
-- Autonomous remediation loops are bounded by `max_retries` or 3 if unset.
-- Draft PR creation is allowed after autonomous pre-PR approval. Auto-merge is never allowed.
-
-## terminal_result
-
-External harnesses should read `run.json.terminal_result` instead of parsing gate internals when `status` is terminal.
+Terminal result shape:
 
 ```json
 {
   "status": "completed",
   "run_id": "app-123",
-  "pr_url": "https://github.com/org/repo/pull/123",
+  "pr_url": "https://github.com/owner/repo/pull/123",
+  "pr_number": 123,
+  "repository": "owner/repo",
+  "draft": true,
   "reason": null,
-  "summary": "Implemented approval workflow and opened draft PR.",
+  "summary": "Draft PR created.",
   "artifacts": {
     "story": "artifacts/story.md",
     "technical_brief": "artifacts/technical-brief.md",
-    "plan": "plan/plan.md",
+    "test_report": "artifacts/test-report.md",
     "validation_report": "artifacts/validation-report.md",
-    "security_review": "reviews/security-reviewer.json",
     "pr_body": "artifacts/pr-body.md"
   }
 }
 ```
 
-For `blocked`, `partial`, or `needs-human`, set `reason` to the concise operator-actionable blocker and leave `pr_url` null unless a PR already exists with an accepted matching `pr-created` attestation. Completed terminal PR URLs are trusted only after `feature-factory factory pr-created` validates and stages `attestations/pr-created.json` before the terminal `run.json` write.
+## Evidence And Review Files
 
-If a reviewer guard block causes a terminal stop, use existing `run.status = "blocked"` and copy the guard-block `reason` into `terminal_result.reason`.
+Builder claim blocks are not accepted directly as durable truth. The orchestrator translates builder claim `status: pass|blocked` into observed evidence fields: `status` records the observed outcome, and `review_ready` is true only when the orchestrator observed the diff and required checks itself.
+
+Remediation attempts use attempt-suffixed evidence refs. A rejected slice fix writes a new file such as `evidence/be-api.attempt-2.json` and updates `run.json.slices[].evidence_ref` to that attempt before re-review.
+
+Slice evidence shape:
+
+```json
+{
+  "subject": "be-api",
+  "attempt": 2,
+  "status": "pass",
+  "review_ready": true,
+  "head": "abc1234",
+  "commands": [
+    {"command": "npm test -- api", "status": "pass"}
+  ]
+}
+```
+
+Slice review shape:
+
+```json
+{
+  "subject": "be-api",
+  "verdict": "APPROVE",
+  "required_fixes": []
+}
+```
+
+`reviews/implementation-validator.json` shape:
+
+```json
+{
+  "subject": "app-123-short-slug",
+  "verdict": "GO",
+  "summary": "All acceptance criteria are covered.",
+  "required_fixes": []
+}
+```
+
+Allowed implementation-validator verdicts are `GO`, `GO-WITH-NITS`, and `NO-GO`. The `subject` is the integrated feature branch name.
+
+`reviews/security-reviewer.json` shape:
+
+```json
+{
+  "subject": "app-123-short-slug",
+  "verdict": "PASS",
+  "summary": "No blocking security findings.",
+  "required_fixes": []
+}
+```
+
+Allowed security-reviewer verdicts are `PASS` and `BLOCK`. The `subject` is the integrated feature branch name.
+
+## Gates And pending_snapshot
+
+Protected gates are `story`, `brief`, and `pre_pr`.
+
+`pending_snapshot` captures the exact pending material the answer is allowed to consume: `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, `created_at`, and optional `answer_ref`/`answer_hash`.
+
+Before an approved, changes_requested, or stopped gate decision consumes an external answer, the factory re-hashes the current pending question, artifact, and answer material. Missing files, escaped refs, stale hashes, question/answer overlap, or mismatched `pending_snapshot` fields fail closed.
+
+`question_ref` must be rooted under `gates/`. `answer_ref`, when present, must be rooted under `gates/`. `artifact_ref` remains rooted under `artifacts/`; gate questions and answers are never laundered through `artifacts/`.
+
+## PR-Created Transition
+
+The normal CLI surface is:
+
+```sh
+feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO [--draft|--no-draft] [--json]
+```
+
+Preconditions:
+
+- `gates.pre_pr.status` is `approved`.
+- `validator.verdict` is `GO` or `GO-WITH-NITS`.
+- `validator.report` resolves under `artifacts/`.
+- `security_review.verdict` is `PASS`.
+- `security_review.review_ref` resolves under `reviews/` and parses as JSON.
+- Every slice is `merged` or `blocked`, with at least one `merged` slice.
+- `pr_url` is a canonical GitHub PR URL.
+- `pr_number` matches the canonical GitHub PR URL.
+
+On success, the transition writes `run.pr_url`, `status: "completed"`, and `terminal_result.pr_url` atomically with the completed terminal result.
 
 ## plan/slices.json
 
@@ -662,184 +457,19 @@ If a reviewer guard block causes a terminal stop, use existing `run.status = "bl
     {
       "id": "be-api",
       "stack": "backend",
-      "paths": ["src/server/api/", "src/server/domain/"],
+      "paths": ["src/api/**", "test/api/**"],
       "depends_on": [],
       "acceptance": ["AC1"],
-      "test_plan": ["npm test -- api.feature.test"]
-    },
-    {
-      "id": "fe-screen",
-      "stack": "frontend",
-      "paths": ["src/ui/feature/"],
-      "depends_on": ["be-api"],
-      "acceptance": ["AC2", "AC3"],
-      "test_plan": ["npm test -- feature-screen.test"]
+      "test_plan": ["npm test -- api"]
     }
   ]
 }
 ```
 
-The dependency graph must be acyclic. A slice is eligible when every id in `depends_on` has status `merged`.
+Rules:
 
-## Code-Level Validation
-
-The CLI enforces this schema with `feature-factory factory validate [run-id]`. Validation covers `run.json`, `factory_provenance` redaction, gate `pending_snapshot` material, run slices, terminal results, accepted attestation graph semantics including `pr-created`, physical durable-root/worktree identity, and `plan/slices.json` when present. Provenance-sensitive states fail closed unless backed by accepted attestations plus current safe-Git/filesystem observations. `factory status` and `factory answer` reject invalid `run.json`; `factory list` marks invalid runs instead of failing the whole listing.
-
-`factory start --detached` writes stdout/stderr logs under `.opencode/factory/processes/` for external watchers.
-
-## evidence/<subject>.json
-
-For slices and reviewed test steps, the orchestrator writes observed evidence:
-
-```json
-{
-  "subject": "be-api",
-  "attempt": 1,
-  "branch": "app-123-short-slug--be-api",
-  "base_ref": "app-123-short-slug",
-  "worktree": ".opencode/worktrees/app-123-short-slug--be-api",
-  "status": "completed",
-  "blocked_reason": null,
-  "files_changed": ["src/server/api/foo.ts"],
-  "diff_stat": "1 file changed, 40 insertions(+)",
-  "diff_observed": true,
-  "commands": [
-    {"cmd": "git diff --stat app-123-short-slug...HEAD", "exit": 0, "summary": "1 file changed"}
-  ],
-  "tests": {
-    "cmd": "npm test -- api.feature.test",
-    "exit": 0,
-    "observed": true,
-    "skipped_reason": null
-  },
-  "commit": "abc1234",
-  "observed_by": "feature-factory",
-  "review_ready": true
-}
-```
-
-`review_ready` requires status completed, non-empty observed diff, `diff_observed=true`, and tests observed passing or explicitly skipped with a reason.
-
-## reviews/<subject>.json
-
-```json
-{
-  "subject": "be-api",
-  "reviewer": "work-reviewer",
-  "verdict": "APPROVE",
-  "attempt": 1,
-  "findings": [
-    {
-      "severity": "blocker",
-      "note": "Acceptance criterion AC1 is not implemented",
-      "path": "src/server/api/foo.ts:42",
-      "fix_owner": "backend-builder"
-    }
-  ],
-  "required_fixes": [],
-  "checked_against": ["output-contract", "technical-brief", "observed-evidence", "repo-guidelines"]
-}
-```
-
-Verdict values for `work-reviewer` review files: `APPROVE`, `REJECT`.
-
-Severity values: `blocker`, `major`, `minor`.
-
-### Guard-block review report
-
-Use a separate blocked report shape when a reviewer-designated agent returns but the reviewed worktree guard remains `dirty` after bounded recovery/retry, or is `unverifiable`. Do not add new normal verdict enum values for this case.
-
-```json
-{
-  "status": "blocked",
-  "reason": "reviewer left reviewed worktree dirty (1 git-visible path)",
-  "reviewer": "work-reviewer",
-  "subject": "be-api",
-  "attempt": 1,
-  "reviewed_worktree": ".opencode/worktrees/app-123-short-slug--be-api",
-  "review_output_valid": false,
-  "dirty_paths": [
-    {
-      "path": "src/server/api/foo.ts",
-      "original_path": null,
-      "raw": " M src/server/api/foo.ts",
-      "xy": " M",
-      "index_status": " ",
-      "worktree_status": "M",
-      "staged": false,
-      "unstaged": true,
-      "deleted": false,
-      "conflicted": false,
-      "untracked": false
-    }
-  ],
-  "guard": {
-    "ok": false,
-    "status": "dirty",
-    "worktree": ".opencode/worktrees/app-123-short-slug--be-api",
-    "command": "git -C .opencode/worktrees/app-123-short-slug--be-api status --porcelain=v1 --untracked-files=all",
-    "exit_code": 0,
-    "stdout": " M src/server/api/foo.ts\n",
-    "stderr": "",
-    "dirty_paths": [
-      {
-        "path": "src/server/api/foo.ts",
-        "original_path": null,
-        "raw": " M src/server/api/foo.ts",
-        "xy": " M",
-        "index_status": " ",
-        "worktree_status": "M",
-        "staged": false,
-        "unstaged": true,
-        "deleted": false,
-        "conflicted": false,
-        "untracked": false
-      }
-    ]
-  }
-}
-```
-
-Write the guard-block report at the relevant review ref (`reviews/<subject>.json`, `reviews/security-reviewer.json`, or `reviews/implementation-validator.json`). State updates use existing statuses:
-
-- Reviewed step blocked (`spec-writer`, `work-decomposer`, or `test-verifier` via `work-reviewer`): set `run.json.steps[].status = "blocked"` and point `review_ref` at the guard-block report.
-- Slice review blocked: set `slice.status = "blocked"`, set `slice.blocked_reason` from the guard-block `reason`, and point `slice.review_ref` at the guard-block report.
-- `implementation-validator` guard block: set `run.json.validator.verdict = "NO-GO"` and point `run.json.validator.report` at the guard-block report.
-- `security-reviewer` guard block: set `run.json.security_review.verdict = "BLOCK"` and point `run.json.security_review.review_ref` at the guard-block report.
-- If the guard block stops the run, use existing `run.status = "blocked"` and `run.json.terminal_result.reason`.
-
-## reviews/security-reviewer.json
-
-The pre-PR security panel writes a separate review shape because its verdict feeds the Gate 3 panel directly rather than the normal `work-reviewer` approve/reject loop.
-
-```json
-{
-  "subject": "integrated-feature",
-  "reviewer": "security-reviewer",
-  "verdict": "PASS",
-  "attempt": 1,
-  "ingresses_reviewed": ["src/server/api/foo.ts:12 POST /foo"],
-  "findings": [
-    {
-      "severity": "block",
-      "note": "Untrusted request metadata can forge a trusted source marker",
-      "path": "src/server/api/foo.ts:42",
-      "bypass": "POST /foo with source=system bypasses server-side ownership checks",
-      "fix": "derive source from server auth context and ignore request body source"
-    }
-  ],
-  "bypass_attempts": [
-    {
-      "attempt": "Forge trusted source marker through alternate endpoint",
-      "result": "exploitable",
-      "detail": "Alternate endpoint accepts source from request body"
-    }
-  ]
-}
-```
-
-Security reviewer verdict values: `PASS`, `BLOCK`.
-
-Security reviewer severity values: `block`, `nonblocking`.
-
-When `security-reviewer` leaves `$FEAT_WT` dirty or unverifiable, discard its reviewer output and use the guard-block review report shape instead of this normal PASS/BLOCK payload.
+- Every acceptance criterion maps to at least one slice.
+- Same-wave slices are file-disjoint.
+- Dependencies are real consumption dependencies.
+- Generated files have one owning slice.
+- Shared hotspots are serialized by `depends_on`.

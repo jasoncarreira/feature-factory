@@ -3,9 +3,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { readJsoncConfig, readStrictJsonConfig } from "./config.js";
-import { collectProvenance, resolvePluginConfig } from "./provenance.js";
+import { collectEnv, resolvePluginConfig, scrubSecretEnv } from "./env-snapshot.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const SUBAGENTS = [
@@ -33,7 +33,7 @@ export async function runDoctor(options = {}) {
   const pluginEntry = findPluginEntry(cfg, pluginSpec, options.local);
   const pluginOptions = Array.isArray(pluginEntry) ? pluginEntry[1] || {} : {};
   const registered = await resolvePluginConfig(pluginOptions);
-  const provenance = await collectProvenance({ cwd: options.cwd, pluginSpec, pluginOptions });
+  const env = await collectEnv({ cwd: options.cwd, pluginSpec, pluginOptions });
   const providers = providerAuthState();
   const checks = [];
 
@@ -41,9 +41,9 @@ export async function runDoctor(options = {}) {
   add(checks, "opencode config", existsSync(configPath), configPath);
   add(checks, "plugin configured", Boolean(pluginEntry), pluginSpec);
   add(checks, "profile config shape", staleProfileKeys(pluginOptions).length === 0, staleProfileKeys(pluginOptions).join(", ") || "profiles", "warn");
-  add(checks, "opencode CLI", provenance.capabilities.opencode, provenance.opencode_version || "opencode");
-  add(checks, "opencode run --command", provenance.capabilities.opencode_run_command, "opencode run --help");
-  add(checks, "opencode run --dir", provenance.capabilities.opencode_run_dir, "opencode run --help");
+  add(checks, "opencode CLI", env.capabilities.opencode, env.opencode_version || "opencode");
+  add(checks, "opencode run --command", env.capabilities.opencode_run_command, "opencode run --help");
+  add(checks, "opencode run --dir", env.capabilities.opencode_run_dir, "opencode run --help");
   add(checks, "/feature command registered", Boolean(registered.command?.feature), "command.feature");
   add(checks, "/feature command uses primary agent", registered.command?.feature?.agent === "feature-factory", registered.command?.feature?.agent || "unset");
   add(checks, "feature-factory primary agent", Boolean(registered.agent?.["feature-factory"]), "agent.feature-factory");
@@ -53,15 +53,15 @@ export async function runDoctor(options = {}) {
   add(checks, "TUI sidebar export", hasTuiExport(), "package.json exports[\"./tui\"]", "warn");
   add(checks, "repo-local feature skill", existsSync(join(options.cwd || process.cwd(), ".opencode", "skills", "feature", "SKILL.md")), ".opencode/skills/feature/SKILL.md", "warn");
   add(checks, "repo-local feature schema", existsSync(join(options.cwd || process.cwd(), ".opencode", "skills", "feature", "SCHEMA.md")), ".opencode/skills/feature/SCHEMA.md", "warn");
-  add(checks, "git CLI", provenance.capabilities.git, "git");
-  add(checks, "git repository", provenance.capabilities.git_repo, options.cwd || process.cwd());
-  add(checks, "base branch", Boolean(provenance.capabilities.base_branch), provenance.capabilities.base_branch || "not detected");
-  add(checks, "gh CLI", provenance.capabilities.gh, "gh");
-  add(checks, "gh auth", provenance.capabilities.gh_auth, "gh auth status", "warn");
-  add(checks, ".opencode/factory ignored", provenance.capabilities.factory_gitignored === true, ".opencode/factory/", "warn");
-  add(checks, ".opencode/worktrees ignored", provenance.capabilities.worktrees_gitignored === true, ".opencode/worktrees/", "warn");
+  add(checks, "git CLI", env.capabilities.git, "git");
+  add(checks, "git repository", env.capabilities.git_repo, options.cwd || process.cwd());
+  add(checks, "base branch", Boolean(env.capabilities.base_branch), env.capabilities.base_branch || "not detected");
+  add(checks, "gh CLI", env.capabilities.gh, "gh");
+  add(checks, "gh auth", env.capabilities.gh_auth, "gh auth status", "warn");
+  add(checks, ".opencode/factory ignored", env.capabilities.factory_gitignored === true, ".opencode/factory/", "warn");
+  add(checks, ".opencode/worktrees ignored", env.capabilities.worktrees_gitignored === true, ".opencode/worktrees/", "warn");
 
-  for (const [agent, model] of Object.entries(provenance.resolved_models)) {
+  for (const [agent, model] of Object.entries(env.resolved_models)) {
     if (!model) continue;
     const provider = modelProvider(model);
     add(checks, `model ${agent}`, Boolean(provider), model);
@@ -80,9 +80,9 @@ export async function runDoctor(options = {}) {
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ checks, provenance }, null, 2));
+    console.log(JSON.stringify({ checks, env }, null, 2));
   } else {
-    if (options.profiles) printProfileMap(provenance.resolved_models, provenance.resolved_variants);
+    if (options.profiles) printProfileMap(env.resolved_models, env.resolved_variants);
     for (const check of checks) console.log(`${check.level}: ${check.label} (${check.detail})`);
   }
   return checks.every((check) => check.level !== "missing");
@@ -150,8 +150,8 @@ function findPluginEntry(cfg, pluginSpec, local) {
 }
 
 function providerAuthState() {
-  const proc = spawnSync("opencode", ["providers", "list"], { encoding: "utf8" });
-  return proc.status === 0 ? `${proc.stdout}\n${proc.stderr}`.toLowerCase() : "";
+  const proc = runOpencode(["providers", "list"]);
+  return proc.ok ? `${proc.stdout}\n${proc.stderr}`.toLowerCase() : "";
 }
 
 function modelProvider(model) {
@@ -182,13 +182,33 @@ function providerEnv(provider) {
 }
 
 function smokeProvider(model, cwd) {
-  const proc = spawnSync("opencode", ["run", "--dir", cwd, "--model", model, "Reply OK only."], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024,
-  });
-  const output = `${proc.stdout || ""}\n${proc.stderr || ""}`.trim();
-  return { ok: proc.status === 0, detail: proc.status === 0 ? "smoke passed" : output.slice(0, 300) };
+  const proc = runOpencode(["run", "--dir", cwd, "--model", model, "Reply OK only."], { cwd, maxBuffer: 1024 * 1024 });
+  const output = scrubSecretEnv(`${proc.stdout || ""}\n${proc.stderr || ""}`.trim());
+  return { ok: proc.ok, detail: proc.ok ? "smoke passed" : output.slice(0, 300) };
+}
+
+function runOpencode(args, options = {}) {
+  try {
+    return {
+      ok: true,
+      stdout: execFileSync("opencode", args, { cwd: options.cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: options.timeout || 30000, maxBuffer: options.maxBuffer || 1024 * 1024 }),
+      stderr: "",
+      status: 0,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: normalizeCommandOutput(error.stdout),
+      stderr: normalizeCommandOutput(error.stderr || error.message),
+      status: error.status ?? 1,
+    };
+  }
+}
+
+function normalizeCommandOutput(value) {
+  if (typeof value === "string") return value;
+  if (Buffer.isBuffer(value)) return value.toString("utf8");
+  return String(value || "");
 }
 
 function printProfileMap(models, variants) {
