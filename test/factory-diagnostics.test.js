@@ -169,6 +169,24 @@ describe("factory diagnostics run inspection", () => {
     }
   });
 
+  it("fails closed for unanchored active runs even when liveness alarms are present", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: "2026-07-08T11:00:00.000Z" }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatLease({ last_tick_at: "2026-07-08T11:00:00.000Z", pid: 987654321 }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
+      assert.equal(diagnostics.authoritative, false);
+      assert.equal(diagnostics.status, "error");
+      assert.equal(diagnostics.classification, "blocked");
+      assert.deepEqual(diagnostics.items.map((item) => item.condition), ["missing-heartbeat-process", "stale-heartbeat", "unverifiable-authority"]);
+      assert.equal(diagnostics.items[2].authoritative, false);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("reports invalid sidecar schema as invalid-run-state before liveness checks", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
@@ -285,6 +303,31 @@ describe("factory diagnostics run inspection", () => {
       assert.equal(diagnostics.classification, "terminal");
       assert.equal(diagnostics.status, "ok");
       assert.equal(diagnostics.severity, "info");
+      assert.equal(diagnostics.authoritative, true);
+      assert.equal(diagnostics.items[0].authoritative, true);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("fails closed for unanchored terminal runs without trusting mutable run.json", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), terminalRun("completed", { heartbeat_at: "2026-07-08T11:00:00.000Z" }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatLease({ last_tick_at: "2026-07-08T11:00:00.000Z", pid: 987654321 }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
+      assert.equal(diagnostics.authoritative, false);
+      assert.equal(diagnostics.classification, "blocked");
+      assert.equal(diagnostics.status, "error");
+      assert.equal(diagnostics.severity, "critical");
+      assert.notEqual(diagnostics.classification, "terminal");
+      assert.notEqual(diagnostics.status, "ok");
+      assert.deepEqual(diagnostics.items.map((item) => item.condition), ["unverifiable-authority", "terminal-run"]);
+      assert.equal(diagnostics.items[0].authoritative, false);
+      assert.equal(diagnostics.items[1].authoritative, false);
+      assert.doesNotMatch(JSON.stringify(diagnostics), /stale-heartbeat|missing-heartbeat-process|missing-worktree/u);
     } finally {
       cleanup(repo);
     }

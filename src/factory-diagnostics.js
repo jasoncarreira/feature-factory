@@ -196,17 +196,20 @@ export function diagnoseRunObject(input, options = {}) {
 
   const terminal = TERMINAL_STATUSES.has(run.status);
   const authoritative = Boolean(runDir && authority.authoritative !== false);
+  const acceptedAuthority = hasAcceptedRunAuthority(authority, options);
+  const trustedAuthoritative = authoritative && acceptedAuthority;
   const protectedGate = pendingProtectedGate(run);
 
   if (terminal) {
-    items.push(terminalRunItem(run, { checkedAt, runDir, runFile, authoritative }));
-    return diagnosticEnvelope(items, { checkedAt, authoritative });
+    if (runDir && !acceptedAuthority) items.push(unverifiableRunAuthorityItem({ checkedAt, runDir, runFile, terminal: true }));
+    items.push(terminalRunItem(run, { checkedAt, runDir, runFile, authoritative: trustedAuthoritative }));
+    return diagnosticEnvelope(items, { checkedAt, authoritative: trustedAuthoritative && !hasUntrustedAuthorityItem(items) });
   }
 
   if (protectedGate) {
     items.push(diagnosticItem("protected-gate", {
       checkedAt,
-      authoritative,
+      authoritative: trustedAuthoritative,
       message: `Run is waiting at protected gate '${protectedGate}'.`,
       evidence: { source: "run.json", run_dir: runDir, run_path: runFile, gate: protectedGate },
     }));
@@ -225,14 +228,14 @@ export function diagnoseRunObject(input, options = {}) {
     }
   }
 
-  const missingWorktree = inspectWorktree(run, { ...options, checkedAt, runDir, authoritative });
+  const missingWorktree = inspectWorktree(run, { ...options, checkedAt, runDir, authoritative: trustedAuthoritative });
   if (missingWorktree) items.push(missingWorktree);
 
-  if (!terminal && runDir && !hasAcceptedRunAuthority(authority, options) && items.length === 0) {
-    items.push(unverifiableActiveAuthorityItem({ checkedAt, runDir, runFile }));
+  if (runDir && !acceptedAuthority) {
+    items.push(unverifiableRunAuthorityItem({ checkedAt, runDir, runFile }));
   }
 
-  return diagnosticEnvelope(items, { checkedAt, authoritative: authoritative && !items.some((item) => item.condition === "invalid-run-state" || item.condition === "unverifiable-authority") });
+  return diagnosticEnvelope(items, { checkedAt, authoritative: trustedAuthoritative && !hasUntrustedAuthorityItem(items) });
 }
 
 export function diagnosticEnvelope(items = [], options = {}) {
@@ -328,18 +331,22 @@ function hasAcceptedRunAuthority(authority, options = {}) {
   return Array.isArray(authority?.orderedRefs) && authority.orderedRefs.length > 0;
 }
 
-function unverifiableActiveAuthorityItem({ checkedAt, runDir, runFile }) {
+function unverifiableRunAuthorityItem({ checkedAt, runDir, runFile, terminal = false }) {
   return diagnosticItem("unverifiable-authority", {
     checkedAt,
     authoritative: false,
-    message: "Active factory run authority cannot be verified from accepted run-base or attestation proofs.",
+    message: `${terminal ? "Terminal" : "Active"} factory run authority cannot be verified from accepted run-base or attestation proofs.`,
     evidence: {
       source: "provenance-authority",
       run_dir: runDir,
       run_path: runFile,
-      errors: [{ path: "attestations/index.json", message: "active run requires an accepted run-base attestation or authority proof" }],
+      errors: [{ path: "attestations/index.json", message: `${terminal ? "terminal" : "active"} run requires an accepted run-base attestation or authority proof` }],
     },
   });
+}
+
+function hasUntrustedAuthorityItem(items) {
+  return items.some((item) => item.condition === "invalid-run-state" || item.condition === "unverifiable-authority");
 }
 
 function authorityItem(authority, { checkedAt, runDir, runFile }) {
