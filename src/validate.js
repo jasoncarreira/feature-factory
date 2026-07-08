@@ -498,6 +498,7 @@ function validatePendingSnapshot(errors, pendingSnapshot, path) {
   requiredHash(errors, pendingSnapshot, "question_hash", `${path}.question_hash`);
   requiredString(errors, pendingSnapshot, "artifact_ref", `${path}.artifact_ref`);
   requiredHash(errors, pendingSnapshot, "artifact_hash", `${path}.artifact_hash`);
+  optionalString(errors, pendingSnapshot, "answer_ref", `${path}.answer_ref`);
   requiredString(errors, pendingSnapshot, "created_at", `${path}.created_at`);
 }
 

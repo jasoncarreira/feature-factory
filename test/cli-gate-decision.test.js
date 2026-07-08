@@ -152,7 +152,7 @@ describe("cli gate decision routing", () => {
     }
   });
 
-  it("rejects public approval after pending answer ref poisoning", () => {
+  it("approves public non-canonical answer refs only after pending snapshot binding", () => {
     const repo = tempRepo();
 
     try {
@@ -160,41 +160,41 @@ describe("cli gate decision routing", () => {
       const runDir = createRun(repo);
       writeFixture(runDir, "artifacts/story.json", "{\n  \"title\": \"Story\"\n}\n");
       writeFixture(runDir, "gates/story.question.json", "{\n  \"question\": \"Approve?\"\n}\n");
-      writeFixture(runDir, "gates/story.answer", "{\n  \"answer\": \"approve\"\n}\n");
-      writeFixture(runDir, "gates/evil.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
+      writeFixture(runDir, "gates/story.external.answer", "{\n  \"answer\": \"approve\"\n}\n");
+      writeFixture(runDir, "gates/other.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
 
       const pending = runGateDecision(repo, [
         "pending",
         "--answer-ref",
-        "gates/evil.answer.json",
+        "gates/story.external.answer",
       ]);
 
       assert.equal(pending.status, 0, pending.stderr);
-      const poisonedRun = readJson(join(runDir, "run.json"));
-      assert.equal(poisonedRun.gates.story.answer_ref, "gates/evil.answer.json");
-      assert.equal(poisonedRun.gates.story.pending_snapshot.answer_ref, undefined);
+      const pendingRun = readJson(join(runDir, "run.json"));
+      assert.equal(pendingRun.gates.story.answer_ref, "gates/story.external.answer");
+      assert.equal(pendingRun.gates.story.pending_snapshot.answer_ref, "gates/story.external.answer");
 
       const rejected = runGateDecision(repo, [
         "approved",
         "--answer-ref",
-        "gates/evil.answer.json",
+        "gates/other.answer.json",
       ]);
 
       assert.notEqual(rejected.status, 0);
-      assert.match(rejected.stderr, /answer_ref must match trusted pending answer_ref 'gates\/story\.answer'/u);
-      assert.deepEqual(readJson(join(runDir, "run.json")), poisonedRun);
+      assert.match(rejected.stderr, /answer_ref must match trusted pending answer_ref 'gates\/story\.external\.answer'/u);
+      assert.deepEqual(readJson(join(runDir, "run.json")), pendingRun);
       assert.equal(existsSync(join(runDir, "attestations", "gates", "story.json")), false);
 
       const approved = runGateDecision(repo, [
         "approved",
         "--answer-ref",
-        "gates/story.answer",
+        "gates/story.external.answer",
       ]);
 
       assert.equal(approved.status, 0, approved.stderr);
       const run = readJson(join(runDir, "run.json"));
       assert.equal(run.gates.story.status, "approved");
-      assert.equal(run.gates.story.answer_ref, "gates/story.answer");
+      assert.equal(run.gates.story.answer_ref, "gates/story.external.answer");
       assert.equal(run.gates.story.approval_source, "external-driver");
     } finally {
       cleanup(repo);

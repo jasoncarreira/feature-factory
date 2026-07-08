@@ -894,7 +894,7 @@ function preparePendingGateDecision(runDir, gateName, gate) {
     throw new Error(`pending gate '${gateName}' requires ${missingFields.join(", ")}`);
   }
 
-  const snapshot = createPendingGateSnapshot(runDir, gateName, gate.artifact, gate.question_ref, gate.pending_snapshot?.created_at);
+  const snapshot = createPendingGateSnapshot(runDir, gateName, gate.artifact, gate.question_ref, gate.pending_snapshot?.created_at, gate.answer_ref);
   if (gate.pending_snapshot !== undefined && gate.pending_snapshot !== null) {
     assertPendingSnapshotMatches(gateName, gate.pending_snapshot, snapshot, "supplied pending snapshot");
   }
@@ -919,6 +919,7 @@ function assertPendingGateMaterialFresh(runDir, gateName, currentGate, gate) {
     currentGate.pending_snapshot.artifact_ref,
     currentGate.pending_snapshot.question_ref,
     currentGate.pending_snapshot.created_at,
+    currentGate.pending_snapshot.answer_ref,
   );
   assertPendingSnapshotMatches(gateName, currentGate.pending_snapshot, freshSnapshot, "current pending snapshot");
   if (gate.artifact !== currentGate.pending_snapshot.artifact_ref) {
@@ -929,16 +930,22 @@ function assertPendingGateMaterialFresh(runDir, gateName, currentGate, gate) {
   }
 }
 
-function createPendingGateSnapshot(runDir, gateName, artifactRef, questionRef, createdAt) {
+function createPendingGateSnapshot(runDir, gateName, artifactRef, questionRef, createdAt, answerRef) {
   const artifact = resolveArtifactRef(runDir, artifactRef);
   const question = resolveGateRef(runDir, questionRef);
-  return {
+  const snapshot = {
     question_ref: questionRef,
     question_hash: hashFile(question.path, { mode: "raw" }),
     artifact_ref: artifactRef,
     artifact_hash: hashFile(artifact.path, { mode: "raw" }),
     created_at: stringValue(createdAt) ? createdAt : new Date().toISOString(),
   };
+  if (stringValue(answerRef)) {
+    const answer = resolveGateRef(runDir, answerRef, { mustExist: false });
+    if (answer.path === question.path) throw new Error(`gate '${gateName}' answer_ref must not overlap question_ref`);
+    snapshot.answer_ref = answerRef;
+  }
+  return snapshot;
 }
 
 function assertPendingSnapshotMatches(gateName, actual, expected, label) {
@@ -952,6 +959,12 @@ function assertPendingSnapshotMatches(gateName, actual, expected, label) {
     if (actualValue !== expectedValue) {
       throw new Error(`gate '${gateName}' ${label} ${field} is stale or mismatched`);
     }
+  }
+  if (stringValue(expected.answer_ref) && actual?.answer_ref !== expected.answer_ref) {
+    throw new Error(`gate '${gateName}' ${label} answer_ref is stale or mismatched`);
+  }
+  if (!stringValue(expected.answer_ref) && stringValue(actual?.answer_ref)) {
+    throw new Error(`gate '${gateName}' ${label} answer_ref is unexpected`);
   }
   if (!stringValue(actual?.created_at)) throw new Error(`gate '${gateName}' ${label} created_at is missing`);
 }
