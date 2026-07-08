@@ -4,13 +4,25 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createAttestationIndex, createRunBaseAttestation } from "../src/provenance-authority.js";
+import {
+  createAttestationIndex,
+  createDirectReviewedCommitAttestation,
+  createGateDecisionAttestation,
+  createMergeChainAttestation,
+  createReviewApprovalAttestation,
+  createRunBaseAttestation,
+  gitDiffHash,
+  hashFile,
+  hashValue,
+} from "../src/provenance-authority.js";
+import { SAFE_GIT_POLICY } from "../src/safe-git.js";
 import {
   hashRunState,
   heartbeatOnce,
   mutateRunJsonLocked,
   transitionGateDecision,
   transitionLifecycleRun,
+  transitionPrCreated,
   transitionRunJson,
   transitionRunSlice,
   transitionRunStep,
@@ -160,6 +172,35 @@ describe("mutateRunJsonLocked", () => {
       assert.equal(result.updated, true);
       assert.equal(stored.updated_at, "2026-07-06T11:35:00.000Z");
       assert.equal(stored.gates.brief.status, "pending");
+      assert.deepEqual(readdirSync(fixture.runDir).sort(), ["run.json"]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed on PR URL no-index writes", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+
+    try {
+      await assert.rejects(
+        mutateRunJsonLocked(fixture.runDir, (run) => {
+          run.status = "completed";
+          run.pr_url = "https://github.com/example/repo/pull/123";
+          run.terminal_result = {
+            status: "completed",
+            run_id: run.run_id,
+            pr_url: run.pr_url,
+            reason: null,
+            summary: "Draft PR created.",
+            artifacts: {},
+          };
+        }),
+        /no provenance-sensitive next claims.*pr_url/u,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
       assert.deepEqual(readdirSync(fixture.runDir).sort(), ["run.json"]);
     } finally {
       fixture.cleanup();
@@ -404,6 +445,11 @@ describe("transition helpers", () => {
     writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
 
     try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
       const result = await transitionGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.md",
@@ -435,6 +481,11 @@ describe("transition helpers", () => {
     writeFixture(fixture.runDir, "gates/story.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
 
     try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.json",
+        question_ref: "gates/story.question.json",
+      });
       const result = await transitionGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.json",
@@ -467,6 +518,11 @@ describe("transition helpers", () => {
     writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
 
     try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
       await transitionGateDecision(fixture.runDir, "story", approvedGate);
       const current = readJson(join(fixture.runDir, "run.json"));
       const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
@@ -512,8 +568,13 @@ describe("transition helpers", () => {
     writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
 
     try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
       await transitionGateDecision(fixture.runDir, "story", approvedGate);
-      const reopened = await transitionGateDecision(fixture.runDir, "story", { status: "pending" });
+      const reopened = await transitionGateDecision(fixture.runDir, "story", { ...approvedGate, status: "pending" });
       const index = readJson(join(fixture.runDir, "attestations", "index.json"));
       const latest = readJson(join(fixture.runDir, index.entries.at(-1).ref));
 
@@ -553,6 +614,11 @@ describe("transition helpers", () => {
     writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
 
     try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
       await transitionGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.md",
@@ -594,6 +660,11 @@ describe("transition helpers", () => {
     writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
 
     try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
       await transitionGateDecision(fixture.runDir, "story", approvedGate);
       const approvedRun = readJson(join(fixture.runDir, "run.json"));
 
@@ -608,7 +679,7 @@ describe("transition helpers", () => {
       assert.equal(validateRunDir(fixture.runDir).ok, false);
 
       writeJson(join(fixture.runDir, "run.json"), approvedRun);
-      await transitionGateDecision(fixture.runDir, "story", { status: "pending" });
+      await transitionGateDecision(fixture.runDir, "story", { ...approvedGate, status: "pending" });
       const reopenedRun = readJson(join(fixture.runDir, "run.json"));
 
       writeJson(join(fixture.runDir, "run.json"), {
@@ -652,10 +723,15 @@ describe("transition helpers", () => {
     rmSync(join(fixture.runDir, "attestations", "gates"), { recursive: true, force: true });
     symlinkSync(outsideAttestations, join(fixture.runDir, "attestations", "gates"), "dir");
 
-    const current = readJson(join(fixture.runDir, "run.json"));
     const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
 
     try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
+      const pendingRun = readJson(join(fixture.runDir, "run.json"));
       await assert.rejects(
         transitionGateDecision(fixture.runDir, "story", {
           status: "approved",
@@ -668,7 +744,7 @@ describe("transition helpers", () => {
       );
 
       assert.equal(existsSync(join(outsideAttestations, "story.json")), false);
-      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), pendingRun);
       assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
     } finally {
       fixture.cleanup();
@@ -685,6 +761,12 @@ describe("transition helpers", () => {
     writeFixture(fixture.runDir, "gates/pre_pr.answer", "approve\n");
 
     try {
+      await transitionGateDecision(fixture.runDir, "pre_pr", {
+        status: "pending",
+        artifact: "artifacts/pre_pr.md",
+        question_ref: "gates/pre_pr.question.md",
+      });
+      const pending = readJson(join(fixture.runDir, "run.json"));
       await assert.rejects(
         transitionGateDecision(fixture.runDir, "pre_pr", {
           status: "approved",
@@ -696,11 +778,377 @@ describe("transition helpers", () => {
         /run\.gates\.pre_pr\.status: approved pre_pr gate requires/u,
       );
 
-      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), pending);
       assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
       assert.equal(existsSync(join(fixture.runDir, "attestations", "gates", "pre_pr.json")), false);
     } finally {
       fixture.cleanup();
+    }
+  });
+
+  it("rejects transitionGateDecision approval when the current gate is not pending", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+
+    try {
+      await assert.rejects(
+        transitionGateDecision(fixture.runDir, "story", {
+          status: "approved",
+          artifact: "artifacts/story.md",
+          question_ref: "gates/story.question.md",
+          answer_ref: "gates/story.answer",
+          approval_source: "human",
+        }),
+        /requires current gate status pending/u,
+      );
+      assert.equal(existsSync(join(fixture.runDir, "attestations", "gates", "story.json")), false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects supplied gate refs that do not match pending material", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "artifacts/other.md", "other artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+
+    try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
+      const pending = readJson(join(fixture.runDir, "run.json"));
+
+      await assert.rejects(
+        transitionGateDecision(fixture.runDir, "story", {
+          status: "approved",
+          artifact: "artifacts/other.md",
+          question_ref: "gates/story.question.md",
+          answer_ref: "gates/story.answer",
+          approval_source: "human",
+        }),
+        /artifact must match pending artifact/u,
+      );
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), pending);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects stale pending snapshots before approving a gate", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+    writeFixture(fixture.runDir, "gates/story.answer", "approve\n");
+
+    try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
+      writeFixture(fixture.runDir, "artifacts/story.md", "changed story artifact\n");
+
+      await assert.rejects(
+        transitionGateDecision(fixture.runDir, "story", {
+          status: "approved",
+          artifact: "artifacts/story.md",
+          question_ref: "gates/story.question.md",
+          answer_ref: "gates/story.answer",
+          approval_source: "human",
+        }),
+        /current pending snapshot artifact_hash is stale or mismatched/u,
+      );
+      assert.equal(existsSync(join(fixture.runDir, "attestations", "gates", "story.json")), false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("preserves autonomous text answers while validating pending material", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/story.md", "story artifact\n");
+    writeFixture(fixture.runDir, "gates/story.question.md", "approve story?\n");
+
+    try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
+      const result = await transitionGateDecision(fixture.runDir, "story", {
+        status: "approved",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer: "autonomous approval after validator/security review",
+        approval_source: "autonomous",
+      });
+
+      const attestation = readJson(join(fixture.runDir, result.attestation_ref));
+      assert.equal(result.run.gates.story.answer, "autonomous approval after validator/security review");
+      assert.equal(attestation.bindings.answer_ref, undefined);
+      assert.match(attestation.bindings.answer_text_hash, /^sha256:[0-9a-f]{64}$/u);
+      assert.equal(validateRunDir(fixture.runDir).ok, true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("records pr-created attestation before completing a PR-created run", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+    const authority = writePrPrerequisiteAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/pr-body.md", "PR body\n");
+
+    try {
+      const result = await transitionPrCreated(fixture.runDir, prCreatedInput(authority.context));
+
+      const stored = readJson(join(fixture.runDir, "run.json"));
+      const index = readJson(join(fixture.runDir, "attestations", "index.json"));
+      const prCreated = readJson(join(fixture.runDir, "attestations", "pr-created.json"));
+      assert.equal(result.updated, true);
+      assert.equal(result.attestation_ref, "attestations/pr-created.json");
+      assert.equal(stored.status, "completed");
+      assert.equal(stored.pr_url, "https://github.com/example/repo/pull/123");
+      assert.equal(stored.terminal_result.status, "completed");
+      assert.equal(stored.terminal_result.run_id, "heartbeat-liveness");
+      assert.equal(stored.terminal_result.pr_url, stored.pr_url);
+      assert.equal(index.entries.at(-1).type, "pr-created");
+      assert.equal(prCreated.bindings.merge_chain_attestation_ref, "attestations/merge-chain.json");
+      assert.equal(prCreated.bindings.pre_pr_gate_attestation_ref, "attestations/gates/pre_pr.json");
+      assert.equal(validateRunDir(fixture.runDir).ok, true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("does not leave pr-created staged files when attestation validation fails", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+    const authority = writePrPrerequisiteAuthority(fixture.runDir);
+    const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+    writeFixture(fixture.runDir, "artifacts/pr-body.md", "PR body\n");
+
+    try {
+      await assert.rejects(
+        transitionPrCreated(
+          fixture.runDir,
+          prCreatedInput(authority.context, {
+            remote_observation: {
+              pr_url: "https://github.com/example/repo/pull/123",
+              pr_number: 123,
+              provider: "github",
+              repository: "example/repo",
+              remote: "origin",
+              github_account: "octocat",
+              head_branch: authority.context.branch,
+              head_commit: authority.context.baseCommit,
+              head_tree: authority.context.baseTree,
+              base_ref: "HEAD",
+              base_commit: authority.context.baseCommit,
+              base_tree: authority.context.baseTree,
+              draft: true,
+            },
+          }),
+        ),
+        /remote_observation\.head_commit/u,
+      );
+
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+      assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects pr-created transitions with token-shaped canonical GitHub URL segments", async () => {
+    for (const scenario of [
+      {
+        name: "glpat-owner",
+        prUrl: `https://github.com/glpat-${"A".repeat(24)}/repo/pull/123`,
+        repository: `glpat-${"A".repeat(24)}/repo`,
+      },
+      {
+        name: "akia-owner-asia-repo",
+        prUrl: "https://github.com/AKIAIOSFODNN7EXAMPLE/ASIAIOSFODNN7EXAMPLE/pull/123",
+        repository: "AKIAIOSFODNN7EXAMPLE/ASIAIOSFODNN7EXAMPLE",
+      },
+    ]) {
+      const fixture = createRunFixture();
+      const current = baseRun();
+      writeJson(join(fixture.runDir, "run.json"), current);
+      const authority = writePrPrerequisiteAuthority(fixture.runDir);
+      const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+      writeFixture(fixture.runDir, "artifacts/pr-body.md", "PR body\n");
+
+      try {
+        await assert.rejects(
+          transitionPrCreated(
+            fixture.runDir,
+            prCreatedInput(authority.context, {
+              pr_url: scenario.prUrl,
+              repository: scenario.repository,
+            }),
+          ),
+          /sensitive or token-shaped/u,
+          scenario.name,
+        );
+
+        assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current, scenario.name);
+        assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex, scenario.name);
+        assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false, scenario.name);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  });
+
+  it("rejects pr-created transitions when current authority is missing required attestations", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+    writeRunBaseAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/pr-body.md", "PR body\n");
+
+    try {
+      await assert.rejects(
+        transitionPrCreated(fixture.runDir, prCreatedInput(repoContext())),
+        /pr-created requires current accepted merge-chain, approved pre_pr gate-decision/u,
+      );
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("requires explicit remote_observation for pr-created transitions", async () => {
+    const fixture = createRunFixture();
+    const current = baseRun();
+    writeJson(join(fixture.runDir, "run.json"), current);
+    const authority = writePrPrerequisiteAuthority(fixture.runDir);
+    const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+    writeFixture(fixture.runDir, "artifacts/pr-body.md", "PR body\n");
+    const input = prCreatedInput(authority.context);
+    delete input.remote_observation;
+
+    try {
+      await assert.rejects(
+        transitionPrCreated(fixture.runDir, input),
+        /requires remote_observation/u,
+      );
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
+      assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("treats an identical existing pr-created attestation as idempotent without restaging", async () => {
+    const fixture = createRunFixture();
+    writeJson(join(fixture.runDir, "run.json"), baseRun());
+    const authority = writePrPrerequisiteAuthority(fixture.runDir);
+    writeFixture(fixture.runDir, "artifacts/pr-body.md", "PR body\n");
+
+    try {
+      await transitionPrCreated(fixture.runDir, prCreatedInput(authority.context));
+      const storedRun = readJson(join(fixture.runDir, "run.json"));
+      const storedIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+      const storedAttestation = readJson(join(fixture.runDir, "attestations", "pr-created.json"));
+
+      const result = await transitionPrCreated(fixture.runDir, prCreatedInput(authority.context));
+
+      assert.equal(result.updated, false);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), storedRun);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), storedIndex);
+      assert.deepEqual(readJson(join(fixture.runDir, "attestations", "pr-created.json")), storedAttestation);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects differing existing pr-created facts without mutating run.json or attestations", async () => {
+    for (const scenario of [
+      {
+        name: "pr-url",
+        mutate() {
+          return prCreatedInput(repoContext(), { pr_url: "https://github.com/example/repo/pull/124", pr_number: 124 });
+        },
+        error: /different pr_url/u,
+      },
+      {
+        name: "body",
+        mutate({ fixture, input }) {
+          writeFixture(fixture.runDir, "artifacts/pr-body-2.md", "changed PR body\n");
+          return { ...input, pr_body_ref: "artifacts/pr-body-2.md" };
+        },
+        error: /different pr_body_ref, pr_body_hash/u,
+      },
+      {
+        name: "remote-observation-head",
+        mutate({ authority }) {
+          return prCreatedInput(authority.context, {
+            remote_observation: {
+              pr_url: "https://github.com/example/repo/pull/123",
+              pr_number: 123,
+              provider: "github",
+              repository: "example/repo",
+              remote: "origin",
+              github_account: "octocat",
+              head_branch: authority.context.branch,
+              head_commit: authority.context.baseCommit,
+              head_tree: authority.context.baseTree,
+              base_ref: "HEAD",
+              base_commit: authority.context.baseCommit,
+              base_tree: authority.context.baseTree,
+              draft: true,
+            },
+          });
+        },
+        error: /different remote_observation/u,
+      },
+    ]) {
+      const fixture = createRunFixture();
+      writeJson(join(fixture.runDir, "run.json"), baseRun());
+      const authority = writePrPrerequisiteAuthority(fixture.runDir);
+      writeFixture(fixture.runDir, "artifacts/pr-body.md", "PR body\n");
+
+      try {
+        const input = prCreatedInput(authority.context);
+        await transitionPrCreated(fixture.runDir, input);
+        const storedRun = readJson(join(fixture.runDir, "run.json"));
+        const storedIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+        const storedAttestation = readJson(join(fixture.runDir, "attestations", "pr-created.json"));
+        const nextInput = scenario.mutate({ fixture, authority, input });
+
+        await assert.rejects(
+          transitionPrCreated(fixture.runDir, nextInput),
+          scenario.error,
+          scenario.name,
+        );
+        assert.deepEqual(readJson(join(fixture.runDir, "run.json")), storedRun, scenario.name);
+        assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), storedIndex, scenario.name);
+        assert.deepEqual(readJson(join(fixture.runDir, "attestations", "pr-created.json")), storedAttestation, scenario.name);
+      } finally {
+        fixture.cleanup();
+      }
     }
   });
 });
@@ -1114,14 +1562,162 @@ function writeRunBaseAuthority(runDir) {
       feature_branch: context.branch,
       feature_worktree: context.featureWorktree,
       base_ref: "HEAD",
-      base_commit: context.headCommit,
-      base_tree: context.headTree,
+      base_commit: context.baseCommit,
+      base_tree: context.baseTree,
     },
   });
   writeJson(join(runDir, "attestations", "run-base.json"), runBase);
   const index = createAttestationIndex([{ ref: "attestations/run-base.json", attestation: runBase }]);
   writeJson(join(runDir, "attestations", "index.json"), index);
   return { runBase, index };
+}
+
+function writePrPrerequisiteAuthority(runDir) {
+  const { runBase } = writeRunBaseAuthority(runDir);
+  const context = repoContext();
+  const directEvidenceRef = "evidence/direct-feature.json";
+  const directReviewRef = "reviews/direct-feature.approval.json";
+  writeJson(join(runDir, directEvidenceRef), { summary: "direct feature commit" });
+  writeJson(join(runDir, directReviewRef), {
+    subject: "feature-direct",
+    reviewer: "work-reviewer",
+    verdict: "APPROVE",
+  });
+  const guard = {
+    status: "clean",
+    safe_git_policy: SAFE_GIT_POLICY,
+    worktree: context.featureWorktree,
+    head_commit: context.headCommit,
+    head_tree: context.headTree,
+    dirty_paths: [],
+    hidden_index_paths: [],
+  };
+  const directCommit = createDirectReviewedCommitAttestation({
+    run_id: "heartbeat-liveness",
+    sequence: 2,
+    prev_hash: runBase.attestation_hash,
+    bindings: {
+      entry_id: "feature-direct",
+      purpose: "validation-fix",
+      commit: context.headCommit,
+      parent_commit: context.baseCommit,
+      tree: context.headTree,
+      diff_hash: gitDiffHash(context.featureWorktree, context.baseCommit, context.headCommit),
+      evidence_ref: directEvidenceRef,
+      evidence_hash: hashFile(join(runDir, directEvidenceRef)),
+      producing_role: "backend-builder",
+      review_hash: hashFile(join(runDir, directReviewRef)),
+      guard_result_hash: hashValue(guard),
+    },
+  });
+  const reviewApproval = createReviewApprovalAttestation({
+    run_id: "heartbeat-liveness",
+    sequence: 3,
+    prev_hash: directCommit.attestation_hash,
+    bindings: {
+      subject_type: "direct_commit",
+      subject: "feature-direct",
+      reviewer: "work-reviewer",
+      verdict: "APPROVE",
+      review_ref: directReviewRef,
+      review_hash: hashFile(join(runDir, directReviewRef)),
+      evidence_ref: directEvidenceRef,
+      evidence_hash: hashFile(join(runDir, directEvidenceRef)),
+      subject_commit: context.headCommit,
+      subject_tree: context.headTree,
+      guard_result_hash: hashValue(guard),
+      guard,
+    },
+  });
+  const mergeChain = createMergeChainAttestation({
+    run_id: "heartbeat-liveness",
+    sequence: 4,
+    prev_hash: reviewApproval.attestation_hash,
+    bindings: {
+      feature_branch: context.branch,
+      base_attestation_ref: "attestations/run-base.json",
+      base_attestation_hash: runBase.attestation_hash,
+      base_commit: context.baseCommit,
+      head_commit: context.headCommit,
+      head_tree: context.headTree,
+      entries: [
+        {
+          type: "direct_reviewed_commit",
+          commit: context.headCommit,
+          direct_commit_attestation_ref: "attestations/direct-commits/feature-direct.json",
+          direct_commit_attestation_hash: directCommit.attestation_hash,
+          review_attestation_ref: "attestations/reviews/direct-feature.approval.json",
+          review_attestation_hash: reviewApproval.attestation_hash,
+        },
+      ],
+    },
+  });
+  writeFixture(runDir, "artifacts/pre_pr.md", "pre-pr artifact\n");
+  writeFixture(runDir, "gates/pre_pr.question.md", "approve pre-pr?\n");
+  writeFixture(runDir, "gates/pre_pr.answer", "approve\n");
+  const prePrGate = createGateDecisionAttestation({
+    run_id: "heartbeat-liveness",
+    sequence: 5,
+    prev_hash: mergeChain.attestation_hash,
+    bindings: {
+      gate: "pre_pr",
+      decision: "approved",
+      approval_source: "autonomous",
+      question_ref: "gates/pre_pr.question.md",
+      question_hash: hashFile(join(runDir, "gates", "pre_pr.question.md"), { mode: "raw" }),
+      artifact_ref: "artifacts/pre_pr.md",
+      artifact_hash: hashFile(join(runDir, "artifacts", "pre_pr.md"), { mode: "raw" }),
+      answer_ref: "gates/pre_pr.answer",
+      answer_hash: hashFile(join(runDir, "gates", "pre_pr.answer"), { mode: "raw" }),
+    },
+  });
+  const records = [
+    { ref: "attestations/run-base.json", attestation: runBase },
+    { ref: "attestations/direct-commits/feature-direct.json", attestation: directCommit },
+    { ref: "attestations/reviews/direct-feature.approval.json", attestation: reviewApproval },
+    { ref: "attestations/merge-chain.json", attestation: mergeChain },
+    { ref: "attestations/gates/pre_pr.json", attestation: prePrGate },
+  ];
+  for (const record of records.slice(1)) writeAttestation(runDir, record.ref, record.attestation);
+  const index = createAttestationIndex(records);
+  writeJson(join(runDir, "attestations", "index.json"), index);
+  return { context, runBase, directCommit, reviewApproval, mergeChain, prePrGate, index };
+}
+
+function prCreatedInput(context, overrides = {}) {
+  const prUrl = overrides.pr_url ?? "https://github.com/example/repo/pull/123";
+  return {
+    pr_url: prUrl,
+    pr_number: overrides.pr_number ?? 123,
+    provider: overrides.provider ?? "github",
+    repository: overrides.repository ?? "example/repo",
+    remote: overrides.remote ?? "origin",
+    github_account: overrides.github_account ?? "octocat",
+    draft: overrides.draft ?? true,
+    pr_body_ref: overrides.pr_body_ref ?? "artifacts/pr-body.md",
+    terminal_result: overrides.terminal_result,
+    remote_observation: overrides.remote_observation ?? {
+      pr_url: prUrl,
+      pr_number: overrides.pr_number ?? 123,
+      provider: overrides.provider ?? "github",
+      repository: overrides.repository ?? "example/repo",
+      remote: overrides.remote ?? "origin",
+      github_account: overrides.github_account ?? "octocat",
+      head_branch: context.branch,
+      head_commit: context.headCommit,
+      head_tree: context.headTree,
+      base_ref: "HEAD",
+      base_commit: context.baseCommit,
+      base_tree: context.baseTree,
+      draft: overrides.draft ?? true,
+    },
+  };
+}
+
+function writeAttestation(runDir, ref, attestation) {
+  const path = join(runDir, ref);
+  mkdirSync(dirname(path), { recursive: true });
+  writeJson(path, attestation);
 }
 
 function writeFixture(runDir, ref, contents) {
@@ -1160,10 +1756,15 @@ function repoContext() {
   writeFileSync(join(repo, "tracked.txt"), "base\n", "utf8");
   gitStdout(repo, ["add", "."]);
   gitStdout(repo, ["commit", "-m", "base"]);
+  const baseCommit = gitStdout(repo, ["rev-parse", "HEAD"]);
+  const baseTree = gitStdout(repo, ["rev-parse", "HEAD^{tree}"]);
   const branch = "heartbeat-liveness-branch";
   const worktreePath = join(repo, ".opencode", "worktrees", branch);
   mkdirSync(dirname(worktreePath), { recursive: true });
   gitStdout(repo, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+  writeFileSync(join(worktreePath, "tracked.txt"), "base\nfeature\n", "utf8");
+  gitStdout(worktreePath, ["add", "."]);
+  gitStdout(worktreePath, ["commit", "-m", "feature"]);
   process.on("exit", () => rmSync(repo, { recursive: true, force: true }));
   const featureWorktree = realpathSync(worktreePath);
   const gitCommonDir = realpathSync(resolve(featureWorktree, gitStdout(featureWorktree, ["rev-parse", "--git-common-dir"])));
@@ -1172,6 +1773,8 @@ function repoContext() {
     gitCommonDir,
     repoRoot: dirname(gitCommonDir),
     branch,
+    baseCommit,
+    baseTree,
     headCommit: gitStdout(featureWorktree, ["rev-parse", "HEAD"]),
     headTree: gitStdout(featureWorktree, ["rev-parse", "HEAD^{tree}"]),
   };

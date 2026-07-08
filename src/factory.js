@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { assertHeartbeatOwnerCapability, hasInFlightHeartbeatWork, heartbeatOnce, withRunJsonLock } from "./run-state.js";
 import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunAuthority, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { collectRunProvenanceSnapshot } from "./provenance.js";
+import { hashFile, resolveArtifactRef, resolveGateRef } from "./provenance-authority.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -232,14 +234,23 @@ export function writeGateAnswer(runId, gate, answer, opts = {}) {
   if (!answer) throw new Error("answer is required: approve, changes: ..., or stop");
   const runDir = resolveGateAnswerRunDir(runId, opts);
   const run = readRunFile(join(runDir, "run.json"));
+  assertRunAuthorityValid(runDir, run);
   const pending = pendingGate(run);
   if (pending && gateName !== pending) throw new Error(`gate '${gateName}' is not pending; current pending gate is '${pending}'`);
   if (!pending) throw new Error("run has no pending gate");
-  const gatesDir = resolveGateAnswerGatesDir(runDir);
+  const gateState = run.gates?.[gateName];
+  const target = resolvePendingGateAnswerTarget(runDir, gateName, gateState);
   const normalized = normalizeAnswer(answer);
-  const answerPath = resolveGateAnswerPath(gatesDir, gateName);
-  writeGateAnswerFileAtomically(gatesDir, answerPath, normalized + "\n");
-  return { run_id: run.run_id, gate: gateName, answer: normalized, path: answerPath };
+  writeGateAnswerFileAtomically(target.gatesDir, target.answerPath, normalized + "\n");
+  return { run_id: run.run_id, gate: gateName, answer: normalized, path: target.answerPath };
+}
+
+export async function persistFactoryRunCreatedProvenance(runId, opts = {}) {
+  return persistFactoryRunProvenance(runId, "created", opts);
+}
+
+export async function persistFactoryRunResumeProvenance(runId, opts = {}) {
+  return persistFactoryRunProvenance(runId, "resume", opts);
 }
 
 export function latestRunId(opts = {}) {
@@ -521,15 +532,15 @@ function resolveGateAnswerRunDir(runId, opts = {}) {
 }
 
 function resolveGateAnswerGatesDir(runDir) {
-  const gatesDir = resolveExistingDirectory(join(runDir, "gates"), "gates directory");
+  const gatesDir = resolveGateAnswerRootDirectory(join(runDir, "gates"), "gates directory");
   if (!insideDirectory(runDir, gatesDir)) {
     throw new Error(`gates directory must stay inside ${runDir}`);
   }
   return gatesDir;
 }
 
-function resolveGateAnswerPath(gatesDir, gateName) {
-  const answerPath = resolve(gatesDir, `${gateName}.answer`);
+function resolveGateAnswerPath(gatesDir, answerRef) {
+  const answerPath = resolveGateRef(resolveGateAnswerDurableRoots(dirname(gatesDir)), answerRef, { mustExist: false }).path;
   if (existsSync(answerPath) && lstatSync(answerPath).isSymbolicLink()) {
     throw new Error(`gate answer path must not be a symlink: ${answerPath}`);
   }
@@ -537,6 +548,92 @@ function resolveGateAnswerPath(gatesDir, gateName) {
     throw new Error(`gate answer path must stay inside ${gatesDir}`);
   }
   return answerPath;
+}
+
+function resolvePendingGateAnswerTarget(runDir, gateName, gate) {
+  if (!gate || gate.status !== "pending") throw new Error(`gate '${gateName}' is not pending`);
+  const pendingSnapshot = gate.pending_snapshot;
+  if (!pendingSnapshot || typeof pendingSnapshot !== "object" || Array.isArray(pendingSnapshot)) {
+    throw new Error(`gate '${gateName}' requires pending_snapshot before external answers`);
+  }
+  if (!stringValue(gate.artifact)) throw new Error(`gate '${gateName}' requires artifact ref`);
+  if (!stringValue(gate.question_ref)) throw new Error(`gate '${gateName}' requires question_ref`);
+  if (!stringValue(gate.answer_ref)) throw new Error(`gate '${gateName}' requires answer_ref`);
+  if (pendingSnapshot.artifact_ref !== gate.artifact) {
+    throw new Error(`gate '${gateName}' has stale artifact ref: pending_snapshot '${pendingSnapshot.artifact_ref}' does not match '${gate.artifact}'`);
+  }
+  if (pendingSnapshot.question_ref !== gate.question_ref) {
+    throw new Error(`gate '${gateName}' has stale question_ref: pending_snapshot '${pendingSnapshot.question_ref}' does not match '${gate.question_ref}'`);
+  }
+  assertPendingAnswerRef(gateName, gate, pendingSnapshot);
+  if (gate.answer_ref === gate.question_ref) {
+    throw new Error(`gate '${gateName}' answer_ref must not overlap question_ref`);
+  }
+
+  const roots = resolveGateAnswerDurableRoots(runDir);
+  const artifact = resolveArtifactRef(roots, gate.artifact);
+  const question = resolveGateRef(roots, gate.question_ref);
+  const answer = resolveGateRef(roots, gate.answer_ref, { mustExist: false });
+
+  assertPendingSnapshotHash(gateName, "artifact", artifact.path, pendingSnapshot.artifact_hash);
+  assertPendingSnapshotHash(gateName, "question", question.path, pendingSnapshot.question_hash);
+
+  const answerPath = resolveGateAnswerPath(roots.gates, gate.answer_ref);
+  if (answerPath !== answer.path) throw new Error(`gate '${gateName}' answer_ref resolved inconsistently`);
+  if (answerPath === question.path) throw new Error(`gate '${gateName}' answer_ref must not overlap question_ref`);
+  return { gatesDir: roots.gates, answerPath };
+}
+
+function assertPendingAnswerRef(gateName, gate, pendingSnapshot) {
+  if (stringValue(pendingSnapshot.answer_ref)) {
+    if (pendingSnapshot.answer_ref !== gate.answer_ref) {
+      throw new Error(`gate '${gateName}' has stale answer_ref: pending_snapshot '${pendingSnapshot.answer_ref}' does not match '${gate.answer_ref}'`);
+    }
+    return;
+  }
+
+  const canonicalAnswerRef = canonicalGateAnswerRef(gateName);
+  if (gate.answer_ref !== canonicalAnswerRef) {
+    throw new Error(`gate '${gateName}' requires pending_snapshot.answer_ref for non-canonical answer_ref '${gate.answer_ref}'`);
+  }
+}
+
+function canonicalGateAnswerRef(gateName) {
+  return `gates/${gateName}.answer`;
+}
+
+function resolveGateAnswerDurableRoots(runDir) {
+  const runRealPath = resolveExistingDirectory(runDir, "run directory");
+  return {
+    run_dir: runRealPath,
+    artifacts: resolveGateAnswerDurableRoot(runRealPath, "artifacts"),
+    gates: resolveGateAnswerGatesDir(runRealPath),
+    evidence: join(runRealPath, "evidence"),
+    reviews: join(runRealPath, "reviews"),
+    attestations: join(runRealPath, "attestations"),
+  };
+}
+
+function resolveGateAnswerDurableRoot(runDir, rootName) {
+  const rootDir = resolveGateAnswerRootDirectory(join(runDir, rootName), `${rootName} directory`);
+  if (!insideDirectory(runDir, rootDir)) {
+    throw new Error(`${rootName} directory must stay inside ${runDir}`);
+  }
+  return rootDir;
+}
+
+function resolveGateAnswerRootDirectory(path, label) {
+  if (!existsSync(path)) throw new Error(`missing ${label}: ${path}`);
+  if (lstatSync(path).isSymbolicLink()) throw new Error(`${label} must not be a symlink: ${path}`);
+  return resolveExistingDirectory(path, label);
+}
+
+function assertPendingSnapshotHash(gateName, label, file, expectedHash) {
+  if (!stringValue(expectedHash)) throw new Error(`gate '${gateName}' pending_snapshot ${label}_hash is required`);
+  const actualHash = hashFile(file, { mode: "raw" });
+  if (actualHash !== expectedHash) {
+    throw new Error(`gate '${gateName}' pending_snapshot ${label}_hash is stale: found ${actualHash}, expected ${expectedHash}`);
+  }
 }
 
 function writeGateAnswerFileAtomically(gatesDir, answerPath, contents) {
@@ -1028,6 +1125,46 @@ function writeJsonAtomic(file, value) {
   } finally {
     if (existsSync(temp)) rmSync(temp, { force: true });
   }
+}
+
+async function persistFactoryRunProvenance(runId, eventKind, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const runPath = join(runDir, "run.json");
+  const current = readRunFile(runPath);
+  const snapshot = await collectRunProvenanceSnapshot({
+    cwd: opts.cwd || process.cwd(),
+    driverKind: opts.driverKind,
+    pluginSpec: opts.pluginSpec,
+    pluginOptions: opts.pluginOptions,
+    event: opts.event || (eventKind === "resume" ? "run-resumed" : "run-created"),
+    now: opts.now,
+  });
+  const next = validateRun({
+    ...current,
+    factory_provenance: nextFactoryProvenance(current.factory_provenance, snapshot, eventKind),
+  });
+  writeJsonAtomic(runPath, next);
+  return next.factory_provenance;
+}
+
+function nextFactoryProvenance(current, snapshot, eventKind) {
+  const existing = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+  if (eventKind === "resume") {
+    return {
+      created_with: existing.created_with || snapshot,
+      last_resumed_with: snapshot,
+      resume_count: nonNegativeInteger(existing.resume_count) + 1,
+    };
+  }
+  return {
+    created_with: existing.created_with || snapshot,
+    last_resumed_with: existing.last_resumed_with ?? null,
+    resume_count: nonNegativeInteger(existing.resume_count),
+  };
+}
+
+function nonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 function normalizeHeartbeatPhase(phase) {

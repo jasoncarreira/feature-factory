@@ -19,12 +19,30 @@ export const ATTESTATION_TYPES = Object.freeze([
   "direct-reviewed-commit",
   "gate-decision",
   "merge-chain",
+  "pr-created",
 ]);
 
 const DIRECT_REVIEWED_COMMIT_PURPOSE_SET = new Set(DIRECT_REVIEWED_COMMIT_PURPOSES);
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const OBJECT_ID_PATTERN = /^[0-9a-f]{40}$/u;
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
+const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
+const GITHUB_REPO_PATTERN = /^(?!\.\.?$)[A-Za-z0-9._-]+$/u;
+const SENSITIVE_URL_TOKEN_PATTERN = /(?:x-access-token|access[_-]?token|api[_-]?key|secret|password|passwd|bearer|oauth)/iu;
+const TOKEN_SHAPED_URL_VALUE_PATTERNS = Object.freeze([
+  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/u,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/u,
+  /\bsk-proj[-_][A-Za-z0-9_-]{20,}\b/u,
+  /\bsk-[A-Za-z0-9_-]{20,}\b/u,
+  /\bxox[abp][_-][A-Za-z0-9-]{10,}(?:-[A-Za-z0-9-]{10,})*\b/u,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/iu,
+  /\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
+]);
+const CREDENTIAL_BEARING_URL_PATTERN = /(?:https?|ssh|git|ftp):\/\/[^/\s:@]+:[^/\s@]+@/iu;
+const HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH = 40;
+const HIGH_ENTROPY_MIN_SHANNON = 3.5;
 const JSON_LEAF_ROOTS = new Set(["evidence", "reviews"]);
 const REVIEW_APPROVAL_RULES = Object.freeze({
   "work-reviewer": Object.freeze({ verdicts: Object.freeze(["APPROVE"]) }),
@@ -46,6 +64,10 @@ export function hashFile(filePath, options = {}) {
   const content = readFileSync(file);
   if (mode === "raw") return hashBuffer(content);
   return hashValue(JSON.parse(content.toString("utf8")));
+}
+
+export function canonicalizeGithubPrUrl(value) {
+  return parseCanonicalGithubPrUrl(value, "pr_url").canonicalUrl;
 }
 
 export function withAttestationHash(attestation) {
@@ -125,6 +147,13 @@ export function createMergeChainAttestation(input = {}) {
   return createAuthorityAttestation("merge-chain", {
     ...input,
     subject: input.subject ?? input.bindings?.feature_branch ?? "merge-chain",
+  });
+}
+
+export function createPrCreatedAttestation(input = {}) {
+  return createAuthorityAttestation("pr-created", {
+    ...input,
+    subject: input.subject ?? input.bindings?.pr_url ?? "pr-created",
   });
 }
 
@@ -892,6 +921,133 @@ export function validateMergeChainAttestation(attestation, context = {}) {
   return finalizeChecks(checks);
 }
 
+export function validatePrCreatedAttestation(attestation, context = {}) {
+  const checks = [];
+  const shapeErrors = [
+    ...collectCommonAttestationErrors(attestation, "pr-created", "pr-created"),
+    ...collectPrCreatedBindingErrors(attestation?.bindings, "pr-created.bindings"),
+  ];
+  checks.push(shapeErrors.length === 0 ? okCheck("pr-created.shape") : failCheck("pr-created.shape", shapeErrors));
+  if (shapeErrors.length > 0) return finalizeChecks(checks);
+
+  const bindings = attestation.bindings;
+  const roots = resolveRootsForContext(context);
+  const runBaseBinding = getRefHashBinding(bindings, "run_base_attestation", ["run_base"]);
+  const mergeChainBinding = getRefHashBinding(bindings, "merge_chain_attestation", ["merge_chain"]);
+  const prePrGateBinding = getRefHashBinding(bindings, "pre_pr_gate_attestation", ["pre_pr_gate"]);
+  let runBaseRecord = null;
+
+  checks.push(runCheck("pr-created.remote-observation", () => {
+    validatePrRemoteObservation(bindings.remote_observation, bindings);
+    return { pr_url: bindings.pr_url, pr_number: bindings.pr_number };
+  }));
+
+  checks.push(runCheck("pr-created.url-binding", () => {
+    validatePrUrlBinding(bindings);
+    return { provider: bindings.provider, repository: bindings.repository, pr_number: bindings.pr_number };
+  }));
+
+  checks.push(runCheck("pr-created.pr-body-hash", () => {
+    const prBody = resolveArtifactRef(roots, bindings.pr_body_ref, context);
+    const observedHash = hashFile(prBody.path, { mode: "raw" });
+    if (observedHash !== bindings.pr_body_hash) {
+      throw new Error(`PR body hash is ${observedHash}, expected ${bindings.pr_body_hash}`);
+    }
+    return { pr_body_ref: bindings.pr_body_ref };
+  }));
+
+  checks.push(runCheck("pr-created.run-base-attestation", () => {
+    runBaseRecord = resolvePrCreatedAcceptedAttestation(
+      roots,
+      runBaseBinding.ref,
+      runBaseBinding.hash,
+      context,
+      "run-base",
+      "pr-created.bindings.run_base_attestation_ref",
+    );
+    return { ref: runBaseBinding.ref };
+  }));
+
+  checks.push(runCheck("pr-created.local-head", () => {
+    if (!runBaseRecord) throw new Error("run-base attestation could not be verified");
+    const runBase = runBaseRecord.attestation;
+    const featureWorktree = readRealPath(resolve(runBase.bindings.feature_worktree), "run-base feature_worktree", context);
+    const observedBranch = requireGitSuccess(featureWorktree, ["symbolic-ref", "--short", "HEAD"], context, "git symbolic-ref --short HEAD").stdout.trim();
+    if (observedBranch !== bindings.head_branch) {
+      throw new Error(`feature worktree branch is ${observedBranch}, expected ${bindings.head_branch}`);
+    }
+    if (runBase.bindings.feature_branch !== bindings.head_branch) {
+      throw new Error(`head branch is ${bindings.head_branch}, expected run-base feature branch ${runBase.bindings.feature_branch}`);
+    }
+    if (runBase.bindings.base_ref !== bindings.base_ref) {
+      throw new Error(`base ref is ${bindings.base_ref}, expected run-base base ref ${runBase.bindings.base_ref}`);
+    }
+    if (runBase.bindings.base_commit !== bindings.base_commit) {
+      throw new Error(`base commit is ${bindings.base_commit}, expected run-base base commit ${runBase.bindings.base_commit}`);
+    }
+    if (runBase.bindings.base_tree !== bindings.base_tree) {
+      throw new Error(`base tree is ${bindings.base_tree}, expected run-base base tree ${runBase.bindings.base_tree}`);
+    }
+    const observedBaseTree = revParseSingle(featureWorktree, `${bindings.base_commit}^{tree}`, context);
+    if (observedBaseTree !== bindings.base_tree) {
+      throw new Error(`PR base tree is ${observedBaseTree}, expected ${bindings.base_tree}`);
+    }
+    const observation = readHeadObservation(featureWorktree, context);
+    if (observation.head_commit !== bindings.head_commit) {
+      throw new Error(`feature worktree head commit is ${observation.head_commit}, expected ${bindings.head_commit}`);
+    }
+    if (observation.head_tree !== bindings.head_tree) {
+      throw new Error(`feature worktree head tree is ${observation.head_tree}, expected ${bindings.head_tree}`);
+    }
+    if (!isAncestor(featureWorktree, bindings.base_commit, bindings.head_commit, context)) {
+      throw new Error(`base commit ${bindings.base_commit} is not an ancestor of PR head ${bindings.head_commit}`);
+    }
+    return { ...observation, base_tree: observedBaseTree };
+  }));
+
+  checks.push(runCheck("pr-created.merge-chain-attestation", () => {
+    const mergeChainRecord = resolvePrCreatedAcceptedAttestation(
+      roots,
+      mergeChainBinding.ref,
+      mergeChainBinding.hash,
+      context,
+      "merge-chain",
+      "pr-created.bindings.merge_chain_attestation_ref",
+    );
+    const mergeBindings = mergeChainRecord.attestation.bindings;
+    if (mergeBindings.head_commit !== bindings.head_commit) {
+      throw new Error(`merge-chain head commit is ${mergeBindings.head_commit}, expected ${bindings.head_commit}`);
+    }
+    if (mergeBindings.head_tree !== bindings.head_tree) {
+      throw new Error(`merge-chain head tree is ${mergeBindings.head_tree}, expected ${bindings.head_tree}`);
+    }
+    if (mergeBindings.base_commit !== bindings.base_commit) {
+      throw new Error(`merge-chain base commit is ${mergeBindings.base_commit}, expected ${bindings.base_commit}`);
+    }
+    return { ref: mergeChainBinding.ref };
+  }));
+
+  checks.push(runCheck("pr-created.pre-pr-gate-attestation", () => {
+    const gateRecord = resolvePrCreatedAcceptedAttestation(
+      roots,
+      prePrGateBinding.ref,
+      prePrGateBinding.hash,
+      context,
+      "gate-decision",
+      "pr-created.bindings.pre_pr_gate_attestation_ref",
+    );
+    if (gateRecord.attestation.bindings.gate !== "pre_pr") {
+      throw new Error(`pre_pr gate attestation binds gate ${gateRecord.attestation.bindings.gate}, expected pre_pr`);
+    }
+    if (gateRecord.attestation.bindings.decision !== "approved") {
+      throw new Error(`pre_pr gate decision is ${gateRecord.attestation.bindings.decision}, expected approved`);
+    }
+    return { ref: prePrGateBinding.ref };
+  }));
+
+  return finalizeChecks(checks);
+}
+
 export function validateProvenanceAuthority(runDir, options = {}) {
   const checks = [];
   let roots;
@@ -942,6 +1098,8 @@ export function validateProvenanceAuthority(runDir, options = {}) {
       result = validateGateDecisionAttestation(attestation, sharedContext);
     } else if (attestation.type === "merge-chain") {
       result = validateMergeChainAttestation(attestation, sharedContext);
+    } else if (attestation.type === "pr-created") {
+      result = validatePrCreatedAttestation(attestation, sharedContext);
     } else {
       result = finalizeChecks([
         failCheck(`provenance-authority.attestation.${ref}`, [
@@ -1139,6 +1297,220 @@ function collectMergeChainBindingErrors(bindings, path) {
     errors.push({ path: `${path}.entries`, message: "must be a non-empty array" });
   }
   return errors;
+}
+
+function collectPrCreatedBindingErrors(bindings, path) {
+  const errors = [];
+  if (!isRecord(bindings)) return [{ path, message: "must be an object" }];
+  pushRequiredString(errors, bindings, "pr_url", `${path}.pr_url`);
+  if (!Number.isInteger(bindings.pr_number) || bindings.pr_number < 1) {
+    errors.push({ path: `${path}.pr_number`, message: "must be a positive integer" });
+  }
+  pushRequiredString(errors, bindings, "provider", `${path}.provider`);
+  pushRequiredString(errors, bindings, "repository", `${path}.repository`);
+  pushRequiredString(errors, bindings, "remote", `${path}.remote`);
+  pushRequiredString(errors, bindings, "github_account", `${path}.github_account`);
+  pushRequiredString(errors, bindings, "head_branch", `${path}.head_branch`);
+  pushRequiredObjectId(errors, bindings, "head_commit", `${path}.head_commit`);
+  pushRequiredObjectId(errors, bindings, "head_tree", `${path}.head_tree`);
+  pushRequiredString(errors, bindings, "base_ref", `${path}.base_ref`);
+  pushRequiredObjectId(errors, bindings, "base_commit", `${path}.base_commit`);
+  pushRequiredObjectId(errors, bindings, "base_tree", `${path}.base_tree`);
+  if (typeof bindings.draft !== "boolean") errors.push({ path: `${path}.draft`, message: "must be a boolean" });
+  pushRequiredString(errors, bindings, "pr_body_ref", `${path}.pr_body_ref`);
+  pushRequiredHash(errors, bindings, "pr_body_hash", `${path}.pr_body_hash`);
+  pushRequiredRefHashBinding(errors, bindings, "run_base_attestation", ["run_base"], path);
+  pushRequiredRefHashBinding(errors, bindings, "merge_chain_attestation", ["merge_chain"], path);
+  pushRequiredRefHashBinding(errors, bindings, "pre_pr_gate_attestation", ["pre_pr_gate"], path);
+  if (!isRecord(bindings.remote_observation)) {
+    errors.push({ path: `${path}.remote_observation`, message: "must be an object" });
+  } else {
+    pushRequiredPrRemoteObservationErrors(errors, bindings.remote_observation, `${path}.remote_observation`);
+  }
+  return errors;
+}
+
+function pushRequiredPrRemoteObservationErrors(errors, observation, path) {
+  pushRequiredString(errors, observation, "pr_url", `${path}.pr_url`);
+  if (!Number.isInteger(observation.pr_number) || observation.pr_number < 1) {
+    errors.push({ path: `${path}.pr_number`, message: "must be a positive integer" });
+  }
+  pushRequiredString(errors, observation, "provider", `${path}.provider`);
+  pushRequiredString(errors, observation, "repository", `${path}.repository`);
+  pushRequiredString(errors, observation, "remote", `${path}.remote`);
+  pushRequiredString(errors, observation, "github_account", `${path}.github_account`);
+  pushRequiredString(errors, observation, "head_branch", `${path}.head_branch`);
+  pushRequiredObjectId(errors, observation, "head_commit", `${path}.head_commit`);
+  pushRequiredObjectId(errors, observation, "head_tree", `${path}.head_tree`);
+  pushRequiredString(errors, observation, "base_ref", `${path}.base_ref`);
+  pushRequiredObjectId(errors, observation, "base_commit", `${path}.base_commit`);
+  pushRequiredObjectId(errors, observation, "base_tree", `${path}.base_tree`);
+  if (typeof observation.draft !== "boolean") errors.push({ path: `${path}.draft`, message: "must be a boolean" });
+}
+
+function pushRequiredRefHashBinding(errors, bindings, canonicalPrefix, aliases, path) {
+  const ref = getAliasedValue(bindings, `${canonicalPrefix}_ref`, aliases.map((alias) => `${alias}_ref`));
+  const hash = getAliasedValue(bindings, `${canonicalPrefix}_hash`, aliases.map((alias) => `${alias}_hash`));
+  if (!stringValue(ref)) errors.push({ path: `${path}.${canonicalPrefix}_ref`, message: "must be a non-empty string" });
+  if (!isHashString(hash)) errors.push({ path: `${path}.${canonicalPrefix}_hash`, message: "must be a sha256 hash" });
+}
+
+function getRefHashBinding(bindings, canonicalPrefix, aliases = []) {
+  return {
+    ref: getAliasedValue(bindings, `${canonicalPrefix}_ref`, aliases.map((alias) => `${alias}_ref`)),
+    hash: getAliasedValue(bindings, `${canonicalPrefix}_hash`, aliases.map((alias) => `${alias}_hash`)),
+  };
+}
+
+function getAliasedValue(record, canonicalKey, aliasKeys = []) {
+  if (record[canonicalKey] !== undefined) return record[canonicalKey];
+  for (const aliasKey of aliasKeys) {
+    if (record[aliasKey] !== undefined) return record[aliasKey];
+  }
+  return undefined;
+}
+
+function validatePrRemoteObservation(observation, bindings) {
+  const mismatches = [];
+  const comparisons = [
+    ["pr_url", bindings.pr_url],
+    ["pr_number", bindings.pr_number],
+    ["provider", bindings.provider],
+    ["repository", bindings.repository],
+    ["remote", bindings.remote],
+    ["github_account", bindings.github_account],
+    ["head_branch", bindings.head_branch],
+    ["head_commit", bindings.head_commit],
+    ["head_tree", bindings.head_tree],
+    ["base_ref", bindings.base_ref],
+    ["base_commit", bindings.base_commit],
+    ["base_tree", bindings.base_tree],
+    ["draft", bindings.draft],
+  ];
+  for (const [key, expected] of comparisons) {
+    if (observation[key] !== expected) {
+      mismatches.push({ path: `pr-created.bindings.remote_observation.${key}`, message: `is ${String(observation[key])}, expected ${String(expected)}` });
+    }
+  }
+  if (mismatches.length > 0) throw new ValidationFailure(mismatches);
+}
+
+function validatePrUrlBinding(bindings) {
+  if (bindings.provider !== "github") throw new Error(`unsupported PR provider ${bindings.provider}`);
+  const parsed = parseCanonicalGithubPrUrl(bindings.pr_url, "pr_url");
+  if (parsed.repository !== bindings.repository) {
+    throw new Error(`PR URL repository is ${parsed.repository}, expected ${bindings.repository}`);
+  }
+  if (parsed.prNumber !== bindings.pr_number) {
+    throw new Error(`PR URL number is ${parsed.prNumber}, expected ${bindings.pr_number}`);
+  }
+}
+
+function parseCanonicalGithubPrUrl(value, label = "pr_url") {
+  const raw = requireText(value, label);
+  if (raw.trim() !== raw) throw new Error(`${label} must be canonical without leading or trailing whitespace`);
+  assertNoSensitiveUrlValue(raw, label);
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (error) {
+    throw new Error(`${label} is not a valid URL: ${error.message}`);
+  }
+
+  if (parsed.username || parsed.password) throw new Error(`${label} must not include username or password credentials`);
+  if (parsed.search) throw new Error(`${label} must not include a query string`);
+  if (parsed.hash) throw new Error(`${label} must not include a fragment`);
+  if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") {
+    throw new Error(`${label} must use https://github.com/<owner>/<repo>/pull/<number>`);
+  }
+
+  const rawAuthority = raw.match(/^https:\/\/([^/]+)(?:\/|$)/u)?.[1] ?? "";
+  if (rawAuthority !== "github.com" || parsed.host !== "github.com") {
+    throw new Error(`${label} must not include a port or non-canonical host`);
+  }
+
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length !== 4 || segments[2] !== "pull") {
+    throw new Error(`${label} must use https://github.com/<owner>/<repo>/pull/<number>`);
+  }
+
+  const [owner, repo, , prNumberText] = segments;
+  assertNoSensitiveUrlValue(owner, `${label} owner`);
+  assertNoSensitiveUrlValue(repo, `${label} repo`);
+  if (!GITHUB_OWNER_PATTERN.test(owner)) {
+    throw new Error(`${label} owner must match GitHub owner syntax`);
+  }
+  if (!GITHUB_REPO_PATTERN.test(repo)) {
+    throw new Error(`${label} repo must match GitHub repository syntax`);
+  }
+  if (!/^[1-9][0-9]*$/u.test(prNumberText)) {
+    throw new Error(`${label} pull number must be a positive integer`);
+  }
+
+  const prNumber = Number.parseInt(prNumberText, 10);
+  const repository = `${owner}/${repo}`;
+  const canonicalUrl = `https://github.com/${repository}/pull/${prNumber}`;
+  if (raw !== canonicalUrl) {
+    throw new Error(`${label} must be canonical ${canonicalUrl}`);
+  }
+
+  return { owner, repo, repository, prNumber, canonicalUrl };
+}
+
+function assertNoSensitiveUrlValue(value, label) {
+  const text = safeDecodeURIComponent(String(value));
+  if (
+    SENSITIVE_URL_TOKEN_PATTERN.test(text) ||
+    TOKEN_SHAPED_URL_VALUE_PATTERNS.some((pattern) => pattern.test(text)) ||
+    credentialBearingUrl(text) ||
+    CREDENTIAL_BEARING_URL_PATTERN.test(text) ||
+    looksLikeHighEntropyToken(text)
+  ) {
+    throw new Error(`${label} contains a sensitive or token-shaped value`);
+  }
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function looksLikeHighEntropyToken(value) {
+  if (value.length < HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH) return false;
+  if (/\s/u.test(value)) return false;
+  if (!/^[A-Za-z0-9._~+/=-]+$/u.test(value)) return false;
+  return shannonEntropy(value) >= HIGH_ENTROPY_MIN_SHANNON;
+}
+
+function credentialBearingUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return Boolean(parsed.username || parsed.password);
+  } catch {
+    return false;
+  }
+}
+
+function shannonEntropy(value) {
+  const counts = new Map();
+  for (const char of value) counts.set(char, (counts.get(char) || 0) + 1);
+  return [...counts.values()].reduce((entropy, count) => {
+    const probability = count / value.length;
+    return entropy - probability * Math.log2(probability);
+  }, 0);
+}
+
+function resolvePrCreatedAcceptedAttestation(roots, ref, expectedHash, context, expectedType, path) {
+  resolveAttestationRef(roots, ref, context);
+  const record = resolveAcceptedAttestation(ref, expectedHash, context.acceptedAttestations, expectedType);
+  if (record.attestation_hash !== expectedHash) {
+    throw new Error(`${path} hash mismatch for ${ref}`);
+  }
+  return record;
 }
 
 function validateSliceMergeEntry({ entry, previousCommit, commitObservation, featureWorktree, repoRoot, acceptedAttestations, context }) {

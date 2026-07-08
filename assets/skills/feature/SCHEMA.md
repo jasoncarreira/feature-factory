@@ -41,6 +41,7 @@ The feature factory persists a per-run control plane so runs are durable, resuma
     reviews/<subject>.approval.json
     direct-commits/<entry-id>.observation.json
     merge-chain.json
+    pr-created.json
   processes/<timestamp>.log
 ```
 
@@ -63,6 +64,8 @@ Rules:
 
 - Mutable local metadata is never sole trust. `run.json`, `reviews/*.json`, `evidence/*.json`, `factory.lock`, path strings, `base_ref`, `base_commit`, and status booleans are claims only.
 - Gate, review, slice, validator, security, merge, and PR states must be backed by accepted attestations plus fresh observations.
+- `run.json.factory_provenance` is diagnostic-only metadata collected at run creation/resume; it is useful for debugging but is never authority proof.
+- Diagnostic provenance must omit sensitive keys and redact token-shaped or high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`/`ghu_*`/`ghs_*`/`ghr_*`, `sk-proj_*`, `sk-*`, `xoxb_*`/`xoxp_*`/`xoxa_*`, `glpat-*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and single-token high-entropy strings.
 - The heartbeat owner capability in `factory.lock` is local runtime authority for heartbeat control only; it is not provenance proof for reviews, gates, merges, or prior Git state.
 - Validation must fail closed whenever accepted attestations, safe Git observations, durable-root containment, or worktree identity cannot be re-proved.
 
@@ -77,7 +80,8 @@ All semantic `run.json` writes go through the transition helpers:
 - `transitionRunSlice(runDir, sliceId, updater, options)` seeds or updates `slices[]` entries by stable `id` identity.
 - `transitionTerminalResult(runDir, terminalResult, options)` keeps top-level `run.json.status` and `run.json.terminal_result` consistent and normalizes `terminal_result.run_id` to the durable run id.
 - `transitionGateDecision(runDir, gateName, gate, options)` is the only approved-gate writer. Scripted harnesses can invoke it through `feature-factory factory gate-decision <run-id> <gate> <status> ...`. For `status: "approved"` it requires an already accepted non-empty `attestations/index.json`, stages `attestations/gates/<gate>.json` plus the updated `attestations/index.json`, validates that material, and commits those accepted attestation records before the approved gate state is written to `run.json`. If the next state fails validation, it rolls back the staged gate attestation/index files and leaves `run.json` unchanged.
-- `mutateRunJsonLocked(runDir, mutator, options)` is compatibility-only when `attestations/index.json` is absent. It may write bootstrap-safe non-provenance-sensitive state only. It must fail closed if the current or next state claims approved gates, review-approved or merged slices, passing validator/security verdicts, or run-base fields without accepted attestations. PR URLs are terminal bookkeeping until a dedicated PR-created attestation type exists.
+- `transitionPrCreated(runDir, prCreatedInput, options)` is the only trusted PR-created terminal writer. Scripted harnesses invoke it through `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref REF --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA [--draft|--no-draft] [--json]`. It stages and validates `attestations/pr-created.json` plus the updated `attestations/index.json` before writing `run.pr_url`, `status: "completed"`, or `terminal_result.pr_url`; rollback leaves `run.json` unchanged.
+- `mutateRunJsonLocked(runDir, mutator, options)` is compatibility-only when `attestations/index.json` is absent. It may write bootstrap-safe non-provenance-sensitive state only. It must fail closed if the current or next state claims approved gates, review-approved or merged slices, passing validator/security verdicts, run-base fields, or PR URL claims without accepted attestations.
 
 These helpers do not change heartbeat or external-driver semantics: `heartbeat.json` remains liveness-only, and external drivers still write only `gates/<gate>.answer`; approved file-sourced answers still record `approval_source: "external-driver"`.
 
@@ -94,6 +98,7 @@ $RUN/attestations/
   reviews/<subject>.approval.json
   direct-commits/<entry-id>.observation.json
   merge-chain.json
+  pr-created.json
 ```
 
 Durable-root rules:
@@ -112,7 +117,7 @@ Every accepted attestation uses the same common envelope and a canonical JSON ha
   "schema_version": 1,
   "authority_model": "feature-factory-provenance-v1",
   "authority": "feature-factory",
-  "type": "run-base|slice-observation|review-approval|direct-reviewed-commit|gate-decision|merge-chain",
+  "type": "run-base|slice-observation|review-approval|direct-reviewed-commit|gate-decision|merge-chain|pr-created",
   "run_id": "app-123",
   "sequence": 1,
   "prev_hash": null,
@@ -184,6 +189,8 @@ All provenance-sensitive Git facts must be observed through the centralized safe
 
 - Type: `gate-decision`
 - Binds `gate`, `decision`, `approval_source`, `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and either `answer_ref` + `answer_hash` or `answer_text_hash`.
+- Pending gates in `run.json.gates.<gate>.pending_snapshot` record the exact pending material the answer is allowed to consume: `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, `created_at`, and optional `answer_ref`/`answer_hash`.
+- Before an approved or stopped gate decision consumes an external answer, the factory re-hashes the current pending question, artifact, and answer material. Missing files, escaped refs, stale hashes, question/answer overlap, or mismatched `pending_snapshot` fields fail closed.
 - `question_ref` must be rooted under `gates/`.
 - `answer_ref`, when present, must be rooted under `gates/`.
 - `artifact_ref` remains rooted under `artifacts/`; gate questions and answers are never laundered through `artifacts/`.
@@ -211,6 +218,18 @@ All provenance-sensitive Git facts must be observed through the centralized safe
 - The parent list is exactly `[previous_first_parent_commit]`.
 - The entry must reference accepted `direct-reviewed-commit` and `review-approval` attestations whose commit/tree/diff/evidence/review/guard bindings all agree.
 - Unknown entry types, optional proof gaps, missing refs, hash mismatches, parent mismatches, or commit/tree mismatches fail closed.
+
+### PR-created attestation (`attestations/pr-created.json`)
+
+- Type: `pr-created`
+- Written only by `transitionPrCreated()` after the draft PR exists and the orchestrator has fresh local/remote observations.
+- The normal CLI surface is:
+  ```sh
+  feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref artifacts/pr-body.md --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA [--draft|--no-draft] [--json]
+  ```
+- Binds `pr_url`, `pr_number`, `provider`, `repository`, `remote`, `github_account`, `draft`, `pr_body_ref`, `pr_body_hash`, remote observation (`head_branch`, `head_commit`, `head_tree`, `base_ref`, `base_commit`, `base_tree`), the accepted run-base attestation, merge-chain attestation, and pre-PR gate attestation.
+- Validation re-observes local HEAD/base tree bindings, verifies the PR body hash, checks that the remote observation matches the claimed URL/number/repository/branch/base, and requires accepted run-base, merge-chain, and pre-PR gate attestations.
+- `run.pr_url` and `run.terminal_result.pr_url` are provenance-sensitive claims. They are trusted only when they match the latest accepted `pr-created` attestation binding. Missing or mismatched PR-created authority fails closed and must not emit trusted `completed` state.
 
 ### Local-only limits
 
@@ -294,6 +313,39 @@ External monitoring semantics:
 - Use pending gate status in `run.json.gates.*` for story/brief/pre-PR waits because heartbeat is intentionally absent there.
 - Use terminal `run.status` plus `terminal_result` as the durable completion/blocking signal; heartbeat must already be stopped before those terminal writes land.
 
+## factory_provenance diagnostic state
+
+`run.json.factory_provenance` stores redacted diagnostic snapshots for debugging factory environment drift. It is optional for backward compatibility and diagnostic-only; accepted attestations and fresh observations remain the authority for gates, reviews, merges, and PR URLs.
+
+```json
+"factory_provenance": {
+  "created_with": {
+    "collected_at": "2026-07-06T12:00:00Z",
+    "event": "created",
+    "diagnostic_only": true,
+    "provenance": {
+      "feature_factory_version": "0.1.0",
+      "opencode_version": "1.17.13",
+      "plugin_spec": "opencode-feature-factory",
+      "resolved_models": {},
+      "driver": {"kind": "cli", "name": "feature-factory"},
+      "capabilities": {"git": true, "gh": true}
+    }
+  },
+  "last_resumed_with": null,
+  "resume_count": 0
+}
+```
+
+Rules:
+
+- `created_with` and `last_resumed_with` snapshots have `diagnostic_only: true`, `collected_at`, `event`, and a `provenance` object.
+- `resume_count` is a non-negative integer incremented by resume recording.
+- Use `feature-factory factory provenance record-created <run-id> --json` after initial manifest creation.
+- Use `feature-factory factory provenance record-resume <run-id> --json` before a mutating resume step.
+- Sensitive keys are omitted. Token-shaped or high-entropy credential values are replaced with `[redacted]`; raw `ghp_*`, `github_pat_*`, `gho_*`/`ghu_*`/`ghs_*`/`ghr_*`, `sk-proj_*`, `sk-*`, `xoxb_*`/`xoxp_*`/`xoxa_*`, `glpat-*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and single-token high-entropy strings are invalid in persisted factory provenance.
+- If provenance collection or validation fails, do not persist raw diagnostics. Continue only with a valid redacted snapshot or fail the state mutation closed according to the caller path.
+
 ## run.json
 
 ```json
@@ -318,12 +370,31 @@ External monitoring semantics:
     "risk_reasons": ["security_or_auth", "schema_or_persistence"],
     "rationale": "Defaulted to strict because the run touches auth and persistence risks."
   },
+  "factory_provenance": {
+    "created_with": {
+      "collected_at": "2026-07-04T11:45:00Z",
+      "event": "created",
+      "diagnostic_only": true,
+      "provenance": {"feature_factory_version": "0.1.0", "capabilities": {"git": true}}
+    },
+    "last_resumed_with": null,
+    "resume_count": 0
+  },
   "gates": {
     "story": {
       "status": "pending",
       "artifact": "artifacts/story.md",
       "question_ref": "gates/story.question.md",
       "answer_ref": "gates/story.answer",
+      "pending_snapshot": {
+        "question_ref": "gates/story.question.md",
+        "question_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "artifact_ref": "artifacts/story.md",
+        "artifact_hash": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        "answer_ref": "gates/story.answer",
+        "answer_hash": null,
+        "created_at": "2026-07-04T11:50:00Z"
+      },
       "answered_at": null,
       "answer": null,
       "approval_source": null,
@@ -334,6 +405,7 @@ External monitoring semantics:
       "artifact": "artifacts/technical-brief.md",
       "question_ref": "gates/brief.question.md",
       "answer_ref": "gates/brief.answer",
+      "pending_snapshot": null,
       "answered_at": null,
       "answer": null,
       "approval_source": null,
@@ -344,6 +416,7 @@ External monitoring semantics:
       "artifact": "artifacts/validation-report.md",
       "question_ref": "gates/pre_pr.question.md",
       "answer_ref": "gates/pre_pr.answer",
+      "pending_snapshot": null,
       "answered_at": null,
       "answer": null,
       "approval_source": null,
@@ -391,7 +464,7 @@ External monitoring semantics:
 }
 ```
 
-Authority note: this example shows bookkeeping state. `run.json` remains mutable local metadata; approved/merged/validator/security booleans, worktree paths, `base_ref`, and `base_commit` require accepted attestations plus current observations before they count as provenance. PR URLs are terminal bookkeeping until a dedicated PR-created attestation type exists.
+Authority note: this example shows bookkeeping state. `run.json` remains mutable local metadata; approved/merged/validator/security booleans, worktree paths, `base_ref`, `base_commit`, and PR URLs require accepted attestations plus current observations before they count as provenance. `factory_provenance` is diagnostic-only, and `run.pr_url` / `terminal_result.pr_url` require the latest accepted `pr-created` attestation.
 
 Run status values: `running`, `completed`, `blocked`, `partial`, `needs-human`.
 
@@ -457,7 +530,7 @@ This schema documents post-run git-visible dirty-state detection only, not OS/pr
 
 ## Gate Protocol
 
-The factory writes question files and records pending gates in `run.json`. External drivers write only answer files.
+The factory writes question files and records pending gates in `run.json`. Every pending gate stores a `pending_snapshot` of the exact question/artifact/answer material that may be consumed later. External drivers write only answer files.
 
 Allowed answer file contents:
 
@@ -473,7 +546,7 @@ stop
 changes: <specific requested change>
 ```
 
-The factory consumes the answer, records it in `run.json.gates.<gate>`, and continues. Approved answers from gate answer files must use `approval_source: "external-driver"`; interactive chat approvals use `approval_source: "human"`; autonomous approvals use `approval_source: "autonomous"`. Do not store the answer file path in `approval_source`. If the answer file is missing in scripted mode, the factory stops after writing the pending gate.
+The factory consumes the answer only after re-hashing the current refs against `pending_snapshot`, records it in `run.json.gates.<gate>`, and continues. Approved answers from gate answer files must use `approval_source: "external-driver"`; interactive chat approvals use `approval_source: "human"`; autonomous approvals use `approval_source: "autonomous"`. Do not store the answer file path in `approval_source`. If the answer file is missing in scripted mode, the factory stops after writing the pending gate. Stale or missing pending material fails closed.
 
 One-writer rule: external drivers must not modify `run.json`, artifacts, evidence, reviews, plans, branches, or PRs.
 
@@ -511,7 +584,7 @@ External harnesses should read `run.json.terminal_result` instead of parsing gat
 }
 ```
 
-For `blocked`, `partial`, or `needs-human`, set `reason` to the concise operator-actionable blocker and leave `pr_url` null unless a PR already exists.
+For `blocked`, `partial`, or `needs-human`, set `reason` to the concise operator-actionable blocker and leave `pr_url` null unless a PR already exists with an accepted matching `pr-created` attestation. Completed terminal PR URLs are trusted only after `feature-factory factory pr-created` validates and stages `attestations/pr-created.json` before the terminal `run.json` write.
 
 If a reviewer guard block causes a terminal stop, use existing `run.status = "blocked"` and copy the guard-block `reason` into `terminal_result.reason`.
 
@@ -544,7 +617,7 @@ The dependency graph must be acyclic. A slice is eligible when every id in `depe
 
 ## Code-Level Validation
 
-The CLI enforces this schema with `feature-factory factory validate [run-id]`. Validation covers `run.json`, gates, run slices, terminal results, accepted attestation graph semantics, physical durable-root/worktree identity, and `plan/slices.json` when present. Provenance-sensitive states fail closed unless backed by accepted attestations plus current safe-Git/filesystem observations. `factory status` and `factory answer` reject invalid `run.json`; `factory list` marks invalid runs instead of failing the whole listing.
+The CLI enforces this schema with `feature-factory factory validate [run-id]`. Validation covers `run.json`, `factory_provenance` redaction, gate `pending_snapshot` material, run slices, terminal results, accepted attestation graph semantics including `pr-created`, physical durable-root/worktree identity, and `plan/slices.json` when present. Provenance-sensitive states fail closed unless backed by accepted attestations plus current safe-Git/filesystem observations. `factory status` and `factory answer` reject invalid `run.json`; `factory list` marks invalid runs instead of failing the whole listing.
 
 `factory start --detached` writes stdout/stderr logs under `.opencode/factory/processes/` for external watchers.
 

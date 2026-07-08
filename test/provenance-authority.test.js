@@ -9,10 +9,12 @@ import { SAFE_GIT_POLICY } from "../src/safe-git.js";
 import {
   AUTHORITY_MODEL,
   checkWorktreeIdentity,
+  canonicalizeGithubPrUrl,
   createAttestationIndex,
   createDirectReviewedCommitAttestation,
   createGateDecisionAttestation,
   createMergeChainAttestation,
+  createPrCreatedAttestation,
   createReviewApprovalAttestation,
   createRunBaseAttestation,
   createSliceObservationAttestation,
@@ -24,6 +26,7 @@ import {
   validateAttestationGraph,
   validateGateDecisionAttestation,
   validateProvenanceAuthority,
+  validatePrCreatedAttestation,
   validateReviewApprovalAttestation,
   withAttestationHash,
 } from "../src/provenance-authority.js";
@@ -740,6 +743,376 @@ describe("provenance authority", () => {
       cleanup(fixture.repoRoot);
     }
   });
+
+  it("accepts a PR-created attestation bound to remote observation, durable refs, and local head", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      const run = buildAuthorityRun(fixture, "valid-pr-created");
+      const pr = appendPrCreatedAttestation(run, fixture, "valid-pr-created", { includePrePrGate: true });
+
+      const directResult = validatePrCreatedAttestation(pr.prCreated, {
+        runDir: run.runDir,
+        runBase: run.runBase,
+        acceptedAttestations: acceptedAttestationsForRun(run.runDir),
+      });
+      assert.equal(directResult.ok, true);
+
+      const authority = validateProvenanceAuthority(run.runDir);
+      assert.equal(authority.ok, true);
+      assert.equal(authority.acceptedAttestations[pr.prCreatedRef].attestation.type, "pr-created");
+      assert.equal(authority.acceptedAttestations[pr.prCreatedRef].attestation.bindings.pr_url, "https://github.com/example/repo/pull/123");
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects canonical GitHub PR URLs with token-shaped owner or repo segments", () => {
+    for (const [name, prUrl] of [
+      ["glpat owner", `https://github.com/glpat-${"A".repeat(24)}/repo/pull/123`],
+      ["glpat repo", `https://github.com/example/glpat-${"A".repeat(24)}/pull/123`],
+      ["AKIA owner", "https://github.com/AKIAIOSFODNN7EXAMPLE/repo/pull/123"],
+      ["ASIA repo", "https://github.com/example/ASIAIOSFODNN7EXAMPLE/pull/123"],
+    ]) {
+      assert.throws(
+        () => canonicalizeGithubPrUrl(prUrl),
+        /sensitive or token-shaped/u,
+        name,
+      );
+    }
+  });
+
+  it("rejects PR-created attestations with credential-bearing, non-canonical, or token-shaped GitHub PR URLs", () => {
+    const scenarios = [
+      {
+        name: "userinfo",
+        prUrl: "https://octocat:ghp_abcdefghijklmnopqrstuvwxyz123456@github.com/example/repo/pull/123",
+        error: /username or password credentials|sensitive or token-shaped/u,
+      },
+      {
+        name: "query",
+        prUrl: "https://github.com/example/repo/pull/123?token=ghp_abcdefghijklmnopqrstuvwxyz123456",
+        error: /query string|sensitive or token-shaped/u,
+      },
+      {
+        name: "fragment",
+        prUrl: "https://github.com/example/repo/pull/123#access_token=ghp_abcdefghijklmnopqrstuvwxyz123456",
+        error: /fragment|sensitive or token-shaped/u,
+      },
+      {
+        name: "port",
+        prUrl: "https://github.com:8443/example/repo/pull/123",
+        error: /port or non-canonical host/u,
+      },
+      {
+        name: "token-shaped-owner",
+        prUrl: "https://github.com/ghp_abcdefghijklmnopqrstuvwxyz123456/repo/pull/123",
+        repository: "ghp_abcdefghijklmnopqrstuvwxyz123456/repo",
+        error: /sensitive or token-shaped/u,
+      },
+      {
+        name: "glpat-owner",
+        prUrl: `https://github.com/glpat-${"A".repeat(24)}/repo/pull/123`,
+        repository: `glpat-${"A".repeat(24)}/repo`,
+        error: /sensitive or token-shaped/u,
+      },
+      {
+        name: "aws-owner-repo",
+        prUrl: "https://github.com/AKIAIOSFODNN7EXAMPLE/ASIAIOSFODNN7EXAMPLE/pull/123",
+        repository: "AKIAIOSFODNN7EXAMPLE/ASIAIOSFODNN7EXAMPLE",
+        error: /sensitive or token-shaped/u,
+      },
+      {
+        name: "bad-owner-syntax",
+        prUrl: "https://github.com/bad_owner/repo/pull/123",
+        repository: "bad_owner/repo",
+        error: /owner must match GitHub owner syntax/u,
+      },
+      {
+        name: "bad-repo-syntax",
+        prUrl: "https://github.com/example/bad~repo/pull/123",
+        repository: "example/bad~repo",
+        error: /repo must match GitHub repository syntax/u,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const fixture = createHistoryFixture();
+      try {
+        const run = buildAuthorityRun(fixture, `pr-created-url-${scenario.name}`);
+        appendPrCreatedAttestation(run, fixture, `pr-created-url-${scenario.name}`, {
+          includePrePrGate: true,
+          mutateBindings(bindings) {
+            return withRemoteObservation({
+              ...bindings,
+              pr_url: scenario.prUrl,
+              repository: scenario.repository ?? bindings.repository,
+            });
+          },
+        });
+
+        const result = validateProvenanceAuthority(run.runDir);
+        assert.equal(result.ok, false, `expected ${scenario.name} URL to fail`);
+        assert.match(joinErrors(result), scenario.error, scenario.name);
+      } finally {
+        cleanup(fixture.repoRoot);
+      }
+    }
+  });
+
+  it("rejects PR-created attestations without a normalized remote observation", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      const run = buildAuthorityRun(fixture, "pr-created-missing-remote");
+      appendPrCreatedAttestation(run, fixture, "pr-created-missing-remote", {
+        includePrePrGate: true,
+        mutateBindings(bindings) {
+          const mutated = { ...bindings };
+          delete mutated.remote_observation;
+          return mutated;
+        },
+      });
+
+      const result = validateProvenanceAuthority(run.runDir);
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /remote_observation/u);
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects PR-created attestations missing merge-chain or pre_pr gate attestation refs", () => {
+    const scenarios = [
+      {
+        name: "missing-merge-chain",
+        mutateBindings(bindings) {
+          const mutated = { ...bindings };
+          delete mutated.merge_chain_attestation_ref;
+          delete mutated.merge_chain_attestation_hash;
+          return mutated;
+        },
+        error: /merge_chain_attestation_ref|merge_chain_attestation_hash/u,
+      },
+      {
+        name: "missing-pre-pr-gate",
+        mutateBindings(bindings) {
+          const mutated = { ...bindings };
+          delete mutated.pre_pr_gate_attestation_ref;
+          delete mutated.pre_pr_gate_attestation_hash;
+          return mutated;
+        },
+        error: /pre_pr_gate_attestation_ref|pre_pr_gate_attestation_hash/u,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const fixture = createHistoryFixture();
+      try {
+        const run = buildAuthorityRun(fixture, `pr-created-${scenario.name}`);
+        appendPrCreatedAttestation(run, fixture, `pr-created-${scenario.name}`, {
+          includePrePrGate: true,
+          mutateBindings: scenario.mutateBindings,
+        });
+
+        const result = validateProvenanceAuthority(run.runDir);
+        assert.equal(result.ok, false, `expected ${scenario.name} to fail`);
+        assert.match(joinErrors(result), scenario.error);
+      } finally {
+        cleanup(fixture.repoRoot);
+      }
+    }
+  });
+
+  it("rejects PR-created attestations bound to non-approved pre_pr gate decisions", () => {
+    const fixture = createHistoryFixture();
+
+    try {
+      const run = buildAuthorityRun(fixture, "pr-created-non-approved-pre-pr");
+      appendPrCreatedAttestation(run, fixture, "pr-created-non-approved-pre-pr", {
+        includePrePrGate: true,
+        prePrDecision: "rejected",
+      });
+
+      const result = validateProvenanceAuthority(run.runDir);
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /pre_pr gate decision is rejected, expected approved/u);
+    } finally {
+      cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects PR-created attestations with mismatched URL, head/base observations, account metadata, draft flag, or PR body hash", () => {
+    const scenarios = [
+      {
+        name: "url",
+        mutateBindings(bindings) {
+          return { ...bindings, pr_url: "https://github.com/example/repo/pull/456", pr_number: 456 };
+        },
+        error: /remote_observation\.pr_url|remote_observation\.pr_number/u,
+      },
+      {
+        name: "provider",
+        mutateBindings(bindings) {
+          return withRemoteObservation({ ...bindings, provider: "gitlab" });
+        },
+        error: /unsupported PR provider/u,
+      },
+      {
+        name: "repository",
+        mutateBindings(bindings) {
+          return withRemoteObservation({ ...bindings, repository: "evil/repo" });
+        },
+        error: /PR URL repository/u,
+      },
+      {
+        name: "remote",
+        mutateBindings(bindings) {
+          return { ...bindings, remote: "upstream" };
+        },
+        error: /remote_observation\.remote/u,
+      },
+      {
+        name: "account",
+        mutateBindings(bindings) {
+          return { ...bindings, github_account: "mallory" };
+        },
+        error: /remote_observation\.github_account/u,
+      },
+      {
+        name: "head-branch",
+        mutateBindings(bindings) {
+          return { ...bindings, head_branch: "other-feature" };
+        },
+        error: /remote_observation\.head_branch|feature worktree branch/u,
+      },
+      {
+        name: "head-commit",
+        mutateBindings(bindings, fixture) {
+          return { ...bindings, head_commit: fixture.baseCommit };
+        },
+        error: /remote_observation\.head_commit|feature worktree head commit/u,
+      },
+      {
+        name: "head-tree",
+        mutateBindings(bindings, fixture) {
+          return { ...bindings, head_tree: fixture.baseTree };
+        },
+        error: /remote_observation\.head_tree|feature worktree head tree/u,
+      },
+      {
+        name: "base-ref",
+        mutateBindings(bindings) {
+          return { ...bindings, base_ref: "refs/heads/release" };
+        },
+        error: /remote_observation\.base_ref|base ref/u,
+      },
+      {
+        name: "base-commit",
+        mutateBindings(bindings, fixture) {
+          return { ...bindings, base_commit: fixture.headCommit };
+        },
+        error: /remote_observation\.base_commit|base commit/u,
+      },
+      {
+        name: "base-tree",
+        mutateBindings(bindings, fixture) {
+          return { ...bindings, base_tree: fixture.headTree };
+        },
+        error: /remote_observation\.base_tree|base tree|PR base tree/u,
+      },
+      {
+        name: "draft",
+        mutateBindings(bindings) {
+          return { ...bindings, draft: true };
+        },
+        error: /remote_observation\.draft/u,
+      },
+      {
+        name: "body-hash",
+        mutateBindings(bindings) {
+          return { ...bindings, pr_body_hash: hashValue("forged-body") };
+        },
+        error: /PR body hash/u,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const fixture = createHistoryFixture();
+      try {
+        const run = buildAuthorityRun(fixture, `pr-created-mismatch-${scenario.name}`);
+        appendPrCreatedAttestation(run, fixture, `pr-created-mismatch-${scenario.name}`, {
+          includePrePrGate: true,
+          mutateBindings: scenario.mutateBindings,
+        });
+
+        const result = validateProvenanceAuthority(run.runDir);
+        assert.equal(result.ok, false, `expected ${scenario.name} mismatch to fail`);
+        assert.match(joinErrors(result), scenario.error);
+      } finally {
+        cleanup(fixture.repoRoot);
+      }
+    }
+  });
+
+  it("rejects PR-created attestations with escaped attestation refs or escaped/symlinked PR body refs", () => {
+    const escapedAttestationFixture = createHistoryFixture();
+    try {
+      const run = buildAuthorityRun(escapedAttestationFixture, "pr-created-escaped-attestation");
+      appendPrCreatedAttestation(run, escapedAttestationFixture, "pr-created-escaped-attestation", {
+        includePrePrGate: true,
+        mutateBindings(bindings) {
+          return { ...bindings, run_base_attestation_ref: "attestations/../run-base.json" };
+        },
+      });
+
+      const result = validateProvenanceAuthority(run.runDir);
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /must not contain empty, '\.' or '\.\.' segments/u);
+    } finally {
+      cleanup(escapedAttestationFixture.repoRoot);
+    }
+
+    const escapedFixture = createHistoryFixture();
+    try {
+      const run = buildAuthorityRun(escapedFixture, "pr-created-escaped-body");
+      appendPrCreatedAttestation(run, escapedFixture, "pr-created-escaped-body", {
+        includePrePrGate: true,
+        mutateBindings(bindings) {
+          return { ...bindings, pr_body_ref: "artifacts/../pr-body.md" };
+        },
+      });
+
+      const result = validateProvenanceAuthority(run.runDir);
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /must not contain empty, '\.' or '\.\.' segments/u);
+    } finally {
+      cleanup(escapedFixture.repoRoot);
+    }
+
+    const symlinkFixture = createHistoryFixture();
+    try {
+      const run = buildAuthorityRun(symlinkFixture, "pr-created-symlink-body");
+      const outsideBody = join(symlinkFixture.repoRoot, "outside-pr-body.md");
+      writeFileSync(outsideBody, "external body\n", "utf8");
+      appendPrCreatedAttestation(run, symlinkFixture, "pr-created-symlink-body", {
+        includePrePrGate: true,
+        afterBodyWritten({ bodyPath }) {
+          cleanup(bodyPath);
+          symlinkSync(outsideBody, bodyPath);
+        },
+        mutateBindings(bindings) {
+          return { ...bindings, pr_body_hash: hashFile(outsideBody) };
+        },
+      });
+
+      const result = validateProvenanceAuthority(run.runDir);
+      assert.equal(result.ok, false);
+      assert.match(joinErrors(result), /must not traverse symlinks/u);
+    } finally {
+      cleanup(symlinkFixture.repoRoot);
+    }
+  });
 });
 
 function buildAuthorityRun(fixture, runId, options = {}) {
@@ -1020,6 +1393,154 @@ function buildAuthorityRun(fixture, runId, options = {}) {
   };
 }
 
+function appendPrCreatedAttestation(run, fixture, runId, options = {}) {
+  const prBodyRef = "artifacts/pr-body.md";
+  const prBodyPath = join(run.runDir, ...prBodyRef.split("/"));
+  writeFixture(run.runDir, prBodyRef, "PR body\n\n- provenance checked\n");
+  if (typeof options.afterBodyWritten === "function") options.afterBodyWritten({ bodyPath: prBodyPath });
+
+  let sequence = run.mergeChain.sequence + 1;
+  let prevHash = run.mergeChain.attestation_hash;
+  const newRecords = [];
+  let prePrGate = null;
+  let prePrGateRef = null;
+
+  if (options.includePrePrGate) {
+    writeFixture(run.runDir, "artifacts/pre_pr.md", "pre-pr artifact\n");
+    writeFixture(run.runDir, "gates/pre_pr.question.md", "approve pre-pr?\n");
+    writeFixture(run.runDir, "gates/pre_pr.answer", "approve\n");
+    prePrGateRef = "attestations/gates/pre_pr.json";
+    prePrGate = createGateDecisionAttestation({
+      run_id: runId,
+      sequence,
+      prev_hash: prevHash,
+      created_at: isoAt(sequence),
+      bindings: {
+        gate: "pre_pr",
+        decision: options.prePrDecision ?? "approved",
+        approval_source: "autonomous",
+        question_ref: "gates/pre_pr.question.md",
+        question_hash: hashFile(join(run.runDir, "gates", "pre_pr.question.md")),
+        artifact_ref: "artifacts/pre_pr.md",
+        artifact_hash: hashFile(join(run.runDir, "artifacts", "pre_pr.md")),
+        answer_ref: "gates/pre_pr.answer",
+        answer_hash: hashFile(join(run.runDir, "gates", "pre_pr.answer")),
+      },
+    });
+    newRecords.push({ ref: prePrGateRef, attestation: prePrGate });
+    sequence += 1;
+    prevHash = prePrGate.attestation_hash;
+  }
+
+  const baseBindings = createPrCreatedBindings(run, fixture, {
+    prBodyRef,
+    prBodyHash: hashFile(prBodyPath),
+    prePrGateRef,
+    prePrGateHash: prePrGate?.attestation_hash,
+  });
+  const bindings = typeof options.mutateBindings === "function"
+    ? options.mutateBindings(baseBindings, fixture, run)
+    : baseBindings;
+  const prCreated = createPrCreatedAttestation({
+    run_id: runId,
+    sequence,
+    prev_hash: prevHash,
+    created_at: isoAt(sequence),
+    bindings,
+  });
+  const prCreatedRef = "attestations/pr-created.json";
+  newRecords.push({ ref: prCreatedRef, attestation: prCreated });
+
+  for (const record of newRecords) writeAttestation(run.runDir, record.ref, record.attestation);
+  appendAttestationsToIndex(run.runDir, newRecords);
+
+  return { prCreated, prCreatedRef, prePrGate, prePrGateRef };
+}
+
+function createPrCreatedBindings(run, fixture, { prBodyRef, prBodyHash, prePrGateRef, prePrGateHash }) {
+  const remoteObservation = {
+    provider: "github",
+    repository: "example/repo",
+    remote: "origin",
+    github_account: "octocat",
+    pr_url: "https://github.com/example/repo/pull/123",
+    pr_number: 123,
+    head_branch: fixture.featureBranch,
+    head_commit: fixture.headCommit,
+    head_tree: fixture.headTree,
+    base_ref: "refs/heads/main",
+    base_commit: fixture.baseCommit,
+    base_tree: fixture.baseTree,
+    draft: false,
+  };
+  return {
+    provider: remoteObservation.provider,
+    repository: remoteObservation.repository,
+    remote: remoteObservation.remote,
+    github_account: remoteObservation.github_account,
+    pr_url: remoteObservation.pr_url,
+    pr_number: remoteObservation.pr_number,
+    head_branch: remoteObservation.head_branch,
+    head_commit: remoteObservation.head_commit,
+    head_tree: remoteObservation.head_tree,
+    base_ref: remoteObservation.base_ref,
+    base_commit: remoteObservation.base_commit,
+    base_tree: remoteObservation.base_tree,
+    draft: remoteObservation.draft,
+    pr_body_ref: prBodyRef,
+    pr_body_hash: prBodyHash,
+    run_base_attestation_ref: "attestations/run-base.json",
+    run_base_attestation_hash: run.runBase.attestation_hash,
+    merge_chain_attestation_ref: "attestations/merge-chain.json",
+    merge_chain_attestation_hash: run.mergeChain.attestation_hash,
+    ...(prePrGateRef
+      ? {
+          pre_pr_gate_attestation_ref: prePrGateRef,
+          pre_pr_gate_attestation_hash: prePrGateHash,
+        }
+      : {}),
+    remote_observation: remoteObservation,
+  };
+}
+
+function withRemoteObservation(bindings) {
+  return {
+    ...bindings,
+    remote_observation: {
+      ...bindings.remote_observation,
+      provider: bindings.provider,
+      repository: bindings.repository,
+      remote: bindings.remote,
+      github_account: bindings.github_account,
+      pr_url: bindings.pr_url,
+      pr_number: bindings.pr_number,
+      head_branch: bindings.head_branch,
+      head_commit: bindings.head_commit,
+      head_tree: bindings.head_tree,
+      base_ref: bindings.base_ref,
+      base_commit: bindings.base_commit,
+      base_tree: bindings.base_tree,
+      draft: bindings.draft,
+    },
+  };
+}
+
+function appendAttestationsToIndex(runDir, newRecords) {
+  const indexPath = join(runDir, "attestations", "index.json");
+  const index = readJson(indexPath);
+  const existingRecords = index.entries.map((entry) => ({
+    ref: entry.ref,
+    attestation: readJson(join(runDir, ...entry.ref.split("/"))),
+  }));
+  writeJson(indexPath, createAttestationIndex([...existingRecords, ...newRecords]));
+}
+
+function acceptedAttestationsForRun(runDir) {
+  const graph = validateAttestationGraph(runDir);
+  assert.equal(graph.ok, true);
+  return graph.acceptedAttestations;
+}
+
 function createHistoryFixture(options = {}) {
   const repoRoot = mkdtempSync(join(tmpdir(), "prov-auth-repo-"));
   mkdirSync(join(repoRoot, ".opencode", "worktrees"), { recursive: true });
@@ -1242,6 +1763,10 @@ function rewriteMergeChainBaseAttestationRef(runDir, baseAttestationRef) {
 function writeJson(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function readJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
 }
 
 function writeFixture(root, relativePath, content) {

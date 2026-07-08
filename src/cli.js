@@ -6,11 +6,12 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { cleanupRun, heartbeatStatus, listRuns, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
+import { cleanupRun, heartbeatStatus, listRuns, persistFactoryRunCreatedProvenance, persistFactoryRunResumeProvenance, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectProvenance } from "./provenance.js";
 import { readJsoncConfig } from "./config.js";
-import { assertHeartbeatOwnerCapability, heartbeatOnce, transitionGateDecision } from "./run-state.js";
+import { canonicalizeGithubPrUrl } from "./provenance-authority.js";
+import { assertHeartbeatOwnerCapability, heartbeatOnce, transitionGateDecision, transitionPrCreated } from "./run-state.js";
 import { HEARTBEAT_PHASES, HEARTBEAT_PROTECTED_GATES, validateRun } from "./validate.js";
 
 const cliPath = fileURLToPath(import.meta.url);
@@ -41,6 +42,7 @@ Commands:
   factory cleanup <run-id>      Remove terminal run state, worktrees, and branches
   factory answer <run> <gate> <approve|stop|changes: ...>
   factory gate-decision <run> <gate> <pending|approved|changes_requested|stopped> [--artifact REF] [--question-ref REF] [--answer-ref REF|--answer TEXT] [--approval-source SOURCE]
+  factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref REF --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA [--draft|--no-draft] [--json]
   factory watch [run-id] [--all] Print status changes as JSON
   factory provenance            Print detected versions, models, and capabilities
 `);
@@ -117,12 +119,13 @@ async function factory(args) {
     process.exitCode = result.ok ? 0 : 1;
     return;
   }
-  if (sub === "provenance") return print(await collectProvenance({ cwd: opts.cwd }), { ...opts, json: true });
+  if (sub === "provenance") return provenance(rest);
   if (sub === "answer") {
     const [runId, gate, ...answerParts] = positional;
     return print(writeGateAnswer(runId, gate, answerParts.join(" "), opts), opts);
   }
   if (sub === "gate-decision") return gateDecision(rest);
+  if (sub === "pr-created") return prCreated(rest);
   if (sub === "watch") {
     watchRun(positional[0], opts);
     return;
@@ -207,6 +210,8 @@ function options(args) {
     foreground: args.includes("--foreground"),
     ownerCapability: process.env[HEARTBEAT_OWNER_ENV],
   };
+  if (args.includes("--draft")) opts.draft = true;
+  if (args.includes("--no-draft")) opts.noDraft = true;
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--repo") opts.cwd = resolve(args[++index]);
     if (args[index] === "--gh-account") opts.ghAccount = args[++index];
@@ -224,6 +229,17 @@ function options(args) {
     if (args[index] === "--approval-source") opts.approvalSource = args[++index];
     if (args[index] === "--decision-note") opts.decisionNote = args[++index];
     if (args[index] === "--answered-at") opts.answeredAt = args[++index];
+    if (args[index] === "--pr-url") opts.prUrl = args[++index];
+    if (args[index] === "--pr-number") opts.prNumber = args[++index];
+    if (args[index] === "--pr-body-ref") opts.prBodyRef = args[++index];
+    if (args[index] === "--provider") opts.provider = args[++index];
+    if (args[index] === "--repository") opts.repository = args[++index];
+    if (args[index] === "--remote") opts.remote = args[++index];
+    if (args[index] === "--github-account") opts.githubAccount = args[++index];
+    if (args[index] === "--head-branch") opts.headBranch = args[++index];
+    if (args[index] === "--head-commit") opts.headCommit = args[++index];
+    if (args[index] === "--base-ref") opts.baseRef = args[++index];
+    if (args[index] === "--base-commit") opts.baseCommit = args[++index];
   }
   return opts;
 }
@@ -232,7 +248,7 @@ function positionals(args) {
   const output = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (["--repo", "--gh-account", "--model", "--interval", "--max-duration", "--wait-ms", "--phase", "--token", "--reviewer", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at"].includes(arg)) {
+    if (["--repo", "--gh-account", "--model", "--interval", "--max-duration", "--wait-ms", "--phase", "--token", "--reviewer", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--pr-url", "--pr-number", "--pr-body-ref", "--provider", "--repository", "--remote", "--github-account", "--head-branch", "--head-commit", "--base-ref", "--base-commit"].includes(arg)) {
       index += 1;
       continue;
     }
@@ -240,6 +256,22 @@ function positionals(args) {
     output.push(arg);
   }
   return output;
+}
+
+async function provenance(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [action, runId] = positional;
+  if (action === "record-created") {
+    if (!stringValue(runId) || positional.length !== 2) throw new Error("factory provenance record-created requires <run-id>");
+    return print(await persistFactoryRunCreatedProvenance(runId, opts), { ...opts, json: true });
+  }
+  if (action === "record-resume") {
+    if (!stringValue(runId) || positional.length !== 2) throw new Error("factory provenance record-resume requires <run-id>");
+    return print(await persistFactoryRunResumeProvenance(runId, opts), { ...opts, json: true });
+  }
+  if (positional.length > 0) throw new Error(`unknown factory provenance action: ${action}`);
+  return print(await collectProvenance({ cwd: opts.cwd }), { ...opts, json: true });
 }
 
 async function gateDecision(args) {
@@ -251,6 +283,7 @@ async function gateDecision(args) {
   }
 
   const decision = { status: normalizeGateDecisionStatus(statusValue) };
+  assertPublicGateDecisionAllowed(decision.status, opts);
   if (stringValue(opts.artifact)) decision.artifact = opts.artifact;
   if (stringValue(opts.questionRef)) decision.question_ref = opts.questionRef;
   if (stringValue(opts.answerRef)) decision.answer_ref = opts.answerRef;
@@ -259,7 +292,220 @@ async function gateDecision(args) {
   if (stringValue(opts.decisionNote)) decision.decision_note = opts.decisionNote;
   if (stringValue(opts.answeredAt)) decision.answered_at = opts.answeredAt;
 
-  return print(await transitionGateDecision(resolveRunDir(runId, opts), gate, decision), opts);
+  return print(await transitionGateDecision(resolveRunDir(runId, opts), gate, decision, publicGateDecisionOptions(decision.status, opts)), opts);
+}
+
+async function prCreated(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) {
+    throw new Error("factory pr-created requires exactly one <run-id>");
+  }
+  if (opts.draft === true && opts.noDraft === true) throw new Error("factory pr-created accepts only one of --draft or --no-draft");
+
+  const request = {
+    pr_url: canonicalizeGithubPrUrl(requiredOption(opts.prUrl, "--pr-url")),
+    pr_number: normalizeCliPrNumber(requiredOption(opts.prNumber, "--pr-number")),
+    provider: requiredOption(opts.provider, "--provider"),
+    repository: requiredOption(opts.repository, "--repository"),
+    remote: requiredOption(opts.remote, "--remote"),
+    github_account: requiredOption(opts.githubAccount, "--github-account"),
+    draft: opts.draft === true ? true : false,
+    pr_body_ref: requiredOption(opts.prBodyRef, "--pr-body-ref"),
+  };
+  const supplied = {
+    ...request,
+    head_branch: requiredOption(opts.headBranch, "--head-branch"),
+    head_commit: requiredOption(opts.headCommit, "--head-commit"),
+    base_ref: requiredOption(opts.baseRef, "--base-ref"),
+    base_commit: requiredOption(opts.baseCommit, "--base-commit"),
+  };
+  const runDir = resolveRunDir(runId, opts);
+  const remoteObservation = observePrRemote(opts, supplied, runDir);
+
+  return print(await transitionPrCreated(runDir, { ...request, remote_observation: remoteObservation }, opts), opts);
+}
+
+function assertPublicGateDecisionAllowed(statusValue, opts) {
+  if (statusValue !== "approved") return;
+  if (stringValue(opts.answer)) throw new Error("factory gate-decision approved requires --answer-ref; inline --answer is not accepted by the public CLI");
+  if (!stringValue(opts.answerRef)) throw new Error("factory gate-decision approved requires --answer-ref from an external driver");
+  if (stringValue(opts.approvalSource)) throw new Error("factory gate-decision approved does not accept --approval-source; approval_source is derived as external-driver");
+}
+
+function publicGateDecisionOptions(statusValue, opts) {
+  if (statusValue !== "approved") return opts;
+  return { ...opts, publicExternalDriverApproval: true };
+}
+
+function observePrRemote(opts, supplied, runDir) {
+  if (supplied.provider !== "github") throw new Error("factory pr-created currently supports --provider github only");
+  const localCwd = prCreatedLocalCwd(runDir, opts.cwd);
+  const observed = observeGithubPr(opts.cwd, supplied.pr_url);
+  const observedRepository = repositoryFromGithubPrUrl(observed.pr_url);
+  const remoteRepository = repositoryFromGitRemote(localCwd, supplied.remote);
+  const account = observeGithubAccount();
+  const local = observeLocalGitFacts(localCwd, supplied.remote, observed.base_commit, observed.head_commit);
+
+  const remoteObservation = {
+    pr_url: observed.pr_url,
+    pr_number: observed.pr_number,
+    provider: "github",
+    repository: observedRepository,
+    remote: local.remote,
+    github_account: account,
+    head_branch: observed.head_branch,
+    head_commit: observed.head_commit,
+    head_tree: gitTreeForCommit(localCwd, observed.head_commit, "observed PR head commit"),
+    base_ref: observed.base_ref,
+    base_commit: observed.base_commit,
+    base_tree: gitTreeForCommit(localCwd, observed.base_commit, "observed PR base commit"),
+    draft: observed.draft,
+  };
+
+  const comparisons = [
+    ["pr_url", supplied.pr_url, remoteObservation.pr_url],
+    ["pr_number", supplied.pr_number, remoteObservation.pr_number],
+    ["provider", supplied.provider, remoteObservation.provider],
+    ["repository", supplied.repository, remoteObservation.repository],
+    ["remote", supplied.remote, remoteObservation.remote],
+    ["github_account", supplied.github_account, remoteObservation.github_account],
+    ["head_branch", supplied.head_branch, remoteObservation.head_branch],
+    ["head_commit", supplied.head_commit, remoteObservation.head_commit],
+    ["base_ref", supplied.base_ref, remoteObservation.base_ref],
+    ["base_commit", supplied.base_commit, remoteObservation.base_commit],
+    ["draft", supplied.draft, remoteObservation.draft],
+    ["remote_repository", supplied.repository, remoteRepository],
+    ["local_branch", supplied.head_branch, local.branch],
+    ["local_head", supplied.head_commit, local.head_commit],
+  ];
+  const mismatch = comparisons.find(([, expected, actual]) => expected !== actual);
+  if (mismatch) {
+    const [field, expected, actual] = mismatch;
+    throw new Error(`factory pr-created ${field} observed ${String(actual)}, expected ${String(expected)}`);
+  }
+  return remoteObservation;
+}
+
+function prCreatedLocalCwd(runDir, fallbackCwd) {
+  try {
+    const runBase = JSON.parse(readFileSync(join(runDir, "attestations", "run-base.json"), "utf8"));
+    if (stringValue(runBase?.bindings?.feature_worktree)) return runBase.bindings.feature_worktree;
+  } catch {
+    // Fall back to the command cwd; transitionPrCreated will report missing authority.
+  }
+  return fallbackCwd;
+}
+
+function observeGithubPr(cwd, prUrl) {
+  const proc = spawnSync("gh", ["pr", "view", prUrl, "--json", "url,number,isDraft,headRefName,headRefOid,baseRefName,baseRefOid"], {
+    cwd: resolve(cwd || process.cwd()),
+    encoding: "utf8",
+  });
+  if (proc.error) throw proc.error;
+  if (proc.status !== 0) throw new Error(`factory pr-created could not observe PR with gh pr view: ${(proc.stderr || proc.stdout).trim()}`);
+  let view;
+  try {
+    view = JSON.parse(proc.stdout);
+  } catch (error) {
+    throw new Error(`factory pr-created could not parse gh pr view JSON: ${error.message}`);
+  }
+  return {
+    pr_url: canonicalizeGithubPrUrl(requiredGhField(view.url, "url")),
+    pr_number: normalizeCliPrNumber(requiredGhField(view.number, "number")),
+    head_branch: requiredGhField(view.headRefName, "headRefName"),
+    head_commit: requiredGhField(view.headRefOid, "headRefOid"),
+    base_ref: requiredGhField(view.baseRefName, "baseRefName"),
+    base_commit: requiredGhField(view.baseRefOid, "baseRefOid"),
+    draft: normalizeGhBoolean(view.isDraft, "isDraft"),
+  };
+}
+
+function observeGithubAccount() {
+  const proc = spawnSync("gh", ["api", "user", "--jq", ".login"], { encoding: "utf8" });
+  if (proc.error) throw proc.error;
+  if (proc.status !== 0) throw new Error(`factory pr-created could not observe GitHub account with gh api user: ${(proc.stderr || proc.stdout).trim()}`);
+  const account = proc.stdout.trim();
+  if (!stringValue(account)) throw new Error("factory pr-created gh api user returned an empty account");
+  return account;
+}
+
+function observeLocalGitFacts(cwd, remote, baseCommit, headCommit) {
+  const branch = gitStdout(cwd, ["symbolic-ref", "--short", "HEAD"], "current branch");
+  const localHead = gitStdout(cwd, ["rev-parse", "--verify", "HEAD"], "HEAD");
+  gitStdout(cwd, ["rev-parse", "--verify", `${baseCommit}^{commit}`], "observed base commit");
+  gitStdout(cwd, ["rev-parse", "--verify", `${headCommit}^{commit}`], "observed head commit");
+  const ancestor = spawnSync("git", ["merge-base", "--is-ancestor", baseCommit, headCommit], { cwd: resolve(cwd || process.cwd()), encoding: "utf8" });
+  if (ancestor.status !== 0) throw new Error(`factory pr-created observed base commit is not an ancestor of head commit: ${(ancestor.stderr || ancestor.stdout).trim()}`);
+  return { remote, branch, head_commit: localHead };
+}
+
+function repositoryFromGitRemote(cwd, remote) {
+  const url = gitStdout(cwd, ["remote", "get-url", remote], `remote ${remote}`);
+  const repository = parseGithubRemoteRepository(url);
+  if (!repository) throw new Error(`factory pr-created remote ${remote} does not point at github.com`);
+  return repository;
+}
+
+function repositoryFromGithubPrUrl(prUrl) {
+  const parsed = new URL(canonicalizeGithubPrUrl(prUrl));
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  return `${segments[0]}/${segments[1]}`;
+}
+
+function parseGithubRemoteRepository(url) {
+  const text = String(url || "").trim();
+  let match = text.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/u);
+  if (match) return `${match[1]}/${match[2]}`;
+  try {
+    const parsed = new URL(text);
+    if ((parsed.protocol === "https:" || parsed.protocol === "ssh:") && parsed.hostname === "github.com") {
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      if (segments.length >= 2) return `${segments[0]}/${segments[1].replace(/\.git$/u, "")}`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function requiredGhField(value, field) {
+  if (typeof value === "number") return value;
+  if (!stringValue(value)) throw new Error(`factory pr-created gh pr view missing ${field}`);
+  return value;
+}
+
+function normalizeGhBoolean(value, field) {
+  if (typeof value !== "boolean") throw new Error(`factory pr-created gh pr view missing boolean ${field}`);
+  return value;
+}
+
+function normalizeCliPrNumber(value) {
+  const number = typeof value === "string" && value.trim() !== "" ? Number.parseInt(value, 10) : value;
+  if (!Number.isInteger(number) || number < 1 || String(number) !== String(value).trim()) {
+    throw new Error("factory pr-created requires --pr-number to be a positive integer");
+  }
+  return number;
+}
+
+function requiredOption(value, flag) {
+  if (!stringValue(value)) throw new Error(`factory pr-created requires ${flag}`);
+  return value;
+}
+
+function gitStdout(cwd, args, label) {
+  const proc = spawnSync("git", args, { cwd: resolve(cwd || process.cwd()), encoding: "utf8" });
+  if (proc.error) throw proc.error;
+  if (proc.status !== 0) throw new Error(`factory pr-created could not observe ${label}: ${(proc.stderr || proc.stdout).trim()}`);
+  return proc.stdout.trim();
+}
+
+function gitTreeForCommit(cwd, commit, flag) {
+  const value = requiredOption(commit, flag);
+  const proc = spawnSync("git", ["rev-parse", `${value}^{tree}`], { cwd: resolve(cwd || process.cwd()), encoding: "utf8" });
+  if (proc.status !== 0) throw new Error(`factory pr-created could not resolve ${flag} tree: ${(proc.stderr || proc.stdout).trim()}`);
+  return proc.stdout.trim();
 }
 
 function normalizeGateDecisionStatus(value) {
