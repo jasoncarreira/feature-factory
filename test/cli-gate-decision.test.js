@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
-import { createAttestationIndex, createRunBaseAttestation } from "../src/provenance-authority.js";
+import { createAttestationIndex, createRunBaseAttestation, hashFile } from "../src/provenance-authority.js";
 import { validateRunDir } from "../src/validate.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -21,6 +21,7 @@ describe("cli gate decision routing", () => {
       writeFixture(runDir, "artifacts/story.json", "{\n  \"title\": \"Story\"\n}\n");
       writeFixture(runDir, "gates/story.question.json", "{\n  \"question\": \"Approve?\"\n}\n");
       writeFixture(runDir, "gates/story.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
+      writePendingGateSnapshot(runDir, "story", "artifacts/story.json", "gates/story.question.json");
 
       const proc = spawnSync(process.execPath, [
         CLI,
@@ -132,6 +133,19 @@ function writeFixture(root, ref, contents) {
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function writePendingGateSnapshot(runDir, gateName, artifactRef, questionRef) {
+  const runPath = join(runDir, "run.json");
+  const run = readJson(runPath);
+  run.gates[gateName].pending_snapshot = {
+    question_ref: questionRef,
+    question_hash: hashFile(join(runDir, questionRef), { mode: "raw" }),
+    artifact_ref: artifactRef,
+    artifact_hash: hashFile(join(runDir, artifactRef), { mode: "raw" }),
+    created_at: "2026-07-07T00:00:00.000Z",
+  };
+  writeJson(runPath, run);
 }
 
 function readJson(path) {
