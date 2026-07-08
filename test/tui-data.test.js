@@ -43,6 +43,13 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("tolerates missing TUI startup path state", () => {
+    for (const api of [null, {}, { state: null }, { state: { path: null } }, { state: { path: {} } }]) {
+      assert.doesNotThrow(() => factoryRoots(api));
+      assert.ok(Array.isArray(factoryRoots(api)));
+    }
+  });
+
   it("projects review tier summary fields from durable run.json", () => {
     const repo = tempDir();
     writeRun(repo, "strict-run", {
@@ -107,6 +114,19 @@ describe("TUI factory scanner", () => {
     assert.equal(run.diagnostic_severity, "warning");
     assert.equal(run.diagnostic_classification, "needs-human");
     assert.match(run.diagnostic_summary, /protected gate 'story'/i);
+    cleanup(repo);
+  });
+
+  it("can skip expensive diagnostics for responsive sidebar refreshes", () => {
+    const repo = tempDir();
+    writeRun(repo, "light-run", { status: "running", updated_at: "2026-07-05T00:00:00Z", gates: {} });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(run.run_id, "light-run");
+    assert.equal(run.status, "running");
+    assert.equal(run.diagnostic_status, "ok");
+    assert.equal(run.diagnostic_classification, "healthy");
     cleanup(repo);
   });
 

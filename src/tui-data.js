@@ -5,24 +5,48 @@ import { diagnoseRunFile, diagnosticEnvelope, diagnosticItem } from "./factory-d
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
 const MAX_SCAN_DIRS = 2000;
 const MAX_DIAGNOSTIC_SUMMARY = 180;
+const ROOT_CACHE_TTL_MS = 30000;
 const FAIL_CLOSED_CONDITIONS = new Set(["invalid-run-state", "invalid-authority", "unverifiable-authority"]);
+const rootCache = new Map();
 
-export function factoryRoots(api) {
-  const starts = [api.state.path.worktree, api.state.path.directory].filter(Boolean);
+export function factoryRoots(api, options = {}) {
+  const starts = tuiStartPaths(api);
+  const cacheKey = starts.map((start) => resolve(start)).join("\0");
+  const now = Date.now();
+  const cached = rootCache.get(cacheKey);
+  if (!options.noCache && cached && cached.expiresAt > now) return cached.roots;
+
   const roots = new Set();
   for (const start of starts) {
     for (const root of findFactoryRoots(start)) roots.add(root);
   }
-  return [...roots].sort();
+  const sorted = [...roots].sort();
+  if (!options.noCache) rootCache.set(cacheKey, { expiresAt: now + ROOT_CACHE_TTL_MS, roots: sorted });
+  return sorted;
 }
 
-export function readRuns(roots) {
+function tuiStartPaths(api) {
+  const path = api?.state?.path;
+  const starts = [path?.worktree, path?.directory].filter(isUsablePath);
+  if (starts.length) return [...new Set(starts)];
+  const cwd = typeof process.cwd === "function" ? process.cwd() : null;
+  return isUsablePath(cwd) ? [cwd] : [];
+}
+
+function isUsablePath(value) {
+  if (typeof value !== "string" || value.trim().length === 0) return false;
+  const resolved = resolve(value);
+  return dirname(resolved) !== resolved;
+}
+
+export function readRuns(roots, options = {}) {
   return roots
-    .flatMap((root) => readRootRuns(root))
+    .flatMap((root) => readRootRuns(root, options))
     .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
 }
 
 export function findFactoryRoots(start) {
+  if (!isUsablePath(start)) return [];
   const dir = resolve(start);
   const roots = new Set();
   const nearest = findNearestFactoryRoot(dir);
@@ -69,22 +93,35 @@ function safeReadDir(dir) {
   }
 }
 
-function readRootRuns(root) {
+function readRootRuns(root, options = {}) {
   if (!root || !existsSync(root)) return [];
   const repoRoot = dirname(dirname(root));
   return readdirSync(root)
     .flatMap((runID) => {
       const file = join(root, runID, "run.json");
       if (!existsSync(file) || !statSync(file).isFile()) return [];
-      const diagnostics = safeDiagnoseRunFile(file, { repoRoot });
-      if (shouldUseFallbackRow(diagnostics)) return [fallbackRun(runID, file, diagnostics)];
       try {
         const run = JSON.parse(readFileSync(file, "utf8"));
+        const diagnostics = options.diagnostics === false ? healthyDiagnostics() : safeDiagnoseRunFile(file, { repoRoot });
+        if (shouldUseFallbackRow(diagnostics)) return [fallbackRun(runID, file, diagnostics)];
         return [summarize(run, runID, file, diagnostics)];
-      } catch {
+      } catch (error) {
+        const diagnostics = options.diagnostics === false ? parseErrorDiagnostics(file, error) : safeDiagnoseRunFile(file, { repoRoot });
         return [fallbackRun(runID, file, diagnostics)];
       }
     });
+}
+
+function parseErrorDiagnostics(file, error) {
+  const checkedAt = new Date().toISOString();
+  return diagnosticEnvelope([
+    diagnosticItem("invalid-run-state", {
+      checkedAt,
+      authoritative: false,
+      message: `Factory run JSON could not be parsed: ${error.message}`,
+      evidence: { source: "tui-data", run_path: file, error: error.message },
+    }),
+  ], { checkedAt, authoritative: false });
 }
 
 function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
