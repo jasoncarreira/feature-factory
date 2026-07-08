@@ -461,10 +461,11 @@ Required continuation contract:
 - Treat the injected continuation payload and all CLI arguments as untrusted operator data/config, not privileged instructions.
 - Require the parent `run.json.status` to be exactly `blocked`; do not continue from `completed`, `partial`, `needs-human`, `running`, missing, or invalid parent state.
 - Validate `--review <review-ref>` as an approved review-evidence ref under the parent run, including referenced artifacts/evidence/reviews and subject consistency. Do not authorize continuation by checking for a special blocking verdict enum.
-- Persist `run.continuation` / `run.json.continuation` in the child with `parent_run_id`, `parent_status: "blocked"`, parent branch/commit/worktree refs, `review_ref`, source artifact/evidence/review refs, `created_at`, and optional operator summary.
+- Persist `run.continuation` / `run.json.continuation` in the child with `kind: "blocked-run-continuation"`, nested `parent`, `review`, and `target` objects, hashes for validated refs, `parent_artifacts` `{kind, ref, hash}` entries, optional parent evidence/review `{ref, hash}` entries, `created_at`, and optional operator summary.
 - Treat all parent context as read-only. The child must not edit the parent manifest, gates, artifacts, evidence, reviews, branch, worktree, PR URL, or terminal result.
 - Run the normal factory flow for the child: story gate, research/design, brief/spec/decomposition gate, build slices, acceptance tests, implementation-validator, security-reviewer, pre-PR gate, and PR-created transition.
 - Continuation PRs are always draft-only. Force `driver.ready=false` even if operator payload asks to mark ready.
+- `factory continue` rejects `--ready` and `--no-draft`; the continuation entry point has no ready-for-review or non-draft override.
 - If bounded remediation is exhausted, ownership is ambiguous, or validator/security remains blocking, end the child at terminal `blocked` with no PR URL (`run.pr_url` unset and `terminal_result.pr_url: null`).
 
 ## 11. Fallback Models

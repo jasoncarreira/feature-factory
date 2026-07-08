@@ -185,6 +185,12 @@ describe("blocked-run continuation docs contract", () => {
     }
   });
 
+  it("documents top-level payload.continuation rather than driver.continuation", () => {
+    assert.match(COMMAND, /payload\.continuation/, "COMMAND must read continuation metadata from top-level payload.continuation");
+    assert.match(COMMAND, /Do not read continuation metadata from driver configuration/i, "COMMAND must reject driver config as the continuation source");
+    assert.doesNotMatch(COMMAND, /driver\.continuation/i, "COMMAND must not route continuation from driver.continuation");
+  });
+
   it("documents continuation manifest persistence and parent validation", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
       assert.match(text, /run\.json\.continuation|run\.continuation/i, `${name} must persist run.continuation`);
@@ -193,6 +199,33 @@ describe("blocked-run continuation docs contract", () => {
       assert.match(text, /approved review evidence/i, `${name} must validate approved review evidence`);
       assert.match(text, /not rely on|do not depend on|without relying on/i, `${name} must not rely on a blocking verdict enum`);
       assert.match(text, /blocking verdict enum/i, `${name} must name the blocking verdict enum non-requirement`);
+    }
+  });
+
+  it("documents the accepted nested run.continuation shape with hashes", () => {
+    for (const term of [
+      '"kind": "blocked-run-continuation"',
+      '"parent"',
+      '"review"',
+      '"target"',
+      '"run_hash"',
+      '"hash"',
+      '"parent_artifacts"',
+      '"parent_evidence"',
+      '"parent_reviews"',
+      '"base_commit"',
+    ]) {
+      assert.match(SCHEMA, literalPattern(term), `SCHEMA must document continuation field ${term}`);
+    }
+    assert.match(SCHEMA, /parent_artifacts[\s\S]*\{kind, ref, hash\}/, "SCHEMA must describe parent_artifacts as ref/hash entries");
+    assert.match(SCHEMA, /nested `parent`, `review`, and `target` objects/i, "SCHEMA must describe nested continuation objects");
+    assert.match(SCHEMA, /refs paired with hashes|ref.*hash/i, "SCHEMA must require validated refs and hashes");
+  });
+
+  it("documents rejected ready/non-draft flags for factory continue", () => {
+    for (const [name, text] of documentEntries({ README, SPEC })) {
+      assert.match(text, /factory continue[\s\S]*rejects?[\s\S]*`--ready`[\s\S]*`--no-draft`/i, `${name} must document rejecting --ready and --no-draft`);
+      assert.match(text, /draft-only|draft mode/i, `${name} must document draft-only continuation behavior`);
     }
   });
 
