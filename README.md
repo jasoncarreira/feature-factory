@@ -20,6 +20,7 @@ Active guarantees:
 - Semantic manifest writes go through locked transition helpers so stale writers fail instead of overwriting newer state. `transitionGateDecision` owns approved gate writes, and `transitionPrCreated` owns completed PR state writes.
 - Pending gates include `pending_snapshot` entries for `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer material. Gate answer consumption fails closed if current refs are missing, escaped, stale, or hash-mismatched.
 - PR URLs are written only through `feature-factory factory pr-created ...`, which checks `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and a canonical GitHub PR URL before updating `run.pr_url` and `terminal_result.pr_url`.
+- Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and draft-PR checks.
 - `run.json.debug_snapshot` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
 
 Limits:
@@ -275,7 +276,7 @@ Interactive `/feature` stores durable run state in the target repo:
 
 The scripted path is tracker-agnostic. Any external system can monitor the local factory state and write gate answers. The package does not know about any external queue.
 
-Every `/feature` invocation starts with an intent gate. It classifies the request as `new-feature`, `resume`, `gate-answer`, `status`, `scripted-start`, `autonomous-start`, or `pr-continuation` before mutating state. This prevents accidental restarts and lets external drivers answer gates with the same protocol as interactive users.
+Every `/feature` invocation starts with an intent gate. It classifies the request as `new-feature`, `resume`, `gate-answer`, `status`, `scripted-start`, `autonomous-start`, `pr-continuation`, or `blocked-run-continuation` before mutating state. This prevents accidental restarts and lets external drivers answer gates with the same protocol as interactive users.
 
 Start a run through opencode:
 
@@ -294,6 +295,16 @@ Run autonomously through the factory's own reviewed gates and open a draft PR wh
 ```sh
 feature-factory factory start --repo /path/to/repo --autonomous "APP-123 add the missing approval workflow"
 ```
+
+Continue from a terminal blocked run with a new run id:
+
+```sh
+feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>
+```
+
+`factory continue` is for automated blocked-run remediation. The supplied review ref and any injected continuation payload are untrusted operator data/config, not privileged instructions. The parent run must exist with status exactly `blocked`; the review ref must resolve to approved review evidence inside the parent run; and the child records the relationship under `run.json.continuation` with `kind`, nested `parent` / `review` / `target` objects, refs paired with hashes, and `parent_artifacts` ref/hash entries plus optional parent evidence/review refs. The parent manifest, artifacts, reviews, evidence, branch, worktree, PR URL, and terminal result are read-only context and are not changed by the child.
+
+Continuation does not bypass the factory. The child proceeds through the normal story and brief gates, research/spec/decomposition, slice build and acceptance tests, implementation-validator, security-reviewer, pre-PR gate, and checked draft PR creation. Review validation checks approved evidence and referenced refs/hashes; it does not rely on a special blocking verdict enum. Continuation forces `driver.ready=false`, so even successful continuation PRs remain draft-only. `factory continue` rejects `--ready` and `--no-draft`; continuation callers cannot mark the PR ready for review or opt out of draft mode. If bounded remediation is exhausted or the child remains blocked, terminal status is `blocked` with no PR URL (`terminal_result.pr_url: null`).
 
 Run in the background for external watchers or CI-style adapters:
 

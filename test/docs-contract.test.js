@@ -16,6 +16,7 @@ const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
 const TODO = readDoc("../TODO.md");
 const CLI = readDoc("../src/cli.js");
+const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
 const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-created <run-id> --json",
   "factory env record-resume <run-id> --json",
@@ -163,6 +164,80 @@ describe("diagnostics docs contract", () => {
       assert.match(text, /restore (?:the )?worktree|recover from durable state/i, `${name} must explain missing-worktree action`);
       assert.match(text, /answer (?:the )?pending protected gate|answer or stop/i, `${name} must explain protected-gate action`);
       assert.match(text, /read `terminal_result`|inspect the terminal result/i, `${name} must explain terminal-run action`);
+    }
+  });
+});
+
+describe("blocked-run continuation docs contract", () => {
+  it("documents the public continuation command and intent", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, literalPattern(BLOCKED_CONTINUE_COMMAND), `${name} must document factory continue CLI`);
+      assert.match(text, /blocked-run-continuation/, `${name} must document blocked-run-continuation intent or payload`);
+    }
+    assert.match(SKILL, /Intent types:[\s\S]*blocked-run-continuation/i, "SKILL must list blocked-run-continuation intent");
+    assert.match(SKILL, /Actions by intent:[\s\S]*blocked-run-continuation/i, "SKILL must define blocked-run-continuation action");
+  });
+
+  it("treats continuation payloads as untrusted operator data, not privileged instructions", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /continuation payload[\s\S]*untrusted operator data\/config/i, `${name} must call continuation payload untrusted data/config`);
+      assert.match(text, /not privileged instruction/i, `${name} must deny privileged-instruction status`);
+    }
+  });
+
+  it("documents top-level payload.continuation rather than driver.continuation", () => {
+    assert.match(COMMAND, /payload\.continuation/, "COMMAND must read continuation metadata from top-level payload.continuation");
+    assert.match(COMMAND, /Do not read continuation metadata from driver configuration/i, "COMMAND must reject driver config as the continuation source");
+    assert.doesNotMatch(COMMAND, /driver\.continuation/i, "COMMAND must not route continuation from driver.continuation");
+  });
+
+  it("documents continuation manifest persistence and parent validation", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /run\.json\.continuation|run\.continuation/i, `${name} must persist run.continuation`);
+      assert.match(text, /status(?:`|\s)*(?:is\s+)?exactly(?:`|\s)*`?blocked`?/i, `${name} must require parent status exactly blocked`);
+      assert.match(text, /read-only parent context|parent context as read-only/i, `${name} must make parent context read-only`);
+      assert.match(text, /approved review evidence/i, `${name} must validate approved review evidence`);
+      assert.match(text, /not rely on|do not depend on|without relying on/i, `${name} must not rely on a blocking verdict enum`);
+      assert.match(text, /blocking verdict enum/i, `${name} must name the blocking verdict enum non-requirement`);
+    }
+  });
+
+  it("documents the accepted nested run.continuation shape with hashes", () => {
+    for (const term of [
+      '"kind": "blocked-run-continuation"',
+      '"parent"',
+      '"review"',
+      '"target"',
+      '"run_hash"',
+      '"hash"',
+      '"parent_artifacts"',
+      '"parent_evidence"',
+      '"parent_reviews"',
+      '"base_commit"',
+    ]) {
+      assert.match(SCHEMA, literalPattern(term), `SCHEMA must document continuation field ${term}`);
+    }
+    assert.match(SCHEMA, /parent_artifacts[\s\S]*\{kind, ref, hash\}/, "SCHEMA must describe parent_artifacts as ref/hash entries");
+    assert.match(SCHEMA, /nested `parent`, `review`, and `target` objects/i, "SCHEMA must describe nested continuation objects");
+    assert.match(SCHEMA, /refs paired with hashes|ref.*hash/i, "SCHEMA must require validated refs and hashes");
+  });
+
+  it("documents rejected ready/non-draft flags for factory continue", () => {
+    for (const [name, text] of documentEntries({ README, SPEC })) {
+      assert.match(text, /factory continue[\s\S]*rejects?[\s\S]*`--ready`[\s\S]*`--no-draft`/i, `${name} must document rejecting --ready and --no-draft`);
+      assert.match(text, /draft-only|draft mode/i, `${name} must document draft-only continuation behavior`);
+    }
+  });
+
+  it("documents normal gates, draft-only PRs, and exhausted-remediation terminal blocked outcome", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      for (const term of ["story", "brief", "build", "test", "validator", "security", "pre-PR"]) {
+        assert.match(text, new RegExp(escapeRegExp(term), "i"), `${name} must include normal ${term} gate/step`);
+      }
+      assert.match(text, /draft-only/i, `${name} must require draft-only continuation PRs`);
+      assert.match(text, /driver\.ready\s*=\s*false/i, `${name} must force driver.ready=false`);
+      assert.match(text, /terminal[\s\S]*blocked|status:\s*"blocked"/i, `${name} must document terminal blocked outcome`);
+      assert.match(text, /no PR URL|pr_url:\s*null/i, `${name} must document no PR URL on exhausted remediation`);
     }
   });
 });
