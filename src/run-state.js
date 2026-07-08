@@ -882,7 +882,7 @@ function preparePublicExternalDriverApproval(gateName, currentGate, gate) {
 
 function trustedPendingAnswerRef(gateName, currentGate) {
   if (stringValue(currentGate?.pending_snapshot?.answer_ref)) return currentGate.pending_snapshot.answer_ref;
-  if (stringValue(currentGate?.answer_ref)) return currentGate.answer_ref;
+  // Older pending snapshots omitted answer_ref; do not trust mutable gate state as authority.
   return `gates/${gateName}.answer`;
 }
 

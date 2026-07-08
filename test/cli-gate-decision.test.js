@@ -151,6 +151,55 @@ describe("cli gate decision routing", () => {
       cleanup(repo);
     }
   });
+
+  it("rejects public approval after pending answer ref poisoning", () => {
+    const repo = tempRepo();
+
+    try {
+      initRepo(repo);
+      const runDir = createRun(repo);
+      writeFixture(runDir, "artifacts/story.json", "{\n  \"title\": \"Story\"\n}\n");
+      writeFixture(runDir, "gates/story.question.json", "{\n  \"question\": \"Approve?\"\n}\n");
+      writeFixture(runDir, "gates/story.answer", "{\n  \"answer\": \"approve\"\n}\n");
+      writeFixture(runDir, "gates/evil.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
+
+      const pending = runGateDecision(repo, [
+        "pending",
+        "--answer-ref",
+        "gates/evil.answer.json",
+      ]);
+
+      assert.equal(pending.status, 0, pending.stderr);
+      const poisonedRun = readJson(join(runDir, "run.json"));
+      assert.equal(poisonedRun.gates.story.answer_ref, "gates/evil.answer.json");
+      assert.equal(poisonedRun.gates.story.pending_snapshot.answer_ref, undefined);
+
+      const rejected = runGateDecision(repo, [
+        "approved",
+        "--answer-ref",
+        "gates/evil.answer.json",
+      ]);
+
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.stderr, /answer_ref must match trusted pending answer_ref 'gates\/story\.answer'/u);
+      assert.deepEqual(readJson(join(runDir, "run.json")), poisonedRun);
+      assert.equal(existsSync(join(runDir, "attestations", "gates", "story.json")), false);
+
+      const approved = runGateDecision(repo, [
+        "approved",
+        "--answer-ref",
+        "gates/story.answer",
+      ]);
+
+      assert.equal(approved.status, 0, approved.stderr);
+      const run = readJson(join(runDir, "run.json"));
+      assert.equal(run.gates.story.status, "approved");
+      assert.equal(run.gates.story.answer_ref, "gates/story.answer");
+      assert.equal(run.gates.story.approval_source, "external-driver");
+    } finally {
+      cleanup(repo);
+    }
+  });
 });
 
 function runGateDecision(repo, extraArgs) {
