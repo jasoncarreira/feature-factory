@@ -525,6 +525,7 @@ function assertGateDecisionTransitions(current, next, hooks = {}) {
 }
 
 function assertTerminalTransition(current, next, hooks = {}) {
+  if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot be mutated`);
   if (current.status === next.status) return;
   if (next.status !== "completed") return;
   if (hooks.prCreated === true) return;

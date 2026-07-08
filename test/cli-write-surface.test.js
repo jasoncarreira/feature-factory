@@ -93,6 +93,8 @@ describe("cli write surface", () => {
       assert.equal(validation.ok, false);
       assert.equal(validation.runs[0].checks.find((check) => check.name === "run.schema")?.ok, true);
       assert.equal(validation.runs[0].diagnostics.items[0].condition, "terminal-run");
+      assert.match(runFactoryFail(repo, ["step", RUN_ID, "spec-writer", "running", "--attempts", "2", "--json"]).stderr, /terminal run 'blocked' cannot be mutated/u);
+      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]).stderr, /terminal run 'blocked' cannot be mutated/u);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

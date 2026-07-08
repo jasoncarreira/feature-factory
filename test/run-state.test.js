@@ -360,6 +360,12 @@ describe("simplified run-state transitions", () => {
 
       assert.equal(result.run.status, "completed");
       assert.equal(result.run.pr_url, "https://github.com/jasoncarreira/opencode-feature-factory/pull/99");
+      await assert.rejects(
+        transitionRunJson(fixture.runDir, (run) => {
+          run.updated_at = NOW;
+        }),
+        /terminal run 'completed' cannot be mutated/u,
+      );
     } finally {
       cleanup(fixture.repo);
     }
