@@ -192,13 +192,74 @@ describe("factory state validation", () => {
     try {
       buildInvalidAuthorityRun(fixture, "authority-invalid-status-list");
 
-      assert.throws(() => status("authority-invalid-status-list", { cwd: fixture.repoRoot }), /run\.gates\.story\.artifact/i);
+      const current = status("authority-invalid-status-list", { cwd: fixture.repoRoot });
+      assert.equal(current.run_id, "authority-invalid-status-list");
+      assert.equal(current.status, "invalid");
+      assert.match(current.error, /run\.gates\.story\.artifact/i);
+      assert.equal(current.diagnostics.authoritative, false);
+      assert.equal(current.diagnostics.status, "error");
+      assert.equal(current.diagnostics.classification, "invalid");
+      assert.equal(current.diagnostics.items[0].condition, "invalid-authority");
+      assert.equal("branch" in current, false);
+      assert.equal("worktree" in current, false);
+      assert.equal("pending_gate" in current, false);
+      assert.equal("gates" in current, false);
+      assert.equal("pr_url" in current, false);
 
       const listed = listRuns({ cwd: fixture.repoRoot });
       assert.equal(listed[0].status, "invalid");
       assert.match(listed[0].error, /run\.gates\.story\.artifact/i);
+      assert.equal(listed[0].diagnostics.status, "error");
+
+      const validation = validateState("authority-invalid-status-list", { cwd: fixture.repoRoot });
+      assert.equal(validation.ok, false);
+      assert.equal(validation.runs[0].diagnostics.items[0].condition, "invalid-authority");
     } finally {
       cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("surfaces recoverable stale-heartbeat diagnostics without failing valid validation", () => {
+    const repo = tempRepo();
+    const runDir = join(repo, ".opencode", "factory", "stale-heartbeat");
+    const originalLog = console.log;
+    mkdirSync(runDir, { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun({
+      run_id: "stale-heartbeat",
+      gates: {},
+      heartbeat_at: "2026-07-05T00:00:00.000Z",
+      slices: [{ id: "be-api", stack: "backend", depends_on: [], status: "running" }],
+    }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatLease({
+      run_id: "stale-heartbeat",
+      token: "secret-heartbeat-token",
+      pid: process.pid,
+      last_tick_at: "2026-07-05T00:00:00.000Z",
+      interval_ms: 1000,
+    }));
+
+    try {
+      const opts = { cwd: repo, now: "2026-07-05T00:03:00.000Z" };
+      const current = status("stale-heartbeat", opts);
+      const listed = listRuns(opts);
+      const validation = validateState("stale-heartbeat", opts);
+      const lines = [];
+      console.log = (value) => lines.push(String(value));
+      const watcher = watchRun("stale-heartbeat", { ...opts, intervalMs: 10_000 });
+      clearInterval(watcher);
+      console.log = originalLog;
+
+      assert.equal(current.diagnostics.status, "warning");
+      assert.equal(current.diagnostics.classification, "recoverable");
+      assert.equal(current.diagnostics.items[0].condition, "stale-heartbeat");
+      assert.equal(JSON.stringify(current.diagnostics).includes("secret-heartbeat-token"), false);
+      assert.equal(listed[0].diagnostics.items[0].condition, "stale-heartbeat");
+      assert.equal(validation.ok, true);
+      assert.equal(validation.runs[0].diagnostics.status, "warning");
+      assert.equal(JSON.parse(lines[0]).diagnostics.items[0].condition, "stale-heartbeat");
+    } finally {
+      console.log = originalLog;
+      cleanup(repo);
     }
   });
 
@@ -217,15 +278,15 @@ describe("factory state validation", () => {
       try {
         buildInvalidAuthorityRun(fixture, `authority-invalid-${label.replace(/[^a-z]/giu, "")}`);
 
-        assert.throws(
-          () => status(`authority-invalid-${label.replace(/[^a-z]/giu, "")}`, { cwd: fixture.repoRoot, ...opts }),
-          /run\.gates\.story\.artifact/i,
-          label,
-        );
+        const current = status(`authority-invalid-${label.replace(/[^a-z]/giu, "")}`, { cwd: fixture.repoRoot, ...opts });
+        assert.equal(current.status, "invalid", label);
+        assert.match(current.error, /run\.gates\.story\.artifact/i, label);
+        assert.equal(current.diagnostics.items[0].condition, "invalid-authority", label);
 
         const listed = listRuns({ cwd: fixture.repoRoot, ...opts });
         assert.equal(listed[0].status, "invalid", label);
         assert.match(listed[0].error, /run\.gates\.story\.artifact/i, label);
+        assert.equal(listed[0].diagnostics.items[0].condition, "invalid-authority", label);
       } finally {
         cleanup(fixture.repoRoot);
       }
@@ -249,7 +310,11 @@ describe("factory state validation", () => {
       try {
         buildInvalidAuthorityRun(fixture, runId);
 
-        assert.throws(() => watchRun(runId, { cwd: fixture.repoRoot, intervalMs: 10_000, ...opts }), /run\.gates\.story\.artifact/i, label);
+        const singleLines = [];
+        console.log = (value) => singleLines.push(String(value));
+        const singleWatcher = watchRun(runId, { cwd: fixture.repoRoot, intervalMs: 10_000, ...opts });
+        clearInterval(singleWatcher);
+        assert.equal(JSON.parse(singleLines[0]).status, "invalid", label);
 
         const lines = [];
         console.log = (value) => lines.push(String(value));
@@ -260,6 +325,7 @@ describe("factory state validation", () => {
         const payload = JSON.parse(lines[0]);
         assert.equal(payload[0].status, "invalid", label);
         assert.match(payload[0].error, /run\.gates\.story\.artifact/i, label);
+        assert.equal(payload[0].diagnostics.items[0].condition, "invalid-authority", label);
       } finally {
         console.log = originalLog;
         cleanup(fixture.repoRoot);
@@ -277,11 +343,14 @@ describe("factory state validation", () => {
       buildInvalidAuthorityRun(fixture, runId);
       process.argv = [process.execPath, "cli.js", "factory", "heartbeat", runId, "--status"];
 
-      assert.throws(() => status(runId, { cwd: fixture.repoRoot }), /run\.gates\.story\.artifact/i);
+      const current = status(runId, { cwd: fixture.repoRoot });
+      assert.equal(current.status, "invalid");
+      assert.match(current.error, /run\.gates\.story\.artifact/i);
 
       const listed = listRuns({ cwd: fixture.repoRoot });
       assert.equal(listed[0].status, "invalid");
       assert.match(listed[0].error, /run\.gates\.story\.artifact/i);
+      assert.equal(listed[0].diagnostics.items[0].condition, "invalid-authority");
 
       const lines = [];
       console.log = (value) => lines.push(String(value));
@@ -292,6 +361,7 @@ describe("factory state validation", () => {
       const payload = JSON.parse(lines[0]);
       assert.equal(payload[0].status, "invalid");
       assert.match(payload[0].error, /run\.gates\.story\.artifact/i);
+      assert.equal(payload[0].diagnostics.items[0].condition, "invalid-authority");
     } finally {
       process.argv = originalArgv;
       console.log = originalLog;
@@ -1125,6 +1195,25 @@ function runningRun(overrides = {}) {
         answer_ref: "gates/story.answer",
       },
     },
+    ...overrides,
+  };
+}
+
+function heartbeatLease(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: "app-123",
+    token: "lease-1",
+    phase: "builder-wave",
+    status: "running",
+    pid: 4242,
+    started_at: "2026-07-05T00:00:00.000Z",
+    last_tick_at: "2026-07-05T00:00:00.000Z",
+    stop_requested_at: null,
+    stopped_at: null,
+    interval_ms: 1000,
+    deadline_at: "2026-07-05T01:00:00.000Z",
+    stop_reason: null,
     ...overrides,
   };
 }
