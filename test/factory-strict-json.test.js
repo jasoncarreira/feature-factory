@@ -40,8 +40,18 @@ function assertRunJsonRejected(runId, runJson) {
     assert.equal(listed[0].status, "invalid");
     assert.equal(typeof listed[0].error, "string");
     assert.notEqual(listed[0].error, "");
+    assert.equal(listed[0].diagnostics.status, "error");
+    assert.equal(listed[0].diagnostics.classification, "invalid");
+    assert.equal(listed[0].diagnostics.items[0].condition, "invalid-run-state");
 
-    assert.throws(() => status(runId, { cwd: repo }), SyntaxError);
+    const current = status(runId, { cwd: repo });
+    assert.equal(current.run_id, runId);
+    assert.equal(current.status, "invalid");
+    assert.equal(current.path, runPath);
+    assert.equal(current.diagnostics.authoritative, false);
+    assert.equal(current.diagnostics.items[0].condition, "invalid-run-state");
+    assert.equal("branch" in current, false);
+    assert.equal("gates" in current, false);
   } finally {
     cleanup(repo);
   }

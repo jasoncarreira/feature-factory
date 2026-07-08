@@ -1,6 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import {
+  DIAGNOSTIC_CLASSIFICATIONS,
+  DIAGNOSTIC_CONDITIONS,
+  DIAGNOSTIC_SEVERITIES,
+  DIAGNOSTIC_STATUSES,
+} from "../src/factory-diagnostics.js";
 import { HEARTBEAT_PHASES, TERMINAL_RUN_STATUSES } from "../src/validate.js";
 
 const SKILL = readDoc("../assets/skills/feature/SKILL.md");
@@ -291,6 +297,118 @@ describe("provenance redaction and pr-created docs contract", () => {
   });
 });
 
+describe("detached-run diagnostics docs contract", () => {
+  it("documents the diagnostic envelope shape and all enums", () => {
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
+      for (const field of [
+        "schema_version",
+        "checked_at",
+        "authoritative",
+        "status",
+        "severity",
+        "classification",
+        "summary",
+        "items",
+        "condition",
+        "message",
+        "action",
+        "evidence",
+      ]) {
+        assert.match(text, literalPattern(field), `${name} must document diagnostics.${field}`);
+      }
+
+      for (const condition of DIAGNOSTIC_CONDITIONS) {
+        assert.match(text, literalPattern(`\`${condition}\``), `${name} must document diagnostic condition ${condition}`);
+      }
+      for (const classification of DIAGNOSTIC_CLASSIFICATIONS) {
+        assert.match(text, literalPattern(`\`${classification}\``), `${name} must document diagnostic classification ${classification}`);
+      }
+      for (const status of DIAGNOSTIC_STATUSES) {
+        assert.match(text, literalPattern(`\`${status}\``), `${name} must document diagnostic status ${status}`);
+      }
+      for (const severity of DIAGNOSTIC_SEVERITIES) {
+        assert.match(text, literalPattern(`\`${severity}\``), `${name} must document diagnostic severity ${severity}`);
+      }
+    }
+  });
+
+  it("documents exact aggregation priority", () => {
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
+      assert.match(text, orderedPattern(["invalid", "blocked", "needs-human", "recoverable", "terminal", "healthy"]), `${name} must document classification aggregation order`);
+      assert.match(text, orderedPattern(["critical", "error", "warning", "info"]), `${name} must document severity aggregation order`);
+      assert.match(text, orderedPattern(["error", "warning", "ok"]), `${name} must document status aggregation order`);
+      assert.match(text, orderedPattern(["invalid-run-state", "invalid-authority", "unverifiable-authority", "missing-worktree", "missing-heartbeat-process", "stale-heartbeat", "protected-gate", "terminal-run"]), `${name} must document condition aggregation order`);
+      assert.match(text, /original detection order/i, `${name} must document detection-order tiebreaker`);
+    }
+  });
+
+  it("documents operator actions for every diagnostic condition", () => {
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA, TODO })) {
+      assert.match(text, /stale heartbeat|stale-heartbeat/i, `${name} must mention stale heartbeat diagnostics`);
+      assert.match(text, /missing (?:heartbeat helper )?process|missing-heartbeat-process/i, `${name} must mention missing process diagnostics`);
+      assert.match(text, /missing worktree|missing-worktree/i, `${name} must mention missing worktree diagnostics`);
+      assert.match(text, /invalid run state|invalid-run-state/i, `${name} must mention invalid run state diagnostics`);
+      assert.match(text, /invalid[/\s-]+unverifiable authority|invalid-authority|unverifiable-authority/i, `${name} must mention invalid/unverifiable authority diagnostics`);
+    }
+
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
+      assert.match(text, /do not restart blindly|not restart blindly|silently restarted/i, `${name} must warn against blind restart`);
+      assert.match(text, /restore (?:the )?(?:provenance-validated )?(?:trusted )?worktree|recover from validated durable state/i, `${name} must explain missing-worktree action`);
+      assert.match(text, /inspect accepted attestations|accepted attestations/i, `${name} must explain invalid-authority action`);
+      assert.match(text, /restore (?:or inspect )?missing proof|restore proof|missing proof/i, `${name} must explain unverifiable-authority action`);
+      assert.match(text, /answer (?:the )?pending protected gate|answer or stop a protected gate|answer the pending protected/i, `${name} must explain protected-gate action`);
+      assert.match(text, /read `terminal_result`|inspect the terminal result/i, `${name} must explain terminal-run action`);
+    }
+  });
+
+  it("documents liveness-only heartbeat PID and process semantics", () => {
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA, COMMAND, TODO })) {
+      assert.match(text, /liveness-only|liveness only/i, `${name} must describe liveness-only diagnostics`);
+    }
+
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
+      assert.match(text, /heartbeat helper (?:PID|process)|heartbeat-helper PID/i, `${name} must identify heartbeat helper process semantics`);
+      assert.match(text, /not (?:a )?detached opencode process/i, `${name} must not equate PID with detached opencode process`);
+      assert.match(text, /no durable run-id-to-opencode-PID registry/i, `${name} must document absent opencode PID registry`);
+      assert.match(text, /evidence\.liveness_only|`liveness_only`|"liveness_only"/i, `${name} must require liveness_only evidence`);
+      assert.match(text, /authoritative: false|"authoritative": false/i, `${name} must mark heartbeat evidence non-authoritative`);
+    }
+  });
+
+  it("documents protected-gate and terminal liveness suppression", () => {
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA, COMMAND })) {
+      assert.match(text, /protected-gate|protected gate/i, `${name} must document protected-gate diagnostics`);
+      assert.match(text, /needs-human[\s\S]*warning[\s\S]*warning/i, `${name} must document protected-gate tuple`);
+      assert.match(text, /suppresses? stale-heartbeat and missing-heartbeat-process|suppress(?:es)? heartbeat stale\/missing-process alarms|suppress(?:es)? stale.*missing/i, `${name} must suppress heartbeat liveness alarms at protected gates`);
+    }
+
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
+      assert.match(text, /valid terminal (?:states|runs)[\s\S]*suppress(?:es)? heartbeat(?:\/worktree)? liveness alarms|terminal valid states suppress heartbeat\/worktree liveness alarms/i, `${name} must suppress terminal liveness alarms`);
+      assert.match(text, /completed[\s\S]*partial[\s\S]*terminal[\s\S]*ok[\s\S]*info/i, `${name} must document completed/partial terminal tuple`);
+      assert.match(text, /blocked[\s\S]*blocked[\s\S]*error[\s\S]*error/i, `${name} must document blocked terminal tuple`);
+      assert.match(text, /needs-human[\s\S]*needs-human[\s\S]*warning[\s\S]*warning/i, `${name} must document needs-human terminal tuple`);
+    }
+  });
+
+  it("documents provenance fail-closed policy for diagnostics", () => {
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA, COMMAND, TODO })) {
+      assert.match(text, /fail closed|fail-closed/i, `${name} must document diagnostic fail-closed behavior`);
+    }
+
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
+      assert.match(text, /diagnostics\.authoritative/i, `${name} must document diagnostics.authoritative`);
+      assert.match(text, /schema (?:validation )?and run-authority checks|run\.json schema and run-authority checks/i, `${name} must require schema and authority checks`);
+      assert.match(text, /not (?:enough )?to infer (?:a )?healthy run|must not be treated as healthy|cannot prove health/i, `${name} must reject non-authoritative health inference`);
+      assert.match(text, /heartbeat.*PID.*process|heartbeat\/PID\/process|PID.*process.*heartbeat/i, `${name} must mention heartbeat/PID/process evidence together`);
+      assert.match(text, /status booleans/i, `${name} must reject status booleans as authority`);
+      assert.match(text, /worktree strings/i, `${name} must reject worktree strings as authority`);
+      assert.match(text, /mutable `run\.json` claims|mutable run\.json claims/i, `${name} must reject mutable run.json claims as authority`);
+      assert.match(text, /PR, gate, branch, (?:and )?worktree claims|PR, gate, branch, or worktree claims/i, `${name} must omit trusted claims from invalid envelopes`);
+      assert.match(text, /accepted attestations plus fresh observations/i, `${name} must preserve provenance authority`);
+    }
+  });
+});
+
 function documentEntries(map) {
   return Object.entries(map);
 }
@@ -305,6 +423,10 @@ function literalPattern(value) {
 
 function helperNamePattern(name) {
   return new RegExp(`\\b${escapeRegExp(name)}(?:\\([^)]*\\))?\\b`);
+}
+
+function orderedPattern(values) {
+  return new RegExp(values.map((value) => escapeRegExp(value)).join("[\\s\\S]*"));
 }
 
 function escapeRegExp(value) {

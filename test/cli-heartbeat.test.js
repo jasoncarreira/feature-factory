@@ -214,6 +214,27 @@ describe("cli heartbeat routing", () => {
       cleanup(repo);
     }
   });
+
+  it("prints a concise diagnostics column for human factory list output without heartbeat tokens", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: "2026-07-06T11:00:00.000Z" }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatLease({ token: "secret-heartbeat-token", pid: process.pid }));
+
+    try {
+      const proc = runFactoryCli(repo, ["list"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      const line = proc.stdout.trim();
+      const columns = line.split("\t");
+      assert.equal(columns.length, 5);
+      assert.equal(columns[0], RUN_ID);
+      assert.equal(columns[1], "running");
+      assert.match(columns[4], /recoverable\/warning:Heartbeat has not advanced/u);
+      assert.equal(proc.stdout.includes("secret-heartbeat-token"), false);
+    } finally {
+      cleanup(repo);
+    }
+  });
 });
 
 function tempRepo() {
@@ -229,6 +250,17 @@ function createRunDir(repo) {
 
 function runHeartbeatCli(repo, args, runId = RUN_ID, env = {}) {
   const proc = spawnSync(process.execPath, [CLI, "factory", "heartbeat", runId, ...args], {
+    cwd: repo,
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+    timeout: 15000,
+  });
+  if (proc.error) throw proc.error;
+  return proc;
+}
+
+function runFactoryCli(repo, args, env = {}) {
+  const proc = spawnSync(process.execPath, [CLI, "factory", ...args, "--repo", repo], {
     cwd: repo,
     encoding: "utf8",
     env: { ...process.env, ...env },
@@ -323,6 +355,25 @@ function runningRun(overrides = {}) {
     security_review: null,
     pr_url: null,
     terminal_result: null,
+    ...overrides,
+  };
+}
+
+function heartbeatLease(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: RUN_ID,
+    token: "lease-1",
+    phase: "builder-wave",
+    status: "running",
+    pid: 4242,
+    started_at: "2026-07-06T11:00:00.000Z",
+    last_tick_at: "2026-07-06T11:00:00.000Z",
+    stop_requested_at: null,
+    stopped_at: null,
+    interval_ms: 1000,
+    deadline_at: "2026-07-06T12:00:00.000Z",
+    stop_reason: null,
     ...overrides,
   };
 }

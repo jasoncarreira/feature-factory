@@ -22,14 +22,14 @@ describe("TUI factory scanner", () => {
     const workspace = tempDir();
     const nested = join(workspace, "nested-repo");
     mkdirSync(nested, { recursive: true });
-    writeRun(nested, "nested", { status: "needs-human", updated_at: "2026-07-05T00:00:00Z" });
+    writeRun(nested, "nested", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
 
     const roots = findFactoryRoots(workspace);
     const runs = readRuns(roots);
 
     assert.equal(runs.length, 1);
     assert.equal(runs[0].run_id, "nested");
-    assert.equal(runs[0].status, "needs-human");
+    assert.equal(runs[0].status, "running");
     cleanup(workspace);
   });
 
@@ -48,7 +48,12 @@ describe("TUI factory scanner", () => {
     writeRun(repo, "strict-run", {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
-      review_tier: { selected: "strict", source: "default" },
+      review_tier: {
+        selected: "strict",
+        source: "default",
+        risk_reasons: [],
+        rationale: "test fixture",
+      },
     });
     writeRun(repo, "legacy-run", { status: "running", updated_at: "2026-07-04T00:00:00Z" });
 
@@ -69,7 +74,7 @@ describe("TUI factory scanner", () => {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
       slices: [
-        { id: "done", status: "merged", attempts: 1 },
+        { id: "done", status: "pending", attempts: 1 },
         { id: "docs-authority-contract", status: "running", attempts: 2 },
       ],
       steps: [{ agent: "work-decomposer", status: "running", attempts: 1 }],
@@ -89,6 +94,83 @@ describe("TUI factory scanner", () => {
     assert.equal(stepRun.current, "spec-writer running a2");
     cleanup(repo);
   });
+
+  it("projects shared diagnostic envelope fields for TUI rows", () => {
+    const repo = tempDir();
+    writeRun(repo, "gate-run", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.run_id, "gate-run");
+    assert.equal(run.diagnostics.schema_version, 1);
+    assert.equal(run.diagnostic_status, "warning");
+    assert.equal(run.diagnostic_severity, "warning");
+    assert.equal(run.diagnostic_classification, "needs-human");
+    assert.match(run.diagnostic_summary, /protected gate 'story'/i);
+    cleanup(repo);
+  });
+
+  it("keeps invalid JSON visible as a fail-closed fallback row", () => {
+    const repo = tempDir();
+    writeRawRun(repo, "bad-json", "{\n");
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.run_id, "bad-json");
+    assert.equal(run.status, "invalid");
+    assert.equal(run.branch, null);
+    assert.equal(run.diagnostic_status, "error");
+    assert.equal(run.diagnostic_severity, "critical");
+    assert.equal(run.diagnostic_classification, "invalid");
+    assert.equal(run.diagnostics.items[0].condition, "invalid-run-state");
+    cleanup(repo);
+  });
+
+  it("uses the run directory id for invalid run-state fallback rows", () => {
+    const repo = tempDir();
+    writeRawRun(repo, "bad-schema", JSON.stringify({ run_id: "untrusted-claim", status: "bogus", branch: "do-not-trust" }));
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.run_id, "bad-schema");
+    assert.equal(run.status, "invalid");
+    assert.equal(run.branch, null);
+    assert.equal(run.diagnostics.items[0].condition, "invalid-run-state");
+    cleanup(repo);
+  });
+
+  it("fails closed for unverifiable authority diagnostics", () => {
+    const repo = tempDir();
+    writeRun(repo, "unverifiable", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [{ id: "merged-without-proof", status: "merged", attempts: 1 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.run_id, "unverifiable");
+    assert.equal(run.status, "invalid");
+    assert.equal(run.diagnostic_status, "error");
+    assert.equal(run.diagnostics.items[0].condition, "unverifiable-authority");
+    cleanup(repo);
+  });
+
+  it("does not expose heartbeat tokens through diagnostic rows", () => {
+    const repo = tempDir();
+    writeRun(repo, "heartbeat-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+    });
+    writeHeartbeat(repo, "heartbeat-run", { token: "super-secret-heartbeat-token" });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.diagnostic_status, "warning");
+    assert.doesNotMatch(JSON.stringify(run.diagnostics), /super-secret-heartbeat-token/);
+    cleanup(repo);
+  });
 });
 
 function tempDir() {
@@ -106,13 +188,48 @@ function writeRun(repo, id, input) {
     run_id: id,
     status: input.status,
     updated_at: input.updated_at,
-    gates: { story: { status: "pending" } },
+    gates: input.gates === undefined ? { story: { status: "pending" } } : input.gates,
   };
   if (input.review_tier !== undefined) run.review_tier = input.review_tier;
   if (input.slices !== undefined) run.slices = input.slices;
   if (input.steps !== undefined) run.steps = input.steps;
+  if (["completed", "blocked", "partial", "needs-human"].includes(input.status)) {
+    run.terminal_result = {
+      run_id: id,
+      status: input.status,
+      reason: input.status === "completed" ? null : `${input.status} fixture`,
+    };
+  }
   writeFileSync(
     join(dir, "run.json"),
     `${JSON.stringify(run, null, 2)}\n`,
+  );
+}
+
+function writeRawRun(repo, id, contents) {
+  const dir = join(repo, ".opencode", "factory", id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "run.json"), contents);
+}
+
+function writeHeartbeat(repo, id, input = {}) {
+  const dir = join(repo, ".opencode", "factory", id);
+  writeFileSync(
+    join(dir, "heartbeat.json"),
+    `${JSON.stringify({
+      schema_version: 1,
+      run_id: id,
+      token: input.token || "heartbeat-token",
+      phase: "builder-wave",
+      status: "running",
+      pid: 999999,
+      started_at: "1970-01-01T00:00:00.000Z",
+      last_tick_at: "1970-01-01T00:00:00.000Z",
+      stop_requested_at: null,
+      stopped_at: null,
+      interval_ms: 30000,
+      deadline_at: "2099-01-01T00:00:00.000Z",
+      stop_reason: null,
+    }, null, 2)}\n`,
   );
 }

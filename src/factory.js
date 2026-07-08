@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { assertHeartbeatOwnerCapability, hasInFlightHeartbeatWork, heartbeatOnce, withRunJsonLock } from "./run-state.js";
 import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunAuthority, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunProvenanceSnapshot } from "./provenance.js";
 import { hashFile, resolveArtifactRef, resolveGateRef } from "./provenance-authority.js";
+import { diagnoseRunDir } from "./factory-diagnostics.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -22,6 +23,7 @@ const HEARTBEAT_ACTIVE_STATUSES = new Set(["active", "running"]);
 const HEARTBEAT_TERMINAL_STATUSES = new Set(["stopped", "error"]);
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
 const HEARTBEAT_OWNER_ENV = "FEATURE_FACTORY_HEARTBEAT_OWNER";
+const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state", "invalid-authority", "unverifiable-authority"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const activeHeartbeatLoops = new Map();
@@ -44,20 +46,12 @@ export function listRuns(opts = {}) {
   if (!existsSync(root)) return [];
   return readdirSync(root)
     .map((runId) => {
-      const file = join(root, runId, "run.json");
+      const runDir = join(root, runId);
+      const file = join(runDir, "run.json");
       if (!existsSync(file)) return null;
+      const diagnostics = diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo));
       const run = tryReadPublicRun(file, { ...opts, repoRoot: repo });
-      if (run.error) {
-        return {
-          run_id: runId,
-          status: "invalid",
-          gate: null,
-          review_tier: null,
-          updated_at: null,
-          path: file,
-          error: run.error,
-        };
-      }
+      if (run.error || diagnosticsFailClosed(diagnostics)) return invalidListRun(runId, file, diagnostics, run.error);
       return {
         run_id: run.value.run_id || runId,
         status: run.value.status || "unknown",
@@ -65,6 +59,7 @@ export function listRuns(opts = {}) {
         review_tier: selectedReviewTier(run.value),
         updated_at: run.value.updated_at || null,
         path: file,
+        diagnostics,
       };
     })
     .filter(Boolean)
@@ -72,6 +67,11 @@ export function listRuns(opts = {}) {
 }
 
 export function status(runId, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const runFile = join(runDir, "run.json");
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const diagnostics = diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo));
+  if (diagnosticsFailClosed(diagnostics)) return invalidStatusEnvelope(runId, runDir, runFile, diagnostics);
   const run = loadPublicRun(runId, opts);
   return {
     run_id: run.run_id,
@@ -88,6 +88,7 @@ export function status(runId, opts = {}) {
     review_tier: run.review_tier || null,
     terminal_result: run.terminal_result || null,
     updated_at: run.updated_at || null,
+    diagnostics,
   };
 }
 
@@ -275,8 +276,54 @@ export function watchRun(runId, opts = {}) {
 export function validateState(runId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDirs = runId ? [resolveRunDir(runId, opts)] : allRunDirs(opts);
-  const runs = runDirs.map((dir) => ({ run_dir: dir, ...validateRunDir(dir, { ...opts, repoRoot: repo }) }));
+  const runs = runDirs.map((dir) => {
+    const diagnostics = diagnoseRunDir(dir, publicDiagnosticOptions(opts, repo));
+    const validation = validateRunDir(dir, { ...opts, repoRoot: repo });
+    return {
+      run_dir: dir,
+      ...validation,
+      ok: validation.ok && diagnostics.status !== "error",
+      diagnostics,
+    };
+  });
   return { ok: runs.every((item) => item.ok), runs };
+}
+
+function publicDiagnosticOptions(opts, repo) {
+  return { ...opts, repoRoot: repo };
+}
+
+function invalidListRun(runId, file, diagnostics, error) {
+  return {
+    run_id: runId,
+    status: "invalid",
+    gate: null,
+    review_tier: null,
+    updated_at: null,
+    path: file,
+    error: error || diagnostics.summary || "run diagnostics failed closed",
+    diagnostics,
+  };
+}
+
+function invalidStatusEnvelope(runId, runDir, runFile, diagnostics) {
+  return {
+    run_id: fallbackRunId(runId, runDir),
+    status: "invalid",
+    path: runFile,
+    error: diagnostics.summary || "run diagnostics failed closed",
+    diagnostics,
+  };
+}
+
+function diagnosticsFailClosed(diagnostics) {
+  return Array.isArray(diagnostics?.items)
+    && diagnostics.items.some((item) => FAIL_CLOSED_DIAGNOSTIC_CONDITIONS.has(item?.condition));
+}
+
+function fallbackRunId(runId, runDir) {
+  if (typeof runId === "string" && runId.trim() && !isAbsolute(runId) && !runId.includes("/") && !runId.includes("\\")) return runId.trim();
+  return basename(runDir);
 }
 
 export function cleanupRun(runId, opts = {}) {
