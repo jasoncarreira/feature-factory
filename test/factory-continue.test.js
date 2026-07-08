@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -28,15 +28,32 @@ describe("factory continue", () => {
       assert.equal(result.status, "dry-run");
       assert.equal(result.payload.driver.ready, false);
       assert.equal(result.payload.driver.github_account, "octo-org");
+      const parentCommit = gitStdout(fixture.repo, ["rev-parse", "--verify", `refs/heads/${fixture.runId}^{commit}`]);
       assert.deepEqual(result.payload.continuation, {
-        parent_run_id: fixture.runId,
-        target_run_id: "blocked-parent-continue",
-        parent_branch: fixture.runId,
-        parent_run_ref: `.opencode/factory/${fixture.runId}/run.json`,
-        parent_run_hash: beforeRunHash,
-        review_ref: "reviews/reviewer.json",
-        review_hash: beforeReviewHash,
-        artifact_refs: [{ ref: "artifacts/story.md", hash: hashFile(join(fixture.runDir, "artifacts", "story.md")) }],
+        kind: "blocked-run-continuation",
+        schema: "feature-factory.continuation.v1",
+        schema_version: 1,
+        parent: {
+          run_id: fixture.runId,
+          status: "blocked",
+          ref: `.opencode/factory/${fixture.runId}/run.json`,
+          hash: beforeRunHash,
+          branch: fixture.runId,
+          commit: parentCommit,
+          artifact_refs: [{ ref: "artifacts/story.md", hash: hashFile(join(fixture.runDir, "artifacts", "story.md")) }],
+        },
+        review: {
+          ref: "reviews/reviewer.json",
+          hash: beforeReviewHash,
+          subject: "blocked run",
+          summary: "needs continuation",
+          required_fixes: [],
+        },
+        target: {
+          run_id: "blocked-parent-continue",
+          branch: "blocked-parent-continue",
+          worktree: join(gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]), ".opencode", "worktrees", "blocked-parent-continue"),
+        },
       });
       assert.equal(hashFile(join(fixture.runDir, "run.json")), beforeRunHash);
       assert.equal(hashFile(join(fixture.runDir, "reviews", "reviewer.json")), beforeReviewHash);
@@ -50,9 +67,68 @@ describe("factory continue", () => {
     const fixture = createFixture("fixes-review", { review: { subject: "fixes", required_fixes: ["repair tests"], verdict: "not-a-standard-verdict" } });
     try {
       const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "fixes-review-next", dryRun: true });
-      assert.equal(result.payload.continuation.review_ref, "reviews/reviewer.json");
+      assert.equal(result.payload.continuation.review.ref, "reviews/reviewer.json");
+      assert.deepEqual(result.payload.continuation.review.required_fixes, ["repair tests"]);
+      assert.equal(result.payload.continuation.review.summary, null);
     } finally {
       cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects missing parents and missing reviews", () => {
+    const missingParent = createFixture("missing-parent-source");
+    try {
+      assert.throws(
+        () => continueFactory("missing-parent", { cwd: missingParent.repo, review: "reviewer.json", runId: "missing-parent-next", dryRun: true }),
+        /run not found/u,
+      );
+    } finally {
+      cleanup(missingParent.repo);
+    }
+
+    const missingReview = createFixture("missing-review");
+    try {
+      rmSync(join(missingReview.runDir, "reviews", "reviewer.json"));
+      assert.throws(
+        () => continueFactory(missingReview.runId, { cwd: missingReview.repo, review: "reviewer.json", runId: "missing-review-next", dryRun: true }),
+        /review is unresolvable|missing/u,
+      );
+    } finally {
+      cleanup(missingReview.repo);
+    }
+  });
+
+  it("rejects invalid JSON, non-object reviews, and empty required_fixes entries without summary", () => {
+    const invalidJson = createFixture("invalid-json-review");
+    try {
+      writeFileSync(join(invalidJson.runDir, "reviews", "reviewer.json"), "{\n", "utf8");
+      assert.throws(
+        () => continueFactory(invalidJson.runId, { cwd: invalidJson.repo, review: "reviewer.json", runId: "invalid-json-next", dryRun: true }),
+        /must parse as a JSON object/u,
+      );
+    } finally {
+      cleanup(invalidJson.repo);
+    }
+
+    const nonObject = createFixture("non-object-review");
+    try {
+      writeFileSync(join(nonObject.runDir, "reviews", "reviewer.json"), "[]\n", "utf8");
+      assert.throws(
+        () => continueFactory(nonObject.runId, { cwd: nonObject.repo, review: "reviewer.json", runId: "non-object-next", dryRun: true }),
+        /must parse as a JSON object/u,
+      );
+    } finally {
+      cleanup(nonObject.repo);
+    }
+
+    const emptyFixes = createFixture("empty-fixes-review", { review: { subject: "fixes", required_fixes: ["", "   "] } });
+    try {
+      assert.throws(
+        () => continueFactory(emptyFixes.runId, { cwd: emptyFixes.repo, review: "reviewer.json", runId: "empty-fixes-next", dryRun: true }),
+        /non-empty summary or required_fixes\[\]/u,
+      );
+    } finally {
+      cleanup(emptyFixes.repo);
     }
   });
 
@@ -106,8 +182,36 @@ describe("factory continue", () => {
         () => continueFactory(unsafeTarget.runId, { cwd: unsafeTarget.repo, review: "reviewer.json", runId: "already-exists", dryRun: true }),
         /target branch already exists/u,
       );
+      mkdirSync(join(unsafeTarget.repo, ".opencode", "factory", "target-run-exists"), { recursive: true });
+      writeFileSync(join(unsafeTarget.repo, ".opencode", "factory", "target-run-exists", "run.json"), "{}\n", "utf8");
+      assert.throws(
+        () => continueFactory(unsafeTarget.runId, { cwd: unsafeTarget.repo, review: "reviewer.json", runId: "target-run-exists", dryRun: true }),
+        /target run already exists/u,
+      );
+      mkdirSync(join(unsafeTarget.repo, ".opencode", "worktrees", "target-worktree-exists"), { recursive: true });
+      assert.throws(
+        () => continueFactory(unsafeTarget.runId, { cwd: unsafeTarget.repo, review: "reviewer.json", runId: "target-worktree-exists", dryRun: true }),
+        /target worktree already exists/u,
+      );
     } finally {
       cleanup(unsafeTarget.repo);
+    }
+  });
+
+  it("rejects review symlink escapes, including an escaped parent reviews directory", () => {
+    const fixture = createFixture("symlink-review");
+    const escapedReviews = mkdtempSync(join(tmpdir(), "factory-escaped-reviews-"));
+    try {
+      writeJson(join(escapedReviews, "reviewer.json"), { subject: "escaped", summary: "outside parent run" });
+      rmSync(join(fixture.runDir, "reviews"), { recursive: true, force: true });
+      symlinkSync(escapedReviews, join(fixture.runDir, "reviews"), "dir");
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "symlink-review-next", dryRun: true }),
+        /reviews\//u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+      cleanup(escapedReviews);
     }
   });
 
@@ -118,7 +222,7 @@ describe("factory continue", () => {
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
       assert.equal(output.status, "dry-run");
-      assert.equal(output.payload.continuation.target_run_id, "cli-parent-next");
+      assert.equal(output.payload.continuation.target.run_id, "cli-parent-next");
       assert.equal(output.payload.driver.ready, false);
 
       assert.match(
@@ -176,6 +280,12 @@ function runCli(repo, args) {
 function runGit(repo, args) {
   const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
   assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+}
+
+function gitStdout(repo, args) {
+  const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+  return proc.stdout.trim();
 }
 
 function hashFile(file) {

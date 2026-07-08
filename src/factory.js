@@ -46,7 +46,7 @@ export function continueFactory(parentRunId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
 
-  const prompt = `Continue blocked feature-factory run '${continuation.parent_run_id}' as '${continuation.target_run_id}' using review '${continuation.review_ref}'.`;
+  const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
   const payload = featureCommandPayload(prompt, { ...opts, repo, ready: false, continuation });
   if (opts.dryRun) return { status: "dry-run", payload };
 
@@ -508,17 +508,31 @@ function buildContinuation(parentRunId, opts = {}) {
   const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
   assertContinuationTargetAvailable(repo, targetRunId);
   const review = resolveContinuationReview(parentRunDir, requiredContinuationReview(opts.review));
-  validateContinuationReview(readReviewJson(review.path), review.ref);
+  const reviewMetadata = validateContinuationReview(readReviewJson(review.path), review.ref);
 
   return {
-    parent_run_id: parentRun.run_id,
-    target_run_id: targetRunId,
-    parent_branch: parentRun.branch,
-    parent_run_ref: relativeRef(repo, parentRunFile),
-    parent_run_hash: sha256File(parentRunFile),
-    review_ref: review.ref,
-    review_hash: sha256File(review.path),
-    artifact_refs: collectHashedRefs(join(parentRunDir, "artifacts"), "artifacts"),
+    kind: "blocked-run-continuation",
+    schema: "feature-factory.continuation.v1",
+    schema_version: 1,
+    parent: {
+      run_id: parentRun.run_id,
+      status: parentRun.status,
+      ref: relativeRef(repo, parentRunFile),
+      hash: sha256File(parentRunFile),
+      branch: parentRun.branch,
+      commit: branchCommit(repo, parentRun.branch),
+      artifact_refs: collectHashedRefs(join(parentRunDir, "artifacts"), "artifacts"),
+    },
+    review: {
+      ref: review.ref,
+      hash: sha256File(review.path),
+      ...reviewMetadata,
+    },
+    target: {
+      run_id: targetRunId,
+      branch: targetRunId,
+      worktree: resolve(repo, ".opencode", "worktrees", targetRunId),
+    },
   };
 }
 
@@ -549,8 +563,11 @@ function resolveContinuationReview(parentRunDir, reviewRef) {
   if (isAbsolute(reviewRef) || reviewRef.includes("\\")) {
     throw new Error("--review must resolve under the parent run reviews/ directory");
   }
-  const parentReviewsDir = resolveExistingDirectory(join(parentRunDir, "reviews"), "reviews directory");
   const parentRunPhysical = physicalPath(parentRunDir, "parent run directory", { mustExist: true });
+  const parentReviewsDir = resolveExistingDirectory(join(parentRunDir, "reviews"), "reviews directory");
+  if (!isContainedPath(parentRunPhysical, parentReviewsDir, { allowEqual: false })) {
+    throw new Error("--review must resolve under the parent run reviews/ directory");
+  }
   const relativeReviewRef = reviewRef.startsWith("reviews/") ? reviewRef : `reviews/${reviewRef}`;
   const reviewPath = resolve(parentRunPhysical, relativeReviewRef);
   const reviewPhysical = physicalPath(reviewPath, "review", { mustExist: true });
@@ -573,11 +590,23 @@ function readReviewJson(file) {
 
 function validateContinuationReview(review, ref) {
   if (!stringValue(review.subject)) throw new Error(`review '${ref}' must have non-empty subject`);
-  const hasSummary = stringValue(review.summary);
-  const hasRequiredFixes = Array.isArray(review.required_fixes) && review.required_fixes.length > 0;
+  const summary = stringValue(review.summary) ? String(review.summary).trim() : null;
+  const requiredFixes = normalizeRequiredFixes(review.required_fixes);
+  const hasSummary = summary !== null;
+  const hasRequiredFixes = requiredFixes.length > 0;
   if (!hasSummary && !hasRequiredFixes) {
     throw new Error(`review '${ref}' must have non-empty summary or required_fixes[]`);
   }
+  return {
+    subject: String(review.subject).trim(),
+    summary,
+    required_fixes: requiredFixes,
+  };
+}
+
+function normalizeRequiredFixes(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter(stringValue).map((item) => String(item).trim());
 }
 
 function collectHashedRefs(dir, refPrefix) {
@@ -601,6 +630,12 @@ function collectHashedRefsEntry(baseDir, refPrefix, name) {
 
 function branchExists(repo, branch) {
   return git(repo, ["show-ref", "--verify", `refs/heads/${branch}`]).ok;
+}
+
+function branchCommit(repo, branch) {
+  const proc = git(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (!proc.ok) throw new Error(`parent run requires resolvable branch commit for '${branch}'`);
+  return proc.stdout.trim();
 }
 
 function sha256File(file) {
