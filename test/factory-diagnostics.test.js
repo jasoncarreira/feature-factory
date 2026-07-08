@@ -127,6 +127,48 @@ describe("factory diagnostics run inspection", () => {
     }
   });
 
+  it("rejects heartbeat sidecars for a different run before using liveness fields", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: "2026-07-08T11:00:00.000Z" }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatLease({
+      run_id: "different-run",
+      token: "secret-heartbeat-token",
+      last_tick_at: "2026-07-08T11:00:00.000Z",
+      pid: 987654321,
+    }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
+      assert.equal(diagnostics.authoritative, false);
+      assert.equal(diagnostics.classification, "invalid");
+      assert.deepEqual(diagnostics.items.map((item) => item.condition), ["invalid-run-state"]);
+      assert.match(diagnostics.items[0].message, /heartbeat\.run_id/u);
+      const serialized = JSON.stringify(diagnostics);
+      assert.doesNotMatch(serialized, /secret-heartbeat-token/u);
+      assert.doesNotMatch(serialized, /stale-heartbeat|missing-heartbeat-process/u);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("fails closed for unanchored active runs even with a fresh mutable heartbeat timestamp", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: "2026-07-08T11:59:59.000Z" }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT });
+      assert.equal(diagnostics.authoritative, false);
+      assert.equal(diagnostics.status, "error");
+      assert.equal(diagnostics.classification, "blocked");
+      assert.notEqual(diagnostics.classification, "healthy");
+      assert.deepEqual(diagnostics.items.map((item) => item.condition), ["unverifiable-authority"]);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("reports invalid sidecar schema as invalid-run-state before liveness checks", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);

@@ -183,7 +183,7 @@ export function diagnoseRunObject(input, options = {}) {
     ], { checkedAt, authoritative: false });
   }
 
-  const invalidSidecar = runDir ? inspectSidecars(runDir, checkedAt) : null;
+  const invalidSidecar = runDir ? inspectSidecars(runDir, checkedAt, run) : null;
   if (invalidSidecar) {
     return diagnosticEnvelope([invalidSidecar], { checkedAt, authoritative: false });
   }
@@ -194,8 +194,8 @@ export function diagnoseRunObject(input, options = {}) {
     return diagnosticEnvelope(items, { checkedAt, authoritative: false });
   }
 
-  const authoritative = Boolean(runDir && authority.authoritative !== false);
   const terminal = TERMINAL_STATUSES.has(run.status);
+  const authoritative = Boolean(runDir && authority.authoritative !== false);
   const protectedGate = pendingProtectedGate(run);
 
   if (terminal) {
@@ -228,7 +228,11 @@ export function diagnoseRunObject(input, options = {}) {
   const missingWorktree = inspectWorktree(run, { ...options, checkedAt, runDir, authoritative });
   if (missingWorktree) items.push(missingWorktree);
 
-  return diagnosticEnvelope(items, { checkedAt, authoritative: authoritative && !items.some((item) => item.condition === "invalid-run-state") });
+  if (!terminal && runDir && !hasAcceptedRunAuthority(authority, options) && items.length === 0) {
+    items.push(unverifiableActiveAuthorityItem({ checkedAt, runDir, runFile }));
+  }
+
+  return diagnosticEnvelope(items, { checkedAt, authoritative: authoritative && !items.some((item) => item.condition === "invalid-run-state" || item.condition === "unverifiable-authority") });
 }
 
 export function diagnosticEnvelope(items = [], options = {}) {
@@ -318,6 +322,26 @@ function validateAuthority(runDir, run, options) {
   };
 }
 
+function hasAcceptedRunAuthority(authority, options = {}) {
+  if (typeof options.validateRunAuthorityFn === "function") return authority?.authoritative !== false;
+  if (authority?.authoritative === false) return false;
+  return Array.isArray(authority?.orderedRefs) && authority.orderedRefs.length > 0;
+}
+
+function unverifiableActiveAuthorityItem({ checkedAt, runDir, runFile }) {
+  return diagnosticItem("unverifiable-authority", {
+    checkedAt,
+    authoritative: false,
+    message: "Active factory run authority cannot be verified from accepted run-base or attestation proofs.",
+    evidence: {
+      source: "provenance-authority",
+      run_dir: runDir,
+      run_path: runFile,
+      errors: [{ path: "attestations/index.json", message: "active run requires an accepted run-base attestation or authority proof" }],
+    },
+  });
+}
+
 function authorityItem(authority, { checkedAt, runDir, runFile }) {
   const message = formatValidationErrors(authority.errors) || CONDITION_DEFINITIONS[authority.condition].message;
   return diagnosticItem(authority.condition, {
@@ -342,7 +366,7 @@ function terminalRunItem(run, options) {
   });
 }
 
-function inspectSidecars(runDir, checkedAt) {
+function inspectSidecars(runDir, checkedAt, run) {
   const checks = [
     { path: join(runDir, HEARTBEAT_FILE), source: HEARTBEAT_FILE, validator: validateHeartbeatState },
     { path: join(runDir, "factory.lock"), source: "factory.lock", validator: validateFactoryLock },
@@ -351,7 +375,22 @@ function inspectSidecars(runDir, checkedAt) {
   for (const check of checks) {
     if (!existsSync(check.path)) continue;
     try {
-      check.validator(JSON.parse(readFileSync(check.path, "utf8")));
+      const sidecar = check.validator(JSON.parse(readFileSync(check.path, "utf8")));
+      if (check.source === HEARTBEAT_FILE && sidecar.run_id !== run.run_id) {
+        return diagnosticItem("invalid-run-state", {
+          checkedAt,
+          authoritative: false,
+          message: "Factory sidecar state contradicts run.json: heartbeat.run_id does not match run.run_id.",
+          evidence: {
+            source: check.source,
+            run_dir: runDir,
+            path: check.path,
+            error: "heartbeat.run_id does not match run.run_id",
+            run_id: run.run_id,
+            heartbeat_run_id: sidecar.run_id,
+          },
+        });
+      }
     } catch (error) {
       return diagnosticItem("invalid-run-state", {
         checkedAt,
@@ -375,6 +414,9 @@ function inspectHeartbeat(run, options) {
   if (heartbeatPath && existsSync(heartbeatPath)) {
     try {
       heartbeat = validateHeartbeatState(JSON.parse(readFileSync(heartbeatPath, "utf8")));
+      if (heartbeat.run_id !== run.run_id) {
+        return { invalid: true, error: "heartbeat.run_id does not match run.run_id", path: heartbeatPath };
+      }
       source = "heartbeat.json";
     } catch (error) {
       return { invalid: true, error: error.message, path: heartbeatPath };
