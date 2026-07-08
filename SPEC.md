@@ -482,7 +482,230 @@ feature-factory install --profile '{"model":"openai/gpt-5.5","variant":"xhigh"}'
 feature-factory install --profiles-file profiles.json
 ```
 
-## 12. Non-Goals
+## 12. OpenTelemetry GenAI Instrumentation
+
+Add opt-in OpenTelemetry tracing for feature-factory runs, shaped to work with the OpenTelemetry GenAI semantic conventions and Honeycomb Agent Timeline. The goal is to make one factory run debuggable as a conversation timeline across the orchestrator, subagents, tool calls, gates, slices, validation, PR creation, and terminal state.
+
+Reference design target: <https://www.honeycomb.io/blog/instrumenting-ai-agents-agent-timeline-opentelemetry-guide>
+
+Relevant upstream context:
+
+- `anomalyco/opencode#5245` is an old, still-open, merge-conflicted attempt to add direct OpenTelemetry setup to opencode.
+- The useful comments on that PR say current opencode can emit AI SDK spans when `experimental.openTelemetry` is enabled and an OpenTelemetry SDK/exporter is initialized.
+- Those native AI SDK spans were reported as `ai.streamText`, `ai.toolCall`, and `ai.streamText.doStream`, and may include full prompt text.
+- Current opencode has native OTLP setup under `packages/core/src/observability/otlp.ts`, gates AI SDK telemetry with `experimental.openTelemetry`, and reads standard `OTEL_EXPORTER_OTLP_*` env vars.
+- The external `@devtheops/opencode-plugin-otel` plugin provides mature generic opencode telemetry, metrics, logs, trace export, and `traceparent` support, but it does not know feature-factory run/gate/slice/provenance semantics and uses OpenInference-style attributes rather than Honeycomb Agent Timeline's `gen_ai.*` contract.
+
+Current feature-factory state: the factory has durable local artifacts (`run.json`, `evidence/*`, `reviews/*`, attestations, heartbeat, process logs), but no factory-specific emitted telemetry. Debugging a failed run requires reading local files and logs manually.
+
+Goals:
+
+- Keep telemetry vendor-neutral through OpenTelemetry APIs and OTLP export.
+- Prefer native opencode/AI SDK telemetry for generic LLM and tool execution spans when available.
+- Avoid duplicating generic opencode telemetry that native opencode or `@devtheops/opencode-plugin-otel` already provides.
+- Make each factory run appear as one Agent Timeline conversation.
+- Show agent swim lanes for `feature-factory`, story/spec/decomposition agents, builders, reviewers, validators, and security review.
+- Show tool calls and downstream factory operations with enough metadata to debug failures.
+- Correlate local durable artifacts with spans through stable refs and hashes, not raw large payloads.
+- Keep telemetry optional and safe by default.
+
+Non-goals for the first implementation:
+
+- No telemetry enabled by default.
+- No Honeycomb-only API dependency in core code.
+- No first-pass generic OTLP exporter/metrics clone inside feature-factory.
+- No default capture of prompts, responses, tool arguments, tool outputs, gate answers, diffs, reviews, or evidence bodies.
+- No use of telemetry as provenance authority. Local attestations and fresh observations remain the authority model.
+- No opencode core fork as a prerequisite for the first useful version. If native opencode span enrichment is needed later, design it as an upstream contribution.
+
+### Native OpenCode Interop
+
+Feature-factory telemetry should compose with three possible operator setups:
+
+1. Native opencode OTel: `experimental.openTelemetry: true` plus `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS`.
+2. Companion plugin: `@devtheops/opencode-plugin-otel` or similar initializes SDK/exporters and emits generic opencode metrics/logs/traces.
+3. Feature-factory-only metadata spans: feature-factory emits run/gate/slice spans, but generic LLM/tool spans may be absent.
+
+The preferred first implementation is option 1 or 2 plus feature-factory-specific correlation. Do not add heavyweight exporter dependencies to feature-factory until we prove native opencode and companion plugin paths cannot provide enough plumbing.
+
+Initial feature-factory code should depend only on `@opentelemetry/api` if possible. That lets the plugin and CLI create spans when a provider is already initialized, while remaining a no-op when telemetry is disabled or no SDK exists. Add SDK/exporter dependencies only for a later phase that explicitly needs root CLI spans from the `feature-factory` process itself.
+
+Native AI SDK spans are valuable but insufficient for the Agent Timeline by themselves because they may not include `gen_ai.conversation.id`, `gen_ai.agent.name`, or factory run metadata. Feature-factory must either emit bridge/parent spans with the required GenAI attributes or, in a later upstream opencode change, enrich native AI SDK spans with conversation and agent attributes.
+
+### Conversation And Span Model
+
+Use `run.run_id` as `gen_ai.conversation.id` once a run exists. Before run creation is observable, use a generated `feature_factory.execution_id` or `sessionID` as a temporary correlation key and attach the eventual `run_id` when it is known.
+
+Every feature-factory GenAI span should include:
+
+- `gen_ai.conversation.id`: factory `run_id` when available.
+- `gen_ai.agent.name`: the agent that owns the operation.
+- `gen_ai.operation.name`: one of `invoke_agent`, `chat`, `execute_tool`, `gate_decision`, `validate`, `create_pr`, `cleanup`, or `heartbeat`.
+- `feature_factory.run_id`: duplicate run id under the package namespace for non-GenAI queries.
+- `feature_factory.mode`: `interactive`, `headless`, or `autonomous`.
+- `feature_factory.review_tier`: selected review tier when known.
+- `feature_factory.status`: current run/slice/gate status when relevant.
+
+Native opencode spans may only carry generic attributes such as `session.id` or AI SDK span names. For phase 1, it is acceptable if those spans live in the same trace but do not independently satisfy Agent Timeline grouping, as long as feature-factory emits adjacent/parent spans with `gen_ai.conversation.id` and stable artifact refs. Phase 2 should pursue native span enrichment if Honeycomb Agent Timeline requires every model/tool span to carry the conversation id.
+
+Prefer additional package-scoped attributes for factory-specific concepts instead of overloading GenAI attributes:
+
+- `feature_factory.gate.name`
+- `feature_factory.gate.status`
+- `feature_factory.slice.id`
+- `feature_factory.slice.stack`
+- `feature_factory.slice.attempt`
+- `feature_factory.step.agent`
+- `feature_factory.artifact.ref`
+- `feature_factory.review.ref`
+- `feature_factory.evidence.ref`
+- `feature_factory.pr.url`
+- `feature_factory.terminal.status`
+- `feature_factory.terminal.reason_type`
+
+Avoid absolute local paths by default. When a path is needed, prefer repo-relative refs already present in durable artifacts. If an absolute path is operationally useful, put it behind an explicit `includePaths` option.
+
+### Span Taxonomy
+
+| Span name | Source | Required attributes | Notes |
+|---|---|---|---|
+| `factory.start` | `src/factory.js` `startFactory()` | `feature_factory.mode`, `feature_factory.repo`, `feature_factory.execution_id` | Root CLI/control-plane span for `feature-factory factory start`. |
+| `invoke_agent feature-factory` | plugin `command.execute.before` and CLI launch | `gen_ai.agent.name=feature-factory`, `gen_ai.operation.name=invoke_agent` | Correlates `/feature` command admission with the factory run. |
+| `invoke_agent <agent>` | opencode task/tool hooks when visible | caller `gen_ai.agent.name`, `feature_factory.target_agent.name` | Shows multi-agent handoffs. The caller emits the handoff span. |
+| `chat <model>` | native opencode AI SDK OTel, plus feature-factory bridge spans when needed | `gen_ai.operation.name=chat`, `gen_ai.request.model` | Native spans may be named `ai.streamText` / `ai.streamText.doStream`; feature-factory should not duplicate payload capture. |
+| `execute_tool <tool>` | native opencode AI SDK OTel or plugin events | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id` | Native spans may be named `ai.toolCall`; feature-factory adds run/slice/gate context when available. |
+| `factory.gate <gate>` | `transitionGateDecision()` / CLI gate commands | gate attributes and answer source | Do not attach raw gate answers unless content capture is explicitly enabled. |
+| `factory.step <agent>` | `transitionRunStep()` | step agent/status/attempt | Records spec/decomposition/test/validation/security phase transitions. |
+| `factory.slice <slice>` | slice state transitions | slice id/stack/status/attempt | Records builder/reviewer/remediation progress. |
+| `factory.validate` | `validateState()` | validation ok/error counts | Includes authority validation failures as span errors. |
+| `factory.heartbeat` | heartbeat helper | heartbeat phase/status | Useful for detecting stalls and zombie runs. |
+| `factory.cleanup` | `cleanupRun()` | removed/skipped counts | Operator span, not part of normal build timeline unless `run_id` is available. |
+
+Use OpenTelemetry error status and `error.type` on failed spans. This is required for Agent Timeline failure filtering.
+
+### Content Capture And Redaction
+
+Default content policy:
+
+- `captureMessages: false`
+- `captureToolArguments: false`
+- `captureToolResults: false`
+- `captureReviews: false`
+- `captureEvidence: false`
+
+Important native-opencode caveat: AI SDK telemetry may capture full prompt and tool payload data outside feature-factory's own redaction path. `doctor --telemetry` should warn when native opencode OTel is enabled and the current opencode/AI SDK setup is known or suspected to record inputs/outputs. Production use should require one of:
+
+- upstream opencode/AI SDK settings that disable prompt/output recording;
+- an OpenTelemetry Collector redaction processor;
+- a trusted non-production telemetry environment;
+- or feature-factory telemetry only, without native AI SDK content spans.
+
+When content capture is explicitly enabled, redact before setting span attributes or events. Reuse or share the same token-shaped redaction rules as diagnostic provenance redaction so telemetry cannot leak values like `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer tokens, SSH keys, or high-entropy credential-shaped strings.
+
+All captured content should be capped before export:
+
+- default max string attribute bytes: `4096`;
+- default max array entries: `20`;
+- default max object depth: `4`;
+- replace truncated content with a marker and byte count.
+
+Telemetry should record artifact refs and content hashes by default, not artifact bodies.
+
+### Configuration
+
+Prefer standard OpenTelemetry environment variables for exporter configuration:
+
+```sh
+FEATURE_FACTORY_OTEL_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
+OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=${HONEYCOMB_API_KEY},x-honeycomb-dataset=feature-factory
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=dev,feature_factory.enabled=true
+```
+
+Native opencode LLM/tool spans also require opencode config:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "experimental": {
+    "openTelemetry": true
+  }
+}
+```
+
+Plugin options may override package-specific behavior, but should not require secrets in `opencode.jsonc`:
+
+```jsonc
+{
+  "plugin": [
+    [
+      "opencode-feature-factory",
+      {
+        "telemetry": {
+          "enabled": true,
+          "mode": "native-opencode",
+          "captureMessages": false,
+          "captureToolArguments": false,
+          "captureToolResults": false,
+          "includePaths": false,
+          "maxAttributeBytes": 4096
+        }
+      }
+    ]
+  ]
+}
+```
+
+`feature-factory doctor --telemetry` should validate telemetry setup without requiring a real factory run:
+
+- OTel enabled/disabled status.
+- service name.
+- exporter endpoint configured or missing.
+- headers present without printing values.
+- whether opencode config enables `experimental.openTelemetry`.
+- whether a companion opencode telemetry plugin is configured.
+- whether current opencode is expected to emit native AI SDK spans.
+- whether package instrumentation can be loaded.
+- whether content capture is enabled and redaction is active.
+- whether native AI SDK spans may include full prompt/output content.
+
+### Implementation Plan
+
+1. Add `src/telemetry.js` with a no-op default, `@opentelemetry/api` wrappers, redaction helpers, and helpers such as `withSpan()`, `recordError()`, and `runAttributes()`.
+2. Add `feature-factory doctor --telemetry` to detect native opencode OTel config, OTLP env vars, companion telemetry plugins, and risky native prompt/output capture.
+3. Propagate `OTEL_EXPORTER_OTLP_*`, `OTEL_RESOURCE_ATTRIBUTES`, W3C trace context when available, and `feature_factory.execution_id` into spawned `opencode run` processes. Do not strip operator-provided OTel env.
+4. Instrument feature-factory plugin hooks in `src/plugin.js`: `command.execute.before`, `chat.message`, `chat.params`, `tool.execute.before`, `tool.execute.after`, and `event` where useful. Prefer adding run/gate/slice attributes and bridge spans over duplicating generic model/tool payload spans.
+5. Instrument durable state transition helpers in `src/run-state.js` so spans/events are emitted when opencode-run node scripts update gates, steps, slices, PR-created/opened state, validation, or terminal results.
+6. Instrument CLI/control-plane boundaries in `src/factory.js`: start, detached start, validate, cleanup, gate answer, heartbeat start/stop/tick. If no SDK is initialized in the CLI process, these spans may be no-op in phase 1; the important part is trace/context propagation into opencode.
+7. Add tests with an in-memory span exporter covering disabled mode, enabled mode, redaction, tool span lifecycle, run-id correlation, and error status.
+8. Extend package smoke tests to prove telemetry dependencies do not break published install/import surfaces when no OTel env is configured.
+9. Document setup for native opencode OTel, companion plugin OTel, and Honeycomb OTLP, including prompt-capture warnings.
+10. Only after phase 1 evidence, decide whether feature-factory needs its own SDK/exporter dependency for CLI root spans.
+
+### Known Limitations And Open Questions
+
+- Native opencode OTel may provide AI SDK spans without Agent Timeline `gen_ai.*` attributes. We may need bridge spans or an upstream opencode contribution to enrich native spans.
+- Native AI SDK spans may include full prompts/tool payloads outside feature-factory redaction. This requires upstream controls or collector redaction before production use.
+- Plugin-only tool spans may miss failed tool executions if opencode does not call `tool.execute.after` on failure. If this matters, add or consume an opencode hook that fires in `finally` with error metadata.
+- `chat.params` exposes request metadata but not guaranteed final token usage or response model. Full `gen_ai.usage.*`, `gen_ai.response.model`, and finish reason support may require native opencode telemetry, opencode events, or richer hooks.
+- Subagent handoffs are visible through task/tool flows only if opencode surfaces enough tool metadata to identify the target agent reliably.
+- Detached runs need careful context propagation because parent and child processes are separate. The parent should inject trace context into the child environment; the child/plugin should extract it.
+- Telemetry cardinality must be controlled. Use run ids and artifact refs intentionally, but do not attach large or unbounded values.
+- `@devtheops/opencode-plugin-otel` is useful as a companion/reference, but it is MPL-2.0 licensed. Do not copy its code into this MIT package without explicit license review.
+
+### Acceptance Criteria
+
+- Telemetry is off by default and adds no exporter/network side effects unless explicitly enabled.
+- `doctor --telemetry` reports native opencode OTel readiness, OTLP env readiness, companion plugin presence, and content-capture risk.
+- With telemetry enabled and native opencode OTel configured, `factory start --detached` and normal foreground starts produce native opencode AI SDK spans plus feature-factory correlation spans in the same trace when possible.
+- Spans include the three Agent Timeline attributes where applicable: `gen_ai.conversation.id`, `gen_ai.agent.name`, and `gen_ai.operation.name`.
+- Factory tool/bridge spans include `gen_ai.tool.name` and `gen_ai.tool.call.id` when tool metadata is available.
+- Errors set OpenTelemetry error status and `error.type`.
+- Secret-shaped values are redacted before export, including token-shaped values that do not contain literal `secret`, `token`, or `password` words.
+- The docs warn that native opencode/AI SDK spans may capture prompts unless upstream or collector redaction is configured.
+- Tests prove disabled mode, enabled mode, redaction, and package smoke behavior.
+
+## 13. Non-Goals
 
 - No default telemetry.
 - No tracker-specific logic in core.
@@ -501,7 +724,8 @@ feature-factory install --profiles-file profiles.json
 6. Planner interview mode prompt update.
 7. Stale/watch helpers.
 8. Better install flow.
-9. Package layering refactor, once code volume warrants it.
-10. Optional fallback model design, pending opencode support.
+9. OpenTelemetry GenAI instrumentation, metadata-only and opt-in first.
+10. Package layering refactor, once code volume warrants it.
+11. Optional fallback model design, pending opencode support.
 
 None of these are prerequisites for a first supervised run. The factory is runnable now; one real run should feed the next reprioritization pass.

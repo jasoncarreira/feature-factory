@@ -51,6 +51,44 @@ Then restart opencode. Config is loaded at startup.
 
 Local installs configure the package root, not `src/plugin.js`, so opencode can discover both the server plugin and the TUI sidebar export.
 
+## Package Surface
+
+The published package exposes only the release-supported entry points declared in `package.json`:
+
+- `import "opencode-feature-factory"` and `import "opencode-feature-factory/server"` load the server plugin registration.
+- `import "opencode-feature-factory/tui"` loads the generated TUI sidebar module from `dist/tui.js`.
+- The `feature-factory` bin runs the CLI.
+- `import "opencode-feature-factory/cli"` remains available as the existing CLI subpath.
+
+`dist/` is generated during packing and included in the published files; it is not edited or committed as source.
+
+## Release Checks
+
+Run the package gates before publishing or handing off a release branch:
+
+```sh
+npm run test:unit
+npm run smoke:pack
+npm run check
+```
+
+- `npm run test:unit` runs the deterministic unit test suite.
+- `npm run smoke:pack` builds the generated TUI through `prepack`, creates an npm package tarball, installs it into a fresh temporary project, and verifies the published package, bin, exports, plugin registration, and TUI import surfaces.
+- `npm run check` is the release-safe aggregate gate and currently runs unit tests followed by package smoke.
+
+Package smoke intentionally avoids launching interactive opencode. It checks deterministic package and registration surfaces only, so failures point to publish/install/export regressions rather than interactive terminal state.
+
+## Local Diagnostics
+
+Use doctor checks when diagnosing a developer machine or local opencode install; keep them separate from release gates because they depend on local tools, config, credentials, and repository state:
+
+```sh
+feature-factory doctor --local
+npm run doctor:local
+```
+
+Both commands run the local doctor path; the npm script is a convenience wrapper around `feature-factory doctor --local` for this checkout.
+
 ## Use In opencode
 
 ```text

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { cleanupRun, heartbeatStatus, listRuns, persistFactoryRunCreatedProvenance, persistFactoryRunResumeProvenance, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectProvenance } from "./provenance.js";
+import { readJsoncConfig } from "./config.js";
 import { canonicalizeGithubPrUrl } from "./provenance-authority.js";
 import { assertHeartbeatOwnerCapability, heartbeatOnce, transitionGateDecision, transitionPrCreated } from "./run-state.js";
 import { HEARTBEAT_PHASES, HEARTBEAT_PROTECTED_GATES, validateRun } from "./validate.js";
@@ -58,10 +59,11 @@ async function main(argv) {
 
 function install(args) {
   const local = args.includes("--local");
-  const configPath = join(homedir(), ".config", "opencode", "opencode.jsonc");
+  const home = homedir();
+  const configPath = join(home, ".config", "opencode", "opencode.jsonc");
   mkdirSync(dirname(configPath), { recursive: true });
   const pluginSpec = local ? localPluginSpec() : "opencode-feature-factory";
-  const cfg = readConfig(configPath);
+  const cfg = readJsoncConfig(configPath);
   cfg.$schema ??= "https://opencode.ai/config.json";
   cfg.plugin ??= [];
   const oldSpec = local ? oldLocalPluginSpec() : null;
@@ -73,6 +75,28 @@ function install(args) {
   console.log(`configured opencode plugin: ${pluginSpec}`);
   console.log(`updated: ${configPath}`);
   console.log("restart opencode for plugin changes to take effect");
+  warnGlobalFeatureSkillConflicts(findGlobalFeatureSkillConflicts(home));
+}
+
+function findGlobalFeatureSkillConflicts(home) {
+  return [
+    join(home, ".config", "opencode", "skills", "feature", "SKILL.md"),
+    join(home, ".config", "opencode", "skill", "feature", "SKILL.md"),
+    join(home, ".claude", "skills", "feature", "SKILL.md"),
+    join(home, ".agents", "skills", "feature", "SKILL.md"),
+  ].filter((path) => existsSync(path));
+}
+
+function warnGlobalFeatureSkillConflicts(paths) {
+  if (!paths.length) return;
+  console.warn([
+    "",
+    "WARNING: existing global feature skill detected.",
+    "These files are not installed or managed by opencode-feature-factory and can shadow or conflict with the plugin's current feature workflow:",
+    ...paths.map((path) => `- ${path}`),
+    "Remove stale files, or replace them with a delegator that reads the repo-seeded .opencode/skills/feature/SKILL.md before mutating factory state.",
+    "Restart opencode after changing skill files.",
+  ].join("\n"));
 }
 
 async function doctor(args) {
@@ -676,13 +700,6 @@ function stringValue(value) {
 
 function sleep(ms) {
   return new Promise((nextResolve) => setTimeout(nextResolve, ms));
-}
-
-function readConfig(path) {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, "utf8");
-  const stripped = raw.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim();
-  return stripped ? JSON.parse(stripped) : {};
 }
 
 function localPluginSpec() {

@@ -518,13 +518,13 @@ Slice status values: `pending`, `running`, `review`, `merged`, `blocked`.
 
 Step status values: `running`, `accepted`, `rejected`, `blocked`.
 
-Reviewer-designated agents are only `work-reviewer`, `implementation-validator`, and `security-reviewer`. After each invocation, before accepting or writing the reviewer result, check the reviewed worktree with `git -C <reviewed_worktree> status --porcelain=v1 --untracked-files=all` or equivalent `src/review-guard.js` semantics:
+Reviewer-designated agents are only `work-reviewer`, `implementation-validator`, and `security-reviewer`. Reviewer prompts must state that the reviewed worktree is read-only and must not be modified. After each invocation, before accepting or writing the reviewer result, check the reviewed worktree with `git -C <reviewed_worktree> status --porcelain=v1 --untracked-files=all` or equivalent `src/review-guard.js` semantics:
 
 - `clean`: exit `0` and empty stdout
 - `dirty`: exit `0` and non-empty stdout
 - `unverifiable`: non-zero exit
 
-These are guard/helper outcomes, not new normal review verdict enums. If the guard is `dirty` or `unverifiable`, discard the reviewer output and write a separate blocked report shape.
+These are guard/helper outcomes, not new normal review verdict enums. If the guard is `dirty`, discard the reviewer output, capture the dirty state, and prefer a bounded recovery/retry when the dirty changes are safely attributable to the reviewer and the worktree can be restored to the observed clean commit/tree. If recovery is unsafe, retry fails, or the guard is `unverifiable`, write a separate blocked report shape.
 
 This schema documents post-run git-visible dirty-state detection only, not OS/process sandboxing. Ignored files, committed or reverted mutations, effects outside the reviewed worktree, and non-git-visible side effects remain out of scope.
 
@@ -681,7 +681,7 @@ Severity values: `blocker`, `major`, `minor`.
 
 ### Guard-block review report
 
-Use a separate blocked report shape when a reviewer-designated agent returns but the reviewed worktree guard is `dirty` or `unverifiable`. Do not add new normal verdict enum values for this case.
+Use a separate blocked report shape when a reviewer-designated agent returns but the reviewed worktree guard remains `dirty` after bounded recovery/retry, or is `unverifiable`. Do not add new normal verdict enum values for this case.
 
 ```json
 {

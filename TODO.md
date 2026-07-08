@@ -59,6 +59,14 @@
   - If prior durable state is available, recover from it and reconcile with git branch/commit evidence.
   - If prior durable state cannot be recovered, fail loudly with terminal `blocked` or `needs-human` plus clear `terminal_result.reason`.
 
+- Automated blocked-run continuation
+  - Add a `factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>` workflow.
+  - Treat the blocked branch/worktrees and review artifacts as read-only source context.
+  - Use the final/blocking review as the remediation spec seed while preserving the original story/brief as scope boundaries.
+  - Record parent run, blocked branch/commit, review ref/hash, and original artifact refs in continuation provenance.
+  - Fail closed if the blocked branch, review, or provenance cannot be verified.
+  - Open a draft PR only after the normal validator/security gates pass.
+
 - Crash-durability for atomic writes
   - Consider fsync-on-rename for `run.json` and heartbeat writes if crash durability is required.
   - Current atomic rename gives atomic visibility, not necessarily durable persistence across power loss.
@@ -90,6 +98,12 @@
   - Feed reviewers prior findings as input without preserving reviewer execution context.
 
 ### Observability And Cost
+
+- Honeycomb OpenTelemetry enablement
+  - First milestone: enable native opencode OTel export to Honeycomb and verify traces with a small factory run.
+  - Estimate: 30-90 minutes for basic export; 1-2 days for feature-factory run correlation; 2-4 days for production-safe redaction/docs/tests.
+  - Follow the design in `SPEC.md#12-opentelemetry-genai-instrumentation`.
+  - Include `doctor --telemetry` readiness checks for `experimental.openTelemetry`, `OTEL_EXPORTER_OTLP_*`, companion plugin presence, and prompt-capture risk.
 
 - Cost attribution
   - Record per-agent and per-slice token/cost usage.
