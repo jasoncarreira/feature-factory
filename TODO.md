@@ -35,19 +35,16 @@
 ### Provenance And Terminal State Authority
 
 - PR URL authority for completed runs
-  - Completed PR runs currently treat `run.pr_url` and `terminal_result.pr_url` as terminal bookkeeping, not provenance proof.
-  - Future hardening: add a dedicated PR-created/opened attestation and validate PR URL bindings against it.
-  - Keep successful PR creation valid while this authority path is absent.
+  - Current flow uses the dedicated `pr-created` attestation recorded by `feature-factory factory pr-created <run-id> --json` after draft PR creation.
+  - Keep monitoring for provider-specific PR observation gaps; `run.pr_url` and `terminal_result.pr_url` must continue to fail closed without a matching accepted `attestations/pr-created.json` binding.
 
 - Persist factory provenance at run creation/resume
-  - Helper exists, but SPEC notes orchestrator does not yet persist factory provenance.
-  - Persist enough factory/plugin/driver provenance in `run.json` for debugging and reproducibility.
-  - Keep this as diagnostic metadata, not proof, unless backed by accepted attestations.
+  - Current flow persists redacted diagnostic snapshots in `run.json.factory_provenance` through `factory provenance record-created <run-id> --json` and `factory provenance record-resume <run-id> --json`.
+  - Keep this as diagnostic metadata, not proof; do not weaken redaction for token-shaped/high-entropy credentials such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, and `xoxb_*`.
 
 - Tighten gate answer preconditions
-  - Before accepting gate answers, verify pending gate question and artifact refs exist.
-  - Verify refs are physically contained under durable roots.
-  - Do not accept answers for missing, escaped, or stale gate refs.
+  - Current flow records `pending_snapshot` on pending gates and verifies question/artifact/answer refs and hashes before consuming answers.
+  - Continue adding fixtures for missing, escaped, stale, or overlapping gate refs as new edge cases are found.
 
 ### Factory Robustness And Durability
 
