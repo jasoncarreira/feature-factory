@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { continueFactory } from "../src/factory.js";
+import { ValidationError, validateRun } from "../src/validate.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
@@ -16,6 +17,7 @@ describe("factory continue", () => {
     try {
       const beforeRunHash = hashFile(join(fixture.runDir, "run.json"));
       const beforeReviewHash = hashFile(join(fixture.runDir, "reviews", "reviewer.json"));
+      const beforeArtifactHashes = hashArtifactRefs(fixture.runDir, ["artifacts/story.md"]);
 
       const result = continueFactory(fixture.runId, {
         cwd: fixture.repo,
@@ -57,7 +59,27 @@ describe("factory continue", () => {
       });
       assert.equal(hashFile(join(fixture.runDir, "run.json")), beforeRunHash);
       assert.equal(hashFile(join(fixture.runDir, "reviews", "reviewer.json")), beforeReviewHash);
+      assert.deepEqual(hashArtifactRefs(fixture.runDir, result.payload.continuation.parent.artifact_refs.map((artifact) => artifact.ref)), beforeArtifactHashes);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "blocked-parent-continue", "run.json")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("exposes that the emitted continuation payload does not match the persisted run.continuation schema", () => {
+    const fixture = createFixture("schema-parent");
+    try {
+      const proc = runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "schema-parent-next", "--dry-run", "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      const output = JSON.parse(proc.stdout);
+
+      assert.throws(
+        () => validateRun(childRunFromPayload(output.payload.continuation)),
+        (error) => error instanceof ValidationError
+          && error.message.includes("run.continuation.parent.run_ref: must be a non-empty string")
+          && error.message.includes("run.continuation.parent.run_hash: must be a sha256 hash")
+          && error.message.includes("run.continuation.parent_artifacts: must be an array"),
+      );
     } finally {
       cleanup(fixture.repo);
     }
@@ -290,6 +312,22 @@ function gitStdout(repo, args) {
 
 function hashFile(file) {
   return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+}
+
+function hashArtifactRefs(runDir, refs) {
+  return refs.map((ref) => ({ ref, hash: hashFile(join(runDir, ref)) }));
+}
+
+function childRunFromPayload(continuation) {
+  return {
+    schema_version: 1,
+    run_id: continuation.target.run_id,
+    status: "running",
+    branch: continuation.target.branch,
+    worktree: continuation.target.worktree,
+    gates: {},
+    continuation,
+  };
 }
 
 function writeJson(file, value) {
