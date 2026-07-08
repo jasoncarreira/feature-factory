@@ -102,6 +102,12 @@
 
 ### Observability And Cost
 
+- Honeycomb OpenTelemetry enablement
+  - First milestone: enable native opencode OTel export to Honeycomb and verify traces with a small factory run.
+  - Estimate: 30-90 minutes for basic export; 1-2 days for feature-factory run correlation; 2-4 days for production-safe redaction/docs/tests.
+  - Follow the design in `SPEC.md#12-opentelemetry-genai-instrumentation`.
+  - Include `doctor --telemetry` readiness checks for `experimental.openTelemetry`, `OTEL_EXPORTER_OTLP_*`, companion plugin presence, and prompt-capture risk.
+
 - Cost attribution
   - Record per-agent and per-slice token/cost usage.
   - Persist cost data in durable run artifacts.
