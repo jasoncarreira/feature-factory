@@ -27,8 +27,6 @@ describe("cli gate decision routing", () => {
         "approved",
         "--answer-ref",
         "gates/story.answer.json",
-        "--approval-source",
-        "external-driver",
       ]);
 
       assert.equal(proc.status, 0, proc.stderr);
@@ -39,7 +37,9 @@ describe("cli gate decision routing", () => {
       const run = readJson(join(runDir, "run.json"));
       const index = readJson(join(runDir, "attestations", "index.json"));
       assert.equal(run.gates.story.status, "approved");
+      assert.equal(run.gates.story.approval_source, "external-driver");
       assert.equal(index.entries.at(-1).type, "gate-decision");
+      assert.equal(readJson(join(runDir, index.entries.at(-1).ref)).bindings.approval_source, "external-driver");
       assert.equal(validateRunDir(runDir, { repoRoot: repo }).ok, true);
     } finally {
       cleanup(repo);
@@ -61,8 +61,6 @@ describe("cli gate decision routing", () => {
         "approved",
         "--answer",
         "approve inline",
-        "--approval-source",
-        "external-driver",
       ]);
 
       assert.notEqual(proc.status, 0);
@@ -74,8 +72,8 @@ describe("cli gate decision routing", () => {
     }
   });
 
-  it("rejects public approved gate decisions with forgeable non-external approval sources", () => {
-    for (const source of ["human", "autonomous", "override"]) {
+  it("rejects public approved gate decisions with any caller-supplied approval source", () => {
+    for (const source of ["external-driver", "human", "autonomous", "override"]) {
       const repo = tempRepo();
       try {
         initRepo(repo);
@@ -95,12 +93,62 @@ describe("cli gate decision routing", () => {
         ]);
 
         assert.notEqual(proc.status, 0, source);
-        assert.match(proc.stderr, /--approval-source external-driver/u, source);
+        assert.match(proc.stderr, /does not accept --approval-source/u, source);
         assert.deepEqual(readJson(join(runDir, "run.json")), originalRun, source);
         assert.equal(existsSync(join(runDir, "attestations", "gates", "story.json")), false, source);
       } finally {
         cleanup(repo);
       }
+    }
+  });
+
+  it("rejects public approved gate decisions without an external answer ref", () => {
+    const repo = tempRepo();
+
+    try {
+      initRepo(repo);
+      const runDir = createRun(repo);
+      writeFixture(runDir, "artifacts/story.json", "{\n  \"title\": \"Story\"\n}\n");
+      writeFixture(runDir, "gates/story.question.json", "{\n  \"question\": \"Approve?\"\n}\n");
+      writePendingGateSnapshot(runDir, "story", "artifacts/story.json", "gates/story.question.json");
+      const originalRun = readJson(join(runDir, "run.json"));
+
+      const proc = runGateDecision(repo, ["approved"]);
+
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /requires --answer-ref/u);
+      assert.deepEqual(readJson(join(runDir, "run.json")), originalRun);
+      assert.equal(existsSync(join(runDir, "attestations", "gates", "story.json")), false);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("rejects public approved gate decisions whose answer ref does not match the pending target", () => {
+    const repo = tempRepo();
+
+    try {
+      initRepo(repo);
+      const runDir = createRun(repo);
+      writeFixture(runDir, "artifacts/story.json", "{\n  \"title\": \"Story\"\n}\n");
+      writeFixture(runDir, "gates/story.question.json", "{\n  \"question\": \"Approve?\"\n}\n");
+      writeFixture(runDir, "gates/story.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
+      writeFixture(runDir, "gates/other.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
+      writePendingGateSnapshot(runDir, "story", "artifacts/story.json", "gates/story.question.json");
+      const originalRun = readJson(join(runDir, "run.json"));
+
+      const proc = runGateDecision(repo, [
+        "approved",
+        "--answer-ref",
+        "gates/other.answer.json",
+      ]);
+
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /answer_ref must match trusted pending answer_ref 'gates\/story\.answer\.json'/u);
+      assert.deepEqual(readJson(join(runDir, "run.json")), originalRun);
+      assert.equal(existsSync(join(runDir, "attestations", "gates", "story.json")), false);
+    } finally {
+      cleanup(repo);
     }
   });
 });
@@ -207,6 +255,7 @@ function writePendingGateSnapshot(runDir, gateName, artifactRef, questionRef) {
     question_hash: hashFile(join(runDir, questionRef), { mode: "raw" }),
     artifact_ref: artifactRef,
     artifact_hash: hashFile(join(runDir, artifactRef), { mode: "raw" }),
+    answer_ref: run.gates[gateName].answer_ref,
     created_at: "2026-07-07T00:00:00.000Z",
   };
   writeJson(runPath, run);

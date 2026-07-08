@@ -106,7 +106,7 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
           runDir,
           (draft, { authority }) => {
             draft.gates = normalizeGateMap(draft.gates);
-            const preparedGate = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate);
+            const preparedGate = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, options);
             draft.gates[gateName] = preparedGate;
 
             const latestGateDecision = findAcceptedGateDecisionRecord(authority, gateName);
@@ -843,16 +843,47 @@ function findLastAcceptedAttestationEntry(records, predicate) {
   return null;
 }
 
-function prepareGateDecisionTransition(runDir, gateName, currentGate, gate) {
+function prepareGateDecisionTransition(runDir, gateName, currentGate, gate, options = {}) {
   const nextGate = cloneJson(gate);
   if (nextGate.status === "pending") {
     return preparePendingGateDecision(runDir, gateName, nextGate);
+  }
+  if (nextGate.status === "approved" && options.publicExternalDriverApproval === true) {
+    preparePublicExternalDriverApproval(gateName, currentGate, nextGate);
   }
   assertPendingGateMaterialFresh(runDir, gateName, currentGate, nextGate);
   return {
     ...nextGate,
     pending_snapshot: cloneJson(currentGate.pending_snapshot),
   };
+}
+
+function preparePublicExternalDriverApproval(gateName, currentGate, gate) {
+  if (!isRecord(currentGate) || currentGate.status !== "pending") {
+    throw new Error(`public approved gate decision '${gateName}' requires current gate status pending`);
+  }
+  if (stringValue(gate.answer)) {
+    throw new Error(`public approved gate decision '${gateName}' requires answer_ref; inline answer is not accepted`);
+  }
+  if (stringValue(gate.approval_source)) {
+    throw new Error(`public approved gate decision '${gateName}' does not accept caller-supplied approval_source`);
+  }
+  if (!stringValue(gate.answer_ref)) {
+    throw new Error(`public approved gate decision '${gateName}' requires answer_ref from an external driver`);
+  }
+
+  const expectedAnswerRef = trustedPendingAnswerRef(gateName, currentGate);
+  if (gate.answer_ref !== expectedAnswerRef) {
+    throw new Error(`public approved gate decision '${gateName}' answer_ref must match trusted pending answer_ref '${expectedAnswerRef}'`);
+  }
+
+  gate.approval_source = "external-driver";
+}
+
+function trustedPendingAnswerRef(gateName, currentGate) {
+  if (stringValue(currentGate?.pending_snapshot?.answer_ref)) return currentGate.pending_snapshot.answer_ref;
+  if (stringValue(currentGate?.answer_ref)) return currentGate.answer_ref;
+  return `gates/${gateName}.answer`;
 }
 
 function preparePendingGateDecision(runDir, gateName, gate) {

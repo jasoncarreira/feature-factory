@@ -268,7 +268,7 @@ async function gateDecision(args) {
   if (stringValue(opts.decisionNote)) decision.decision_note = opts.decisionNote;
   if (stringValue(opts.answeredAt)) decision.answered_at = opts.answeredAt;
 
-  return print(await transitionGateDecision(resolveRunDir(runId, opts), gate, decision), opts);
+  return print(await transitionGateDecision(resolveRunDir(runId, opts), gate, decision, publicGateDecisionOptions(decision.status, opts)), opts);
 }
 
 async function prCreated(args) {
@@ -307,9 +307,12 @@ function assertPublicGateDecisionAllowed(statusValue, opts) {
   if (statusValue !== "approved") return;
   if (stringValue(opts.answer)) throw new Error("factory gate-decision approved requires --answer-ref; inline --answer is not accepted by the public CLI");
   if (!stringValue(opts.answerRef)) throw new Error("factory gate-decision approved requires --answer-ref from an external driver");
-  if (opts.approvalSource !== "external-driver") {
-    throw new Error("factory gate-decision approved requires --approval-source external-driver");
-  }
+  if (stringValue(opts.approvalSource)) throw new Error("factory gate-decision approved does not accept --approval-source; approval_source is derived as external-driver");
+}
+
+function publicGateDecisionOptions(statusValue, opts) {
+  if (statusValue !== "approved") return opts;
+  return { ...opts, publicExternalDriverApproval: true };
 }
 
 function observePrRemote(opts, supplied, runDir) {
