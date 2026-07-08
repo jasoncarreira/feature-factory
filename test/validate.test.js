@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 import { ValidationError, checkRunConsistency, validateRun, validateRunDir } from "../src/validate.js";
 
+const HASH = `sha256:${"a".repeat(64)}`;
+
 describe("run schema and consistency", () => {
   it("accepts debug snapshots", () => {
     const run = validateRun({
@@ -28,6 +30,55 @@ describe("run schema and consistency", () => {
     assert.throws(
       () => validateRun({ ...runningRun(), review_tier: { selected: "strict" } }),
       (error) => error instanceof ValidationError && error.message.includes("run.review_tier: must be a non-empty string"),
+    );
+  });
+
+  it("accepts blocked-run continuation metadata without bumping run schema", () => {
+    const run = validateRun({
+      ...runningRun("continuation-run"),
+      branch: "continuation-branch",
+      worktree: "/tmp/continuation-worktree",
+      continuation: continuationMetadata("continuation-run"),
+    });
+
+    assert.equal(run.schema_version, 1);
+    assert.equal(run.continuation.schema_version, 1);
+    assert.equal(run.continuation.kind, "blocked-run-continuation");
+  });
+
+  it("rejects invalid blocked-run continuation metadata", () => {
+    const invalidVersion = continuationMetadata();
+    invalidVersion.schema_version = 2;
+    assert.throws(
+      () => validateRun({ ...runningRun(), continuation: invalidVersion }),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.schema_version: must equal 1"),
+    );
+
+    const invalidParentStatus = continuationMetadata();
+    invalidParentStatus.parent.status = "completed";
+    assert.throws(
+      () => validateRun({ ...runningRun(), continuation: invalidParentStatus }),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.parent.status: must be one of blocked"),
+    );
+
+    const invalidReviewHash = continuationMetadata();
+    invalidReviewHash.review.hash = "not-a-hash";
+    assert.throws(
+      () => validateRun({ ...runningRun(), continuation: invalidReviewHash }),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.review.hash: must be a sha256 hash"),
+    );
+
+    const mismatchedTarget = continuationMetadata("other-run");
+    assert.throws(
+      () => validateRun({ ...runningRun("run"), continuation: mismatchedTarget }),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.target.run_id: must match run.run_id"),
+    );
+
+    const unpairedArtifactHash = continuationMetadata();
+    delete unpairedArtifactHash.parent_artifacts.hashes.validation_report;
+    assert.throws(
+      () => validateRun({ ...runningRun(), continuation: unpairedArtifactHash }),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.parent_artifacts.hashes.validation_report: is required"),
     );
   });
 
@@ -101,6 +152,43 @@ function snapshotRoot({ env } = {}) {
     },
     last_resumed_with: null,
     resume_count: 0,
+  };
+}
+
+function continuationMetadata(targetRunId = "run") {
+  return {
+    schema_version: 1,
+    kind: "blocked-run-continuation",
+    parent: {
+      run_id: "parent-run",
+      status: "blocked",
+      run_ref: "runs/parent-run/run.json",
+      run_hash: HASH,
+      branch: "parent-branch",
+      commit: "abc123",
+    },
+    review: {
+      ref: "reviews/implementation-validator.json",
+      hash: HASH,
+      subject: "parent-run",
+      summary: "Validator found required fixes.",
+      required_fixes: ["fix failing acceptance test"],
+    },
+    target: {
+      run_id: targetRunId,
+      branch: "continuation-branch",
+      worktree: "/tmp/continuation-worktree",
+    },
+    parent_artifacts: {
+      refs: {
+        validation_report: "artifacts/validation-report.md",
+        run_json: "runs/parent-run/run.json",
+      },
+      hashes: {
+        validation_report: HASH,
+        run_json: HASH,
+      },
+    },
   };
 }
 
