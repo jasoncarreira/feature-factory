@@ -23,6 +23,7 @@ const HEARTBEAT_ACTIVE_STATUSES = new Set(["active", "running"]);
 const HEARTBEAT_TERMINAL_STATUSES = new Set(["stopped", "error"]);
 const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
 const HEARTBEAT_OWNER_ENV = "FEATURE_FACTORY_HEARTBEAT_OWNER";
+const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state", "invalid-authority", "unverifiable-authority"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const activeHeartbeatLoops = new Map();
@@ -50,7 +51,7 @@ export function listRuns(opts = {}) {
       if (!existsSync(file)) return null;
       const diagnostics = diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo));
       const run = tryReadPublicRun(file, { ...opts, repoRoot: repo });
-      if (run.error || !diagnostics.authoritative) return invalidListRun(runId, file, diagnostics, run.error);
+      if (run.error || diagnosticsFailClosed(diagnostics)) return invalidListRun(runId, file, diagnostics, run.error);
       return {
         run_id: run.value.run_id || runId,
         status: run.value.status || "unknown",
@@ -70,7 +71,7 @@ export function status(runId, opts = {}) {
   const runFile = join(runDir, "run.json");
   const repo = repoRoot(opts.cwd || process.cwd());
   const diagnostics = diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo));
-  if (!diagnostics.authoritative) return invalidStatusEnvelope(runId, runDir, runFile, diagnostics);
+  if (diagnosticsFailClosed(diagnostics)) return invalidStatusEnvelope(runId, runDir, runFile, diagnostics);
   const run = loadPublicRun(runId, opts);
   return {
     run_id: run.run_id,
@@ -313,6 +314,11 @@ function invalidStatusEnvelope(runId, runDir, runFile, diagnostics) {
     error: diagnostics.summary || "run diagnostics failed closed",
     diagnostics,
   };
+}
+
+function diagnosticsFailClosed(diagnostics) {
+  return Array.isArray(diagnostics?.items)
+    && diagnostics.items.some((item) => FAIL_CLOSED_DIAGNOSTIC_CONDITIONS.has(item?.condition));
 }
 
 function fallbackRunId(runId, runDir) {

@@ -231,7 +231,7 @@ export function diagnoseRunObject(input, options = {}) {
   const missingWorktree = inspectWorktree(run, { ...options, checkedAt, runDir, authoritative: trustedAuthoritative });
   if (missingWorktree) items.push(missingWorktree);
 
-  if (runDir && !acceptedAuthority) {
+  if (runDir && !acceptedAuthority && items.length === 0) {
     items.push(unverifiableRunAuthorityItem({ checkedAt, runDir, runFile }));
   }
 

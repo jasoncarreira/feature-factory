@@ -169,7 +169,7 @@ describe("factory diagnostics run inspection", () => {
     }
   });
 
-  it("fails closed for unanchored active runs even when liveness alarms are present", () => {
+  it("preserves liveness warnings for unanchored active runs instead of masking them", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: "2026-07-08T11:00:00.000Z" }));
@@ -178,10 +178,11 @@ describe("factory diagnostics run inspection", () => {
     try {
       const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
       assert.equal(diagnostics.authoritative, false);
-      assert.equal(diagnostics.status, "error");
-      assert.equal(diagnostics.classification, "blocked");
-      assert.deepEqual(diagnostics.items.map((item) => item.condition), ["missing-heartbeat-process", "stale-heartbeat", "unverifiable-authority"]);
-      assert.equal(diagnostics.items[2].authoritative, false);
+      assert.equal(diagnostics.status, "warning");
+      assert.equal(diagnostics.classification, "recoverable");
+      assert.deepEqual(diagnostics.items.map((item) => item.condition), ["missing-heartbeat-process", "stale-heartbeat"]);
+      assert.equal(diagnostics.items[0].authoritative, false);
+      assert.equal(diagnostics.items[1].authoritative, false);
     } finally {
       cleanup(repo);
     }

@@ -22,14 +22,14 @@ describe("TUI factory scanner", () => {
     const workspace = tempDir();
     const nested = join(workspace, "nested-repo");
     mkdirSync(nested, { recursive: true });
-    writeRun(nested, "nested", { status: "needs-human", updated_at: "2026-07-05T00:00:00Z" });
+    writeRun(nested, "nested", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
 
     const roots = findFactoryRoots(workspace);
     const runs = readRuns(roots);
 
     assert.equal(runs.length, 1);
     assert.equal(runs[0].run_id, "nested");
-    assert.equal(runs[0].status, "needs-human");
+    assert.equal(runs[0].status, "running");
     cleanup(workspace);
   });
 
