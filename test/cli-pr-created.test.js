@@ -28,36 +28,7 @@ describe("cli pr-created routing", () => {
     const fixture = createPrFixture("cli-pr-created-success", { includePrerequisites: true });
 
     try {
-      const proc = spawnSync(process.execPath, [
-        CLI,
-        "factory",
-        "pr-created",
-        fixture.runId,
-        "--pr-url",
-        PR_URL,
-        "--pr-number",
-        "123",
-        "--pr-body-ref",
-        "artifacts/pr-body.md",
-        "--provider",
-        "github",
-        "--repository",
-        "example/repo",
-        "--remote",
-        "origin",
-        "--github-account",
-        "octocat",
-        "--head-branch",
-        fixture.context.branch,
-        "--head-commit",
-        fixture.context.headCommit,
-        "--base-ref",
-        "main",
-        "--base-commit",
-        fixture.context.baseCommit,
-        "--draft",
-        "--json",
-      ], { cwd: fixture.repo, encoding: "utf8" });
+      const proc = runPrCreated(fixture);
 
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
@@ -72,6 +43,7 @@ describe("cli pr-created routing", () => {
       assert.equal(run.pr_url, PR_URL);
       assert.equal(run.terminal_result.pr_url, PR_URL);
       assert.equal(index.entries.at(-1).type, "pr-created");
+      assert.equal(attestation.bindings.pr_url, PR_URL);
       assert.equal(attestation.bindings.remote_observation.head_commit, fixture.context.headCommit);
       assert.equal(attestation.bindings.remote_observation.base_commit, fixture.context.baseCommit);
       assert.equal(validateRunDir(fixture.runDir, { repoRoot: fixture.repo }).ok, true);
@@ -105,7 +77,7 @@ describe("cli pr-created routing", () => {
       const proc = runPrCreated(fixture, { headCommit: fixture.context.baseCommit });
 
       assert.notEqual(proc.status, 0);
-      assert.match(proc.stderr, /remote_observation\.head_commit/u);
+      assert.match(proc.stderr, /head_commit observed/u);
       assert.deepEqual(readJson(join(fixture.runDir, "run.json")), originalRun);
       assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex);
       assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false);
@@ -123,6 +95,38 @@ describe("cli pr-created routing", () => {
 
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /requires --github-account/u);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), originalRun);
+      assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed when the trusted gh observation disagrees with the supplied PR URL", () => {
+    const fixture = createPrFixture("cli-pr-created-gh-url-mismatch", { includePrerequisites: true });
+    const originalRun = readJson(join(fixture.runDir, "run.json"));
+
+    try {
+      const proc = runPrCreated(fixture, { observedPrUrl: "https://github.com/example/repo/pull/124", observedPrNumber: 124 });
+
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /pr_url observed https:\/\/github\.com\/example\/repo\/pull\/124/u);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")), originalRun);
+      assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed when the trusted gh account observation disagrees with the supplied account", () => {
+    const fixture = createPrFixture("cli-pr-created-gh-account-mismatch", { includePrerequisites: true });
+    const originalRun = readJson(join(fixture.runDir, "run.json"));
+
+    try {
+      const proc = runPrCreated(fixture, { observedGithubAccount: "mallory" });
+
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /github_account observed mallory/u);
       assert.deepEqual(readJson(join(fixture.runDir, "run.json")), originalRun);
       assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false);
     } finally {
@@ -208,7 +212,28 @@ function runPrCreated(fixture, overrides = {}) {
     "--draft",
     "--json",
   );
-  return spawnSync(process.execPath, args, { cwd: fixture.repo, encoding: "utf8" });
+  return spawnSync(process.execPath, args, {
+    cwd: fixture.repo,
+    encoding: "utf8",
+    env: fakeGhEnv(fixture, overrides),
+  });
+}
+
+function fakeGhEnv(fixture, overrides = {}) {
+  return {
+    ...process.env,
+    PATH: `${fixture.fakeGhBin}:${process.env.PATH || ""}`,
+    FAKE_GH_PR_VIEW_JSON: JSON.stringify({
+      url: overrides.observedPrUrl || PR_URL,
+      number: overrides.observedPrNumber ?? 123,
+      isDraft: overrides.observedDraft ?? true,
+      headRefName: overrides.observedHeadBranch || fixture.context.branch,
+      headRefOid: overrides.observedHeadCommit || fixture.context.headCommit,
+      baseRefName: overrides.observedBaseRef || "main",
+      baseRefOid: overrides.observedBaseCommit || fixture.context.baseCommit,
+    }),
+    FAKE_GH_ACCOUNT: overrides.observedGithubAccount || "octocat",
+  };
 }
 
 function runProvenance(fixture, action) {
@@ -255,6 +280,7 @@ function createPrFixture(runId, { includePrerequisites }) {
   try {
     initRepo(repo);
     const context = createFeatureWorktree(repo, runId);
+    const fakeGhBin = writeFakeGh(repo);
     const runDir = join(repo, ".opencode", "factory", runId);
     for (const directory of ["artifacts", "attestations", "evidence", "gates", "reviews"]) {
       mkdirSync(join(runDir, directory), { recursive: true });
@@ -271,6 +297,7 @@ function createPrFixture(runId, { includePrerequisites }) {
       runId,
       runDir,
       context,
+      fakeGhBin,
       cleanup() {
         cleanup(repo);
       },
@@ -288,6 +315,31 @@ function initRepo(repo) {
   writeFixture(repo, "tracked.txt", "base\n");
   git(repo, ["add", "."]);
   git(repo, ["commit", "-m", "base"]);
+  git(repo, ["remote", "add", "origin", "https://github.com/example/repo.git"]);
+}
+
+function writeFakeGh(repo) {
+  const bin = join(repo, "fake-bin");
+  mkdirSync(bin, { recursive: true });
+  const script = join(bin, "gh");
+  writeFileSync(script, [
+    "#!/usr/bin/env node",
+    "const args = process.argv.slice(2);",
+    "if (args[0] === 'pr' && args[1] === 'view') {",
+    "  process.stdout.write(process.env.FAKE_GH_PR_VIEW_JSON || '{}');",
+    "  process.stdout.write('\\n');",
+    "  process.exit(0);",
+    "}",
+    "if (args[0] === 'api' && args[1] === 'user') {",
+    "  process.stdout.write(process.env.FAKE_GH_ACCOUNT || 'octocat');",
+    "  process.stdout.write('\\n');",
+    "  process.exit(0);",
+    "}",
+    "process.stderr.write(`unexpected gh invocation: ${args.join(' ')}\\n`);",
+    "process.exit(1);",
+    "",
+  ].join("\n"), { encoding: "utf8", mode: 0o755 });
+  return bin;
 }
 
 function createFeatureWorktree(repo, runId) {

@@ -760,8 +760,75 @@ describe("provenance authority", () => {
       const authority = validateProvenanceAuthority(run.runDir);
       assert.equal(authority.ok, true);
       assert.equal(authority.acceptedAttestations[pr.prCreatedRef].attestation.type, "pr-created");
+      assert.equal(authority.acceptedAttestations[pr.prCreatedRef].attestation.bindings.pr_url, "https://github.com/example/repo/pull/123");
     } finally {
       cleanup(fixture.repoRoot);
+    }
+  });
+
+  it("rejects PR-created attestations with credential-bearing, non-canonical, or token-shaped GitHub PR URLs", () => {
+    const scenarios = [
+      {
+        name: "userinfo",
+        prUrl: "https://octocat:ghp_abcdefghijklmnopqrstuvwxyz123456@github.com/example/repo/pull/123",
+        error: /username or password credentials|sensitive or token-shaped/u,
+      },
+      {
+        name: "query",
+        prUrl: "https://github.com/example/repo/pull/123?token=ghp_abcdefghijklmnopqrstuvwxyz123456",
+        error: /query string|sensitive or token-shaped/u,
+      },
+      {
+        name: "fragment",
+        prUrl: "https://github.com/example/repo/pull/123#access_token=ghp_abcdefghijklmnopqrstuvwxyz123456",
+        error: /fragment|sensitive or token-shaped/u,
+      },
+      {
+        name: "port",
+        prUrl: "https://github.com:8443/example/repo/pull/123",
+        error: /port or non-canonical host/u,
+      },
+      {
+        name: "token-shaped-owner",
+        prUrl: "https://github.com/ghp_abcdefghijklmnopqrstuvwxyz123456/repo/pull/123",
+        repository: "ghp_abcdefghijklmnopqrstuvwxyz123456/repo",
+        error: /sensitive or token-shaped/u,
+      },
+      {
+        name: "bad-owner-syntax",
+        prUrl: "https://github.com/bad_owner/repo/pull/123",
+        repository: "bad_owner/repo",
+        error: /owner must match GitHub owner syntax/u,
+      },
+      {
+        name: "bad-repo-syntax",
+        prUrl: "https://github.com/example/bad~repo/pull/123",
+        repository: "example/bad~repo",
+        error: /repo must match GitHub repository syntax/u,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const fixture = createHistoryFixture();
+      try {
+        const run = buildAuthorityRun(fixture, `pr-created-url-${scenario.name}`);
+        appendPrCreatedAttestation(run, fixture, `pr-created-url-${scenario.name}`, {
+          includePrePrGate: true,
+          mutateBindings(bindings) {
+            return withRemoteObservation({
+              ...bindings,
+              pr_url: scenario.prUrl,
+              repository: scenario.repository ?? bindings.repository,
+            });
+          },
+        });
+
+        const result = validateProvenanceAuthority(run.runDir);
+        assert.equal(result.ok, false, `expected ${scenario.name} URL to fail`);
+        assert.match(joinErrors(result), scenario.error, scenario.name);
+      } finally {
+        cleanup(fixture.repoRoot);
+      }
     }
   });
 

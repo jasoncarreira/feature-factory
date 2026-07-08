@@ -23,23 +23,13 @@ describe("cli gate decision routing", () => {
       writeFixture(runDir, "gates/story.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
       writePendingGateSnapshot(runDir, "story", "artifacts/story.json", "gates/story.question.json");
 
-      const proc = spawnSync(process.execPath, [
-        CLI,
-        "factory",
-        "gate-decision",
-        RUN_ID,
-        "story",
+      const proc = runGateDecision(repo, [
         "approved",
-        "--artifact",
-        "artifacts/story.json",
-        "--question-ref",
-        "gates/story.question.json",
         "--answer-ref",
         "gates/story.answer.json",
         "--approval-source",
-        "human",
-        "--json",
-      ], { cwd: repo, encoding: "utf8" });
+        "external-driver",
+      ]);
 
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
@@ -55,7 +45,81 @@ describe("cli gate decision routing", () => {
       cleanup(repo);
     }
   });
+
+  it("rejects public approved gate decisions with inline answers", () => {
+    const repo = tempRepo();
+
+    try {
+      initRepo(repo);
+      const runDir = createRun(repo);
+      writeFixture(runDir, "artifacts/story.json", "{\n  \"title\": \"Story\"\n}\n");
+      writeFixture(runDir, "gates/story.question.json", "{\n  \"question\": \"Approve?\"\n}\n");
+      writePendingGateSnapshot(runDir, "story", "artifacts/story.json", "gates/story.question.json");
+      const originalRun = readJson(join(runDir, "run.json"));
+
+      const proc = runGateDecision(repo, [
+        "approved",
+        "--answer",
+        "approve inline",
+        "--approval-source",
+        "external-driver",
+      ]);
+
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /inline --answer is not accepted/u);
+      assert.deepEqual(readJson(join(runDir, "run.json")), originalRun);
+      assert.equal(existsSync(join(runDir, "attestations", "gates", "story.json")), false);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("rejects public approved gate decisions with forgeable non-external approval sources", () => {
+    for (const source of ["human", "autonomous", "override"]) {
+      const repo = tempRepo();
+      try {
+        initRepo(repo);
+        const runDir = createRun(repo);
+        writeFixture(runDir, "artifacts/story.json", "{\n  \"title\": \"Story\"\n}\n");
+        writeFixture(runDir, "gates/story.question.json", "{\n  \"question\": \"Approve?\"\n}\n");
+        writeFixture(runDir, "gates/story.answer.json", "{\n  \"answer\": \"approve\"\n}\n");
+        writePendingGateSnapshot(runDir, "story", "artifacts/story.json", "gates/story.question.json");
+        const originalRun = readJson(join(runDir, "run.json"));
+
+        const proc = runGateDecision(repo, [
+          "approved",
+          "--answer-ref",
+          "gates/story.answer.json",
+          "--approval-source",
+          source,
+        ]);
+
+        assert.notEqual(proc.status, 0, source);
+        assert.match(proc.stderr, /--approval-source external-driver/u, source);
+        assert.deepEqual(readJson(join(runDir, "run.json")), originalRun, source);
+        assert.equal(existsSync(join(runDir, "attestations", "gates", "story.json")), false, source);
+      } finally {
+        cleanup(repo);
+      }
+    }
+  });
 });
+
+function runGateDecision(repo, extraArgs) {
+  return spawnSync(process.execPath, [
+    CLI,
+    "factory",
+    "gate-decision",
+    RUN_ID,
+    "story",
+    ...extraArgs,
+    "--artifact",
+    "artifacts/story.json",
+    "--question-ref",
+    "gates/story.question.json",
+    "--json",
+  ], { cwd: repo, encoding: "utf8" });
+}
 
 function tempRepo() {
   return mkdtempSync(join(tmpdir(), "feature-factory-cli-gate-"));

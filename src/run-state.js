@@ -4,6 +4,7 @@ import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
+  canonicalizeGithubPrUrl,
   createAttestationIndex,
   createGateDecisionAttestation,
   createPrCreatedAttestation,
@@ -1085,7 +1086,7 @@ function normalizeTerminalResult(terminalResult) {
 function normalizePrCreatedInput(input) {
   if (!isRecord(input)) throw new Error("transitionPrCreated requires an input object");
   const remoteObservation = normalizePrRemoteObservation(input.remote_observation);
-  const prUrl = firstNonEmptyString(input.pr_url, remoteObservation.pr_url);
+  const prUrl = canonicalizeGithubPrUrl(firstNonEmptyString(input.pr_url, remoteObservation.pr_url));
   const prNumber = normalizePrNumber(input.pr_number ?? remoteObservation.pr_number);
   const draft = normalizeBoolean(input.draft ?? remoteObservation.draft, "draft");
   const prBodyRef = firstNonEmptyString(input.pr_body_ref, input.prBodyRef);
@@ -1117,7 +1118,11 @@ function normalizePrCreatedInput(input) {
 
 function assertOptionalRemoteObservationMatch(input, remoteObservation, key) {
   if (input[key] === undefined || input[key] === null) return;
-  const actual = key === "pr_number" ? normalizePrNumber(input[key]) : input[key];
+  const actual = key === "pr_number"
+    ? normalizePrNumber(input[key])
+    : key === "pr_url"
+      ? canonicalizeGithubPrUrl(input[key])
+      : input[key];
   if (actual !== remoteObservation[key]) {
     throw new Error(`transitionPrCreated ${key} must match remote_observation.${key}`);
   }
@@ -1127,7 +1132,7 @@ function normalizePrRemoteObservation(observation) {
   if (!isRecord(observation)) throw new Error("transitionPrCreated requires remote_observation");
   const source = cloneJson(observation);
   const normalized = {
-    pr_url: source.pr_url,
+    pr_url: canonicalizeGithubPrUrl(source.pr_url),
     pr_number: normalizePrNumber(source.pr_number),
     provider: source.provider,
     repository: source.repository,

@@ -26,6 +26,9 @@ const DIRECT_REVIEWED_COMMIT_PURPOSE_SET = new Set(DIRECT_REVIEWED_COMMIT_PURPOS
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const OBJECT_ID_PATTERN = /^[0-9a-f]{40}$/u;
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
+const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
+const GITHUB_REPO_PATTERN = /^(?!\.\.?$)[A-Za-z0-9._-]+$/u;
+const SENSITIVE_URL_TOKEN_PATTERN = /(?:github_pat_|gh[pousr]_|x-access-token|access[_-]?token|api[_-]?key|secret|password|passwd|bearer|oauth)/iu;
 const JSON_LEAF_ROOTS = new Set(["evidence", "reviews"]);
 const REVIEW_APPROVAL_RULES = Object.freeze({
   "work-reviewer": Object.freeze({ verdicts: Object.freeze(["APPROVE"]) }),
@@ -47,6 +50,10 @@ export function hashFile(filePath, options = {}) {
   const content = readFileSync(file);
   if (mode === "raw") return hashBuffer(content);
   return hashValue(JSON.parse(content.toString("utf8")));
+}
+
+export function canonicalizeGithubPrUrl(value) {
+  return parseCanonicalGithubPrUrl(value, "pr_url").canonicalUrl;
 }
 
 export function withAttestationHash(attestation) {
@@ -1375,32 +1382,85 @@ function validatePrRemoteObservation(observation, bindings) {
 }
 
 function validatePrUrlBinding(bindings) {
+  if (bindings.provider !== "github") throw new Error(`unsupported PR provider ${bindings.provider}`);
+  const parsed = parseCanonicalGithubPrUrl(bindings.pr_url, "pr_url");
+  if (parsed.repository !== bindings.repository) {
+    throw new Error(`PR URL repository is ${parsed.repository}, expected ${bindings.repository}`);
+  }
+  if (parsed.prNumber !== bindings.pr_number) {
+    throw new Error(`PR URL number is ${parsed.prNumber}, expected ${bindings.pr_number}`);
+  }
+}
+
+function parseCanonicalGithubPrUrl(value, label = "pr_url") {
+  const raw = requireText(value, label);
+  if (raw.trim() !== raw) throw new Error(`${label} must be canonical without leading or trailing whitespace`);
+  assertNoSensitiveUrlValue(raw, label);
+
   let parsed;
   try {
-    parsed = new URL(bindings.pr_url);
+    parsed = new URL(raw);
   } catch (error) {
-    throw new Error(`pr_url is not a valid URL: ${error.message}`);
+    throw new Error(`${label} is not a valid URL: ${error.message}`);
   }
 
-  if (bindings.provider !== "github") throw new Error(`unsupported PR provider ${bindings.provider}`);
+  if (parsed.username || parsed.password) throw new Error(`${label} must not include username or password credentials`);
+  if (parsed.search) throw new Error(`${label} must not include a query string`);
+  if (parsed.hash) throw new Error(`${label} must not include a fragment`);
   if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") {
-    throw new Error("github PR URL must use https://github.com/<owner>/<repo>/pull/<number>");
+    throw new Error(`${label} must use https://github.com/<owner>/<repo>/pull/<number>`);
   }
+
+  const rawAuthority = raw.match(/^https:\/\/([^/]+)(?:\/|$)/u)?.[1] ?? "";
+  if (rawAuthority !== "github.com" || parsed.host !== "github.com") {
+    throw new Error(`${label} must not include a port or non-canonical host`);
+  }
+
   const segments = parsed.pathname.split("/").filter(Boolean);
   if (segments.length !== 4 || segments[2] !== "pull") {
-    throw new Error("github PR URL must use https://github.com/<owner>/<repo>/pull/<number>");
+    throw new Error(`${label} must use https://github.com/<owner>/<repo>/pull/<number>`);
   }
-  const repository = `${segments[0]}/${segments[1]}`;
-  const prNumber = Number.parseInt(segments[3], 10);
-  if (!Number.isInteger(prNumber) || String(prNumber) !== segments[3]) {
-    throw new Error("github PR URL pull number must be a positive integer");
+
+  const [owner, repo, , prNumberText] = segments;
+  assertNoSensitiveUrlValue(owner, `${label} owner`);
+  assertNoSensitiveUrlValue(repo, `${label} repo`);
+  if (!GITHUB_OWNER_PATTERN.test(owner)) {
+    throw new Error(`${label} owner must match GitHub owner syntax`);
   }
-  if (repository !== bindings.repository) {
-    throw new Error(`PR URL repository is ${repository}, expected ${bindings.repository}`);
+  if (!GITHUB_REPO_PATTERN.test(repo)) {
+    throw new Error(`${label} repo must match GitHub repository syntax`);
   }
-  if (prNumber !== bindings.pr_number) {
-    throw new Error(`PR URL number is ${prNumber}, expected ${bindings.pr_number}`);
+  if (!/^[1-9][0-9]*$/u.test(prNumberText)) {
+    throw new Error(`${label} pull number must be a positive integer`);
   }
+
+  const prNumber = Number.parseInt(prNumberText, 10);
+  const repository = `${owner}/${repo}`;
+  const canonicalUrl = `https://github.com/${repository}/pull/${prNumber}`;
+  if (raw !== canonicalUrl) {
+    throw new Error(`${label} must be canonical ${canonicalUrl}`);
+  }
+
+  return { owner, repo, repository, prNumber, canonicalUrl };
+}
+
+function assertNoSensitiveUrlValue(value, label) {
+  const text = safeDecodeURIComponent(String(value));
+  if (SENSITIVE_URL_TOKEN_PATTERN.test(text) || looksLikeHighEntropyToken(text)) {
+    throw new Error(`${label} contains a sensitive or token-shaped value`);
+  }
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function looksLikeHighEntropyToken(value) {
+  return /^[A-Za-z0-9_-]{40,}$/u.test(value) && /[A-Za-z]/u.test(value) && /[0-9]/u.test(value);
 }
 
 function resolvePrCreatedAcceptedAttestation(roots, ref, expectedHash, context, expectedType, path) {
