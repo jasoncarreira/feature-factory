@@ -534,6 +534,7 @@ function assertTerminalTransition(current, next, hooks = {}) {
 
 function assertPrCreatedPreconditions(run, request) {
   if (stringValue(run.pr_url)) throw new Error("pr-created requires run.pr_url to be unset");
+  if (run.continuation?.kind === "blocked-run-continuation" && request.draft === false) throw new Error("pr-created requires draft PR for blocked-run-continuation runs");
   if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");

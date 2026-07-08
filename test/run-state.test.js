@@ -11,12 +11,14 @@ import {
   transitionRecoverOrphan,
   transitionRunJson,
   transitionRunSlice,
+  transitionTerminalResult,
   transitionSliceMerged,
   withRunJsonLock,
 } from "../src/run-state.js";
 import { checkRunConsistency } from "../src/validate.js";
 
 const NOW = "2026-07-08T12:00:00.000Z";
+const HASH = `sha256:${"a".repeat(64)}`;
 
 describe("simplified run-state transitions", () => {
   it("approves gates through transition-time pending snapshot checks", async () => {
@@ -371,6 +373,54 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("allows default draft PR creation for blocked-run continuations", async () => {
+    const fixture = createFixture("pr-continuation-default-draft");
+    try {
+      writeReadyPrRun(fixture, {
+        branch: "continuation-branch",
+        worktree: "/tmp/continuation-worktree",
+        continuation: continuationMetadata(fixture.runId),
+      });
+
+      const result = await transitionPrCreated(fixture.runDir, {
+        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/103",
+        pr_number: 103,
+        repository: "jasoncarreira/opencode-feature-factory",
+      });
+
+      assert.equal(result.run.status, "completed");
+      assert.equal(result.run.terminal_result.draft, true);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects non-draft PR creation for blocked-run continuations", async () => {
+    const fixture = createFixture("pr-continuation-no-draft");
+    try {
+      writeReadyPrRun(fixture, {
+        branch: "continuation-branch",
+        worktree: "/tmp/continuation-worktree",
+        continuation: continuationMetadata(fixture.runId),
+      });
+
+      await assert.rejects(
+        transitionPrCreated(fixture.runDir, {
+          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
+          pr_number: 104,
+          repository: "jasoncarreira/opencode-feature-factory",
+          draft: false,
+        }),
+        /requires draft PR for blocked-run-continuation/u,
+      );
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(run.status, "running");
+      assert.equal(run.pr_url, undefined);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects PR creation while slices are still in flight", async () => {
     const fixture = createFixture("pr-slice-review");
     try {
@@ -404,6 +454,57 @@ describe("simplified run-state transitions", () => {
       );
     } finally {
       cleanup(fixture.repo);
+    }
+  });
+
+  it("keeps validator NO-GO and security BLOCK runs out of PR-created state", async () => {
+    const cases = [
+      {
+        runId: "pr-validator-no-go",
+        overrides: { validator: { verdict: "NO-GO", report: "artifacts/story.md", review_ref: "reviews/implementation-validator.json" } },
+        review: { subject: "feature-branch", verdict: "NO-GO" },
+        message: /validator verdict GO or GO-WITH-NITS/u,
+      },
+      {
+        runId: "pr-security-block",
+        overrides: { security_review: { verdict: "BLOCK", review_ref: "reviews/security-reviewer.json" } },
+        review: { subject: "feature-branch", verdict: "BLOCK" },
+        message: /security_review verdict PASS/u,
+      },
+    ];
+
+    for (const item of cases) {
+      const fixture = createFixture(item.runId);
+      try {
+        writeReadyPrRun(fixture, {
+          branch: "continuation-branch",
+          worktree: "/tmp/continuation-worktree",
+          continuation: continuationMetadata(fixture.runId),
+          ...item.overrides,
+        });
+        if (item.runId === "pr-validator-no-go") writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), item.review);
+        else writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), item.review);
+
+        await assert.rejects(
+          transitionPrCreated(fixture.runDir, {
+            pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/105",
+            pr_number: 105,
+            repository: "jasoncarreira/opencode-feature-factory",
+          }),
+          item.message,
+        );
+        let run = readJson(join(fixture.runDir, "run.json"));
+        assert.equal(run.status, "running");
+        assert.equal(run.pr_url, undefined);
+
+        const blocked = await transitionTerminalResult(fixture.runDir, { status: "blocked", reason: "review gate did not pass", artifacts: {} });
+        assert.equal(blocked.run.status, "blocked");
+        assert.equal(blocked.run.pr_url, undefined);
+        run = readJson(join(fixture.runDir, "run.json"));
+        assert.equal(run.terminal_result.pr_url, undefined);
+      } finally {
+        cleanup(fixture.repo);
+      }
     }
   });
 
@@ -602,6 +703,34 @@ function writeReadyPrRun(fixture, overrides = {}) {
     security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
     ...overrides,
   });
+}
+
+function continuationMetadata(targetRunId) {
+  return {
+    schema_version: 1,
+    kind: "blocked-run-continuation",
+    parent: {
+      run_id: "parent-run",
+      status: "blocked",
+      run_ref: "runs/parent-run/run.json",
+      run_hash: HASH,
+      branch: "parent-branch",
+      commit: "abc123",
+    },
+    review: {
+      ref: "reviews/implementation-validator.json",
+      hash: HASH,
+      subject: "parent-run",
+      summary: "Validator required fixes before PR creation.",
+      required_fixes: ["address validation failure"],
+    },
+    target: {
+      run_id: targetRunId,
+      branch: "continuation-branch",
+      worktree: "/tmp/continuation-worktree",
+    },
+    parent_artifacts: [{ ref: "artifacts/validation-report.md", hash: HASH }],
+  };
 }
 
 function initGitRepo(repo, branches = []) {

@@ -7,6 +7,7 @@ import { join } from "node:path";
 
 const CLI = new URL("../src/cli.js", import.meta.url).pathname;
 const PR_URL = "https://github.com/jasoncarreira/opencode-feature-factory/pull/99";
+const HASH = `sha256:${"a".repeat(64)}`;
 
 describe("cli pr-created", () => {
   it("records completed PR state through checked transition", () => {
@@ -31,6 +32,33 @@ describe("cli pr-created", () => {
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /approved pre_pr gate|validator verdict|security_review verdict/u);
       assert.equal(readJson(join(fixture.runDir, "run.json")).status, "running");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects --no-draft for blocked-run continuations without recording PR state", () => {
+    const fixture = createFixture("cli-pr-continuation-no-draft", { continuation: true });
+    try {
+      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--no-draft"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /requires draft PR for blocked-run-continuation/u);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(run.status, "running");
+      assert.equal(run.pr_url, undefined);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("keeps default draft PR creation available for blocked-run continuations", () => {
+    const fixture = createFixture("cli-pr-continuation-draft", { continuation: true });
+    try {
+      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(run.status, "completed");
+      assert.equal(run.terminal_result.draft, true);
     } finally {
       cleanup(fixture.repo);
     }
@@ -63,7 +91,7 @@ describe("cli pr-created", () => {
   });
 });
 
-function createFixture(runId, { ready = true } = {}) {
+function createFixture(runId, { ready = true, continuation = false } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "cli-pr-simplified-"));
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
@@ -75,13 +103,44 @@ function createFixture(runId, { ready = true } = {}) {
     schema_version: 1,
     run_id: runId,
     status: "running",
+    branch: continuation ? "continuation-branch" : undefined,
+    worktree: continuation ? "/tmp/continuation-worktree" : undefined,
     gates: ready ? { pre_pr: { status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md", answer: "approve", answered_at: "2026-07-08T12:00:00.000Z" } } : {},
     slices: ready ? [{ id: "slice", status: "merged", attempts: 1, merge_commit: "abc123" }] : [],
     validator: ready ? { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" } : null,
     security_review: ready ? { verdict: "PASS", review_ref: "reviews/security-reviewer.json" } : null,
+    continuation: continuation ? continuationMetadata(runId) : undefined,
   };
   writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId };
+}
+
+function continuationMetadata(targetRunId) {
+  return {
+    schema_version: 1,
+    kind: "blocked-run-continuation",
+    parent: {
+      run_id: "parent-run",
+      status: "blocked",
+      run_ref: "runs/parent-run/run.json",
+      run_hash: HASH,
+      branch: "parent-branch",
+      commit: "abc123",
+    },
+    review: {
+      ref: "reviews/implementation-validator.json",
+      hash: HASH,
+      subject: "parent-run",
+      summary: "Validator required fixes before PR creation.",
+      required_fixes: ["address validation failure"],
+    },
+    target: {
+      run_id: targetRunId,
+      branch: "continuation-branch",
+      worktree: "/tmp/continuation-worktree",
+    },
+    parent_artifacts: [{ ref: "artifacts/validation-report.md", hash: HASH }],
+  };
 }
 
 function runCli(repo, args) {
