@@ -28,7 +28,21 @@ const OBJECT_ID_PATTERN = /^[0-9a-f]{40}$/u;
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
 const GITHUB_REPO_PATTERN = /^(?!\.\.?$)[A-Za-z0-9._-]+$/u;
-const SENSITIVE_URL_TOKEN_PATTERN = /(?:github_pat_|gh[pousr]_|x-access-token|access[_-]?token|api[_-]?key|secret|password|passwd|bearer|oauth)/iu;
+const SENSITIVE_URL_TOKEN_PATTERN = /(?:x-access-token|access[_-]?token|api[_-]?key|secret|password|passwd|bearer|oauth)/iu;
+const TOKEN_SHAPED_URL_VALUE_PATTERNS = Object.freeze([
+  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/u,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/u,
+  /\bsk-proj[-_][A-Za-z0-9_-]{20,}\b/u,
+  /\bsk-[A-Za-z0-9_-]{20,}\b/u,
+  /\bxox[abp][_-][A-Za-z0-9-]{10,}(?:-[A-Za-z0-9-]{10,})*\b/u,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/iu,
+  /\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
+]);
+const CREDENTIAL_BEARING_URL_PATTERN = /(?:https?|ssh|git|ftp):\/\/[^/\s:@]+:[^/\s@]+@/iu;
+const HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH = 40;
+const HIGH_ENTROPY_MIN_SHANNON = 3.5;
 const JSON_LEAF_ROOTS = new Set(["evidence", "reviews"]);
 const REVIEW_APPROVAL_RULES = Object.freeze({
   "work-reviewer": Object.freeze({ verdicts: Object.freeze(["APPROVE"]) }),
@@ -1446,7 +1460,13 @@ function parseCanonicalGithubPrUrl(value, label = "pr_url") {
 
 function assertNoSensitiveUrlValue(value, label) {
   const text = safeDecodeURIComponent(String(value));
-  if (SENSITIVE_URL_TOKEN_PATTERN.test(text) || looksLikeHighEntropyToken(text)) {
+  if (
+    SENSITIVE_URL_TOKEN_PATTERN.test(text) ||
+    TOKEN_SHAPED_URL_VALUE_PATTERNS.some((pattern) => pattern.test(text)) ||
+    credentialBearingUrl(text) ||
+    CREDENTIAL_BEARING_URL_PATTERN.test(text) ||
+    looksLikeHighEntropyToken(text)
+  ) {
     throw new Error(`${label} contains a sensitive or token-shaped value`);
   }
 }
@@ -1460,7 +1480,28 @@ function safeDecodeURIComponent(value) {
 }
 
 function looksLikeHighEntropyToken(value) {
-  return /^[A-Za-z0-9_-]{40,}$/u.test(value) && /[A-Za-z]/u.test(value) && /[0-9]/u.test(value);
+  if (value.length < HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH) return false;
+  if (/\s/u.test(value)) return false;
+  if (!/^[A-Za-z0-9._~+/=-]+$/u.test(value)) return false;
+  return shannonEntropy(value) >= HIGH_ENTROPY_MIN_SHANNON;
+}
+
+function credentialBearingUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return Boolean(parsed.username || parsed.password);
+  } catch {
+    return false;
+  }
+}
+
+function shannonEntropy(value) {
+  const counts = new Map();
+  for (const char of value) counts.set(char, (counts.get(char) || 0) + 1);
+  return [...counts.values()].reduce((entropy, count) => {
+    const probability = count / value.length;
+    return entropy - probability * Math.log2(probability);
+  }, 0);
 }
 
 function resolvePrCreatedAcceptedAttestation(roots, ref, expectedHash, context, expectedType, path) {

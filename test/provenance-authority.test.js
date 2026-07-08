@@ -9,6 +9,7 @@ import { SAFE_GIT_POLICY } from "../src/safe-git.js";
 import {
   AUTHORITY_MODEL,
   checkWorktreeIdentity,
+  canonicalizeGithubPrUrl,
   createAttestationIndex,
   createDirectReviewedCommitAttestation,
   createGateDecisionAttestation,
@@ -766,6 +767,21 @@ describe("provenance authority", () => {
     }
   });
 
+  it("rejects canonical GitHub PR URLs with token-shaped owner or repo segments", () => {
+    for (const [name, prUrl] of [
+      ["glpat owner", `https://github.com/glpat-${"A".repeat(24)}/repo/pull/123`],
+      ["glpat repo", `https://github.com/example/glpat-${"A".repeat(24)}/pull/123`],
+      ["AKIA owner", "https://github.com/AKIAIOSFODNN7EXAMPLE/repo/pull/123"],
+      ["ASIA repo", "https://github.com/example/ASIAIOSFODNN7EXAMPLE/pull/123"],
+    ]) {
+      assert.throws(
+        () => canonicalizeGithubPrUrl(prUrl),
+        /sensitive or token-shaped/u,
+        name,
+      );
+    }
+  });
+
   it("rejects PR-created attestations with credential-bearing, non-canonical, or token-shaped GitHub PR URLs", () => {
     const scenarios = [
       {
@@ -792,6 +808,18 @@ describe("provenance authority", () => {
         name: "token-shaped-owner",
         prUrl: "https://github.com/ghp_abcdefghijklmnopqrstuvwxyz123456/repo/pull/123",
         repository: "ghp_abcdefghijklmnopqrstuvwxyz123456/repo",
+        error: /sensitive or token-shaped/u,
+      },
+      {
+        name: "glpat-owner",
+        prUrl: `https://github.com/glpat-${"A".repeat(24)}/repo/pull/123`,
+        repository: `glpat-${"A".repeat(24)}/repo`,
+        error: /sensitive or token-shaped/u,
+      },
+      {
+        name: "aws-owner-repo",
+        prUrl: "https://github.com/AKIAIOSFODNN7EXAMPLE/ASIAIOSFODNN7EXAMPLE/pull/123",
+        repository: "AKIAIOSFODNN7EXAMPLE/ASIAIOSFODNN7EXAMPLE",
         error: /sensitive or token-shaped/u,
       },
       {

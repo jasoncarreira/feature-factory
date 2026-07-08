@@ -977,6 +977,48 @@ describe("transition helpers", () => {
     }
   });
 
+  it("rejects pr-created transitions with token-shaped canonical GitHub URL segments", async () => {
+    for (const scenario of [
+      {
+        name: "glpat-owner",
+        prUrl: `https://github.com/glpat-${"A".repeat(24)}/repo/pull/123`,
+        repository: `glpat-${"A".repeat(24)}/repo`,
+      },
+      {
+        name: "akia-owner-asia-repo",
+        prUrl: "https://github.com/AKIAIOSFODNN7EXAMPLE/ASIAIOSFODNN7EXAMPLE/pull/123",
+        repository: "AKIAIOSFODNN7EXAMPLE/ASIAIOSFODNN7EXAMPLE",
+      },
+    ]) {
+      const fixture = createRunFixture();
+      const current = baseRun();
+      writeJson(join(fixture.runDir, "run.json"), current);
+      const authority = writePrPrerequisiteAuthority(fixture.runDir);
+      const originalIndex = readJson(join(fixture.runDir, "attestations", "index.json"));
+      writeFixture(fixture.runDir, "artifacts/pr-body.md", "PR body\n");
+
+      try {
+        await assert.rejects(
+          transitionPrCreated(
+            fixture.runDir,
+            prCreatedInput(authority.context, {
+              pr_url: scenario.prUrl,
+              repository: scenario.repository,
+            }),
+          ),
+          /sensitive or token-shaped/u,
+          scenario.name,
+        );
+
+        assert.deepEqual(readJson(join(fixture.runDir, "run.json")), current, scenario.name);
+        assert.deepEqual(readJson(join(fixture.runDir, "attestations", "index.json")), originalIndex, scenario.name);
+        assert.equal(existsSync(join(fixture.runDir, "attestations", "pr-created.json")), false, scenario.name);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  });
+
   it("rejects pr-created transitions when current authority is missing required attestations", async () => {
     const fixture = createRunFixture();
     const current = baseRun();
