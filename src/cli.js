@@ -561,9 +561,12 @@ async function startHeartbeatProcess(runId, opts) {
   const config = heartbeatStartConfig(opts);
   const runDir = resolveRunDir(runId, opts);
   const run = readHeartbeatStartRun(runDir);
-  const current = status(runId, opts);
+  let current = status(runId, opts);
   const ownerCapability = requiredHeartbeatOwnerCapability(opts, "heartbeat --start");
   assertHeartbeatOwnerCapability(runDir, run.run_id, ownerCapability, "heartbeat --start");
+  if (current.status === "invalid" && canStartHeartbeatFromLegacyUnanchoredRun(current, run)) {
+    current = { run_id: run.run_id, status: run.status, pending_gate: null };
+  }
   if (current.status === "invalid") {
     throw new Error(current.error || "run diagnostics failed closed");
   }
@@ -670,6 +673,16 @@ function hasInFlightHeartbeatWork(run) {
     return true;
   }
   return false;
+}
+
+function canStartHeartbeatFromLegacyUnanchoredRun(current, run) {
+  if (run.status !== "running" || !hasInFlightHeartbeatWork(run)) return false;
+  if (Object.values(run.gates || {}).some((gate) => gate?.status === "approved")) return false;
+  if (run.validator?.verdict === "GO" || run.validator?.verdict === "GO-WITH-NITS") return false;
+  if (run.security_review?.verdict === "PASS") return false;
+  if (stringValue(run.pr_url) || stringValue(run.terminal_result?.pr_url)) return false;
+  const items = Array.isArray(current?.diagnostics?.items) ? current.diagnostics.items : [];
+  return items.length === 1 && items[0]?.condition === "unverifiable-authority";
 }
 
 function factoryRoot(cwd) {
