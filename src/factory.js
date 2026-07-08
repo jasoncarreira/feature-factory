@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, withRunJsonLock } from "./run-state.js";
@@ -21,6 +21,7 @@ const HEARTBEAT_TICK_LOCK_TIMEOUT_MS = 1000;
 const HEARTBEAT_TICK_LOCK_RETRIES = 3;
 const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
+const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const activeHeartbeatLoops = new Map();
 
@@ -31,6 +32,28 @@ export function startFactory(args, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo }));
+  if (opts.detached) return startDetached(repo, commandArgs);
+  try {
+    execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
+  } catch (error) {
+    throw new Error(`opencode exited ${error.status ?? 1}`);
+  }
+}
+
+export function continueFactory(parentRunId, opts = {}) {
+  if (opts.ready) throw new Error("factory continue does not accept --ready");
+  if (opts.noDraft) throw new Error("factory continue does not accept --no-draft");
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
+
+  const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
+  const payload = featureCommandPayload(prompt, { ...opts, repo, ready: false, continuation });
+  if (opts.dryRun) return { status: "dry-run", payload };
+
+  seedRepoSkill(repo);
+  const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
+  if (opts.model) commandArgs.push("--model", opts.model);
+  commandArgs.push(JSON.stringify(payload, null, 2));
   if (opts.detached) return startDetached(repo, commandArgs);
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
@@ -466,6 +489,163 @@ function tryReadPublicRun(file, opts = {}) {
   }
 }
 
+function buildContinuation(parentRunId, opts = {}) {
+  if (!stringValue(parentRunId)) throw new Error("factory continue requires exactly one <blocked-run-id>");
+  const repo = opts.cwd || process.cwd();
+  const parentRunDir = resolveRunDir(parentRunId, opts);
+  const parentRunFile = join(parentRunDir, "run.json");
+  const parentRun = readRunFile(parentRunFile);
+  if (parentRun.status !== "blocked") {
+    throw new Error(`parent run '${parentRun.run_id}' must have status blocked`);
+  }
+  if (!stringValue(parentRun.branch)) {
+    throw new Error(`parent run '${parentRun.run_id}' must have a local branch`);
+  }
+  if (!branchExists(repo, parentRun.branch)) {
+    throw new Error(`parent run '${parentRun.run_id}' requires existing branch '${parentRun.branch}'`);
+  }
+
+  const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
+  assertContinuationTargetAvailable(repo, targetRunId);
+  const review = resolveContinuationReview(parentRunDir, requiredContinuationReview(opts.review));
+  const reviewMetadata = validateContinuationReview(readReviewJson(review.path), review.ref);
+
+  return {
+    kind: "blocked-run-continuation",
+    schema: "feature-factory.continuation.v1",
+    schema_version: 1,
+    parent: {
+      run_id: parentRun.run_id,
+      status: parentRun.status,
+      ref: relativeRef(repo, parentRunFile),
+      hash: sha256File(parentRunFile),
+      branch: parentRun.branch,
+      commit: branchCommit(repo, parentRun.branch),
+      artifact_refs: collectHashedRefs(join(parentRunDir, "artifacts"), "artifacts"),
+    },
+    review: {
+      ref: review.ref,
+      hash: sha256File(review.path),
+      ...reviewMetadata,
+    },
+    target: {
+      run_id: targetRunId,
+      branch: targetRunId,
+      worktree: resolve(repo, ".opencode", "worktrees", targetRunId),
+    },
+  };
+}
+
+function normalizeContinuationTargetRunId(runId, parentRunId) {
+  if (!stringValue(runId)) throw new Error("factory continue requires --run-id");
+  const value = String(runId).trim();
+  if (!SAFE_RUN_ID_PATTERN.test(value) || value.includes("..") || value.endsWith(".lock")) {
+    throw new Error("--run-id must be a bare safe factory run id");
+  }
+  if (value === parentRunId) throw new Error("--run-id must differ from the parent run id");
+  return value;
+}
+
+function assertContinuationTargetAvailable(repo, targetRunId) {
+  const targetRunFile = join(factoryRoot(repo), targetRunId, "run.json");
+  if (existsSync(targetRunFile)) throw new Error(`target run already exists: ${targetRunId}`);
+  if (branchExists(repo, targetRunId)) throw new Error(`target branch already exists: ${targetRunId}`);
+  const targetWorktree = resolve(repo, ".opencode", "worktrees", targetRunId);
+  if (existsSync(targetWorktree)) throw new Error(`target worktree already exists: ${targetWorktree}`);
+}
+
+function requiredContinuationReview(value) {
+  if (!stringValue(value)) throw new Error("factory continue requires --review");
+  return String(value).trim();
+}
+
+function resolveContinuationReview(parentRunDir, reviewRef) {
+  if (isAbsolute(reviewRef) || reviewRef.includes("\\")) {
+    throw new Error("--review must resolve under the parent run reviews/ directory");
+  }
+  const parentRunPhysical = physicalPath(parentRunDir, "parent run directory", { mustExist: true });
+  const parentReviewsDir = resolveExistingDirectory(join(parentRunDir, "reviews"), "reviews directory");
+  if (!isContainedPath(parentRunPhysical, parentReviewsDir, { allowEqual: false })) {
+    throw new Error("--review must resolve under the parent run reviews/ directory");
+  }
+  const relativeReviewRef = reviewRef.startsWith("reviews/") ? reviewRef : `reviews/${reviewRef}`;
+  const reviewPath = resolve(parentRunPhysical, relativeReviewRef);
+  const reviewPhysical = physicalPath(reviewPath, "review", { mustExist: true });
+  if (!isContainedPath(parentReviewsDir, reviewPhysical, { allowEqual: false })) {
+    throw new Error("--review must resolve under the parent run reviews/ directory");
+  }
+  if (!statSync(reviewPhysical).isFile()) throw new Error(`--review must be a JSON file: ${relativeReviewRef}`);
+  return { ref: relativeRef(parentRunPhysical, reviewPhysical), path: reviewPhysical };
+}
+
+function readReviewJson(file) {
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("must be a JSON object");
+    return value;
+  } catch (error) {
+    throw new Error(`--review must parse as a JSON object: ${error.message}`);
+  }
+}
+
+function validateContinuationReview(review, ref) {
+  if (!stringValue(review.subject)) throw new Error(`review '${ref}' must have non-empty subject`);
+  const summary = stringValue(review.summary) ? String(review.summary).trim() : null;
+  const requiredFixes = normalizeRequiredFixes(review.required_fixes);
+  const hasSummary = summary !== null;
+  const hasRequiredFixes = requiredFixes.length > 0;
+  if (!hasSummary && !hasRequiredFixes) {
+    throw new Error(`review '${ref}' must have non-empty summary or required_fixes[]`);
+  }
+  return {
+    subject: String(review.subject).trim(),
+    summary,
+    required_fixes: requiredFixes,
+  };
+}
+
+function normalizeRequiredFixes(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter(stringValue).map((item) => String(item).trim());
+}
+
+function collectHashedRefs(dir, refPrefix) {
+  if (!existsSync(dir)) return [];
+  const physicalDir = physicalPath(dir, `${refPrefix} directory`, { mustExist: true });
+  if (!statSync(physicalDir).isDirectory()) return [];
+  return readdirSync(physicalDir, { withFileTypes: true })
+    .flatMap((entry) => collectHashedRefsEntry(physicalDir, refPrefix, entry.name))
+    .sort((a, b) => a.ref.localeCompare(b.ref));
+}
+
+function collectHashedRefsEntry(baseDir, refPrefix, name) {
+  const path = join(baseDir, name);
+  const stat = statSync(path);
+  if (stat.isDirectory()) {
+    return readdirSync(path, { withFileTypes: true }).flatMap((entry) => collectHashedRefsEntry(baseDir, refPrefix, join(name, entry.name)));
+  }
+  if (!stat.isFile()) return [];
+  return [{ ref: `${refPrefix}/${relativeRef(baseDir, path)}`, hash: sha256File(path) }];
+}
+
+function branchExists(repo, branch) {
+  return git(repo, ["show-ref", "--verify", `refs/heads/${branch}`]).ok;
+}
+
+function branchCommit(repo, branch) {
+  const proc = git(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (!proc.ok) throw new Error(`parent run requires resolvable branch commit for '${branch}'`);
+  return proc.stdout.trim();
+}
+
+function sha256File(file) {
+  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+}
+
+function relativeRef(from, to) {
+  return relative(from, to).replace(/\\/gu, "/");
+}
+
 function resolveRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
@@ -699,7 +879,7 @@ export function validateSlices(plan) {
 
 function featureCommandPayload(prompt, opts) {
   const githubAccount = resolveGithubAccount(opts);
-  return {
+  const payload = {
     operator_request: String(prompt),
     driver: {
       mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
@@ -708,6 +888,8 @@ function featureCommandPayload(prompt, opts) {
       github_account: githubAccount,
     },
   };
+  if (opts.continuation !== undefined) payload.continuation = opts.continuation;
+  return payload;
 }
 
 function resolveGithubAccount(opts) {

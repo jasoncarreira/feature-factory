@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { cleanupRun, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
+import { cleanupRun, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
@@ -23,7 +23,7 @@ const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report"]);
 
 function usage(write = console.log) {
   write(`feature-factory
@@ -32,6 +32,7 @@ Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] <prompt...>
+  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--dry-run]
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory heartbeat <run-id> --start --phase <phase> [--interval MS] [--json]  Start detached liveness ticker
@@ -117,6 +118,10 @@ async function factory(args) {
   const opts = options(rest);
   const positional = positionals(rest);
   if (sub === "start") return print(startFactory(positional, opts), opts);
+  if (sub === "continue") {
+    if (positional.length !== 1) throw new Error("factory continue requires exactly one <blocked-run-id>");
+    return print(continueFactory(positional[0], opts), opts);
+  }
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
   if (sub === "heartbeat") return heartbeat(rest);
@@ -219,6 +224,8 @@ function options(args) {
     if (args[index] === "--interval") opts.intervalMs = Number(args[++index]);
     if (args[index] === "--phase") opts.phase = args[++index];
     if (args[index] === "--reviewer") opts.reviewer = args[++index];
+    if (args[index] === "--review") opts.review = args[++index];
+    if (args[index] === "--run-id") opts.runId = args[++index];
     if (args[index] === "--from") opts.from = args[++index];
     if (args[index] === "--artifact") opts.artifact = args[++index];
     if (args[index] === "--question-ref") opts.questionRef = args[++index];
