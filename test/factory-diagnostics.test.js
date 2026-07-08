@@ -163,6 +163,74 @@ describe("factory diagnostics run inspection", () => {
     }
   });
 
+  it("still reports validated missing worktrees while protected gates are pending", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({
+      worktree: ".opencode/worktrees/missing",
+      heartbeat_at: "2026-07-08T11:00:00.000Z",
+      gates: { pre_pr: { status: "pending", artifact: "artifacts/pre_pr.md", question_ref: "gates/pre_pr.question.md", answer_ref: "gates/pre_pr.answer" } },
+    }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatLease({ last_tick_at: "2026-07-08T11:00:00.000Z", pid: 987654321 }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false, validateRunAuthorityFn: validAuthority });
+      assert.deepEqual(diagnostics.items.map((item) => item.condition), ["protected-gate", "missing-worktree"]);
+      assert.equal(diagnostics.classification, "blocked");
+      assert.equal(diagnostics.status, "error");
+      assert.equal(diagnostics.severity, "error");
+      assert.equal(diagnostics.summary, diagnostics.items[1].message);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("reports invalid authority failures as non-authoritative without provenance secret leakage", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({ branch: "forged-branch" }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, {
+        cwd: repo,
+        now: CHECKED_AT,
+        validateRunAuthorityFn: () => invalidAuthority("trusted-secret-branch"),
+      });
+      assert.equal(diagnostics.authoritative, false);
+      assert.equal(diagnostics.items[0].authoritative, false);
+      assert.equal(diagnostics.items[0].condition, "invalid-authority");
+      assert.equal(diagnostics.classification, "invalid");
+      const serialized = JSON.stringify(diagnostics);
+      assert.doesNotMatch(serialized, /trusted-secret-branch/u);
+      assert.doesNotMatch(serialized, /acceptedAttestations|orderedRefs/u);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("reports unverifiable authority failures as non-authoritative without provenance secret leakage", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({ validator: { verdict: "GO", report: "artifacts/validator.md", review_ref: "reviews/validator.md" } }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, {
+        cwd: repo,
+        now: CHECKED_AT,
+        validateRunAuthorityFn: () => unverifiableAuthority("/tmp/provenance-secret-proof.json"),
+      });
+      assert.equal(diagnostics.authoritative, false);
+      assert.equal(diagnostics.items[0].authoritative, false);
+      assert.equal(diagnostics.items[0].condition, "unverifiable-authority");
+      assert.equal(diagnostics.classification, "blocked");
+      const serialized = JSON.stringify(diagnostics);
+      assert.doesNotMatch(serialized, /provenance-secret-proof/u);
+      assert.doesNotMatch(serialized, /acceptedAttestations|orderedRefs/u);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("suppresses heartbeat and worktree liveness alarms for terminal valid runs", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
@@ -287,6 +355,32 @@ function writeJson(filePath, value) {
 
 function validAuthority() {
   return { ok: true, checks: [], acceptedAttestations: {}, orderedRefs: [] };
+}
+
+function invalidAuthority(secretBranch) {
+  return {
+    ok: false,
+    checks: [{
+      name: "run.provenance.run-base",
+      ok: false,
+      errors: [{ path: "run.branch", message: `must match accepted feature branch '${secretBranch}'` }],
+    }],
+    acceptedAttestations: { "attestations/secret.json": { token: "provenance-secret-token" } },
+    orderedRefs: ["attestations/secret.json"],
+  };
+}
+
+function unverifiableAuthority(secretProofPath) {
+  return {
+    ok: false,
+    checks: [{
+      name: "provenance-authority.index",
+      ok: false,
+      errors: [{ path: "attestations/index.json", message: `missing proof at ${secretProofPath}` }],
+    }],
+    acceptedAttestations: { "attestations/proof.json": { api_key: "provenance-secret-token" } },
+    orderedRefs: ["attestations/proof.json"],
+  };
 }
 
 function cleanup(repo) {

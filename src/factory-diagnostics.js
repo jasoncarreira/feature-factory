@@ -10,6 +10,7 @@ import {
   validateRunAuthority,
   validateSlicesPlan,
 } from "./validate.js";
+import { scrubSecretProvenance } from "./provenance.js";
 
 export const DIAGNOSTIC_SCHEMA_VERSION = 1;
 export const HEARTBEAT_FILE = "heartbeat.json";
@@ -209,20 +210,19 @@ export function diagnoseRunObject(input, options = {}) {
       message: `Run is waiting at protected gate '${protectedGate}'.`,
       evidence: { source: "run.json", run_dir: runDir, run_path: runFile, gate: protectedGate },
     }));
-    return diagnosticEnvelope(items, { checkedAt, authoritative });
-  }
-
-  const heartbeat = inspectHeartbeat(run, { ...options, checkedAt, runDir });
-  if (heartbeat.invalid) {
-    items.push(diagnosticItem("invalid-run-state", {
-      checkedAt,
-      authoritative: false,
-      message: `Heartbeat state is invalid: ${heartbeat.error}`,
-      evidence: { source: "heartbeat.json", run_dir: runDir, heartbeat_path: heartbeat.path, error: heartbeat.error },
-    }));
   } else {
-    if (heartbeat.missingProcess) items.push(heartbeat.missingProcess);
-    if (heartbeat.stale) items.push(heartbeat.stale);
+    const heartbeat = inspectHeartbeat(run, { ...options, checkedAt, runDir });
+    if (heartbeat.invalid) {
+      items.push(diagnosticItem("invalid-run-state", {
+        checkedAt,
+        authoritative: false,
+        message: `Heartbeat state is invalid: ${heartbeat.error}`,
+        evidence: { source: "heartbeat.json", run_dir: runDir, heartbeat_path: heartbeat.path, error: heartbeat.error },
+      }));
+    } else {
+      if (heartbeat.missingProcess) items.push(heartbeat.missingProcess);
+      if (heartbeat.stale) items.push(heartbeat.stale);
+    }
   }
 
   const missingWorktree = inspectWorktree(run, { ...options, checkedAt, runDir, authoritative });
@@ -313,7 +313,7 @@ function validateAuthority(runDir, run, options) {
   const errors = validationErrors(authority.checks);
   return {
     ...authority,
-    errors,
+    errors: sanitizeAuthorityErrors(errors),
     condition: classifyAuthorityFailure(errors),
   };
 }
@@ -496,6 +496,13 @@ function validationErrors(checks = []) {
   return checks.flatMap((check) => (Array.isArray(check?.errors) ? check.errors : [])).map((error) => ({
     path: error.path || "authority",
     message: error.message || String(error),
+  }));
+}
+
+function sanitizeAuthorityErrors(errors = []) {
+  return errors.map((error) => ({
+    path: stringValue(error.path) ? String(scrubSecretProvenance(error.path)) : "authority",
+    message: stringValue(error.message) ? String(scrubSecretProvenance(error.message)) : String(scrubSecretProvenance(String(error))),
   }));
 }
 
