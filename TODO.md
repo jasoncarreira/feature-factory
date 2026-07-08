@@ -49,9 +49,9 @@
 ### Factory Robustness And Durability
 
 - Factory stale/recovery diagnostics
-  - Add diagnostics before relying heavily on detached runs.
-  - Surface stale heartbeat, missing process, missing worktree, invalid run state, and recoverable vs terminal conditions clearly.
-  - Prefer explicit `blocked`/`needs-human` terminal state over zombie or silently restarted runs.
+  - Current diagnostic contract surfaces stale heartbeat, missing heartbeat helper process, missing worktree, invalid run state, invalid/unverifiable authority, protected gates, and terminal runs without mutating durable state.
+  - Keep classifications stable: `recoverable`, `blocked`, `needs-human`, `terminal`, and first-class `invalid` must remain operator-facing.
+  - Preserve liveness-only heartbeat/PID/process semantics and provenance fail-closed behavior; prefer explicit `blocked`/`needs-human` terminal state over zombie or silently restarted runs.
 
 - Non-destructive disrupted-worktree recovery
   - Make the factory robust when its working directory/worktree disappears or becomes inaccessible mid-run.
