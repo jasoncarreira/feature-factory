@@ -94,6 +94,21 @@ describe("factory continue", () => {
     }
   });
 
+  it("hashes only documented parent artifact refs", () => {
+    const fixture = createFixture("known-artifacts-only");
+    try {
+      writeFileSync(join(fixture.runDir, "artifacts", "extra.json"), "{}\n", "utf8");
+      mkdirSync(join(fixture.runDir, "artifacts", "nested"));
+      writeFileSync(join(fixture.runDir, "artifacts", "nested", "extra.md"), "extra\n", "utf8");
+
+      const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "known-artifacts-only-next", dryRun: true });
+
+      assert.deepEqual(result.payload.continuation.parent_artifacts, hashArtifactRefs(fixture.runDir, ["artifacts/story.md"]));
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects missing parents and missing reviews", () => {
     const missingParent = createFixture("missing-parent-source");
     try {
@@ -231,6 +246,91 @@ describe("factory continue", () => {
     } finally {
       cleanup(fixture.repo);
       cleanup(escapedReviews);
+    }
+  });
+
+  it("rejects a parent reviews symlink to artifacts even when artifact JSON looks like review evidence", () => {
+    const fixture = createFixture("reviews-to-artifacts");
+    try {
+      writeJson(join(fixture.runDir, "artifacts", "reviewer.json"), { subject: "artifact review", summary: "must not be accepted" });
+      rmSync(join(fixture.runDir, "reviews"), { recursive: true, force: true });
+      symlinkSync(join(fixture.runDir, "artifacts"), join(fixture.runDir, "reviews"), "dir");
+
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reviews-to-artifacts-next", dryRun: true }),
+        /reviews\/ directory without symlinks/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects a symlinked review file under reviews", () => {
+    const fixture = createFixture("symlink-review-file");
+    try {
+      writeJson(join(fixture.runDir, "artifacts", "linked-review.json"), { subject: "linked", summary: "outside reviews" });
+      rmSync(join(fixture.runDir, "reviews", "reviewer.json"), { force: true });
+      symlinkSync(join(fixture.runDir, "artifacts", "linked-review.json"), join(fixture.runDir, "reviews", "reviewer.json"), "file");
+
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "symlink-review-file-next", dryRun: true }),
+        /reviews\/ directory without symlinks/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects a symlinked intermediate review directory", () => {
+    const fixture = createFixture("symlink-review-dir");
+    const escapedReviews = mkdtempSync(join(tmpdir(), "factory-review-dir-"));
+    try {
+      writeJson(join(escapedReviews, "reviewer.json"), { subject: "linked dir", summary: "outside reviews" });
+      symlinkSync(escapedReviews, join(fixture.runDir, "reviews", "nested"), "dir");
+
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "nested/reviewer.json", runId: "symlink-review-dir-next", dryRun: true }),
+        /reviews\/ directory without symlinks/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+      cleanup(escapedReviews);
+    }
+  });
+
+  it("rejects a symlinked artifact file before reading parent_artifacts", () => {
+    const fixture = createFixture("symlink-artifact-file");
+    const escapedArtifacts = mkdtempSync(join(tmpdir(), "factory-escaped-artifacts-"));
+    try {
+      writeFileSync(join(escapedArtifacts, "story.md"), "outside story\n", "utf8");
+      rmSync(join(fixture.runDir, "artifacts", "story.md"), { force: true });
+      symlinkSync(join(escapedArtifacts, "story.md"), join(fixture.runDir, "artifacts", "story.md"), "file");
+
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "symlink-artifact-file-next", dryRun: true }),
+        /parent artifact 'artifacts\/story\.md' must not contain symlinks/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+      cleanup(escapedArtifacts);
+    }
+  });
+
+  it("rejects a symlinked artifact root", () => {
+    const fixture = createFixture("symlink-artifact-root");
+    const escapedArtifacts = mkdtempSync(join(tmpdir(), "factory-artifacts-root-"));
+    try {
+      writeFileSync(join(escapedArtifacts, "story.md"), "outside story\n", "utf8");
+      rmSync(join(fixture.runDir, "artifacts"), { recursive: true, force: true });
+      symlinkSync(escapedArtifacts, join(fixture.runDir, "artifacts"), "dir");
+
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "symlink-artifact-root-next", dryRun: true }),
+        /parent artifacts\/ directory must not contain symlinks/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+      cleanup(escapedArtifacts);
     }
   });
 

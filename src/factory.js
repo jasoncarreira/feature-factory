@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
@@ -23,6 +23,15 @@ const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
+const CONTINUATION_PARENT_ARTIFACT_REFS = [
+  "artifacts/story.md",
+  "artifacts/research-map.md",
+  "artifacts/design-brief.md",
+  "artifacts/technical-brief.md",
+  "artifacts/test-report.md",
+  "artifacts/validation-report.md",
+  "artifacts/pr-body.md",
+];
 const activeHeartbeatLoops = new Map();
 
 export function startFactory(args, opts = {}) {
@@ -531,7 +540,7 @@ function buildContinuation(parentRunId, opts = {}) {
       branch: targetRunId,
       worktree: resolve(repo, ".opencode", "worktrees", targetRunId),
     },
-    parent_artifacts: collectHashedRefs(join(parentRunDir, "artifacts"), "artifacts"),
+    parent_artifacts: collectContinuationParentArtifacts(parentRunDir),
   };
 }
 
@@ -562,19 +571,21 @@ function resolveContinuationReview(parentRunDir, reviewRef) {
   if (isAbsolute(reviewRef) || reviewRef.includes("\\")) {
     throw new Error("--review must resolve under the parent run reviews/ directory");
   }
-  const parentRunPhysical = physicalPath(parentRunDir, "parent run directory", { mustExist: true });
-  const parentReviewsDir = resolveExistingDirectory(join(parentRunDir, "reviews"), "reviews directory");
-  if (!isContainedPath(parentRunPhysical, parentReviewsDir, { allowEqual: false })) {
+  const parentRun = resolve(parentRunDir);
+  const parentReviewsDir = join(parentRun, "reviews");
+  const reviewsDirEntry = lstatRequiredNoSymlinks(parentRun, parentReviewsDir, "--review", "--review must resolve under the parent run reviews/ directory without symlinks");
+  if (!reviewsDirEntry.isDirectory()) throw new Error("reviews directory must be a directory");
+  if (!isLogicalContainedPath(parentRun, parentReviewsDir, { allowEqual: false })) {
     throw new Error("--review must resolve under the parent run reviews/ directory");
   }
   const relativeReviewRef = reviewRef.startsWith("reviews/") ? reviewRef : `reviews/${reviewRef}`;
-  const reviewPath = resolve(parentRunPhysical, relativeReviewRef);
-  const reviewPhysical = physicalPath(reviewPath, "review", { mustExist: true });
-  if (!isContainedPath(parentReviewsDir, reviewPhysical, { allowEqual: false })) {
+  const reviewPath = resolve(parentRun, relativeReviewRef);
+  if (!isLogicalContainedPath(parentReviewsDir, reviewPath, { allowEqual: false })) {
     throw new Error("--review must resolve under the parent run reviews/ directory");
   }
-  if (!statSync(reviewPhysical).isFile()) throw new Error(`--review must be a JSON file: ${relativeReviewRef}`);
-  return { ref: relativeRef(parentRunPhysical, reviewPhysical), path: reviewPhysical };
+  const reviewEntry = lstatRequiredNoSymlinks(parentRun, reviewPath, "--review", "--review must resolve under the parent run reviews/ directory without symlinks");
+  if (!reviewEntry.isFile()) throw new Error(`--review must be a JSON file: ${relativeReviewRef}`);
+  return { ref: relativeRef(parentRun, reviewPath), path: reviewPath };
 }
 
 function readReviewJson(file) {
@@ -608,23 +619,59 @@ function normalizeRequiredFixes(value) {
   return value.filter(stringValue).map((item) => String(item).trim());
 }
 
-function collectHashedRefs(dir, refPrefix) {
-  if (!existsSync(dir)) return [];
-  const physicalDir = physicalPath(dir, `${refPrefix} directory`, { mustExist: true });
-  if (!statSync(physicalDir).isDirectory()) return [];
-  return readdirSync(physicalDir, { withFileTypes: true })
-    .flatMap((entry) => collectHashedRefsEntry(physicalDir, refPrefix, entry.name))
-    .sort((a, b) => a.ref.localeCompare(b.ref));
+function collectContinuationParentArtifacts(parentRunDir) {
+  const parentRun = resolve(parentRunDir);
+  const artifactsDir = join(parentRun, "artifacts");
+  const artifactsDirEntry = lstatOptionalNoSymlinks(parentRun, artifactsDir, "parent artifacts", "parent artifacts/ directory must not contain symlinks");
+  if (!artifactsDirEntry) return [];
+  if (!artifactsDirEntry.isDirectory()) return [];
+  return CONTINUATION_PARENT_ARTIFACT_REFS.flatMap((ref) => {
+    const artifactPath = resolve(parentRun, ref);
+    const artifactEntry = lstatOptionalNoSymlinks(parentRun, artifactPath, `parent artifact '${ref}'`, `parent artifact '${ref}' must not contain symlinks`);
+    if (!artifactEntry || !artifactEntry.isFile()) return [];
+    return [{ ref, hash: sha256File(artifactPath) }];
+  }).sort((a, b) => a.ref.localeCompare(b.ref));
 }
 
-function collectHashedRefsEntry(baseDir, refPrefix, name) {
-  const path = join(baseDir, name);
-  const stat = statSync(path);
-  if (stat.isDirectory()) {
-    return readdirSync(path, { withFileTypes: true }).flatMap((entry) => collectHashedRefsEntry(baseDir, refPrefix, join(name, entry.name)));
+function lstatRequiredNoSymlinks(rootDir, targetPath, label, symlinkMessage) {
+  const result = lstatPathNoSymlinks(rootDir, targetPath, symlinkMessage);
+  if (!result.entry) throw new Error(`${label} is unresolvable: ${targetPath}`);
+  return result.entry;
+}
+
+function lstatOptionalNoSymlinks(rootDir, targetPath, label, symlinkMessage) {
+  return lstatPathNoSymlinks(rootDir, targetPath, symlinkMessage || `${label} must not contain symlinks`).entry;
+}
+
+function lstatPathNoSymlinks(rootDir, targetPath, symlinkMessage) {
+  const root = resolve(rootDir);
+  const target = resolve(targetPath);
+  if (!isLogicalContainedPath(root, target, { allowEqual: false })) return { entry: null };
+  const segments = relative(root, target).split(/[\\/]+/u).filter(Boolean);
+  let current = root;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = join(current, segments[index]);
+    let entry;
+    try {
+      entry = lstatSync(current);
+    } catch (error) {
+      if (error?.code === "ENOENT") return { entry: null };
+      throw error;
+    }
+    if (entry.isSymbolicLink()) {
+      throw new Error(`${symlinkMessage}: ${relativeRef(root, current)}`);
+    }
+    if (index < segments.length - 1 && !entry.isDirectory()) return { entry: null };
+    if (index === segments.length - 1) return { entry };
   }
-  if (!stat.isFile()) return [];
-  return [{ ref: `${refPrefix}/${relativeRef(baseDir, path)}`, hash: sha256File(path) }];
+  return { entry: null };
+}
+
+function isLogicalContainedPath(parent, child, options = {}) {
+  const allowEqual = options.allowEqual !== false;
+  const rel = relative(resolve(parent), resolve(child));
+  if (rel === "") return allowEqual;
+  return rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel);
 }
 
 function branchExists(repo, branch) {
