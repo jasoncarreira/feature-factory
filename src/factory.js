@@ -10,6 +10,7 @@ import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
+import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -90,14 +91,11 @@ export function startFactory(args, opts = {}) {
 }
 
 export function listRuns(opts = {}) {
-  const root = factoryRoot(opts.cwd || process.cwd());
-  const repo = repoRoot(opts.cwd || process.cwd());
-  if (!existsSync(root)) return [];
-  return readdirSync(root)
-    .map((runId) => {
-      const runDir = join(root, runId);
+  return allRunDirs(opts)
+    .map((runDir) => {
+      const repo = factoryRepoFromRunDir(runDir);
+      const runId = basename(runDir);
       const file = join(runDir, "run.json");
-      if (!existsSync(file)) return null;
       const run = tryReadPublicRun(file, { ...opts, repoRoot: repo });
       const diagnostics = run.error ? diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo)) : diagnoseRunObject(run.value, { ...publicDiagnosticOptions(opts, repo), runDir, runFile: file });
       if (run.error || diagnosticsFailClosed(diagnostics)) return invalidListRun(runId, file, diagnostics, run.error);
@@ -122,7 +120,7 @@ function compareRunListItems(a, b) {
 export function status(runId, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const runFile = join(runDir, "run.json");
-  const repo = repoRoot(opts.cwd || process.cwd());
+  const repo = factoryRepoFromRunDir(runDir);
   const runResult = tryReadPublicRun(runFile, { ...opts, repoRoot: repo });
   const diagnostics = runResult.error ? diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo)) : diagnoseRunObject(runResult.value, { ...publicDiagnosticOptions(opts, repo), runDir, runFile });
   if (diagnosticsFailClosed(diagnostics)) return invalidStatusEnvelope(runId, runDir, runFile, diagnostics);
@@ -298,9 +296,9 @@ export function watchRun(runId, opts = {}) {
 }
 
 export function validateState(runId, opts = {}) {
-  const repo = repoRoot(opts.cwd || process.cwd());
   const runDirs = runId ? [resolveRunDir(runId, opts)] : allRunDirs(opts);
   const runs = runDirs.map((dir) => {
+    const repo = factoryRepoFromRunDir(dir);
     const diagnostics = diagnoseRunDir(dir, publicDiagnosticOptions(opts, repo));
     const validation = validateRunDir(dir, { ...opts, repoRoot: repo });
     return {
@@ -351,8 +349,8 @@ function fallbackRunId(runId, runDir) {
 }
 
 export async function cleanupRun(runId, opts = {}) {
-  const repo = repoRoot(opts.cwd || process.cwd());
-  const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
+  const runDir = resolveRunDir(runId, opts);
+  const repo = factoryRepoFromRunDir(runDir);
   if (!insideFactoryRoot(repo, runDir)) {
     throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
   }
@@ -519,19 +517,22 @@ function tryReadPublicRun(file, opts = {}) {
 function resolveRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
-  const root = factoryRoot(opts.cwd || process.cwd());
   const value = String(id).trim();
   if (isExplicitRunPath(value)) {
     const asPath = resolve(opts.cwd || process.cwd(), value);
-    if (!insideDirectory(root, asPath)) throw new Error(`run path must be inside .opencode/factory: ${asPath}`);
+    const root = factoryRootsForLookup(opts.cwd || process.cwd()).find((candidate) => insideDirectory(candidate, asPath));
+    if (!root) throw new Error(`run path must be inside .opencode/factory: ${asPath}`);
     if (!existsSync(join(asPath, "run.json"))) throw new Error(`run not found: ${id}`);
     return asPath;
   }
   if (!value || value === "." || value === "..") throw new Error("run id must be a bare factory run id");
-  const dir = resolve(root, value);
-  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
-  if (!insideDirectory(root, dir)) throw new Error(`run directory must be inside .opencode/factory: ${dir}`);
-  return dir;
+  for (const root of factoryRootsForLookup(opts.cwd || process.cwd())) {
+    const dir = resolve(root, value);
+    if (!existsSync(join(dir, "run.json"))) continue;
+    if (!insideDirectory(root, dir)) throw new Error(`run directory must be inside .opencode/factory: ${dir}`);
+    return dir;
+  }
+  throw new Error(`run not found: ${id}`);
 }
 
 function isExplicitRunPath(value) {
@@ -547,26 +548,33 @@ function formatValidationChecks(checks) {
 function resolveHeartbeatRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
-  const root = factoryRoot(opts.cwd || process.cwd());
   const normalized = normalizeHeartbeatRunId(id);
-  const dir = resolve(root, normalized);
-  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
-  if (!insideDirectory(root, dir)) {
-    throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
+  for (const root of factoryRootsForLookup(opts.cwd || process.cwd())) {
+    const dir = resolve(root, normalized);
+    if (!existsSync(join(dir, "run.json"))) continue;
+    if (!insideDirectory(root, dir)) throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
+    return dir;
   }
-  return dir;
+  throw new Error(`run not found: ${id}`);
 }
 
 function factoryRoot(cwd) {
-  return join(repoRoot(cwd), ".opencode", "factory");
+  return directFactoryRoot(cwd);
 }
 
 function allRunDirs(opts = {}) {
-  const root = factoryRoot(opts.cwd || process.cwd());
-  if (!existsSync(root)) return [];
-  return readdirSync(root)
-    .map((runId) => join(root, runId))
-    .filter((dir) => existsSync(join(dir, "run.json")));
+  const seen = new Set();
+  const dirs = [];
+  for (const root of factoryRootsForLookup(opts.cwd || process.cwd())) {
+    if (!existsSync(root)) continue;
+    for (const runId of readdirSync(root)) {
+      const dir = join(root, runId);
+      if (!existsSync(join(dir, "run.json")) || seen.has(dir)) continue;
+      seen.add(dir);
+      dirs.push(dir);
+    }
+  }
+  return dirs;
 }
 
 function startDetached(repo, commandArgs) {
@@ -954,7 +962,7 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
   const runPath = join(runDir, "run.json");
   const current = readRunFile(runPath);
   const snapshot = await collectRunDebugSnapshot({
-    cwd: opts.cwd || process.cwd(),
+    cwd: factoryRepoFromRunDir(runDir),
     driverKind: opts.driverKind,
     pluginSpec: opts.pluginSpec,
     pluginOptions: opts.pluginOptions,

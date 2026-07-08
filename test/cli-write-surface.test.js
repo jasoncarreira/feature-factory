@@ -99,6 +99,32 @@ describe("cli write surface", () => {
       rmSync(repo, { recursive: true, force: true });
     }
   });
+
+  it("resolves state commands from a managed git worktree cwd without --repo", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-worktree-cwd-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    const branch = `${RUN_ID}-worktree`;
+    const worktree = join(repo, ".opencode", "worktrees", branch);
+    try {
+      initGitRepo(repo);
+      mkdirSync(join(repo, ".opencode", "worktrees"), { recursive: true });
+      runGit(repo, ["worktree", "add", "-b", branch, worktree]);
+      seedRun(runDir);
+      writeJson(join(runDir, "run.json"), { ...readJson(join(runDir, "run.json")), branch, worktree });
+      writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
+      writeFileSync(join(runDir, "gates", "story.question.md"), "approve story?\n", "utf8");
+
+      const current = JSON.parse(runFactoryFrom(worktree, ["status", RUN_ID, "--json"]).stdout);
+      runFactoryFrom(worktree, ["gate-decision", RUN_ID, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--json"]);
+      const listed = JSON.parse(runFactoryFrom(worktree, ["list", "--json"]).stdout);
+
+      assert.equal(current.run_id, RUN_ID);
+      assert.equal(listed[0].run_id, RUN_ID);
+      assert.equal(readJson(join(runDir, "run.json")).gates.story.status, "pending");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });
 
 function seedRun(runDir) {
@@ -126,6 +152,17 @@ function runFactoryFail(repo, args) {
 
 function runFactory(repo, args) {
   const proc = spawnFactory(repo, args);
+  assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+  return proc;
+}
+
+function runFactoryFrom(cwd, args) {
+  const proc = spawnSync(process.execPath, [CLI, "factory", ...args], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    timeout: 15000,
+  });
   assert.equal(proc.status, 0, proc.stderr || proc.stdout);
   return proc;
 }
