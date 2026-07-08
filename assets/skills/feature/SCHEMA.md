@@ -313,6 +313,72 @@ External monitoring semantics:
 - Use pending gate status in `run.json.gates.*` for story/brief/pre-PR waits because heartbeat is intentionally absent there.
 - Use terminal `run.status` plus `terminal_result` as the durable completion/blocking signal; heartbeat must already be stopped before those terminal writes land.
 
+## Detached run diagnostics (output-only)
+
+Diagnostics are emitted by `factory status`, `factory list`, `factory validate`, `factory watch`, and TUI data. They are output-only and do not change persisted `run.json`, `heartbeat.json`, gate, or attestation schemas.
+
+Envelope shape:
+
+```json
+{
+  "schema_version": 1,
+  "checked_at": "2026-07-08T00:00:00.000Z",
+  "authoritative": true,
+  "status": "ok",
+  "severity": "info",
+  "classification": "healthy",
+  "summary": "No diagnostics",
+  "items": [
+    {
+      "condition": "stale-heartbeat",
+      "classification": "recoverable",
+      "severity": "warning",
+      "status": "warning",
+      "message": "Heartbeat has not advanced within the stale threshold.",
+      "action": "Inspect the run log and validate durable state before resuming; do not restart blindly.",
+      "authoritative": false,
+      "checked_at": "2026-07-08T00:00:00.000Z",
+      "evidence": {
+        "source": "heartbeat.json",
+        "liveness_only": true,
+        "pid": 4242,
+        "process_alive": false
+      }
+    }
+  ]
+}
+```
+
+Enums:
+
+- `condition`: `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `invalid-authority`, `unverifiable-authority`, `protected-gate`, `terminal-run`.
+- `classification`: `healthy`, `recoverable`, `blocked`, `needs-human`, `terminal`, `invalid`. `invalid` is first-class.
+- `status`: `ok`, `warning`, `error`.
+- `severity`: `info`, `warning`, `error`, `critical`.
+
+Aggregation:
+
+- No items yields `classification: "healthy"`, `status: "ok"`, `severity: "info"`, and `summary: "No diagnostics"`.
+- Primary item priority is classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`, severity `critical` > `error` > `warning` > `info`, status `error` > `warning` > `ok`, condition `invalid-run-state` > `invalid-authority` > `unverifiable-authority` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`, then original detection order.
+- Top-level `classification`, `status`, `severity`, and `summary` come from the primary item.
+
+Condition mappings and operator actions:
+
+- `stale-heartbeat` -> `recoverable` / `warning` / `warning`; liveness-only; threshold `max(2 * interval_ms, 120000ms)`; inspect logs and validate durable state before resuming, do not restart blindly.
+- `missing-heartbeat-process` -> `recoverable` / `warning` / `warning`; heartbeat-helper PID only; liveness-only; the PID is not a detached opencode process.
+- `missing-worktree` -> `blocked` / `error` / `error`; based on validated worktree identity checks; restore the trusted worktree or recover from validated durable state.
+- `invalid-run-state` -> `invalid` / `error` / `critical`; invalid JSON/schema/required sidecars; treat as untrusted until validation passes.
+- `invalid-authority` -> `invalid` / `error` / `critical`; contradictory provenance or accepted attestation claims; inspect accepted attestations and current observations.
+- `unverifiable-authority` -> `blocked` / `error` / `critical`; missing/inaccessible proof; restore proof before trusting status, branch, PR, gate, or worktree claims.
+- `protected-gate` -> exactly `needs-human` / `warning` / `warning`; answer the pending protected `story`, `brief`, or `pre_pr` gate or stop the run.
+- `terminal-run`: `completed`/`partial` -> `terminal` / `ok` / `info`; `blocked` -> `blocked` / `error` / `error`; `needs-human` -> `needs-human` / `warning` / `warning`; read `terminal_result`.
+
+Heartbeat/PID/process semantics are liveness-only. `missing-heartbeat-process` refers to the heartbeat helper process recorded in `heartbeat.json`, not to a detached opencode process; no durable run-id-to-opencode-PID registry exists. Heartbeat evidence is always `authoritative: false` with `evidence.liveness_only: true`; PID liveness, process existence, `heartbeat.json`, and mutable `run.json` heartbeat fields cannot prove health or ownership.
+
+Protected gates suppress stale-heartbeat and missing-heartbeat-process diagnostics because `story`, `brief`, and `pre_pr` waits are intentionally heartbeat-free. Valid terminal states suppress heartbeat/worktree liveness alarms.
+
+Provenance fail-closed policy: `diagnostics.authoritative` is true only when `run.json` schema and run-authority checks required for emitted trusted fields pass. Invalid or unverifiable state must not be treated as healthy, silently restarted, or inferred from heartbeat/PID/process evidence, status booleans, worktree strings, or mutable `run.json` claims. Fail-closed envelopes omit trusted PR, gate, branch, and worktree claims unless accepted attestations plus fresh observations verify them.
+
 ## factory_provenance diagnostic state
 
 `run.json.factory_provenance` stores redacted diagnostic snapshots for debugging factory environment drift. It is optional for backward compatibility and diagnostic-only; accepted attestations and fresh observations remain the authority for gates, reviews, merges, and PR URLs.
