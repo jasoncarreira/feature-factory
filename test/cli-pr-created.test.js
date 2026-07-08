@@ -139,10 +139,7 @@ function continuationMetadata(targetRunId) {
       branch: "continuation-branch",
       worktree: "/tmp/continuation-worktree",
     },
-    parent_artifacts: {
-      refs: { validation_report: "artifacts/validation-report.md" },
-      hashes: { validation_report: HASH },
-    },
+    parent_artifacts: [{ ref: "artifacts/validation-report.md", hash: HASH }],
   };
 }
 

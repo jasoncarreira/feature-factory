@@ -314,8 +314,11 @@ function validateContinuationReview(errors, review, path) {
   requiredString(errors, review, "ref", `${path}.ref`);
   requiredHash(errors, review, "hash", `${path}.hash`);
   requiredString(errors, review, "subject", `${path}.subject`);
-  requiredString(errors, review, "summary", `${path}.summary`);
-  validateStringArray(errors, review.required_fixes, `${path}.required_fixes`, { required: true });
+  optionalString(errors, review, "summary", `${path}.summary`);
+  validateStringArray(errors, review.required_fixes, `${path}.required_fixes`, { required: false });
+  if (!stringValue(review.summary) && !hasNonEmptyStringItem(review.required_fixes)) {
+    errors.push({ path, message: "requires summary or required_fixes" });
+  }
 }
 
 function validateContinuationTarget(errors, run, target, path) {
@@ -332,18 +335,18 @@ function validateContinuationTarget(errors, run, target, path) {
 }
 
 function validateContinuationParentArtifacts(errors, parentArtifacts, path) {
-  if (!isRecord(parentArtifacts)) {
-    errors.push({ path, message: "must be an object" });
+  if (!Array.isArray(parentArtifacts)) {
+    errors.push({ path, message: "must be an array" });
     return;
   }
-  validateRequiredStringMap(errors, parentArtifacts.refs, `${path}.refs`);
-  validateRequiredHashMap(errors, parentArtifacts.hashes, `${path}.hashes`);
-  if (!isRecord(parentArtifacts.refs) || !isRecord(parentArtifacts.hashes)) return;
-  for (const key of Object.keys(parentArtifacts.refs)) {
-    if (!(key in parentArtifacts.hashes)) errors.push({ path: `${path}.hashes.${key}`, message: "is required for parent_artifacts ref" });
-  }
-  for (const key of Object.keys(parentArtifacts.hashes)) {
-    if (!(key in parentArtifacts.refs)) errors.push({ path: `${path}.refs.${key}`, message: "is required for parent_artifacts hash" });
+  for (const [index, artifact] of parentArtifacts.entries()) {
+    const itemPath = `${path}[${index}]`;
+    if (!isRecord(artifact)) {
+      errors.push({ path: itemPath, message: "must be an object" });
+      continue;
+    }
+    requiredString(errors, artifact, "ref", `${itemPath}.ref`);
+    requiredHash(errors, artifact, "hash", `${itemPath}.hash`);
   }
 }
 
@@ -570,6 +573,10 @@ function validateStringArray(errors, value, path, options = {}) {
     if (!stringValue(item)) errors.push({ path: `${path}[${index}]`, message: "must be a non-empty string" });
     else if (options.values && !options.values.has(item)) errors.push({ path: `${path}[${index}]`, message: `unknown dependency '${item}'` });
   }
+}
+
+function hasNonEmptyStringItem(value) {
+  return Array.isArray(value) && value.some((item) => stringValue(item));
 }
 
 function requiredString(errors, obj, key, path) {

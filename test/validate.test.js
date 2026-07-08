@@ -44,6 +44,20 @@ describe("run schema and consistency", () => {
     assert.equal(run.schema_version, 1);
     assert.equal(run.continuation.schema_version, 1);
     assert.equal(run.continuation.kind, "blocked-run-continuation");
+    assert.deepEqual(run.continuation.parent_artifacts, [
+      { ref: "artifacts/validation-report.md", hash: HASH },
+      { ref: "runs/parent-run/run.json", hash: HASH },
+    ]);
+  });
+
+  it("accepts continuation reviews with summary or required fixes", () => {
+    const summaryOnly = continuationMetadata();
+    summaryOnly.review.required_fixes = [];
+    assert.equal(validateRun({ ...runningRun(), continuation: summaryOnly }).continuation.review.summary, "Validator found required fixes.");
+
+    const fixesOnly = continuationMetadata();
+    delete fixesOnly.review.summary;
+    assert.deepEqual(validateRun({ ...runningRun(), continuation: fixesOnly }).continuation.review.required_fixes, ["fix failing acceptance test"]);
   });
 
   it("rejects invalid blocked-run continuation metadata", () => {
@@ -74,11 +88,26 @@ describe("run schema and consistency", () => {
       (error) => error instanceof ValidationError && error.message.includes("run.continuation.target.run_id: must match run.run_id"),
     );
 
-    const unpairedArtifactHash = continuationMetadata();
-    delete unpairedArtifactHash.parent_artifacts.hashes.validation_report;
+    const missingReviewDetail = continuationMetadata();
+    missingReviewDetail.review.summary = "";
+    missingReviewDetail.review.required_fixes = [];
     assert.throws(
-      () => validateRun({ ...runningRun(), continuation: unpairedArtifactHash }),
-      (error) => error instanceof ValidationError && error.message.includes("run.continuation.parent_artifacts.hashes.validation_report: is required"),
+      () => validateRun({ ...runningRun(), continuation: missingReviewDetail }),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.review: requires summary or required_fixes"),
+    );
+
+    const invalidArtifactHash = continuationMetadata();
+    invalidArtifactHash.parent_artifacts[0].hash = "not-a-hash";
+    assert.throws(
+      () => validateRun({ ...runningRun(), continuation: invalidArtifactHash }),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.parent_artifacts[0].hash: must be a sha256 hash"),
+    );
+
+    const invalidArtifactShape = continuationMetadata();
+    invalidArtifactShape.parent_artifacts = { refs: { validation_report: "artifacts/validation-report.md" }, hashes: { validation_report: HASH } };
+    assert.throws(
+      () => validateRun({ ...runningRun(), continuation: invalidArtifactShape }),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.parent_artifacts: must be an array"),
     );
   });
 
@@ -179,16 +208,10 @@ function continuationMetadata(targetRunId = "run") {
       branch: "continuation-branch",
       worktree: "/tmp/continuation-worktree",
     },
-    parent_artifacts: {
-      refs: {
-        validation_report: "artifacts/validation-report.md",
-        run_json: "runs/parent-run/run.json",
-      },
-      hashes: {
-        validation_report: HASH,
-        run_json: HASH,
-      },
-    },
+    parent_artifacts: [
+      { ref: "artifacts/validation-report.md", hash: HASH },
+      { ref: "runs/parent-run/run.json", hash: HASH },
+    ],
   };
 }
 

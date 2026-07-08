@@ -476,7 +476,12 @@ describe("simplified run-state transitions", () => {
     for (const item of cases) {
       const fixture = createFixture(item.runId);
       try {
-        writeReadyPrRun(fixture, item.overrides);
+        writeReadyPrRun(fixture, {
+          branch: "continuation-branch",
+          worktree: "/tmp/continuation-worktree",
+          continuation: continuationMetadata(fixture.runId),
+          ...item.overrides,
+        });
         if (item.runId === "pr-validator-no-go") writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), item.review);
         else writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), item.review);
 
@@ -724,10 +729,7 @@ function continuationMetadata(targetRunId) {
       branch: "continuation-branch",
       worktree: "/tmp/continuation-worktree",
     },
-    parent_artifacts: {
-      refs: { validation_report: "artifacts/validation-report.md" },
-      hashes: { validation_report: HASH },
-    },
+    parent_artifacts: [{ ref: "artifacts/validation-report.md", hash: HASH }],
   };
 }
 
