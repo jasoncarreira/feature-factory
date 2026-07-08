@@ -57,7 +57,7 @@ function sliceLine(slices) {
 
 function View(props) {
   const roots = () => factoryRoots(props.api);
-  const scanRuns = () => readRuns(roots(), { diagnostics: false });
+  const scanRuns = () => readRuns(roots());
   const [runs, setRuns] = createSignal(scanRuns());
   const theme = () => currentTheme(props.api);
   const visible = createMemo(() => runs().length > 0);
@@ -70,7 +70,7 @@ function View(props) {
     return list;
   });
   const visibleRuns = createMemo(() => shown().slice(0, MAX_VISIBLE_RUNS));
-  const hiddenCount = createMemo(() => Math.max(0, shown().length - visibleRuns().length));
+  const hiddenCount = createMemo(() => Math.max(0, runs().length - visibleRuns().length));
   const timer = setInterval(() => setRuns(scanRuns()), REFRESH_INTERVAL_MS);
   onCleanup(() => clearInterval(timer));
 

@@ -1,13 +1,15 @@
-import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "node:child_process";
-import { assertHeartbeatOwnerCapability, hasInFlightHeartbeatWork, heartbeatOnce, withRunJsonLock } from "./run-state.js";
-import { HEARTBEAT_PHASES, pendingProtectedGate, validateHeartbeatState, validateRun, validateRunAuthority, validateRunDir, validateSlicesPlan } from "./validate.js";
-import { collectRunProvenanceSnapshot } from "./provenance.js";
-import { hashFile, resolveArtifactRef, resolveGateRef } from "./provenance-authority.js";
-import { diagnoseRunDir } from "./factory-diagnostics.js";
+import { execFileSync, spawn } from "node:child_process";
+import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, withRunJsonLock } from "./run-state.js";
+import { pendingProtectedGate, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { collectRunDebugSnapshot } from "./env-snapshot.js";
+import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
+import { git, repoRoot } from "./git.js";
+import { checkWorktreeIdentity } from "./worktrees.js";
+import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -15,15 +17,9 @@ const HEARTBEAT_FILE = "heartbeat.json";
 const HEARTBEAT_SCHEMA_VERSION = 1;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
 const MIN_HEARTBEAT_INTERVAL_MS = 1000;
-const DEFAULT_HEARTBEAT_MAX_DURATION_MS = 7200000;
-const DEFAULT_HEARTBEAT_STOP_WAIT_MS = 5000;
-const DEFAULT_HEARTBEAT_POLL_MS = 25;
 const HEARTBEAT_TICK_LOCK_TIMEOUT_MS = 1000;
-const HEARTBEAT_ACTIVE_STATUSES = new Set(["active", "running"]);
-const HEARTBEAT_TERMINAL_STATUSES = new Set(["stopped", "error"]);
-const HEARTBEAT_PHASE_SET = new Set(HEARTBEAT_PHASES);
-const HEARTBEAT_OWNER_ENV = "FEATURE_FACTORY_HEARTBEAT_OWNER";
-const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state", "invalid-authority", "unverifiable-authority"]);
+const HEARTBEAT_TICK_LOCK_RETRIES = 3;
+const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const activeHeartbeatLoops = new Map();
@@ -36,8 +32,11 @@ export function startFactory(args, opts = {}) {
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo }));
   if (opts.detached) return startDetached(repo, commandArgs);
-  const proc = spawnSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
-  if (proc.status !== 0) throw new Error(`opencode exited ${proc.status ?? 1}`);
+  try {
+    execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
+  } catch (error) {
+    throw new Error(`opencode exited ${error.status ?? 1}`);
+  }
 }
 
 export function listRuns(opts = {}) {
@@ -49,8 +48,8 @@ export function listRuns(opts = {}) {
       const runDir = join(root, runId);
       const file = join(runDir, "run.json");
       if (!existsSync(file)) return null;
-      const diagnostics = diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo));
       const run = tryReadPublicRun(file, { ...opts, repoRoot: repo });
+      const diagnostics = run.error ? diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo)) : diagnoseRunObject(run.value, { ...publicDiagnosticOptions(opts, repo), runDir, runFile: file });
       if (run.error || diagnosticsFailClosed(diagnostics)) return invalidListRun(runId, file, diagnostics, run.error);
       return {
         run_id: run.value.run_id || runId,
@@ -63,16 +62,22 @@ export function listRuns(opts = {}) {
       };
     })
     .filter(Boolean)
-    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+    .sort(compareRunListItems);
+}
+
+function compareRunListItems(a, b) {
+  return String(b.updated_at || "").localeCompare(String(a.updated_at || "")) || String(b.run_id || "").localeCompare(String(a.run_id || ""));
 }
 
 export function status(runId, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const runFile = join(runDir, "run.json");
   const repo = repoRoot(opts.cwd || process.cwd());
-  const diagnostics = diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo));
+  const runResult = tryReadPublicRun(runFile, { ...opts, repoRoot: repo });
+  const diagnostics = runResult.error ? diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo)) : diagnoseRunObject(runResult.value, { ...publicDiagnosticOptions(opts, repo), runDir, runFile });
   if (diagnosticsFailClosed(diagnostics)) return invalidStatusEnvelope(runId, runDir, runFile, diagnostics);
-  const run = loadPublicRun(runId, opts);
+  if (runResult.error) return invalidStatusEnvelope(runId, runDir, runFile, diagnostics);
+  const run = runResult.value;
   return {
     run_id: run.run_id,
     schema_version: run.schema_version || run.version || null,
@@ -95,7 +100,7 @@ export function status(runId, opts = {}) {
 export function heartbeatStatus(runId, opts = {}) {
   const file = heartbeatPath(resolveHeartbeatRunDir(runId, opts));
   if (!existsSync(file)) return null;
-  return readHeartbeatFile(file);
+  return withHeartbeatLiveness(readHeartbeatFile(file), opts);
 }
 
 export async function startHeartbeat(runId, config = {}, opts = {}) {
@@ -103,15 +108,11 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
   const heartbeatFile = heartbeatPath(runDir);
   const phase = normalizeHeartbeatPhase(config.phase);
   const intervalMs = normalizeHeartbeatInterval(config.intervalMs);
-  const maxDurationMs = normalizeHeartbeatDuration(config.maxDurationMs);
   const startedAt = timestamp(opts.now);
-  const token = String(opts.token || randomUUID());
-  const ownerCapability = resolveHeartbeatOwnerCapability(opts, "startHeartbeat");
-  let lease;
+  let heartbeat;
 
   await withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
-    assertHeartbeatOwnerCapability(runDir, run.run_id, ownerCapability, "startHeartbeat");
     if (run.status !== "running") {
       throw new Error(`run '${run.run_id}' must be running to start a heartbeat`);
     }
@@ -122,40 +123,31 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     if (!hasInFlightHeartbeatWork(run)) {
       throw new Error(`run '${run.run_id}' has no in-flight factory work for heartbeat`);
     }
-    assertRunAuthorityValid(runDir, run);
-
     const current = tryReadHeartbeatFile(heartbeatFile);
-    if (current.error) throw new Error(`invalid heartbeat lease at ${heartbeatFile}: ${current.error}`);
-    if (current.value && !heartbeatLeaseReplaceable(current.value, startedAt)) {
+    if (current.error) throw new Error(`invalid heartbeat at ${heartbeatFile}: ${current.error}`);
+    if (current.value && heartbeatIsFresh(current.value, startedAt, opts)) {
       throw new Error(`heartbeat already active for run '${run.run_id}'`);
     }
 
-    lease = validateHeartbeatState({
+    heartbeat = validateHeartbeatState({
       schema_version: HEARTBEAT_SCHEMA_VERSION,
       run_id: run.run_id,
-      token,
       phase,
-      status: "running",
       pid: process.pid,
-      started_at: startedAt,
       last_tick_at: startedAt,
-      stop_requested_at: null,
-      stopped_at: null,
       interval_ms: intervalMs,
-      deadline_at: new Date(Date.parse(startedAt) + maxDurationMs).toISOString(),
-      stop_reason: null,
     });
-    writeHeartbeatFile(heartbeatFile, lease);
+    writeHeartbeatFile(heartbeatFile, heartbeat);
+    writeJsonAtomic(join(runDir, "run.json"), validateRun({ ...run, heartbeat_at: startedAt }));
   });
 
-  const runtime = createHeartbeatRuntime(runDir, lease, { ...opts, ownerCapability });
+  const runtime = createHeartbeatRuntime(runDir, heartbeat, opts);
   activeHeartbeatLoops.set(runDir, runtime);
-  runtime.loopPromise = runHeartbeatLoop(runtime);
+  runtime.timer = setInterval(() => runHeartbeatTick(runtime), runtime.intervalMs);
 
-  await runtime.firstTick.promise;
   const current = heartbeatStatus(runId, opts);
-  if (!current || current.token !== token || !HEARTBEAT_ACTIVE_STATUSES.has(current.status)) {
-    throw new Error(`heartbeat failed to start for run '${lease.run_id}'`);
+  if (!current || current.pid !== process.pid || !current.fresh) {
+    throw new Error(`heartbeat failed to start for run '${heartbeat.run_id}'`);
   }
   return current;
 }
@@ -163,71 +155,31 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 export async function stopHeartbeat(runId, config = {}, opts = {}) {
   const runDir = resolveHeartbeatRunDir(runId, opts);
   const heartbeatFile = heartbeatPath(runDir);
-  const waitMs = normalizeHeartbeatWait(config.waitMs);
-  const force = Boolean(config.force);
-  const requestedToken = stringValue(config.token) ? String(config.token) : null;
-  const stopRequestedAt = timestamp(opts.now);
-  let currentLease = null;
+  const stoppedAt = timestamp(opts.now);
+  let stopped = null;
 
   await withRunJsonLock(runDir, async () => {
     const current = tryReadHeartbeatFile(heartbeatFile);
-    if (current.error) throw new Error(`invalid heartbeat lease at ${heartbeatFile}: ${current.error}`);
+    if (current.error) throw new Error(`invalid heartbeat at ${heartbeatFile}: ${current.error}`);
     if (!current.value) {
-      currentLease = null;
+      stopped = null;
       return;
     }
 
-    const lease = current.value;
-    if (!requestedToken) {
-      throw new Error(`heartbeat token required for run '${lease.run_id}'`);
+    const heartbeat = current.value;
+    stopActiveHeartbeatLoop(runDir);
+    if (heartbeat.pid && heartbeat.pid !== process.pid && isProcessAlive(heartbeat.pid)) {
+      try {
+        process.kill(heartbeat.pid, "SIGTERM");
+      } catch {
+        // Best-effort stop; the liveness rule handles dead or inaccessible processes.
+      }
     }
-    if (lease.token !== requestedToken) {
-      throw new Error(`heartbeat token mismatch for run '${lease.run_id}'`);
-    }
-    if (HEARTBEAT_TERMINAL_STATUSES.has(lease.status)) {
-      currentLease = lease;
-      return;
-    }
-
-    currentLease = validateHeartbeatState({
-      ...lease,
-      status: "stopping",
-      stop_requested_at: lease.stop_requested_at || stopRequestedAt,
-      stop_reason: lease.stop_reason || "stop-requested",
-    });
-    writeHeartbeatFile(heartbeatFile, currentLease);
+    stopped = validateHeartbeatState({ ...heartbeat, pid: null, last_tick_at: stoppedAt });
+    writeHeartbeatFile(heartbeatFile, stopped);
   });
 
-  if (!currentLease) return null;
-  if (HEARTBEAT_TERMINAL_STATUSES.has(currentLease.status)) return currentLease;
-
-  signalHeartbeatLoop(runDir, currentLease.token);
-
-  const stopped = await waitForHeartbeatStop(runDir, currentLease.token, waitMs);
-  if (stopped) return stopped;
-
-  if (!isProcessAlive(currentLease.pid)) {
-    return (
-      (await finalizeHeartbeatStop(runDir, currentLease.token, {
-        now: timestamp(),
-        reason: currentLease.stop_reason || "process-exited",
-        stopRequestedAt: currentLease.stop_requested_at || stopRequestedAt,
-      })) || heartbeatStatus(runId, opts)
-    );
-  }
-
-  if (force) {
-    signalHeartbeatLoop(runDir, currentLease.token);
-    return (
-      (await finalizeHeartbeatStop(runDir, currentLease.token, {
-        now: timestamp(),
-        reason: "force-stop",
-        stopRequestedAt: currentLease.stop_requested_at || stopRequestedAt,
-      })) || heartbeatStatus(runId, opts)
-    );
-  }
-
-  throw new Error(`timed out waiting for heartbeat '${currentLease.run_id}' to stop`);
+  return stopped ? withHeartbeatLiveness(stopped, opts) : null;
 }
 
 export function writeGateAnswer(runId, gate, answer, opts = {}) {
@@ -235,23 +187,22 @@ export function writeGateAnswer(runId, gate, answer, opts = {}) {
   if (!answer) throw new Error("answer is required: approve, changes: ..., or stop");
   const runDir = resolveGateAnswerRunDir(runId, opts);
   const run = readRunFile(join(runDir, "run.json"));
-  assertRunAuthorityValid(runDir, run);
   const pending = pendingGate(run);
   if (pending && gateName !== pending) throw new Error(`gate '${gateName}' is not pending; current pending gate is '${pending}'`);
   if (!pending) throw new Error("run has no pending gate");
   const gateState = run.gates?.[gateName];
-  const target = resolvePendingGateAnswerTarget(runDir, gateName, gateState);
+  const target = resolveGateAnswerTarget(runDir, gateName, gateState);
   const normalized = normalizeAnswer(answer);
   writeGateAnswerFileAtomically(target.gatesDir, target.answerPath, normalized + "\n");
   return { run_id: run.run_id, gate: gateName, answer: normalized, path: target.answerPath };
 }
 
-export async function persistFactoryRunCreatedProvenance(runId, opts = {}) {
-  return persistFactoryRunProvenance(runId, "created", opts);
+export async function persistFactoryRunCreatedEnv(runId, opts = {}) {
+  return persistFactoryRunEnv(runId, "created", opts);
 }
 
-export async function persistFactoryRunResumeProvenance(runId, opts = {}) {
-  return persistFactoryRunProvenance(runId, "resume", opts);
+export async function persistFactoryRunResumeEnv(runId, opts = {}) {
+  return persistFactoryRunEnv(runId, "resume", opts);
 }
 
 export function latestRunId(opts = {}) {
@@ -262,15 +213,38 @@ export function latestRunId(opts = {}) {
 export function watchRun(runId, opts = {}) {
   const intervalMs = Number(opts.intervalMs || 2000);
   let last = "";
-  const print = () => {
-    const current = JSON.stringify(opts.all ? listRuns(opts) : status(runId, opts));
+  let timer = null;
+  let stopped = false;
+  const emit = (value) => {
+    const current = JSON.stringify(value);
     if (current !== last) {
       last = current;
       console.log(current);
     }
   };
+  const finish = (value) => {
+    emit(value);
+    stopped = true;
+    if (timer) clearInterval(timer);
+  };
+  const print = () => {
+    try {
+      emit(opts.all ? listRuns(opts) : status(runId, opts));
+    } catch (error) {
+      if (/run not found|no factory runs found/u.test(error.message)) {
+        finish({ run_id: runId || null, status: "removed", error: error.message });
+        return;
+      }
+      emit({ run_id: runId || null, status: "error", error: error.message });
+    }
+  };
   print();
-  return setInterval(print, intervalMs);
+  if (stopped) return null;
+  timer = setInterval(print, intervalMs);
+  setTimeout(() => {
+    if (!stopped) print();
+  }, 0);
+  return timer;
 }
 
 export function validateState(runId, opts = {}) {
@@ -326,47 +300,77 @@ function fallbackRunId(runId, runDir) {
   return basename(runDir);
 }
 
-export function cleanupRun(runId, opts = {}) {
+export async function cleanupRun(runId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   if (!insideFactoryRoot(repo, runDir)) {
     throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
   }
-  const run = readRunFile(join(runDir, "run.json"));
-  if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
-    throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
+  return withRunJsonLock(runDir, async () => {
+    const run = readRunFile(join(runDir, "run.json"));
+    if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
+      throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
+    }
+    const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
+    if (heartbeat.error) throw new Error(`invalid heartbeat at ${heartbeatPath(runDir)}: ${heartbeat.error}`);
+    if (heartbeat.value && heartbeatIsFresh(heartbeat.value, timestamp(opts.now), opts) && !opts.force) {
+      throw new Error(`run '${run.run_id}' has a fresh heartbeat; cleanup requires --force`);
+    }
+    if (heartbeat.value && opts.force && !opts.dryRun) stopHeartbeatForCleanup(runDir, heartbeat.value, opts);
+
+    const result = {
+      run_id: run.run_id,
+      status: run.status,
+      dry_run: Boolean(opts.dryRun),
+      removed_worktrees: [],
+      skipped_worktrees: [],
+      deleted_branches: [],
+      skipped_branches: [],
+      removed_run_dir: false,
+      run_dir: runDir,
+    };
+
+    for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts);
+    for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts);
+
+    if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
+    result.removed_run_dir = !opts.dryRun;
+    return result;
+  }, opts);
+}
+
+function stopHeartbeatForCleanup(runDir, heartbeat, opts = {}) {
+  stopActiveHeartbeatLoop(runDir);
+  if (heartbeat.pid && heartbeat.pid !== process.pid && isProcessAlive(heartbeat.pid, opts)) {
+    try {
+      process.kill(heartbeat.pid, "SIGTERM");
+    } catch {
+      // Best-effort cleanup stop.
+    }
   }
-  const cleanupAuthority = resolveCleanupAuthority(repo, runDir, run);
-
-  const result = {
-    run_id: run.run_id,
-    status: run.status,
-    dry_run: Boolean(opts.dryRun),
-    removed_worktrees: [],
-    skipped_worktrees: [],
-    deleted_branches: [],
-    skipped_branches: [],
-    removed_run_dir: false,
-    run_dir: runDir,
-  };
-
-  for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts, cleanupAuthority);
-  for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts, run.status, cleanupAuthority);
-
-  if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
-  result.removed_run_dir = !opts.dryRun;
-  return result;
+  writeHeartbeatFile(heartbeatPath(runDir), validateHeartbeatState({ ...heartbeat, pid: null, last_tick_at: timestamp(opts.now) }));
 }
 
 function cleanupWorktrees(run) {
-  return [...new Set([run.worktree, ...(Array.isArray(run.slices) ? run.slices.map((slice) => slice?.worktree) : [])].filter(Boolean))];
+  const entries = [];
+  if (run.worktree) entries.push({ worktree: run.worktree, branch: run.branch });
+  if (Array.isArray(run.slices)) {
+    for (const slice of run.slices) if (slice?.worktree) entries.push({ worktree: slice.worktree, branch: slice.branch, slice_id: slice.id });
+  }
+  const seen = new Set();
+  return entries.filter((entry) => {
+    if (seen.has(entry.worktree)) return false;
+    seen.add(entry.worktree);
+    return true;
+  });
 }
 
 function cleanupBranches(run) {
   return [...new Set([run.branch, ...(Array.isArray(run.slices) ? run.slices.map((slice) => slice?.branch) : [])].filter(Boolean))];
 }
 
-function removeWorktree(repo, worktree, result, opts, authority = null) {
+function removeWorktree(repo, worktreeEntry, result, opts) {
+  const worktree = worktreeEntry.worktree;
   const resolved = resolve(repo, worktree);
   if (!insideWorktreeRoot(repo, resolved)) {
     result.skipped_worktrees.push({ worktree, reason: "outside .opencode/worktrees" });
@@ -377,14 +381,14 @@ function removeWorktree(repo, worktree, result, opts, authority = null) {
     return;
   }
   const physicalWorktree = physicalPath(resolved);
-  const worktreePermission = resolveCleanupWorktreePermission(physicalWorktree, authority);
+  const worktreePermission = resolveCleanupWorktreePermission(repo, physicalWorktree, worktreeEntry.branch);
   if (!worktreePermission.allowed) {
     result.skipped_worktrees.push({ worktree: physicalWorktree, reason: worktreePermission.reason });
     return;
   }
   if (!opts.dryRun) {
-    const proc = spawnSync("git", ["worktree", "remove", "--force", physicalWorktree], { cwd: repo, encoding: "utf8" });
-    if (proc.status !== 0) {
+    const proc = git(repo, ["worktree", "remove", "--force", physicalWorktree]);
+    if (!proc.ok) {
       result.skipped_worktrees.push({ worktree: physicalWorktree, reason: (proc.stderr || proc.stdout || "git worktree remove failed").trim() });
       return;
     }
@@ -392,32 +396,32 @@ function removeWorktree(repo, worktree, result, opts, authority = null) {
   result.removed_worktrees.push(physicalWorktree);
 }
 
-function deleteBranch(repo, branch, result, opts, runStatus, authority = null) {
+function deleteBranch(repo, branch, result, opts) {
   const name = String(branch).trim();
   if (!name) return;
-  const branchPermission = resolveCleanupBranchPermission(name, authority);
+  const branchPermission = resolveCleanupBranchPermission(name);
   if (!branchPermission.allowed) {
     result.skipped_branches.push({ branch: name, reason: branchPermission.reason });
     return;
   }
-  const current = spawnSync("git", ["branch", "--show-current"], { cwd: repo, encoding: "utf8" }).stdout?.trim();
+  const current = git(repo, ["branch", "--show-current"]).stdout.trim();
   if (current === name) {
     result.skipped_branches.push({ branch: name, reason: "current branch" });
     return;
   }
-  const exists = spawnSync("git", ["show-ref", "--verify", `refs/heads/${name}`], { cwd: repo, encoding: "utf8" });
-  if (exists.status !== 0) {
+  const exists = git(repo, ["show-ref", "--verify", `refs/heads/${name}`]);
+  if (!exists.ok) {
     result.skipped_branches.push({ branch: name, reason: "missing" });
     return;
   }
-  const deleteFlag = runStatus === "completed" || opts.force ? "-D" : "-d";
+  const deleteFlag = opts.force ? "-D" : "-d";
   if (opts.dryRun && deleteFlag === "-d" && !branchMergedIntoHead(repo, name)) {
     result.skipped_branches.push({ branch: name, reason: "not merged; use --force to delete" });
     return;
   }
   if (!opts.dryRun) {
-    const proc = spawnSync("git", ["branch", deleteFlag, "--", name], { cwd: repo, encoding: "utf8" });
-    if (proc.status !== 0) {
+    const proc = git(repo, ["branch", deleteFlag, "--", name]);
+    if (!proc.ok) {
       result.skipped_branches.push({ branch: name, reason: (proc.stderr || proc.stdout || "git branch delete failed").trim() });
       return;
     }
@@ -426,7 +430,7 @@ function deleteBranch(repo, branch, result, opts, runStatus, authority = null) {
 }
 
 function branchMergedIntoHead(repo, branch) {
-  return spawnSync("git", ["merge-base", "--is-ancestor", branch, "HEAD"], { cwd: repo, encoding: "utf8" }).status === 0;
+  return git(repo, ["merge-base", "--is-ancestor", branch, "HEAD"]).ok;
 }
 
 function insideFactoryRoot(repo, runDir) {
@@ -438,24 +442,7 @@ function insideWorktreeRoot(repo, worktree) {
 }
 
 function insideDirectory(parent, child) {
-  const rel = relative(physicalPath(parent), physicalPath(child));
-  return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel);
-}
-
-function physicalPath(path) {
-  return existsSync(path) ? realpathSync.native(path) : resolve(path);
-}
-
-function loadRun(runId, opts = {}) {
-  return readRunFile(join(resolveRunDir(runId, opts), "run.json"));
-}
-
-function loadPublicRun(runId, opts = {}) {
-  const runDir = resolveRunDir(runId, opts);
-  const run = readRunFile(join(runDir, "run.json"));
-  const authority = validateRunAuthority(runDir, run, { ...opts, repoRoot: repoRoot(opts.cwd || process.cwd()) });
-  if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
-  return run;
+  return isContainedPath(parent, child, { allowEqual: false });
 }
 
 function readRunFile(file) {
@@ -473,11 +460,7 @@ function tryReadRunFile(file) {
 
 function tryReadPublicRun(file, opts = {}) {
   try {
-    const runDir = dirname(file);
-    const run = readRunFile(file);
-    const authority = validateRunAuthority(runDir, run, opts);
-    if (!authority.ok) return { error: formatValidationChecks(authority.checks) };
-    return { value: run };
+    return { value: readRunFile(file) };
   } catch (error) {
     return { error: error.message };
   }
@@ -486,12 +469,23 @@ function tryReadPublicRun(file, opts = {}) {
 function resolveRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
-  // Trusted operator escape hatch: callers may pass an explicit run directory.
-  const asPath = resolve(opts.cwd || process.cwd(), String(id));
-  if (existsSync(join(asPath, "run.json"))) return asPath;
-  const dir = join(factoryRoot(opts.cwd || process.cwd()), String(id));
+  const root = factoryRoot(opts.cwd || process.cwd());
+  const value = String(id).trim();
+  if (isExplicitRunPath(value)) {
+    const asPath = resolve(opts.cwd || process.cwd(), value);
+    if (!insideDirectory(root, asPath)) throw new Error(`run path must be inside .opencode/factory: ${asPath}`);
+    if (!existsSync(join(asPath, "run.json"))) throw new Error(`run not found: ${id}`);
+    return asPath;
+  }
+  if (!value || value === "." || value === "..") throw new Error("run id must be a bare factory run id");
+  const dir = resolve(root, value);
   if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
+  if (!insideDirectory(root, dir)) throw new Error(`run directory must be inside .opencode/factory: ${dir}`);
   return dir;
+}
+
+function isExplicitRunPath(value) {
+  return isAbsolute(value) || value.includes("/") || value.includes("\\");
 }
 
 function formatValidationChecks(checks) {
@@ -506,10 +500,10 @@ function resolveHeartbeatRunDir(runId, opts = {}) {
   const root = factoryRoot(opts.cwd || process.cwd());
   const normalized = normalizeHeartbeatRunId(id);
   const dir = resolve(root, normalized);
+  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
   if (!insideDirectory(root, dir)) {
     throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
   }
-  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
   return dir;
 }
 
@@ -556,12 +550,13 @@ function pendingGate(run) {
 }
 
 function selectedReviewTier(run) {
-  return typeof run.review_tier?.selected === "string" ? run.review_tier.selected : null;
+  return typeof run.review_tier === "string" ? run.review_tier : null;
 }
 
 function normalizeAnswer(answer) {
   const text = String(answer).trim();
-  if (text === "approve" || text === "stop" || text.startsWith("changes:")) return text;
+  if (text === "approve" || text === "stop") return text;
+  if (text.startsWith("changes:") && text.slice("changes:".length).trim().length > 0) return text;
   throw new Error("answer must be exactly approve, stop, or start with changes:");
 }
 
@@ -576,111 +571,6 @@ function requireSafeGateName(value, label) {
 
 function resolveGateAnswerRunDir(runId, opts = {}) {
   return resolveExistingDirectory(resolveRunDir(runId, opts), "run directory");
-}
-
-function resolveGateAnswerGatesDir(runDir) {
-  const gatesDir = resolveGateAnswerRootDirectory(join(runDir, "gates"), "gates directory");
-  if (!insideDirectory(runDir, gatesDir)) {
-    throw new Error(`gates directory must stay inside ${runDir}`);
-  }
-  return gatesDir;
-}
-
-function resolveGateAnswerPath(gatesDir, answerRef) {
-  const answerPath = resolveGateRef(resolveGateAnswerDurableRoots(dirname(gatesDir)), answerRef, { mustExist: false }).path;
-  if (existsSync(answerPath) && lstatSync(answerPath).isSymbolicLink()) {
-    throw new Error(`gate answer path must not be a symlink: ${answerPath}`);
-  }
-  if (!insideDirectory(gatesDir, answerPath)) {
-    throw new Error(`gate answer path must stay inside ${gatesDir}`);
-  }
-  return answerPath;
-}
-
-function resolvePendingGateAnswerTarget(runDir, gateName, gate) {
-  if (!gate || gate.status !== "pending") throw new Error(`gate '${gateName}' is not pending`);
-  const pendingSnapshot = gate.pending_snapshot;
-  if (!pendingSnapshot || typeof pendingSnapshot !== "object" || Array.isArray(pendingSnapshot)) {
-    throw new Error(`gate '${gateName}' requires pending_snapshot before external answers`);
-  }
-  if (!stringValue(gate.artifact)) throw new Error(`gate '${gateName}' requires artifact ref`);
-  if (!stringValue(gate.question_ref)) throw new Error(`gate '${gateName}' requires question_ref`);
-  if (!stringValue(gate.answer_ref)) throw new Error(`gate '${gateName}' requires answer_ref`);
-  if (pendingSnapshot.artifact_ref !== gate.artifact) {
-    throw new Error(`gate '${gateName}' has stale artifact ref: pending_snapshot '${pendingSnapshot.artifact_ref}' does not match '${gate.artifact}'`);
-  }
-  if (pendingSnapshot.question_ref !== gate.question_ref) {
-    throw new Error(`gate '${gateName}' has stale question_ref: pending_snapshot '${pendingSnapshot.question_ref}' does not match '${gate.question_ref}'`);
-  }
-  assertPendingAnswerRef(gateName, gate, pendingSnapshot);
-  if (gate.answer_ref === gate.question_ref) {
-    throw new Error(`gate '${gateName}' answer_ref must not overlap question_ref`);
-  }
-
-  const roots = resolveGateAnswerDurableRoots(runDir);
-  const artifact = resolveArtifactRef(roots, gate.artifact);
-  const question = resolveGateRef(roots, gate.question_ref);
-  const answer = resolveGateRef(roots, gate.answer_ref, { mustExist: false });
-
-  assertPendingSnapshotHash(gateName, "artifact", artifact.path, pendingSnapshot.artifact_hash);
-  assertPendingSnapshotHash(gateName, "question", question.path, pendingSnapshot.question_hash);
-
-  const answerPath = resolveGateAnswerPath(roots.gates, gate.answer_ref);
-  if (answerPath !== answer.path) throw new Error(`gate '${gateName}' answer_ref resolved inconsistently`);
-  if (answerPath === question.path) throw new Error(`gate '${gateName}' answer_ref must not overlap question_ref`);
-  return { gatesDir: roots.gates, answerPath };
-}
-
-function assertPendingAnswerRef(gateName, gate, pendingSnapshot) {
-  if (stringValue(pendingSnapshot.answer_ref)) {
-    if (pendingSnapshot.answer_ref !== gate.answer_ref) {
-      throw new Error(`gate '${gateName}' has stale answer_ref: pending_snapshot '${pendingSnapshot.answer_ref}' does not match '${gate.answer_ref}'`);
-    }
-    return;
-  }
-
-  const canonicalAnswerRef = canonicalGateAnswerRef(gateName);
-  if (gate.answer_ref !== canonicalAnswerRef) {
-    throw new Error(`gate '${gateName}' requires pending_snapshot.answer_ref for non-canonical answer_ref '${gate.answer_ref}'`);
-  }
-}
-
-function canonicalGateAnswerRef(gateName) {
-  return `gates/${gateName}.answer`;
-}
-
-function resolveGateAnswerDurableRoots(runDir) {
-  const runRealPath = resolveExistingDirectory(runDir, "run directory");
-  return {
-    run_dir: runRealPath,
-    artifacts: resolveGateAnswerDurableRoot(runRealPath, "artifacts"),
-    gates: resolveGateAnswerGatesDir(runRealPath),
-    evidence: join(runRealPath, "evidence"),
-    reviews: join(runRealPath, "reviews"),
-    attestations: join(runRealPath, "attestations"),
-  };
-}
-
-function resolveGateAnswerDurableRoot(runDir, rootName) {
-  const rootDir = resolveGateAnswerRootDirectory(join(runDir, rootName), `${rootName} directory`);
-  if (!insideDirectory(runDir, rootDir)) {
-    throw new Error(`${rootName} directory must stay inside ${runDir}`);
-  }
-  return rootDir;
-}
-
-function resolveGateAnswerRootDirectory(path, label) {
-  if (!existsSync(path)) throw new Error(`missing ${label}: ${path}`);
-  if (lstatSync(path).isSymbolicLink()) throw new Error(`${label} must not be a symlink: ${path}`);
-  return resolveExistingDirectory(path, label);
-}
-
-function assertPendingSnapshotHash(gateName, label, file, expectedHash) {
-  if (!stringValue(expectedHash)) throw new Error(`gate '${gateName}' pending_snapshot ${label}_hash is required`);
-  const actualHash = hashFile(file, { mode: "raw" });
-  if (actualHash !== expectedHash) {
-    throw new Error(`gate '${gateName}' pending_snapshot ${label}_hash is stale: found ${actualHash}, expected ${expectedHash}`);
-  }
 }
 
 function writeGateAnswerFileAtomically(gatesDir, answerPath, contents) {
@@ -728,7 +618,7 @@ function gateAnswerTempOpenFlags() {
 
 function resolveExistingDirectory(path, label) {
   if (!existsSync(path)) throw new Error(`missing ${label}: ${path}`);
-  const physical = realpathSync.native(path);
+  const physical = physicalPath(path, label, { mustExist: true });
   if (!statSync(physical).isDirectory()) throw new Error(`${label} must be a directory: ${path}`);
   return physical;
 }
@@ -750,26 +640,53 @@ export function assertFactoryRoot(repo) {
 export function seedRepoSkill(repo) {
   const dest = join(repo, ".opencode", "skills", "feature");
   mkdirSync(dest, { recursive: true });
+  const seedHashPath = join(dest, ".seed-hash");
+  const recorded = readSeedHashes(seedHashPath);
+  const nextHashes = { ...recorded };
+  const skipped = [];
   for (const file of ["SKILL.md", "SCHEMA.md"]) {
-    copyFileSync(join(root, "assets", "skills", "feature", file), join(dest, file));
+    const source = join(root, "assets", "skills", "feature", file);
+    const target = join(dest, file);
+    const sourceText = readFileSync(source, "utf8");
+    const sourceHash = sha256(sourceText);
+    const currentText = existsSync(target) ? readFileSync(target, "utf8") : null;
+    const currentHash = currentText === null ? null : sha256(currentText);
+    const locallyEdited = currentHash !== null && currentHash !== sourceHash && (!recorded[file] || currentHash !== recorded[file]);
+    if (locallyEdited) {
+      skipped.push(file);
+      continue;
+    }
+    if (currentHash !== sourceHash) copyFileSync(source, target);
+    nextHashes[file] = sourceHash;
   }
+  if (skipped.length) console.warn(`feature-factory: preserved locally edited seeded skill file(s): ${skipped.join(", ")}`);
+  writeFileSync(seedHashPath, `${JSON.stringify(nextHashes, null, 2)}\n`, "utf8");
   ensureGitInfoExclude(repo, ".opencode/skills/feature/");
   return dest;
 }
 
+function readSeedHashes(file) {
+  if (!existsSync(file)) return {};
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 function ensureGitInfoExclude(repo, pattern) {
-  const proc = spawnSync("git", ["rev-parse", "--git-path", "info/exclude"], { cwd: repo, encoding: "utf8" });
-  if (proc.status !== 0) return;
+  const proc = git(repo, ["rev-parse", "--git-path", "info/exclude"]);
+  if (!proc.ok) return;
   const excludePath = resolve(repo, proc.stdout.trim());
   mkdirSync(dirname(excludePath), { recursive: true });
   const current = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
   if (current.split(/\r?\n/).includes(pattern)) return;
   appendFileSync(excludePath, `${current.endsWith("\n") || !current ? "" : "\n"}${pattern}\n`);
-}
-
-function repoRoot(cwd) {
-  const proc = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: resolve(cwd), encoding: "utf8" });
-  return proc.status === 0 ? proc.stdout.trim() : resolve(cwd);
 }
 
 function formatPrompt(prompt, opts) {
@@ -803,8 +720,8 @@ function resolveGithubAccount(opts) {
 }
 
 function detectGithubRemoteOwner(repo) {
-  const proc = spawnSync("git", ["config", "--get", "remote.origin.url"], { cwd: repo, encoding: "utf8" });
-  if (proc.status !== 0) return null;
+  const proc = git(repo, ["config", "--get", "remote.origin.url"]);
+  if (!proc.ok) return null;
   return githubOwnerFromRemote(proc.stdout.trim());
 }
 
@@ -822,292 +739,88 @@ function normalizeGithubAccount(value) {
   return account;
 }
 
-function shouldSkipAuthorityForHeartbeatStart(opts = {}) {
-  return opts?.start === true && stringValue(opts.phase);
-}
-
-function resolveHeartbeatOwnerCapability(opts = {}, command = "heartbeat") {
-  const ownerCapability = stringValue(opts.ownerCapability) ? opts.ownerCapability : process.env[HEARTBEAT_OWNER_ENV];
-  if (!stringValue(ownerCapability)) {
-    throw new Error(`${command} requires trusted heartbeat owner capability from factory.lock`);
-  }
-  return ownerCapability.trim();
-}
-
-function createHeartbeatRuntime(runDir, lease, opts) {
+function createHeartbeatRuntime(runDir, heartbeat, opts) {
   return {
     runDir,
-    runId: lease.run_id,
-    token: lease.token,
-    ownerPid: lease.pid,
-    ownerCapability: opts.ownerCapability,
-    intervalMs: lease.interval_ms,
+    runId: heartbeat.run_id,
+    intervalMs: heartbeat.interval_ms,
     tickTimeoutMs: normalizePositiveInteger(opts.tickTimeoutMs, HEARTBEAT_TICK_LOCK_TIMEOUT_MS, "tickTimeoutMs"),
-    firstTick: deferred(),
-    pendingWake: false,
-    waiter: null,
-    loopPromise: null,
+    lockTimeouts: 0,
+    timer: null,
+    ticking: false,
+    stopped: false,
   };
 }
 
-async function runHeartbeatLoop(runtime) {
-  try {
-    const first = await heartbeatTick(runtime);
-    runtime.firstTick.resolve(first);
-    if (!first.continue) return first;
-
-    while (true) {
-      await waitForHeartbeatInterval(runtime, runtime.intervalMs);
-      const next = await heartbeatTick(runtime);
-      if (!next.continue) return next;
-    }
-  } catch (error) {
-    runtime.firstTick.resolve({ continue: false, reason: error.message });
-    await markHeartbeatError(runtime.runDir, runtime.token, timestamp(), error.message);
-    return { continue: false, reason: error.message };
-  } finally {
-    clearHeartbeatWaiter(runtime);
-    if (activeHeartbeatLoops.get(runtime.runDir)?.token === runtime.token) activeHeartbeatLoops.delete(runtime.runDir);
-  }
+function runHeartbeatTick(runtime) {
+  if (runtime.stopped || runtime.ticking) return;
+  runtime.ticking = true;
+  heartbeatTick(runtime)
+    .then((next) => {
+      if (!next.continue) stopActiveHeartbeatLoop(runtime.runDir, runtime);
+    })
+    .catch(() => stopActiveHeartbeatLoop(runtime.runDir, runtime))
+    .finally(() => {
+      runtime.ticking = false;
+    });
 }
 
 async function heartbeatTick(runtime) {
   const now = timestamp();
-  const current = currentHeartbeatLease(runtime.runDir, runtime.runId, runtime.token, now);
-  if (!current.active) {
-    if (current.reason === "heartbeat-lease-stopping") {
-      await finalizeHeartbeatStop(runtime.runDir, runtime.token, {
-        now,
-        reason: current.lease?.stop_reason || "stop-requested",
-        stopRequestedAt: current.lease?.stop_requested_at || now,
-      });
-    } else if (current.reason === "heartbeat-lease-expired") {
-      await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: "max-duration-exceeded" });
-    }
-    return { continue: false, reason: current.reason };
-  }
-
-  const run = readRunFile(join(runtime.runDir, "run.json"));
-  if (TERMINAL_STATUSES.has(run.status)) {
-    await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: `run-${run.status}` });
-    return { continue: false, reason: "terminal-status" };
-  }
-  const protectedGate = pendingProtectedGate(run);
-  if (protectedGate) {
-    await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: `pending-gate-${protectedGate}` });
-    return { continue: false, reason: "protected-gate-pending" };
-  }
-  if (!hasInFlightHeartbeatWork(run)) {
-    await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: "no-in-flight-work" });
-    return { continue: false, reason: "no-in-flight-work" };
-  }
-  assertRunAuthorityValid(runtime.runDir, run);
-
-  let result;
   try {
-    result = await heartbeatOnce(
-      runtime.runDir,
-      { token: runtime.token, ownerPid: runtime.ownerPid, ownerCapability: runtime.ownerCapability, now },
-      { timeoutMs: runtime.tickTimeoutMs },
-    );
-  } catch (error) {
-    if (isRunJsonLockTimeout(error)) {
-      return await stopHeartbeatLoopForError(runtime, now, error.message);
-    }
-    throw error;
-  }
+    return await withRunJsonLock(runtime.runDir, async () => {
+      const heartbeat = tryReadHeartbeatFile(heartbeatPath(runtime.runDir));
+      if (heartbeat.error || !heartbeat.value) return { continue: false, reason: heartbeat.error ? "invalid-heartbeat" : "missing-heartbeat" };
+      if (heartbeat.value.pid !== process.pid) return { continue: false, reason: "heartbeat-not-owned" };
 
-  if (!result.updated) {
-    if (result.reason === "terminal-status") {
-      await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: `run-${result.status}` });
-    } else if (result.reason === "protected-gate-pending") {
-      await finalizeHeartbeatStop(runtime.runDir, runtime.token, {
-        now,
-        reason: result.gate ? `pending-gate-${result.gate}` : "protected-gate-pending",
-      });
-    } else if (result.reason === "no-in-flight-work") {
-      await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: "no-in-flight-work" });
-    } else if (result.reason === "heartbeat-lease-stopping") {
-      await finalizeHeartbeatStop(runtime.runDir, runtime.token, {
-        now,
-        reason: current.lease?.stop_reason || "stop-requested",
-        stopRequestedAt: current.lease?.stop_requested_at || now,
-      });
-    } else if (result.reason === "heartbeat-lease-expired") {
-      await finalizeHeartbeatStop(runtime.runDir, runtime.token, { now, reason: "max-duration-exceeded" });
-    }
-    return { continue: false, reason: result.reason };
-  }
-
-  const synced = await syncHeartbeatAfterTick(runtime.runDir, runtime.runId, runtime.token, now);
-  return { continue: synced.continue, reason: synced.reason };
-}
-
-async function stopHeartbeatLoopForError(runtime, now, message) {
-  await markHeartbeatError(runtime.runDir, runtime.token, now, message);
-  return { continue: false, reason: message };
-}
-
-function currentHeartbeatLease(runDir, runId, token, now) {
-  const current = tryReadHeartbeatFile(heartbeatPath(runDir));
-  if (current.error) return { active: false, reason: "invalid-heartbeat-lease" };
-  if (!current.value) return { active: false, reason: "missing-heartbeat-lease" };
-  return inspectHeartbeatLease(current.value, runId, token, now);
-}
-
-function inspectHeartbeatLease(lease, runId, token, now) {
-  if (lease.run_id !== runId) return { active: false, reason: "heartbeat-run-id-mismatch", lease };
-  if (lease.token !== token) return { active: false, reason: "heartbeat-token-mismatch", lease };
-  if (HEARTBEAT_TERMINAL_STATUSES.has(lease.status) || stringValue(lease.stopped_at)) {
-    return { active: false, reason: "heartbeat-lease-stopped", lease };
-  }
-  if (lease.status === "stopping" || stringValue(lease.stop_requested_at)) {
-    return { active: false, reason: "heartbeat-lease-stopping", lease };
-  }
-  const deadlineMs = Date.parse(lease.deadline_at);
-  const nowMs = Date.parse(now);
-  if (Number.isNaN(deadlineMs) || Number.isNaN(nowMs)) {
-    return { active: false, reason: "invalid-heartbeat-lease", lease };
-  }
-  if (nowMs >= deadlineMs) {
-    return { active: false, reason: "heartbeat-lease-expired", lease };
-  }
-  return { active: true, lease };
-}
-
-async function syncHeartbeatAfterTick(runDir, runId, token, now) {
-  return withRunJsonLock(runDir, async () => {
-    const current = tryReadHeartbeatFile(heartbeatPath(runDir));
-    if (current.error) return { continue: false, reason: "invalid-heartbeat-lease" };
-    if (!current.value) return { continue: false, reason: "missing-heartbeat-lease" };
-    const state = inspectHeartbeatLease(current.value, runId, token, now);
-    if (!state.active) {
-      if (state.reason === "heartbeat-lease-stopping") {
-        writeHeartbeatFile(
-          heartbeatPath(runDir),
-          stoppedHeartbeatState(state.lease, {
-            lastTickAt: now,
-            now,
-            reason: state.lease?.stop_reason || "stop-requested",
-            stopRequestedAt: state.lease?.stop_requested_at || now,
-          }),
-        );
-      } else if (state.reason === "heartbeat-lease-expired") {
-        writeHeartbeatFile(heartbeatPath(runDir), stoppedHeartbeatState(state.lease, { lastTickAt: now, now, reason: "max-duration-exceeded" }));
+      const runPath = join(runtime.runDir, "run.json");
+      const runResult = tryReadRunFile(runPath);
+      if (runResult.error) {
+        writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        return { continue: false, reason: "missing-or-invalid-run" };
       }
-      return { continue: false, reason: state.reason };
+
+      const run = runResult.value;
+      if (TERMINAL_STATUSES.has(run.status)) {
+        writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        return { continue: false, reason: "terminal-status" };
+      }
+      const protectedGate = pendingProtectedGate(run);
+      if (protectedGate) {
+        writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        return { continue: false, reason: "protected-gate-pending" };
+      }
+      if (!hasInFlightHeartbeatWork(run)) {
+        writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        return { continue: false, reason: "no-in-flight-work" };
+      }
+
+      const nextHeartbeat = validateHeartbeatState({ ...heartbeat.value, pid: process.pid, last_tick_at: now });
+      const nextRun = validateRun({ ...run, heartbeat_at: now });
+      writeHeartbeatFile(heartbeatPath(runtime.runDir), nextHeartbeat);
+      writeJsonAtomic(runPath, nextRun);
+      runtime.lockTimeouts = 0;
+      return { continue: true, reason: null };
+    }, { timeoutMs: runtime.tickTimeoutMs });
+  } catch (error) {
+    if (isRunJsonLockTimeout(error) && runtime.lockTimeouts < HEARTBEAT_TICK_LOCK_RETRIES) {
+      runtime.lockTimeouts += 1;
+      return { continue: true, reason: "lock-timeout" };
     }
-
-    const next = validateHeartbeatState({
-      ...state.lease,
-      status: "running",
-      pid: process.pid,
-      last_tick_at: now,
-    });
-    writeHeartbeatFile(heartbeatPath(runDir), next);
-    return { continue: true, reason: null };
-  });
-}
-
-async function finalizeHeartbeatStop(runDir, token, { now, reason, stopRequestedAt } = {}) {
-  return withRunJsonLock(runDir, async () => {
-    const current = tryReadHeartbeatFile(heartbeatPath(runDir));
-    if (current.error || !current.value) return null;
-    if (current.value.token !== token) return null;
-    if (HEARTBEAT_TERMINAL_STATUSES.has(current.value.status)) return current.value;
-    const next = stoppedHeartbeatState(current.value, {
-      lastTickAt: resolveStoppedHeartbeatTickAt(runDir, current.value),
-      now,
-      reason,
-      stopRequestedAt,
-    });
-    writeHeartbeatFile(heartbeatPath(runDir), next);
-    return next;
-  });
-}
-
-async function markHeartbeatError(runDir, token, now, reason) {
-  try {
-    return await withRunJsonLock(runDir, async () => {
-      const current = tryReadHeartbeatFile(heartbeatPath(runDir));
-      if (current.error || !current.value) return null;
-      if (current.value.token !== token) return null;
-      if (HEARTBEAT_TERMINAL_STATUSES.has(current.value.status)) return current.value;
-      const next = validateHeartbeatState({
-        ...current.value,
-        last_tick_at: resolveStoppedHeartbeatTickAt(runDir, current.value),
-        status: "error",
-        stopped_at: now,
-        stop_reason: reason || current.value.stop_reason || "heartbeat-error",
-      });
-      writeHeartbeatFile(heartbeatPath(runDir), next);
-      return next;
-    });
-  } catch {
-    return null;
+    return { continue: false, reason: error.message };
   }
 }
 
-async function waitForHeartbeatStop(runDir, token, waitMs) {
-  const deadline = Date.now() + waitMs;
-  while (Date.now() <= deadline) {
-    const current = tryReadHeartbeatFile(heartbeatPath(runDir));
-    if (current.value) {
-      if (current.value.token !== token || HEARTBEAT_TERMINAL_STATUSES.has(current.value.status)) return current.value;
-      if (!isProcessAlive(current.value.pid)) return null;
-    } else if (!current.error) {
-      return null;
-    }
-    if (Date.now() >= deadline) break;
-    await sleep(Math.min(DEFAULT_HEARTBEAT_POLL_MS, Math.max(1, deadline - Date.now())));
-  }
-  return null;
+function isRunJsonLockTimeout(error) {
+  return /timed out waiting for run\.json lock/u.test(error?.message || "");
 }
 
-function signalHeartbeatLoop(runDir, token) {
-  const runtime = activeHeartbeatLoops.get(runDir);
-  if (!runtime || runtime.token !== token) return false;
-  if (runtime.waiter) {
-    runtime.waiter.resolve("signal");
-    return true;
-  }
-  runtime.pendingWake = true;
+function stopActiveHeartbeatLoop(runDir, runtime = activeHeartbeatLoops.get(runDir)) {
+  if (!runtime) return false;
+  runtime.stopped = true;
+  if (runtime.timer) clearInterval(runtime.timer);
+  if (activeHeartbeatLoops.get(runDir) === runtime) activeHeartbeatLoops.delete(runDir);
   return true;
-}
-
-function waitForHeartbeatInterval(runtime, intervalMs) {
-  if (runtime.pendingWake) {
-    runtime.pendingWake = false;
-    return Promise.resolve("signal");
-  }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      if (runtime.waiter?.timer === timer) runtime.waiter = null;
-      resolve("interval");
-    }, intervalMs);
-    runtime.waiter = {
-      timer,
-      resolve(reason) {
-        clearTimeout(timer);
-        if (runtime.waiter?.timer === timer) runtime.waiter = null;
-        resolve(reason);
-      },
-    };
-  });
-}
-
-function clearHeartbeatWaiter(runtime) {
-  if (!runtime.waiter) return;
-  runtime.waiter.resolve("cleared");
-}
-
-function heartbeatLeaseReplaceable(lease, now) {
-  if (HEARTBEAT_TERMINAL_STATUSES.has(lease.status) || stringValue(lease.stopped_at)) return true;
-  const deadlineMs = Date.parse(lease.deadline_at);
-  const nowMs = Date.parse(now);
-  if (Number.isNaN(deadlineMs) || Number.isNaN(nowMs)) return false;
-  if (nowMs >= deadlineMs) return true;
-  return !isProcessAlive(lease.pid);
 }
 
 function heartbeatPath(runDir) {
@@ -1132,36 +845,29 @@ function writeHeartbeatFile(file, heartbeat) {
   writeJsonAtomic(file, next);
 }
 
-function stoppedHeartbeatState(lease, { lastTickAt, now, reason, stopRequestedAt } = {}) {
-  return validateHeartbeatState({
-    ...lease,
-    last_tick_at: lastTickAt || lease.last_tick_at,
-    status: "stopped",
-    stop_requested_at: stopRequestedAt || lease.stop_requested_at || null,
-    stopped_at: now || timestamp(),
-    stop_reason: reason || lease.stop_reason || "stop-requested",
-  });
+function withHeartbeatLiveness(heartbeat, opts = {}) {
+  const now = timestamp(opts.now);
+  const liveness = heartbeatLiveness(heartbeat, now, opts);
+  return { ...heartbeat, ...liveness };
 }
 
-function resolveStoppedHeartbeatTickAt(runDir, lease) {
-  const lastTickAt = stringValue(lease?.last_tick_at) ? lease.last_tick_at : null;
-  const run = tryReadRunFile(join(runDir, "run.json"));
-  const heartbeatAt = stringValue(run.value?.heartbeat_at) ? run.value.heartbeat_at : null;
-  return latestTimestamp(lastTickAt, heartbeatAt) || lastTickAt || heartbeatAt || timestamp();
+function heartbeatIsFresh(heartbeat, now, opts = {}) {
+  return heartbeatLiveness(heartbeat, now, opts).fresh;
 }
 
-function latestTimestamp(left, right) {
-  const leftMs = parseTimestamp(left);
-  const rightMs = parseTimestamp(right);
-  if (leftMs === null) return rightMs === null ? null : right;
-  if (rightMs === null) return left;
-  return rightMs >= leftMs ? right : left;
-}
-
-function parseTimestamp(value) {
-  if (!stringValue(value)) return null;
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : parsed;
+function heartbeatLiveness(heartbeat, now, opts = {}) {
+  const nowMs = Date.parse(now);
+  const lastTickMs = Date.parse(heartbeat.last_tick_at || "");
+  const intervalMs = Number.isInteger(heartbeat.interval_ms) && heartbeat.interval_ms > 0 ? heartbeat.interval_ms : DEFAULT_HEARTBEAT_INTERVAL_MS;
+  const staleMs = Math.max(2 * intervalMs, 120000);
+  const processAlive = isProcessAlive(heartbeat.pid, opts);
+  const ageMs = Number.isFinite(nowMs) && Number.isFinite(lastTickMs) ? Math.max(0, nowMs - lastTickMs) : null;
+  return {
+    fresh: Boolean(processAlive && ageMs !== null && ageMs <= staleMs),
+    process_alive: processAlive,
+    age_ms: ageMs,
+    stale_after: Number.isFinite(lastTickMs) ? new Date(lastTickMs + staleMs).toISOString() : null,
+  };
 }
 
 function writeJsonAtomic(file, value) {
@@ -1174,11 +880,11 @@ function writeJsonAtomic(file, value) {
   }
 }
 
-async function persistFactoryRunProvenance(runId, eventKind, opts = {}) {
+async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const runPath = join(runDir, "run.json");
   const current = readRunFile(runPath);
-  const snapshot = await collectRunProvenanceSnapshot({
+  const snapshot = await collectRunDebugSnapshot({
     cwd: opts.cwd || process.cwd(),
     driverKind: opts.driverKind,
     pluginSpec: opts.pluginSpec,
@@ -1188,13 +894,13 @@ async function persistFactoryRunProvenance(runId, eventKind, opts = {}) {
   });
   const next = validateRun({
     ...current,
-    factory_provenance: nextFactoryProvenance(current.factory_provenance, snapshot, eventKind),
+    debug_snapshot: nextDebugSnapshot(current.debug_snapshot, snapshot, eventKind),
   });
   writeJsonAtomic(runPath, next);
-  return next.factory_provenance;
+  return next.debug_snapshot;
 }
 
-function nextFactoryProvenance(current, snapshot, eventKind) {
+function nextDebugSnapshot(current, snapshot, eventKind) {
   const existing = current && typeof current === "object" && !Array.isArray(current) ? current : {};
   if (eventKind === "resume") {
     return {
@@ -1215,24 +921,12 @@ function nonNegativeInteger(value) {
 }
 
 function normalizeHeartbeatPhase(phase) {
-  if (!stringValue(phase)) throw new Error(`heartbeat phase must be one of ${HEARTBEAT_PHASES.join(", ")}`);
-  if (!HEARTBEAT_PHASE_SET.has(phase)) throw new Error(`heartbeat phase must be one of ${HEARTBEAT_PHASES.join(", ")}`);
-  return phase;
+  if (!stringValue(phase)) throw new Error("heartbeat phase must be a non-empty string");
+  return String(phase).trim();
 }
 
 function normalizeHeartbeatInterval(value) {
   return Math.max(MIN_HEARTBEAT_INTERVAL_MS, normalizePositiveInteger(value, DEFAULT_HEARTBEAT_INTERVAL_MS, "intervalMs"));
-}
-
-function normalizeHeartbeatDuration(value) {
-  return normalizePositiveInteger(value, DEFAULT_HEARTBEAT_MAX_DURATION_MS, "maxDurationMs");
-}
-
-function normalizeHeartbeatWait(value) {
-  if (value === undefined || value === null) return DEFAULT_HEARTBEAT_STOP_WAIT_MS;
-  const next = Number(value);
-  if (!Number.isInteger(next) || next < 0) throw new Error("waitMs must be a non-negative integer");
-  return next;
 }
 
 function normalizePositiveInteger(value, fallback, name) {
@@ -1242,100 +936,34 @@ function normalizePositiveInteger(value, fallback, name) {
   return next;
 }
 
-function timestamp(value) {
-  if (value === undefined || value === null) return new Date().toISOString();
-  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
-  if (!Number.isFinite(parsed)) throw new Error("invalid heartbeat timestamp");
-  return new Date(parsed).toISOString();
-}
-
-function isProcessAlive(pid) {
+function isProcessAlive(pid, opts = {}) {
+  if (typeof opts.processAliveFn === "function") return Boolean(opts.processAliveFn(pid));
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
     if (error?.code === "ESRCH") return false;
-    return error?.code === "EPERM";
+    return false;
   }
-}
-
-function isRunJsonLockTimeout(error) {
-  return error instanceof Error && /timed out waiting for run\.json lock/.test(error.message);
-}
-
-function deferred() {
-  let resolve;
-  let settled = false;
-  const promise = new Promise((nextResolve) => {
-    resolve = (value) => {
-      if (settled) return;
-      settled = true;
-      nextResolve(value);
-    };
-  });
-  return { promise, resolve };
 }
 
 function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function resolveCleanupAuthority(repo, runDir, run) {
-  const authority = validateRunAuthority(runDir, run, { repoRoot: repo });
-  const attestedBranches = new Set();
-  const attestedWorktrees = new Set();
-
-  if (authority.ok) {
-    for (const record of Object.values(authority.acceptedAttestations || {})) {
-      if (record?.attestation?.type === "run-base") {
-        if (stringValue(record.attestation.bindings?.feature_branch)) {
-          attestedBranches.add(record.attestation.bindings.feature_branch.trim());
-        }
-        if (stringValue(record.attestation.bindings?.feature_worktree)) {
-          attestedWorktrees.add(physicalPath(record.attestation.bindings.feature_worktree.trim()));
-        }
-      }
-      if (record?.attestation?.type === "slice-observation") {
-        if (stringValue(record.attestation.bindings?.branch)) {
-          attestedBranches.add(record.attestation.bindings.branch.trim());
-        }
-        if (stringValue(record.attestation.bindings?.worktree)) {
-          attestedWorktrees.add(physicalPath(record.attestation.bindings.worktree.trim()));
-        }
-      }
-    }
-  }
-
-  return {
-    ok: authority.ok,
-    runId: run.run_id,
-    attestedBranches,
-    attestedWorktrees,
-  };
-}
-
-function resolveCleanupBranchPermission(branch, authority) {
+function resolveCleanupBranchPermission(branch) {
   if (!isSafeCleanupBranchName(branch)) {
     return { allowed: false, reason: "unsafe branch name" };
   }
-  if (authority?.attestedBranches?.has(branch)) {
-    return { allowed: true };
-  }
-  return {
-    allowed: false,
-    reason: "branch deletion requires accepted branch authority",
-  };
+  return { allowed: true };
 }
 
-function resolveCleanupWorktreePermission(worktree, authority) {
-  if (authority?.attestedWorktrees?.has(physicalPath(worktree))) {
-    return { allowed: true };
-  }
-  return {
-    allowed: false,
-    reason: "worktree removal requires accepted worktree authority",
-  };
+function resolveCleanupWorktreePermission(repo, worktree, expectedBranch) {
+  if (!stringValue(expectedBranch)) return { allowed: false, reason: "missing expected branch" };
+  const identity = checkWorktreeIdentity(repo, worktree, { branch: expectedBranch });
+  if (!identity.ok) return { allowed: false, reason: identity.reason };
+  return { allowed: true };
 }
 
 function isSafeCleanupBranchName(branch) {
@@ -1347,12 +975,6 @@ function isSafeCleanupBranchName(branch) {
     && !branch.includes("//")
     && !branch.includes("@{")
     && !/[\\~^:?*\[\]\s]/u.test(branch);
-}
-
-function assertRunAuthorityValid(runDir, run) {
-  const authority = validateRunAuthority(runDir, run);
-  if (!authority.ok) throw new Error(formatValidationChecks(authority.checks));
-  return authority;
 }
 
 function sleep(ms) {

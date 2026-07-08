@@ -55,12 +55,7 @@ describe("TUI factory scanner", () => {
     writeRun(repo, "strict-run", {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
-      review_tier: {
-        selected: "strict",
-        source: "default",
-        risk_reasons: [],
-        rationale: "test fixture",
-      },
+      review_tier: "strict",
     });
     writeRun(repo, "legacy-run", { status: "running", updated_at: "2026-07-04T00:00:00Z" });
 
@@ -69,7 +64,7 @@ describe("TUI factory scanner", () => {
     const legacyRun = runs.find((run) => run.run_id === "legacy-run");
 
     assert.equal(strictRun.review_tier, "strict");
-    assert.equal(strictRun.review_tier_source, "default");
+    assert.equal(strictRun.review_tier_source, null);
     assert.equal(legacyRun.review_tier, null);
     assert.equal(legacyRun.review_tier_source, null);
     cleanup(repo);
@@ -146,6 +141,31 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("sorts invalid fallback rows before valid stale rows", () => {
+    const repo = tempDir();
+    writeRun(repo, "valid-newer", { status: "running", updated_at: "2026-07-05T00:00:00Z", gates: {} });
+    writeRawRun(repo, "bad-json", "{\n");
+
+    const runs = readRuns(findFactoryRoots(repo));
+
+    assert.equal(runs[0].run_id, "bad-json");
+    assert.equal(runs[0].status, "invalid");
+    cleanup(repo);
+  });
+
+  it("emits a scan-truncated note when nested root scanning is bounded", () => {
+    const workspace = tempDir();
+    const child = join(workspace, "child");
+    mkdirSync(child, { recursive: true });
+    const notes = [];
+
+    findFactoryRoots(workspace, { maxScanDirs: 1, notes });
+
+    assert.equal(notes[0].type, "scan-truncated");
+    assert.equal(notes[0].scanned, 1);
+    cleanup(workspace);
+  });
+
   it("uses the run directory id for invalid run-state fallback rows", () => {
     const repo = tempDir();
     writeRawRun(repo, "bad-schema", JSON.stringify({ run_id: "untrusted-claim", status: "bogus", branch: "do-not-trust" }));
@@ -159,7 +179,7 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
-  it("fails closed for unverifiable authority diagnostics", () => {
+  it("keeps simplified consistency issues visible without authority proof diagnostics", () => {
     const repo = tempDir();
     writeRun(repo, "unverifiable", {
       status: "running",
@@ -170,25 +190,24 @@ describe("TUI factory scanner", () => {
     const [run] = readRuns(findFactoryRoots(repo));
 
     assert.equal(run.run_id, "unverifiable");
-    assert.equal(run.status, "invalid");
-    assert.equal(run.diagnostic_status, "error");
-    assert.equal(run.diagnostics.items[0].condition, "unverifiable-authority");
+    assert.equal(run.status, "running");
+    assert.equal(run.diagnostics.items[0]?.condition, "protected-gate");
     cleanup(repo);
   });
 
-  it("does not expose heartbeat tokens through diagnostic rows", () => {
+  it("projects stale heartbeat diagnostics without hidden lease fields", () => {
     const repo = tempDir();
     writeRun(repo, "heartbeat-run", {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
       gates: {},
     });
-    writeHeartbeat(repo, "heartbeat-run", { token: "super-secret-heartbeat-token" });
+    writeHeartbeat(repo, "heartbeat-run");
 
     const [run] = readRuns(findFactoryRoots(repo));
 
     assert.equal(run.diagnostic_status, "warning");
-    assert.doesNotMatch(JSON.stringify(run.diagnostics), /super-secret-heartbeat-token/);
+    assert.equal(run.diagnostics.items[0]?.condition, "missing-heartbeat-process");
     cleanup(repo);
   });
 });
@@ -239,17 +258,11 @@ function writeHeartbeat(repo, id, input = {}) {
     `${JSON.stringify({
       schema_version: 1,
       run_id: id,
-      token: input.token || "heartbeat-token",
       phase: "builder-wave",
-      status: "running",
       pid: 999999,
-      started_at: "1970-01-01T00:00:00.000Z",
       last_tick_at: "1970-01-01T00:00:00.000Z",
-      stop_requested_at: null,
-      stopped_at: null,
       interval_ms: 30000,
-      deadline_at: "2099-01-01T00:00:00.000Z",
-      stop_reason: null,
+      ...input,
     }, null, 2)}\n`,
   );
 }

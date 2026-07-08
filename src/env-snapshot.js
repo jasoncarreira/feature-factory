@@ -1,14 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { git } from "./git.js";
 import plugin from "./plugin.js";
+import { timestamp } from "./utils.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const SENSITIVE_PROVENANCE_KEY_PATTERN =
-  /(?:secret|token|password|passwd|pwd|api[_-]?key|private[_-]?key|credential|authorization|auth[_-]?header|access[_-]?key|bearer|cookie)/iu;
-const SENSITIVE_PROVENANCE_VALUE_PATTERN = /(?:secret|token|password|passwd|api[_-]?key|private[_-]?key)/iu;
-const TOKEN_SHAPED_PROVENANCE_VALUE_PATTERNS = [
+const SENSITIVE_ENV_KEY_PATTERN = /(?:secret|token|password|passwd|pwd|api[_-]?key|private[_-]?key|credential|authorization|auth[_-]?header|access[_-]?key|bearer|cookie)/iu;
+const SENSITIVE_ENV_VALUE_PATTERN = /(?:secret|token|password|passwd|api[_-]?key|private[_-]?key)/iu;
+const TOKEN_SHAPED_ENV_VALUE_PATTERNS = [
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/u,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
   /\bsk-proj[-_][A-Za-z0-9_-]{20,}\b/u,
@@ -16,26 +17,22 @@ const TOKEN_SHAPED_PROVENANCE_VALUE_PATTERNS = [
   /\bxox[abp][_-][A-Za-z0-9-]{10,}(?:-[A-Za-z0-9-]{10,})*\b/u,
   /\bglpat-[A-Za-z0-9_-]{20,}\b/u,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/iu,
-  /\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u,
+  /\beyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
   /(?:https?|ssh|git|ftp):\/\/[^/\s:@]+:[^/\s@]+@/iu,
 ];
 const HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH = 40;
 const HIGH_ENTROPY_MIN_SHANNON = 3.5;
-export const REDACTED_PROVENANCE_VALUE = "[redacted]";
+export const REDACTED_ENV_VALUE = "[redacted]";
 
-export async function collectProvenance(options = {}) {
+export async function collectEnv(options = {}) {
   const resolvedConfig = await resolvePluginConfig(options.pluginOptions || {});
   return {
     feature_factory_version: packageVersion(),
     opencode_version: commandOutput("opencode", ["--version"]),
     plugin_spec: options.pluginSpec || "opencode-feature-factory",
-    resolved_models: Object.fromEntries(
-      Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.model || null]),
-    ),
-    resolved_variants: Object.fromEntries(
-      Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.variant || null]),
-    ),
+    resolved_models: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.model || null])),
+    resolved_variants: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.variant || null])),
     driver: {
       kind: options.driverKind || "cli",
       name: "feature-factory",
@@ -45,19 +42,12 @@ export async function collectProvenance(options = {}) {
   };
 }
 
-export async function collectRunProvenanceSnapshot({ cwd, driverKind, pluginSpec, pluginOptions, event, now } = {}) {
+export async function collectRunDebugSnapshot({ cwd, driverKind, pluginSpec, pluginOptions, event, now } = {}) {
   return {
-    collected_at: timestamp(now),
+    collected_at: timestamp(now, "environment snapshot timestamp"),
     event: stringValue(event) ? event.trim() : "run-created",
     diagnostic_only: true,
-    provenance: scrubSecretProvenance(
-      await collectProvenance({
-        cwd,
-        driverKind,
-        pluginSpec,
-        pluginOptions,
-      }),
-    ),
+    env: scrubSecretEnv(await collectEnv({ cwd, driverKind, pluginSpec, pluginOptions })),
   };
 }
 
@@ -83,18 +73,56 @@ export function detectCapabilities(cwd = process.cwd()) {
   };
 }
 
+export function scrubSecretEnv(value) {
+  if (Array.isArray(value)) return value.map((item) => scrubSecretEnv(item));
+  if (typeof value === "string") return isSensitiveEnvValue(value) ? REDACTED_ENV_VALUE : value;
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !isSensitiveEnvKey(key))
+      .map(([key, item]) => [key, scrubSecretEnv(item)]),
+  );
+}
+
+export function isSensitiveEnvKey(key) {
+  return SENSITIVE_ENV_KEY_PATTERN.test(String(key ?? ""));
+}
+
+export function isSensitiveEnvValue(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return SENSITIVE_ENV_VALUE_PATTERN.test(trimmed)
+    || TOKEN_SHAPED_ENV_VALUE_PATTERNS.some((pattern) => pattern.test(trimmed))
+    || credentialBearingUrl(trimmed)
+    || highEntropySingleToken(trimmed);
+}
+
 function packageVersion() {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   return pkg.version || "unknown";
 }
 
 function commandOk(command, args, cwd = process.cwd()) {
-  return spawnSync(command, args, { cwd, stdio: "ignore" }).status === 0;
+  if (command === "git") return git(cwd, args).ok;
+  try {
+    execFileSync(command, args, { cwd, stdio: "ignore", timeout: 10000, maxBuffer: 1024 * 1024 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function commandOutput(command, args, cwd = process.cwd()) {
-  const proc = spawnSync(command, args, { cwd, encoding: "utf8" });
-  return proc.status === 0 ? (proc.stdout || proc.stderr || "").trim() : null;
+  if (command === "git") {
+    const proc = git(cwd, args);
+    return proc.ok ? (proc.stdout || proc.stderr || "").trim() : null;
+  }
+  try {
+    return execFileSync(command, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10000, maxBuffer: 1024 * 1024 }).trim();
+  } catch {
+    return null;
+  }
 }
 
 function opencodeRunSupports(flag) {
@@ -104,7 +132,7 @@ function opencodeRunSupports(flag) {
 
 function detectBaseBranch(cwd) {
   const symbolic = commandOutput("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"], cwd);
-  if (symbolic) return symbolic.replace(/^origin\//, "");
+  if (symbolic) return symbolic.replace(/^origin\//u, "");
   for (const candidate of ["main", "master", "development", "develop"]) {
     if (commandOk("git", ["rev-parse", "--verify", `origin/${candidate}`], cwd)) return candidate;
   }
@@ -114,34 +142,6 @@ function detectBaseBranch(cwd) {
 function gitIgnored(cwd, path) {
   if (!existsSync(join(cwd, ".git")) && !commandOk("git", ["rev-parse", "--show-toplevel"], cwd)) return null;
   return commandOk("git", ["check-ignore", path], cwd);
-}
-
-export function scrubSecretProvenance(value) {
-  if (Array.isArray(value)) return value.map((item) => scrubSecretProvenance(item));
-  if (typeof value === "string") return isSensitiveProvenanceValue(value) ? REDACTED_PROVENANCE_VALUE : value;
-  if (!value || typeof value !== "object") return value;
-
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) => !isSensitiveProvenanceKey(key))
-      .map(([key, item]) => [key, scrubSecretProvenance(item)]),
-  );
-}
-
-export function isSensitiveProvenanceKey(key) {
-  return SENSITIVE_PROVENANCE_KEY_PATTERN.test(String(key ?? ""));
-}
-
-export function isSensitiveProvenanceValue(value) {
-  if (typeof value !== "string") return false;
-  const trimmed = value.trim();
-  if (!trimmed) return false;
-  return (
-    SENSITIVE_PROVENANCE_VALUE_PATTERN.test(trimmed) ||
-    TOKEN_SHAPED_PROVENANCE_VALUE_PATTERNS.some((pattern) => pattern.test(trimmed)) ||
-    credentialBearingUrl(trimmed) ||
-    highEntropySingleToken(trimmed)
-  );
 }
 
 function credentialBearingUrl(value) {
@@ -167,13 +167,6 @@ function shannonEntropy(value) {
     const probability = count / value.length;
     return entropy - probability * Math.log2(probability);
   }, 0);
-}
-
-function timestamp(value) {
-  if (value === undefined || value === null) return new Date().toISOString();
-  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
-  if (!Number.isFinite(parsed)) throw new Error("invalid provenance timestamp");
-  return new Date(parsed).toISOString();
 }
 
 function stringValue(value) {

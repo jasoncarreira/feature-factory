@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { diagnoseRunFile, diagnosticEnvelope, diagnosticItem } from "./factory-diagnostics.js";
+import { diagnoseRunFile, diagnoseRunObject, diagnosticEnvelope, diagnosticItem } from "./factory-diagnostics.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
 const MAX_SCAN_DIRS = 2000;
 const MAX_DIAGNOSTIC_SUMMARY = 180;
 const ROOT_CACHE_TTL_MS = 30000;
-const FAIL_CLOSED_CONDITIONS = new Set(["invalid-run-state", "invalid-authority", "unverifiable-authority"]);
+const FAIL_CLOSED_CONDITIONS = new Set(["invalid-run-state"]);
 const rootCache = new Map();
 
 export function factoryRoots(api, options = {}) {
@@ -14,11 +14,11 @@ export function factoryRoots(api, options = {}) {
   const cacheKey = starts.map((start) => resolve(start)).join("\0");
   const now = Date.now();
   const cached = rootCache.get(cacheKey);
-  if (!options.noCache && cached && cached.expiresAt > now) return cached.roots;
+  if (!options.noCache && !options.notes && cached && cached.expiresAt > now) return cached.roots;
 
   const roots = new Set();
   for (const start of starts) {
-    for (const root of findFactoryRoots(start)) roots.add(root);
+    for (const root of findFactoryRoots(start, options)) roots.add(root);
   }
   const sorted = [...roots].sort();
   if (!options.noCache) rootCache.set(cacheKey, { expiresAt: now + ROOT_CACHE_TTL_MS, roots: sorted });
@@ -42,16 +42,16 @@ function isUsablePath(value) {
 export function readRuns(roots, options = {}) {
   return roots
     .flatMap((root) => readRootRuns(root, options))
-    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+    .sort(compareRunRows);
 }
 
-export function findFactoryRoots(start) {
+export function findFactoryRoots(start, options = {}) {
   if (!isUsablePath(start)) return [];
   const dir = resolve(start);
   const roots = new Set();
   const nearest = findNearestFactoryRoot(dir);
   if (nearest) roots.add(nearest);
-  for (const root of findNestedFactoryRoots(dir)) roots.add(root);
+  for (const root of findNestedFactoryRoots(dir, options)) roots.add(root);
   if (!roots.size) roots.add(join(dir, ".opencode", "factory"));
   return [...roots];
 }
@@ -67,11 +67,12 @@ function findNearestFactoryRoot(start) {
   }
 }
 
-function findNestedFactoryRoots(start) {
+function findNestedFactoryRoots(start, options = {}) {
   const roots = [];
   const queue = [resolve(start)];
+  const maxScanDirs = Number.isInteger(options.maxScanDirs) && options.maxScanDirs > 0 ? options.maxScanDirs : MAX_SCAN_DIRS;
   let scanned = 0;
-  while (queue.length && scanned < MAX_SCAN_DIRS) {
+  while (queue.length && scanned < maxScanDirs) {
     const dir = queue.shift();
     scanned += 1;
     const candidate = join(dir, ".opencode", "factory");
@@ -82,7 +83,18 @@ function findNestedFactoryRoots(start) {
       if (child.isDirectory()) queue.push(path);
     }
   }
+  if (queue.length && Array.isArray(options.notes)) {
+    options.notes.push({ type: "scan-truncated", start: resolve(start), scanned, remaining: queue.length, max_scan_dirs: maxScanDirs });
+  }
   return roots;
+}
+
+function compareRunRows(a, b) {
+  return Number(isInvalidRow(b)) - Number(isInvalidRow(a)) || String(b.updated_at || "").localeCompare(String(a.updated_at || "")) || String(b.run_id || "").localeCompare(String(a.run_id || ""));
+}
+
+function isInvalidRow(row) {
+  return row?.status === "invalid" || row?.diagnostic_classification === "invalid";
 }
 
 function safeReadDir(dir) {
@@ -102,7 +114,7 @@ function readRootRuns(root, options = {}) {
       if (!existsSync(file) || !statSync(file).isFile()) return [];
       try {
         const run = JSON.parse(readFileSync(file, "utf8"));
-        const diagnostics = options.diagnostics === false ? healthyDiagnostics() : safeDiagnoseRunFile(file, { repoRoot });
+        const diagnostics = options.diagnostics === false ? healthyDiagnostics() : safeDiagnoseRunObject(run, file, { repoRoot });
         if (shouldUseFallbackRow(diagnostics)) return [fallbackRun(runID, file, diagnostics)];
         return [summarize(run, runID, file, diagnostics)];
       } catch (error) {
@@ -132,8 +144,8 @@ function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
     gate: pendingGate(run),
     branch: run.branch ? String(run.branch) : null,
     pr_url: run.pr_url ? String(run.pr_url) : null,
-    review_tier: stringOrNull(run.review_tier?.selected),
-    review_tier_source: stringOrNull(run.review_tier?.source),
+    review_tier: stringOrNull(run.review_tier),
+    review_tier_source: null,
     updated_at: run.updated_at ? String(run.updated_at) : null,
     current: currentSummary(run),
     slices: sliceSummary(run),
@@ -173,6 +185,22 @@ function shouldUseFallbackRow(diagnostics) {
 function safeDiagnoseRunFile(file, options) {
   try {
     return diagnoseRunFile(file, options);
+  } catch (error) {
+    const checkedAt = new Date().toISOString();
+    return diagnosticEnvelope([
+      diagnosticItem("invalid-run-state", {
+        checkedAt,
+        authoritative: false,
+        message: `Factory diagnostics failed: ${error.message}`,
+        evidence: { source: "tui-data", run_path: file, error: error.message },
+      }),
+    ], { checkedAt, authoritative: false });
+  }
+}
+
+function safeDiagnoseRunObject(run, file, options) {
+  try {
+    return diagnoseRunObject(run, { ...options, runDir: dirname(file), runFile: file });
   } catch (error) {
     const checkedAt = new Date().toISOString();
     return diagnosticEnvelope([

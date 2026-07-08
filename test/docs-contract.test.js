@@ -15,396 +15,154 @@ const COMMAND = readDoc("../assets/command/feature.md");
 const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
 const TODO = readDoc("../TODO.md");
+const CLI = readDoc("../src/cli.js");
+const STATE_WRITE_COMMANDS = Object.freeze([
+  "factory env record-created <run-id> --json",
+  "factory env record-resume <run-id> --json",
+  "factory answer --json <run-id> <gate> approve",
+  "factory recover <run-id> --reason TEXT --json",
+  "factory gate-decision <run-id> <gate> pending",
+  "factory gate-decision <run-id> <gate> approved",
+  "factory slices-seed <run-id> --from plan/slices.json",
+  "factory slice-status <run-id> <slice-id> running",
+  "factory slice-status <run-id> <slice-id> review",
+  "factory slice-status <run-id> <slice-id> blocked",
+  "factory step <run-id> <known-agent> running",
+  "factory step <run-id> <known-agent> accepted",
+  "factory verdicts <run-id> --validator GO",
+  "factory terminal <run-id> blocked --reason TEXT",
+  "factory slice-merged <run-id> <slice-id> --merge-commit SHA",
+  "factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO",
+]);
 
 describe("heartbeat docs contract", () => {
   it("lists every required heartbeat phase in the skill and schema", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      for (const phase of HEARTBEAT_PHASES) {
-        assert.match(text, literalPattern(`\`${phase}\``), `${name} missing phase ${phase}`);
-      }
+      for (const phase of HEARTBEAT_PHASES) assert.match(text, literalPattern(`\`${phase}\``), `${name} missing phase ${phase}`);
     }
   });
 
-  it("requires heartbeat only around long Task waits and stops it before semantic manifest writes", () => {
+  it("documents heartbeat as liveness-only around long waits", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /liveness-only|liveness only/i, `${name} must describe heartbeat as liveness-only`);
+      assert.match(text, /Start heartbeat immediately before/i, `${name} must start heartbeat immediately before waits`);
+      assert.match(text, /long\s+`Task`|long orchestrator waits/i, `${name} must tie heartbeat to long waits`);
+      assert.match(text, /stop heartbeat/i, `${name} must stop heartbeat after waits`);
+      assert.match(text, /last_tick_at/i, `${name} must document timestamp liveness`);
+      assert.match(text, /interval_ms/i, `${name} must document heartbeat interval`);
+      assert.match(text, /max\(2 \* interval_ms, 120000ms\)/i, `${name} must document freshness threshold`);
+      assert.match(text, /not.*heartbeat\.json.*authority|heartbeat\.json.*not.*authority/i, `${name} must not treat heartbeat.json as authority`);
+    }
+  });
+
+  it("forbids heartbeat during protected gates and names terminal statuses", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      assert.match(text, /Start heartbeat immediately before/i, `${name} must start heartbeat immediately before the long wait`);
-      assert.match(text, /long\s+`Task`/i, `${name} must tie heartbeat to long Task waits`);
-      assert.match(text, /`?finally`?\/after-return path/i, `${name} must stop heartbeat in a finally/after-return path`);
-      assert.match(text, /foreground semantic `run\.json` (write|mutation)/i, `${name} must stop heartbeat before semantic run.json writes`);
-    }
-  });
-
-  it("forbids heartbeat during gates and before terminal states", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      assert.match(text, /Do not start heartbeat while[\s\S]*`story`[\s\S]*`brief`[\s\S]*`pre_pr`/i, `${name} must forbid heartbeat during story/brief/pre_pr gates`);
-      assert.match(text, /Before writing terminal[\s\S]*`terminal_result`[\s\S]*stop heartbeat/i, `${name} must stop heartbeat before terminal writes`);
-      for (const status of TERMINAL_RUN_STATUSES) {
-        assert.match(text, literalPattern(`\`${status}\``), `${name} must name terminal status ${status}`);
-      }
-    }
-  });
-
-  it("documents the heartbeat helper, sidecar, lock, and monitoring semantics", () => {
-    assert.match(SCHEMA, /heartbeat\.json/, "SCHEMA must document heartbeat.json");
-    assert.match(SCHEMA, /factory\.lock/, "SCHEMA must document factory.lock");
-    assert.match(SCHEMA, /run-json\.lock\//, "SCHEMA must document run-json.lock/");
-    assert.match(
-      SCHEMA,
-      /only allowed `run\.json` mutation is the helper updating `heartbeat_at`/i,
-      "SCHEMA must document the heartbeat-only manifest mutation rule",
-    );
-
-    for (const [name, text] of documentEntries({ README, SPEC })) {
-      assert.match(text, /feature-factory factory heartbeat <run-id> --status --json/, `${name} must document the heartbeat helper surface`);
-      assert.match(text, /factory\.lock/, `${name} must mention factory.lock`);
-      assert.match(text, /heartbeat\.json/, `${name} must mention heartbeat.json monitoring`);
-      assert.match(text, /terminal_result/, `${name} must explain terminal monitoring semantics`);
-    }
-  });
-
-  it("documents owner-bound heartbeat authority instead of treating heartbeat.json as authority", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      assert.match(text, /trusted heartbeat owner capability/i, `${name} must require trusted heartbeat owner capability`);
-      assert.match(text, /factory\.lock/, `${name} must source heartbeat authority from factory.lock`);
-      assert.match(text, /not.*heartbeat\.json.*authority|heartbeat\.json.*not.*authority/i, `${name} must treat heartbeat.json as data, not authority`);
+      assert.match(text, /Do not start heartbeat while[\s\S]*`story`[\s\S]*`brief`[\s\S]*`pre_pr`/i, `${name} must forbid heartbeat during protected gates`);
+      assert.match(text, /Before writing terminal[\s\S]*terminal_result[\s\S]*stop heartbeat if it is active/i, `${name} must stop active heartbeat before terminal writes`);
+      for (const status of TERMINAL_RUN_STATUSES) assert.match(text, literalPattern(`\`${status}\``), `${name} must name terminal status ${status}`);
     }
   });
 });
 
-describe("provenance authority docs contract", () => {
-  it("defines authority roles and treats mutable local state as claims only", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      assert.match(text, /untrusted caller claims/i, `${name} must define untrusted caller claims`);
-      assert.match(text, /orchestrator observations/i, `${name} must define orchestrator observations`);
-      assert.match(text, /factory-owned attestations/i, `${name} must define factory-owned attestations`);
-      assert.match(text, /status booleans.*claims only|claims only.*status booleans|must not trust status booleans alone/i, `${name} must reject status booleans as sole proof`);
-      assert.match(text, /run\.json[\s\S]*claims only|run\.json[\s\S]*not proof/i, `${name} must treat run.json as claim data, not proof`);
+describe("simplified state contract docs", () => {
+  it("documents durable local state, transition helpers, and no proof layer", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /run\.json/i, `${name} must document run.json`);
+      assert.match(text, /transitionGateDecision/i, `${name} must document transitionGateDecision`);
+      assert.match(text, /transitionPrCreated/i, `${name} must document transitionPrCreated`);
+      assert.match(text, /pending_snapshot/i, `${name} must document pending_snapshot`);
+      assert.match(text, /debug_snapshot/i, `${name} must document debug_snapshot`);
+      assert.match(text, /proof layer removed/i, `${name} must document removed proof layer`);
     }
   });
 
-  it("documents the attestation directory, common fields, and accepted graph semantics", () => {
-    for (const phrase of [
-      "attestations/index.json",
-      "attestations/run-base.json",
-      "attestations/gates/<gate>.json",
-      "attestations/slices/<slice-id>.observation.json",
-      "attestations/reviews/<subject>.approval.json",
-      "attestations/direct-commits/<entry-id>.observation.json",
-      "attestations/merge-chain.json",
-      "feature-factory-provenance-v1",
-      "safe-git-v1",
-      "attestation_hash",
-      "prev_hash",
-    ]) {
-      assert.match(SCHEMA, literalPattern(phrase), `SCHEMA must mention ${phrase}`);
-    }
-
-    assert.match(SCHEMA, /canonical JSON hash/i, "SCHEMA must document canonical attestation hashing");
-    assert.match(SCHEMA, /attestation graph/i, "SCHEMA must document the accepted attestation graph");
-    assert.match(SCHEMA, /index\.json[\s\S]*prev_hash/i, "SCHEMA must describe index.json and prev_hash semantics together");
-  });
-
-  it("documents attestation types, safe Git, and physical identity validation", () => {
-    for (const phrase of [
-      "run-base",
-      "slice-observation",
-      "review-approval",
-      "direct-reviewed-commit",
-      "gate-decision",
-      "merge-chain",
-      "slice_merge",
-      "direct_reviewed_commit",
-    ]) {
-      assert.match(SCHEMA, literalPattern(phrase), `SCHEMA must document ${phrase}`);
-    }
-
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      assert.match(text, /safe Git|safeGit|safe_git_policy/i, `${name} must document the safe Git policy`);
-      assert.match(text, /worktree identity/i, `${name} must document worktree identity validation`);
-      assert.match(text, /fail closed/i, `${name} must document fail-closed validation`);
-    }
-
-    assert.match(SCHEMA, /symlinked durable roots are rejected/i, "SCHEMA must reject symlinked durable roots");
-    assert.match(SCHEMA, /bounded local authority|local-only/i, "SCHEMA must explain local-only provenance limits");
-  });
-
-  it("documents gate-decision ref roots to match the implemented authority model", () => {
-    assert.match(SCHEMA, /question_ref.*rooted under `gates\//i, "SCHEMA must require question_ref under gates/");
-    assert.match(SCHEMA, /answer_ref.*rooted under `gates\//i, "SCHEMA must require answer_ref under gates/");
-    assert.match(SCHEMA, /artifact_ref.*rooted under `artifacts\//i, "SCHEMA must require artifact_ref under artifacts/");
-
-    assert.match(SKILL, /question_ref.*`gates\/`/i, "SKILL must keep gate question refs under gates/");
-    assert.match(SKILL, /answer_ref.*`gates\/`/i, "SKILL must keep gate answer refs under gates/");
-    assert.match(SKILL, /artifact_ref.*`artifacts\/`/i, "SKILL must keep gate artifact refs under artifacts/");
-    assert.match(SKILL, /Do not write gate question or answer refs under `artifacts\//i, "SKILL must forbid artifact-rooted gate question/answer refs");
-  });
-
-  it("requires the orchestrator to write attestations at each provenance boundary", () => {
-    for (const phrase of [
-      "attestations/index.json",
-      "run-base attestation",
-      "attestations/gates/<gate>.json",
-      "attestations/slices/<slice-id>.observation.json",
-      "attestations/reviews/<slice-id>.approval.json",
-      "attestations/direct-commits/<entry-id>.observation.json",
-      "attestations/merge-chain.json",
-      "direct_reviewed_commit",
-    ]) {
-      assert.match(SKILL, literalPattern(phrase), `SKILL must mention ${phrase}`);
-    }
-
-    assert.match(SKILL, /reviewer approval attestations are written only after the reviewed-worktree guard returns `clean`/i, "SKILL must bind review approvals to a clean guard");
-    assert.match(SKILL, /must not trust status booleans alone/i, "SKILL must warn against trusting status booleans alone");
-  });
-
-  it("summarizes guarantees and limits in README and SPEC", () => {
-    for (const [name, text] of documentEntries({ README, SPEC })) {
-      assert.match(text, /attestations\//i, `${name} must mention the attestation directory`);
-      assert.match(text, /safe Git|safe_git_policy/i, `${name} must mention safe Git guarantees`);
-      assert.match(text, /bounded local authority|local-only/i, `${name} must describe bounded local authority`);
-      assert.match(text, /fail closed/i, `${name} must mention fail-closed behavior`);
-      assert.match(text, /not cryptographic|not tamper-proof|coherent rewrite of local files and Git history/i, `${name} must describe local-only limits`);
-    }
-  });
-});
-
-describe("run-state transition docs contract", () => {
-  it("documents the run-state helpers and their semantic roles", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      for (const helper of [
-        "hashRunState",
-        "transitionRunJson",
-        "transitionGateDecision",
-        "transitionTerminalResult",
-        "transitionRunStep",
-        "transitionRunSlice",
-        "transitionLifecycleRun",
-        "mutateRunJsonLocked",
-      ]) {
-        assert.match(text, helperNamePattern(helper), `${name} must mention ${helper}`);
-      }
-
-      assert.match(text, /expectedCurrentHash|current-state hash|stale `run\.json` transition|stale-write detection/i, `${name} must document stale transition protection`);
-      assert.match(text, /transitionRunStep[\s\S]*steps\[\]/i, `${name} must document step transitions`);
-      assert.match(text, /transitionRunSlice[\s\S]*slices\[\]/i, `${name} must document slice transitions`);
-      assert.match(text, /transitionTerminalResult[\s\S]*terminal_result/i, `${name} must document terminal result synchronization`);
-    }
-  });
-
-  it("documents fail-closed no-index bootstrap rules and non-empty attestation indexes", () => {
-    assert.match(SKILL, /Do not create placeholder\/empty `attestations\/index\.json`/i, "SKILL must forbid placeholder empty attestation indexes");
-    assert.match(SKILL, /first accepted attestation[\s\S]*sequence-1 `attestations\/run-base\.json`/i, "SKILL must require run-base to anchor the accepted graph");
-    assert.match(SKILL, /gate decisions cannot bootstrap[\s\S]*before run-base exists/i, "SKILL must forbid gate-decision bootstrap before run-base");
-    assert.match(SKILL, /mutateRunJsonLocked[\s\S]*compatibility-only[\s\S]*fail closed/i, "SKILL must document fail-closed no-index compatibility mode");
-
-    assert.match(SCHEMA, /must never be a placeholder-empty file/i, "SCHEMA must reject placeholder empty attestation indexes");
-    assert.match(SCHEMA, /entries` must be a non-empty array|entries must be a non-empty array/i, "SCHEMA must require non-empty attestation index entries");
-    assert.match(SCHEMA, /first accepted attestation[\s\S]*sequence-1 `attestations\/run-base\.json`/i, "SCHEMA must require run-base first");
-    assert.match(SCHEMA, /gate decisions cannot bootstrap|cannot bootstrap or precede the graph root/i, "SCHEMA must forbid gate-decision bootstrap before run-base");
-    assert.match(SCHEMA, /mutateRunJsonLocked[\s\S]*compatibility-only[\s\S]*fail closed/i, "SCHEMA must document fail-closed no-index compatibility mode");
-  });
-
-  it("documents approved gate ordering through transitionGateDecision", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      assert.match(text, /transitionGateDecision[\s\S]*only (path|approved-gate writer)/i, `${name} must reserve approved gates for transitionGateDecision`);
-      assert.match(text, /transitionGateDecision[\s\S]*attestations\/gates\/<gate>\.json[\s\S]*attestations\/index\.json[\s\S]*before the approved gate state/i, `${name} must document gate attestation ordering`);
-      assert.match(text, /roll back the staged gate attestation\/index files and leave `run\.json` unchanged/i, `${name} must document rollback on approved gate validation failure`);
-    }
-  });
-
-  it("requires feature worktree and run-base bootstrap before story gate approval", () => {
-    assert.match(SKILL, /Step 0[\s\S]*create the feature branch\/worktree immediately/i, "SKILL must create the feature worktree during Step 0");
-    assert.match(SKILL, /Before Gate 1[\s\S]*attestations\/run-base\.json[\s\S]*attestations\/index\.json/i, "SKILL must write run-base/index before story gate approval");
-    assert.match(SKILL, /caller checkout[\s\S]*launcher\/control-plane[\s\S]*clean `\$FEAT_WT`/i, "SKILL must isolate factory work from caller checkout dirt");
-    assert.match(SKILL, /work-reviewer` subject `spec-writer` -> `\$FEAT_WT`/i, "SKILL must guard spec review against FEAT_WT");
-    assert.match(SKILL, /work-reviewer` subject `work-decomposer` -> `\$FEAT_WT`/i, "SKILL must guard decomposition review against FEAT_WT");
-    assert.match(SKILL, /codebase-researcher[\s\S]*`\$FEAT_WT` as the repository context/i, "SKILL must research the clean feature worktree");
-    assert.match(SCHEMA, /New runs create the feature branch\/worktree during Step 0[\s\S]*before story Gate 1/i, "SCHEMA must document early feature worktree bootstrap");
-    assert.match(SCHEMA, /Spec and decomposition reviews guard the clean feature worktree \(`\$FEAT_WT`\), not the caller checkout/i, "SCHEMA must keep planning guards on FEAT_WT");
-  });
-
-  it("states that transition helpers do not change heartbeat or external-driver authority", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
-      assert.match(text, /do not change heartbeat or external-driver semantics/i, `${name} must preserve heartbeat and external-driver semantics`);
-      assert.match(text, /`heartbeat\.json` remains liveness-only/i, `${name} must keep heartbeat as liveness-only`);
-      assert.match(text, /external drivers still write only `gates\/<gate>\.answer`/i, `${name} must keep gate answers external-driver-only`);
-      assert.match(text, /approval_source: `?"?external-driver"?`?/i, `${name} must keep approved file answers labeled external-driver`);
-    }
-  });
-});
-
-describe("provenance redaction and pr-created docs contract", () => {
-  it("documents diagnostic factory_provenance and credential redaction guarantees", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
-      assert.match(text, /factory_provenance/i, `${name} must document factory_provenance`);
-    }
-
+  it("documents environment snapshot commands and redaction", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
-      assert.match(text, /diagnostic-only|diagnostic only/i, `${name} must mark factory provenance diagnostic-only`);
-      assert.match(text, /redact|omit/i, `${name} must document redaction/omission`);
+      assert.match(text, /factory env record-created <run-id> --json/i, `${name} must document record-created`);
+      assert.match(text, /factory env record-resume <run-id> --json/i, `${name} must document record-resume`);
+      assert.match(text, /diagnostic-only|diagnostic only/i, `${name} must mark snapshots diagnostic-only`);
+      assert.match(text, /redact|omit/i, `${name} must document redaction`);
       for (const tokenShape of ["ghp_*", "github_pat_*", "gho_*", "sk-proj_*", "sk-*", "xoxb_*"]) {
         assert.match(text, literalPattern(tokenShape), `${name} must mention token shape ${tokenShape}`);
       }
-      assert.match(text, /high-entropy/i, `${name} must mention high-entropy credential redaction`);
     }
   });
 
-  it("documents pending_snapshot gate freshness and fail-closed answer behavior", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
-      assert.match(text, /pending_snapshot/i, `${name} must document pending_snapshot`);
-    }
-
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
-      assert.match(text, /question_ref/i, `${name} must document pending question refs`);
-      assert.match(text, /artifact_ref|artifact/i, `${name} must document pending artifact refs`);
-      assert.match(text, /question_hash/i, `${name} must document question hashes`);
-      assert.match(text, /artifact_hash/i, `${name} must document artifact hashes`);
-      assert.match(text, /fail closed|fails closed/i, `${name} must document fail-closed stale gate behavior`);
-      assert.match(text, /stale|hash-mismatched|mismatched/i, `${name} must document stale/mismatched pending material`);
-    }
-  });
-
-  it("documents provenanced pr-created CLI flow and trusted PR URL requirements", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
-      assert.match(text, /pr-created/i, `${name} must document pr-created`);
-    }
-
+  it("documents PR-created transition preconditions", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
       assert.match(text, /feature-factory factory pr-created <run-id>/i, `${name} must document factory pr-created CLI`);
-      assert.match(text, /attestations\/pr-created\.json/i, `${name} must document pr-created attestation path`);
-      assert.match(text, /run\.pr_url/i, `${name} must document run.pr_url authority`);
-      assert.match(text, /terminal_result\.pr_url/i, `${name} must document terminal_result.pr_url authority`);
-      assert.match(text, /trusted only|only then|only after/i, `${name} must require attestation before PR URL trust`);
-      assert.match(text, /fail closed|fails closed/i, `${name} must document fail-closed PR URL behavior`);
+      assert.match(text, /pre_pr/i, `${name} must mention pre_pr gate`);
+      assert.match(text, /validator[\s\S]*(GO|GO-WITH-NITS)/i, `${name} must require passing validator`);
+      assert.match(text, /security[\s\S]*PASS/i, `${name} must require passing security review`);
+      assert.match(text, /canonical GitHub PR URL|canonical PR URL/i, `${name} must require canonical PR URL`);
     }
   });
 
-  it("documents provenance recording commands", () => {
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
-      assert.match(text, /feature-factory factory provenance record-created <run-id> --json/i, `${name} must document record-created`);
-      assert.match(text, /feature-factory factory provenance record-resume <run-id> --json/i, `${name} must document record-resume`);
+  it("documents reachable CLI verbs for orchestrator state writes", () => {
+    for (const command of STATE_WRITE_COMMANDS) {
+      assert.match(SKILL, commandPattern(command), `SKILL missing ${command}`);
+      assert.match(SCHEMA, commandPattern(command), `SCHEMA missing ${command}`);
+      assertCliSurfaceIncludes(command);
+    }
+    for (const verb of implementedStateWriteVerbs()) {
+      assert.ok(documentedStateWriteVerbs().has(verb), `factory ${verb} mutates state but is missing from STATE_WRITE_COMMANDS`);
+    }
+    for (const forbidden of ["transitionRunStep", "transitionRunSlice", "transitionTerminalResult", "transitionLifecycleRun", "mutateRunJsonLocked", "run-state.js"]) {
+      assert.doesNotMatch(SKILL, literalPattern(forbidden), `SKILL must not instruct unreachable helper ${forbidden}`);
     }
   });
 
-  it("does not instruct direct PR URL bookkeeping after draft PR creation", () => {
+  it("does not reintroduce removed proof-layer terminology in active docs", () => {
+    const retiredTerms = [
+      "heartbeat" + "_owner",
+      "stop" + "_requested_at",
+      "deadline" + "_at",
+      "owner" + "Capability",
+      "HEARTBEAT" + "_OWNER",
+      "assertSemantic" + "TransitionHeartbeatState",
+      "prove" + "nance",
+      "prove" + "nance" + "-authority",
+      "review" + "-guard",
+      "safe" + "-git",
+      "safe" + "_git" + "_policy",
+      "merge" + "-chain",
+      "invalid" + "-authority",
+      "unverifiable" + "-authority",
+    ];
+    const retiredPattern = new RegExp(retiredTerms.map(escapeRegExp).join("|"), "i");
+    const retiredDirectoryPattern = new RegExp(`${escapeRegExp("attest" + "ations")}/`, "i");
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
-      assert.doesNotMatch(text, /PR URLs (?:are|remain) terminal bookkeeping/i, `${name} must not describe PR URLs as terminal bookkeeping`);
-      assert.doesNotMatch(text, /Record `pr_url` in `run\.json` and set `status: completed`/i, `${name} must not instruct direct PR URL persistence`);
+      assert.doesNotMatch(text, retiredPattern, `${name} must not reference removed proof-layer terms`);
+      assert.doesNotMatch(text, retiredDirectoryPattern, `${name} must not require retired proof directories`);
     }
-
-    assert.match(SKILL, /Do not directly edit or persist `run\.json\.pr_url`/i, "SKILL must explicitly forbid direct PR URL persistence");
-    assert.match(COMMAND, /Do not directly persist `run\.json\.pr_url`/i, "command must explicitly forbid direct PR URL persistence");
   });
 });
 
-describe("detached-run diagnostics docs contract", () => {
-  it("documents the diagnostic envelope shape and all enums", () => {
+describe("diagnostics docs contract", () => {
+  it("documents the diagnostic envelope shape and enums", () => {
     for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
-      for (const field of [
-        "schema_version",
-        "checked_at",
-        "authoritative",
-        "status",
-        "severity",
-        "classification",
-        "summary",
-        "items",
-        "condition",
-        "message",
-        "action",
-        "evidence",
-      ]) {
+      for (const field of ["schema_version", "checked_at", "authoritative", "status", "severity", "classification", "summary", "items", "condition", "message", "action", "evidence"]) {
         assert.match(text, literalPattern(field), `${name} must document diagnostics.${field}`);
       }
-
-      for (const condition of DIAGNOSTIC_CONDITIONS) {
-        assert.match(text, literalPattern(`\`${condition}\``), `${name} must document diagnostic condition ${condition}`);
-      }
-      for (const classification of DIAGNOSTIC_CLASSIFICATIONS) {
-        assert.match(text, literalPattern(`\`${classification}\``), `${name} must document diagnostic classification ${classification}`);
-      }
-      for (const status of DIAGNOSTIC_STATUSES) {
-        assert.match(text, literalPattern(`\`${status}\``), `${name} must document diagnostic status ${status}`);
-      }
-      for (const severity of DIAGNOSTIC_SEVERITIES) {
-        assert.match(text, literalPattern(`\`${severity}\``), `${name} must document diagnostic severity ${severity}`);
-      }
+      for (const condition of DIAGNOSTIC_CONDITIONS) assert.match(text, literalPattern(`\`${condition}\``), `${name} must document condition ${condition}`);
+      for (const classification of DIAGNOSTIC_CLASSIFICATIONS) assert.match(text, literalPattern(`\`${classification}\``), `${name} must document classification ${classification}`);
+      for (const status of DIAGNOSTIC_STATUSES) assert.match(text, literalPattern(`\`${status}\``), `${name} must document status ${status}`);
+      for (const severity of DIAGNOSTIC_SEVERITIES) assert.match(text, literalPattern(`\`${severity}\``), `${name} must document severity ${severity}`);
     }
   });
 
-  it("documents exact aggregation priority", () => {
+  it("documents aggregation order and operator actions", () => {
+    const conditionOrder = ["invalid-run-state", "missing-worktree", "missing-heartbeat-process", "stale-heartbeat", "protected-gate", "terminal-run"];
     for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
-      assert.match(text, orderedPattern(["invalid", "blocked", "needs-human", "recoverable", "terminal", "healthy"]), `${name} must document classification aggregation order`);
-      assert.match(text, orderedPattern(["critical", "error", "warning", "info"]), `${name} must document severity aggregation order`);
-      assert.match(text, orderedPattern(["error", "warning", "ok"]), `${name} must document status aggregation order`);
-      assert.match(text, orderedPattern(["invalid-run-state", "invalid-authority", "unverifiable-authority", "missing-worktree", "missing-heartbeat-process", "stale-heartbeat", "protected-gate", "terminal-run"]), `${name} must document condition aggregation order`);
+      assert.match(text, orderedPattern(["invalid", "blocked", "needs-human", "recoverable", "terminal", "healthy"]), `${name} must document classification order`);
+      assert.match(text, orderedPattern(["critical", "error", "warning", "info"]), `${name} must document severity order`);
+      assert.match(text, orderedPattern(["error", "warning", "ok"]), `${name} must document status order`);
+      assert.match(text, orderedPattern(conditionOrder), `${name} must document condition order`);
       assert.match(text, /original detection order/i, `${name} must document detection-order tiebreaker`);
-    }
-  });
-
-  it("documents operator actions for every diagnostic condition", () => {
-    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA, TODO })) {
-      assert.match(text, /stale heartbeat|stale-heartbeat/i, `${name} must mention stale heartbeat diagnostics`);
-      assert.match(text, /missing (?:heartbeat helper )?process|missing-heartbeat-process/i, `${name} must mention missing process diagnostics`);
-      assert.match(text, /missing worktree|missing-worktree/i, `${name} must mention missing worktree diagnostics`);
-      assert.match(text, /invalid run state|invalid-run-state/i, `${name} must mention invalid run state diagnostics`);
-      assert.match(text, /invalid[/\s-]+unverifiable authority|invalid-authority|unverifiable-authority/i, `${name} must mention invalid/unverifiable authority diagnostics`);
-    }
-
-    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
-      assert.match(text, /do not restart blindly|not restart blindly|silently restarted/i, `${name} must warn against blind restart`);
-      assert.match(text, /restore (?:the )?(?:provenance-validated )?(?:trusted )?worktree|recover from validated durable state/i, `${name} must explain missing-worktree action`);
-      assert.match(text, /inspect accepted attestations|accepted attestations/i, `${name} must explain invalid-authority action`);
-      assert.match(text, /restore (?:or inspect )?missing proof|restore proof|missing proof/i, `${name} must explain unverifiable-authority action`);
-      assert.match(text, /answer (?:the )?pending protected gate|answer or stop a protected gate|answer the pending protected/i, `${name} must explain protected-gate action`);
+      assert.match(text, /do not restart blindly|not restart blindly/i, `${name} must warn against blind restart`);
+      assert.match(text, /restore (?:the )?worktree|recover from durable state/i, `${name} must explain missing-worktree action`);
+      assert.match(text, /answer (?:the )?pending protected gate|answer or stop/i, `${name} must explain protected-gate action`);
       assert.match(text, /read `terminal_result`|inspect the terminal result/i, `${name} must explain terminal-run action`);
-    }
-  });
-
-  it("documents liveness-only heartbeat PID and process semantics", () => {
-    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA, COMMAND, TODO })) {
-      assert.match(text, /liveness-only|liveness only/i, `${name} must describe liveness-only diagnostics`);
-    }
-
-    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
-      assert.match(text, /heartbeat helper (?:PID|process)|heartbeat-helper PID/i, `${name} must identify heartbeat helper process semantics`);
-      assert.match(text, /not (?:a )?detached opencode process/i, `${name} must not equate PID with detached opencode process`);
-      assert.match(text, /no durable run-id-to-opencode-PID registry/i, `${name} must document absent opencode PID registry`);
-      assert.match(text, /evidence\.liveness_only|`liveness_only`|"liveness_only"/i, `${name} must require liveness_only evidence`);
-      assert.match(text, /authoritative: false|"authoritative": false/i, `${name} must mark heartbeat evidence non-authoritative`);
-    }
-  });
-
-  it("documents protected-gate and terminal liveness suppression", () => {
-    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA, COMMAND })) {
-      assert.match(text, /protected-gate|protected gate/i, `${name} must document protected-gate diagnostics`);
-      assert.match(text, /needs-human[\s\S]*warning[\s\S]*warning/i, `${name} must document protected-gate tuple`);
-      assert.match(text, /suppresses? stale-heartbeat and missing-heartbeat-process|suppress(?:es)? heartbeat stale\/missing-process alarms|suppress(?:es)? stale.*missing/i, `${name} must suppress heartbeat liveness alarms at protected gates`);
-    }
-
-    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
-      assert.match(text, /valid terminal (?:states|runs)[\s\S]*suppress(?:es)? heartbeat(?:\/worktree)? liveness alarms|terminal valid states suppress heartbeat\/worktree liveness alarms/i, `${name} must suppress terminal liveness alarms`);
-      assert.match(text, /completed[\s\S]*partial[\s\S]*terminal[\s\S]*ok[\s\S]*info/i, `${name} must document completed/partial terminal tuple`);
-      assert.match(text, /blocked[\s\S]*blocked[\s\S]*error[\s\S]*error/i, `${name} must document blocked terminal tuple`);
-      assert.match(text, /needs-human[\s\S]*needs-human[\s\S]*warning[\s\S]*warning/i, `${name} must document needs-human terminal tuple`);
-    }
-  });
-
-  it("documents provenance fail-closed policy for diagnostics", () => {
-    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA, COMMAND, TODO })) {
-      assert.match(text, /fail closed|fail-closed/i, `${name} must document diagnostic fail-closed behavior`);
-    }
-
-    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
-      assert.match(text, /diagnostics\.authoritative/i, `${name} must document diagnostics.authoritative`);
-      assert.match(text, /schema (?:validation )?and run-authority checks|run\.json schema and run-authority checks/i, `${name} must require schema and authority checks`);
-      assert.match(text, /not (?:enough )?to infer (?:a )?healthy run|must not be treated as healthy|cannot prove health/i, `${name} must reject non-authoritative health inference`);
-      assert.match(text, /heartbeat.*PID.*process|heartbeat\/PID\/process|PID.*process.*heartbeat/i, `${name} must mention heartbeat/PID/process evidence together`);
-      assert.match(text, /status booleans/i, `${name} must reject status booleans as authority`);
-      assert.match(text, /worktree strings/i, `${name} must reject worktree strings as authority`);
-      assert.match(text, /mutable `run\.json` claims|mutable run\.json claims/i, `${name} must reject mutable run.json claims as authority`);
-      assert.match(text, /PR, gate, branch, (?:and )?worktree claims|PR, gate, branch, or worktree claims/i, `${name} must omit trusted claims from invalid envelopes`);
-      assert.match(text, /accepted attestations plus fresh observations/i, `${name} must preserve provenance authority`);
     }
   });
 });
@@ -421,12 +179,73 @@ function literalPattern(value) {
   return new RegExp(escapeRegExp(value));
 }
 
-function helperNamePattern(name) {
-  return new RegExp(`\\b${escapeRegExp(name)}(?:\\([^)]*\\))?\\b`);
-}
-
 function orderedPattern(values) {
   return new RegExp(values.map((value) => escapeRegExp(value)).join("[\\s\\S]*"));
+}
+
+function commandPattern(command) {
+  return new RegExp(command.split(/\s+/u).map((part) => escapeRegExp(part)).join("\\s+"));
+}
+
+function assertCliSurfaceIncludes(command) {
+  const parts = command.split(/\s+/u);
+  const verb = parts[1];
+  for (const flag of commandFlags(command)) assertCliParsesFlag(flag, command);
+  if (verb === "env") {
+    assert.match(CLI, /sub === "env"/, "CLI missing factory env");
+    assert.match(CLI, /action === "record-created"/, "CLI missing env record-created");
+    assert.match(CLI, /action === "record-resume"/, "CLI missing env record-resume");
+    return;
+  }
+  assert.match(CLI, new RegExp(`sub === "${escapeRegExp(verb)}"`), `CLI missing factory ${verb}`);
+}
+
+function documentedStateWriteVerbs() {
+  return new Set(STATE_WRITE_COMMANDS.map((command) => command.split(/\s+/u)[1]));
+}
+
+function implementedStateWriteVerbs() {
+  const verbs = [];
+  const dispatchPattern = /if \(sub === "([^"]+)"(?: \|\| sub === "[^"]+")?\) return ([A-Za-z0-9]+)\(rest\);/gu;
+  for (const [, verb, handler] of CLI.matchAll(dispatchPattern)) {
+    const body = extractFunctionBody(handler);
+    if (/transition[A-Z]|writeGateAnswer|persistFactoryRun/u.test(body)) verbs.push(verb);
+  }
+  return verbs;
+}
+
+function extractFunctionBody(name) {
+  const match = new RegExp(`(?:async\\s+)?function\\s+${escapeRegExp(name)}\\s*\\(`, "u").exec(CLI);
+  assert.ok(match, `CLI missing handler function ${name}`);
+  const open = CLI.indexOf("{", match.index);
+  let depth = 0;
+  for (let index = open; index < CLI.length; index += 1) {
+    const char = CLI[index];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return CLI.slice(open + 1, index);
+    }
+  }
+  throw new Error(`unterminated CLI handler function ${name}`);
+}
+
+function commandFlags(command) {
+  return [...new Set([...command.matchAll(/--[a-z-]+/gu)].map((match) => match[0]))];
+}
+
+function assertCliParsesFlag(flag, command) {
+  assert.ok(parsedCliFlags().has(flag), `${command} documents ${flag}, but CLI options() does not parse it`);
+}
+
+function parsedCliFlags() {
+  return new Set([...extractFlagSet("BOOLEAN_FLAGS"), ...extractFlagSet("VALUE_FLAGS")]);
+}
+
+function extractFlagSet(name) {
+  const match = new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]\\);`, "u").exec(CLI);
+  assert.ok(match, `CLI missing ${name}`);
+  return [...match[1].matchAll(/"(--[^"]+)"/gu)].map((flagMatch) => flagMatch[1]);
 }
 
 function escapeRegExp(value) {

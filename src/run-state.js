@@ -1,54 +1,42 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
-import {
-  canonicalizeGithubPrUrl,
-  createAttestationIndex,
-  createGateDecisionAttestation,
-  createPrCreatedAttestation,
-  hashFile,
-  hashValue,
-  resolveArtifactRef,
-  resolveGateRef,
-  validateGateDecisionAttestation,
-  validatePrCreatedAttestation,
-  validateProvenanceAuthority,
-} from "./provenance-authority.js";
-import { pendingProtectedGate, validateFactoryLock, validateHeartbeatState, validateRun, validateRunAuthority } from "./validate.js";
+import { dirname, join } from "node:path";
+import { git } from "./git.js";
+import { canonicalizeGithubPrUrl, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef } from "./refs.js";
+import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
+import { requireNonEmptyString, timestamp } from "./utils.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
-const ACTIVE_HEARTBEAT_STATUSES = new Set(["active", "running"]);
 const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
 const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
-const SENSITIVE_SLICE_STATUSES = new Set(["review", "merged"]);
 const PASSING_VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS"]);
 const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
-
+const GATE_DECISION_STATUSES = new Set(["approved", "changes_requested", "stopped"]);
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
+const DEFAULT_STALE_LOCK_MS = 60000;
+const DEFAULT_MISSING_OWNER_STEAL_MS = 5000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
+const MIN_STALE_HEARTBEAT_MS = 120000;
 const LOCK_DIR = "run-json.lock";
 const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
-const FACTORY_LOCK_FILE = "factory.lock";
 const HEARTBEAT_FILE = "heartbeat.json";
-const ATTESTATIONS_DIR = "attestations";
-const ATTESTATIONS_INDEX_FILE = "index.json";
-const ATTESTATIONS_INDEX_REF = `${ATTESTATIONS_DIR}/${ATTESTATIONS_INDEX_FILE}`;
-const ATTESTATIONS_GATES_DIR = "gates";
-const ATTESTATIONS_PR_CREATED_REF = `${ATTESTATIONS_DIR}/pr-created.json`;
-const APPROVED_GATE_TRANSITION_HOOK = Symbol("approvedGateTransition");
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
   const timeoutMs = normalizePositiveInteger(options.timeoutMs, DEFAULT_LOCK_TIMEOUT_MS);
   const retryDelayMs = normalizePositiveInteger(options.retryDelayMs, DEFAULT_LOCK_RETRY_DELAY_MS);
+  const staleLockMs = normalizePositiveInteger(options.staleLockMs, DEFAULT_STALE_LOCK_MS);
   const lockDir = join(runDir, LOCK_DIR);
   const ownerPath = join(lockDir, LOCK_OWNER_FILE);
   const deadline = Date.now() + timeoutMs;
+  let stolenFrom = null;
+  let stealAttempted = false;
 
   while (true) {
     try {
@@ -58,17 +46,20 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
       if (error?.code !== "EEXIST") throw error;
       if (Date.now() >= deadline) {
         const owner = await readJsonIfExists(ownerPath);
+        if (!stealAttempted && canStealRunJsonLock(owner, staleLockMs, lockDir, options)) {
+          await rm(lockDir, { recursive: true, force: true });
+          stolenFrom = owner || { missing_owner: true };
+          stealAttempted = true;
+          continue;
+        }
         throw new Error(formatLockTimeout(lockDir, owner));
       }
       await delay(Math.min(retryDelayMs, Math.max(1, deadline - Date.now())));
     }
   }
 
-  const owner = {
-    pid: process.pid,
-    hostname: hostname(),
-    acquired_at: new Date().toISOString(),
-  };
+  const owner = { pid: process.pid, hostname: hostname(), acquired_at: new Date().toISOString() };
+  if (stolenFrom) owner.stolen_from = sanitizeLockOwner(stolenFrom);
 
   try {
     await writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, "utf8");
@@ -76,6 +67,27 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
   } finally {
     await rm(lockDir, { recursive: true, force: true });
   }
+}
+
+function canStealRunJsonLock(owner, staleLockMs, lockDir, options = {}) {
+  if (!isRecord(owner)) return missingOwnerLockIsOldEnough(lockDir, options);
+  if (!isProcessAlive(owner.pid, options)) return true;
+  const acquiredMs = Date.parse(owner.acquired_at || "");
+  return Number.isFinite(acquiredMs) && Date.now() - acquiredMs > staleLockMs;
+}
+
+function missingOwnerLockIsOldEnough(lockDir, options = {}) {
+  const threshold = normalizePositiveInteger(options.missingOwnerStealMs, DEFAULT_MISSING_OWNER_STEAL_MS);
+  try {
+    return Date.now() - statSync(lockDir).mtimeMs > threshold;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeLockOwner(owner) {
+  if (!isRecord(owner)) return owner;
+  return Object.fromEntries(Object.entries(owner).filter(([key]) => key !== "stolen_from"));
 }
 
 export function hashRunState(run) {
@@ -90,225 +102,147 @@ export async function transitionRunJson(runDir, mutator, options = {}) {
 export async function transitionGateDecision(runDir, gateName, gate, options = {}) {
   if (!stringValue(gateName)) throw new Error("transitionGateDecision requires a gate name");
   assertSafeGateName(gateName);
-  const nextGate = normalizeGateDecision(gateName, gate);
+  const nextGate = normalizeGateDecision(gateName, gate, options);
+  const answerArchives = [];
+  const result = await withRunJsonLock(runDir, async () => {
+    return transitionRunJsonLocked(
+      runDir,
+      (draft) => {
+        draft.gates = normalizeGateMap(draft.gates);
+        draft.gates[gateName] = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, (archive) => answerArchives.push(archive));
+      },
+      options,
+      { authorizedGate: gateName, beforeWrite: async () => {
+        for (const archive of answerArchives) await archiveConsumedGateAnswer(archive);
+      } },
+    );
+  }, options);
+  return { ...result, gate: gateName };
+}
 
-  return withRunJsonLock(
-    runDir,
-    async () => {
-      let stagedAttestationRef = null;
-      let stagedSnapshots = [];
-      let shouldStageAttestation = false;
-      let forceTransition = false;
-      let committed = false;
-
-      try {
-        const result = await transitionRunJsonLocked(
-          runDir,
-          (draft, { authority }) => {
-            draft.gates = normalizeGateMap(draft.gates);
-            const preparedGate = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, options);
-            draft.gates[gateName] = preparedGate;
-
-            const latestGateDecision = findAcceptedGateDecisionRecord(authority, gateName);
-            shouldStageAttestation = shouldStageGateDecisionAttestation(latestGateDecision, preparedGate);
-            forceTransition = shouldStageAttestation && preparedGate.status !== "approved";
-
-            if (forceTransition) return draft;
-          },
-          options,
-          {
-            beforeValidateNext: async ({ current, next }) => {
-              if (!shouldStageAttestation) return;
-
-              const graph = assertProvenanceGraphValid(runDir, options);
-              const records = acceptedAttestationEntries(graph);
-              const staged = createGateDecisionState({
-                runDir,
-                current,
-                gateName,
-                gate: next.gates?.[gateName],
-                records,
-              });
-              const gateAttestationPath = await resolveAttestationWritePath(runDir, staged.ref, { createParents: true });
-              const indexPath = await resolveAttestationWritePath(runDir, ATTESTATIONS_INDEX_REF, { createParents: true });
-              stagedSnapshots = [await snapshotFile(gateAttestationPath), await snapshotFile(indexPath)];
-              stagedAttestationRef = staged.ref;
-
-              const attestationValidation = validateGateDecisionAttestation(staged.attestation, { ...options, runDir });
-              assertValidationChecksValid(attestationValidation, "gate-decision validation failed");
-
-              await writeJsonAtomically(gateAttestationPath, staged.attestation);
-              await writeJsonAtomically(indexPath, staged.index);
-            },
-            [APPROVED_GATE_TRANSITION_HOOK]: gateName,
-          },
-        );
-        committed = true;
-        return { ...result, gate: gateName, attestation_ref: stagedAttestationRef };
-      } catch (error) {
-        if (!committed && stagedSnapshots.length > 0) {
-          try {
-            for (const snapshot of stagedSnapshots) await restoreSnapshot(snapshot);
-          } catch (restoreError) {
-            throw rollbackError(error, restoreError);
-          }
-        }
-        throw error;
-      }
-    },
-    options,
-  );
+export function resolveGateAnswerTarget(runDir, gateName, gate) {
+  if (!stringValue(gateName)) throw new Error("resolveGateAnswerTarget requires a gate name");
+  assertSafeGateName(gateName);
+  if (!isRecord(gate) || gate.status !== "pending") throw new Error(`gate '${gateName}' is not pending`);
+  if (!isRecord(gate.pending_snapshot)) throw new Error(`gate '${gateName}' requires pending_snapshot before external answers`);
+  if (!stringValue(gate.answer_ref)) throw new Error(`gate '${gateName}' requires answer_ref`);
+  if (!stringValue(gate.artifact)) throw new Error(`gate '${gateName}' requires artifact ref`);
+  if (!stringValue(gate.question_ref)) throw new Error(`gate '${gateName}' requires question_ref`);
+  const freshSnapshot = createPendingGateSnapshot(runDir, gateName, gate.artifact, gate.question_ref, gate.pending_snapshot.created_at, gate.answer_ref);
+  assertPendingSnapshotMatches(gateName, gate.pending_snapshot, freshSnapshot, "current pending snapshot");
+  const answer = resolveGateRef(runDir, gate.answer_ref, { mustExist: false });
+  return { gatesDir: dirname(answer.path), answerPath: answer.path };
 }
 
 export async function transitionPrCreated(runDir, input, options = {}) {
-  const request = normalizePrCreatedInput(input);
-
-  return withRunJsonLock(
+  const request = { ...normalizePrCreatedInput(input), runDir };
+  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(
     runDir,
-    async () => {
-      let stagedSnapshots = [];
-      let stagedAttestationRef = null;
-      let committed = false;
-
-      try {
-        const result = await transitionRunJsonLocked(
-          runDir,
-          (draft, { authority }) => {
-            const existingPrCreated = findAcceptedPrCreatedRecord(authority);
-            if (existingPrCreated) {
-              assertExistingPrCreatedRequestCompatible(runDir, existingPrCreated, request);
-            }
-            draft.pr_url = request.pr_url;
-            draft.status = "completed";
-            draft.terminal_result = normalizePrCreatedTerminalResult(draft, request);
-          },
-          options,
-          {
-            beforeValidateNext: async ({ current, next }) => {
-              const graph = assertProvenanceGraphValid(runDir, options);
-              const staged = createPrCreatedState({
-                runDir,
-                current,
-                next,
-                records: acceptedAttestationEntries(graph),
-                request,
-              });
-              const attestationPath = await resolveAttestationWritePath(runDir, staged.ref, { createParents: true });
-              const indexPath = await resolveAttestationWritePath(runDir, ATTESTATIONS_INDEX_REF, { createParents: true });
-              if (staged.existing) {
-                stagedAttestationRef = staged.ref;
-                return;
-              }
-              stagedSnapshots = [await snapshotFile(attestationPath), await snapshotFile(indexPath)];
-              stagedAttestationRef = staged.ref;
-
-              const attestationValidation = validatePrCreatedAttestation(staged.attestation, {
-                ...options,
-                runDir,
-                acceptedAttestations: acceptedAttestationMap(staged.records),
-              });
-              assertValidationChecksValid(attestationValidation, "pr-created validation failed");
-
-              await writeJsonAtomically(attestationPath, staged.attestation);
-              await writeJsonAtomically(indexPath, staged.index);
-            },
-          },
-        );
-        committed = true;
-        return { ...result, attestation_ref: stagedAttestationRef, pr_url: result.run.pr_url, terminal_result: result.run.terminal_result };
-      } catch (error) {
-        if (!committed && stagedSnapshots.length > 0) {
-          try {
-            for (const snapshot of stagedSnapshots) await restoreSnapshot(snapshot);
-          } catch (restoreError) {
-            throw rollbackError(error, restoreError, "pr-created");
-          }
-        }
-        throw error;
-      }
+    (draft) => {
+      assertPrCreatedPreconditions(draft, request);
+      draft.pr_url = request.pr_url;
+      draft.status = "completed";
+      draft.terminal_result = normalizePrCreatedTerminalResult(draft, request);
     },
     options,
-  );
+    { prCreated: true },
+  ), options);
+  return { ...result, pr_url: result.run.pr_url, terminal_result: result.run.terminal_result };
 }
 
 export async function transitionTerminalResult(runDir, terminalResult, options = {}) {
   const nextTerminalResult = normalizeTerminalResult(terminalResult);
-  const result = await transitionLifecycleRun(
-    runDir,
-    (draft) => {
-      const next = {
-        ...cloneJson(nextTerminalResult),
-        run_id: draft.run_id,
-        status: nextTerminalResult.status,
-      };
-      draft.status = next.status;
-      draft.terminal_result = next;
-    },
-    options,
-  );
+  const result = await transitionLifecycleRun(runDir, (draft) => {
+    const next = { ...cloneJson(nextTerminalResult), run_id: draft.run_id, status: nextTerminalResult.status };
+    draft.status = next.status;
+    draft.terminal_result = next;
+  }, options);
   return { ...result, terminal_result: result.run.terminal_result };
+}
+
+export async function transitionRecoverOrphan(runDir, reason = "orphaned factory run", options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (current.status !== "running") throw new Error(`recover requires a running run, found '${current.status}'`);
+    const recoverable = inspectRecoverableHeartbeat(runDir, options);
+    if (!recoverable.ok) throw new Error(`recover requires terminal, missing, stale, or dead heartbeat: ${recoverable.reason}`);
+
+    const now = timestamp(options.now);
+    await stopHeartbeatForRecovery(runDir, recoverable.heartbeat, now);
+    const next = validateRun({
+      ...current,
+      status: "needs-human",
+      updated_at: now,
+      terminal_result: {
+        status: "needs-human",
+        run_id: current.run_id,
+        pr_url: current.pr_url || null,
+        reason: stringValue(reason) ? String(reason) : "orphaned factory run",
+        summary: "Run was recovered from an orphaned or stale heartbeat and requires human inspection before resuming.",
+        artifacts: {},
+      },
+    });
+
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, recovery: recoverable };
+  }, options);
 }
 
 export async function transitionRunStep(runDir, stepSelector, updater, options = {}) {
   assertCollectionUpdater(updater, "transitionRunStep");
   let stepIndex = -1;
-
-  const result = await transitionRunJson(
-    runDir,
-    async (draft) => {
-      const hadSteps = Array.isArray(draft.steps);
-      const steps = hadSteps ? draft.steps : [];
-      const update = await applyCollectionItemUpdate({
-        items: steps,
-        selector: stepSelector,
-        updater,
-        selectorLabel: "step selector",
-        seed: seedRunStep(stepSelector),
-        identityKey: "agent",
-      });
-      stepIndex = update.index;
-      if (!update.changed) return;
-      if (!hadSteps) draft.steps = steps;
-    },
-    options,
-  );
-
-  return {
-    ...result,
-    step_index: stepIndex,
-    step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null,
-  };
+  const result = await transitionRunJson(runDir, async (draft) => {
+    const hadSteps = Array.isArray(draft.steps);
+    const steps = hadSteps ? draft.steps : [];
+    if (options.mustExist && !collectionHasItem(steps, stepSelector, "agent")) throw new Error(`step '${formatSelector(stepSelector)}' not found`);
+    const update = await applyCollectionItemUpdate({ items: steps, selector: stepSelector, updater, selectorLabel: "step selector", seed: seedRunStep(stepSelector), identityKey: "agent" });
+    stepIndex = update.index;
+    if (!update.changed) return;
+    if (!hadSteps) draft.steps = steps;
+  }, options);
+  return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
 }
 
 export async function transitionRunSlice(runDir, sliceId, updater, options = {}) {
   assertCollectionUpdater(updater, "transitionRunSlice");
   let sliceIndex = -1;
+  const result = await transitionRunJson(runDir, async (draft) => {
+    const hadSlices = Array.isArray(draft.slices);
+    const slices = hadSlices ? draft.slices : [];
+    if (options.mustExist && !collectionHasItem(slices, sliceId, "id")) throw new Error(`slice '${formatSelector(sliceId)}' not found`);
+    const update = await applyCollectionItemUpdate({ items: slices, selector: sliceId, updater, selectorLabel: "slice selector", seed: seedRunSlice(sliceId), identityKey: "id" });
+    sliceIndex = update.index;
+    if (!update.changed) return;
+    if (!hadSlices) draft.slices = slices;
+    if (sliceIndex >= 0) assertSliceReviewPreconditions(runDir, slices[sliceIndex].id || sliceId, slices[sliceIndex]);
+  }, options);
+  return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
+}
 
-  const result = await transitionRunJson(
-    runDir,
-    async (draft) => {
-      const hadSlices = Array.isArray(draft.slices);
-      const slices = hadSlices ? draft.slices : [];
-      const update = await applyCollectionItemUpdate({
-        items: slices,
-        selector: sliceId,
-        updater,
-        selectorLabel: "slice selector",
-        seed: seedRunSlice(sliceId),
-        identityKey: "id",
-      });
-      sliceIndex = update.index;
-      if (!update.changed) return;
-      if (!hadSlices) draft.slices = slices;
-    },
-    options,
-  );
-
-  return {
-    ...result,
-    slice_index: sliceIndex,
-    slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null,
-  };
+export async function transitionSliceMerged(runDir, sliceId, input = {}, options = {}) {
+  if (!stringValue(sliceId)) throw new Error("transitionSliceMerged requires a slice id");
+  const request = normalizeSliceMergedInput(input);
+  let sliceIndex = -1;
+  const result = await transitionRunJson(runDir, (draft) => {
+    const slices = Array.isArray(draft.slices) ? draft.slices : [];
+    sliceIndex = slices.findIndex((slice) => slice?.id === sliceId);
+    if (sliceIndex < 0) throw new Error(`slice '${sliceId}' not found`);
+    const currentSlice = slices[sliceIndex];
+    if (currentSlice.status === "merged") throw new Error(`slice '${sliceId}' is already merged`);
+    const updatedAt = timestamp(options.now);
+    const nextSlice = { ...currentSlice, merge_commit: request.merge_commit };
+    assertSliceMergedPreconditions(runDir, sliceId, nextSlice, options);
+    slices[sliceIndex] = {
+      ...nextSlice,
+      status: "merged",
+      merge_commit: request.merge_commit,
+      updated_at: updatedAt,
+    };
+    draft.slices = slices;
+    draft.updated_at = updatedAt;
+  }, options);
+  return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
 }
 
 export async function transitionLifecycleRun(runDir, mutator, options = {}) {
@@ -317,617 +251,153 @@ export async function transitionLifecycleRun(runDir, mutator, options = {}) {
 
 export async function mutateRunJsonLocked(runDir, mutator, options = {}) {
   if (typeof mutator !== "function") throw new Error("mutateRunJsonLocked requires a mutator");
-  if (existsSync(join(runDir, ATTESTATIONS_DIR, ATTESTATIONS_INDEX_FILE))) {
-    return transitionRunJson(runDir, mutator, options);
-  }
+  return transitionRunJson(runDir, mutator, options);
+}
+
+export async function heartbeatOnce(runDir, { now } = {}, options = {}) {
+  const heartbeatAt = timestamp(now);
 
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertExpectedCurrentHash(current, options.expectedCurrentHash);
-    await assertSemanticTransitionHeartbeatState(runDir, options);
-    assertLegacyNoIndexCompatibleRun(current, "current");
+    if (TERMINAL_RUN_STATUSES.has(current.status)) return { updated: false, reason: "terminal-status", status: current.status, run: current };
+    if (current.status !== "running") return { updated: false, reason: "run-not-running", status: current.status, run: current };
+    const protectedGate = pendingProtectedGate(current);
+    if (protectedGate) return { updated: false, reason: "protected-gate-pending", gate: protectedGate, status: current.status, run: current };
+    if (!hasInFlightHeartbeatWork(current)) return { updated: false, reason: "no-in-flight-work", status: current.status, run: current };
 
-    const draft = cloneJson(current);
-    let nextValue = await mutator(draft, { current, runDir });
-    if (nextValue === undefined) {
-      if (sameJson(current, draft)) {
-        return { updated: false, reason: "mutator-skip", status: current.status, run: current };
-      }
-      nextValue = draft;
-    }
-
-    const next = validateRun(nextValue);
-    assertLegacyNoIndexCompatibleRun(next, "next");
+    const next = validateRun({ ...current, heartbeat_at: heartbeatAt });
     await writeJsonAtomically(join(runDir, RUN_FILE), next);
-    return { updated: true, status: next.status, run: next };
+    return { updated: true, status: next.status, heartbeat_at: heartbeatAt, run: next };
   }, options);
 }
 
-export async function heartbeatOnce(runDir, { token, ownerPid, ownerCapability, now } = {}, options = {}) {
-  if (!stringValue(token)) throw new Error("heartbeatOnce requires a token");
-  const heartbeatOwnerPid = normalizeHeartbeatOwnerPid(ownerPid);
-  const heartbeatAt = normalizeTimestamp(now);
-
-  return withRunJsonLock(
-    runDir,
-    async () => {
-      const current = await readRunJson(runDir);
-      assertHeartbeatOwnerCapability(runDir, current.run_id, ownerCapability, "heartbeatOnce");
-      if (TERMINAL_RUN_STATUSES.has(current.status)) {
-        return { updated: false, reason: "terminal-status", status: current.status, run: current };
-      }
-      if (current.status !== "running") {
-        return { updated: false, reason: "run-not-running", status: current.status, run: current };
-      }
-
-      const protectedGate = pendingProtectedGate(current);
-      if (protectedGate) {
-        return { updated: false, reason: "protected-gate-pending", gate: protectedGate, status: current.status, run: current };
-      }
-      if (!hasInFlightHeartbeatWork(current)) {
-        return { updated: false, reason: "no-in-flight-work", status: current.status, run: current };
-      }
-      assertRunAuthorityValid(runDir, current, options);
-
-      const lease = await inspectHeartbeatLease(runDir, current.run_id, {
-        token,
-        ownerPid: heartbeatOwnerPid,
-        now: heartbeatAt,
-      });
-      if (!lease.active) {
-        return { updated: false, reason: lease.reason, gate: lease.gate || null, status: current.status, run: current };
-      }
-      const next = validateRun({ ...current, heartbeat_at: heartbeatAt });
-      await writeJsonAtomically(join(runDir, RUN_FILE), next);
-      return { updated: true, status: next.status, heartbeat_at: heartbeatAt, run: next };
-    },
-    options,
-  );
-}
-
-export function assertHeartbeatOwnerCapability(runDir, runId, ownerCapability, command = "heartbeat") {
-  const file = join(runDir, FACTORY_LOCK_FILE);
-  if (!existsSync(file)) throw new Error(`missing factory.lock for run '${runId}'`);
-
-  let factoryLock;
-  try {
-    factoryLock = validateFactoryLock(JSON.parse(readFileSync(file, "utf8")));
-  } catch (error) {
-    throw new Error(`invalid factory.lock for run '${runId}': ${error.message}`);
-  }
-
-  if (factoryLock.run_id !== runId) throw new Error(`invalid factory.lock for run '${runId}': run id mismatch`);
-
-  const capability = normalizeHeartbeatOwnerCapability(ownerCapability, command);
-  if (factoryLock.heartbeat_owner !== capability) {
-    throw new Error(`${command} requires trusted heartbeat owner capability from factory.lock`);
-  }
-
-  return factoryLock;
-}
-
 export function hasInFlightHeartbeatWork(run) {
-  if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) {
-    return true;
-  }
-  if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) {
-    return true;
-  }
+  if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) return true;
+  if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) return true;
   return false;
 }
 
 async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}) {
   const current = await readRunJson(runDir);
-  const authority = assertRunAuthorityValid(runDir, current, options);
   assertExpectedCurrentHash(current, options.expectedCurrentHash);
-  await assertSemanticTransitionHeartbeatState(runDir, options);
 
   const draft = cloneJson(current);
-  let nextValue = await mutator(draft, {
-    authority,
-    current,
-    runDir,
-  });
-
+  let nextValue = await mutator(draft, { current, runDir });
   if (nextValue === undefined) {
-    if (sameJson(current, draft)) {
-      return { updated: false, reason: "mutator-skip", status: current.status, run: current };
-    }
+    if (sameJson(current, draft)) return { updated: false, reason: "mutator-skip", status: current.status, run: current };
     nextValue = draft;
   }
 
   const next = validateRun(nextValue);
-  if (typeof hooks.beforeValidateNext === "function") {
-    await hooks.beforeValidateNext({ authority, current, next, runDir });
-  }
-  const nextAuthority = assertRunAuthorityValid(runDir, next, options);
-  assertGateDecisionTransitions(current, next, nextAuthority, hooks);
-  if (typeof hooks.beforeCommit === "function") {
-    await hooks.beforeCommit({ authority, current, next, runDir });
-  }
+  assertGateDecisionTransitions(current, next, hooks);
+  assertTerminalTransition(current, next, hooks);
+  if (typeof hooks.beforeWrite === "function") await hooks.beforeWrite(next, current);
   await writeJsonAtomically(join(runDir, RUN_FILE), next);
-  if (typeof hooks.afterCommit === "function") {
-    await hooks.afterCommit({ authority, current, next, runDir });
-  }
   return { updated: true, status: next.status, run: next };
 }
 
 async function readRunJson(runDir) {
-  const run = await readJson(join(runDir, RUN_FILE));
-  return validateRun(run);
+  return validateRun(await readJson(join(runDir, RUN_FILE)));
 }
 
-async function inspectHeartbeatLease(runDir, runId, { token, ownerPid, now } = {}) {
+function inspectRecoverableHeartbeat(runDir, options = {}) {
   const heartbeatPath = join(runDir, HEARTBEAT_FILE);
-  if (!existsSync(heartbeatPath)) return { active: false, reason: "missing-heartbeat-lease" };
-
-  let lease;
+  if (!existsSync(heartbeatPath)) return { ok: true, reason: "missing-heartbeat", heartbeat: null };
+  let heartbeat;
   try {
-    lease = validateHeartbeatState(await readJson(heartbeatPath));
-  } catch {
-    return { active: false, reason: "invalid-heartbeat-lease" };
-  }
-
-  if (lease.run_id !== runId) return { active: false, reason: "heartbeat-run-id-mismatch" };
-  if (lease.token !== token) return { active: false, reason: "heartbeat-token-mismatch" };
-  if (lease.pid !== ownerPid) return { active: false, reason: "heartbeat-owner-mismatch" };
-
-  const statusState = inspectHeartbeatLeaseStatus(lease.status, lease);
-  if (!statusState.active) return statusState;
-
-  const deadlineAt = lease.deadline_at;
-  if (!stringValue(deadlineAt)) return { active: false, reason: "invalid-heartbeat-lease" };
-
-  const deadlineMs = Date.parse(deadlineAt);
-  const nowMs = Date.parse(now);
-  if (Number.isNaN(deadlineMs) || Number.isNaN(nowMs)) return { active: false, reason: "invalid-heartbeat-lease" };
-  if (nowMs >= deadlineMs) return { active: false, reason: "heartbeat-lease-expired" };
-
-  return { active: true, lease };
-}
-
-function inspectHeartbeatLeaseStatus(status, lease) {
-  if (stringValue(lease.stopped_at) || status === "stopped") {
-    return { active: false, reason: "heartbeat-lease-stopped" };
-  }
-  if (stringValue(lease.stop_requested_at) || status === "stopping") {
-    return { active: false, reason: "heartbeat-lease-stopping" };
-  }
-  if (stringValue(lease.stop_reason) && ACTIVE_HEARTBEAT_STATUSES.has(status)) {
-    return { active: false, reason: "invalid-heartbeat-lease" };
-  }
-  if (TERMINAL_RUN_STATUSES.has(status)) {
-    return { active: false, reason: "heartbeat-lease-terminal" };
-  }
-  if (status === "inactive") {
-    return { active: false, reason: "heartbeat-lease-inactive" };
-  }
-  if (!ACTIVE_HEARTBEAT_STATUSES.has(status)) {
-    return { active: false, reason: "invalid-heartbeat-lease" };
-  }
-  return { active: true };
-}
-
-async function assertSemanticTransitionHeartbeatState(runDir, options = {}) {
-  if (options.allowActiveHeartbeat === true) return null;
-  const heartbeatPath = join(runDir, HEARTBEAT_FILE);
-  if (!existsSync(heartbeatPath)) return null;
-
-  let lease;
-  try {
-    lease = validateHeartbeatState(await readJson(heartbeatPath));
+    heartbeat = validateHeartbeatState(JSON.parse(readFileSync(heartbeatPath, "utf8")));
   } catch (error) {
-    throw new Error(`invalid heartbeat lease at ${heartbeatPath}: ${error.message}`);
+    return { ok: true, reason: `invalid-heartbeat:${error.message}`, heartbeat: null };
   }
+  const liveness = inspectHeartbeatLiveness(heartbeat, options);
+  if (!liveness.fresh) return { ok: true, reason: liveness.reason, heartbeat };
+  return { ok: false, reason: "fresh-heartbeat", heartbeat };
+}
 
-  if (lease.status === "stopped" || lease.status === "error") return lease;
-  if (lease.status === "stopping") {
-    throw new Error("foreground semantic run.json writes require a confirmed stopped heartbeat lease");
-  }
-  if (ACTIVE_HEARTBEAT_STATUSES.has(lease.status)) {
-    throw new Error("stop heartbeat before foreground semantic run.json writes");
-  }
+async function stopHeartbeatForRecovery(runDir, heartbeat, now) {
+  if (!heartbeat) return;
+  const next = validateHeartbeatState({
+    ...heartbeat,
+    pid: null,
+    last_tick_at: now,
+  });
+  await writeJsonAtomically(join(runDir, HEARTBEAT_FILE), next);
+}
 
-  throw new Error(`invalid heartbeat lease at ${heartbeatPath}: unsupported status '${lease.status}'`);
+function inspectHeartbeatLiveness(heartbeat, options = {}) {
+  const nowMs = Date.parse(timestamp(options.now));
+  const lastTickMs = Date.parse(heartbeat.last_tick_at || "");
+  const intervalMs = Number.isInteger(heartbeat.interval_ms) && heartbeat.interval_ms > 0 ? heartbeat.interval_ms : DEFAULT_HEARTBEAT_INTERVAL_MS;
+  const staleMs = Math.max(2 * intervalMs, MIN_STALE_HEARTBEAT_MS);
+  const processAlive = isProcessAlive(heartbeat.pid, options);
+  if (!processAlive) return { fresh: false, reason: "dead-heartbeat-process" };
+  if (!Number.isFinite(nowMs) || !Number.isFinite(lastTickMs)) return { fresh: false, reason: "invalid-heartbeat-time" };
+  if (nowMs - lastTickMs > staleMs) return { fresh: false, reason: "stale-heartbeat" };
+  return { fresh: true, reason: "fresh-heartbeat" };
+}
+
+function isProcessAlive(pid, options = {}) {
+  if (typeof options.processAliveFn === "function") return Boolean(options.processAliveFn(pid));
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    return false;
+  }
 }
 
 function assertExpectedCurrentHash(run, expectedCurrentHash) {
   if (expectedCurrentHash === undefined || expectedCurrentHash === null) return;
   if (!stringValue(expectedCurrentHash)) throw new Error("expectedCurrentHash must be a non-empty string");
-  const actualCurrentHash = hashRunState(run);
-  if (actualCurrentHash !== expectedCurrentHash) {
-    throw new Error(`stale run.json transition: expected current hash ${expectedCurrentHash}, found ${actualCurrentHash}`);
-  }
+  const actualCurrentHash = hashValue(run);
+  if (actualCurrentHash !== expectedCurrentHash) throw new Error(`stale run.json transition: expected current hash ${expectedCurrentHash}, found ${actualCurrentHash}`);
 }
 
-function assertRunAuthorityValid(runDir, run, options = {}) {
-  const authority = validateRunAuthority(runDir, run, options);
-  return assertValidationChecksValid(authority, "run authority validation failed");
-}
-
-function assertProvenanceGraphValid(runDir, options = {}) {
-  const graph = validateProvenanceAuthority(runDir, options);
-  return assertValidationChecksValid(graph, "provenance authority validation failed");
-}
-
-function assertValidationChecksValid(result, fallbackMessage = "validation failed") {
-  if (result?.ok) return result;
-  const message = formatValidationChecks(result?.checks);
-  throw new Error(message === "run validation failed" ? fallbackMessage : message);
-}
-
-function createGateDecisionState({ runDir, current, gateName, gate, records }) {
-  if (!Array.isArray(records) || records.length === 0) {
-    throw new Error("gate decisions require a non-empty accepted attestation index");
-  }
-
-  assertFinalGateDecisionShape(gateName, gate);
-
-  const latestGateRecord = findAcceptedGateDecisionEntry(records, gateName);
-  const previousRecord = records.at(-1) ?? null;
-  const sequence = (previousRecord?.attestation?.sequence ?? 0) + 1;
-  const ref = latestGateRecord ? gateAttestationHistoryRef(gateName, sequence) : gateAttestationRef(gateName);
-  const bindings = createGateDecisionBindings({
-    runDir,
-    currentGate: current.gates?.[gateName],
-    gateName,
-    gate,
-  });
-  const attestation = createGateDecisionAttestation({
-    run_id: current.run_id,
-    sequence,
-    prev_hash: previousRecord?.attestation?.attestation_hash ?? null,
-    bindings,
-  });
-  const nextRecords = [...records, { ref, attestation }];
-  const index = createAttestationIndex(nextRecords);
-
-  if (!Array.isArray(index.entries) || index.entries.length === 0) {
-    throw new Error("gate decisions require a non-empty attestation index");
-  }
-
-  return { ref, attestation, index, records: nextRecords };
-}
-
-function createPrCreatedState({ runDir, current, next, records, request }) {
-  if (!Array.isArray(records) || records.length === 0) {
-    throw new Error("pr-created requires a non-empty accepted attestation index");
-  }
-
-  const runBaseRecord = findLastAcceptedAttestationEntry(records, (record) => record.attestation?.type === "run-base");
-  const mergeChainRecord = findLastAcceptedAttestationEntry(records, (record) => record.attestation?.type === "merge-chain");
-  const prePrGateRecord = findLastAcceptedAttestationEntry(
-    records,
-    (record) => record.attestation?.type === "gate-decision"
-      && record.attestation?.bindings?.gate === "pre_pr"
-      && record.attestation?.bindings?.decision === "approved",
-  );
-  const missing = [];
-  if (!runBaseRecord) missing.push("run-base");
-  if (!mergeChainRecord) missing.push("merge-chain");
-  if (!prePrGateRecord) missing.push("approved pre_pr gate-decision");
-  if (missing.length > 0) throw new Error(`pr-created requires current accepted ${missing.join(", ")}`);
-
-  const latestPrCreated = findLastAcceptedAttestationEntry(records, (record) => record.attestation?.type === "pr-created");
-  if (latestPrCreated) {
-    assertExistingPrCreatedRequestCompatible(runDir, latestPrCreated, request);
-    return {
-      ref: latestPrCreated.ref,
-      attestation: latestPrCreated.attestation,
-      index: createAttestationIndex(records),
-      records,
-      existing: true,
-    };
-  }
-
-  const runBase = runBaseRecord.attestation.bindings;
-  const mergeChain = mergeChainRecord.attestation.bindings;
-  const prBody = resolveArtifactRef(runDir, request.pr_body_ref);
-  const previousRecord = records.at(-1) ?? null;
-  const sequence = (previousRecord?.attestation?.sequence ?? 0) + 1;
-  const ref = ATTESTATIONS_PR_CREATED_REF;
-  const remoteObservation = request.remote_observation;
-  const bindings = {
-    pr_url: remoteObservation.pr_url,
-    pr_number: remoteObservation.pr_number,
-    provider: remoteObservation.provider,
-    repository: remoteObservation.repository,
-    remote: remoteObservation.remote,
-    github_account: remoteObservation.github_account,
-    head_branch: runBase.feature_branch,
-    head_commit: mergeChain.head_commit,
-    head_tree: mergeChain.head_tree,
-    base_ref: runBase.base_ref,
-    base_commit: runBase.base_commit,
-    base_tree: runBase.base_tree,
-    draft: remoteObservation.draft,
-    pr_body_ref: request.pr_body_ref,
-    pr_body_hash: hashFile(prBody.path, { mode: "raw" }),
-    run_base_attestation_ref: runBaseRecord.ref,
-    run_base_attestation_hash: runBaseRecord.attestation.attestation_hash,
-    merge_chain_attestation_ref: mergeChainRecord.ref,
-    merge_chain_attestation_hash: mergeChainRecord.attestation.attestation_hash,
-    pre_pr_gate_attestation_ref: prePrGateRecord.ref,
-    pre_pr_gate_attestation_hash: prePrGateRecord.attestation.attestation_hash,
-    remote_observation: remoteObservation,
-  };
-
-  if (next.pr_url !== bindings.pr_url) throw new Error("run.pr_url must match pr-created binding");
-  if (next.terminal_result?.pr_url !== bindings.pr_url) throw new Error("run.terminal_result.pr_url must match pr-created binding");
-
-  const attestation = createPrCreatedAttestation({
-    run_id: current.run_id,
-    sequence,
-    prev_hash: previousRecord?.attestation?.attestation_hash ?? null,
-    bindings,
-  });
-  const nextRecords = [...records, { ref, attestation }];
-  const index = createAttestationIndex(nextRecords);
-
-  if (!Array.isArray(index.entries) || index.entries.length === 0) {
-    throw new Error("pr-created requires a non-empty attestation index");
-  }
-
-  return { ref, attestation, index, records: nextRecords };
-}
-
-function createGateDecisionBindings({ runDir, currentGate, gateName, gate }) {
-  if (gate?.status !== "pending") assertPendingGateMaterialFresh(runDir, gateName, currentGate, gate);
-  const artifactRef = gate.artifact;
-  const questionRef = gate.question_ref;
-  const approvalSource = gate.approval_source;
-
-  const missingFields = [];
-  if (!stringValue(artifactRef)) missingFields.push("artifact");
-  if (!stringValue(questionRef)) missingFields.push("question_ref");
-  if (!stringValue(approvalSource)) missingFields.push("approval_source");
-  if (missingFields.length > 0) {
-    throw new Error(`gate decision '${gateName}' requires ${missingFields.join(", ")}`);
-  }
-
-  const artifact = resolveArtifactRef(runDir, artifactRef);
-  const question = resolveGateRef(runDir, questionRef);
-  const answerBindings = createGateDecisionAnswerBindings({ runDir, gateName, gate });
-
-  return {
-    gate: gateName,
-    decision: gate.status,
-    approval_source: approvalSource,
-    question_ref: questionRef,
-    question_hash: hashFile(question.path, { mode: "raw" }),
-    artifact_ref: artifactRef,
-    artifact_hash: hashFile(artifact.path, { mode: "raw" }),
-    ...answerBindings,
-  };
-}
-
-function createGateDecisionAnswerBindings({ runDir, gateName, gate }) {
-  if (stringValue(gate?.answer_ref)) {
-    const answer = resolveGateRef(runDir, gate.answer_ref);
-    return {
-      answer_ref: gate.answer_ref,
-      answer_hash: hashFile(answer.path, { mode: "raw" }),
-    };
-  }
-
-  if (stringValue(gate?.answer)) {
-    return { answer_text_hash: hashTextClaim(gate.answer) };
-  }
-
-  throw new Error(`gate decision '${gateName}' requires answer_ref or answer`);
-}
-
-function shouldStageGateDecisionAttestation(latestGateDecision, gate) {
-  if (gate?.status && gate.status !== "pending") return true;
-  return latestGateDecision?.attestation?.bindings?.decision === "approved";
-}
-
-function acceptedAttestationEntries(authority) {
-  return (authority.orderedRefs || [])
-    .map((ref) => {
-      const record = authority.acceptedAttestations?.[ref];
-      if (!record?.attestation) return null;
-      return {
-        ref,
-        attestation: cloneJson(record.attestation),
-      };
-    })
-    .filter(Boolean);
-}
-
-function acceptedAttestationMap(records) {
-  return Object.fromEntries((records || []).map((record) => [record.ref, {
-    ref: record.ref,
-    attestation: record.attestation,
-    attestation_hash: record.attestation?.attestation_hash,
-  }]));
-}
-
-function assertGateDecisionTransitions(current, next, authority, hooks = {}) {
-  const errors = [];
-  const authorizedGate = stringValue(hooks[APPROVED_GATE_TRANSITION_HOOK]) ? hooks[APPROVED_GATE_TRANSITION_HOOK] : null;
-  const currentGates = isRecord(current.gates) ? current.gates : {};
-  const nextGates = isRecord(next.gates) ? next.gates : {};
-
-  for (const [gateName, currentGate] of Object.entries(currentGates)) {
-    if (!isRecord(currentGate) || currentGate.status !== "approved") continue;
-
-    const nextGate = nextGates[gateName];
-    if (nextGate?.status === "approved") continue;
-
-    if (gateName !== authorizedGate) {
-      errors.push({
-        path: `run.gates.${gateName}.status`,
-        message: "approved gate transitions must use transitionGateDecision",
-      });
-      continue;
-    }
-
-    const record = findAcceptedGateDecisionRecord(authority, gateName);
-    if (record?.attestation?.bindings?.decision !== nextGate?.status) {
-      errors.push({
-        path: `run.gates.${gateName}.status`,
-        message: "approved gate transitions must use transitionGateDecision",
-      });
-    }
-  }
-
-  for (const [gateName, gate] of Object.entries(nextGates)) {
-    if (!isRecord(gate) || gate.status !== "approved") continue;
-
-    const currentGate = currentGates[gateName];
-    if (currentGate?.status !== "approved" && gateName !== authorizedGate) {
-      errors.push({
-        path: `run.gates.${gateName}.status`,
-        message: "approved gate transitions must use transitionGateDecision",
-      });
-    }
-
-    const record = findAcceptedGateDecisionRecord(authority, gateName);
-    if (!record) continue;
-    pushApprovedGateBindingErrors(errors, gateName, gate, record.attestation.bindings || {});
-  }
-
-  if (errors.length > 0) throw new Error(formatErrorItems(errors));
-}
-
-function findAcceptedGateDecisionRecord(authority, gateName) {
-  return findAcceptedGateDecisionEntry(acceptedAttestationEntries(authority), gateName);
-}
-
-function findAcceptedPrCreatedRecord(authority) {
-  return findLastAcceptedAttestationEntry(acceptedAttestationEntries(authority), (record) => record.attestation?.type === "pr-created");
-}
-
-function findAcceptedGateDecisionEntry(records, gateName) {
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    const record = records[index];
-    if (record?.attestation?.type !== "gate-decision") continue;
-    if (record.attestation?.bindings?.gate !== gateName) continue;
-    return record;
-  }
-  return null;
-}
-
-function assertExistingPrCreatedRequestCompatible(runDir, record, request) {
-  const bindings = record?.attestation?.bindings;
-  if (!isRecord(bindings)) throw new Error("accepted pr-created attestation is missing bindings");
-  const prBody = resolveArtifactRef(runDir, request.pr_body_ref);
-  const requestedBodyHash = hashFile(prBody.path, { mode: "raw" });
-  const remoteObservation = request.remote_observation;
-  const mismatches = [];
-  const comparisons = [
-    ["pr_url", request.pr_url, bindings.pr_url],
-    ["pr_number", request.pr_number, bindings.pr_number],
-    ["provider", request.provider, bindings.provider],
-    ["repository", request.repository, bindings.repository],
-    ["remote", request.remote, bindings.remote],
-    ["github_account", request.github_account, bindings.github_account],
-    ["draft", request.draft, bindings.draft],
-    ["pr_body_ref", request.pr_body_ref, bindings.pr_body_ref],
-    ["pr_body_hash", requestedBodyHash, bindings.pr_body_hash],
-    ["remote_observation", hashValue(remoteObservation), hashValue(bindings.remote_observation)],
-  ];
-  for (const [field, actual, expected] of comparisons) {
-    if (actual !== expected) mismatches.push(field);
-  }
-  if (mismatches.length > 0) {
-    throw new Error(`accepted pr-created attestation already exists with different ${mismatches.join(", ")}`);
-  }
-}
-
-function findLastAcceptedAttestationEntry(records, predicate) {
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    if (predicate(records[index])) return records[index];
-  }
-  return null;
-}
-
-function prepareGateDecisionTransition(runDir, gateName, currentGate, gate, options = {}) {
+function prepareGateDecisionTransition(runDir, gateName, currentGate, gate, onAnswerArchive) {
   const nextGate = cloneJson(gate);
-  if (nextGate.status === "pending") {
-    return preparePendingGateDecision(runDir, gateName, nextGate);
+  if (nextGate.status === "pending") return preparePendingGateDecision(runDir, gateName, nextGate);
+  const decision = assertPendingGateMaterialFresh(runDir, gateName, currentGate, nextGate);
+  if (decision.archive) {
+    onAnswerArchive?.(decision.archive);
+    nextGate.answer_ref = decision.archive.toRef;
   }
-  if (nextGate.status === "approved" && options.publicExternalDriverApproval === true) {
-    preparePublicExternalDriverApproval(gateName, currentGate, nextGate);
-  }
-  assertPendingGateMaterialFresh(runDir, gateName, currentGate, nextGate);
-  return {
-    ...nextGate,
-    pending_snapshot: cloneJson(currentGate.pending_snapshot),
-  };
-}
-
-function preparePublicExternalDriverApproval(gateName, currentGate, gate) {
-  if (!isRecord(currentGate) || currentGate.status !== "pending") {
-    throw new Error(`public approved gate decision '${gateName}' requires current gate status pending`);
-  }
-  if (stringValue(gate.answer)) {
-    throw new Error(`public approved gate decision '${gateName}' requires answer_ref; inline answer is not accepted`);
-  }
-  if (stringValue(gate.approval_source)) {
-    throw new Error(`public approved gate decision '${gateName}' does not accept caller-supplied approval_source`);
-  }
-  if (!stringValue(gate.answer_ref)) {
-    throw new Error(`public approved gate decision '${gateName}' requires answer_ref from an external driver`);
-  }
-
-  const expectedAnswerRef = trustedPendingAnswerRef(gateName, currentGate);
-  if (gate.answer_ref !== expectedAnswerRef) {
-    throw new Error(`public approved gate decision '${gateName}' answer_ref must match trusted pending answer_ref '${expectedAnswerRef}'`);
-  }
-
-  gate.approval_source = "external-driver";
-}
-
-function trustedPendingAnswerRef(gateName, currentGate) {
-  if (stringValue(currentGate?.pending_snapshot?.answer_ref)) return currentGate.pending_snapshot.answer_ref;
-  // Older pending snapshots omitted answer_ref; do not trust mutable gate state as authority.
-  return `gates/${gateName}.answer`;
+  return { ...nextGate, answer: decision.answer, pending_snapshot: cloneJson(currentGate.pending_snapshot) };
 }
 
 function preparePendingGateDecision(runDir, gateName, gate) {
   const missingFields = [];
   if (!stringValue(gate.artifact)) missingFields.push("artifact");
   if (!stringValue(gate.question_ref)) missingFields.push("question_ref");
-  if (missingFields.length > 0) {
-    throw new Error(`pending gate '${gateName}' requires ${missingFields.join(", ")}`);
-  }
-
+  if (missingFields.length > 0) throw new Error(`pending gate '${gateName}' requires ${missingFields.join(", ")}`);
+  assertNoPendingAnswerFile(runDir, gateName, gate.answer_ref);
   const snapshot = createPendingGateSnapshot(runDir, gateName, gate.artifact, gate.question_ref, gate.pending_snapshot?.created_at, gate.answer_ref);
-  if (gate.pending_snapshot !== undefined && gate.pending_snapshot !== null) {
-    assertPendingSnapshotMatches(gateName, gate.pending_snapshot, snapshot, "supplied pending snapshot");
-  }
-  return {
-    ...gate,
-    pending_snapshot: snapshot,
-  };
+  if (gate.pending_snapshot !== undefined && gate.pending_snapshot !== null) assertPendingSnapshotMatches(gateName, gate.pending_snapshot, snapshot, "supplied pending snapshot");
+  return { ...gate, pending_snapshot: snapshot };
 }
 
 function assertPendingGateMaterialFresh(runDir, gateName, currentGate, gate) {
-  if (!isRecord(currentGate) || currentGate.status !== "pending") {
-    throw new Error(`gate decision '${gateName}' requires current gate status pending`);
-  }
-  if (!isRecord(currentGate.pending_snapshot)) {
-    throw new Error(`gate decision '${gateName}' requires current pending material snapshot`);
-  }
+  if (!isRecord(currentGate) || currentGate.status !== "pending") throw new Error(`gate decision '${gateName}' requires current gate status pending`);
+  if (!isRecord(currentGate.pending_snapshot)) throw new Error(`gate decision '${gateName}' requires current pending material snapshot`);
   if (!stringValue(gate?.artifact)) throw new Error(`gate decision '${gateName}' requires artifact`);
   if (!stringValue(gate?.question_ref)) throw new Error(`gate decision '${gateName}' requires question_ref`);
-  const freshSnapshot = createPendingGateSnapshot(
-    runDir,
-    gateName,
-    currentGate.pending_snapshot.artifact_ref,
-    currentGate.pending_snapshot.question_ref,
-    currentGate.pending_snapshot.created_at,
-    currentGate.pending_snapshot.answer_ref,
-  );
+  const freshSnapshot = createPendingGateSnapshot(runDir, gateName, currentGate.pending_snapshot.artifact_ref, currentGate.pending_snapshot.question_ref, currentGate.pending_snapshot.created_at, currentGate.pending_snapshot.answer_ref);
   assertPendingSnapshotMatches(gateName, currentGate.pending_snapshot, freshSnapshot, "current pending snapshot");
-  if (gate.artifact !== currentGate.pending_snapshot.artifact_ref) {
-    throw new Error(`gate decision '${gateName}' artifact must match pending artifact '${currentGate.pending_snapshot.artifact_ref}'`);
+  if (gate.artifact !== currentGate.pending_snapshot.artifact_ref) throw new Error(`gate decision '${gateName}' artifact must match pending artifact '${currentGate.pending_snapshot.artifact_ref}'`);
+  if (gate.question_ref !== currentGate.pending_snapshot.question_ref) throw new Error(`gate decision '${gateName}' question_ref must match pending question_ref '${currentGate.pending_snapshot.question_ref}'`);
+  if (stringValue(gate.answer_ref) && stringValue(currentGate.pending_snapshot.answer_ref) && gate.answer_ref !== currentGate.pending_snapshot.answer_ref) {
+    throw new Error(`gate decision '${gateName}' answer_ref must match pending answer_ref '${currentGate.pending_snapshot.answer_ref}'`);
   }
-  if (gate.question_ref !== currentGate.pending_snapshot.question_ref) {
-    throw new Error(`gate decision '${gateName}' question_ref must match pending question_ref '${currentGate.pending_snapshot.question_ref}'`);
-  }
+  const decision = readGateDecisionAnswer(runDir, gateName, gate);
+  assertGateAnswerMatchesStatus(gateName, gate.status, decision.answer);
+  return decision;
+}
+
+function assertNoPendingAnswerFile(runDir, gateName, answerRef) {
+  if (!stringValue(answerRef)) return;
+  const answer = resolveGateRef(runDir, answerRef, { mustExist: false });
+  if (existsSync(answer.path)) throw new Error(`pending gate '${gateName}' answer_ref already exists; archive or delete it before re-pending`);
 }
 
 function createPendingGateSnapshot(runDir, gateName, artifactRef, questionRef, createdAt, answerRef) {
@@ -944,257 +414,195 @@ function createPendingGateSnapshot(runDir, gateName, artifactRef, questionRef, c
     const answer = resolveGateRef(runDir, answerRef, { mustExist: false });
     if (answer.path === question.path) throw new Error(`gate '${gateName}' answer_ref must not overlap question_ref`);
     snapshot.answer_ref = answerRef;
+    if (existsSync(answer.path)) snapshot.answer_hash = hashFile(answer.path, { mode: "raw" });
   }
   return snapshot;
 }
 
 function assertPendingSnapshotMatches(gateName, actual, expected, label) {
-  const checks = [
+  for (const [field, actualValue, expectedValue] of [
     ["question_ref", actual?.question_ref, expected.question_ref],
     ["question_hash", actual?.question_hash, expected.question_hash],
     ["artifact_ref", actual?.artifact_ref, expected.artifact_ref],
     ["artifact_hash", actual?.artifact_hash, expected.artifact_hash],
-  ];
-  for (const [field, actualValue, expectedValue] of checks) {
-    if (actualValue !== expectedValue) {
-      throw new Error(`gate '${gateName}' ${label} ${field} is stale or mismatched`);
-    }
+  ]) {
+    if (actualValue !== expectedValue) throw new Error(`gate '${gateName}' ${label} ${field} is stale or mismatched`);
   }
-  if (stringValue(expected.answer_ref) && actual?.answer_ref !== expected.answer_ref) {
-    throw new Error(`gate '${gateName}' ${label} answer_ref is stale or mismatched`);
-  }
-  if (!stringValue(expected.answer_ref) && stringValue(actual?.answer_ref)) {
-    throw new Error(`gate '${gateName}' ${label} answer_ref is unexpected`);
-  }
+  if (stringValue(expected.answer_ref) && actual?.answer_ref !== expected.answer_ref) throw new Error(`gate '${gateName}' ${label} answer_ref is stale or mismatched`);
+  if (!stringValue(expected.answer_ref) && stringValue(actual?.answer_ref)) throw new Error(`gate '${gateName}' ${label} answer_ref is unexpected`);
+  if (stringValue(actual?.answer_hash) && actual.answer_hash !== expected.answer_hash) throw new Error(`gate '${gateName}' ${label} answer_hash is stale or mismatched`);
   if (!stringValue(actual?.created_at)) throw new Error(`gate '${gateName}' ${label} created_at is missing`);
 }
 
-function pushApprovedGateBindingErrors(errors, gateName, gate, bindings) {
-  pushRequiredStringMatch(
-    errors,
-    gate?.artifact,
-    bindings.artifact_ref,
-    `run.gates.${gateName}.artifact`,
-    "accepted gate artifact ref",
-  );
-  pushRequiredStringMatch(
-    errors,
-    gate?.question_ref,
-    bindings.question_ref,
-    `run.gates.${gateName}.question_ref`,
-    "accepted gate question ref",
-  );
-  pushRequiredStringMatch(
-    errors,
-    gate?.approval_source,
-    bindings.approval_source,
-    `run.gates.${gateName}.approval_source`,
-    "accepted gate approval source",
-  );
-
-  if (stringValue(bindings.answer_ref)) {
-    pushRequiredStringMatch(
-      errors,
-      gate?.answer_ref,
-      bindings.answer_ref,
-      `run.gates.${gateName}.answer_ref`,
-      "accepted gate answer ref",
-    );
-    return;
-  }
-
-  if (!stringValue(bindings.answer_text_hash)) {
-    errors.push({
-      path: `run.gates.${gateName}.answer`,
-      message: "accepted gate decision is missing an answer binding",
-    });
-    return;
-  }
-
-  if (!stringValue(gate?.answer)) {
-    errors.push({
-      path: `run.gates.${gateName}.answer`,
-      message: `must carry accepted answer hash '${bindings.answer_text_hash}'`,
-    });
-    return;
-  }
-
-  if (hashTextClaim(gate.answer) !== bindings.answer_text_hash) {
-    errors.push({
-      path: `run.gates.${gateName}.answer`,
-      message: `must match accepted answer hash '${bindings.answer_text_hash}'`,
-    });
-  }
+function readGateDecisionAnswer(runDir, gateName, gate) {
+  if (stringValue(gate.answer)) return { answer: normalizeGateAnswer(gateName, String(gate.answer).trim()), archive: null };
+  const answerRef = requireNonEmptyString(gate.answer_ref, "answer_ref");
+  const answer = readGateDecisionAnswerRef(runDir, gateName, answerRef);
+  return {
+    answer: normalizeGateAnswer(gateName, answer.text),
+    archive: nextConsumedGateAnswer(runDir, answerRef, answer.path),
+  };
 }
 
-function pushRequiredStringMatch(errors, actual, expected, path, label) {
-  if (!stringValue(actual)) {
-    errors.push({ path, message: `${label} is missing` });
-    return;
-  }
-  if (!stringValue(expected)) {
-    errors.push({ path, message: `${label} is missing` });
-    return;
-  }
-  if (actual !== expected) errors.push({ path, message: `must match ${label} '${expected}'` });
+function readGateDecisionAnswerRef(runDir, gateName, answerRef) {
+  if (!stringValue(answerRef)) throw new Error(`gate decision '${gateName}' requires answer_ref or answer`);
+  const resolved = resolveGateRef(runDir, answerRef);
+  return { text: readFileSync(resolved.path, "utf8").trim(), path: resolved.path };
 }
 
-function normalizeGateDecision(gateName, gate) {
+function nextConsumedGateAnswer(runDir, answerRef, answerPath) {
+  for (let index = 1; index < 1000; index += 1) {
+    const toRef = `${answerRef}.consumed-${index}`;
+    const to = resolveGateRef(runDir, toRef, { mustExist: false });
+    if (!existsSync(to.path)) return { fromPath: answerPath, toPath: to.path, toRef };
+  }
+  throw new Error(`unable to allocate consumed answer ref for ${answerRef}`);
+}
+
+async function archiveConsumedGateAnswer(archive) {
+  await rename(archive.fromPath, archive.toPath);
+}
+
+function normalizeGateAnswer(gateName, answer) {
+  const text = String(answer || "").trim();
+  if (text === "approve" || text === "stop") return text;
+  if (text.startsWith("changes:") && text.slice("changes:".length).trim().length > 0) return text;
+  throw new Error(`gate decision '${gateName}' answer must be exactly approve, stop, or start with changes:`);
+}
+
+function assertGateAnswerMatchesStatus(gateName, status, answer) {
+  if (status === "approved" && answer !== "approve") throw new Error(`gate decision '${gateName}' approved status requires approve answer`);
+  if (status === "changes_requested" && !answer.startsWith("changes:")) throw new Error(`gate decision '${gateName}' changes_requested status requires changes: answer`);
+  if (status === "stopped" && answer !== "stop") throw new Error(`gate decision '${gateName}' stopped status requires stop answer`);
+}
+
+function normalizeGateDecision(gateName, gate, options = {}) {
   if (!isRecord(gate)) throw new Error(`transitionGateDecision requires a gate object for '${gateName}'`);
-  return cloneJson(gate);
-}
-
-function assertFinalGateDecisionShape(gateName, gate) {
-  if (gate?.status === "pending") return;
-  assertApprovedGateDecisionShape(gateName, gate);
-}
-
-function assertApprovedGateDecisionShape(gateName, gate) {
-  const missingFields = [];
-  if (!stringValue(gate.artifact)) missingFields.push("artifact");
-  if (!stringValue(gate.question_ref)) missingFields.push("question_ref");
-  if (!stringValue(gate.approval_source)) missingFields.push("approval_source");
-  if (!stringValue(gate.answer_ref) && !stringValue(gate.answer)) {
-    missingFields.push("answer_ref or answer");
+  const next = cloneJson(gate);
+  if (!stringValue(next.status)) throw new Error(`gate decision '${gateName}' requires status`);
+  if (next.status !== "pending") {
+    if (!stringValue(next.answer_ref) && !stringValue(next.answer)) throw new Error(`gate decision '${gateName}' requires answer_ref or answer`);
+    next.approval_source ||= defaultApprovalSource(next, options);
+    next.answered_at ||= timestamp(options.now);
   }
-  if (missingFields.length > 0) {
-    throw new Error(`approved gate '${gateName}' requires ${missingFields.join(", ")}`);
+  return next;
+}
+
+function defaultApprovalSource(gate, options) {
+  if (stringValue(options.approvalSource)) return options.approvalSource;
+  if (stringValue(gate.answer_ref)) return "external-driver";
+  if (stringValue(gate.answer)) return "human";
+  return "human";
+}
+
+function assertGateDecisionTransitions(current, next, hooks = {}) {
+  const authorizedGate = stringValue(hooks.authorizedGate) ? hooks.authorizedGate : null;
+  const currentGates = isRecord(current.gates) ? current.gates : {};
+  const nextGates = isRecord(next.gates) ? next.gates : {};
+  const errors = [];
+  for (const [gateName, gate] of Object.entries(nextGates)) {
+    if (!isRecord(gate)) continue;
+    const currentGate = currentGates[gateName];
+    if (currentGate?.status === "pending" && GATE_DECISION_STATUSES.has(gate.status) && gateName !== authorizedGate) {
+      errors.push({ path: `run.gates.${gateName}.status`, message: "pending gate decisions must use transitionGateDecision" });
+    }
+    if (gate.status === "approved" && currentGate?.status !== "approved" && gateName !== authorizedGate) {
+      errors.push({ path: `run.gates.${gateName}.status`, message: "approved gate transitions must use transitionGateDecision" });
+    }
   }
-}
-
-function gateAttestationRef(gateName) {
-  assertSafeGateName(gateName);
-  return `${ATTESTATIONS_DIR}/${ATTESTATIONS_GATES_DIR}/${gateName}.json`;
-}
-
-function gateAttestationHistoryRef(gateName, sequence) {
-  assertSafeGateName(gateName);
-  if (!Number.isInteger(sequence) || sequence < 1) throw new Error(`invalid gate attestation sequence for '${gateName}'`);
-  return `${ATTESTATIONS_DIR}/${ATTESTATIONS_GATES_DIR}/${gateName}/${sequence}.json`;
-}
-
-function assertSafeGateName(gateName) {
-  if (!SAFE_GATE_NAME_PATTERN.test(gateName)) {
-    throw new Error(`invalid gate name '${gateName}': must match safe pattern [a-z0-9][a-z0-9_-]*[a-z0-9]`);
+  for (const [gateName, gate] of Object.entries(currentGates)) {
+    if (!isRecord(gate)) continue;
+    const nextGate = nextGates[gateName];
+    if (gate.status === "pending" && nextGate?.status !== "pending" && gateName !== authorizedGate) {
+      errors.push({ path: `run.gates.${gateName}.status`, message: "pending gate decisions must use transitionGateDecision" });
+    }
+    if (gate.status !== "approved") continue;
+    if (nextGate?.status !== "approved" && gateName !== authorizedGate) {
+      errors.push({ path: `run.gates.${gateName}.status`, message: "approved gate transitions must use transitionGateDecision" });
+    }
   }
+  if (errors.length > 0) throw new Error(formatErrorItems(errors));
 }
 
-function assertLegacyNoIndexCompatibleRun(run, label) {
-  const claims = collectProvenanceSensitiveClaims(run);
-  if (claims.length === 0) return;
-  throw new Error(
-    `mutateRunJsonLocked compatibility mode requires no provenance-sensitive ${label} claims when attestations/index.json is absent: ${claims.join(", ")}`,
-  );
+function assertTerminalTransition(current, next, hooks = {}) {
+  if (current.status === next.status) return;
+  if (next.status !== "completed") return;
+  if (hooks.prCreated === true) return;
+  throw new Error("completed terminal transitions must use transitionPrCreated");
 }
 
-function firstNonEmptyString(...values) {
-  for (const value of values) {
-    if (stringValue(value)) return value;
-  }
-  return null;
+function assertPrCreatedPreconditions(run, request) {
+  if (stringValue(run.pr_url)) throw new Error("pr-created requires run.pr_url to be unset");
+  if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
+  if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
+  if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
+  assertPrCreatedSliceState(run);
+  assertPassingVerdictArtifacts(request.runDir, run);
+  assertPrNumberMatchesUrl(request.pr_url, request.pr_number);
 }
 
-function collectProvenanceSensitiveClaims(run) {
-  const claims = [];
-  if (!isRecord(run)) return claims;
-
-  for (const [gateName, gate] of Object.entries(run.gates || {})) {
-    if (isRecord(gate) && gate.status === "approved") claims.push(`gate:${gateName}`);
-  }
-
-  for (const [index, slice] of (Array.isArray(run.slices) ? run.slices : []).entries()) {
-    if (sliceRequiresAuthority(slice)) claims.push(`slice:${slice?.id || index}`);
-  }
-
-  if (PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) claims.push("validator");
-  if (PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) claims.push("security_review");
-  if (stringValue(run.pr_url) || stringValue(run.terminal_result?.pr_url)) claims.push("pr_url");
-  if ([run.branch, run.worktree, run.base_ref, run.base_commit].some(stringValue)) claims.push("run_base");
-
-  return claims;
+function assertPrCreatedSliceState(run) {
+  const slices = Array.isArray(run.slices) ? run.slices : [];
+  const unfinished = slices.filter((slice) => slice?.status !== "merged" && slice?.status !== "blocked").map((slice) => slice?.id || "<unknown>");
+  if (unfinished.length > 0) throw new Error(`pr-created requires all slices to be merged or blocked; unfinished slices: ${unfinished.join(", ")}`);
+  if (!slices.some((slice) => slice?.status === "merged")) throw new Error("pr-created requires at least one merged slice");
 }
 
-function sliceRequiresAuthority(slice) {
-  return isRecord(slice)
-    && (SENSITIVE_SLICE_STATUSES.has(slice.status)
-      || stringValue(slice.merge_commit)
-      || (slice.status === "merged" && stringValue(slice.review_ref)));
+function assertPassingVerdictArtifacts(runDir, run) {
+  if (!stringValue(runDir)) throw new Error("pr-created requires run directory context");
+  if (!stringValue(run.validator?.report)) throw new Error("pr-created requires validator report ref");
+  resolveArtifactRef(runDir, run.validator.report);
+  const validatorReviewRef = stringValue(run.validator.review_ref) ? run.validator.review_ref : "reviews/implementation-validator.json";
+  const validatorReview = resolveReviewRef(runDir, validatorReviewRef);
+  const validatorJson = parseJsonObjectFile(validatorReview.path, "validator review_ref");
+  if (!PASSING_VALIDATOR_VERDICTS.has(validatorJson.verdict)) throw new Error("pr-created requires validator review verdict GO or GO-WITH-NITS");
+  if (validatorJson.verdict !== run.validator.verdict) throw new Error("pr-created requires validator review verdict to match run.validator.verdict");
+  if (!stringValue(run.security_review?.review_ref)) throw new Error("pr-created requires security_review review_ref");
+  const securityReview = resolveReviewRef(runDir, run.security_review.review_ref);
+  const securityJson = parseJsonObjectFile(securityReview.path, "security_review.review_ref");
+  if (securityJson.verdict !== "PASS") throw new Error("pr-created requires security_review review verdict PASS");
+  if (securityJson.verdict !== run.security_review.verdict) throw new Error("pr-created requires security review verdict to match run.security_review.verdict");
 }
 
-function normalizeTerminalResult(terminalResult) {
-  if (typeof terminalResult === "string") return { status: terminalResult };
-  if (!isRecord(terminalResult)) throw new Error("transitionTerminalResult requires a terminal result object");
-  return cloneJson(terminalResult);
+function assertPrNumberMatchesUrl(prUrl, prNumber) {
+  const canonical = canonicalizeGithubPrUrl(prUrl);
+  const number = Number(canonical.split("/").pop());
+  if (number !== prNumber) throw new Error("pr-created requires pr_number to match the GitHub PR URL");
 }
 
 function normalizePrCreatedInput(input) {
   if (!isRecord(input)) throw new Error("transitionPrCreated requires an input object");
-  const remoteObservation = normalizePrRemoteObservation(input.remote_observation);
-  const prUrl = canonicalizeGithubPrUrl(firstNonEmptyString(input.pr_url, remoteObservation.pr_url));
-  const prNumber = normalizePrNumber(input.pr_number ?? remoteObservation.pr_number);
-  const draft = normalizeBoolean(input.draft ?? remoteObservation.draft, "draft");
-  const prBodyRef = firstNonEmptyString(input.pr_body_ref, input.prBodyRef);
-
-  assertOptionalRemoteObservationMatch(input, remoteObservation, "pr_url");
-  assertOptionalRemoteObservationMatch(input, remoteObservation, "pr_number");
-  assertOptionalRemoteObservationMatch(input, remoteObservation, "provider");
-  assertOptionalRemoteObservationMatch(input, remoteObservation, "repository");
-  assertOptionalRemoteObservationMatch(input, remoteObservation, "remote");
-  assertOptionalRemoteObservationMatch(input, remoteObservation, "github_account");
-  assertOptionalRemoteObservationMatch(input, remoteObservation, "draft");
-
-  if (!stringValue(prUrl)) throw new Error("transitionPrCreated requires pr_url");
-  if (!stringValue(prBodyRef)) throw new Error("transitionPrCreated requires pr_body_ref");
-
   return {
     ...cloneJson(input),
-    pr_url: prUrl,
-    pr_number: prNumber,
-    draft,
-    pr_body_ref: prBodyRef,
-    provider: firstNonEmptyString(input.provider, remoteObservation.provider),
-    repository: firstNonEmptyString(input.repository, remoteObservation.repository),
-    remote: firstNonEmptyString(input.remote, remoteObservation.remote),
-    github_account: firstNonEmptyString(input.github_account, remoteObservation.github_account),
-    remote_observation: remoteObservation,
+    pr_url: canonicalizeGithubPrUrl(firstNonEmptyString(input.pr_url, input.prUrl)),
+    pr_number: normalizePrNumber(input.pr_number ?? input.prNumber),
+    repository: requireNonEmptyString(input.repository, "repository"),
+    draft: input.draft === undefined ? true : normalizeBoolean(input.draft, "draft"),
   };
 }
 
-function assertOptionalRemoteObservationMatch(input, remoteObservation, key) {
-  if (input[key] === undefined || input[key] === null) return;
-  const actual = key === "pr_number"
-    ? normalizePrNumber(input[key])
-    : key === "pr_url"
-      ? canonicalizeGithubPrUrl(input[key])
-      : input[key];
-  if (actual !== remoteObservation[key]) {
-    throw new Error(`transitionPrCreated ${key} must match remote_observation.${key}`);
-  }
+function normalizeSliceMergedInput(input) {
+  if (!isRecord(input)) throw new Error("transitionSliceMerged requires an input object");
+  return { merge_commit: requireNonEmptyString(input.merge_commit ?? input.mergeCommit, "merge_commit") };
 }
 
-function normalizePrRemoteObservation(observation) {
-  if (!isRecord(observation)) throw new Error("transitionPrCreated requires remote_observation");
-  const source = cloneJson(observation);
-  const normalized = {
-    pr_url: canonicalizeGithubPrUrl(source.pr_url),
-    pr_number: normalizePrNumber(source.pr_number),
-    provider: source.provider,
-    repository: source.repository,
-    remote: source.remote,
-    github_account: source.github_account,
-    head_branch: source.head_branch,
-    head_commit: source.head_commit,
-    head_tree: source.head_tree,
-    base_ref: source.base_ref,
-    base_commit: source.base_commit,
-    base_tree: source.base_tree,
-    draft: normalizeBoolean(source.draft, "remote_observation.draft"),
-  };
-  const missing = Object.entries(normalized)
-    .filter(([key, value]) => key !== "pr_number" && key !== "draft" && !stringValue(value))
-    .map(([key]) => key);
-  if (missing.length > 0) throw new Error(`transitionPrCreated requires remote observation ${missing.join(", ")}`);
-  return normalized;
+function assertSliceMergedPreconditions(runDir, sliceId, slice, options = {}) {
+  if (!stringValue(slice.merge_commit)) throw new Error(`slice '${sliceId}' merge requires merge_commit`);
+  const review = resolveReviewRef(runDir, requireNonEmptyString(slice.review_ref, "review_ref"));
+  const reviewJson = parseJsonObjectFile(review.path, `slice '${sliceId}' review_ref`);
+  if (reviewJson.verdict !== "APPROVE") throw new Error(`slice '${sliceId}' merge requires APPROVE review`);
+  if (reviewJson.subject !== sliceId) throw new Error(`slice '${sliceId}' review subject must match slice id`);
+  resolveEvidenceRef(runDir, requireNonEmptyString(slice.evidence_ref, "evidence_ref"));
+  const branch = requireNonEmptyString(slice.branch, "branch");
+  const branchResult = git(options.repoRoot || runDir, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+  if (!branchResult.ok) throw new Error(`slice '${sliceId}' merge requires existing branch '${branch}'`);
+}
+
+function assertSliceReviewPreconditions(runDir, sliceId, slice) {
+  if (slice.status !== "review") return;
+  const evidence = resolveEvidenceRef(runDir, requireNonEmptyString(slice.evidence_ref, "evidence_ref"));
+  const evidenceJson = parseJsonObjectFile(evidence.path, `slice '${sliceId}' evidence_ref`);
+  if (stringValue(evidenceJson.subject) && evidenceJson.subject !== sliceId) throw new Error(`slice '${sliceId}' evidence subject must match slice id`);
 }
 
 function normalizePrCreatedTerminalResult(run, request) {
@@ -1204,15 +612,24 @@ function normalizePrCreatedTerminalResult(run, request) {
     status: "completed",
     run_id: run.run_id,
     pr_url: request.pr_url,
+    pr_number: request.pr_number,
+    repository: request.repository,
+    draft: request.draft,
     reason: terminalResult.reason ?? null,
     summary: terminalResult.summary ?? "Draft PR created.",
     artifacts: isRecord(terminalResult.artifacts) ? terminalResult.artifacts : {},
   };
 }
 
-function normalizePrNumber(value) {
-  const number = typeof value === "string" && value.trim() !== "" ? Number.parseInt(value, 10) : value;
-  if (!Number.isInteger(number) || number < 1) throw new Error("transitionPrCreated requires pr_number");
+function normalizeTerminalResult(terminalResult) {
+  if (typeof terminalResult === "string") return { status: terminalResult };
+  if (!isRecord(terminalResult)) throw new Error("transitionTerminalResult requires a terminal result object");
+  return cloneJson(terminalResult);
+}
+
+export function normalizePrNumber(value) {
+  const number = typeof value === "string" && value.trim() !== "" ? Number(value.trim()) : value;
+  if (!Number.isInteger(number) || number < 1 || String(number) !== String(value).trim()) throw new Error("transitionPrCreated requires pr_number");
   return number;
 }
 
@@ -1223,6 +640,10 @@ function normalizeBoolean(value, label) {
 
 function normalizeGateMap(gates) {
   return isRecord(gates) ? gates : {};
+}
+
+function assertSafeGateName(gateName) {
+  if (!SAFE_GATE_NAME_PATTERN.test(gateName)) throw new Error(`invalid gate name '${gateName}': must match safe pattern [a-z0-9][a-z0-9_-]*[a-z0-9]`);
 }
 
 function assertCollectionUpdater(updater, label) {
@@ -1236,17 +657,8 @@ async function applyCollectionItemUpdate({ items, selector, updater, selectorLab
   const original = hasExisting ? items[index] : undefined;
   const base = hasExisting ? cloneJson(original) : cloneJson(seed);
   let nextValue;
-
-  if (typeof updater === "function") {
-    nextValue = await updater(base, {
-      current: hasExisting ? cloneJson(original) : null,
-      index,
-      selector,
-    });
-  } else {
-    nextValue = updater;
-  }
-
+  if (typeof updater === "function") nextValue = await updater(base, { current: hasExisting ? cloneJson(original) : null, index, selector });
+  else nextValue = updater;
   if (nextValue === undefined) {
     if (hasExisting) {
       if (sameJson(original, base)) return { changed: false, index };
@@ -1257,11 +669,7 @@ async function applyCollectionItemUpdate({ items, selector, updater, selectorLab
     items.push(base);
     return { changed: true, index: items.length - 1 };
   }
-
-  const replacement = isRecord(base) && isRecord(nextValue)
-    ? { ...base, ...cloneJson(nextValue) }
-    : cloneJson(nextValue);
-
+  const replacement = isRecord(base) && isRecord(nextValue) ? { ...base, ...cloneJson(nextValue) } : cloneJson(nextValue);
   if (hasExisting) {
     if (sameJson(original, replacement)) return { changed: false, index };
     items[index] = replacement;
@@ -1291,6 +699,17 @@ function selectCollectionItemIndex(items, selector, selectorLabel, identityKey) 
   throw new Error(`invalid ${selectorLabel}`);
 }
 
+function collectionHasItem(items, selector, identityKey) {
+  return selectCollectionItemIndex(items, selector, "collection selector", identityKey) >= 0;
+}
+
+function formatSelector(selector) {
+  if (stringValue(selector)) return selector;
+  if (isRecord(selector) && stringValue(selector.id)) return selector.id;
+  if (isRecord(selector) && stringValue(selector.agent)) return selector.agent;
+  return JSON.stringify(selector);
+}
+
 function seedRunStep(stepSelector) {
   if (stringValue(stepSelector)) return { agent: stepSelector };
   if (isRecord(stepSelector) && stringValue(stepSelector.agent)) return { agent: stepSelector.agent };
@@ -1316,100 +735,6 @@ async function readJsonIfExists(path) {
   }
 }
 
-async function snapshotFile(path) {
-  if (!existsSync(path)) {
-    return {
-      exists: false,
-      path,
-      contents: null,
-    };
-  }
-
-  return {
-    exists: true,
-    path,
-    contents: await readFile(path, "utf8"),
-  };
-}
-
-async function resolveAttestationWritePath(runDir, ref, { createParents = false } = {}) {
-  const { attestationRootRealPath } = resolveAttestationRoot(runDir);
-  const segments = normalizeAttestationRefSegments(ref);
-  let currentPath = attestationRootRealPath;
-
-  for (const segment of segments.slice(1, -1)) {
-    const nextPath = join(currentPath, segment);
-    if (!existsSync(nextPath)) {
-      if (createParents) await mkdir(nextPath);
-      currentPath = createParents ? readRealPath(nextPath, `${ref} parent`) : nextPath;
-      assertContainedAttestationPath(ref, attestationRootRealPath, currentPath, "parent");
-      continue;
-    }
-
-    const stats = lstatSync(nextPath);
-    if (stats.isSymbolicLink()) throw new Error(`${ref} must not traverse symlinked attestation parents`);
-    if (!stats.isDirectory()) throw new Error(`${ref} parent must be a directory: ${nextPath}`);
-    currentPath = readRealPath(nextPath, `${ref} parent`);
-    assertContainedAttestationPath(ref, attestationRootRealPath, currentPath, "parent");
-  }
-
-  const candidatePath = resolve(join(currentPath, segments.at(-1)));
-  assertContainedAttestationPath(ref, attestationRootRealPath, candidatePath, "target");
-  if (!existsSync(candidatePath)) return candidatePath;
-
-  const stats = lstatSync(candidatePath);
-  if (stats.isSymbolicLink()) throw new Error(`${ref} must not be a symlink`);
-  if (stats.isDirectory()) throw new Error(`${ref} must be a file path`);
-  const realPath = readRealPath(candidatePath, ref);
-  assertContainedAttestationPath(ref, attestationRootRealPath, realPath, "target");
-  return realPath;
-}
-
-function resolveAttestationRoot(runDir) {
-  const runPath = resolve(requireNonEmptyString(runDir, "runDir"));
-  const runRealPath = readRealPath(runPath, "runDir");
-  const attestationRootPath = join(runPath, ATTESTATIONS_DIR);
-  if (!existsSync(attestationRootPath)) {
-    throw new Error(`attestations root is missing: ${attestationRootPath}`);
-  }
-
-  const stats = lstatSync(attestationRootPath);
-  if (stats.isSymbolicLink()) throw new Error(`attestations root must not be a symlink: ${attestationRootPath}`);
-  if (!stats.isDirectory()) throw new Error(`attestations root must be a directory: ${attestationRootPath}`);
-
-  const attestationRootRealPath = readRealPath(attestationRootPath, "attestations root");
-  if (!isContainedPath(runRealPath, attestationRootRealPath)) {
-    throw new Error(`attestations root must be physically contained under ${runRealPath}`);
-  }
-
-  return { runRealPath, attestationRootRealPath };
-}
-
-function normalizeAttestationRefSegments(ref) {
-  const normalizedRef = requireNonEmptyString(ref, "attestation ref");
-  if (normalizedRef.includes("\\")) throw new Error(`${normalizedRef} must use forward slashes`);
-  const segments = normalizedRef.split("/");
-  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
-    throw new Error(`${normalizedRef} must not contain empty, '.' or '..' segments`);
-  }
-  if (segments[0] !== ATTESTATIONS_DIR) throw new Error(`${normalizedRef} must be rooted under ${ATTESTATIONS_DIR}/`);
-  return segments;
-}
-
-function assertContainedAttestationPath(ref, attestationRootRealPath, candidatePath, label) {
-  if (isContainedPath(attestationRootRealPath, candidatePath)) return;
-  throw new Error(`${ref} ${label} must remain physically contained under ${attestationRootRealPath}`);
-}
-
-async function restoreSnapshot(snapshot) {
-  if (!snapshot) return;
-  if (snapshot.exists) {
-    await writeTextAtomically(snapshot.path, snapshot.contents);
-    return;
-  }
-  await rm(snapshot.path, { force: true });
-}
-
 async function writeJsonAtomically(path, value) {
   await writeTextAtomically(path, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -1424,12 +749,6 @@ async function writeTextAtomically(path, contents) {
   }
 }
 
-function rollbackError(error, restoreError, label = "gate-decision") {
-  const primary = error instanceof Error ? error.message : String(error);
-  const rollback = restoreError instanceof Error ? restoreError.message : String(restoreError);
-  return new Error(`${primary}; failed to restore prior ${label} state: ${rollback}`);
-}
-
 function formatLockTimeout(lockDir, owner) {
   if (!isRecord(owner)) return `timed out waiting for run.json lock at ${lockDir}`;
   const heldBy = [owner.hostname, owner.pid].filter((value) => value !== undefined && value !== null).join(":");
@@ -1438,46 +757,27 @@ function formatLockTimeout(lockDir, owner) {
   return `timed out waiting for run.json lock at ${lockDir}${suffix}${acquiredAt}`;
 }
 
-function formatValidationChecks(checks) {
-  const errors = (Array.isArray(checks) ? checks : []).flatMap((check) => Array.isArray(check?.errors) ? check.errors : []);
-  if (errors.length === 0) return "run validation failed";
-  return formatErrorItems(errors);
-}
-
 function formatErrorItems(errors) {
   return errors.map((error) => `${error.path}: ${error.message}`).join("; ");
 }
 
-function readRealPath(pathValue, label) {
+function firstNonEmptyString(...values) {
+  for (const value of values) if (stringValue(value)) return String(value).trim();
+  return null;
+}
+
+function parseJsonFile(path, label) {
   try {
-    return realpathSync.native(pathValue);
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    const reason = classifyRealPathFailure(error);
-    throw new Error(`${label} is ${reason}: ${pathValue}`);
+    throw new Error(`${label} must be valid JSON: ${error.message}`);
   }
 }
 
-function classifyRealPathFailure(error) {
-  if (error?.code === "ENOENT") return "missing";
-  if (error?.code === "EACCES" || error?.code === "EPERM") return "inaccessible";
-  return "unresolvable";
-}
-
-function isContainedPath(parentPath, childPath) {
-  const rel = relative(parentPath, childPath);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function requireNonEmptyString(value, label) {
-  if (!stringValue(value)) throw new Error(`${label} must be a non-empty string`);
+function parseJsonObjectFile(path, label) {
+  const value = parseJsonFile(path, label);
+  if (!isRecord(value)) throw new Error(`${label} must be a JSON object`);
   return value;
-}
-
-function normalizeTimestamp(now) {
-  if (now === undefined) return new Date().toISOString();
-  const value = now instanceof Date ? now.getTime() : Date.parse(now);
-  if (!Number.isFinite(value)) throw new Error("invalid heartbeat timestamp");
-  return new Date(value).toISOString();
 }
 
 function normalizePositiveInteger(value, fallback) {
@@ -1486,26 +786,13 @@ function normalizePositiveInteger(value, fallback) {
   return value;
 }
 
-function normalizeHeartbeatOwnerPid(ownerPid) {
-  if (!Number.isInteger(ownerPid) || ownerPid <= 0) throw new Error("heartbeatOnce requires ownerPid");
-  return ownerPid;
-}
-
-function normalizeHeartbeatOwnerCapability(ownerCapability, command) {
-  if (!stringValue(ownerCapability)) throw new Error(`${command} requires trusted heartbeat owner capability from factory.lock`);
-  return ownerCapability.trim();
-}
-
 function cloneJson(value) {
+  // JSON cloning intentionally treats undefined as absent; use explicit null to clear fields.
   return JSON.parse(JSON.stringify(value));
 }
 
 function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function hashTextClaim(value) {
-  return `sha256:${createHash("sha256").update(String(value), "utf8").digest("hex")}`;
 }
 
 function isRecord(value) {

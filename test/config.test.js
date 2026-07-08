@@ -19,6 +19,10 @@ describe("parseJsoncConfig", () => {
     });
   });
 
+  it("strips a leading BOM before parsing JSONC", () => {
+    assert.deepEqual(parseJsoncConfig('\ufeff{"enabled":true}'), { enabled: true });
+  });
+
   it("accepts line comments, inline comments, and block comments", () => {
     const config = parseJsoncConfig(`
       // before the object
@@ -99,6 +103,10 @@ describe("parseStrictJsonConfig", () => {
       items: [1, 2],
       name: "factory",
     });
+  });
+
+  it("strips a leading BOM before parsing strict JSON", () => {
+    assert.deepEqual(parseStrictJsonConfig('\ufeff{"enabled":true}'), { enabled: true });
   });
 
   it("rejects comments", () => {

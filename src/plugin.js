@@ -9,9 +9,10 @@ function readAsset(...parts) {
   return readFileSync(join(assets, ...parts), "utf8");
 }
 
-function parseFrontmatter(markdown) {
-  const match = markdown.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (!match) return { meta: {}, body: markdown };
+export function parseFrontmatter(markdown) {
+  const normalized = String(markdown).replace(/\r\n/g, "\n");
+  const match = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!match) return { meta: {}, body: normalized };
   return { meta: parseSimpleYaml(match[1]), body: match[2] };
 }
 

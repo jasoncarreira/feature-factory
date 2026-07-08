@@ -12,30 +12,20 @@ Ideas to implement after reviewing `oh-my-openagent`, adapted for this package's
 
 ## Trust-model contract
 
-Current provenance guarantees assume three authority layers:
+The proof layer removed in the simplified factory. The durable contract is local state plus transition-time checks, not a cryptographic or tamper-proof authority system.
 
-- `untrusted caller claims`: `run.json`, gate answers, `evidence/*`, `reviews/*`, worktree path strings, status booleans, `base_ref`, and `base_commit`.
-- `orchestrator observations`: fresh safe Git/filesystem observations, physical durable-root containment, worktree identity, commit/tree/parent relationships, file hashes, and reviewed-worktree guard results.
-- `factory-owned attestations`: canonical records under `.opencode/factory/<run-id>/attestations/`.
+Current guarantees:
 
-Accepted provenance requires `attestations/index.json`, canonical `attestation_hash`, an unbroken `prev_hash` chain from `run-base`, and fresh re-observation of current Git/filesystem facts. Merge history is proven by `merge-chain.json` entries of type `slice_merge` or `direct_reviewed_commit`, not by `merged`/`approved` flags alone.
-
-Diagnostic `run.json.factory_provenance` is not authority. It records redacted factory/opencode/plugin creation and resume snapshots for debugging only. Snapshot persistence must omit sensitive keys and redact token-shaped/high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar secrets.
-
-Pending gates carry a `pending_snapshot` with `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer refs/hashes. Gate answer consumption must fail closed when refs are missing, escaped, stale, or hash-mismatched.
-
-PR URL claims require a dedicated `pr-created` attestation. The normal draft PR flow calls `feature-factory factory pr-created` after successful PR creation; `run.pr_url` and `terminal_result.pr_url` are trusted only when they match the latest accepted `attestations/pr-created.json` binding.
-
-Expected guarantees:
-
-- bounded local authority with centralized safe Git (`safe_git_policy: "safe-git-v1"`);
-- durable-root and worktree identity validation;
-- fail closed behavior when attestation proof, worktree identity, or current observations cannot be re-verified.
+- `run.json`, gate answers, `evidence/*`, `reviews/*`, and `terminal_result` are durable local workflow state.
+- Semantic manifest writes go through locked transition helpers so stale writers fail instead of overwriting newer state. `transitionGateDecision` owns approved gate writes, and `transitionPrCreated` owns completed PR state writes.
+- Pending gates carry a `pending_snapshot` with `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer refs/hashes. Gate answer consumption must fail closed when refs are missing, escaped, stale, or hash-mismatched.
+- The normal draft PR flow calls `feature-factory factory pr-created` after successful PR creation. That transition requires `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, and a canonical GitHub PR URL before writing `run.pr_url` and `terminal_result.pr_url`.
+- Diagnostic `run.json.debug_snapshot` records redacted factory/opencode/plugin creation and resume snapshots for debugging only. Snapshot persistence must omit sensitive keys and redact token-shaped/high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar secrets.
 
 Explicit limits:
 
-- local-only, not cryptographic or tamper-proof;
-- a coherent rewrite of local files and Git history is outside the model.
+- Local-only, not cryptographic or tamper-proof.
+- A coherent rewrite of local files and Git history is outside the model.
 
 ## 1. Category-Based Model Routing
 
@@ -198,6 +188,7 @@ Classify the invocation as one of:
 - `gate-answer`: answer a pending gate.
 - `status`: inspect current run state.
 - `scripted-start`: start from an already structured external work order.
+- `autonomous-start`: start or resume from an explicit autonomous driver prompt.
 - `pr-continuation`: continue only PR preparation for an already-built branch.
 
 Why:
@@ -243,27 +234,27 @@ Scripted-mode fallback:
 
 ## 5. Stale-Run And Watchdog Helpers
 
-Current state now includes the internal heartbeat helper, `$RUN/factory.lock`, `$RUN/heartbeat.json`, and `run-json.lock/` coordination. The helper is for long orchestrator waits only; it must require the trusted heartbeat owner capability from `factory.lock`, treat `heartbeat.json` as data rather than authority, refuse starts unless the manifest already shows real in-flight work, stay off while the factory is stopped at `story`, `brief`, or `pre_pr` gates, and confirm stop before terminal manifest writes.
+Current state now includes the internal heartbeat helper, `$RUN/heartbeat.json`, and `run-json.lock/` coordination. The helper is for long orchestrator waits only. Start heartbeat immediately before a long `Task` wait begins; `heartbeat.json` is liveness-only data with `{ schema_version, run_id, phase, pid, interval_ms, last_tick_at }`, not authority for workflow state. It must refuse starts unless the manifest already shows real in-flight work, stay off while the factory is stopped at `story`, `brief`, or `pre_pr` gates, and stop heartbeat best-effort before terminal manifest writes.
 
 External monitoring semantics:
 
 - `heartbeat.json` + `run.json.heartbeat_at` are liveness only.
-- `factory.lock` holds the trusted heartbeat owner capability; `feature-factory factory heartbeat <run-id> --status --json` and `heartbeat.json` never expose it.
+- Freshness is derived at read time from `last_tick_at`, `interval_ms`, and whether the recorded PID is alive; no token, owner, deadline, or expiry state exists.
 - Pending gate waits are read from `run.json.gates.*`, not from heartbeat.
-- Terminal `completed|blocked|partial|needs-human` plus `terminal_result` are the stable outcome contract; heartbeat should already be stopped by then.
+- Terminal `completed|blocked|partial|needs-human` plus `terminal_result` are the stable outcome contract.
 - `feature-factory factory heartbeat <run-id> --status --json` is the supported helper/status surface for watchdog tooling.
 
-Implemented detached-run diagnostics are output-only and appear on `factory status`, `factory list`, `factory validate`, `factory watch`, and TUI data. The canonical envelope fields are `schema_version`, `checked_at`, `authoritative`, `status`, `severity`, `classification`, `summary`, and `items[]`; each item carries `condition`, `classification`, `severity`, `status`, `message`, `action`, `authoritative`, `checked_at`, and `evidence`. The condition enum is `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `invalid-authority`, `unverifiable-authority`, `protected-gate`, `terminal-run`. The classification enum is `healthy`, `recoverable`, `blocked`, `needs-human`, `terminal`, `invalid`; `invalid` is first-class. Status enum is `ok`, `warning`, `error`; severity enum is `info`, `warning`, `error`, `critical`.
+Implemented detached-run diagnostics are output-only and appear on `factory status`, `factory list`, `factory validate`, `factory watch`, and TUI data. The canonical envelope fields are `schema_version`, `checked_at`, `authoritative`, `status`, `severity`, `classification`, `summary`, and `items[]`; each item carries `condition`, `classification`, `severity`, `status`, `message`, `action`, `authoritative`, `checked_at`, and `evidence`. The condition enum is `stale-heartbeat`, `missing-heartbeat-process`, `missing-worktree`, `invalid-run-state`, `protected-gate`, `terminal-run`. The classification enum is `healthy`, `recoverable`, `blocked`, `needs-human`, `terminal`, `invalid`; `invalid` is first-class. Status enum is `ok`, `warning`, `error`; severity enum is `info`, `warning`, `error`, `critical`.
 
-Aggregation chooses the primary item using exact priority: classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`; severity `critical` > `error` > `warning` > `info`; status `error` > `warning` > `ok`; condition `invalid-run-state` > `invalid-authority` > `unverifiable-authority` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`; then original detection order. The top-level diagnostic tuple and summary come from that primary item.
+Aggregation chooses the primary item using exact priority: classification `invalid` > `blocked` > `needs-human` > `recoverable` > `terminal` > `healthy`; severity `critical` > `error` > `warning` > `info`; status `error` > `warning` > `ok`; condition `invalid-run-state` > `missing-worktree` > `missing-heartbeat-process` > `stale-heartbeat` > `protected-gate` > `terminal-run`; then original detection order. The top-level diagnostic tuple and summary come from that primary item.
 
-Condition mappings and operator actions are stable: `stale-heartbeat` is `recoverable` / `warning` / `warning` and tells operators to inspect logs and validate durable state before resuming, not restart blindly; `missing-heartbeat-process` is `recoverable` / `warning` / `warning` and means the heartbeat helper PID in `heartbeat.json` is not alive; `missing-worktree` is `blocked` / `error` / `error` and asks the operator to restore the trusted worktree or recover from validated state; `invalid-run-state` and `invalid-authority` are `invalid` / `error` / `critical`; `unverifiable-authority` is `blocked` / `error` / `critical` and asks the operator to restore missing proof before trusting mutable claims; `protected-gate` is exactly `needs-human` / `warning` / `warning` and tells operators to answer the pending protected gate or stop; `terminal-run` maps `completed`/`partial` to `terminal` / `ok` / `info`, `blocked` to `blocked` / `error` / `error`, and `needs-human` to `needs-human` / `warning` / `warning`.
+Condition mappings and operator actions are stable: `stale-heartbeat` is `recoverable` / `warning` / `warning` and tells operators to inspect logs and validate durable state before resuming, not restart blindly; `missing-heartbeat-process` is `recoverable` / `warning` / `warning` and means the heartbeat helper PID in `heartbeat.json` is not alive; `missing-worktree` is `blocked` / `error` / `error` and asks the operator to restore the worktree or recover from durable state; `invalid-run-state` is `invalid` / `error` / `critical`; `protected-gate` is exactly `needs-human` / `warning` / `warning` and tells operators to answer the pending protected gate or stop; `terminal-run` maps `completed`/`partial` to `terminal` / `ok` / `info`, `blocked` to `blocked` / `error` / `error`, and `needs-human` to `needs-human` / `warning` / `warning`.
 
 Heartbeat/PID/process diagnostics are liveness-only. `missing-heartbeat-process` refers to the heartbeat helper process, not a detached opencode process, because there is no durable run-id-to-opencode-PID registry. Heartbeat evidence must include `evidence.liveness_only: true` and remain `authoritative: false`; PID liveness, process existence, `heartbeat.json`, and mutable `run.json` heartbeat fields cannot prove health or ownership. Stale heartbeat uses `max(2 * interval_ms, 120000ms)`.
 
 Protected gates and terminal states suppress inappropriate liveness alarms. A pending protected `story`, `brief`, or `pre_pr` gate suppresses stale-heartbeat and missing-heartbeat-process and always displays the same `needs-human` / `warning` / `warning` tuple. Valid terminal states suppress heartbeat/worktree liveness alarms; operators should read `terminal_result` rather than revive zombie state.
 
-Diagnostics must fail closed with provenance. `diagnostics.authoritative` is true only when `run.json` schema and run-authority checks required for emitted trusted fields pass. Invalid or unverifiable runs must not be treated as healthy, must not be silently restarted, and must not infer authority from heartbeat/PID/process data, status booleans, worktree strings, or mutable `run.json` claims. Fail-closed status envelopes omit trusted PR, gate, branch, and worktree claims unless accepted attestations plus fresh observations verify them.
+Diagnostics must fail closed for invalid local state. `diagnostics.authoritative` is true only when `run.json` schema and required sidecars pass. Invalid runs must not be treated as healthy, must not be silently restarted, and must not infer health from heartbeat/PID/process data, status booleans, worktree strings, or mutable `run.json` claims.
 
 Add commands:
 
@@ -323,11 +314,11 @@ Principles:
 
 Do this after there is enough code to justify the split. Premature layering is a tax; the first priority is making the current driver safe and diagnosable.
 
-## 7. Substrate And Provenance Stamp
+## 7. Environment Snapshot
 
-Add a provenance block to `run.json` and relevant evidence records.
+Add a diagnostic environment snapshot block to `run.json` and relevant evidence records.
 
-Implementation status: helper implemented as `collectProvenance()` and exposed through `feature-factory factory provenance`. Run creation/resume recording is exposed as `feature-factory factory provenance record-created <run-id> --json` and `feature-factory factory provenance record-resume <run-id> --json`, storing redacted diagnostic snapshots under `run.json.factory_provenance`.
+Implementation status: helper implemented as `collectRunDebugSnapshot()` and exposed through `feature-factory factory env`. Run creation/resume recording is exposed as `feature-factory factory env record-created <run-id> --json` and `feature-factory factory env record-resume <run-id> --json`, storing redacted diagnostic snapshots under `run.json.debug_snapshot`.
 
 Why:
 
@@ -339,7 +330,7 @@ Suggested shape:
 
 ```json
 {
-  "provenance": {
+  "env": {
     "feature_factory_version": "0.1.0",
     "opencode_version": "1.17.13",
     "plugin_spec": "opencode-feature-factory",
@@ -347,7 +338,7 @@ Suggested shape:
       "story-reader": "openai/gpt-5.5",
       "backend-builder": "anthropic/claude-sonnet-4-6"
     },
-    "driver": {
+      "driver": {
       "kind": "interactive | cli | external",
       "name": "feature-factory",
       "version": "0.1.0"
@@ -362,16 +353,16 @@ Suggested shape:
 }
 ```
 
-Implemented `run.json.factory_provenance` shape:
+Implemented `run.json.debug_snapshot` shape:
 
 ```json
 {
-  "factory_provenance": {
+  "debug_snapshot": {
     "created_with": {
       "collected_at": "2026-07-06T12:00:00Z",
       "event": "created",
       "diagnostic_only": true,
-      "provenance": {
+      "env": {
         "feature_factory_version": "0.1.0",
         "opencode_version": "1.17.13",
         "resolved_models": {},
@@ -389,8 +380,8 @@ Rules:
 - Do not record secret values.
 - Omit sensitive keys and redact token-shaped or high-entropy credential values, including `ghp_*`, `github_pat_*`, `gho_*`/`ghu_*`/`ghs_*`/`ghr_*`, `sk-proj_*`, `sk-*`, `xoxb_*`/`xoxp_*`/`xoxa_*`, `glpat-*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and single-token high-entropy strings.
 - Record provider/model ids, not API keys.
-- Refresh provenance on resume if the driver/opencode/plugin version changed, while preserving original `created_with` if useful.
-- Treat `factory_provenance` as diagnostic-only. It must never be used as authority for gates, merges, reviews, or PR URL trust.
+- Refresh the snapshot on resume if the driver/opencode/plugin version changed, while preserving original `created_with` if useful.
+- Treat `debug_snapshot` as diagnostic-only. It must never be used as authority for gates, merges, reviews, or PR URL trust.
 
 ## 8. Scripted Environment And Credential Contract
 
@@ -448,10 +439,10 @@ External autonomous drivers should not parse gate internals or write answer file
 
 Draft PR completion contract:
 
-1. Gate 3 must be approved through the same provenance-gated path as interactive runs.
-2. After `gh pr create --draft` or equivalent succeeds, call `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --pr-body-ref artifacts/pr-body.md --provider github --repository OWNER/REPO --remote origin --github-account ACCOUNT --head-branch BRANCH --head-commit SHA --base-ref REF --base-commit SHA --draft --json`.
-3. The command writes `attestations/pr-created.json`, appends it to `attestations/index.json`, validates run-base, merge-chain, pre-PR gate, PR body, local HEAD/base, and remote observation bindings, then writes trusted `run.pr_url` / `terminal_result.pr_url` and completed status.
-4. Missing or mismatched `pr-created` authority fails closed; drivers must not mirror PR URLs from direct manifest edits.
+1. Gate 3 must be approved through the same transition-gated path as interactive runs.
+2. After `gh pr create --draft` or equivalent succeeds, verify it with `gh pr view <url>`, then call `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json`.
+3. The command validates the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and canonical GitHub PR URL, then writes `run.pr_url` / `terminal_result.pr_url` and completed status.
+4. Drivers must not mirror PR URLs from direct manifest edits.
 
 ## 10. Fallback Models
 
@@ -506,9 +497,9 @@ Relevant upstream context:
 - The useful comments on that PR say current opencode can emit AI SDK spans when `experimental.openTelemetry` is enabled and an OpenTelemetry SDK/exporter is initialized.
 - Those native AI SDK spans were reported as `ai.streamText`, `ai.toolCall`, and `ai.streamText.doStream`, and may include full prompt text.
 - Current opencode has native OTLP setup under `packages/core/src/observability/otlp.ts`, gates AI SDK telemetry with `experimental.openTelemetry`, and reads standard `OTEL_EXPORTER_OTLP_*` env vars.
-- The external `@devtheops/opencode-plugin-otel` plugin provides mature generic opencode telemetry, metrics, logs, trace export, and `traceparent` support, but it does not know feature-factory run/gate/slice/provenance semantics and uses OpenInference-style attributes rather than Honeycomb Agent Timeline's `gen_ai.*` contract.
+- The external `@devtheops/opencode-plugin-otel` plugin provides mature generic opencode telemetry, metrics, logs, trace export, and `traceparent` support, but it does not know feature-factory run/gate/slice context and uses OpenInference-style attributes rather than Honeycomb Agent Timeline's `gen_ai.*` contract.
 
-Current feature-factory state: the factory has durable local artifacts (`run.json`, `evidence/*`, `reviews/*`, attestations, heartbeat, process logs), but no factory-specific emitted telemetry. Debugging a failed run requires reading local files and logs manually.
+Current feature-factory state: the factory has durable local artifacts (`run.json`, `evidence/*`, `reviews/*`, heartbeat, process logs), but no factory-specific emitted telemetry. Debugging a failed run requires reading local files and logs manually.
 
 Goals:
 
@@ -527,7 +518,7 @@ Non-goals for the first implementation:
 - No Honeycomb-only API dependency in core code.
 - No first-pass generic OTLP exporter/metrics clone inside feature-factory.
 - No default capture of prompts, responses, tool arguments, tool outputs, gate answers, diffs, reviews, or evidence bodies.
-- No use of telemetry as provenance authority. Local attestations and fresh observations remain the authority model.
+- No use of telemetry as workflow authority. Local transition checks and durable state remain the workflow contract.
 - No opencode core fork as a prerequisite for the first useful version. If native opencode span enrichment is needed later, design it as an upstream contribution.
 
 ### Native OpenCode Interop
@@ -555,7 +546,7 @@ Every feature-factory GenAI span should include:
 - `gen_ai.operation.name`: one of `invoke_agent`, `chat`, `execute_tool`, `gate_decision`, `validate`, `create_pr`, `cleanup`, or `heartbeat`.
 - `feature_factory.run_id`: duplicate run id under the package namespace for non-GenAI queries.
 - `feature_factory.mode`: `interactive`, `headless`, or `autonomous`.
-- `feature_factory.review_tier`: selected review tier when known.
+- `feature_factory.review_tier`: optional display-only review tier label when known.
 - `feature_factory.status`: current run/slice/gate status when relevant.
 
 Native opencode spans may only carry generic attributes such as `session.id` or AI SDK span names. For phase 1, it is acceptable if those spans live in the same trace but do not independently satisfy Agent Timeline grouping, as long as feature-factory emits adjacent/parent spans with `gen_ai.conversation.id` and stable artifact refs. Phase 2 should pursue native span enrichment if Honeycomb Agent Timeline requires every model/tool span to carry the conversation id.
@@ -612,7 +603,7 @@ Important native-opencode caveat: AI SDK telemetry may capture full prompt and t
 - a trusted non-production telemetry environment;
 - or feature-factory telemetry only, without native AI SDK content spans.
 
-When content capture is explicitly enabled, redact before setting span attributes or events. Reuse or share the same token-shaped redaction rules as diagnostic provenance redaction so telemetry cannot leak values like `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer tokens, SSH keys, or high-entropy credential-shaped strings.
+When content capture is explicitly enabled, redact before setting span attributes or events. Reuse or share the same token-shaped redaction rules as diagnostic environment redaction so telemetry cannot leak values like `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer tokens, SSH keys, or high-entropy credential-shaped strings.
 
 All captured content should be capped before export:
 
@@ -729,7 +720,7 @@ Plugin options may override package-specific behavior, but should not require se
 ## Suggested Implementation Order
 
 1. Credential-aware doctor + capability detection.
-2. Provenance stamp in `run.json` and evidence.
+2. Diagnostic environment stamp in `run.json` and evidence.
 3. Scripted environment/credential contract docs and checks.
 4. `factory start --repo` plus headless/detached run-to-next-gate mode.
 5. Intent gate prompt update.

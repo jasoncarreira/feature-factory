@@ -9,65 +9,35 @@ import { HEARTBEAT_PHASES } from "../src/validate.js";
 
 const RUN_ID = "heartbeat-liveness";
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
-const HEARTBEAT_OWNER = "heartbeat-owner-capability";
 
 describe("cli heartbeat routing", () => {
-  it("rejects unauthorized start, foreground, and once heartbeat commands", () => {
-    const repo = tempRepo();
-    const runDir = createRunDir(repo);
-    writeJson(join(runDir, "run.json"), runningRun());
-
-    try {
-      const start = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"]);
-      assert.notEqual(start.status, 0);
-      assert.match(start.stderr, /owner capability/i);
-
-      const foreground = runHeartbeatCli(repo, ["--foreground", "--token", "lease-1", "--phase", "builder-wave", "--json"]);
-      assert.notEqual(foreground.status, 0);
-      assert.match(foreground.stderr, /owner capability/i);
-
-      const once = runHeartbeatCli(repo, ["--once", "--token", "lease-1", "--json"]);
-      assert.notEqual(once.status, 0);
-      assert.match(once.stderr, /owner capability/i);
-    } finally {
-      cleanup(repo);
-    }
-  });
-
-  it("routes authorized start, status, rejects public once, and stop heartbeat commands", async () => {
+  it("starts, reports, and stops liveness heartbeats without credentials", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun());
 
     let started;
     try {
-      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--max-duration", "4000", "--json"], RUN_ID, heartbeatEnv()));
+      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--json"]));
       assert.equal(started.run_id, RUN_ID);
-      assert.equal(started.status, "running");
       assert.equal(started.phase, "builder-wave");
+      assert.equal(started.fresh, true);
+      assert.equal(Number.isInteger(started.pid), true);
 
       const current = jsonOutput(runHeartbeatCli(repo, ["--status", "--json"]));
-      assert.equal(current.token, null);
       assert.equal(current.pid, started.pid);
-      assert.equal(current.status, "running");
+      assert.equal(current.fresh, true);
 
-      await sleep(20);
-
-      const once = runHeartbeatCli(repo, ["--once", "--token", started.token, "--json"]);
-      assert.notEqual(once.status, 0);
-      assert.match(once.stderr, /owner capability/i);
-      assert.equal(readJson(join(runDir, "run.json")).status, "running");
-
-      const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--token", started.token, "--wait-ms", "2500", "--json"]));
-      assert.equal(stopped.status, "stopped");
-      assert.equal(stopped.token, started.token);
+      const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--json"]));
+      assert.equal(stopped.pid, null);
+      assert.equal(stopped.fresh, false);
 
       const finalStatus = jsonOutput(runHeartbeatCli(repo, ["--status", "--json"]));
-      assert.equal(finalStatus.status, "stopped");
-      assert.equal(finalStatus.token, null);
+      assert.equal(finalStatus.pid, null);
+      assert.equal(finalStatus.fresh, false);
       await waitFor(() => !isProcessAlive(started.pid), { timeoutMs: 1500 });
     } finally {
-      await stopIfActive(repo, started?.token);
+      await stopIfActive(repo);
       cleanup(repo);
     }
   });
@@ -107,13 +77,13 @@ describe("cli heartbeat routing", () => {
     }
   });
 
-  it("refuses to start while a protected gate is pending", async () => {
+  it("refuses to start while a protected gate is pending", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun({ gates: protectedGates("brief") }));
 
     try {
-      const proc = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"], RUN_ID, heartbeatEnv());
+      const proc = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"]);
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /protected gate 'brief'/i);
     } finally {
@@ -121,47 +91,39 @@ describe("cli heartbeat routing", () => {
     }
   });
 
-  it("fails closed on forged approved protected gate claims during heartbeat start", async () => {
+  it("starts heartbeat for in-flight work without proof metadata", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
-    ensureAuthorityDirs(runDir);
-    writeJson(join(runDir, "run.json"), runningRun({
-      gates: {
-        story: {
-          status: "approved",
-          artifact: "artifacts/story.md",
-          question_ref: "gates/story.question.md",
-          answer_ref: "gates/story.answer",
-        },
-      },
-    }));
+    writeJson(join(runDir, "run.json"), runningRun({ gates: { story: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer_ref: "gates/story.answer" } } }));
 
     try {
-      const proc = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"], RUN_ID, heartbeatEnv());
-      assert.notEqual(proc.status, 0);
-      assert.match(proc.stderr, /gate-decision attestation|attestations\/index\.json/i);
+      const started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--json"]));
+      assert.equal(started.phase, "builder-wave");
+      assert.equal(started.fresh, true);
+      const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--json"]));
+      assert.equal(stopped.pid, null);
     } finally {
+      await stopIfActive(repo);
       cleanup(repo);
     }
   });
 
-  it("accepts each allowed heartbeat phase label", async () => {
+  it("accepts documented and operator-defined phase labels", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun());
 
     try {
-      for (const phase of HEARTBEAT_PHASES) {
-        const started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", phase, "--interval", "1000", "--max-duration", "1000", "--json"], RUN_ID, heartbeatEnv()));
+      for (const phase of [...HEARTBEAT_PHASES, "operator-defined-phase"]) {
+        const started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", phase, "--interval", "1000", "--json"]));
         const current = jsonOutput(runHeartbeatCli(repo, ["--status", "--json"]));
 
         assert.equal(started.phase, phase);
         assert.equal(current.phase, phase);
-        assert.equal(current.token, null);
+        assert.equal(current.fresh, true);
 
-        const stopped = await waitForHeartbeatStop(repo, started.token, { timeoutMs: 2500 });
-        assert.equal(stopped.phase, phase);
-        assert.equal(stopped.status, "stopped");
+        const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--json"]));
+        assert.equal(stopped.pid, null);
         await waitFor(() => !isProcessAlive(started.pid), { timeoutMs: 1500 });
       }
     } finally {
@@ -170,14 +132,14 @@ describe("cli heartbeat routing", () => {
     }
   });
 
-  it("keeps ticking in the detached heartbeat process without foreground progress commands", async () => {
+  it("keeps ticking in the detached heartbeat process", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun());
 
     let started;
     try {
-      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--max-duration", "4000", "--json"], RUN_ID, heartbeatEnv()));
+      started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--json"]));
       const firstHeartbeatAt = readJson(join(runDir, "run.json")).heartbeat_at;
 
       await waitFor(() => {
@@ -185,41 +147,40 @@ describe("cli heartbeat routing", () => {
         return current !== firstHeartbeatAt ? current : null;
       }, { timeoutMs: 2500 });
 
-      assert.equal(jsonOutput(runHeartbeatCli(repo, ["--status", "--json"])).token, null);
+      assert.equal(jsonOutput(runHeartbeatCli(repo, ["--status", "--json"])).fresh, true);
 
-      const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--token", started.token, "--wait-ms", "2500", "--json"]));
-      assert.equal(stopped.status, "stopped");
+      const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--json"]));
+      assert.equal(stopped.pid, null);
       await waitFor(() => !isProcessAlive(started.pid), { timeoutMs: 1500 });
-    } finally {
-      await stopIfActive(repo, started?.token);
-      cleanup(repo);
-    }
-  });
-
-  it("fails for unknown phases and invalid intervals", async () => {
-    const repo = tempRepo();
-    const runDir = createRunDir(repo);
-    writeJson(join(runDir, "run.json"), runningRun());
-
-    try {
-      const badPhase = runHeartbeatCli(repo, ["--start", "--phase", "unknown-phase", "--json"], RUN_ID, heartbeatEnv());
-      assert.notEqual(badPhase.status, 0);
-      assert.match(badPhase.stderr, /heartbeat phase must be one of/i);
-
-      const badInterval = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "0", "--json"], RUN_ID, heartbeatEnv());
-      assert.notEqual(badInterval.status, 0);
-      assert.match(badInterval.stderr, /intervalMs must be a positive integer/i);
     } finally {
       await stopIfActive(repo);
       cleanup(repo);
     }
   });
 
-  it("prints a concise diagnostics column for human factory list output without heartbeat tokens", () => {
+  it("requires a phase and valid interval", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun());
+
+    try {
+      const missingPhase = runHeartbeatCli(repo, ["--start", "--json"]);
+      assert.notEqual(missingPhase.status, 0);
+      assert.match(missingPhase.stderr, /heartbeat phase must be a non-empty string/i);
+
+      const badInterval = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "0", "--json"]);
+      assert.notEqual(badInterval.status, 0);
+      assert.match(badInterval.stderr, /intervalMs must be a positive integer/i);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("prints a concise diagnostics column for stale heartbeat liveness", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
     writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: "2026-07-06T11:00:00.000Z" }));
-    writeJson(join(runDir, "heartbeat.json"), heartbeatLease({ token: "secret-heartbeat-token", pid: process.pid }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatState({ pid: process.pid, phase: "diagnostic-phase" }));
 
     try {
       const proc = runFactoryCli(repo, ["list"]);
@@ -230,7 +191,6 @@ describe("cli heartbeat routing", () => {
       assert.equal(columns[0], RUN_ID);
       assert.equal(columns[1], "running");
       assert.match(columns[4], /recoverable\/warning:Heartbeat has not advanced/u);
-      assert.equal(proc.stdout.includes("secret-heartbeat-token"), false);
     } finally {
       cleanup(repo);
     }
@@ -248,30 +208,26 @@ function createRunDir(repo) {
   return runDir;
 }
 
-function runHeartbeatCli(repo, args, runId = RUN_ID, env = {}) {
+function runHeartbeatCli(repo, args, runId = RUN_ID) {
   const proc = spawnSync(process.execPath, [CLI, "factory", "heartbeat", runId, ...args], {
     cwd: repo,
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: { ...process.env },
     timeout: 15000,
   });
   if (proc.error) throw proc.error;
   return proc;
 }
 
-function runFactoryCli(repo, args, env = {}) {
+function runFactoryCli(repo, args) {
   const proc = spawnSync(process.execPath, [CLI, "factory", ...args, "--repo", repo], {
     cwd: repo,
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: { ...process.env },
     timeout: 15000,
   });
   if (proc.error) throw proc.error;
   return proc;
-}
-
-function heartbeatEnv(overrides = {}) {
-  return { FEATURE_FACTORY_HEARTBEAT_OWNER: HEARTBEAT_OWNER, ...overrides };
 }
 
 function jsonOutput(proc) {
@@ -279,28 +235,15 @@ function jsonOutput(proc) {
   return JSON.parse(proc.stdout);
 }
 
-async function stopIfActive(repo, token) {
+async function stopIfActive(repo) {
   try {
     const current = readHeartbeat(repo);
-    if (!current) return;
-    if (!["stopped", "error"].includes(current.status)) {
-      const stop = runHeartbeatCli(repo, ["--stop", "--token", token || current.token, "--wait-ms", "2500", "--json"]);
-      if (stop.status !== 0) runHeartbeatCli(repo, ["--stop", "--token", token || current.token, "--wait-ms", "25", "--force", "--json"]);
-    }
-    if (current.pid && current.pid !== process.pid) {
-      await waitFor(() => !isProcessAlive(current.pid), { timeoutMs: 1500 });
-    }
+    if (!current || current.pid === null) return;
+    runHeartbeatCli(repo, ["--stop", "--json"]);
+    if (current.pid && current.pid !== process.pid) await waitFor(() => !isProcessAlive(current.pid), { timeoutMs: 1500 });
   } catch {
     // Best-effort detached process cleanup.
   }
-}
-
-async function waitForHeartbeatStop(repo, token, options = {}) {
-  return waitFor(() => {
-    const heartbeat = readHeartbeat(repo);
-    if (!heartbeat || heartbeat.token !== token || heartbeat.status !== "stopped") return null;
-    return heartbeat;
-  }, options);
 }
 
 function readHeartbeat(repo) {
@@ -332,25 +275,8 @@ function runningRun(overrides = {}) {
     branch: null,
     worktree: null,
     gates: {},
-    steps: [
-      {
-        agent: "story-reader",
-        status: "accepted",
-        attempts: 1,
-        artifact_ref: "artifacts/story.md",
-      },
-    ],
-    slices: [
-      {
-        id: "cli-heartbeat-routing",
-        stack: "backend",
-        depends_on: [],
-        status: "running",
-        branch: "heartbeat-liveness--cli-heartbeat-routing",
-        worktree: ".opencode/worktrees/heartbeat-liveness--cli-heartbeat-routing",
-        attempts: 1,
-      },
-    ],
+    steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md" }],
+    slices: [{ id: "cli-heartbeat-routing", stack: "backend", depends_on: [], status: "running", branch: "heartbeat-liveness--cli-heartbeat-routing", worktree: ".opencode/worktrees/heartbeat-liveness--cli-heartbeat-routing", attempts: 1 }],
     validator: null,
     security_review: null,
     pr_url: null,
@@ -359,21 +285,14 @@ function runningRun(overrides = {}) {
   };
 }
 
-function heartbeatLease(overrides = {}) {
+function heartbeatState(overrides = {}) {
   return {
     schema_version: 1,
     run_id: RUN_ID,
-    token: "lease-1",
     phase: "builder-wave",
-    status: "running",
     pid: 4242,
-    started_at: "2026-07-06T11:00:00.000Z",
     last_tick_at: "2026-07-06T11:00:00.000Z",
-    stop_requested_at: null,
-    stopped_at: null,
     interval_ms: 1000,
-    deadline_at: "2026-07-06T12:00:00.000Z",
-    stop_reason: null,
     ...overrides,
   };
 }
@@ -387,12 +306,6 @@ function protectedGates(pending) {
       answer_ref: `gates/${pending}.answer`,
     },
   };
-}
-
-function ensureAuthorityDirs(runDir) {
-  for (const directory of ["evidence", "artifacts", "reviews", "attestations", "gates"]) {
-    mkdirSync(join(runDir, directory), { recursive: true });
-  }
 }
 
 function cleanup(dir) {
@@ -411,7 +324,6 @@ function factoryLock(overrides = {}) {
   return {
     schema_version: 1,
     run_id: RUN_ID,
-    heartbeat_owner: HEARTBEAT_OWNER,
     session_owner: "session-1",
     updated_at: "2026-07-06T11:00:00.000Z",
     ...overrides,
@@ -423,9 +335,8 @@ function isProcessAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    return error?.code === "EPERM";
+  } catch {
+    return false;
   }
 }
 
