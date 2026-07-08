@@ -6,10 +6,25 @@ const HIDDEN_STATUSES = new Set(["completed"]);
 
 function statusColor(theme, status) {
   if (status === "completed") return theme.success;
-  if (status === "blocked") return theme.error;
+  if (status === "blocked" || status === "invalid") return theme.error;
   if (status === "needs-human" || status === "partial") return theme.warning;
   if (status === "running") return theme.info;
   return theme.textMuted;
+}
+
+function diagnosticColor(theme, status) {
+  if (status === "error") return theme.error;
+  if (status === "warning") return theme.warning;
+  return theme.textMuted;
+}
+
+function hasNonOkDiagnostic(run) {
+  return Boolean(run?.diagnostic_status && run.diagnostic_status !== "ok");
+}
+
+function diagnosticLine(run) {
+  const classification = run.diagnostic_classification ? `${run.diagnostic_classification}: ` : "";
+  return `${classification}${run.diagnostic_summary || "Diagnostics require attention"}`;
 }
 
 function truncate(value, max) {
@@ -22,7 +37,7 @@ function View(props) {
   const [runs, setRuns] = createSignal(readRuns(roots()));
   const theme = () => props.api.theme.current;
   const visible = createMemo(() => runs().length > 0);
-  const active = createMemo(() => runs().filter((run) => !HIDDEN_STATUSES.has(run.status)));
+  const active = createMemo(() => runs().filter((run) => !HIDDEN_STATUSES.has(run.status) || hasNonOkDiagnostic(run)));
   const latestCompleted = createMemo(() => runs().find((run) => run.status === "completed"));
   const shown = createMemo(() => {
     const list = active();
@@ -72,6 +87,11 @@ function View(props) {
               </Show>
               <Show when={run.terminal_reason}>
                 <text fg={theme().warning}>reason: {truncate(run.terminal_reason, 30)}</text>
+              </Show>
+              <Show when={hasNonOkDiagnostic(run)}>
+                <text fg={diagnosticColor(theme(), run.diagnostic_status)}>
+                  diagnostic: {truncate(diagnosticLine(run), 42)}
+                </text>
               </Show>
               <Show when={run.branch}>
                 <text fg={theme().textMuted}>branch: {truncate(run.branch, 30)}</text>

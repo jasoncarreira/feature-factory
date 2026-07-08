@@ -1,8 +1,11 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { diagnoseRunFile, diagnosticEnvelope, diagnosticItem } from "./factory-diagnostics.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
 const MAX_SCAN_DIRS = 2000;
+const MAX_DIAGNOSTIC_SUMMARY = 180;
+const FAIL_CLOSED_CONDITIONS = new Set(["invalid-run-state", "invalid-authority", "unverifiable-authority"]);
 
 export function factoryRoots(api) {
   const starts = [api.state.path.worktree, api.state.path.directory].filter(Boolean);
@@ -68,20 +71,23 @@ function safeReadDir(dir) {
 
 function readRootRuns(root) {
   if (!root || !existsSync(root)) return [];
+  const repoRoot = dirname(dirname(root));
   return readdirSync(root)
     .flatMap((runID) => {
       const file = join(root, runID, "run.json");
       if (!existsSync(file) || !statSync(file).isFile()) return [];
+      const diagnostics = safeDiagnoseRunFile(file, { repoRoot });
+      if (shouldUseFallbackRow(diagnostics)) return [fallbackRun(runID, file, diagnostics)];
       try {
         const run = JSON.parse(readFileSync(file, "utf8"));
-        return [summarize(run, runID, file)];
+        return [summarize(run, runID, file, diagnostics)];
       } catch {
-        return [];
+        return [fallbackRun(runID, file, diagnostics)];
       }
     });
 }
 
-function summarize(run, fallbackID, file) {
+function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
   return {
     run_id: String(run.run_id || fallbackID),
     status: String(run.status || "unknown"),
@@ -97,7 +103,71 @@ function summarize(run, fallbackID, file) {
     panel: panelSummary(run),
     terminal_reason: run.terminal_result?.reason ? String(run.terminal_result.reason) : null,
     file,
+    run_dir: dirname(file),
+    ...diagnosticSummary(diagnostics),
   };
+}
+
+function fallbackRun(fallbackID, file, diagnostics) {
+  return {
+    run_id: String(fallbackID),
+    status: "invalid",
+    mode: null,
+    gate: null,
+    branch: null,
+    pr_url: null,
+    review_tier: null,
+    review_tier_source: null,
+    updated_at: null,
+    current: null,
+    slices: null,
+    panel: null,
+    terminal_reason: null,
+    file,
+    run_dir: dirname(file),
+    ...diagnosticSummary(diagnostics),
+  };
+}
+
+function shouldUseFallbackRow(diagnostics) {
+  return Array.isArray(diagnostics?.items) && diagnostics.items.some((item) => FAIL_CLOSED_CONDITIONS.has(item?.condition));
+}
+
+function safeDiagnoseRunFile(file, options) {
+  try {
+    return diagnoseRunFile(file, options);
+  } catch (error) {
+    const checkedAt = new Date().toISOString();
+    return diagnosticEnvelope([
+      diagnosticItem("invalid-run-state", {
+        checkedAt,
+        authoritative: false,
+        message: `Factory diagnostics failed: ${error.message}`,
+        evidence: { source: "tui-data", run_path: file, error: error.message },
+      }),
+    ], { checkedAt, authoritative: false });
+  }
+}
+
+function diagnosticSummary(diagnostics) {
+  const envelope = diagnostics || healthyDiagnostics();
+  return {
+    diagnostics: envelope,
+    diagnostic_status: stringOrDefault(envelope.status, "ok"),
+    diagnostic_severity: stringOrDefault(envelope.severity, "info"),
+    diagnostic_classification: stringOrDefault(envelope.classification, "healthy"),
+    diagnostic_summary: truncateDiagnosticSummary(stringOrDefault(envelope.summary, "No diagnostics")),
+  };
+}
+
+function healthyDiagnostics() {
+  return diagnosticEnvelope([], { authoritative: true });
+}
+
+function truncateDiagnosticSummary(value) {
+  const text = String(value || "");
+  if (text.length <= MAX_DIAGNOSTIC_SUMMARY) return text;
+  return `${text.slice(0, MAX_DIAGNOSTIC_SUMMARY - 3)}...`;
 }
 
 function pendingGate(run) {
@@ -151,4 +221,8 @@ function panelSummary(run) {
 
 function stringOrNull(value) {
   return typeof value === "string" ? value : null;
+}
+
+function stringOrDefault(value, fallback) {
+  return typeof value === "string" ? value : fallback;
 }
