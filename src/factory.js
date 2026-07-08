@@ -512,16 +512,14 @@ function buildContinuation(parentRunId, opts = {}) {
 
   return {
     kind: "blocked-run-continuation",
-    schema: "feature-factory.continuation.v1",
     schema_version: 1,
     parent: {
       run_id: parentRun.run_id,
       status: parentRun.status,
-      ref: relativeRef(repo, parentRunFile),
-      hash: sha256File(parentRunFile),
+      run_ref: relativeRef(repo, parentRunFile),
+      run_hash: sha256File(parentRunFile),
       branch: parentRun.branch,
       commit: branchCommit(repo, parentRun.branch),
-      artifact_refs: collectHashedRefs(join(parentRunDir, "artifacts"), "artifacts"),
     },
     review: {
       ref: review.ref,
@@ -533,6 +531,7 @@ function buildContinuation(parentRunId, opts = {}) {
       branch: targetRunId,
       worktree: resolve(repo, ".opencode", "worktrees", targetRunId),
     },
+    parent_artifacts: collectHashedRefs(join(parentRunDir, "artifacts"), "artifacts"),
   };
 }
 

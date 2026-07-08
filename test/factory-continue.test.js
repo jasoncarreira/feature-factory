@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { continueFactory } from "../src/factory.js";
-import { ValidationError, validateRun } from "../src/validate.js";
+import { validateRun } from "../src/validate.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
@@ -33,16 +33,14 @@ describe("factory continue", () => {
       const parentCommit = gitStdout(fixture.repo, ["rev-parse", "--verify", `refs/heads/${fixture.runId}^{commit}`]);
       assert.deepEqual(result.payload.continuation, {
         kind: "blocked-run-continuation",
-        schema: "feature-factory.continuation.v1",
         schema_version: 1,
         parent: {
           run_id: fixture.runId,
           status: "blocked",
-          ref: `.opencode/factory/${fixture.runId}/run.json`,
-          hash: beforeRunHash,
+          run_ref: `.opencode/factory/${fixture.runId}/run.json`,
+          run_hash: beforeRunHash,
           branch: fixture.runId,
           commit: parentCommit,
-          artifact_refs: [{ ref: "artifacts/story.md", hash: hashFile(join(fixture.runDir, "artifacts", "story.md")) }],
         },
         review: {
           ref: "reviews/reviewer.json",
@@ -56,30 +54,29 @@ describe("factory continue", () => {
           branch: "blocked-parent-continue",
           worktree: join(gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]), ".opencode", "worktrees", "blocked-parent-continue"),
         },
+        parent_artifacts: [{ ref: "artifacts/story.md", hash: hashFile(join(fixture.runDir, "artifacts", "story.md")) }],
       });
       assert.equal(hashFile(join(fixture.runDir, "run.json")), beforeRunHash);
       assert.equal(hashFile(join(fixture.runDir, "reviews", "reviewer.json")), beforeReviewHash);
-      assert.deepEqual(hashArtifactRefs(fixture.runDir, result.payload.continuation.parent.artifact_refs.map((artifact) => artifact.ref)), beforeArtifactHashes);
+      assert.deepEqual(hashArtifactRefs(fixture.runDir, result.payload.continuation.parent_artifacts.map((artifact) => artifact.ref)), beforeArtifactHashes);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "blocked-parent-continue", "run.json")), false);
     } finally {
       cleanup(fixture.repo);
     }
   });
 
-  it("exposes that the emitted continuation payload does not match the persisted run.continuation schema", () => {
+  it("emits a continuation payload that is valid for the persisted run.continuation schema", () => {
     const fixture = createFixture("schema-parent");
     try {
       const proc = runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "schema-parent-next", "--dry-run", "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
 
-      assert.throws(
-        () => validateRun(childRunFromPayload(output.payload.continuation)),
-        (error) => error instanceof ValidationError
-          && error.message.includes("run.continuation.parent.run_ref: must be a non-empty string")
-          && error.message.includes("run.continuation.parent.run_hash: must be a sha256 hash")
-          && error.message.includes("run.continuation.parent_artifacts: must be an array"),
-      );
+      assert.doesNotThrow(() => validateRun(childRunFromPayload(output.payload.continuation)));
+      assert.equal(output.payload.continuation.parent.run_ref, `.opencode/factory/${fixture.runId}/run.json`);
+      assert.equal(output.payload.continuation.parent.run_hash, hashFile(join(fixture.runDir, "run.json")));
+      assert.deepEqual(output.payload.continuation.parent_artifacts, hashArtifactRefs(fixture.runDir, ["artifacts/story.md"]));
+      assert.equal(output.payload.continuation.parent.artifact_refs, undefined);
     } finally {
       cleanup(fixture.repo);
     }
