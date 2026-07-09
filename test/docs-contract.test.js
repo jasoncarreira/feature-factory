@@ -16,6 +16,7 @@ const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
 const TODO = readDoc("../TODO.md");
 const CLI = readDoc("../src/cli.js");
+const TUI = readDoc("../src/tui.jsx");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
@@ -484,6 +485,10 @@ describe("cost attribution docs contract", () => {
 });
 
 describe("TUI sidebar refresh diagnostics docs contract", () => {
+  it("renders the refresh signal directly under the Feature Factory header with muted styling", () => {
+    assert.match(TUI, /<b>Feature Factory<\/b>[\s\S]*<text fg=\{theme\(\)\.textMuted\} wrapMode="none">\{refreshMetadata\(\)\.label\}<\/text>/, "TUI must render the muted refresh label directly under the Feature Factory header");
+  });
+
   it("documents the sidebar data-version label and restart limitation", () => {
     assert.match(README, /Feature Factory` panel[\s\S]*`sidebar vN · plugin changes need TUI restart`/i, "README must document the sidebar refresh metadata label");
     assert.match(README, /30s root-cache TTL|30-second root-cache TTL|30 second root-cache TTL/i, "README must document the root-cache TTL behind sidebar refreshes");
