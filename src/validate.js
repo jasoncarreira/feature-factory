@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
 import { hashFile, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 
@@ -35,6 +36,9 @@ const BLOCKED_CONTINUATION_PARENT_STATUSES = new Set(["blocked"]);
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const DEBUG_SNAPSHOT_KEYS = new Set(["created_with", "last_resumed_with", "resume_count"]);
 const DEBUG_SNAPSHOT_EVENT_KEYS = new Set(["collected_at", "event", "diagnostic_only", "env"]);
+const COST_ATTRIBUTION_STATUS_SET = new Set(COST_ATTRIBUTION_STATUSES);
+const COST_ATTRIBUTION_ENTRY_OPTIONAL_STRINGS = new Set(["step", "slice_id", "source", "operation", "provider", "model", "request_id", "cost_currency"]);
+const COST_ATTRIBUTION_NUMERIC_FIELDS = new Set([...USAGE_NUMERIC_FIELDS, ...COST_NUMERIC_FIELDS]);
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -70,6 +74,7 @@ export function validateRun(run) {
 
   validateGateMap(errors, run.gates, "run.gates");
   validateRunSlices(errors, run.slices, "run.slices");
+  validateCostAttribution(errors, run.cost_attribution, "run.cost_attribution", run);
   validateSteps(errors, run.steps, "run.steps");
   validateVerdict(errors, run.validator, "run.validator", VALIDATOR_VERDICTS);
   validateVerdict(errors, run.security_review, "run.security_review", SECURITY_VERDICTS);
@@ -626,6 +631,122 @@ function validateTerminalResult(errors, run, path) {
   if (["blocked", "partial", "needs-human"].includes(run.status) && !stringValue(run.terminal_result.reason)) errors.push({ path: `${path}.reason`, message: `is required for ${run.status}` });
 }
 
+function validateCostAttribution(errors, attribution, path, run) {
+  if (attribution === undefined || attribution === null) return;
+  if (!isRecord(attribution)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+
+  requiredInteger(errors, attribution, "schema_version", `${path}.schema_version`);
+  if (Number.isInteger(attribution.schema_version) && attribution.schema_version !== COST_ATTRIBUTION_SCHEMA_VERSION) errors.push({ path: `${path}.schema_version`, message: `must equal ${COST_ATTRIBUTION_SCHEMA_VERSION}` });
+  requiredString(errors, attribution, "updated_at", `${path}.updated_at`);
+  requiredEnum(errors, attribution, "status", COST_ATTRIBUTION_STATUS_SET, `${path}.status`);
+  validateCostAttributionRollup(errors, attribution.totals, `${path}.totals`, { required: true });
+  validateCostAttributionRollupMap(errors, attribution.by_agent, `${path}.by_agent`, { required: true });
+  validateCostAttributionRollupMap(errors, attribution.by_slice, `${path}.by_slice`, { required: true, knownKeys: knownRunSliceIds(run) });
+
+  if (!Array.isArray(attribution.entries)) {
+    errors.push({ path: `${path}.entries`, message: "must be an array" });
+    return;
+  }
+  if (attribution.entries.length > MAX_COST_ATTRIBUTION_ENTRIES) errors.push({ path: `${path}.entries`, message: `must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries` });
+  const knownSlices = knownRunSliceIds(run);
+  const runId = stringValue(run?.run_id) ? run.run_id : null;
+  for (const [index, entry] of attribution.entries.entries()) validateCostAttributionEntry(errors, entry, `${path}.entries[${index}]`, knownSlices, runId);
+}
+
+function validateCostAttributionEntry(errors, entry, path, knownSlices, runId) {
+  if (!isRecord(entry)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredString(errors, entry, "id", `${path}.id`);
+  requiredString(errors, entry, "recorded_at", `${path}.recorded_at`);
+  requiredString(errors, entry, "run_id", `${path}.run_id`);
+  requiredString(errors, entry, "agent", `${path}.agent`);
+  requiredEnum(errors, entry, "status", COST_ATTRIBUTION_STATUS_SET, `${path}.status`);
+  validateStringArray(errors, entry.missing, `${path}.missing`, { required: true });
+
+  for (const field of COST_ATTRIBUTION_ENTRY_OPTIONAL_STRINGS) optionalString(errors, entry, field, `${path}.${field}`);
+  validateCostAttributionNumbers(errors, entry, path);
+  if (hasCostNumber(entry) && !stringValue(entry.cost_currency)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost fields are present" });
+  if (runId && stringValue(entry.run_id) && entry.run_id !== runId) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
+  validateCostAttributionAvailability(errors, entry, path);
+  if ((entry.status === "partial" || entry.status === "unavailable") && Array.isArray(entry.missing) && !hasNonEmptyStringItem(entry.missing)) errors.push({ path: `${path}.missing`, message: `is required when status is ${entry.status}` });
+  if (stringValue(entry.slice_id) && knownSlices && !knownSlices.has(entry.slice_id)) errors.push({ path: `${path}.slice_id`, message: `unknown slice '${entry.slice_id}'` });
+}
+
+function validateCostAttributionAvailability(errors, entry, path) {
+  const missing = costAttributionAvailabilityMissing(entry);
+  const hasUsage = hasUsageNumber(entry);
+  const hasCost = hasCostNumber(entry);
+  if (entry.status === "available" && missing.length > 0) {
+    errors.push({ path: `${path}.status`, message: "available requires provider, model, usage, cost_total, and cost_currency" });
+  }
+  if (entry.status === "unavailable" && (hasUsage || hasCost)) errors.push({ path: `${path}.status`, message: "must be partial or available when usage or cost fields are present" });
+}
+
+function costAttributionAvailabilityMissing(entry) {
+  const missing = [];
+  if (!stringValue(entry.provider)) missing.push("provider");
+  if (!stringValue(entry.model)) missing.push("model");
+  if (!hasUsageNumber(entry)) missing.push("usage");
+  if (entry.cost_total === undefined || entry.cost_total === null) missing.push("cost_total");
+  if (!stringValue(entry.cost_currency)) missing.push("cost_currency");
+  return missing;
+}
+
+function validateCostAttributionRollupMap(errors, map, path, options = {}) {
+  if (!isRecord(map)) {
+    if (options.required) errors.push({ path, message: "must be an object" });
+    return;
+  }
+  for (const [key, rollup] of Object.entries(map)) {
+    if (!stringValue(key)) errors.push({ path: `${path}.${key}`, message: "must be keyed by non-empty strings" });
+    if (options.knownKeys && !options.knownKeys.has(key)) errors.push({ path: `${path}.${key}`, message: `unknown slice '${key}'` });
+    validateCostAttributionRollup(errors, rollup, `${path}.${key}`, { required: true });
+  }
+}
+
+function validateCostAttributionRollup(errors, rollup, path, options = {}) {
+  if (!isRecord(rollup)) {
+    if (options.required) errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredEnum(errors, rollup, "status", COST_ATTRIBUTION_STATUS_SET, `${path}.status`);
+  requiredInteger(errors, rollup, "entry_count", `${path}.entry_count`);
+  optionalInteger(errors, rollup, "request_count", `${path}.request_count`);
+  validateStringArray(errors, rollup.missing, `${path}.missing`, { required: true });
+  optionalBoolean(errors, rollup, "mixed_currency", `${path}.mixed_currency`);
+  optionalString(errors, rollup, "cost_currency", `${path}.cost_currency`);
+  validateCostAttributionNumbers(errors, rollup, path);
+  if (rollup.mixed_currency === true && rollup.cost_total !== undefined && rollup.cost_total !== null) errors.push({ path: `${path}.cost_total`, message: "must be omitted when mixed_currency is true" });
+  if (hasCostNumber(rollup) && rollup.mixed_currency !== true && rollup.cost_total !== undefined && !stringValue(rollup.cost_currency)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost_total is present" });
+}
+
+function validateCostAttributionNumbers(errors, value, path) {
+  for (const field of COST_ATTRIBUTION_NUMERIC_FIELDS) {
+    if (value[field] === undefined || value[field] === null) continue;
+    if (typeof value[field] !== "number" || !Number.isFinite(value[field]) || value[field] < 0) errors.push({ path: `${path}.${field}`, message: "must be a finite non-negative number" });
+  }
+}
+
+function knownRunSliceIds(run) {
+  if (!Array.isArray(run?.slices)) return null;
+  const ids = new Set();
+  for (const slice of run.slices) if (stringValue(slice?.id)) ids.add(slice.id);
+  return ids;
+}
+
+function hasCostNumber(value) {
+  return COST_NUMERIC_FIELDS.some((field) => value[field] !== undefined && value[field] !== null);
+}
+
+function hasUsageNumber(value) {
+  return USAGE_NUMERIC_FIELDS.some((field) => value[field] !== undefined && value[field] !== null);
+}
+
 function validateGateName(errors, name, path) {
   if (!SAFE_GATE_NAME_PATTERN.test(name)) errors.push({ path, message: "must match safe gate name pattern [a-z0-9][a-z0-9_-]*[a-z0-9]" });
 }
@@ -706,6 +827,11 @@ function optionalNumber(errors, obj, key, path) {
 function optionalInteger(errors, obj, key, path) {
   if (obj[key] === undefined || obj[key] === null) return;
   if (!Number.isInteger(obj[key]) || obj[key] < 0) errors.push({ path, message: "must be a non-negative integer" });
+}
+
+function optionalBoolean(errors, obj, key, path) {
+  if (obj[key] === undefined || obj[key] === null) return;
+  if (typeof obj[key] !== "boolean") errors.push({ path, message: "must be a boolean" });
 }
 
 function requiredInteger(errors, obj, key, path) {
