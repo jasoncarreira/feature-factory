@@ -11,14 +11,6 @@ covered there.
   - Do not silently re-scaffold an empty run control plane if `.opencode/factory/<run-id>` or the active worktree is missing/disrupted.
   - If prior durable state is available, recover from it and reconcile with git branch/commit evidence; otherwise fail loudly with terminal `blocked` or `needs-human` plus a clear `terminal_result.reason`.
 
-- Automated blocked-run continuation
-  - Add a `factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>` workflow.
-  - Treat the blocked branch/worktrees and review artifacts as read-only source context.
-  - Use the final/blocking review as the remediation spec seed while preserving the original story/brief as scope boundaries.
-  - Record parent run, blocked branch/commit, review ref, and original artifact refs in continuation metadata.
-  - Refuse to continue if the blocked branch or review cannot be found.
-  - Open a draft PR only after the normal validator/security gates pass.
-
 ## Build And Review Workflow
 
 - Interrupt, steer, and resume (implemented baseline)

@@ -298,6 +298,14 @@ Run autonomously through the factory's own reviewed gates and open a draft PR wh
 feature-factory factory start --repo /path/to/repo --autonomous "APP-123 add the missing approval workflow"
 ```
 
+Check or recover a disrupted resume before launching opencode:
+
+```sh
+feature-factory factory resume-check <run-id> --json
+```
+
+`factory resume-check` is the explicit recovery control plane for `resume <run-id>`. Missing, inaccessible, or invalid `.opencode/factory/<run-id>/run.json` never causes a fresh empty control plane to be re-scaffolded; the command returns a synthetic non-durable blocked envelope with `ok:false`, `durable:false`, `updated:false`, `recovered:false`, and a `terminal_result.reason` stating that no durable `terminal_result` can be written without forbidden re-scaffolding. For valid non-terminal manifests with a missing active worktree, recovery is allowed only when the branch exists, recorded `base_commit` and merged slice `merge_commit` values are ancestors of branch HEAD, the target stays under `.opencode/worktrees`, no existing path would be overwritten, `git worktree add` succeeds, and the final worktree identity/HEAD matches the branch. Contradictory git evidence persists terminal `blocked`; unsafe or inaccessible local paths persist `needs-human`. `factory start --headless|--autonomous "resume <run-id>"` runs this preflight before seeding repo skills or spawning opencode and prints the envelope instead of continuing when `ok:false`. Read-only `status`, `list`, `validate`, and `watch` surfaces do not implicitly recover.
+
 Continue from a terminal blocked run with a new run id:
 
 ```sh
