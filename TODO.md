@@ -11,11 +11,6 @@ covered there.
   - Resume rejects `active-heartbeat` and preserves durable state; raw steering is labeled `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data` only at one-time consume.
   - Future work: live cancellation/kill of running opencode and semantic rollback when steering conflicts with completed artifacts.
 
-- Remediation context reuse
-  - Reuse implementer context across remediation loops where safe.
-  - Keep reviewers fresh and read-only. (Prior findings are already fed forward via the
-    `attempt` + `required_fixes` delta-review wiring.)
-
 ## Observability And Cost
 
 - Honeycomb OpenTelemetry enablement

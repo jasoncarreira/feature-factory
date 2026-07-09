@@ -463,13 +463,11 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 }
 
 export function continueFactory(parentRunId, opts = {}) {
-  if (opts.ready) throw new Error("factory continue does not accept --ready");
-  if (opts.noDraft) throw new Error("factory continue does not accept --no-draft");
   const repo = repoRoot(opts.cwd || process.cwd());
   const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
 
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
-  const payload = featureCommandPayload(prompt, { ...opts, repo, ready: false, continuation });
+  const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
   if (opts.dryRun) return { status: "dry-run", payload };
 
   seedRepoSkill(repo);
@@ -1614,6 +1612,7 @@ function buildResumePayload(run, opts) {
     driver: {
       mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
       ready: false,
+      pr_mode: run.pr_mode || null,
       reviewer: null,
       github_account: resolveGithubAccount(opts),
     },
@@ -1683,12 +1682,19 @@ function featureCommandPayload(prompt, opts) {
     driver: {
       mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
       ready: Boolean(opts.ready),
+      pr_mode: runPrModeOverride(opts),
       reviewer: stringValue(opts.reviewer) ? opts.reviewer : null,
       github_account: githubAccount,
     },
   };
   if (opts.continuation !== undefined) payload.continuation = opts.continuation;
   return payload;
+}
+
+function runPrModeOverride(opts = {}) {
+  if (opts.draft === true) return "draft";
+  if (opts.noDraft === true || opts.ready === true) return "ready";
+  return null;
 }
 
 function resolveGithubAccount(opts) {

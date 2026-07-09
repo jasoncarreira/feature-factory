@@ -8,6 +8,7 @@ import {
   validateRun,
   validateSlicesPlan,
 } from "./validate.js";
+import { hasInFlightHeartbeatWork } from "./run-state.js";
 import { physicalPath, timestamp } from "./utils.js";
 
 export const DIAGNOSTIC_SCHEMA_VERSION = 1;
@@ -116,7 +117,7 @@ export function diagnoseRunObject(input, options = {}) {
       message: `Run is waiting at protected gate '${protectedGate}'.`,
       evidence: { source: "run.json", run_dir: runDir, run_path: runFile, gate: protectedGate },
     }));
-  } else {
+  } else if (hasInFlightHeartbeatWork(run)) {
     const heartbeat = inspectHeartbeat(run, { ...options, checkedAt, runDir });
     if (heartbeat.invalid) {
       items.push(diagnosticItem("invalid-run-state", {
