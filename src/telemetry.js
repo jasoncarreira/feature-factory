@@ -1,4 +1,3 @@
-import { SpanStatusCode, context, trace } from "@opentelemetry/api";
 import {
   REDACTED_ENV_VALUE,
   isSecretShapedEnvKey,
@@ -22,6 +21,36 @@ const OTLP_ENDPOINT_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9]+)?_ENDPOINT$/u;
 const OTLP_HEADERS_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9]+)?_HEADERS$/u;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 const SAFE_ATTRIBUTE_ARRAY_TYPES = new Set(["string", "number", "boolean"]);
+// @opentelemetry/api SpanStatusCode.ERROR is the stable enum value 2. Inlined so
+// this module never needs a static import of an optional runtime dependency.
+const SPAN_STATUS_ERROR = 2;
+// Lazy, cached load of the optional @opentelemetry/api package. `undefined` means
+// not yet attempted, `null` means unavailable, an object is the loaded module.
+let cachedOtelApi;
+async function loadOtelApi(importer) {
+  if (typeof importer === "function") {
+    try {
+      return await importer();
+    } catch {
+      return null;
+    }
+  }
+  if (cachedOtelApi !== undefined) return cachedOtelApi;
+  try {
+    cachedOtelApi = await import("@opentelemetry/api");
+  } catch {
+    cachedOtelApi = null;
+  }
+  return cachedOtelApi;
+}
+function noopSpan() {
+  return {
+    recordException() {},
+    setStatus() {},
+    setAttribute() {},
+    end() {},
+  };
+}
 const DEFAULT_CONTENT_CAPTURE = Object.freeze({
   captureMessages: false,
   captureToolArguments: false,
@@ -219,9 +248,16 @@ export async function withSpan(name, attributesOrCallback = {}, callbackOrOption
   if (typeof callback !== "function") throw new Error("withSpan requires a callback");
   const attributes = typeof attributesOrCallback === "function" ? {} : runAttributes(attributesOrCallback);
   const options = typeof attributesOrCallback === "function" ? (callbackOrOptions || {}) : maybeOptions;
-  const tracer = trace.getTracer(options.tracerName || TELEMETRY_TRACER_NAME);
 
-  return tracer.startActiveSpan(String(name), { attributes }, options.context || context.active(), async (span) => {
+  const api = await loadOtelApi(options.importer);
+  if (!api) {
+    // @opentelemetry/api is not installed: run the work without emitting a span
+    // rather than crashing. Telemetry is strictly optional at runtime.
+    return callback(noopSpan());
+  }
+
+  const tracer = api.trace.getTracer(options.tracerName || TELEMETRY_TRACER_NAME);
+  return tracer.startActiveSpan(String(name), { attributes }, options.context || api.context.active(), async (span) => {
     try {
       return await callback(span);
     } catch (error) {
@@ -238,7 +274,7 @@ export function recordError(span, error) {
   const message = error instanceof Error ? error.message : String(error);
   const type = error instanceof Error && error.name ? error.name : typeof error;
   span.recordException?.(sanitizeException(error));
-  span.setStatus?.({ code: SpanStatusCode.ERROR, message: sanitizeDiagnosticMessage(message) });
+  span.setStatus?.({ code: SPAN_STATUS_ERROR, message: sanitizeDiagnosticMessage(message) });
   span.setAttribute?.("error.type", sanitizeDiagnosticMessage(type));
 }
 
