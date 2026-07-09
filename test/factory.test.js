@@ -196,6 +196,39 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
+  it("repairs recognized stale seeded feature skills when seed metadata is invalid", () => {
+    const repo = mkdtempSync(join(tmpdir(), "factory-seed-skill-invalid-"));
+    try {
+      const dest = seedRepoSkill(repo);
+      const skill = join(dest, "SKILL.md");
+      const schema = join(dest, "SCHEMA.md");
+      const seedHash = join(dest, ".seed-hash");
+      const currentSkill = readFileSync(skill, "utf8");
+      const currentSchema = readFileSync(schema, "utf8");
+      const staleSkill = "older packaged skill from invalid metadata\n";
+      const staleSchema = "older packaged schema from invalid metadata\n";
+      writeFileSync(skill, staleSkill, "utf8");
+      writeFileSync(schema, staleSchema, "utf8");
+      writeFileSync(seedHash, "{\n", "utf8");
+
+      seedRepoSkill(repo, {
+        knownSeedHashes: {
+          "SKILL.md": new Set([sha256(staleSkill)]),
+          "SCHEMA.md": new Set([sha256(staleSchema)]),
+        },
+      });
+
+      assert.equal(readFileSync(skill, "utf8"), currentSkill);
+      assert.equal(readFileSync(schema, "utf8"), currentSchema);
+      assert.deepEqual(readJson(seedHash), {
+        "SKILL.md": sha256(currentSkill),
+        "SCHEMA.md": sha256(currentSchema),
+      });
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("preserves unrecognized local seeded feature edits with empty metadata", () => {
     const repo = mkdtempSync(join(tmpdir(), "factory-seed-skill-local-"));
     try {
