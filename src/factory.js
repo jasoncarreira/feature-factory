@@ -3,8 +3,8 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
-import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, withRunJsonLock } from "./run-state.js";
-import { pendingProtectedGate, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { git, repoRoot } from "./git.js";
@@ -122,6 +122,39 @@ export function continueFactory(parentRunId, opts = {}) {
   }
 }
 
+export async function resumeFactory(runId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
+  const run = readRunFile(join(runDir, "run.json"));
+  const eligibility = resumeEligibility(runDir, run, { ...opts, cwd: repo, repoRoot: repo });
+  if (!eligibility.eligible) throw new Error(`resume ineligible: ${eligibility.reasons.join(", ")}`);
+  const payload = buildResumePayload(run, { ...opts, repo });
+  if (opts.dryRun) return { status: "dry-run", eligible: true, eligibility, payload };
+
+  seedRepoSkill(repo);
+  const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
+  if (opts.model) commandArgs.push("--model", opts.model);
+  commandArgs.push(JSON.stringify(payload, null, 2));
+  if (opts.detached) return startDetached(repo, commandArgs);
+  try {
+    execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
+  } catch (error) {
+    throw new Error(`opencode exited ${error.status ?? 1}`);
+  }
+}
+
+export async function writeSteering(runId, message, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringQueued(runDir, message, opts);
+  return { run_id: result.run.run_id, steering: result.steering };
+}
+
+export async function consumeSteering(runId, input, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringConsumed(runDir, input, opts);
+  return { run_id: result.run.run_id, steering: result.steering };
+}
+
 export function listRuns(opts = {}) {
   return allRunDirs(opts)
     .map((runDir) => {
@@ -135,6 +168,7 @@ export function listRuns(opts = {}) {
         run_id: run.value.run_id || runId,
         status: run.value.status || "unknown",
         gate: pendingGate(run.value),
+        steering: steeringSummary(run.value),
         review_tier: selectedReviewTier(run.value),
         updated_at: run.value.updated_at || null,
         path: file,
@@ -168,6 +202,7 @@ export function status(runId, opts = {}) {
     worktree: run.worktree || null,
     github_account: run.github_account || null,
     pending_gate: pendingGate(run),
+    steering: steeringSummary(run),
     gates: run.gates || {},
     pr_url: run.pr_url || null,
     review_tier: run.review_tier || null,
@@ -1195,6 +1230,90 @@ export function validateSlices(plan) {
   return validateSlicesPlan(plan);
 }
 
+function buildResumePayload(run, opts) {
+  const steering = {
+    schema_version: 1,
+    kind: "operator-steering-pointer",
+    run_id: run.run_id,
+    pending: null,
+    consume: null,
+    raw_message_included: false,
+  };
+  const pending = steeringPendingMetadata(run.steering?.pending);
+  if (pending) {
+    steering.pending = pending;
+    steering.consume = {
+      command: "feature-factory",
+      args: ["factory", "steer-consume", run.run_id, "--ref", pending.ref, "--hash", pending.hash, "--json"],
+    };
+  }
+  return {
+    operator_request: `resume ${run.run_id}`,
+    driver: {
+      mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
+      ready: false,
+      reviewer: null,
+      github_account: resolveGithubAccount(opts),
+    },
+    resume: {
+      schema_version: 1,
+      kind: "existing-run-resume",
+      run_id: run.run_id,
+    },
+    steering,
+  };
+}
+
+function resumeEligibility(runDir, run, opts = {}) {
+  const reasons = [];
+  if (run.status !== "running") reasons.push(TERMINAL_STATUSES.has(run.status) ? "terminal-run" : "run-not-running");
+  const diagnostics = diagnoseRunObject(run, { ...publicDiagnosticOptions(opts, opts.repoRoot || factoryRepoFromRunDir(runDir)), runDir, runFile: join(runDir, "run.json") });
+  if (diagnosticsFailClosed(diagnostics)) reasons.push("invalid-run-state");
+  const steeringChecks = steeringConsistencyChecks(runDir, run);
+  if (!steeringChecks.every((item) => item.ok)) reasons.push("invalid-run-state");
+  if (Array.isArray(diagnostics.items) && diagnostics.items.some((item) => item?.condition === "missing-worktree")) reasons.push("missing-worktree");
+  const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
+  if (heartbeat.error) reasons.push("invalid-run-state");
+  else if (heartbeat.value && heartbeatIsFresh(heartbeat.value, timestamp(opts.now), opts)) reasons.push("active-heartbeat");
+  return { eligible: reasons.length === 0, reasons: [...new Set(reasons)], diagnostics, steering_checks: steeringChecks, heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null };
+}
+
+function assertResumeMutationAllowed(runDir, run, opts = {}) {
+  const eligibility = resumeEligibility(runDir, run, opts);
+  if (!eligibility.eligible) throw new Error(`record-resume requires resumable run: ${eligibility.reasons.join(", ")}`);
+  return eligibility;
+}
+
+function steeringSummary(run) {
+  const steering = run?.steering;
+  if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, consumed_count: 0, latest_consumed: null };
+  const consumed = Array.isArray(steering.history) ? steering.history.filter((item) => item?.event === "consumed") : [];
+  const latest = consumed[consumed.length - 1] || null;
+  return {
+    pending: steeringPendingMetadata(steering.pending),
+    consumed_count: consumed.length,
+    latest_consumed: latest ? {
+      id: latest.id,
+      ref: latest.ref,
+      hash: latest.hash,
+      message_chars: latest.message_chars,
+      created_at: latest.created_at,
+      consumed_at: latest.consumed_at,
+    } : null,
+  };
+}
+
+function steeringPendingMetadata(pending) {
+  if (!pending || typeof pending !== "object" || Array.isArray(pending)) return null;
+  return {
+    id: pending.id,
+    ref: pending.ref,
+    hash: pending.hash,
+    message_chars: pending.message_chars,
+    created_at: pending.created_at,
+  };
+}
+
 function featureCommandPayload(prompt, opts) {
   const githubAccount = resolveGithubAccount(opts);
   const payload = {
@@ -1382,8 +1501,6 @@ function writeJsonAtomic(file, value) {
 
 async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
-  const runPath = join(runDir, "run.json");
-  const current = readRunFile(runPath);
   const snapshot = await collectRunDebugSnapshot({
     cwd: factoryRepoFromRunDir(runDir),
     driverKind: opts.driverKind,
@@ -1392,12 +1509,17 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
     event: opts.event || (eventKind === "resume" ? "run-resumed" : "run-created"),
     now: opts.now,
   });
-  const next = validateRun({
-    ...current,
-    debug_snapshot: nextDebugSnapshot(current.debug_snapshot, snapshot, eventKind),
-  });
-  writeJsonAtomic(runPath, next);
-  return next.debug_snapshot;
+  return withRunJsonLock(runDir, async () => {
+    const runPath = join(runDir, "run.json");
+    const current = readRunFile(runPath);
+    if (eventKind === "resume") assertResumeMutationAllowed(runDir, current, opts);
+    const next = validateRun({
+      ...current,
+      debug_snapshot: nextDebugSnapshot(current.debug_snapshot, snapshot, eventKind),
+    });
+    writeJsonAtomic(runPath, next);
+    return next.debug_snapshot;
+  }, opts);
 }
 
 function nextDebugSnapshot(current, snapshot, eventKind) {

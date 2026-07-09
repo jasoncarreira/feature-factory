@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
@@ -47,6 +48,29 @@ describe("run schema and consistency", () => {
     assert.deepEqual(run.continuation.parent_artifacts, [
       { kind: "validation_report", ref: "artifacts/validation-report.md", hash: HASH },
     ]);
+  });
+
+  it("accepts steering metadata without bumping run schema and checks pending hash", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo, "steering-valid");
+    try {
+      mkdirSync(join(runDir, "steering"), { recursive: true });
+      const steeringFile = { schema_version: 1, kind: "operator-steering", run_id: "steering-valid", id: "s1", message: "do x", message_chars: 4, created_at: "2026-07-08T12:00:00.000Z", source: "factory steer" };
+      writeJson(join(runDir, "steering", "pending.json"), steeringFile);
+      const hash = hashFile(join(runDir, "steering", "pending.json"));
+      const run = {
+        ...runningRun("steering-valid"),
+        steering: { schema_version: 1, pending: { id: "s1", ref: "steering/pending.json", hash, message_chars: 4, created_at: "2026-07-08T12:00:00.000Z" }, history: [] },
+      };
+      writeJson(join(runDir, "run.json"), run);
+
+      assert.equal(validateRun(run).schema_version, 1);
+      assert.equal(validateRunDir(runDir).ok, true);
+      const bad = { ...run, steering: { ...run.steering, pending: { ...run.steering.pending, hash: HASH } } };
+      assert.equal(checkRunConsistency(runDir, bad).ok, false);
+    } finally {
+      cleanup(repo);
+    }
   });
 
   it("accepts continuation reviews with summary or required fixes", () => {
@@ -238,6 +262,10 @@ function createRunDir(repo, runId) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function hashFile(file) {
+  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 }
 
 function cleanup(repo) {
