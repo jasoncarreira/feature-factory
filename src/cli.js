@@ -10,10 +10,10 @@ import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
 import { canonicalizeGithubPrUrl } from "./refs.js";
-import { repoRoot } from "./git.js";
 import { normalizePrNumber as normalizeTransitionPrNumber, transitionGateDecision, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
+import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
@@ -350,7 +350,8 @@ async function slicesSeed(args) {
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory slices-seed requires exactly one <run-id>");
   const from = requiredOption(opts.from, "--from", "factory slices-seed");
-  const plan = validateSlicesPlan(readJsonFile(resolve(opts.cwd, from), "slices plan"));
+  const runDir = resolveRunDir(runId, opts);
+  const plan = validateSlicesPlan(readJsonFile(resolve(opts.repoRoot || opts.cwd, from), "slices plan"));
   const slices = plan.slices.map((slice) => ({
     id: slice.id,
     stack: slice.stack,
@@ -358,7 +359,7 @@ async function slicesSeed(args) {
     status: "pending",
     attempts: 0,
   }));
-  return print(await transitionRunJson(resolveRunDir(runId, opts), (run) => {
+  return print(await transitionRunJson(runDir, (run) => {
     if (!opts.force && Array.isArray(run.slices) && run.slices.some((slice) => slice?.status && slice.status !== "pending")) {
       throw new Error("factory slices-seed refuses to replace non-pending slice progress without --force");
     }
@@ -630,13 +631,19 @@ function normalizePositiveInteger(value, name) {
 }
 
 function resolveRunDir(runId, opts = {}) {
-  const root = factoryRoot(opts.cwd || process.cwd());
-  const dir = resolve(root, normalizeHeartbeatRunId(runId));
-  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${runId}`);
-  if (!insideDirectory(root, dir)) {
-    throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
+  const normalized = normalizeHeartbeatRunId(runId);
+  for (const root of factoryRootsForLookup(opts.cwd || process.cwd())) {
+    const dir = resolve(root, normalized);
+    if (!existsSync(join(dir, "run.json"))) continue;
+    if (!insideDirectory(root, dir)) throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
+    return rememberFactoryRepo(opts, dir);
   }
-  return dir;
+  throw new Error(`run not found: ${runId}`);
+}
+
+function rememberFactoryRepo(opts, runDir) {
+  if (opts && typeof opts === "object") opts.repoRoot = factoryRepoFromRunDir(runDir);
+  return runDir;
 }
 
 function publicHeartbeatStatus(runId, opts = {}) {
@@ -657,10 +664,6 @@ function hasInFlightHeartbeatWork(run) {
     return true;
   }
   return false;
-}
-
-function factoryRoot(cwd) {
-  return join(repoRoot(cwd), ".opencode", "factory");
 }
 
 function normalizeHeartbeatRunId(runId) {

@@ -18,7 +18,7 @@ import {
   writeGateAnswer,
 } from "../src/factory.js";
 
-describe("factory public state operations", () => {
+describe("factory public state operations", { concurrency: false }, () => {
   it("lists and reads runs without authority proofs", () => {
     const fixture = createFixture("public-run");
     try {
