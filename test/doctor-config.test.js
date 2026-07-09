@@ -114,7 +114,7 @@ describe("doctor telemetry readiness helpers", () => {
           HOME: home,
           FEATURE_FACTORY_OTEL_ENABLED: "true",
           OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
-          OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890,Authorization=Bearer abcdefghijklmnopqrstuvwxyz123456",
+          OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890,hc_api_12345678901234567890,Authorization=Bearer abcdefghijklmnopqrstuvwxyz123456",
           OTEL_SERVICE_NAME: "feature-factory",
         },
       });
@@ -132,6 +132,7 @@ describe("doctor telemetry readiness helpers", () => {
       ]);
       const serialized = JSON.stringify(output);
       assert.doesNotMatch(serialized, /github_pat_/u);
+      assert.doesNotMatch(serialized, /hc_api_/u);
       assert.doesNotMatch(serialized, /abcdefghijklmnopqrstuvwxyz/u);
     } finally {
       cleanup(dir);
@@ -157,7 +158,7 @@ describe("doctor telemetry readiness helpers", () => {
   it("summarizes OTLP env readiness without leaking header values or credential-shaped endpoints", () => {
     const readiness = evaluateOtlpEnvReadiness({
       OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
-      OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890,x-honeycomb-dataset=feature-factory,Authorization=Bearer abcdefghijklmnopqrstuvwxyz123456",
+      OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890,hc_api_12345678901234567890,x-honeycomb-dataset=feature-factory,Authorization=Bearer abcdefghijklmnopqrstuvwxyz123456",
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://user:pass@example.test/v1/traces",
       OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=test,service.name=feature-factory,api_token=github_pat_123456789012345678901234567890",
     });
@@ -182,6 +183,7 @@ describe("doctor telemetry readiness helpers", () => {
     ]);
     const serialized = JSON.stringify(readiness);
     assert.doesNotMatch(serialized, /github_pat_/u);
+    assert.doesNotMatch(serialized, /hc_api_/u);
     assert.doesNotMatch(serialized, /abcdefghijklmnopqrstuvwxyz/u);
     assert.doesNotMatch(serialized, /user:pass/u);
   });
@@ -286,6 +288,36 @@ describe("doctor telemetry readiness helpers", () => {
     assert.doesNotMatch(tracesDetail, new RegExp(escapeRegExp(tracesPathCredential), "u"));
     assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(endpointPathCredential), "u"));
     assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(tracesPathCredential), "u"));
+  });
+
+  it("redacts credential-shaped OTLP endpoint host labels from JSON and check detail output", async () => {
+    const hexHostCredential = "0123456789abcdef0123456789abcdef";
+    const honeycombPathCredential = "hc_api_12345678901234567890";
+
+    const readiness = evaluateOtlpEnvReadiness({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `https://${hexHostCredential}.collector.example.test/${honeycombPathCredential}/v1/traces`,
+      OTEL_SERVICE_NAME: "feature-factory",
+    });
+    assert.equal(
+      readiness.endpoint.value,
+      `https://${REDACTED_ENV_VALUE}.collector.example.test/${REDACTED_ENV_VALUE}/v1/traces`,
+    );
+
+    const detail = formatTelemetryEndpointDetail(readiness.endpoint);
+    const aggregate = await collectTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true } },
+      env: {
+        OTEL_EXPORTER_OTLP_ENDPOINT: `https://${hexHostCredential}.collector.example.test/${honeycombPathCredential}/v1/traces`,
+        OTEL_SERVICE_NAME: "feature-factory",
+      },
+      instrumentationLoadability: { ok: true, package: "@opentelemetry/api", exports: ["trace"] },
+    });
+    const jsonOutput = JSON.stringify({ telemetry: aggregate });
+
+    assert.doesNotMatch(detail, new RegExp(escapeRegExp(hexHostCredential), "u"));
+    assert.doesNotMatch(detail, new RegExp(escapeRegExp(honeycombPathCredential), "u"));
+    assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(hexHostCredential), "u"));
+    assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(honeycombPathCredential), "u"));
   });
 
   it("reports companion telemetry plugin presence and disabled action", () => {

@@ -12,6 +12,7 @@ const SENSITIVE_ENV_VALUE_PATTERN = /(?:secret|token|password|passwd|api[_-]?key
 const TOKEN_SHAPED_ENV_VALUE_PATTERNS = [
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/u,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
+  /\bhc_[A-Za-z0-9][A-Za-z0-9_-]{10,}\b/iu,
   /\bsk-proj[-_][A-Za-z0-9_-]{20,}\b/u,
   /\bsk-[A-Za-z0-9_-]{20,}\b/u,
   /\bxox[abp][_-][A-Za-z0-9-]{10,}(?:-[A-Za-z0-9-]{10,})*\b/u,
@@ -19,9 +20,10 @@ const TOKEN_SHAPED_ENV_VALUE_PATTERNS = [
   /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/iu,
   /\beyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
+  /(?:^|[^A-Za-z0-9-])(?:[A-Fa-f0-9]{32,})(?=$|[^A-Za-z0-9-])/u,
   /(?:https?|ssh|git|ftp):\/\/[^/\s:@]+:[^/\s@]+@/iu,
 ];
-const HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH = 40;
+const HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH = 32;
 const HIGH_ENTROPY_MIN_SHANNON = 3.5;
 export const REDACTED_ENV_VALUE = "[redacted]";
 

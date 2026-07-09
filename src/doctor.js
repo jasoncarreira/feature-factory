@@ -339,11 +339,31 @@ function sanitizeEndpointSummary(value) {
       .split("/")
       .map((segment) => sanitizeEndpointPathSegment(segment))
       .join("/") || "/";
+    const safeHost = sanitizeEndpointHost(parsed);
     const safeQuery = endpointSearchHasValues(parsed.searchParams) ? `?${REDACTED_ENV_VALUE}` : "";
-    return `${parsed.protocol}//${parsed.host}${safePath}${safeQuery}`;
+    return `${parsed.protocol}//${safeHost}${safePath}${safeQuery}`;
   } catch {
     return endpointValueLooksSensitive(raw) ? REDACTED_ENV_VALUE : safeValue(raw);
   }
+}
+
+function sanitizeEndpointHost(parsed) {
+  const hostname = parsed.hostname;
+  const port = parsed.port ? `:${parsed.port}` : "";
+  if (!hostname) return scrubSecretEnv(parsed.host || "");
+  if (hostname.startsWith("[") && hostname.endsWith("]")) return `${hostname}${port}`;
+  const safeHostname = hostname
+    .split(".")
+    .map((label) => sanitizeEndpointHostLabel(label))
+    .join(".");
+  return `${safeHostname}${port}`;
+}
+
+function sanitizeEndpointHostLabel(label) {
+  if (!label) return label;
+  const decoded = safeDecodeURIComponent(label);
+  if (endpointValueLooksSensitive(decoded)) return REDACTED_ENV_VALUE;
+  return scrubSecretEnv(label);
 }
 
 function sanitizeEndpointPathSegment(segment) {
