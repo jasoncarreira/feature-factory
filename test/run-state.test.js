@@ -709,6 +709,8 @@ function continuationMetadata(targetRunId) {
   return {
     schema_version: 1,
     kind: "blocked-run-continuation",
+    created_at: "2026-07-08T12:00:00.000Z",
+    operator_summary: "Continue blocked parent run from implementation-validator review.",
     parent: {
       run_id: "parent-run",
       status: "blocked",
@@ -716,20 +718,27 @@ function continuationMetadata(targetRunId) {
       run_hash: HASH,
       branch: "parent-branch",
       commit: "abc123",
+      worktree: "/tmp/parent-worktree",
     },
     review: {
+      kind: "validator",
       ref: "reviews/implementation-validator.json",
       hash: HASH,
       subject: "parent-run",
       summary: "Validator required fixes before PR creation.",
       required_fixes: ["address validation failure"],
+      source: "run.validator.review_ref",
     },
     target: {
       run_id: targetRunId,
       branch: "continuation-branch",
       worktree: "/tmp/continuation-worktree",
+      base_ref: "main",
+      base_commit: "def456",
     },
-    parent_artifacts: [{ ref: "artifacts/validation-report.md", hash: HASH }],
+    parent_artifacts: [{ kind: "validation_report", ref: "artifacts/validation-report.md", hash: HASH }],
+    parent_evidence: [],
+    parent_reviews: [{ kind: "review", ref: "reviews/implementation-validator.json", hash: HASH }],
   };
 }
 

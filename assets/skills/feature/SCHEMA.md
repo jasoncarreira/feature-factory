@@ -263,7 +263,10 @@ Rules:
   "mode": "interactive",
   "status": "running",
   "continuation": {
+    "schema_version": 1,
     "kind": "blocked-run-continuation",
+    "created_at": "2026-07-04T12:05:00Z",
+    "operator_summary": "Continue from blocked validation finding.",
     "parent": {
       "run_id": "app-123",
       "status": "blocked",
@@ -274,10 +277,12 @@ Rules:
       "worktree": ".opencode/worktrees/app-123-short-slug"
     },
     "review": {
+      "kind": "validator",
       "ref": "reviews/remediation-review.json",
       "hash": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       "subject": "app-123-short-slug",
-      "verdict": "APPROVE"
+      "verdict": "APPROVE",
+      "source": "run.validator.review_ref"
     },
     "target": {
       "run_id": "app-123-continuation-1",
@@ -300,18 +305,18 @@ Rules:
     ],
     "parent_evidence": [
       {
+        "kind": "evidence",
         "ref": "evidence/test-verifier.json",
         "hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
       }
     ],
     "parent_reviews": [
       {
+        "kind": "review",
         "ref": "reviews/implementation-validator.json",
         "hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
       }
-    ],
-    "operator_summary": "Continue from blocked validation finding.",
-    "created_at": "2026-07-04T12:05:00Z"
+    ]
   },
   "created_at": "2026-07-04T11:45:00Z",
   "updated_at": "2026-07-04T12:00:00Z",
@@ -394,9 +399,9 @@ Top-level `status` values are `running`, `completed`, `blocked`, `partial`, and 
 
 Top-level `run.json.review_tier` is an optional opaque display string. It may contain labels such as `light`, `standard`, or `strict`, but it does not change gates, agents, PR behavior, validation behavior, or workflow control. It does not change `schema_version`; it remains `1`.
 
-Top-level `run.json.continuation` is present only for child runs created by `factory continue`. Accepted continuation metadata has `kind: "blocked-run-continuation"`, nested `parent`, `review`, and `target` objects, and refs paired with hashes for the parent manifest, approved review evidence, target base commit, and every read-only parent context file. `parent.status` must be exactly `blocked`; `review.ref` resolves under the parent run's `reviews/` directory and is paired with `review.hash`; `target.run_id`, `target.branch`, `target.worktree`, `target.base_ref`, and `target.base_commit` describe the fresh child run. `parent_artifacts` is an array of `{kind, ref, hash}` entries for source artifacts such as story and technical brief, and optional `parent_evidence` / `parent_reviews` arrays carry `{ref, hash}` entries for additional source context. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits/hashes; it must not rely on a special blocking verdict enum as the authorization mechanism.
+Top-level `run.json.continuation` is present only for child runs created by `factory continue`. Accepted continuation metadata has `schema_version: 1`, `kind: "blocked-run-continuation"`, `created_at`, `operator_summary`, nested `parent`, `review`, and `target` objects, and refs paired with hashes for the parent manifest, approved review evidence, target base commit, and every read-only parent context file. `parent.status` must be exactly `blocked`; `parent.worktree`, branch, and commit identify the source worktree. `review.ref` resolves under the parent run's `reviews/` directory, is paired with `review.hash`, must be referenced by parent run state, and must have a subject consistent with that source. `target.run_id`, `target.branch`, `target.worktree`, `target.base_ref`, and `target.base_commit` describe the fresh child run. `parent_artifacts` is an array of `{kind, ref, hash}` entries for source artifacts such as story and technical brief, and `parent_evidence` / `parent_reviews` arrays carry `{kind, ref, hash}` entries for additional source context; `parent_reviews` includes the selected review with the same hash as `review.hash`. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits/hashes; it must not rely on a special blocking verdict enum as the authorization mechanism.
 
-Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before draft PR creation. Continuation PRs are draft-only; the driver contract forces `driver.ready = false`. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
+Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before draft PR creation. Continuation PRs are draft-only; the driver contract forces `driver.ready = false`, and `factory pr-created` verifies GitHub `isDraft: true` before recording a continuation PR URL. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
 
 Gate status values are `pending`, `approved`, `changes_requested`, and `stopped`. `approval_source` values are `human`, `external-driver`, `autonomous`, and `override`.
 

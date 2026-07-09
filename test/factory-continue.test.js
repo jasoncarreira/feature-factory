@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +18,7 @@ describe("factory continue", () => {
       const beforeRunHash = hashFile(join(fixture.runDir, "run.json"));
       const beforeReviewHash = hashFile(join(fixture.runDir, "reviews", "reviewer.json"));
       const beforeArtifactHashes = hashArtifactRefs(fixture.runDir, ["artifacts/story.md"]);
+      const mainCommit = gitStdout(fixture.repo, ["rev-parse", "--verify", "main^{commit}"]);
 
       const result = continueFactory(fixture.runId, {
         cwd: fixture.repo,
@@ -25,6 +26,7 @@ describe("factory continue", () => {
         runId: "blocked-parent-continue",
         dryRun: true,
         ghAccount: "octo-org",
+        now: "2026-07-08T12:00:00.000Z",
       });
 
       assert.equal(result.status, "dry-run");
@@ -34,6 +36,8 @@ describe("factory continue", () => {
       assert.deepEqual(result.payload.continuation, {
         kind: "blocked-run-continuation",
         schema_version: 1,
+        created_at: "2026-07-08T12:00:00.000Z",
+        operator_summary: `Continue blocked run '${fixture.runId}' from reviews/reviewer.json.`,
         parent: {
           run_id: fixture.runId,
           status: "blocked",
@@ -41,20 +45,27 @@ describe("factory continue", () => {
           run_hash: beforeRunHash,
           branch: fixture.runId,
           commit: parentCommit,
+          worktree: join(fixture.repo, ".opencode", "worktrees", fixture.runId),
         },
         review: {
+          kind: "validator",
           ref: "reviews/reviewer.json",
           hash: beforeReviewHash,
-          subject: "blocked run",
+          subject: fixture.runId,
           summary: "needs continuation",
           required_fixes: [],
+          source: "run.validator.review_ref",
         },
         target: {
           run_id: "blocked-parent-continue",
           branch: "blocked-parent-continue",
           worktree: join(gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]), ".opencode", "worktrees", "blocked-parent-continue"),
+          base_ref: "main",
+          base_commit: mainCommit,
         },
-        parent_artifacts: [{ ref: "artifacts/story.md", hash: hashFile(join(fixture.runDir, "artifacts", "story.md")) }],
+        parent_artifacts: [{ kind: "story", ref: "artifacts/story.md", hash: hashFile(join(fixture.runDir, "artifacts", "story.md")) }],
+        parent_evidence: [],
+        parent_reviews: [{ kind: "review", ref: "reviews/reviewer.json", hash: beforeReviewHash }],
       });
       assert.equal(hashFile(join(fixture.runDir, "run.json")), beforeRunHash);
       assert.equal(hashFile(join(fixture.runDir, "reviews", "reviewer.json")), beforeReviewHash);
@@ -83,7 +94,7 @@ describe("factory continue", () => {
   });
 
   it("accepts required_fixes without requiring a verdict enum", () => {
-    const fixture = createFixture("fixes-review", { review: { subject: "fixes", required_fixes: ["repair tests"], verdict: "not-a-standard-verdict" } });
+    const fixture = createFixture("fixes-review", { review: { subject: "fixes-review", required_fixes: ["repair tests"], verdict: "not-a-standard-verdict" } });
     try {
       const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "fixes-review-next", dryRun: true });
       assert.equal(result.payload.continuation.review.ref, "reviews/reviewer.json");
@@ -155,7 +166,7 @@ describe("factory continue", () => {
       cleanup(nonObject.repo);
     }
 
-    const emptyFixes = createFixture("empty-fixes-review", { review: { subject: "fixes", required_fixes: ["", "   "] } });
+    const emptyFixes = createFixture("empty-fixes-review", { review: { subject: "empty-fixes-review", required_fixes: ["", "   "] } });
     try {
       assert.throws(
         () => continueFactory(emptyFixes.runId, { cwd: emptyFixes.repo, review: "reviewer.json", runId: "empty-fixes-next", dryRun: true }),
@@ -229,6 +240,61 @@ describe("factory continue", () => {
       );
     } finally {
       cleanup(unsafeTarget.repo);
+    }
+  });
+
+  it("rejects continuation reviews that are not referenced by parent run state or have mismatched subjects", () => {
+    const unreferenced = createFixture("unreferenced-review");
+    try {
+      writeJson(join(unreferenced.runDir, "reviews", "unreferenced.json"), { subject: unreferenced.runId, summary: "not linked" });
+      assert.throws(
+        () => continueFactory(unreferenced.runId, { cwd: unreferenced.repo, review: "unreferenced.json", runId: "unreferenced-review-next", dryRun: true }),
+        /must be referenced by parent run state/u,
+      );
+    } finally {
+      cleanup(unreferenced.repo);
+    }
+
+    const mismatchedSubject = createFixture("mismatched-review-subject", { review: { subject: "other-run", summary: "wrong subject" } });
+    try {
+      assert.throws(
+        () => continueFactory(mismatchedSubject.runId, { cwd: mismatchedSubject.repo, review: "reviewer.json", runId: "mismatched-review-subject-next", dryRun: true }),
+        /subject must match parent validator source/u,
+      );
+    } finally {
+      cleanup(mismatchedSubject.repo);
+    }
+  });
+
+  it("rejects a symlinked parent run.json trust root before reading or hashing it", () => {
+    const fixture = createFixture("symlink-parent-run-json");
+    const escapedRun = mkdtempSync(join(tmpdir(), "factory-escaped-run-json-"));
+    try {
+      writeFileSync(join(escapedRun, "run.json"), readFileSync(join(fixture.runDir, "run.json")), "utf8");
+      rmSync(join(fixture.runDir, "run.json"), { force: true });
+      symlinkSync(join(escapedRun, "run.json"), join(fixture.runDir, "run.json"), "file");
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "symlink-parent-run-json-next", dryRun: true }),
+        /parent run\.json must not contain symlinks/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+      cleanup(escapedRun);
+    }
+  });
+
+  it("rejects a symlinked parent run directory trust root", () => {
+    const fixture = createFixture("symlink-parent-run-dir");
+    const realRunDir = join(fixture.repo, ".opencode", "factory", `${fixture.runId}-real`);
+    try {
+      renameSync(fixture.runDir, realRunDir);
+      symlinkSync(realRunDir, fixture.runDir, "dir");
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "symlink-parent-run-dir-next", dryRun: true }),
+        /parent run\.json must not contain symlinks/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
     }
   });
 
@@ -358,7 +424,7 @@ describe("factory continue", () => {
   });
 });
 
-function createFixture(runId, { status = "blocked", createBranch = true, review = { subject: "blocked run", summary: "needs continuation" } } = {}) {
+function createFixture(runId, { status = "blocked", createBranch = true, review } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "factory-continue-"));
   initGitRepo(repo);
   if (createBranch) runGit(repo, ["branch", runId]);
@@ -366,13 +432,14 @@ function createFixture(runId, { status = "blocked", createBranch = true, review 
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
-  writeJson(join(runDir, "reviews", "reviewer.json"), review);
+  writeJson(join(runDir, "reviews", "reviewer.json"), review || { subject: runId, summary: "needs continuation" });
   writeJson(join(runDir, "run.json"), {
     schema_version: 1,
     run_id: runId,
     status,
     branch: runId,
     worktree: join(repo, ".opencode", "worktrees", runId),
+    validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
     gates: {},
     terminal_result: status === "blocked" ? { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} } : null,
   });
@@ -412,7 +479,18 @@ function hashFile(file) {
 }
 
 function hashArtifactRefs(runDir, refs) {
-  return refs.map((ref) => ({ ref, hash: hashFile(join(runDir, ref)) }));
+  return refs.map((ref) => ({ kind: parentArtifactKind(ref), ref, hash: hashFile(join(runDir, ref)) }));
+}
+
+function parentArtifactKind(ref) {
+  if (ref === "artifacts/story.md") return "story";
+  if (ref === "artifacts/research-map.md") return "research_map";
+  if (ref === "artifacts/design-brief.md") return "design_brief";
+  if (ref === "artifacts/technical-brief.md") return "technical_brief";
+  if (ref === "artifacts/test-report.md") return "test_report";
+  if (ref === "artifacts/validation-report.md") return "validation_report";
+  if (ref === "artifacts/pr-body.md") return "pr_body";
+  return "artifact";
 }
 
 function childRunFromPayload(continuation) {

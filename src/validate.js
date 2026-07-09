@@ -287,10 +287,15 @@ function validateContinuation(errors, run, path) {
   requiredInteger(errors, continuation, "schema_version", `${path}.schema_version`);
   if (Number.isInteger(continuation.schema_version) && continuation.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
   requiredEnum(errors, continuation, "kind", CONTINUATION_KINDS, `${path}.kind`);
+  requiredString(errors, continuation, "created_at", `${path}.created_at`);
+  requiredString(errors, continuation, "operator_summary", `${path}.operator_summary`);
   validateContinuationParent(errors, continuation.parent, `${path}.parent`);
   validateContinuationReview(errors, continuation.review, `${path}.review`);
   validateContinuationTarget(errors, run, continuation.target, `${path}.target`);
-  validateContinuationParentArtifacts(errors, continuation.parent_artifacts, `${path}.parent_artifacts`);
+  validateContinuationRefHashArray(errors, continuation.parent_artifacts, `${path}.parent_artifacts`);
+  validateContinuationRefHashArray(errors, continuation.parent_evidence, `${path}.parent_evidence`);
+  validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
+  validateContinuationSelectedReview(errors, continuation, path);
 }
 
 function validateContinuationParent(errors, parent, path) {
@@ -304,6 +309,7 @@ function validateContinuationParent(errors, parent, path) {
   requiredHash(errors, parent, "run_hash", `${path}.run_hash`);
   requiredString(errors, parent, "branch", `${path}.branch`);
   requiredString(errors, parent, "commit", `${path}.commit`);
+  requiredString(errors, parent, "worktree", `${path}.worktree`);
 }
 
 function validateContinuationReview(errors, review, path) {
@@ -312,8 +318,11 @@ function validateContinuationReview(errors, review, path) {
     return;
   }
   requiredString(errors, review, "ref", `${path}.ref`);
+  requiredString(errors, review, "kind", `${path}.kind`);
+  optionalString(errors, review, "source", `${path}.source`);
   requiredHash(errors, review, "hash", `${path}.hash`);
   requiredString(errors, review, "subject", `${path}.subject`);
+  optionalString(errors, review, "verdict", `${path}.verdict`);
   optionalString(errors, review, "summary", `${path}.summary`);
   validateStringArray(errors, review.required_fixes, `${path}.required_fixes`, { required: false });
   if (!stringValue(review.summary) && !hasNonEmptyStringItem(review.required_fixes)) {
@@ -329,24 +338,41 @@ function validateContinuationTarget(errors, run, target, path) {
   requiredString(errors, target, "run_id", `${path}.run_id`);
   requiredString(errors, target, "branch", `${path}.branch`);
   requiredString(errors, target, "worktree", `${path}.worktree`);
+  requiredString(errors, target, "base_ref", `${path}.base_ref`);
+  requiredString(errors, target, "base_commit", `${path}.base_commit`);
   if (stringValue(target.run_id) && stringValue(run.run_id) && target.run_id !== run.run_id) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
   if (stringValue(target.branch) && stringValue(run.branch) && target.branch !== run.branch) errors.push({ path: `${path}.branch`, message: "must match run.branch" });
   if (stringValue(target.worktree) && stringValue(run.worktree) && target.worktree !== run.worktree) errors.push({ path: `${path}.worktree`, message: "must match run.worktree" });
 }
 
-function validateContinuationParentArtifacts(errors, parentArtifacts, path) {
-  if (!Array.isArray(parentArtifacts)) {
+function validateContinuationRefHashArray(errors, items, path) {
+  if (!Array.isArray(items)) {
     errors.push({ path, message: "must be an array" });
     return;
   }
-  for (const [index, artifact] of parentArtifacts.entries()) {
+  for (const [index, item] of items.entries()) {
     const itemPath = `${path}[${index}]`;
-    if (!isRecord(artifact)) {
+    if (!isRecord(item)) {
       errors.push({ path: itemPath, message: "must be an object" });
       continue;
     }
-    requiredString(errors, artifact, "ref", `${itemPath}.ref`);
-    requiredHash(errors, artifact, "hash", `${itemPath}.hash`);
+    requiredString(errors, item, "kind", `${itemPath}.kind`);
+    requiredString(errors, item, "ref", `${itemPath}.ref`);
+    requiredHash(errors, item, "hash", `${itemPath}.hash`);
+  }
+}
+
+function validateContinuationSelectedReview(errors, continuation, path) {
+  const review = continuation.review;
+  if (!isRecord(review) || !Array.isArray(continuation.parent_reviews)) return;
+  if (!stringValue(review.ref) || typeof review.hash !== "string" || !HASH_PATTERN.test(review.hash)) return;
+  const match = continuation.parent_reviews.find((item) => isRecord(item) && item.ref === review.ref);
+  if (!match) {
+    errors.push({ path: `${path}.parent_reviews`, message: "must include selected review ref" });
+    return;
+  }
+  if (match.hash !== review.hash) {
+    errors.push({ path: `${path}.parent_reviews`, message: "selected review hash must match review.hash" });
   }
 }
 

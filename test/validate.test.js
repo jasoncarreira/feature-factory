@@ -45,8 +45,7 @@ describe("run schema and consistency", () => {
     assert.equal(run.continuation.schema_version, 1);
     assert.equal(run.continuation.kind, "blocked-run-continuation");
     assert.deepEqual(run.continuation.parent_artifacts, [
-      { ref: "artifacts/validation-report.md", hash: HASH },
-      { ref: "runs/parent-run/run.json", hash: HASH },
+      { kind: "validation_report", ref: "artifacts/validation-report.md", hash: HASH },
     ]);
   });
 
@@ -188,6 +187,8 @@ function continuationMetadata(targetRunId = "run") {
   return {
     schema_version: 1,
     kind: "blocked-run-continuation",
+    created_at: "2026-07-08T12:00:00.000Z",
+    operator_summary: "Continue blocked parent run from implementation-validator review.",
     parent: {
       run_id: "parent-run",
       status: "blocked",
@@ -195,22 +196,32 @@ function continuationMetadata(targetRunId = "run") {
       run_hash: HASH,
       branch: "parent-branch",
       commit: "abc123",
+      worktree: "/tmp/parent-worktree",
     },
     review: {
+      kind: "validator",
       ref: "reviews/implementation-validator.json",
       hash: HASH,
       subject: "parent-run",
       summary: "Validator found required fixes.",
       required_fixes: ["fix failing acceptance test"],
+      source: "run.validator.review_ref",
     },
     target: {
       run_id: targetRunId,
       branch: "continuation-branch",
       worktree: "/tmp/continuation-worktree",
+      base_ref: "main",
+      base_commit: "def456",
     },
     parent_artifacts: [
-      { ref: "artifacts/validation-report.md", hash: HASH },
-      { ref: "runs/parent-run/run.json", hash: HASH },
+      { kind: "validation_report", ref: "artifacts/validation-report.md", hash: HASH },
+    ],
+    parent_evidence: [
+      { kind: "evidence", ref: "evidence/test-verifier.json", hash: HASH },
+    ],
+    parent_reviews: [
+      { kind: "review", ref: "reviews/implementation-validator.json", hash: HASH },
     ],
   };
 }

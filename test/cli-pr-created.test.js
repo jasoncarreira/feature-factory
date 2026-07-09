@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +64,20 @@ describe("cli pr-created", () => {
     }
   });
 
+  it("rejects blocked-run continuation PRs when GitHub reports a non-draft PR", () => {
+    const fixture = createFixture("cli-pr-continuation-github-ready", { continuation: true, ghIsDraft: false });
+    try {
+      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--json"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /isDraft=true/u);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(run.status, "running");
+      assert.equal(run.pr_url, undefined);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects removed pr-created flags as unknown", () => {
     const fixture = createFixture("cli-pr-unknown-flag");
     try {
@@ -91,8 +105,9 @@ describe("cli pr-created", () => {
   });
 });
 
-function createFixture(runId, { ready = true, continuation = false } = {}) {
+function createFixture(runId, { ready = true, continuation = false, ghIsDraft = true } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "cli-pr-simplified-"));
+  writeFakeGh(repo, ghIsDraft);
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
@@ -126,25 +141,42 @@ function continuationMetadata(targetRunId) {
       run_hash: HASH,
       branch: "parent-branch",
       commit: "abc123",
+      worktree: "/tmp/parent-worktree",
     },
     review: {
+      kind: "validator",
       ref: "reviews/implementation-validator.json",
       hash: HASH,
       subject: "parent-run",
       summary: "Validator required fixes before PR creation.",
       required_fixes: ["address validation failure"],
+      source: "run.validator.review_ref",
     },
     target: {
       run_id: targetRunId,
       branch: "continuation-branch",
       worktree: "/tmp/continuation-worktree",
+      base_ref: "main",
+      base_commit: "def456",
     },
-    parent_artifacts: [{ ref: "artifacts/validation-report.md", hash: HASH }],
+    created_at: "2026-07-08T12:00:00.000Z",
+    operator_summary: "Continue blocked parent run from implementation-validator review.",
+    parent_artifacts: [{ kind: "validation_report", ref: "artifacts/validation-report.md", hash: HASH }],
+    parent_evidence: [],
+    parent_reviews: [{ kind: "review", ref: "reviews/implementation-validator.json", hash: HASH }],
   };
 }
 
 function runCli(repo, args) {
-  return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8" });
+  return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, PATH: `${join(repo, "bin")}:${process.env.PATH}` } });
+}
+
+function writeFakeGh(repo, isDraft) {
+  const bin = join(repo, "bin");
+  mkdirSync(bin, { recursive: true });
+  const gh = join(bin, "gh");
+  writeFileSync(gh, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ isDraft }) + "\n")});\n`, "utf8");
+  chmodSync(gh, 0o755);
 }
 
 function readJson(file) {

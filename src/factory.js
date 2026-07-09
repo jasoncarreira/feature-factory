@@ -24,13 +24,13 @@ const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const CONTINUATION_PARENT_ARTIFACT_REFS = [
-  "artifacts/story.md",
-  "artifacts/research-map.md",
-  "artifacts/design-brief.md",
-  "artifacts/technical-brief.md",
-  "artifacts/test-report.md",
-  "artifacts/validation-report.md",
-  "artifacts/pr-body.md",
+  { kind: "story", ref: "artifacts/story.md" },
+  { kind: "research_map", ref: "artifacts/research-map.md" },
+  { kind: "design_brief", ref: "artifacts/design-brief.md" },
+  { kind: "technical_brief", ref: "artifacts/technical-brief.md" },
+  { kind: "test_report", ref: "artifacts/test-report.md" },
+  { kind: "validation_report", ref: "artifacts/validation-report.md" },
+  { kind: "pr_body", ref: "artifacts/pr-body.md" },
 ];
 const activeHeartbeatLoops = new Map();
 
@@ -503,6 +503,7 @@ function buildContinuation(parentRunId, opts = {}) {
   const repo = opts.cwd || process.cwd();
   const parentRunDir = resolveRunDir(parentRunId, opts);
   const parentRunFile = join(parentRunDir, "run.json");
+  lstatRequiredNoSymlinks(repo, parentRunFile, "parent run.json", "parent run.json must not contain symlinks");
   const parentRun = readRunFile(parentRunFile);
   if (parentRun.status !== "blocked") {
     throw new Error(`parent run '${parentRun.run_id}' must have status blocked`);
@@ -517,11 +518,16 @@ function buildContinuation(parentRunId, opts = {}) {
   const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
   assertContinuationTargetAvailable(repo, targetRunId);
   const review = resolveContinuationReview(parentRunDir, requiredContinuationReview(opts.review));
-  const reviewMetadata = validateContinuationReview(readReviewJson(review.path), review.ref);
+  const reviewSource = resolveContinuationReviewSource(parentRun, review.ref);
+  const reviewMetadata = validateContinuationReview(readReviewJson(review.path), review.ref, reviewSource, parentRunDir);
+  const targetBaseRef = continuationBaseRef(parentRun);
+  const targetBaseCommit = continuationBaseCommit(repo, parentRun, targetBaseRef);
 
   return {
     kind: "blocked-run-continuation",
     schema_version: 1,
+    created_at: timestamp(opts.now),
+    operator_summary: `Continue blocked run '${parentRun.run_id}' from ${review.ref}.`,
     parent: {
       run_id: parentRun.run_id,
       status: parentRun.status,
@@ -529,8 +535,10 @@ function buildContinuation(parentRunId, opts = {}) {
       run_hash: sha256File(parentRunFile),
       branch: parentRun.branch,
       commit: branchCommit(repo, parentRun.branch),
+      worktree: requiredParentWorktree(parentRun),
     },
     review: {
+      kind: reviewSource.kind,
       ref: review.ref,
       hash: sha256File(review.path),
       ...reviewMetadata,
@@ -539,9 +547,27 @@ function buildContinuation(parentRunId, opts = {}) {
       run_id: targetRunId,
       branch: targetRunId,
       worktree: resolve(repo, ".opencode", "worktrees", targetRunId),
+      base_ref: targetBaseRef,
+      base_commit: targetBaseCommit,
     },
     parent_artifacts: collectContinuationParentArtifacts(parentRunDir),
+    parent_evidence: collectContinuationParentEvidence(parentRunDir, parentRun),
+    parent_reviews: collectContinuationParentReviews(parentRunDir, parentRun),
   };
+}
+
+function requiredParentWorktree(parentRun) {
+  if (!stringValue(parentRun.worktree)) throw new Error(`parent run '${parentRun.run_id}' must have a recorded worktree`);
+  return parentRun.worktree;
+}
+
+function continuationBaseRef(parentRun) {
+  return stringValue(parentRun.base_ref) ? String(parentRun.base_ref).trim() : "main";
+}
+
+function continuationBaseCommit(repo, parentRun, baseRef) {
+  if (stringValue(parentRun.base_commit)) return String(parentRun.base_commit).trim();
+  return refCommit(repo, baseRef, "target base ref");
 }
 
 function normalizeContinuationTargetRunId(runId, parentRunId) {
@@ -598,8 +624,13 @@ function readReviewJson(file) {
   }
 }
 
-function validateContinuationReview(review, ref) {
+function validateContinuationReview(review, ref, source, parentRunDir) {
   if (!stringValue(review.subject)) throw new Error(`review '${ref}' must have non-empty subject`);
+  const subject = String(review.subject).trim();
+  if (!source.expected_subjects.has(subject)) {
+    throw new Error(`review '${ref}' subject must match parent ${source.kind} source`);
+  }
+  validateContinuationReviewRefs(review, parentRunDir, ref);
   const summary = stringValue(review.summary) ? String(review.summary).trim() : null;
   const requiredFixes = normalizeRequiredFixes(review.required_fixes);
   const hasSummary = summary !== null;
@@ -607,11 +638,47 @@ function validateContinuationReview(review, ref) {
   if (!hasSummary && !hasRequiredFixes) {
     throw new Error(`review '${ref}' must have non-empty summary or required_fixes[]`);
   }
-  return {
-    subject: String(review.subject).trim(),
+  const result = {
+    subject,
     summary,
     required_fixes: requiredFixes,
   };
+  if (stringValue(review.verdict)) result.verdict = String(review.verdict).trim();
+  if (stringValue(source.source)) result.source = source.source;
+  return result;
+}
+
+function validateContinuationReviewRefs(review, parentRunDir, reviewRef) {
+  if (stringValue(review.evidence_ref)) hashParentRef(parentRunDir, review.evidence_ref, "evidence", "evidence");
+  if (stringValue(review.artifact_ref)) hashParentRef(parentRunDir, review.artifact_ref, "artifacts", "artifact");
+  if (stringValue(review.report)) hashParentRef(parentRunDir, review.report, "artifacts", "artifact");
+  if (stringValue(review.review_ref) && review.review_ref !== reviewRef) hashParentRef(parentRunDir, review.review_ref, "reviews", "review");
+}
+
+function resolveContinuationReviewSource(parentRun, reviewRef) {
+  const candidates = continuationReviewSources(parentRun).filter((candidate) => candidate.ref === reviewRef);
+  if (!candidates.length) throw new Error(`review '${reviewRef}' must be referenced by parent run state`);
+  return candidates[0];
+}
+
+function continuationReviewSources(parentRun) {
+  const parentSubjects = new Set([parentRun.run_id, parentRun.branch, "feature-branch"].filter(stringValue).map((value) => String(value).trim()));
+  const sources = [];
+  if (stringValue(parentRun.validator?.review_ref)) {
+    sources.push({ kind: "validator", source: "run.validator.review_ref", ref: parentRun.validator.review_ref, expected_subjects: parentSubjects });
+  }
+  if (stringValue(parentRun.security_review?.review_ref)) {
+    sources.push({ kind: "security_review", source: "run.security_review.review_ref", ref: parentRun.security_review.review_ref, expected_subjects: parentSubjects });
+  }
+  for (const step of Array.isArray(parentRun.steps) ? parentRun.steps : []) {
+    if (!stringValue(step?.review_ref) || !stringValue(step?.agent)) continue;
+    sources.push({ kind: "step", source: `run.steps.${step.agent}.review_ref`, ref: step.review_ref, expected_subjects: new Set([String(step.agent).trim()]) });
+  }
+  for (const slice of Array.isArray(parentRun.slices) ? parentRun.slices : []) {
+    if (!stringValue(slice?.review_ref) || !stringValue(slice?.id)) continue;
+    sources.push({ kind: "slice", source: `run.slices.${slice.id}.review_ref`, ref: slice.review_ref, expected_subjects: new Set([String(slice.id).trim()]) });
+  }
+  return sources.map((source) => ({ ...source, ref: normalizeParentRef(source.ref, "reviews") }));
 }
 
 function normalizeRequiredFixes(value) {
@@ -625,12 +692,50 @@ function collectContinuationParentArtifacts(parentRunDir) {
   const artifactsDirEntry = lstatOptionalNoSymlinks(parentRun, artifactsDir, "parent artifacts", "parent artifacts/ directory must not contain symlinks");
   if (!artifactsDirEntry) return [];
   if (!artifactsDirEntry.isDirectory()) return [];
-  return CONTINUATION_PARENT_ARTIFACT_REFS.flatMap((ref) => {
-    const artifactPath = resolve(parentRun, ref);
-    const artifactEntry = lstatOptionalNoSymlinks(parentRun, artifactPath, `parent artifact '${ref}'`, `parent artifact '${ref}' must not contain symlinks`);
-    if (!artifactEntry || !artifactEntry.isFile()) return [];
-    return [{ ref, hash: sha256File(artifactPath) }];
+  return CONTINUATION_PARENT_ARTIFACT_REFS.flatMap(({ kind, ref }) => {
+    const hashed = optionalHashParentRef(parentRunDir, ref, "artifacts", kind, `parent artifact '${ref}' must not contain symlinks`);
+    return hashed ? [hashed] : [];
   }).sort((a, b) => a.ref.localeCompare(b.ref));
+}
+
+function collectContinuationParentEvidence(parentRunDir, parentRun) {
+  const refs = [];
+  for (const step of Array.isArray(parentRun.steps) ? parentRun.steps : []) if (stringValue(step?.evidence_ref)) refs.push(step.evidence_ref);
+  for (const slice of Array.isArray(parentRun.slices) ? parentRun.slices : []) if (stringValue(slice?.evidence_ref)) refs.push(slice.evidence_ref);
+  return hashUniqueParentRefs(parentRunDir, refs, "evidence", "evidence");
+}
+
+function collectContinuationParentReviews(parentRunDir, parentRun) {
+  return hashUniqueParentRefs(parentRunDir, continuationReviewSources(parentRun).map((source) => source.ref), "reviews", "review");
+}
+
+function hashUniqueParentRefs(parentRunDir, refs, rootName, kind) {
+  return [...new Set(refs.filter(stringValue).map((ref) => normalizeParentRef(ref, rootName)))]
+    .map((ref) => hashParentRef(parentRunDir, ref, rootName, kind))
+    .sort((a, b) => a.ref.localeCompare(b.ref));
+}
+
+function optionalHashParentRef(parentRunDir, ref, rootName, kind, symlinkMessage) {
+  const parentRun = resolve(parentRunDir);
+  const normalizedRef = normalizeParentRef(ref, rootName);
+  const path = resolve(parentRun, normalizedRef);
+  const entry = lstatOptionalNoSymlinks(parentRun, path, `parent ${kind} '${normalizedRef}'`, symlinkMessage || `parent ${kind} '${normalizedRef}' must not contain symlinks`);
+  if (!entry || !entry.isFile()) return null;
+  if (!isLogicalContainedPath(join(parentRun, rootName), path, { allowEqual: false })) throw new Error(`parent ${kind} ref must stay under ${rootName}/: ${normalizedRef}`);
+  return { kind, ref: normalizedRef, hash: sha256File(path) };
+}
+
+function hashParentRef(parentRunDir, ref, rootName, kind) {
+  const hashed = optionalHashParentRef(parentRunDir, ref, rootName, kind);
+  if (!hashed) throw new Error(`missing parent ${kind} ref: ${normalizeParentRef(ref, rootName)}`);
+  return hashed;
+}
+
+function normalizeParentRef(ref, rootName) {
+  if (!stringValue(ref)) throw new Error(`parent ${rootName} ref is required`);
+  const value = String(ref).trim();
+  if (isAbsolute(value) || value.includes("\\")) throw new Error(`parent ${rootName} ref must be relative`);
+  return value.startsWith(`${rootName}/`) ? value : `${rootName}/${value}`;
 }
 
 function lstatRequiredNoSymlinks(rootDir, targetPath, label, symlinkMessage) {
@@ -679,8 +784,16 @@ function branchExists(repo, branch) {
 }
 
 function branchCommit(repo, branch) {
-  const proc = git(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
-  if (!proc.ok) throw new Error(`parent run requires resolvable branch commit for '${branch}'`);
+  return resolveGitCommit(repo, `refs/heads/${branch}^{commit}`, `parent branch '${branch}'`);
+}
+
+function refCommit(repo, ref, label) {
+  return resolveGitCommit(repo, `${ref}^{commit}`, `${label} '${ref}'`);
+}
+
+function resolveGitCommit(repo, spec, label) {
+  const proc = git(repo, ["rev-parse", "--verify", spec]);
+  if (!proc.ok) throw new Error(`parent run requires resolvable ${label} commit`);
   return proc.stdout.trim();
 }
 
