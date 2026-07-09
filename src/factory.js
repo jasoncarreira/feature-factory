@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
@@ -1008,6 +1008,10 @@ function createGateAnswerTempFile(gatesDir) {
 }
 
 function gateAnswerTempOpenFlags() {
+  return exclusiveNoFollowWriteFlags();
+}
+
+function exclusiveNoFollowWriteFlags() {
   let flags = FS_CONSTANTS.O_WRONLY | FS_CONSTANTS.O_CREAT | FS_CONSTANTS.O_EXCL;
   if (typeof FS_CONSTANTS.O_NOFOLLOW === "number") flags |= FS_CONSTANTS.O_NOFOLLOW;
   return flags;
@@ -1035,10 +1039,9 @@ export function assertFactoryRoot(repo) {
 }
 
 export function seedRepoSkill(repo, opts = {}) {
-  const dest = join(repo, ".opencode", "skills", "feature");
-  mkdirSync(dest, { recursive: true });
+  const dest = ensureRepoSeedSkillDirectory(repo);
   const seedHashPath = join(dest, ".seed-hash");
-  const recorded = readSeedHashes(seedHashPath);
+  const recorded = readSeedHashes(repo, seedHashPath);
   const nextHashes = {};
   const skipped = [];
   const refreshed = [];
@@ -1047,7 +1050,7 @@ export function seedRepoSkill(repo, opts = {}) {
     const target = join(dest, file);
     const sourceText = readFileSync(source, "utf8");
     const sourceHash = sha256(sourceText);
-    const currentText = existsSync(target) ? readFileSync(target, "utf8") : null;
+    const currentText = readManagedSeedText(repo, target, `repo-seeded feature skill file '${file}'`);
     const currentHash = currentText === null ? null : sha256(currentText);
     const recordedHash = validSha256(recorded[file]);
     const packagedHash = currentHash !== null && knownSeedHashesFor(opts.knownSeedHashes, file).has(currentHash);
@@ -1059,26 +1062,104 @@ export function seedRepoSkill(repo, opts = {}) {
       continue;
     }
     if (currentHash !== sourceHash) {
-      copyFileSync(source, target);
+      writeManagedSeedFileAtomic(repo, dest, target, sourceText);
       if (currentHash !== null) refreshed.push(file);
     }
     nextHashes[file] = sourceHash;
   }
   if (refreshed.length) console.warn(`feature-factory: refreshed stale repo-seeded feature skill file(s): ${refreshed.join(", ")}`);
   if (skipped.length) console.warn(`feature-factory: preserved locally edited seeded skill file(s): ${skipped.join(", ")}`);
-  writeFileSync(seedHashPath, `${JSON.stringify(nextHashes, null, 2)}\n`, "utf8");
+  writeManagedSeedFileAtomic(repo, dest, seedHashPath, `${JSON.stringify(nextHashes, null, 2)}\n`);
   ensureGitInfoExclude(repo, ".opencode/skills/feature/");
   return dest;
 }
 
-function readSeedHashes(file) {
-  if (!existsSync(file)) return {};
+function ensureRepoSeedSkillDirectory(repo) {
+  const rootDir = resolve(repo);
+  const dirs = [
+    join(rootDir, ".opencode"),
+    join(rootDir, ".opencode", "skills"),
+    join(rootDir, ".opencode", "skills", "feature"),
+  ];
+  for (const dir of dirs) {
+    const label = `repo-seeded feature skill directory '${relativeRef(rootDir, dir)}'`;
+    const entry = lstatOptionalNoSymlinks(rootDir, dir, label, `${label} must not contain symlinks`);
+    if (!entry) {
+      mkdirSync(dir);
+      const created = lstatRequiredNoSymlinks(rootDir, dir, label, `${label} must not contain symlinks`);
+      if (!created.isDirectory()) throw new Error(`${label} must be a directory: ${dir}`);
+      continue;
+    }
+    if (!entry.isDirectory()) throw new Error(`${label} must be a directory: ${dir}`);
+  }
+  return dirs[dirs.length - 1];
+}
+
+function readSeedHashes(repo, file) {
+  const text = readManagedSeedText(repo, file, "repo-seeded feature skill metadata '.seed-hash'");
+  if (text === null) return {};
   try {
-    const value = JSON.parse(readFileSync(file, "utf8"));
+    const value = JSON.parse(text);
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   } catch {
     return {};
   }
+}
+
+function readManagedSeedText(repo, file, label) {
+  const entry = lstatOptionalNoSymlinks(resolve(repo), file, label, `${label} must not contain symlinks`);
+  if (!entry) return null;
+  if (!entry.isFile()) throw new Error(`${label} must be a file: ${file}`);
+  return readFileSync(file, "utf8");
+}
+
+function writeManagedSeedFileAtomic(repo, directory, target, contents) {
+  const rootDir = resolve(repo);
+  const directoryEntry = lstatRequiredNoSymlinks(rootDir, directory, "repo-seeded feature skill directory", "repo-seeded feature skill directory must not contain symlinks");
+  if (!directoryEntry.isDirectory()) throw new Error(`repo-seeded feature skill directory must be a directory: ${directory}`);
+  const targetEntry = lstatOptionalNoSymlinks(rootDir, target, `repo-seeded feature skill file '${basename(target)}'`, `repo-seeded feature skill file '${basename(target)}' must not contain symlinks`);
+  if (targetEntry && !targetEntry.isFile()) throw new Error(`repo-seeded feature skill file '${basename(target)}' must be a file: ${target}`);
+
+  const temp = createManagedSeedTempFile(directory);
+  let closed = false;
+  try {
+    try {
+      writeFileSync(temp.fd, contents, "utf8");
+    } finally {
+      closeSync(temp.fd);
+      closed = true;
+    }
+    renameSync(temp.path, target);
+  } finally {
+    if (!closed) {
+      try {
+        closeSync(temp.fd);
+      } catch {
+        // Best-effort cleanup; the original write/rename error is more useful.
+      }
+    }
+    if (existsSync(temp.path)) rmSync(temp.path, { force: true });
+  }
+}
+
+function createManagedSeedTempFile(directory) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const tempPath = join(directory, `.seed-${process.pid}-${randomUUID()}.tmp`);
+    try {
+      return {
+        path: tempPath,
+        fd: openSync(tempPath, exclusiveNoFollowWriteFlags(), 0o600),
+      };
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        lastError = error;
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError || new Error(`unable to create temporary repo-seeded feature skill file in ${directory}`);
 }
 
 function knownSeedHashesFor(knownSeedHashes, file) {
