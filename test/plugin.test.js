@@ -67,6 +67,18 @@ describe("frontmatter parsing", () => {
   });
 });
 
+describe("telemetry module import", () => {
+  it("imports without changing plugin defaults or requiring telemetry configuration", async () => {
+    const telemetry = await import("../src/telemetry.js");
+    const cfg = await pluginConfig();
+
+    assert.equal(typeof telemetry.withSpan, "function");
+    assert.equal(typeof telemetry.prepareTelemetryEnv, "function");
+    assert.equal(cfg.command.feature.agent, "feature-factory");
+    assert.equal(Object.keys(cfg.agent).length, 13);
+  });
+});
+
 describe("review tier contract docs", () => {
   it("documents top-level run.json.review_tier in the schema", () => {
     assert.match(schemaDoc, /Top-level `run\.json\.review_tier` is an optional opaque display string/i);
