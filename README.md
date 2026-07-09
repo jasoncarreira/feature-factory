@@ -19,6 +19,7 @@ Active guarantees:
 - `run.json`, gate answers, `evidence/*`, `reviews/*`, and `terminal_result` are durable local workflow state.
 - Semantic manifest writes go through locked transition helpers so stale writers fail instead of overwriting newer state. `transitionGateDecision` owns approved gate writes, and `transitionPrCreated` owns completed PR state writes.
 - Pending gates include `pending_snapshot` entries for `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer material. Gate answer consumption fails closed if current refs are missing, escaped, stale, or hash-mismatched.
+- Detached opencode processes are cancellable only through run-scoped evidence: `$RUN/process.json` points at one process identity and `$RUN/processes/<timestamp>.log` records stdout/stderr. `factory cancel` sends a single targeted `SIGTERM` only when that evidence validates; missing, invalid, stale, mismatched, or non-running evidence returns a fail-closed response and sends no signal. There is no broad process kill, process-group kill, `pkill`, or `killall` fallback.
 - PR URLs are written only through `feature-factory factory pr-created ...`, which checks `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and a canonical GitHub PR URL before updating `run.pr_url` and `terminal_result.pr_url`.
 - Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and configured PR checks.
 - `run.json.debug_snapshot` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
@@ -333,9 +334,17 @@ Run in the background for external watchers or CI-style adapters:
 feature-factory factory start --repo /path/to/repo --headless --detached "APP-123 add the missing approval workflow"
 ```
 
-Detached mode returns a PID and writes stdout/stderr to `.opencode/factory/processes/<timestamp>.log`.
+Detached mode returns a PID, writes stdout/stderr to `.opencode/factory/<run-id>/processes/<timestamp>.log`, and records the cancellable process identity in `.opencode/factory/<run-id>/process.json`.
 
-Autonomous mode is explicit opt-in. It still writes gate question files, observed evidence, reviews, and `run.json`; it records story/brief approvals only when the artifacts are complete and unambiguous, decides pre-PR from the implementation-validator/security-reviewer panel, runs bounded remediation on NO-GO, and never auto-merges.
+Cancel a detached run before queueing interrupt steering:
+
+```sh
+feature-factory factory cancel <run-id> --json
+```
+
+`factory cancel` is evidence-bound and fail-closed. On valid running `process.json` identity it sends exactly one `SIGTERM` to the recorded PID, marks `process.json.state` as `cancelled`, and returns `ok:true`, `status:"cancelled"`, `signal:"SIGTERM"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. If `process.json` is missing, invalid, stale, mismatched, already non-running, or the signal fails, it returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, a `reason`, and no broad process kill, process-group signal, `pkill`, or `killall` fallback is attempted.
+
+Autonomous mode is explicit opt-in. It still writes gate question files, observed evidence, reviews, and `run.json`; it records story/brief approvals only when the artifacts are complete and unambiguous, decides pre-PR from the implementation-validator/security-reviewer panel, runs bounded remediation on NO-GO, and never auto-merges. Humans review and merge PRs outside the factory.
 
 ### Remediation context reuse
 
@@ -364,6 +373,8 @@ feature-factory factory validate <run-id>
 feature-factory factory env
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
+feature-factory factory cancel <run-id> --json
+feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json
 feature-factory factory cost-record <run-id> --agent AGENT --step STEP --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
 ```
@@ -608,9 +619,10 @@ This matches the original software-factory pattern while keeping the package tra
 
 ## Interrupt, Steer, And Resume
 
-Operator steering is untrusted operator data/config, not instructions and not a gate bypass. Interrupt the external opencode process first, then queue steering for the existing non-terminal run:
+Operator steering is untrusted operator data/config, not instructions and not a gate bypass. Cancel the external opencode process first, then queue steering for the existing non-terminal run and dry-run the resume before relaunch:
 
 ```sh
+feature-factory factory cancel <run-id> --json
 feature-factory factory steer <run-id> --message TEXT --json
 feature-factory factory status <run-id> --json
 feature-factory factory resume <run-id> --dry-run --json
@@ -620,3 +632,11 @@ feature-factory factory resume <run-id> --headless --json
 `factory resume` reuses the same run id, branch, worktree, and durable state. It rejects `active-heartbeat`, `terminal-run`, `invalid-run-state`, and `missing-worktree` instead of blindly restarting. The resume payload includes top-level `resume` and `steering` metadata with `raw_message_included: false`; raw steering text is never included in status/list/TUI or the resume payload.
 
 On a mutating `/feature resume <run-id>` path, run `feature-factory factory env record-resume <run-id> --json` before `feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json`. The consumed JSON labels raw text as `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data`.
+
+After `steer-consume`, run a steering-conflict checkpoint. Compare the untrusted steering against accepted durable state: approved gates, accepted steps, merged or blocked slices, passing validator/security verdicts, `pr_url`, and `terminal_result`. If honoring the steering would require editing or rolling back that protected state, automatic rollback is forbidden. Record the checkpoint with:
+
+```sh
+feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json
+```
+
+`factory steer-conflict` requires the run to still be `running`, requires inactive heartbeat, verifies the latest consumed steering ref/hash and consumed file hash, then writes terminal `status:"needs-human"` with `terminal_result.summary` explaining that accepted durable state would have to change. Its JSON response has `ok:false`, `conflict:true`, `updated:true`, `status:"needs-human"`, the steering ref/hash, `protected_state`, and `terminal_result`. The operator must reconcile manually; the factory must not silently reset gates, unmerge slices, rewrite evidence/reviews, remove PR URLs, or continue from stale accepted artifacts.
