@@ -30,6 +30,21 @@ describe("plugin profiles", () => {
   });
 });
 
+describe("plugin PR mode", () => {
+  it("defaults successful PR creation to ready for review", async () => {
+    const cfg = await pluginConfig();
+
+    assert.match(cfg.command.feature.template, /PR mode: `ready`/u);
+    assert.match(cfg.command.feature.template, /driver payload has no `pr_mode` override/u);
+  });
+
+  it("can configure successful PR creation as draft", async () => {
+    const cfg = await pluginConfig({ prMode: "draft" });
+
+    assert.match(cfg.command.feature.template, /PR mode: `draft`/u);
+  });
+});
+
 describe("frontmatter parsing", () => {
   it("parses CRLF-delimited frontmatter", () => {
     const parsed = parseFrontmatter("---\r\nmode: primary\r\n---\r\nBody\r\n");

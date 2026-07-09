@@ -339,6 +339,7 @@ Rules:
   "max_parallel_slices": 3,
   "max_retries": 3,
   "review_tier": "strict",
+  "pr_mode": "draft",
   "debug_snapshot": {
     "created_with": {
       "collected_at": "2026-07-04T11:45:00Z",
@@ -414,9 +415,11 @@ Top-level `status` values are `running`, `completed`, `blocked`, `partial`, and 
 
 Top-level `run.json.review_tier` is an optional opaque display string. It may contain labels such as `light`, `standard`, or `strict`, but it does not change gates, agents, PR behavior, validation behavior, or workflow control. It does not change `schema_version`; it remains `1`.
 
+Top-level `run.json.pr_mode` is an optional durable PR creation mode with value `draft` or `ready`. Persist the effective start-time mode there after applying `driver.pr_mode`, legacy `driver.ready`, or the plugin configured default; resume payloads carry this value as `driver.pr_mode` so a run created with a per-run override does not fall back to a later plugin default. It does not change `schema_version`; it remains `1`.
+
 Top-level `run.json.continuation` is present only for child runs created by `factory continue`. Accepted continuation metadata has `schema_version: 1`, `kind: "blocked-run-continuation"`, `created_at`, `operator_summary`, nested `parent`, `review`, and `target` objects, and refs paired with hashes for the parent manifest, approved review evidence, target base commit, and every read-only parent context file. `parent.status` must be exactly `blocked`; `parent.worktree`, branch, and commit identify the source worktree. `review.ref` resolves under the parent run's `reviews/` directory, is paired with `review.hash`, must be referenced by parent run state, and must have a subject consistent with that source. `target.run_id`, `target.branch`, `target.worktree`, `target.base_ref`, and `target.base_commit` describe the fresh child run. `parent_artifacts` is an array of `{kind, ref, hash}` entries for source artifacts such as story and technical brief, and `parent_evidence` / `parent_reviews` arrays carry `{kind, ref, hash}` entries for additional source context; `parent_reviews` includes the selected review with the same hash as `review.hash`. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits/hashes; it must not rely on a special blocking verdict enum as the authorization mechanism.
 
-Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before draft PR creation. Continuation PRs are draft-only; the driver contract forces `driver.ready = false`, and `factory pr-created` verifies GitHub `isDraft: true` before recording a continuation PR URL. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
+Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before PR creation. Continuation PRs use the same effective configured PR mode as normal runs: `draft` creates and records draft PRs, while `ready` creates and records ready-for-review PRs. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
 
 Gate status values are `pending`, `approved`, `changes_requested`, and `stopped`. `approval_source` values are `human`, `external-driver`, `autonomous`, and `override`.
 
@@ -433,9 +436,9 @@ Terminal result shape:
   "pr_url": "https://github.com/owner/repo/pull/123",
   "pr_number": 123,
   "repository": "owner/repo",
-  "draft": true,
+  "draft": false,
   "reason": null,
-  "summary": "Draft PR created.",
+  "summary": "PR created.",
   "artifacts": {
     "story": "artifacts/story.md",
     "technical_brief": "artifacts/technical-brief.md",

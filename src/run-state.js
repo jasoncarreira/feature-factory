@@ -671,7 +671,6 @@ function assertTerminalTransition(current, next, hooks = {}) {
 
 function assertPrCreatedPreconditions(run, request) {
   if (stringValue(run.pr_url)) throw new Error("pr-created requires run.pr_url to be unset");
-  if (run.continuation?.kind === "blocked-run-continuation" && request.draft === false) throw new Error("pr-created requires draft PR for blocked-run-continuation runs");
   if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
@@ -718,7 +717,7 @@ function normalizePrCreatedInput(input) {
     pr_url: prUrl,
     pr_number: normalizePrNumber(input.pr_number ?? input.prNumber),
     repository,
-    draft: input.draft === undefined ? true : normalizeBoolean(input.draft, "draft"),
+    draft: input.draft === undefined ? false : normalizeBoolean(input.draft, "draft"),
   };
 }
 
@@ -757,7 +756,7 @@ function normalizePrCreatedTerminalResult(run, request) {
     repository: request.repository,
     draft: request.draft,
     reason: terminalResult.reason ?? null,
-    summary: terminalResult.summary ?? "Draft PR created.",
+    summary: terminalResult.summary ?? (request.draft ? "Draft PR created." : "PR created."),
     artifacts: isRecord(terminalResult.artifacts) ? terminalResult.artifacts : {},
   };
 }
