@@ -22,8 +22,13 @@ describe("environment snapshot redaction", () => {
   });
 
   it("omits sensitive keys recursively", () => {
+    const honeycombKey = "hc_api_12345678901234567890";
+    const hexKey = "0123456789abcdef0123456789abcdef";
+
     assert.equal(isSensitiveEnvKey("api_token"), true);
-    assert.deepEqual(scrubSecretEnv({ keep: "ok", api_token: "secret", nested: { password: "secret", safe: "value" } }), {
+    assert.equal(isSensitiveEnvKey(honeycombKey), true);
+    assert.equal(isSensitiveEnvKey(hexKey), true);
+    assert.deepEqual(scrubSecretEnv({ keep: "ok", api_token: "secret", [honeycombKey]: "safe", nested: { password: "secret", [hexKey]: "safe", safe: "value" } }), {
       keep: "ok",
       nested: { safe: "value" },
     });

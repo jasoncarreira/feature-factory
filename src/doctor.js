@@ -27,13 +27,10 @@ const EDIT_AGENTS = new Set(["feature-factory", "backend-builder", "frontend-bui
 const NON_INTERACTIVE_ALLOW = ["read", "glob", "grep", "list", "bash", "webfetch", "task", "todowrite"];
 const FACTORY_DENY = ["external_directory"];
 const FEATURE_FACTORY_PLUGIN_SPECS = new Set(["opencode-feature-factory"]);
-const COMPANION_TELEMETRY_PLUGIN_PATTERNS = [
-  /@devtheops\/opencode-plugin-otel/u,
-  /opencode-plugin-otel/u,
-  /opentelemetry/u,
-  /telemetry/u,
-  /\botel\b/u,
-];
+const COMPANION_TELEMETRY_PLUGIN_SPECS = new Set([
+  "@devtheops/opencode-plugin-otel",
+  "opencode-plugin-otel",
+]);
 const OTEL_ENDPOINT_KEYS = ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"];
 const OTEL_HEADER_KEYS = ["OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"];
 const OTEL_RESOURCE_ATTRIBUTES = "OTEL_RESOURCE_ATTRIBUTES";
@@ -300,9 +297,9 @@ function parseOtelKeyValueList(value) {
 function companionPluginCandidate(entry) {
   const spec = pluginEntrySpec(entry);
   if (!stringValue(spec)) return null;
-  const normalized = spec.toLowerCase();
-  if (FEATURE_FACTORY_PLUGIN_SPECS.has(normalized)) return null;
-  if (!COMPANION_TELEMETRY_PLUGIN_PATTERNS.some((pattern) => pattern.test(normalized))) return null;
+  const identity = pluginSpecIdentity(spec);
+  if (!identity || FEATURE_FACTORY_PLUGIN_SPECS.has(identity)) return null;
+  if (!COMPANION_TELEMETRY_PLUGIN_SPECS.has(identity)) return null;
 
   const options = Array.isArray(entry) && plainObject(entry[1]) ? entry[1] : {};
   const disabled = options.enabled === false || options.telemetry?.enabled === false;
@@ -317,6 +314,47 @@ function companionPluginCandidate(entry) {
 
 function pluginEntrySpec(entry) {
   return Array.isArray(entry) ? entry[0] : entry;
+}
+
+function pluginSpecIdentity(spec) {
+  const raw = String(spec || "").trim();
+  if (!raw) return null;
+  const packageSpec = normalizePackageSpec(raw);
+  if (packageSpec) return packageSpec;
+
+  let pathSpec = raw;
+  try {
+    const parsed = new URL(raw);
+    pathSpec = parsed.pathname || raw;
+  } catch {
+    // Non-URL local paths are handled below.
+  }
+
+  const segments = pathSpec
+    .split(/[\\/]+/u)
+    .map((segment) => safeDecodeURIComponent(segment).trim())
+    .filter(Boolean);
+  if (segments.length === 0) return null;
+
+  if (segments.at(-1) === "plugin.js" && segments.at(-2) === "src") {
+    return normalizePackageSpec(segments.at(-3));
+  }
+  return normalizePackageSpec(segments.at(-1));
+}
+
+function normalizePackageSpec(value) {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/^npm:/iu, "")
+    .toLowerCase()
+    .replace(/\/+$/u, "");
+  if (!normalized) return null;
+
+  const scoped = /^(@[^/@]+\/[^/@]+?)(?:@[^/@]+)?$/u.exec(normalized);
+  if (scoped) return scoped[1];
+
+  const unscoped = /^([^/@:]+)(?:@[^/@]+)?$/u.exec(normalized);
+  return unscoped ? unscoped[1] : null;
 }
 
 function sanitizePublicName(value) {

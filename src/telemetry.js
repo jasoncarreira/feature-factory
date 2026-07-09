@@ -1,6 +1,7 @@
 import { SpanStatusCode, context, trace } from "@opentelemetry/api";
 import {
   REDACTED_ENV_VALUE,
+  isSecretShapedEnvKey,
   isSensitiveEnvKey,
   isSensitiveEnvValue,
   scrubSecretEnv,
@@ -227,6 +228,7 @@ export function runAttributes(input = {}) {
   const output = {};
   for (const [key, value] of Object.entries(input)) {
     if (value === undefined || value === null || typeof value === "function") continue;
+    if (isUnsafeAttributeKey(key)) continue;
     output[key] = sanitizeAttribute(key, value);
   }
   return output;
@@ -319,6 +321,10 @@ function sanitizeAttribute(key, value) {
     return safe.length === value.length ? safe : JSON.stringify(scrubSecretEnv(value));
   }
   return JSON.stringify(scrubSecretEnv(value));
+}
+
+function isUnsafeAttributeKey(key) {
+  return isSecretShapedEnvKey(key);
 }
 
 function sanitizeException(error) {
