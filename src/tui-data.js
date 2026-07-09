@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { formatCostAttributionSummary, publicCostAttributionSummary } from "./cost-attribution.js";
+import { formatCostAttributionSummary, publicCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { diagnoseRunFile, diagnoseRunObject, diagnosticEnvelope, diagnosticItem } from "./factory-diagnostics.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
@@ -345,7 +345,7 @@ function firstByStatus(items, statuses) {
 }
 
 function summarizeWorkItem(name, status, attempts) {
-  const label = stringOrNull(name);
+  const label = stringOrNull(name) ? sanitizePublicCostText(name) : null;
   if (!label || !status) return null;
   const normalizedStatus = String(status);
   const attempt = Number.isInteger(attempts) && attempts > 0 ? ` a${attempts}` : "";

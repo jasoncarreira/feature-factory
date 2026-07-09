@@ -216,6 +216,38 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("sanitizes a legacy active slice before it outranks safe blocked work", () => {
+    const repo = tempDir();
+    writeRun(repo, "active-control-slice", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [{ id: "active\u001b[2J-slice\u009b", status: "running", attempts: 2 }],
+      steps: [{ agent: "safe-blocked-step", status: "blocked", attempts: 1 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(run.current, "active[2J-slice running a2");
+    assert.equal(hasTerminalControl(run.current), false);
+    cleanup(repo);
+  });
+
+  it("sanitizes a legacy active step before it outranks a safe blocked slice", () => {
+    const repo = tempDir();
+    writeRun(repo, "active-control-step", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [{ id: "safe-blocked-slice", status: "blocked", attempts: 1 }],
+      steps: [{ agent: "active\u001b]0;pwned\u0007-step\u0085", status: "running", attempts: 3 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(run.current, "active]0;pwned-step running a3");
+    assert.equal(hasTerminalControl(run.current), false);
+    cleanup(repo);
+  });
+
   it("keeps blocked work as the fallback when no work is active", () => {
     const repo = tempDir();
     writeRun(repo, "blocked-run", {

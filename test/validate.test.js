@@ -6,13 +6,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
-import { ValidationError, checkRunConsistency, validateRun, validateRunDir } from "../src/validate.js";
+import { ValidationError, checkRunConsistency, validateRun, validateRunDir, validateSlicesPlan } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
   "USD\u001b]0;pwned\u0007",
   "USD\u001b[2J",
   "USD\u001b]52;c;U0VDUkVU\u0007",
+]);
+const TERMINAL_LABEL_PAYLOADS = Object.freeze([
+  "work\u001b[2J",
+  "work\u0007",
+  "work\u009b2J",
 ]);
 
 describe("run schema and consistency", () => {
@@ -131,6 +136,23 @@ describe("run schema and consistency", () => {
       () => validateRun({ ...runningRun(), cost_attribution: costAttribution }),
       (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.totals.missing[0]: must not contain control characters"),
     );
+  });
+
+  it("rejects terminal controls in planned and durable work labels", () => {
+    for (const payload of TERMINAL_LABEL_PAYLOADS) {
+      assert.throws(
+        () => validateSlicesPlan({ slices: [{ id: payload, stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["safe"], test_plan: ["node --test"] }] }),
+        (error) => error instanceof ValidationError && error.message.includes("plan.slices[0].id: must not contain control characters"),
+      );
+      assert.throws(
+        () => validateRun({ ...runningRun(), slices: [{ id: payload, status: "running" }] }),
+        (error) => error instanceof ValidationError && error.message.includes("run.slices[0].id: must not contain control characters"),
+      );
+      assert.throws(
+        () => validateRun({ ...runningRun(), steps: [{ agent: payload, status: "running" }] }),
+        (error) => error instanceof ValidationError && error.message.includes("run.steps[0].agent: must not contain control characters"),
+      );
+    }
   });
 
   it("treats pr_mode as optional persisted PR creation mode", () => {

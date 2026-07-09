@@ -533,7 +533,7 @@ function validateRunSlice(errors, slice, path, ids) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  requiredString(errors, slice, "id", `${path}.id`);
+  requiredTerminalSafeString(errors, slice, "id", `${path}.id`);
   optionalString(errors, slice, "stack", `${path}.stack`);
   validateStringArray(errors, slice.depends_on, `${path}.depends_on`, { required: false, values: ids });
   optionalEnum(errors, slice, "status", SLICE_STATUSES, `${path}.status`);
@@ -553,7 +553,7 @@ function validatePlannedSlices(errors, slices, path) {
       errors.push({ path: `${path}[${index}]`, message: "must be an object" });
       continue;
     }
-    requiredString(errors, slice, "id", `${path}[${index}].id`);
+    requiredTerminalSafeString(errors, slice, "id", `${path}[${index}].id`);
     requiredString(errors, slice, "stack", `${path}[${index}].stack`);
     validateStringArray(errors, slice.paths, `${path}[${index}].paths`, { required: true, nonEmpty: true });
     validateStringArray(errors, slice.depends_on, `${path}[${index}].depends_on`, { required: true, values: ids });
@@ -603,7 +603,7 @@ function validateSteps(errors, steps, path) {
       errors.push({ path: `${path}[${index}]`, message: "must be an object" });
       continue;
     }
-    requiredString(errors, step, "agent", `${path}[${index}].agent`);
+    requiredTerminalSafeString(errors, step, "agent", `${path}[${index}].agent`);
     requiredEnum(errors, step, "status", STEP_STATUSES, `${path}[${index}].status`);
     optionalInteger(errors, step, "attempts", `${path}[${index}].attempts`);
     optionalString(errors, step, "artifact_ref", `${path}[${index}].artifact_ref`);
@@ -826,6 +826,11 @@ function hasNonEmptyStringItem(value) {
 
 function requiredString(errors, obj, key, path) {
   if (!stringValue(obj[key])) errors.push({ path, message: "must be a non-empty string" });
+}
+
+function requiredTerminalSafeString(errors, obj, key, path) {
+  requiredString(errors, obj, key, path);
+  if (typeof obj[key] === "string" && hasTerminalControl(obj[key])) errors.push({ path, message: "must not contain control characters" });
 }
 
 function optionalString(errors, obj, key, path) {
