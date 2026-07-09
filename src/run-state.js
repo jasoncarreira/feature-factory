@@ -4,7 +4,7 @@ import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { git } from "./git.js";
-import { canonicalizeGithubPrUrl, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef } from "./refs.js";
+import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef } from "./refs.js";
 import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 
@@ -567,18 +567,20 @@ function assertPassingVerdictArtifacts(runDir, run) {
 }
 
 function assertPrNumberMatchesUrl(prUrl, prNumber) {
-  const canonical = canonicalizeGithubPrUrl(prUrl);
-  const number = Number(canonical.split("/").pop());
-  if (number !== prNumber) throw new Error("pr-created requires pr_number to match the GitHub PR URL");
+  if (githubPrUrlParts(prUrl).number !== prNumber) throw new Error("pr-created requires pr_number to match the GitHub PR URL");
 }
 
 function normalizePrCreatedInput(input) {
   if (!isRecord(input)) throw new Error("transitionPrCreated requires an input object");
+  const prUrl = canonicalizeGithubPrUrl(firstNonEmptyString(input.pr_url, input.prUrl));
+  const repository = requireNonEmptyString(input.repository, "repository");
+  const parts = githubPrUrlParts(prUrl);
+  if (repository !== parts.repository) throw new Error("pr-created requires repository to match the GitHub PR URL");
   return {
     ...cloneJson(input),
-    pr_url: canonicalizeGithubPrUrl(firstNonEmptyString(input.pr_url, input.prUrl)),
+    pr_url: prUrl,
     pr_number: normalizePrNumber(input.pr_number ?? input.prNumber),
-    repository: requireNonEmptyString(input.repository, "repository"),
+    repository,
     draft: input.draft === undefined ? true : normalizeBoolean(input.draft, "draft"),
   };
 }

@@ -421,6 +421,27 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("rejects PR creation when repository disagrees with the PR URL", async () => {
+    const fixture = createFixture("pr-repository-mismatch");
+    try {
+      writeReadyPrRun(fixture);
+
+      await assert.rejects(
+        transitionPrCreated(fixture.runDir, {
+          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
+          pr_number: 104,
+          repository: "other-owner/other-repo",
+        }),
+        /repository to match the GitHub PR URL/u,
+      );
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(run.status, "running");
+      assert.equal(run.pr_url, undefined);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects PR creation while slices are still in flight", async () => {
     const fixture = createFixture("pr-slice-review");
     try {

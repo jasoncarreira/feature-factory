@@ -78,6 +78,20 @@ describe("cli pr-created", () => {
     }
   });
 
+  it("rejects repository mismatches without verifying a different repository", () => {
+    const fixture = createFixture("cli-pr-continuation-repo-mismatch", { continuation: true });
+    try {
+      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "other-owner/other-repo", "--json"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /repository to match the GitHub PR URL/u);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(run.status, "running");
+      assert.equal(run.pr_url, undefined);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects removed pr-created flags as unknown", () => {
     const fixture = createFixture("cli-pr-unknown-flag");
     try {
@@ -107,7 +121,7 @@ describe("cli pr-created", () => {
 
 function createFixture(runId, { ready = true, continuation = false, ghIsDraft = true } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "cli-pr-simplified-"));
-  writeFakeGh(repo, ghIsDraft);
+  writeFakeGh(repo, { isDraft: ghIsDraft, expectedRepository: "jasoncarreira/opencode-feature-factory", expectedNumber: "99" });
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
@@ -171,11 +185,19 @@ function runCli(repo, args) {
   return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, PATH: `${join(repo, "bin")}:${process.env.PATH}` } });
 }
 
-function writeFakeGh(repo, isDraft) {
+function writeFakeGh(repo, { isDraft, expectedRepository, expectedNumber }) {
   const bin = join(repo, "bin");
   mkdirSync(bin, { recursive: true });
   const gh = join(bin, "gh");
-  writeFileSync(gh, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ isDraft }) + "\n")});\n`, "utf8");
+  writeFileSync(gh, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const repoIndex = args.indexOf("--repo");
+if (args[0] !== "pr" || args[1] !== "view" || args[2] !== ${JSON.stringify(expectedNumber)} || repoIndex < 0 || args[repoIndex + 1] !== ${JSON.stringify(expectedRepository)}) {
+  process.stderr.write("unexpected gh args\\n");
+  process.exit(2);
+}
+process.stdout.write(${JSON.stringify(JSON.stringify({ isDraft }) + "\n")});
+`, "utf8");
   chmodSync(gh, 0o755);
 }
 

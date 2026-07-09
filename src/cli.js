@@ -9,7 +9,7 @@ import { cleanupRun, continueFactory, heartbeatStatus, listRuns, persistFactoryR
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { canonicalizeGithubPrUrl } from "./refs.js";
+import { canonicalizeGithubPrUrl, githubPrUrlParts } from "./refs.js";
 import { repoRoot } from "./git.js";
 import { normalizePrNumber as normalizeTransitionPrNumber, transitionGateDecision, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
@@ -463,7 +463,8 @@ function verifyContinuationPrIsDraft(run, request, opts = {}) {
 }
 
 function githubPrDraftState(request, opts = {}) {
-  const proc = spawnSync("gh", ["pr", "view", String(request.pr_number), "--repo", request.repository, "--json", "isDraft"], {
+  const pr = githubPrUrlParts(request.pr_url);
+  const proc = spawnSync("gh", ["pr", "view", String(pr.number), "--repo", pr.repository, "--json", "isDraft"], {
     cwd: opts.cwd,
     encoding: "utf8",
     env: { ...process.env },
