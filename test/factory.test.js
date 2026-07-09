@@ -12,6 +12,7 @@ import {
   listRuns,
   persistFactoryRunCreatedEnv,
   persistFactoryRunResumeEnv,
+  recordCostUsage,
   seedRepoSkill,
   status,
   validateState,
@@ -27,8 +28,10 @@ describe("factory public state operations", { concurrency: false }, () => {
       const listed = listRuns({ cwd: fixture.repo });
       const current = status(fixture.runId, { cwd: fixture.repo });
       assert.equal(listed[0].run_id, fixture.runId);
+      assert.equal(listed[0].cost_summary, null);
       assert.equal(current.run_id, fixture.runId);
       assert.equal(current.status, "running");
+      assert.equal(current.cost_summary, null);
     } finally {
       cleanup(fixture.repo);
     }
@@ -45,6 +48,58 @@ describe("factory public state operations", { concurrency: false }, () => {
       assert.equal(JSON.stringify(current).includes("raw message hidden"), false);
       await consumeSteering(fixture.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, { cwd: fixture.repo });
       assert.equal(status(fixture.runId, { cwd: fixture.repo }).steering.consumed_count, 1);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("records cost usage and exposes public summaries in status and list", async () => {
+    const fixture = createFixture("cost-run");
+    try {
+      const recorded = await recordCostUsage(fixture.runId, {
+        agent: "backend-builder",
+        step: "build",
+        provider: "opencode",
+        model: "gpt-5.5",
+        input_tokens: 10,
+        output_tokens: 5,
+        total_tokens: 15,
+        cost_total: 0.02,
+        cost_currency: "USD",
+      }, { cwd: fixture.repo, now: "2026-07-08T12:30:00.000Z", entryId: "cost-1" });
+
+      const run = readJson(join(fixture.runDir, "run.json"));
+      const current = status(fixture.runId, { cwd: fixture.repo });
+      const listed = listRuns({ cwd: fixture.repo })[0];
+
+      assert.equal(recorded.entry.id, "cost-1");
+      assert.equal(recorded.entry.run_id, fixture.runId);
+      assert.equal(run.cost_attribution.entries.length, 1);
+      assert.equal(current.cost_summary.status, "available");
+      assert.equal(current.cost_summary.entry_count, 1);
+      assert.equal(current.cost_summary.total_tokens, 15);
+      assert.equal(listed.cost_summary.cost_total, 0.02);
+      assert.equal(listed.cost_summary.cost_currency, "USD");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("does not coerce missing cost metadata to zero", async () => {
+    const fixture = createFixture("cost-partial");
+    try {
+      const recorded = await recordCostUsage(fixture.runId, {
+        agent: "backend-builder",
+        input_tokens: 7,
+      }, { cwd: fixture.repo, now: "2026-07-08T12:30:00.000Z", entryId: "cost-partial-1" });
+
+      const current = status(fixture.runId, { cwd: fixture.repo });
+
+      assert.equal(recorded.entry.status, "partial");
+      assert.equal(Object.hasOwn(recorded.entry, "cost_total"), false);
+      assert.equal(Object.hasOwn(recorded.entry, "output_tokens"), false);
+      assert.equal(Object.hasOwn(current.cost_summary, "cost_total"), false);
+      assert.deepEqual(recorded.entry.missing, ["cost_currency", "cost_total", "model", "provider"]);
     } finally {
       cleanup(fixture.repo);
     }

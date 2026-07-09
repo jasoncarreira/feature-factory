@@ -25,6 +25,14 @@ describe("cli write surface", () => {
 
       runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
       validateFactory(repo);
+      const costRecorded = JSON.parse(runFactory(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--step", "build", "--slice-id", "slice", "--provider", "opencode", "--model", "gpt-5.5", "--source", "usage-log", "--operation", "completion", "--request-id", "req-1", "--input-tokens", "10", "--output-tokens", "5", "--total-tokens", "15", "--cost-total", "0.02", "--currency", "USD", "--recorded-at", "2026-07-08T12:30:00.000Z", "--entry-id", "cli-cost", "--json"]).stdout);
+      assert.equal(costRecorded.entry.id, "cli-cost");
+      assert.equal(costRecorded.entry.slice_id, "slice");
+      assert.equal(costRecorded.cost_summary.total_tokens, 15);
+      assert.equal(JSON.parse(runFactory(repo, ["status", RUN_ID, "--json"]).stdout).cost_summary.cost_total, 0.02);
+      assert.equal(JSON.parse(runFactory(repo, ["list", "--json"]).stdout)[0].cost_summary.entry_count, 1);
+      assert.match(runFactory(repo, ["list"]).stdout, /cost available · 1 entry · 15 tokens · 0\.02 USD/u);
+      validateFactory(repo);
       runFactory(repo, ["slice-status", RUN_ID, "slice", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/slice", "--attempts", "1", "--json"]);
       validateFactory(repo);
       assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]).stderr, /refuses to replace non-pending slice progress/u);

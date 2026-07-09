@@ -5,7 +5,8 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { formatCostAttributionSummary } from "./cost-attribution.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
@@ -23,7 +24,20 @@ const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id"]);
+const COST_NUMERIC_FLAGS = new Map([
+  ["--input-tokens", "inputTokens"],
+  ["--output-tokens", "outputTokens"],
+  ["--total-tokens", "totalTokens"],
+  ["--cache-creation-input-tokens", "cacheCreationInputTokens"],
+  ["--cache-read-input-tokens", "cacheReadInputTokens"],
+  ["--reasoning-tokens", "reasoningTokens"],
+  ["--cost-total", "costTotal"],
+  ["--cost-input", "costInput"],
+  ["--cost-output", "costOutput"],
+  ["--cost-cache-creation", "costCacheCreation"],
+  ["--cost-cache-read", "costCacheRead"],
+]);
 
 function usage(write = console.log) {
   write(`feature-factory
@@ -36,6 +50,7 @@ Commands:
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--dry-run]
   factory steer <run-id> --message TEXT [--json]
   factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> [--json]
+  factory cost-record <run-id> --agent AGENT [--step STEP] [--slice-id ID] [--provider PROVIDER] [--model MODEL] [--source SOURCE] [--operation OP] [--request-id ID] [--input-tokens N] [--output-tokens N] [--total-tokens N] [--cache-creation-input-tokens N] [--cache-read-input-tokens N] [--reasoning-tokens N] [--cost-total N] [--cost-input N] [--cost-output N] [--cost-cache-creation N] [--cost-cache-read N] [--currency CODE] [--recorded-at ISO] [--entry-id ID] [--json]
   factory resume <run-id> [--headless|--autonomous|--detached] [--dry-run] [--json]
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
@@ -140,6 +155,7 @@ async function factory(args) {
   }
   if (sub === "steer") return steer(rest);
   if (sub === "steer-consume") return steerConsume(rest);
+  if (sub === "cost-record") return costRecord(rest);
   if (sub === "resume") return resume(rest);
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
@@ -191,6 +207,14 @@ async function steerConsume(args) {
   const ref = requiredOption(opts.ref, "--ref", "factory steer-consume");
   const hash = requiredOption(opts.hash, "--hash", "factory steer-consume");
   return print(await consumeSteering(runId, { ref, hash }, opts), opts);
+}
+
+async function costRecord(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) throw new Error("factory cost-record requires exactly one <run-id>");
+  return print(await recordCostUsage(runId, costRecordInput(opts), opts), opts);
 }
 
 async function resume(args) {
@@ -296,6 +320,17 @@ function options(args) {
     if (args[index] === "--message") opts.message = args[++index];
     if (args[index] === "--ref") opts.ref = args[++index];
     if (args[index] === "--hash") opts.hash = args[++index];
+    if (args[index] === "--agent") opts.agent = args[++index];
+    if (args[index] === "--step") opts.step = args[++index];
+    if (args[index] === "--slice-id") opts.sliceId = args[++index];
+    if (args[index] === "--provider") opts.provider = args[++index];
+    if (args[index] === "--source") opts.source = args[++index];
+    if (args[index] === "--operation") opts.operation = args[++index];
+    if (args[index] === "--request-id") opts.requestId = args[++index];
+    if (args[index] === "--currency") opts.currency = args[++index];
+    if (args[index] === "--recorded-at") opts.recordedAt = args[++index];
+    if (args[index] === "--entry-id") opts.entryId = args[++index];
+    if (COST_NUMERIC_FLAGS.has(args[index])) opts[COST_NUMERIC_FLAGS.get(args[index])] = Number(args[++index]);
   }
   return opts;
 }
@@ -550,6 +585,40 @@ function normalizeCliPrNumber(value) {
   }
 }
 
+function costRecordInput(opts) {
+  const input = {};
+  for (const [key, field] of [
+    ["agent", "agent"],
+    ["step", "step"],
+    ["sliceId", "slice_id"],
+    ["provider", "provider"],
+    ["model", "model"],
+    ["source", "source"],
+    ["operation", "operation"],
+    ["requestId", "request_id"],
+    ["currency", "cost_currency"],
+    ["recordedAt", "recorded_at"],
+  ]) {
+    if (stringValue(opts[key])) input[field] = opts[key];
+  }
+  for (const [key, field] of [
+    ["inputTokens", "input_tokens"],
+    ["outputTokens", "output_tokens"],
+    ["totalTokens", "total_tokens"],
+    ["cacheCreationInputTokens", "cache_creation_input_tokens"],
+    ["cacheReadInputTokens", "cache_read_input_tokens"],
+    ["reasoningTokens", "reasoning_tokens"],
+    ["costTotal", "cost_total"],
+    ["costInput", "cost_input"],
+    ["costOutput", "cost_output"],
+    ["costCacheCreation", "cost_cache_creation"],
+    ["costCacheRead", "cost_cache_read"],
+  ]) {
+    if (opts[key] !== undefined) input[field] = opts[key];
+  }
+  return input;
+}
+
 function requiredOption(value, flag, command = "factory pr-created") {
   if (!stringValue(value)) throw new Error(`${command} requires ${flag}`);
   return value;
@@ -620,10 +689,15 @@ function print(value, opts) {
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) console.log(`${item.run_id}\t${item.status}\t${item.gate || "-"}\t${item.updated_at || "-"}\t${formatDiagnosticColumn(item.diagnostics)}`);
+    for (const item of value) console.log(`${item.run_id}\t${item.status}\t${item.gate || "-"}\t${item.updated_at || "-"}\t${formatListCostColumn(item)}\t${formatDiagnosticColumn(item.diagnostics)}`);
     return;
   }
   for (const [key, val] of Object.entries(value)) console.log(`${key}: ${typeof val === "object" ? JSON.stringify(val) : val}`);
+}
+
+function formatListCostColumn(item) {
+  if (!item?.cost_summary) return "-";
+  return cleanDiagnosticText(formatCostAttributionSummary({ totals: item.cost_summary, updated_at: item.cost_summary.updated_at }));
 }
 
 function formatDiagnosticColumn(diagnostics) {
