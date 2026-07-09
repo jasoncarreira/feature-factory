@@ -310,6 +310,53 @@ describe("blocked-run continuation docs contract", () => {
   });
 });
 
+describe("non-destructive disrupted-worktree recovery docs contract", () => {
+  it("requires explicit resume-check recovery and forbids silent re-scaffolding", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /feature-factory factory resume-check <run-id> --json/i, `${name} must document resume-check`);
+      assert.match(text, /factory start --headless\|--autonomous "resume <run-id>"/i, `${name} must document start resume preflight`);
+      assert.match(text, /missing[\s\S]*inaccessible[\s\S]*invalid[\s\S]*(?:run\.json|\.opencode\/factory\/\<run-id\>\/run\.json)/i, `${name} must name missing/inaccessible/invalid durable state`);
+      assert.match(text, /must not[\s\S]*(?:re-scaffold|re-scaffolded)|never[\s\S]*(?:re-scaffold|re-scaffolded)/i, `${name} must forbid re-scaffolding`);
+      assert.match(text, /synthetic non-durable[\s\S]*blocked[\s\S]*ok:false[\s\S]*durable:false[\s\S]*updated:false[\s\S]*recovered:false/i, `${name} must describe non-durable blocked envelope`);
+      assert.match(text, /terminal_result\.reason[\s\S]*no durable `?terminal_result`?[\s\S]*(?:forbidden re-scaffolding|without forbidden re-scaffolding)/i, `${name} must explain why no durable terminal_result can be written`);
+    }
+  });
+
+  it("forbids destructive cleanup, prune, and remove during recovery", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /resume-check[\s\S]*(?:must not|never)[\s\S]*destructive cleanup/i, `${name} must forbid recovery cleanup`);
+      assert.match(text, /resume-check[\s\S]*(?:must not|never)[\s\S]*git worktree prune/i, `${name} must forbid recovery prune`);
+      assert.match(text, /resume-check[\s\S]*(?:must not|never)[\s\S]*git worktree remove/i, `${name} must forbid recovery worktree remove`);
+      assert.match(text, /cleanup remains an explicit operator action/i, `${name} must reserve cleanup for explicit operator action`);
+      assert.match(text, /status[\s\S]*list[\s\S]*validate[\s\S]*watch[\s\S]*(?:read-only|read only)[\s\S]*(?:cleanup|prune|remove)/i, `${name} must keep diagnostics non-destructive`);
+    }
+  });
+
+  it("documents safe missing-worktree restoration criteria", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /missing active worktree|missing \.opencode\/worktrees/i, `${name} must scope recovery to missing active worktrees`);
+      assert.match(text, /branch exists/i, `${name} must require branch existence`);
+      assert.match(text, /base_commit[\s\S]*merge_commit[\s\S]*ancestors? of branch HEAD/i, `${name} must require base and merged commits to be ancestors`);
+      assert.match(text, /target[\s\S]*(?:under|stays under|remains under)[\s\S]*\.opencode\/worktrees/i, `${name} must constrain the target path`);
+      assert.match(text, /no (?:unsafe )?existing path would be overwritten/i, `${name} must forbid overwriting existing paths`);
+      assert.match(text, /git worktree add[\s\S]*succeeds/i, `${name} must require successful git worktree add`);
+      assert.match(text, /(?:final )?(?:checkWorktreeIdentity|worktree identity)[\s\S]*HEAD[\s\S]*(?:match|matches)/i, `${name} must require final identity and HEAD checks`);
+    }
+  });
+
+  it("distinguishes blocked and needs-human terminal outcomes with clear reasons", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /contradictory git evidence[\s\S]*terminal `?blocked`?|terminal `?blocked`?[\s\S]*contradictory git evidence/i, `${name} must map contradictory git evidence to blocked`);
+      assert.match(text, /unsafe or inaccessible local paths?[\s\S]*terminal `?needs-human`?|terminal `?needs-human`?[\s\S]*unsafe or inaccessible local paths?/i, `${name} must map unsafe paths to needs-human`);
+      assert.match(text, /terminal_result\.reason[\s\S]*(?:conflicting branch\/commit evidence|path that requires operator reconciliation)/i, `${name} must require clear terminal_result.reason details`);
+    }
+  });
+
+  it("does not leave disrupted recovery as open future TODO work", () => {
+    assert.doesNotMatch(TODO, /Non-destructive disrupted-worktree recovery/i, "TODO must not leave disrupted recovery open");
+  });
+});
+
 describe("remediation context reuse docs contract", () => {
   it("documents implementer-only runtime task_id reuse boundaries", () => {
     for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA })) {
