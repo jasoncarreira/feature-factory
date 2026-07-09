@@ -183,6 +183,54 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("prefers active work over downstream blocked placeholders", () => {
+    const repo = tempDir();
+    writeRun(repo, "spec-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      steps: [
+        { agent: "spec-writer", status: "running", attempts: 0 },
+        { agent: "work-decomposer", status: "blocked", attempts: 0 },
+        { agent: "test-verifier", status: "blocked", attempts: 0 },
+      ],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.current, "spec-writer running");
+    cleanup(repo);
+  });
+
+  it("prefers an active step over a blocked slice", () => {
+    const repo = tempDir();
+    writeRun(repo, "cross-tier-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [{ id: "docs-authority-contract", status: "blocked", attempts: 1 }],
+      steps: [{ agent: "spec-writer", status: "running", attempts: 2 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.current, "spec-writer running a2");
+    cleanup(repo);
+  });
+
+  it("keeps blocked work as the fallback when no work is active", () => {
+    const repo = tempDir();
+    writeRun(repo, "blocked-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [{ id: "docs-authority-contract", status: "blocked", attempts: 1 }],
+      steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.current, "docs-authority-contract blocked a1");
+    cleanup(repo);
+  });
+
   it("infers pre-PR panel progress after test-verifier acceptance", () => {
     const repo = tempDir();
     writeRun(repo, "panel-run", {

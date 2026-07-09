@@ -276,9 +276,13 @@ function sliceSummary(run) {
 }
 
 function currentSummary(run) {
-  const slice = firstByStatus(run.slices, ["blocked", "running", "review"]);
-  if (slice) return summarizeWorkItem(slice.id, slice.status, slice.attempts);
-  const step = firstByStatus(run.steps, ["blocked", "running", "review", "pending"]);
+  const activeSlice = firstByStatus(run.slices, ["running", "review"]);
+  if (activeSlice) return summarizeWorkItem(activeSlice.id, activeSlice.status, activeSlice.attempts);
+  const activeStep = firstByStatus(run.steps, ["running", "review"]);
+  if (activeStep) return summarizeWorkItem(activeStep.agent, activeStep.status, activeStep.attempts);
+  const blockedSlice = firstByStatus(run.slices, ["blocked"]);
+  if (blockedSlice) return summarizeWorkItem(blockedSlice.id, blockedSlice.status, blockedSlice.attempts);
+  const step = firstByStatus(run.steps, ["blocked", "pending"]);
   if (step) return summarizeWorkItem(step.agent, step.status, step.attempts);
   const panel = inferredPrePrPanelSummary(run);
   if (panel) return panel;
