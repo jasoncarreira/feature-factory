@@ -281,6 +281,39 @@ describe("run schema and consistency", () => {
     }
   });
 
+  it("validates optional process evidence sidecars when present", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo, "process-valid");
+    mkdirSync(join(runDir, "processes"), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun("process-valid"));
+
+    try {
+      assert.equal(validateRunDir(runDir).ok, true, "missing process.json remains valid for old runs");
+
+      writeJson(join(runDir, "process.json"), processEvidence("process-valid", { cwd: repo }));
+      assert.equal(validateRunDir(runDir).ok, true, "valid process.json is accepted");
+
+      const cases = [
+        { name: "run-id mismatch", value: processEvidence("other-run", { cwd: repo }), match: /run_id must match requested run/u },
+        { name: "kind mismatch", value: processEvidence("process-valid", { cwd: repo, kind: "heartbeat" }), match: /kind must be opencode-process/u },
+        { name: "non-positive pid", value: processEvidence("process-valid", { cwd: repo, pid: 0 }), match: /pid must be a positive integer/u },
+        { name: "invalid state", value: processEvidence("process-valid", { cwd: repo, state: "stopping" }), match: /state must be one of running, cancelled, failed-closed, exited/u },
+        { name: "invalid identity", value: processEvidence("process-valid", { cwd: repo, identity: null }), match: /identity must be an object/u },
+        { name: "escaping log ref", value: processEvidence("process-valid", { cwd: repo, log_ref: "processes/../outside.log" }), match: /log_ref must stay under processes/u },
+      ];
+
+      for (const item of cases) {
+        writeJson(join(runDir, "process.json"), item.value);
+        const result = validateRunDir(runDir);
+        const errors = result.checks.flatMap((check) => check.errors || []).map((error) => error.message).join("\n");
+        assert.equal(result.ok, false, item.name);
+        assert.match(errors, item.match, item.name);
+      }
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("allows pending gates to reference not-yet-written question and artifact files", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo, "pending-refs");
@@ -356,6 +389,29 @@ function continuationMetadata(targetRunId = "run") {
       { kind: "review", ref: "reviews/implementation-validator.json", hash: HASH },
     ],
   };
+}
+
+function processEvidence(runId = "run", overrides = {}) {
+  const identity = { inspector: "test-inspector", start_marker: "start-1", command_name: "opencode" };
+  const evidence = {
+    schema_version: 1,
+    kind: "opencode-process",
+    run_id: runId,
+    execution_id: "exec-1",
+    pid: 4242,
+    started_at: "2026-07-09T14:59:00.000Z",
+    updated_at: "2026-07-09T14:59:00.000Z",
+    state: "running",
+    cwd: "/tmp/opencode-process-cwd",
+    identity,
+    log_ref: "processes/opencode.log",
+    cancel: null,
+    ...overrides,
+  };
+  if (overrides.identity && typeof overrides.identity === "object" && !Array.isArray(overrides.identity)) {
+    evidence.identity = { ...identity, ...overrides.identity };
+  }
+  return evidence;
 }
 
 function tempRepo() {

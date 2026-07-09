@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
+import { PROCESS_EVIDENCE_FILE, processEvidenceProcessesDir, validateProcessEvidence } from "./process-evidence.js";
 import { hashFile, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
@@ -119,6 +120,16 @@ export function validateFactoryLock(factoryLock) {
   return factoryLock;
 }
 
+export function validateProcessSidecar(processSidecar, options = {}) {
+  const validation = validateProcessEvidence(processSidecar, { runDir: options.runDir, runId: options.runId });
+  if (!validation.ok) fail([{ path: "process", message: validation.reason }]);
+
+  const errors = [];
+  validateProcessLogRefContainment(errors, validation.evidence.log_ref, "process.log_ref", options.runDir);
+  if (errors.length) fail(errors);
+  return validation.evidence;
+}
+
 export function validateRunDir(runDir) {
   const checks = [];
   const runFile = join(runDir, "run.json");
@@ -131,6 +142,8 @@ export function validateRunDir(runDir) {
   if (existsSync(factoryLockPath)) checks.push(validateFile(factoryLockPath, validateFactoryLock));
   const heartbeatPath = join(runDir, "heartbeat.json");
   if (existsSync(heartbeatPath)) checks.push(validateFile(heartbeatPath, validateHeartbeatState));
+  const processPath = join(runDir, PROCESS_EVIDENCE_FILE);
+  if (existsSync(processPath)) checks.push(validateFile(processPath, (value) => validateProcessSidecar(value, { runDir, runId: run?.run_id })));
   const slicesPath = join(runDir, "plan", "slices.json");
   if (existsSync(slicesPath)) checks.push(validateFile(slicesPath, validateSlicesPlan));
   if (checks.every((item) => item.ok)) checks.push(...checkRunConsistency(runDir, run).checks);
@@ -762,6 +775,16 @@ function validateStringMap(errors, value, path) {
     return;
   }
   for (const [key, item] of Object.entries(value)) if (typeof item !== "string") errors.push({ path: `${path}.${key}`, message: "must be a string" });
+}
+
+function validateProcessLogRefContainment(errors, ref, path, runDir) {
+  if (!stringValue(ref) || !stringValue(runDir)) return;
+  const processesDir = resolve(processEvidenceProcessesDir(runDir));
+  const resolvedLog = resolve(runDir, ref);
+  const relativeLog = relative(processesDir, resolvedLog);
+  if (relativeLog === "" || relativeLog === ".." || relativeLog.startsWith(`..${sep}`)) {
+    errors.push({ path, message: "must stay under run processes directory" });
+  }
 }
 
 function validateRequiredStringMap(errors, value, path) {

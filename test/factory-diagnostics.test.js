@@ -150,6 +150,45 @@ describe("factory diagnostics", () => {
       cleanup(repo);
     }
   });
+
+  it("fails closed with invalid-run-state diagnostics for invalid process sidecars", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    mkdirSync(join(runDir, "processes"), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun());
+    writeJson(join(runDir, "process.json"), processEvidence({ run_id: "other-run", cwd: repo }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT });
+
+      assert.equal(diagnostics.classification, "invalid");
+      assert.equal(diagnostics.authoritative, false);
+      assert.equal(diagnostics.items[0].condition, "invalid-run-state");
+      assert.match(diagnostics.summary, /cancellation must fail closed/u);
+      assert.match(diagnostics.items[0].evidence.error, /run_id must match requested run/u);
+      assert.equal(diagnostics.items[0].evidence.fail_closed, true);
+      assert.equal(diagnostics.items[0].evidence.sidecar_run_id, "other-run");
+      assert.match(diagnostics.items[0].action, /do not signal any process/u);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("accepts valid optional process sidecars without adding diagnostics", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    mkdirSync(join(runDir, "processes"), { recursive: true });
+    writeJson(join(runDir, "run.json"), runningRun());
+    writeJson(join(runDir, "process.json"), processEvidence({ cwd: repo }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT });
+      assert.deepEqual(diagnostics.items, []);
+      assert.equal(diagnostics.classification, "healthy");
+    } finally {
+      cleanup(repo);
+    }
+  });
 });
 
 function tempRepo() {
@@ -191,6 +230,25 @@ function heartbeatState(overrides = {}) {
     pid: process.pid,
     last_tick_at: "2026-07-08T11:59:00.000Z",
     interval_ms: 30000,
+    ...overrides,
+  };
+}
+
+function processEvidence(overrides = {}) {
+  const identity = { inspector: "test-inspector", start_marker: "start-1", command_name: "opencode" };
+  return {
+    schema_version: 1,
+    kind: "opencode-process",
+    run_id: RUN_ID,
+    execution_id: "exec-1",
+    pid: 4242,
+    started_at: "2026-07-09T14:59:00.000Z",
+    updated_at: "2026-07-09T14:59:00.000Z",
+    state: "running",
+    cwd: "/tmp/opencode-process-cwd",
+    identity,
+    log_ref: "processes/opencode.log",
+    cancel: null,
     ...overrides,
   };
 }
