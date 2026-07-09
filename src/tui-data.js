@@ -257,6 +257,22 @@ function currentSummary(run) {
   if (slice) return summarizeWorkItem(slice.id, slice.status, slice.attempts);
   const step = firstByStatus(run.steps, ["blocked", "running", "review", "pending"]);
   if (step) return summarizeWorkItem(step.agent, step.status, step.attempts);
+  const panel = inferredPrePrPanelSummary(run);
+  if (panel) return panel;
+  return null;
+}
+
+function inferredPrePrPanelSummary(run) {
+  if (run?.status !== "running" || pendingGate(run)) return null;
+  const testAccepted = Array.isArray(run.steps) && run.steps.some((step) => step?.agent === "test-verifier" && step?.status === "accepted");
+  if (!testAccepted) return null;
+  const validatorVerdict = stringOrNull(run.validator?.verdict);
+  const securityVerdict = stringOrNull(run.security_review?.verdict);
+  if (!validatorVerdict && !securityVerdict) return "pre-PR panel running";
+  if (validatorVerdict === "NO-GO" || securityVerdict === "BLOCK") return "panel remediation running";
+  if (!validatorVerdict) return "implementation-validator running";
+  if (!securityVerdict) return "security-reviewer running";
+  if (!run.pr_url) return "draft PR pending";
   return null;
 }
 
