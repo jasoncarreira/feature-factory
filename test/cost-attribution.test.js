@@ -84,6 +84,41 @@ describe("cost attribution helpers", () => {
     assert.equal(attribution.by_agent.a.cost_total, 0.01);
   });
 
+  it("detects mixed currency across disjoint populated cost fields", () => {
+    const entries = [
+      { status: "available", missing: [], cost_total: 0.1, cost_input: 0.04, cost_currency: "USD" },
+      { status: "partial", missing: ["cost_total"], cost_output: 0.05, cost_currency: "EUR" },
+    ];
+
+    const rollup = rollupEntries(entries);
+
+    assert.equal(rollup.status, "partial");
+    assert.equal(rollup.mixed_currency, true);
+    assert.equal(Object.hasOwn(rollup, "cost_total"), false);
+    assert.equal(Object.hasOwn(rollup, "cost_currency"), false);
+    assert.equal(rollup.cost_input, 0.04);
+    assert.equal(rollup.cost_output, 0.05);
+    assert.deepEqual(rollup.missing, ["cost_total", "mixed_currency"]);
+  });
+
+  it("rejects finite aggregate overflow for totals and by_step without mutating entries", () => {
+    const entries = [
+      { step: "build", status: "available", missing: [], input_tokens: Number.MAX_VALUE },
+      { step: "build", status: "available", missing: [], input_tokens: Number.MAX_VALUE },
+    ];
+    const before = structuredClone(entries);
+
+    assert.throws(
+      () => rollupEntries(entries),
+      /cost attribution aggregate overflow for input_tokens/u,
+    );
+    assert.throws(
+      () => rollupBy(entries, "step"),
+      /cost attribution aggregate overflow for input_tokens/u,
+    );
+    assert.deepEqual(entries, before);
+  });
+
   it("rejects entries beyond the cap instead of truncating", () => {
     const entries = Array.from({ length: MAX_COST_ATTRIBUTION_ENTRIES + 3 }, (_, index) => ({
       id: `entry-${index}`,

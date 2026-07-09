@@ -15,7 +15,7 @@ import { validateCostAttributionEntries } from "./validate.js";
 export const COST_REPORT_SCHEMA_VERSION = 1;
 
 const NUMERIC_FIELDS = Object.freeze([...USAGE_NUMERIC_FIELDS, ...COST_NUMERIC_FIELDS]);
-const JSON_LITERAL_CONTROL_PATTERN = /[\u007F-\u009F\u2028\u2029]/gu;
+const JSON_LITERAL_CONTROL_PATTERN = /[\u007F-\u009F\u2028\u2029\p{Cf}]/gu;
 
 export function buildCostReport(runId, attribution, options = {}) {
   const entries = reportEntries(attribution);
@@ -68,7 +68,7 @@ export function formatCostReport(report) {
 }
 
 export function serializeCostReport(report) {
-  return JSON.stringify(report, null, 2).replace(JSON_LITERAL_CONTROL_PATTERN, (value) => unicodeEscape(value.charCodeAt(0)));
+  return JSON.stringify(report, null, 2).replace(JSON_LITERAL_CONTROL_PATTERN, unicodeEscapeText);
 }
 
 export function encodeCostReportDisplayLabel(value) {
@@ -172,6 +172,12 @@ function telemetryError(message) {
 
 function unicodeEscape(code) {
   return `\\u${code.toString(16).toUpperCase().padStart(4, "0")}`;
+}
+
+function unicodeEscapeText(value) {
+  let escaped = "";
+  for (let index = 0; index < value.length; index += 1) escaped += unicodeEscape(value.charCodeAt(index));
+  return escaped;
 }
 
 function isRecord(value) {

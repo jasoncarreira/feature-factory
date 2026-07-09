@@ -139,6 +139,7 @@ async function doctor(args) {
 async function factory(args) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
+  if (sub === "cost-report") return costReport(rest);
   const opts = options(rest);
   const positional = positionals(rest);
   if (sub === "start") {
@@ -163,7 +164,6 @@ async function factory(args) {
   if (sub === "steer-consume") return steerConsume(rest);
   if (sub === "steer-conflict") return steerConflict(rest);
   if (sub === "cost-record") return costRecord(rest);
-  if (sub === "cost-report") return costReport(rest);
   if (sub === "resume") return resume(rest);
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
@@ -248,17 +248,21 @@ async function costRecord(args) {
 }
 
 function costReport(args) {
-  const opts = options(args);
-  const positional = positionals(args);
-  if (positional.length !== 1) throw new Error("factory cost-report requires exactly one <run-id>");
+  try {
+    const opts = options(args);
+    const positional = positionals(args);
+    if (positional.length !== 1) throw new Error("factory cost-report requires exactly one <run-id>");
 
-  const requestedRunId = normalizeCostReportRunId(positional[0]);
-  const runDir = resolveRunDir(requestedRunId, opts);
-  const run = readJsonFile(join(runDir, "run.json"), "run.json");
-  if (!run || typeof run !== "object" || Array.isArray(run)) throw new Error("run.json must contain an object");
+    const requestedRunId = normalizeCostReportRunId(positional[0]);
+    const runDir = resolveRunDir(requestedRunId, opts);
+    const run = readJsonFile(join(runDir, "run.json"), "run.json");
+    if (!run || typeof run !== "object" || Array.isArray(run)) throw new Error("run.json must contain an object");
 
-  const report = buildCostReport(basename(runDir), run.cost_attribution, { telemetry: opts.telemetry });
-  console.log(opts.json ? serializeCostReport(report) : formatCostReport(report));
+    const report = buildCostReport(basename(runDir), run.cost_attribution, { telemetry: opts.telemetry });
+    console.log(opts.json ? serializeCostReport(report) : formatCostReport(report));
+  } catch (error) {
+    throw new Error(terminalSafeCostReportError(error?.message));
+  }
 }
 
 async function resume(args) {
@@ -859,7 +863,7 @@ function normalizeHeartbeatRunId(runId) {
 }
 
 function normalizeCostReportRunId(runId) {
-  const value = String(runId).trim();
+  const value = String(runId);
   if (isAbsolute(value) || value.includes("/") || value.includes("\\") || value === "." || value === "..") {
     throw new Error("factory cost-report requires a bare <run-id>, not a filesystem path");
   }
@@ -867,6 +871,18 @@ function normalizeCostReportRunId(runId) {
     throw new Error('factory cost-report requires a safe <run-id> using letters, digits, ".", "_", or "-"');
   }
   return value;
+}
+
+function terminalSafeCostReportError(message) {
+  const value = String(message ?? "cost-report failed");
+  let safe = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    safe += code >= 0x20 && code <= 0x7E
+      ? value[index]
+      : `\\u${code.toString(16).toUpperCase().padStart(4, "0")}`;
+  }
+  return safe;
 }
 
 function insideDirectory(parent, child) {
