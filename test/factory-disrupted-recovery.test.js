@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,6 +96,82 @@ describe("factory disrupted run recovery", () => {
       assert.equal(run.status, "needs-human");
     } finally {
       rmSync(fixture.worktree, { force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects physical worktree paths under a symlinked .opencode/worktrees target", async () => {
+    const outsideRoot = tempRepo("physical-symlink-target");
+    const physicalWorktree = join(outsideRoot, "physical-symlink-run");
+    const fixture = createRecoveryFixture("physical-symlink-run", { worktree: physicalWorktree });
+    try {
+      mkdirSync(join(fixture.repo, ".opencode"), { recursive: true });
+      symlinkSync(outsideRoot, join(fixture.repo, ".opencode", "worktrees"), "dir");
+
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo });
+      const run = readJson(join(fixture.runDir, "run.json"));
+
+      assert.equal(result.ok, false);
+      assert.equal(result.recovered, false);
+      assert.equal(result.status, "needs-human");
+      assert.match(result.terminal_result.reason, /outside \.opencode\/worktrees|must not contain symlinks/i);
+      assert.equal(run.status, "needs-human");
+      assert.equal(existsSync(physicalWorktree), false);
+    } finally {
+      cleanup(fixture.repo);
+      cleanup(outsideRoot);
+    }
+  });
+
+  it("rejects logical recovery worktree paths when .opencode/worktrees is a symlink", async () => {
+    const outsideRoot = tempRepo("logical-symlink-target");
+    const fixture = createRecoveryFixture("logical-symlink-run");
+    try {
+      mkdirSync(join(fixture.repo, ".opencode"), { recursive: true });
+      symlinkSync(outsideRoot, join(fixture.repo, ".opencode", "worktrees"), "dir");
+
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo });
+      const run = readJson(join(fixture.runDir, "run.json"));
+
+      assert.equal(result.ok, false);
+      assert.equal(result.recovered, false);
+      assert.equal(result.status, "needs-human");
+      assert.match(result.terminal_result.reason, /must not contain symlinks/i);
+      assert.equal(run.status, "needs-human");
+      assert.equal(existsSync(join(outsideRoot, fixture.runId)), false);
+    } finally {
+      cleanup(fixture.repo);
+      cleanup(outsideRoot);
+    }
+  });
+
+  it("clears disrupted recovery heartbeat metadata without sending SIGTERM to heartbeat pid", async () => {
+    const fixture = createRecoveryFixture("heartbeat-no-kill-run", { baseMismatch: true });
+    const originalKill = process.kill;
+    const killCalls = [];
+    try {
+      writeJson(join(fixture.runDir, "heartbeat.json"), {
+        schema_version: 1,
+        run_id: fixture.runId,
+        phase: "recovery-test",
+        pid: 987654321,
+        interval_ms: 30000,
+        last_tick_at: "2026-07-08T11:59:00.000Z",
+      });
+      process.kill = (pid, signal) => {
+        killCalls.push({ pid, signal });
+        return true;
+      };
+
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z", processAliveFn: () => true });
+      const heartbeat = readJson(join(fixture.runDir, "heartbeat.json"));
+
+      assert.equal(result.status, "blocked");
+      assert.deepEqual(killCalls, []);
+      assert.equal(heartbeat.pid, null);
+      assert.equal(heartbeat.last_tick_at, "2026-07-08T12:00:00.000Z");
+    } finally {
+      process.kill = originalKill;
       cleanup(fixture.repo);
     }
   });

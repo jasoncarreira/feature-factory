@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
@@ -271,30 +271,41 @@ function recoveryEnvelope(run, details = {}) {
 function resolveRecoveryWorktree(repo, run) {
   if (!stringValue(run.branch)) return { ok: false, reason: `run '${run.run_id}' has no branch, so disrupted worktree recovery needs human reconciliation` };
   const target = stringValue(run.worktree) ? resolve(repo, run.worktree) : deriveExpectedWorktreePath(repo, run.branch);
-  const rootPath = resolve(repo, ".opencode", "worktrees");
-  if (!isLogicalContainedPath(canonicalRecoveryPath(rootPath), canonicalRecoveryPath(target), { allowEqual: false })) {
-    return { ok: false, reason: `recorded recovery worktree path is unsafe because it is outside .opencode/worktrees: ${target}` };
-  }
-  try {
-    lstatPathNoSymlinks(repo, target, "factory recovery worktree path must not contain symlinks");
-  } catch (error) {
-    return { ok: false, reason: `recorded recovery worktree path is inaccessible or unsafe: ${error.message}` };
-  }
+  const safety = verifyRecoveryWorktreePath(repo, target);
+  if (!safety.ok) return safety;
   return { ok: true, path: target };
 }
 
-function canonicalRecoveryPath(path) {
-  const resolved = resolve(path);
-  if (existsSync(resolved)) return realpathSync.native(resolved);
-  const segments = [];
-  let cursor = resolved;
-  while (!existsSync(cursor)) {
-    segments.unshift(basename(cursor));
-    const parent = dirname(cursor);
-    if (parent === cursor) return resolved;
-    cursor = parent;
+function verifyRecoveryWorktreePath(repo, target) {
+  const rootPath = resolve(repo, ".opencode", "worktrees");
+  const resolvedTarget = resolve(target);
+  let pathToInspect = resolvedTarget;
+  try {
+    lstatPathNoSymlinks(repo, rootPath, "factory recovery worktree root must not contain symlinks");
+  } catch (error) {
+    return { ok: false, reason: `recorded recovery worktree path is inaccessible or unsafe: ${error.message}` };
   }
-  return resolve(realpathSync.native(cursor), ...segments);
+  if (!isLogicalContainedPath(rootPath, resolvedTarget, { allowEqual: false })) {
+    const aliasTarget = normalizeDarwinPrivateVarAlias(rootPath, resolvedTarget);
+    if (!aliasTarget || !isLogicalContainedPath(rootPath, aliasTarget, { allowEqual: false })) {
+      return { ok: false, reason: `recorded recovery worktree path is unsafe because it is outside .opencode/worktrees: ${resolvedTarget}` };
+    }
+    pathToInspect = aliasTarget;
+  }
+  if (!isLogicalContainedPath(rootPath, pathToInspect, { allowEqual: false })) {
+    return { ok: false, reason: `recorded recovery worktree path is unsafe because it is outside .opencode/worktrees: ${resolvedTarget}` };
+  }
+  try {
+    lstatPathNoSymlinks(repo, pathToInspect, "factory recovery worktree path must not contain symlinks");
+  } catch (error) {
+    return { ok: false, reason: `recorded recovery worktree path is inaccessible or unsafe: ${error.message}` };
+  }
+  return { ok: true };
+}
+
+function normalizeDarwinPrivateVarAlias(rootPath, targetPath) {
+  if (process.platform !== "darwin" || !rootPath.startsWith("/private/var/") || !targetPath.startsWith("/var/")) return null;
+  return `/private${targetPath}`;
 }
 
 function reconcileRecoveryGitEvidence(repo, run) {
@@ -344,7 +355,11 @@ function checkExistingRecoveryWorktree(repo, worktree, branch) {
 }
 
 function addRecoveryWorktree(repo, worktree, branch) {
+  const safety = verifyRecoveryWorktreePath(repo, worktree);
+  if (!safety.ok) return safety;
   mkdirSync(resolve(repo, ".opencode", "worktrees"), { recursive: true });
+  const postMkdirSafety = verifyRecoveryWorktreePath(repo, worktree);
+  if (!postMkdirSafety.ok) return postMkdirSafety;
   git(repo, ["worktree", "prune"]);
   const proc = git(repo, ["worktree", "add", worktree, branch], { timeout: 30000 });
   if (!proc.ok) return { ok: false, reason: `git worktree add failed for disrupted run recovery: ${(proc.stderr || proc.stdout || "unknown git error").trim()}` };
@@ -392,13 +407,6 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
     const heartbeat = tryReadHeartbeatFile(file);
     if (heartbeat.error || !heartbeat.value) return;
     stopActiveHeartbeatLoop(runDir);
-    if (heartbeat.value.pid && heartbeat.value.pid !== process.pid && isProcessAlive(heartbeat.value.pid, opts)) {
-      try {
-        process.kill(heartbeat.value.pid, "SIGTERM");
-      } catch {
-        // Best-effort disruption recovery stop.
-      }
-    }
     writeHeartbeatFile(file, validateHeartbeatState({ ...heartbeat.value, pid: null, last_tick_at: timestamp(opts.now) }));
   } catch {
     // Recovery terminal writes are best-effort about heartbeat cleanup.
