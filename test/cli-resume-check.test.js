@@ -44,6 +44,27 @@ describe("cli resume-check and resume preflight", () => {
     }
   });
 
+  for (const mode of ["--headless", "--autonomous"]) {
+    it(`rejects active heartbeat before ${mode} factory start resume seeds skills or spawns opencode`, () => {
+      const fixture = createCliRecoveryFixture(`start-resume-active-heartbeat-${mode.slice(2)}`);
+      try {
+        writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
+
+        const proc = runCli(fixture.repo, ["factory", "start", mode, "--json", `resume ${fixture.runId}`]);
+
+        assert.notEqual(proc.status, 0);
+        assert.equal(proc.stderr, "");
+        const output = JSON.parse(proc.stdout);
+        assert.equal(output.ok, false);
+        assert.match(output.reason, /resume ineligible/i);
+        assert.match(output.reason, /active-heartbeat/i);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature", "SKILL.md")), false);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  }
+
   it("recovers a disrupted run through resume-check", () => {
     const fixture = createCliRecoveryFixture("cli-recoverable-run");
     try {
@@ -81,6 +102,17 @@ function createCliRecoveryFixture(runId) {
     terminal_result: null,
   });
   return { repo, runDir, runId, worktree };
+}
+
+function heartbeat(runId) {
+  return {
+    schema_version: 1,
+    run_id: runId,
+    phase: "builder-wave",
+    pid: process.pid,
+    interval_ms: 30000,
+    last_tick_at: new Date().toISOString(),
+  };
 }
 
 function tempRepo(name) {
