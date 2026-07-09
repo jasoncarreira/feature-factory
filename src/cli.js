@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { cleanupRun, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
+import { cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
@@ -23,7 +23,7 @@ const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash"]);
 
 function usage(write = console.log) {
   write(`feature-factory
@@ -33,6 +33,9 @@ Commands:
   doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] <prompt...>
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--dry-run]
+  factory steer <run-id> --message TEXT [--json]
+  factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> [--json]
+  factory resume <run-id> [--headless|--autonomous|--detached] [--dry-run] [--json]
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory heartbeat <run-id> --start --phase <phase> [--interval MS] [--json]  Start detached liveness ticker
@@ -122,6 +125,9 @@ async function factory(args) {
     if (positional.length !== 1) throw new Error("factory continue requires exactly one <blocked-run-id>");
     return print(continueFactory(positional[0], opts), opts);
   }
+  if (sub === "steer") return steer(rest);
+  if (sub === "steer-consume") return steerConsume(rest);
+  if (sub === "resume") return resume(rest);
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
   if (sub === "heartbeat") return heartbeat(rest);
@@ -154,6 +160,32 @@ async function factory(args) {
 function answer(args) {
   const { opts, runId, gate, answerText } = parseAnswerArgs(args);
   return print(writeGateAnswer(runId, gate, answerText, opts), opts);
+}
+
+async function steer(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) throw new Error("factory steer requires exactly one <run-id>");
+  return print(await writeSteering(runId, requiredOption(opts.message, "--message", "factory steer"), opts), opts);
+}
+
+async function steerConsume(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) throw new Error("factory steer-consume requires exactly one <run-id>");
+  const ref = requiredOption(opts.ref, "--ref", "factory steer-consume");
+  const hash = requiredOption(opts.hash, "--hash", "factory steer-consume");
+  return print(await consumeSteering(runId, { ref, hash }, opts), opts);
+}
+
+async function resume(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) throw new Error("factory resume requires exactly one <run-id>");
+  return print(await resumeFactory(runId, opts), opts);
 }
 
 async function heartbeat(args) {
@@ -248,6 +280,9 @@ function options(args) {
     if (args[index] === "--validator") opts.validator = args[++index];
     if (args[index] === "--security") opts.security = args[++index];
     if (args[index] === "--report") opts.report = args[++index];
+    if (args[index] === "--message") opts.message = args[++index];
+    if (args[index] === "--ref") opts.ref = args[++index];
+    if (args[index] === "--hash") opts.hash = args[++index];
   }
   return opts;
 }

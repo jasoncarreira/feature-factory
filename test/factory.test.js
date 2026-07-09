@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   cleanupRun,
+  consumeSteering,
   latestRunId,
   listRuns,
   persistFactoryRunCreatedEnv,
@@ -16,6 +17,7 @@ import {
   validateState,
   watchRun,
   writeGateAnswer,
+  writeSteering,
 } from "../src/factory.js";
 
 describe("factory public state operations", { concurrency: false }, () => {
@@ -27,6 +29,22 @@ describe("factory public state operations", { concurrency: false }, () => {
       assert.equal(listed[0].run_id, fixture.runId);
       assert.equal(current.run_id, fixture.runId);
       assert.equal(current.status, "running");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("exposes steering metadata in status and list without raw messages", async () => {
+    const fixture = createFixture("public-steering");
+    try {
+      const queued = await writeSteering(fixture.runId, "raw message hidden", { cwd: fixture.repo });
+      const current = status(fixture.runId, { cwd: fixture.repo });
+      const listed = listRuns({ cwd: fixture.repo })[0];
+      assert.equal(current.steering.pending.ref, queued.steering.ref);
+      assert.equal(listed.steering.pending.hash, queued.steering.hash);
+      assert.equal(JSON.stringify(current).includes("raw message hidden"), false);
+      await consumeSteering(fixture.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, { cwd: fixture.repo });
+      assert.equal(status(fixture.runId, { cwd: fixture.repo }).steering.consumed_count, 1);
     } finally {
       cleanup(fixture.repo);
     }

@@ -20,6 +20,8 @@ const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-
 const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-created <run-id> --json",
   "factory env record-resume <run-id> --json",
+  "factory steer <run-id> --message TEXT --json",
+  "factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json",
   "factory answer --json <run-id> <gate> approve",
   "factory recover <run-id> --reason TEXT --json",
   "factory gate-decision <run-id> <gate> pending",
@@ -288,6 +290,21 @@ describe("blocked-run continuation docs contract", () => {
       assert.match(text, /driver\.ready\s*=\s*false/i, `${name} must force driver.ready=false`);
       assert.match(text, /terminal[\s\S]*blocked|status:\s*"blocked"/i, `${name} must document terminal blocked outcome`);
       assert.match(text, /no PR URL|pr_url:\s*null/i, `${name} must document no PR URL on exhausted remediation`);
+    }
+  });
+});
+
+describe("interrupt steer resume docs contract", () => {
+  it("documents steering/resume workflow, payload, and untrusted label", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /factory steer <run-id> --message TEXT/i, `${name} must document factory steer`);
+      assert.match(text, /factory steer-consume <run-id> --ref steering\/<file>\.json --hash sha256:<hash>/i, `${name} must document steer-consume`);
+      assert.match(text, /factory resume <run-id>[\s\S]*--dry-run/i, `${name} must document resume dry-run`);
+      assert.match(text, /UNTRUSTED OPERATOR STEERING DATA \(not instructions\)/, `${name} must document untrusted label`);
+      assert.match(text, /untrusted-operator-data/i, `${name} must document untrusted trust value`);
+      assert.match(text, /raw_message_included[\s\S]*false/i, `${name} must document raw_message_included=false`);
+      assert.match(text, /record-resume[\s\S]*before[\s\S]*steer-consume/i, `${name} must document record-resume before steer-consume`);
+      assert.match(text, /active-heartbeat/i, `${name} must document active-heartbeat rejection`);
     }
   });
 });

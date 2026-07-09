@@ -3,7 +3,7 @@ import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { assertContainedPath, physicalPath, requireNonEmptyString } from "./utils.js";
 
-const DURABLE_ROOTS = Object.freeze(["artifacts", "evidence", "reviews", "gates"]);
+const DURABLE_ROOTS = Object.freeze(["artifacts", "evidence", "reviews", "gates", "steering"]);
 
 export function hashFile(file, options = {}) {
   const mode = options.mode || "raw";
@@ -83,6 +83,10 @@ export function resolveArtifactRef(runDirOrRoots, ref, options = {}) {
 
 export function resolveGateRef(runDirOrRoots, ref, options = {}) {
   return resolveDurableRef(runDirOrRoots, ref, "gates", options);
+}
+
+export function resolveSteeringRef(runDirOrRoots, ref, options = {}) {
+  return resolveDurableRef(runDirOrRoots, ref, "steering", options);
 }
 
 function resolveDurableRoot(runDir, rootName, options = {}) {
