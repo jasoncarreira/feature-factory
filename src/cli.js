@@ -330,9 +330,16 @@ function options(args) {
     if (args[index] === "--currency") opts.currency = args[++index];
     if (args[index] === "--recorded-at") opts.recordedAt = args[++index];
     if (args[index] === "--entry-id") opts.entryId = args[++index];
-    if (COST_NUMERIC_FLAGS.has(args[index])) opts[COST_NUMERIC_FLAGS.get(args[index])] = Number(args[++index]);
+    if (COST_NUMERIC_FLAGS.has(args[index])) opts[COST_NUMERIC_FLAGS.get(args[index])] = parseCostNumericOption(args[index], args[++index]);
   }
   return opts;
+}
+
+function parseCostNumericOption(flag, raw) {
+  if (typeof raw !== "string" || raw.trim() === "") throw new Error(`${flag} must be a finite non-negative number`);
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${flag} must be a finite non-negative number`);
+  return value;
 }
 
 function assertKnownOptions(args) {
