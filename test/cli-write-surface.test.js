@@ -73,6 +73,24 @@ describe("cli write surface", () => {
     }
   });
 
+  it("rejects blank cost numeric flags without mutating run.json", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-cost-invalid-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      initGitRepo(repo);
+      seedRun(runDir);
+      const before = readFileSync(join(runDir, "run.json"), "utf8");
+
+      for (const [flag, value] of [["--input-tokens", ""], ["--cost-total", "   "]]) {
+        const failed = runFactoryFail(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", flag, value, "--json"]);
+        assert.match(failed.stderr, new RegExp(`${flag} must be a finite non-negative number`, "u"));
+        assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("refuses stale answers after a gate is re-pended through the CLI", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-gate-repend-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
