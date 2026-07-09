@@ -1,8 +1,8 @@
 # TODO
 
-The active engineering work order is `CODEBASE-REVIEW.md` (verified findings + heartbeat
-rewrite + CLI write-surface completion + right-sizing). Items below are future work not
-covered there.
+The codebase-review and feature-factory hardening pass (verified findings, heartbeat
+rewrite, CLI write-surface completion, and right-sizing) is complete. The items below are
+the remaining future work.
 
 ## Build And Review Workflow
 
