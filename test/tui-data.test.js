@@ -3,9 +3,31 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { factoryRoots, findFactoryRoots, readRuns } from "../src/tui-data.js";
+import { factoryRoots, findFactoryRoots, readRuns, tuiSidebarRefreshMetadata } from "../src/tui-data.js";
 
 describe("TUI factory scanner", () => {
+  it("describes sidebar refresh metadata and active-session limitations", () => {
+    const metadata = tuiSidebarRefreshMetadata({ version: 7 });
+
+    assert.deepEqual(metadata, {
+      schema_version: 1,
+      data_version: 7,
+      root_cache_ttl_ms: 30000,
+      limitation: "An already-open opencode TUI process can keep rendering stale Feature Factory sidebar data after the plugin bundle changes; restart or reload the TUI to pick up plugin changes.",
+      label: "sidebar v7 · plugin changes need TUI restart",
+    });
+  });
+
+  it("sanitizes sidebar refresh data versions for display", () => {
+    for (const version of [undefined, -1, 1.5, "7\u001b[2J", Number.NaN]) {
+      const metadata = tuiSidebarRefreshMetadata({ version });
+
+      assert.equal(metadata.data_version, 0);
+      assert.equal(metadata.label, "sidebar v0 · plugin changes need TUI restart");
+      assert.equal(hasTerminalControl(metadata.label), false);
+    }
+  });
+
   it("finds runs in the current repo factory", () => {
     const repo = tempDir();
     writeRun(repo, "direct", { status: "running", updated_at: "2026-07-05T00:00:00Z" });

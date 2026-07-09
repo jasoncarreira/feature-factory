@@ -490,16 +490,17 @@ If credentials are missing, fail before starting a long build.
 
 Add first-class CLI support for external drivers that want to advance the factory without an interactive terminal.
 
-Implementation status: first pass implemented. `factory start` accepts `--repo`; `--headless` / `--detached` injects driver instructions into the `/feature` invocation. The orchestrator prompt already requires stopping after pending gates in scripted mode. `--autonomous` now injects explicit autonomous instructions so the factory can approve story/brief from its own complete artifacts, decide pre-PR from its implementation/security panel, run bounded remediation, write `terminal_result`, and open a PR without an external gate relay using the configured PR mode.
+Implementation status: first pass implemented. `factory start` accepts `--repo`; `--run-id` passes a validated requested new-run id as `driver.run_id`; `--headless` / `--detached` injects driver instructions into the `/feature` invocation. The orchestrator prompt already requires stopping after pending gates in scripted mode. `--autonomous` now injects explicit autonomous instructions so the factory can approve story/brief from its own complete artifacts, decide pre-PR from its implementation/security panel, run bounded remediation, write `terminal_result`, and open a PR without an external gate relay using the configured PR mode.
 
 Required behavior:
 
 - `feature-factory factory start` accepts `--repo <path>` and runs against that repo root regardless of caller cwd.
+- `feature-factory factory start --run-id <run-id>` validates a bare safe id, rejects resume prompts that also pass `--run-id`, rejects existing run directories before launch, and passes the value as `driver.run_id` for new-run bootstrap only.
 - Add a detached/headless mode, e.g. `--headless` or `--detached`, that runs until the next gate and exits after writing the gate question file.
 - Add an autonomous mode, e.g. `--autonomous`, that runs until terminal status and writes `run.json.terminal_result`.
 - On reaching a gate, the factory writes `gates/<gate>.question.md`, marks the gate pending in `run.json`, and exits cleanly with a recognizable status/output.
 - External drivers can loop:
-  1. `feature-factory factory start --repo <repo> --headless "<prompt or resume>"`
+  1. `feature-factory factory start --repo <repo> --run-id <run-id> --headless "<prompt>"`, or `feature-factory factory start --repo <repo> --headless "resume <run-id>"` for resume.
   2. Read `.opencode/factory/<run-id>/gates/<gate>.question.md`.
   3. Decide externally.
   4. Write `gates/<gate>.answer` via `feature-factory factory answer <run-id> <gate> "approve|changes: ...|stop"`.
@@ -509,7 +510,7 @@ This is the generic adapter contract. External drivers should not need to parse 
 
 Autonomous adapter contract:
 
-1. `feature-factory factory start --repo <repo> --autonomous "<prompt or resume>"`.
+1. `feature-factory factory start --repo <repo> --run-id <run-id> --autonomous "<prompt>"`, or `feature-factory factory start --repo <repo> --autonomous "resume <run-id>"` for resume.
 2. Wait for process exit.
 3. Read `.opencode/factory/<run-id>/run.json` and consume `terminal_result`.
 4. Mirror only stable terminal fields (`status`, `pr_url`, `reason`, summary/artifact refs) to the external tracker.

@@ -72,6 +72,14 @@ It starts a fresh child run from a parent run whose `run.status` is exactly `blo
 
 The corresponding `/feature` intent is `blocked-run-continuation`.
 
+New runs may be named explicitly with:
+
+```sh
+feature-factory factory start --run-id <run-id> <prompt...>
+```
+
+The CLI validates the requested id as a bare safe factory run id, rejects resume prompts that also pass `--run-id`, rejects existing run directories before launch, and passes the value as untrusted driver config `driver.run_id`. The orchestrator must use `driver.run_id` only for new-run manifest bootstrap, not for resume or blocked-run continuation routing.
+
 Required semantic `run.json` write commands:
 
 ```sh

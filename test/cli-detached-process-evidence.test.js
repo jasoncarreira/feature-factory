@@ -41,13 +41,13 @@ describe("cli detached process evidence", () => {
     try {
       const proc = runCli(repo, ["factory", "start", "--detached", "--run-id", victimRunId, "--json", "unrelated prompt"], opencodeBin);
 
-      assert.equal(proc.status, 0, proc.stderr);
-      const output = JSON.parse(proc.stdout);
-      assert.equal(output.status, "started");
+      // A generic start targeting an existing run id is rejected before launch by
+      // assertStartRunIdAvailable. That is a stronger guarantee than starting without
+      // evidence: no process spawns and the victim run dir is never touched.
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /already exists/i);
       assert.equal(existsSync(join(victimRunDir, "process.json")), false);
       assert.equal(existsSync(join(victimRunDir, "processes")), false);
-      assert.equal(existsSync(join(repo, ".opencode", "factory", "processes")), true);
-      stopProcess(output.pid);
     } finally {
       cleanup(repo);
     }

@@ -422,7 +422,7 @@ feature-factory factory cleanup <run-id>
 
 Cleanup removes `.opencode/factory/<run-id>`, recorded worktrees under `.opencode/worktrees/`, and recorded local branches. It only runs for terminal statuses (`completed`, `blocked`, `partial`, or `needs-human`) unless `--force` is supplied. Cleanup refuses to remove run directories outside `.opencode/factory`. Unmerged branches are preserved unless `--force` is supplied. Use `--dry-run` first when you want to preview what would be removed.
 
-When opencode is running in the TUI on a session route, the sidebar also shows a `Feature Factory` panel for runs found under `.opencode/factory/*/run.json` in the current session directory or any nested repo below it. It lists active runs across those repos, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden except for the most recent completed run.
+When opencode is running in the TUI on a session route, the sidebar also shows a `Feature Factory` panel for runs found under `.opencode/factory/*/run.json` in the current session directory or any nested repo below it. It lists active runs across those repos, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden except for the most recent completed run. Directly under the panel header, the muted refresh diagnostic label `sidebar vN · plugin changes need TUI restart` shows the current sidebar data version; run discovery still uses the existing 30s root-cache TTL. An already-open opencode TUI process can keep rendering stale Feature Factory sidebar data after the plugin bundle changes, so restart or reload the TUI to pick up plugin changes.
 
 For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url` only through the `pr-created` transition.
 
@@ -576,11 +576,19 @@ External driver loop:
 
 This lets end users run the workflow interactively from opencode, while automated systems can monitor and drive it without the factory depending on any one tracker.
 
+Use `--run-id <run-id>` on new starts when an external driver needs a predictable factory directory name:
+
+```sh
+feature-factory factory start --repo <repo> --run-id issue-123 --headless "<work order>"
+```
+
+`--run-id` is validated as a bare safe factory run id, rejected for `resume <run-id>` starts, and passed as `driver.run_id` for new-run bootstrap only.
+
 Thin autonomous adapter loop:
 
 1. Claim external work.
 2. Check out the repo.
-3. Run `feature-factory factory start --repo <repo> --autonomous "<work order>"`.
+3. Run `feature-factory factory start --repo <repo> --run-id <run-id> --autonomous "<work order>"`.
 4. Read `run.json.terminal_result`.
 5. Mirror `status`, `pr_url`, and `reason` back to the external system.
 

@@ -16,6 +16,7 @@ const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
 const TODO = readDoc("../TODO.md");
 const CLI = readDoc("../src/cli.js");
+const TUI = readDoc("../src/tui.jsx");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
@@ -545,6 +546,23 @@ describe("cost attribution docs contract", () => {
     assert.doesNotMatch(TODO, /Record per-agent and per-slice token\/cost usage/i, "TODO must not leave baseline cost recording open");
     assert.doesNotMatch(TODO, /Persist cost data in durable run artifacts/i, "TODO must not leave baseline cost persistence open");
     assert.doesNotMatch(TODO, /Surface cost summaries in CLI\/status and eventually TUI/i, "TODO must not leave baseline cost surfacing open");
+  });
+});
+
+describe("TUI sidebar refresh diagnostics docs contract", () => {
+  it("renders the refresh signal directly under the Feature Factory header with muted styling", () => {
+    assert.match(TUI, /<b>Feature Factory<\/b>[\s\S]*<text fg=\{theme\(\)\.textMuted\} wrapMode="none">\{refreshMetadata\(\)\.label\}<\/text>/, "TUI must render the muted refresh label directly under the Feature Factory header");
+  });
+
+  it("documents the sidebar data-version label and restart limitation", () => {
+    assert.match(README, /Feature Factory` panel[\s\S]*`sidebar vN · plugin changes need TUI restart`/i, "README must document the sidebar refresh metadata label");
+    assert.match(README, /30s root-cache TTL|30-second root-cache TTL|30 second root-cache TTL/i, "README must document the root-cache TTL behind sidebar refreshes");
+    assert.match(README, /already-open opencode TUI process[\s\S]*stale Feature Factory sidebar data[\s\S]*restart or reload the TUI/i, "README must document the active-session plugin-change limitation");
+  });
+
+  it("resolves the open TUI refresh hardening TODO while retaining the operational note", () => {
+    assert.doesNotMatch(TODO, /TUI active-session refresh hardening/i, "TODO must not leave the resolved TUI refresh hardening item open");
+    assert.match(TODO, /plugin bundle changes[\s\S]*restart(?:ing)? the opencode TUI|restart(?:ing)? the opencode TUI[\s\S]*plugin bundle changes/i, "TODO must retain the operational restart note");
   });
 });
 

@@ -91,6 +91,9 @@ export async function startFactory(args, opts = {}) {
   if (!args.length) throw new Error("factory start requires a feature prompt");
   const repo = repoRoot(opts.cwd || process.cwd());
   const resumeRunId = resumePromptRunId(args, opts);
+  const requestedRunId = normalizeRequestedStartRunId(opts.runId);
+  if (resumeRunId && requestedRunId) throw new Error("factory start --run-id is only for new runs; use resume <run-id> to resume existing runs");
+  if (requestedRunId) assertStartRunIdAvailable(repo, requestedRunId);
   if (resumeRunId) {
     const activeHeartbeatPreflight = startResumeActiveHeartbeatPreflight(resumeRunId, { ...opts, cwd: repo, repoRoot: repo });
     if (activeHeartbeatPreflight) return activeHeartbeatPreflight;
@@ -102,7 +105,7 @@ export async function startFactory(args, opts = {}) {
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
-  commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo }));
+  commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo, requestedRunId }));
   if (opts.detached) return startDetached(repo, commandArgs, detachedProcessOptions(repo, opts));
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
@@ -199,6 +202,23 @@ function resumePromptRunId(args, opts = {}) {
   const prompt = args.join(" ").trim();
   const match = /^resume\s+([^\s]+)$/iu.exec(prompt);
   return match ? match[1] : null;
+}
+
+function normalizeRequestedStartRunId(value) {
+  if (value === undefined || value === null) return null;
+  if (!stringValue(value)) throw new Error("factory start --run-id must be a non-empty bare safe factory run id");
+  const runId = String(value).trim();
+  if (!SAFE_RUN_ID_PATTERN.test(runId) || runId === "." || runId === ".." || runId.includes("..") || runId.endsWith(".lock")) {
+    throw new Error("factory start --run-id must be a bare safe factory run id");
+  }
+  return runId;
+}
+
+function assertStartRunIdAvailable(repo, runId) {
+  for (const rootPath of factoryRootsForLookup(repo)) {
+    const candidate = resolve(rootPath, runId);
+    if (existsSync(candidate)) throw new Error(`factory start --run-id '${runId}' already exists at ${candidate}`);
+  }
 }
 
 function startResumeEligibility(preflight, opts = {}) {
@@ -1781,15 +1801,17 @@ function steeringPendingMetadata(pending) {
 
 function featureCommandPayload(prompt, opts) {
   const githubAccount = resolveGithubAccount(opts);
+  const driver = {
+    mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
+    ready: Boolean(opts.ready),
+    pr_mode: runPrModeOverride(opts),
+    reviewer: stringValue(opts.reviewer) ? opts.reviewer : null,
+    github_account: githubAccount,
+  };
+  if (stringValue(opts.requestedRunId)) driver.run_id = opts.requestedRunId;
   const payload = {
     operator_request: String(prompt),
-    driver: {
-      mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
-      ready: Boolean(opts.ready),
-      pr_mode: runPrModeOverride(opts),
-      reviewer: stringValue(opts.reviewer) ? opts.reviewer : null,
-      github_account: githubAccount,
-    },
+    driver,
   };
   if (opts.continuation !== undefined) payload.continuation = opts.continuation;
   return payload;
