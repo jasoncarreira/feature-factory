@@ -129,7 +129,7 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
-  it("repairs recognized stale seeded feature skills without seed metadata", () => {
+  it("repairs recognized stale seeded feature skills when seed metadata is missing", () => {
     const repo = mkdtempSync(join(tmpdir(), "factory-seed-skill-stale-"));
     try {
       const dest = seedRepoSkill(repo);
@@ -142,7 +142,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       const staleSchema = "older packaged schema\n";
       writeFileSync(skill, staleSkill, "utf8");
       writeFileSync(schema, staleSchema, "utf8");
-      writeFileSync(seedHash, "{}\n", "utf8");
+      rmSync(seedHash, { force: true });
 
       const warnings = captureWarnings(() => seedRepoSkill(repo, {
         knownSeedHashes: {
@@ -153,25 +153,109 @@ describe("factory public state operations", { concurrency: false }, () => {
 
       assert.equal(readFileSync(skill, "utf8"), currentSkill);
       assert.equal(readFileSync(schema, "utf8"), currentSchema);
+      assert.deepEqual(readJson(seedHash), {
+        "SKILL.md": sha256(currentSkill),
+        "SCHEMA.md": sha256(currentSchema),
+      });
       assert.match(warnings.join("\n"), /refreshed stale repo-seeded feature skill file\(s\): SKILL\.md, SCHEMA\.md/u);
     } finally {
       cleanup(repo);
     }
   });
 
-  it("preserves unrecognized local seeded feature edits without seed metadata", () => {
+  it("repairs recognized stale seeded feature skills when seed metadata is empty", () => {
+    const repo = mkdtempSync(join(tmpdir(), "factory-seed-skill-empty-"));
+    try {
+      const dest = seedRepoSkill(repo);
+      const skill = join(dest, "SKILL.md");
+      const schema = join(dest, "SCHEMA.md");
+      const seedHash = join(dest, ".seed-hash");
+      const currentSkill = readFileSync(skill, "utf8");
+      const currentSchema = readFileSync(schema, "utf8");
+      const staleSkill = "older packaged skill from empty metadata\n";
+      const staleSchema = "older packaged schema from empty metadata\n";
+      writeFileSync(skill, staleSkill, "utf8");
+      writeFileSync(schema, staleSchema, "utf8");
+      writeFileSync(seedHash, "", "utf8");
+
+      seedRepoSkill(repo, {
+        knownSeedHashes: {
+          "SKILL.md": new Set([sha256(staleSkill)]),
+          "SCHEMA.md": new Set([sha256(staleSchema)]),
+        },
+      });
+
+      assert.equal(readFileSync(skill, "utf8"), currentSkill);
+      assert.equal(readFileSync(schema, "utf8"), currentSchema);
+      assert.deepEqual(readJson(seedHash), {
+        "SKILL.md": sha256(currentSkill),
+        "SCHEMA.md": sha256(currentSchema),
+      });
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("preserves unrecognized local seeded feature edits with empty metadata", () => {
     const repo = mkdtempSync(join(tmpdir(), "factory-seed-skill-local-"));
     try {
       const dest = seedRepoSkill(repo);
       const skill = join(dest, "SKILL.md");
+      const schema = join(dest, "SCHEMA.md");
       const seedHash = join(dest, ".seed-hash");
+      const currentSkill = readFileSync(skill, "utf8");
+      const currentSchema = readFileSync(schema, "utf8");
+      const staleSchema = "older packaged schema alongside local edit\n";
       writeFileSync(skill, "local edit\n", "utf8");
-      rmSync(seedHash, { force: true });
+      writeFileSync(schema, staleSchema, "utf8");
+      writeFileSync(seedHash, "{}\n", "utf8");
 
-      const warnings = captureWarnings(() => seedRepoSkill(repo));
+      const warnings = captureWarnings(() => seedRepoSkill(repo, {
+        knownSeedHashes: {
+          "SCHEMA.md": new Set([sha256(staleSchema)]),
+        },
+      }));
 
       assert.equal(readFileSync(skill, "utf8"), "local edit\n");
+      assert.equal(readFileSync(schema, "utf8"), currentSchema);
+      assert.deepEqual(readJson(seedHash), {
+        "SKILL.md": sha256(currentSkill),
+        "SCHEMA.md": sha256(currentSchema),
+      });
       assert.match(warnings.join("\n"), /preserved locally edited seeded skill file\(s\): SKILL\.md/u);
+
+      seedRepoSkill(repo);
+
+      assert.equal(readFileSync(skill, "utf8"), "local edit\n");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("leaves unrelated feature skill files unchanged and absent from seed metadata", () => {
+    const repo = mkdtempSync(join(tmpdir(), "factory-seed-skill-unrelated-"));
+    try {
+      const dest = seedRepoSkill(repo);
+      const skill = join(dest, "SKILL.md");
+      const schema = join(dest, "SCHEMA.md");
+      const seedHash = join(dest, ".seed-hash");
+      const currentSkill = readFileSync(skill, "utf8");
+      const currentSchema = readFileSync(schema, "utf8");
+      const notes = join(dest, "NOTES.md");
+      writeFileSync(notes, "operator notes\n", "utf8");
+      writeJson(seedHash, {
+        "SKILL.md": sha256(currentSkill),
+        "SCHEMA.md": sha256(currentSchema),
+        "NOTES.md": sha256("old notes\n"),
+      });
+
+      seedRepoSkill(repo);
+
+      assert.equal(readFileSync(notes, "utf8"), "operator notes\n");
+      assert.deepEqual(readJson(seedHash), {
+        "SKILL.md": sha256(currentSkill),
+        "SCHEMA.md": sha256(currentSchema),
+      });
     } finally {
       cleanup(repo);
     }

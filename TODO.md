@@ -6,11 +6,6 @@ covered there.
 
 ## Factory Robustness And Durability
 
-- Repo-seeded skill freshness repair
-  - `factory start` currently preserves `.opencode/skills/feature/SKILL.md` and `SCHEMA.md` when `.seed-hash` is missing or empty, which can leave a repo stuck on stale workflow instructions after plugin updates.
-  - Add an explicit repair path, freshness diagnostic, or safe overwrite rule that distinguishes old seeded files from operator-edited files.
-  - Surface the stale seeded-skill condition before launching opencode so a restarted session actually picks up the latest factory contract.
-
 - Enforce heartbeat around long factory subagent waits
   - In an autonomous test run, the orchestrator dispatched `spec-writer` with `run.json.steps[].status = running` but did not start `factory heartbeat`, leaving diagnostics at `missing-heartbeat-process` / `stale-heartbeat` while the detached opencode process was still alive.
   - Add a guard, helper, or docs/test contract so long `Task`/subagent waits start heartbeat before dispatch and stop it before the next semantic `run.json` write.
