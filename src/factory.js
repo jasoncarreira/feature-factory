@@ -1039,7 +1039,7 @@ export function seedRepoSkill(repo, opts = {}) {
   mkdirSync(dest, { recursive: true });
   const seedHashPath = join(dest, ".seed-hash");
   const recorded = readSeedHashes(seedHashPath);
-  const nextHashes = { ...recorded };
+  const nextHashes = {};
   const skipped = [];
   const refreshed = [];
   for (const file of REPO_SEEDED_SKILL_FILES) {
@@ -1055,6 +1055,7 @@ export function seedRepoSkill(repo, opts = {}) {
     const locallyEdited = currentHash !== null && currentHash !== sourceHash && !managedSeed;
     if (locallyEdited) {
       skipped.push(file);
+      nextHashes[file] = sourceHash;
       continue;
     }
     if (currentHash !== sourceHash) {
