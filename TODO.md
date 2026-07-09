@@ -11,6 +11,7 @@ the remaining future work.
   - Resume rejects `active-heartbeat` and preserves durable state; raw steering is labeled `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data` only at one-time consume.
   - Cancellation now records run-scoped `$RUN/process.json` evidence for detached opencode launches with a known explicit run id plus `$RUN/processes/<timestamp>.log`, sends only one targeted `SIGTERM` when identity matches, and fails closed without broad process killing when evidence is absent, stale, invalid, or mismatched.
   - Steering conflicts are explicit: after `steer-consume`, the orchestrator checks accepted durable state and uses `feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --json` to stop as `needs-human` instead of attempting automatic rollback.
+  - Future work: drain and consume pending steering at safe orchestrator decision boundaries in live runs, such as after heartbeat-bracketed waits, before autonomous gate approval, before dispatching the next agent/wave, before remediation, and before terminalization or PR creation. Do not consume steering from low-level transition helpers, heartbeat ticks, cost-record writes, or read-only status/list/TUI paths where the orchestrator would not actually apply the message.
 
 ## Observability And Cost
 
