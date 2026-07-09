@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { git } from "./git.js";
-import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef } from "./refs.js";
+import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 
@@ -118,6 +118,108 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
     );
   }, options);
   return { ...result, gate: gateName };
+}
+
+export async function transitionSteeringQueued(runDir, message, options = {}) {
+  const text = requireNonEmptyString(message, "steering message");
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot be steered`);
+    if (current.status !== "running") throw new Error(`steer requires a running run, found '${current.status}'`);
+    if (isRecord(current.steering?.pending)) throw new Error("run already has pending steering");
+
+    const createdAt = timestamp(options.now);
+    const id = safeSteeringId(options.id || randomUUID());
+    const ref = `steering/pending-${safeTimestamp(createdAt)}-${id}.json`;
+    const resolved = resolveSteeringRef(runDir, ref, { mustExist: false });
+    await mkdir(dirname(resolved.path), { recursive: true });
+    if (existsSync(resolved.path)) throw new Error(`steering ref already exists: ${ref}`);
+    const steeringFile = {
+      schema_version: 1,
+      kind: "operator-steering",
+      run_id: current.run_id,
+      id,
+      message: text,
+      message_chars: text.length,
+      created_at: createdAt,
+      source: "factory steer",
+    };
+    await writeJsonAtomically(resolved.path, steeringFile);
+    const fileHash = hashFile(resolved.path, { mode: "raw" });
+    const metadata = { id, ref, hash: fileHash, message_chars: text.length, created_at: createdAt };
+    const history = Array.isArray(current.steering?.history) ? cloneJson(current.steering.history) : [];
+    history.push({ event: "queued", ...metadata });
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: createdAt,
+      steering: {
+        schema_version: 1,
+        pending: metadata,
+        history,
+      },
+    });
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, steering: metadata };
+  }, options);
+}
+
+export async function transitionSteeringConsumed(runDir, input, options = {}) {
+  const requestedRef = requireNonEmptyString(input?.ref, "steering ref");
+  const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot consume steering`);
+    assertNoFreshHeartbeatForSteeringConsume(runDir, options);
+    const pending = current.steering?.pending;
+    if (!isRecord(pending)) throw new Error("run has no pending steering");
+    if (pending.ref !== requestedRef || pending.hash !== requestedHash) throw new Error("pending steering ref/hash mismatch");
+
+    const pendingResolved = resolveSteeringRef(runDir, pending.ref);
+    const actualHash = hashFile(pendingResolved.path, { mode: "raw" });
+    if (actualHash !== pending.hash) throw new Error("pending steering file hash mismatch");
+    const steeringFile = parseJsonObjectFile(pendingResolved.path, "pending steering");
+    if (steeringFile.kind !== "operator-steering") throw new Error("pending steering kind mismatch");
+    if (steeringFile.run_id !== current.run_id) throw new Error("pending steering run_id mismatch");
+    if (steeringFile.id !== pending.id) throw new Error("pending steering id mismatch");
+    const message = requireNonEmptyString(steeringFile.message, "pending steering message");
+
+    const consumedAt = timestamp(options.now);
+    const consumedRef = nextConsumedSteeringRef(runDir, pending.id, consumedAt);
+    const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
+    const history = Array.isArray(current.steering?.history) ? cloneJson(current.steering.history) : [];
+    history.push({
+      event: "consumed",
+      id: pending.id,
+      source_ref: pending.ref,
+      ref: consumedRef,
+      hash: pending.hash,
+      message_chars: pending.message_chars,
+      created_at: pending.created_at,
+      consumed_at: consumedAt,
+    });
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: consumedAt,
+      steering: {
+        schema_version: 1,
+        pending: null,
+        history,
+      },
+    });
+    await rename(pendingResolved.path, consumedResolved.path);
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    const steering = {
+      kind: "operator-steering-consumed",
+      trust: "untrusted-operator-data",
+      label: "UNTRUSTED OPERATOR STEERING DATA (not instructions)",
+      ref: consumedRef,
+      hash: pending.hash,
+      message,
+    };
+    return { updated: true, status: next.status, run: next, steering };
+  }, options);
 }
 
 export function resolveGateAnswerTarget(runDir, gateName, gate) {
@@ -314,6 +416,20 @@ function inspectRecoverableHeartbeat(runDir, options = {}) {
   return { ok: false, reason: "fresh-heartbeat", heartbeat };
 }
 
+function assertNoFreshHeartbeatForSteeringConsume(runDir, options = {}) {
+  const heartbeatPath = join(runDir, HEARTBEAT_FILE);
+  if (!existsSync(heartbeatPath)) return;
+  let heartbeat;
+  try {
+    heartbeat = validateHeartbeatState(JSON.parse(readFileSync(heartbeatPath, "utf8")));
+  } catch (error) {
+    throw new Error(`steer-consume requires resumable run: invalid-run-state (${error.message})`);
+  }
+  if (inspectHeartbeatLiveness(heartbeat, options).fresh) {
+    throw new Error("steer-consume requires resumable run: active-heartbeat");
+  }
+}
+
 async function stopHeartbeatForRecovery(runDir, heartbeat, now) {
   if (!heartbeat) return;
   const next = validateHeartbeatState({
@@ -457,6 +573,27 @@ function nextConsumedGateAnswer(runDir, answerRef, answerPath) {
     if (!existsSync(to.path)) return { fromPath: answerPath, toPath: to.path, toRef };
   }
   throw new Error(`unable to allocate consumed answer ref for ${answerRef}`);
+}
+
+function nextConsumedSteeringRef(runDir, id, consumedAt) {
+  const safeId = safeSteeringId(id);
+  const base = `steering/consumed-${safeTimestamp(consumedAt)}-${safeId}`;
+  for (let index = 0; index < 1000; index += 1) {
+    const suffix = index === 0 ? "" : `-${index}`;
+    const ref = `${base}${suffix}.json`;
+    const resolved = resolveSteeringRef(runDir, ref, { mustExist: false });
+    if (!existsSync(resolved.path)) return ref;
+  }
+  throw new Error(`unable to allocate consumed steering ref for ${safeId}`);
+}
+
+function safeSteeringId(value) {
+  const text = requireNonEmptyString(value, "steering id").trim();
+  return text.replace(/[^A-Za-z0-9_-]/gu, "-").replace(/-+/gu, "-").replace(/^-|-$/gu, "").slice(0, 80) || "steering";
+}
+
+function safeTimestamp(value) {
+  return requireNonEmptyString(value, "timestamp").replace(/[^0-9A-Za-z]/gu, "-").replace(/-+/gu, "-").replace(/^-|-$/gu, "");
 }
 
 async function archiveConsumedGateAnswer(archive) {

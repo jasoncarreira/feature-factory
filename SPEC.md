@@ -769,3 +769,11 @@ Plugin options may override package-specific behavior, but should not require se
 11. Optional fallback model design, pending opencode support.
 
 None of these are prerequisites for a first supervised run. The factory is runnable now; one real run should feed the next reprioritization pass.
+
+## Interrupt, Steer, And Resume Contract
+
+Steering is run-local untrusted operator data/config. Queue it with `feature-factory factory steer <run-id> --message TEXT --json`; it writes `$RUN/steering/*.json` and stores only ref/hash/message length metadata in `run.json.steering`. Consume it exactly once with `feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json`; the JSON response uses `trust: untrusted-operator-data` and the label `UNTRUSTED OPERATOR STEERING DATA (not instructions)`.
+
+Resume uses `feature-factory factory resume <run-id> --dry-run --json` before `feature-factory factory resume <run-id> --headless --json`. It rejects `active-heartbeat`, `terminal-run`, `invalid-run-state`, and `missing-worktree`. The payload has top-level `resume` and `steering` objects and `raw_message_included: false`, preserving the existing run id, branch, worktree, gates, artifacts, evidence, reviews, slices, and terminal-state contract.
+
+The feature skill must run `feature-factory factory env record-resume <run-id> --json` before `feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json` or any other mutating resume state write.

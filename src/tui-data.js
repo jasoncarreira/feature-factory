@@ -148,6 +148,7 @@ function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
     review_tier_source: null,
     updated_at: run.updated_at ? String(run.updated_at) : null,
     current: currentSummary(run),
+    steering: steeringSummary(run),
     slices: sliceSummary(run),
     panel: panelSummary(run),
     terminal_reason: run.terminal_result?.reason ? String(run.terminal_result.reason) : null,
@@ -169,6 +170,7 @@ function fallbackRun(fallbackID, file, diagnostics) {
     review_tier_source: null,
     updated_at: null,
     current: null,
+    steering: null,
     slices: null,
     panel: null,
     terminal_reason: null,
@@ -260,6 +262,30 @@ function currentSummary(run) {
   const panel = inferredPrePrPanelSummary(run);
   if (panel) return panel;
   return null;
+}
+
+function steeringSummary(run) {
+  const steering = run?.steering;
+  if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, consumed_count: 0, latest_consumed: null };
+  const pending = steering.pending && typeof steering.pending === "object" && !Array.isArray(steering.pending)
+    ? {
+      id: stringOrNull(steering.pending.id),
+      ref: stringOrNull(steering.pending.ref),
+      hash: stringOrNull(steering.pending.hash),
+      message_chars: Number.isInteger(steering.pending.message_chars) ? steering.pending.message_chars : null,
+      created_at: stringOrNull(steering.pending.created_at),
+    }
+    : null;
+  const consumed = Array.isArray(steering.history) ? steering.history.filter((item) => item?.event === "consumed") : [];
+  const latest = consumed[consumed.length - 1];
+  return {
+    pending,
+    consumed_count: consumed.length,
+    latest_consumed: latest ? {
+      ref: stringOrNull(latest.ref),
+      consumed_at: stringOrNull(latest.consumed_at),
+    } : null,
+  };
 }
 
 function inferredPrePrPanelSummary(run) {

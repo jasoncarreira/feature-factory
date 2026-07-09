@@ -70,6 +70,25 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("projects steering metadata without raw message text", () => {
+    const repo = tempDir();
+    writeRun(repo, "steered-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      steering: {
+        schema_version: 1,
+        pending: { id: "s1", ref: "steering/pending.json", hash: `sha256:${"a".repeat(64)}`, message_chars: 11, created_at: "2026-07-05T00:00:00Z" },
+        history: [{ event: "queued", id: "s1", ref: "steering/pending.json", hash: `sha256:${"a".repeat(64)}`, message_chars: 11, created_at: "2026-07-05T00:00:00Z" }],
+      },
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+    assert.equal(run.steering.pending.ref, "steering/pending.json");
+    assert.equal(JSON.stringify(run).includes("raw operator message"), false);
+    cleanup(repo);
+  });
+
   it("projects the current slice or step beside gate state", () => {
     const repo = tempDir();
     writeRun(repo, "slice-run", {
@@ -270,6 +289,7 @@ function writeRun(repo, id, input) {
   if (input.steps !== undefined) run.steps = input.steps;
   if (input.validator !== undefined) run.validator = input.validator;
   if (input.security_review !== undefined) run.security_review = input.security_review;
+  if (input.steering !== undefined) run.steering = input.steering;
   if (["completed", "blocked", "partial", "needs-human"].includes(input.status)) {
     run.terminal_result = {
       run_id: id,

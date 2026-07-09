@@ -11,6 +11,8 @@ import {
   transitionRecoverOrphan,
   transitionRunJson,
   transitionRunSlice,
+  transitionSteeringConsumed,
+  transitionSteeringQueued,
   transitionTerminalResult,
   transitionSliceMerged,
   withRunJsonLock,
@@ -606,6 +608,20 @@ describe("simplified run-state transitions", () => {
       const result = await transitionRecoverOrphan(fixture.runDir, "process was killed", { now: NOW });
       assert.equal(result.run.status, "needs-human");
       assert.equal(result.run.terminal_result.reason, "process was killed");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("queues and consumes steering through locked transitions", async () => {
+    const fixture = createFixture("steering-transition");
+    try {
+      const queued = await transitionSteeringQueued(fixture.runDir, "steer safely", { now: NOW });
+      assert.equal(queued.run.steering.pending.hash.startsWith("sha256:"), true);
+      const consumed = await transitionSteeringConsumed(fixture.runDir, { ref: queued.steering.ref, hash: queued.steering.hash }, { now: "2026-07-08T12:01:00.000Z" });
+      assert.equal(consumed.steering.trust, "untrusted-operator-data");
+      assert.equal(consumed.run.steering.pending, null);
+      assert.equal(consumed.run.steering.history.at(-1).event, "consumed");
     } finally {
       cleanup(fixture.repo);
     }

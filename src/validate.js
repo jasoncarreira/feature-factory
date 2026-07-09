@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
-import { resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef } from "./refs.js";
+import { hashFile, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -66,6 +66,7 @@ export function validateRun(run) {
   optionalNonEmptyString(errors, run, "review_tier", "run.review_tier");
   validateDebugSnapshot(errors, run.debug_snapshot, "run.debug_snapshot");
   validateContinuation(errors, run, "run.continuation");
+  validateSteering(errors, run.steering, "run.steering");
 
   validateGateMap(errors, run.gates, "run.gates");
   validateRunSlices(errors, run.slices, "run.slices");
@@ -187,7 +188,41 @@ export function checkRunConsistency(runDir, run) {
     }));
   }
 
+  checks.push(...steeringConsistencyChecks(runDir, validRun));
+
   return { ok: checks.every((item) => item.ok), checks };
+}
+
+export function steeringConsistencyChecks(runDir, run) {
+  const steering = run.steering;
+  if (!isRecord(steering)) return [];
+  const checks = [];
+  const pending = isRecord(steering.pending) ? steering.pending : null;
+  if (pending) {
+    checks.push(refCheck("run.steering.pending.ref", () => {
+      const resolved = resolveSteeringRef(runDir, pending.ref);
+      const actualHash = hashFile(resolved.path, { mode: "raw" });
+      if (actualHash !== pending.hash) fail([{ path: "run.steering.pending.hash", message: "must match pending steering file" }]);
+      return { ref: resolved.ref, path: resolved.path, hash: actualHash };
+    }));
+  }
+  for (const [index, entry] of (Array.isArray(steering.history) ? steering.history : []).entries()) {
+    if (!isRecord(entry) || !stringValue(entry.ref)) continue;
+    const mustExist = entry.event === "consumed";
+    checks.push(refCheck(`run.steering.history[${index}].ref`, () => {
+      const resolved = resolveSteeringRef(runDir, entry.ref, { mustExist });
+      if (mustExist && stringValue(entry.hash)) {
+        const actualHash = hashFile(resolved.path, { mode: "raw" });
+        if (actualHash !== entry.hash) fail([{ path: `run.steering.history[${index}].hash`, message: "must match steering file" }]);
+        return { ref: resolved.ref, path: resolved.path, hash: actualHash };
+      }
+      return { ref: resolved.ref, path: resolved.path };
+    }));
+    if (stringValue(entry.source_ref)) {
+      checks.push(refCheck(`run.steering.history[${index}].source_ref`, () => resolveSteeringRef(runDir, entry.source_ref, { mustExist: false })));
+    }
+  }
+  return checks;
 }
 
 export function validateFile(file, validator) {
@@ -296,6 +331,41 @@ function validateContinuation(errors, run, path) {
   validateContinuationRefHashArray(errors, continuation.parent_evidence, `${path}.parent_evidence`);
   validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
   validateContinuationSelectedReview(errors, continuation, path);
+}
+
+function validateSteering(errors, steering, path) {
+  if (steering === undefined || steering === null) return;
+  if (!isRecord(steering)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredInteger(errors, steering, "schema_version", `${path}.schema_version`);
+  if (Number.isInteger(steering.schema_version) && steering.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  if (steering.pending !== undefined && steering.pending !== null) validateSteeringEntry(errors, steering.pending, `${path}.pending`, { pending: true });
+  if (steering.pending !== undefined && steering.pending !== null && !isRecord(steering.pending)) errors.push({ path: `${path}.pending`, message: "must be an object or null" });
+  if (steering.history === undefined || steering.history === null) return;
+  if (!Array.isArray(steering.history)) {
+    errors.push({ path: `${path}.history`, message: "must be an array" });
+    return;
+  }
+  for (const [index, entry] of steering.history.entries()) validateSteeringEntry(errors, entry, `${path}.history[${index}]`, { history: true });
+}
+
+function validateSteeringEntry(errors, entry, path, options = {}) {
+  if (!isRecord(entry)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  if (options.history) requiredEnum(errors, entry, "event", new Set(["queued", "consumed"]), `${path}.event`);
+  requiredString(errors, entry, "id", `${path}.id`);
+  requiredString(errors, entry, "ref", `${path}.ref`);
+  requiredHash(errors, entry, "hash", `${path}.hash`);
+  requiredInteger(errors, entry, "message_chars", `${path}.message_chars`);
+  requiredString(errors, entry, "created_at", `${path}.created_at`);
+  if (entry.event === "consumed") {
+    requiredString(errors, entry, "source_ref", `${path}.source_ref`);
+    requiredString(errors, entry, "consumed_at", `${path}.consumed_at`);
+  }
 }
 
 function validateContinuationParent(errors, parent, path) {

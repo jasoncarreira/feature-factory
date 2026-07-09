@@ -121,6 +121,99 @@ describe("factory continue", () => {
     }
   });
 
+  it("accepts continuation reviews referenced by security, step, and slice parent sources", () => {
+    const cases = [
+      {
+        name: "security-parent-source",
+        reviewRef: "reviews/security-reviewer.json",
+        review: { subject: "security-parent-source", summary: "security review blocks continuation" },
+        patchRun(run) {
+          run.security_review = { verdict: "BLOCK", review_ref: "reviews/security-reviewer.json" };
+        },
+        expected: { kind: "security_review", source: "run.security_review.review_ref", subject: "security-parent-source" },
+        expectedReviews: ["reviews/reviewer.json", "reviews/security-reviewer.json"],
+      },
+      {
+        name: "step-parent-source",
+        reviewRef: "reviews/spec-review.json",
+        review: { subject: "spec-writer", summary: "step review blocks continuation" },
+        patchRun(run) {
+          run.steps = [{ agent: "spec-writer", status: "blocked", review_ref: "reviews/spec-review.json" }];
+        },
+        expected: { kind: "step", source: "run.steps.spec-writer.review_ref", subject: "spec-writer" },
+        expectedReviews: ["reviews/reviewer.json", "reviews/spec-review.json"],
+      },
+      {
+        name: "slice-parent-source",
+        reviewRef: "reviews/api-slice-review.json",
+        review: { subject: "api-slice", summary: "slice review blocks continuation" },
+        patchRun(run) {
+          run.slices = [{ id: "api-slice", status: "blocked", review_ref: "reviews/api-slice-review.json" }];
+        },
+        expected: { kind: "slice", source: "run.slices.api-slice.review_ref", subject: "api-slice" },
+        expectedReviews: ["reviews/api-slice-review.json", "reviews/reviewer.json"],
+      },
+    ];
+
+    for (const testCase of cases) {
+      const fixture = createFixture(testCase.name);
+      try {
+        writeJson(join(fixture.runDir, testCase.reviewRef), testCase.review);
+        updateRun(fixture, testCase.patchRun);
+
+        const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: testCase.reviewRef, runId: `${testCase.name}-next`, dryRun: true });
+
+        assert.equal(result.payload.continuation.review.kind, testCase.expected.kind);
+        assert.equal(result.payload.continuation.review.source, testCase.expected.source);
+        assert.equal(result.payload.continuation.review.subject, testCase.expected.subject);
+        assert.equal(result.payload.continuation.review.ref, testCase.reviewRef);
+        assert.deepEqual(result.payload.continuation.parent_reviews, hashReviewRefs(fixture.runDir, testCase.expectedReviews));
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("hashes sorted parent evidence refs from steps and slices", () => {
+    const fixture = createFixture("parent-evidence");
+    try {
+      mkdirSync(join(fixture.runDir, "evidence"));
+      writeJson(join(fixture.runDir, "evidence", "z-step.json"), { ok: false, source: "step" });
+      writeJson(join(fixture.runDir, "evidence", "a-slice.json"), { ok: false, source: "slice" });
+      updateRun(fixture, (run) => {
+        run.steps = [{ agent: "spec-writer", status: "blocked", evidence_ref: "evidence/z-step.json" }];
+        run.slices = [{ id: "api-slice", status: "blocked", evidence_ref: "evidence/a-slice.json" }];
+      });
+
+      const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "parent-evidence-next", dryRun: true });
+
+      assert.deepEqual(result.payload.continuation.parent_evidence, hashEvidenceRefs(fixture.runDir, ["evidence/a-slice.json", "evidence/z-step.json"]));
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects continuation reviews that name missing parent refs", () => {
+    const cases = [
+      { name: "missing-review-evidence", refField: "evidence_ref", ref: "evidence/missing.json", message: /missing parent evidence ref: evidence\/missing\.json/u },
+      { name: "missing-review-artifact", refField: "artifact_ref", ref: "artifacts/missing.md", message: /missing parent artifact ref: artifacts\/missing\.md/u },
+      { name: "missing-review-report", refField: "report", ref: "artifacts/missing-report.md", message: /missing parent artifact ref: artifacts\/missing-report\.md/u },
+      { name: "missing-secondary-review", refField: "review_ref", ref: "reviews/secondary.json", message: /missing parent review ref: reviews\/secondary\.json/u },
+    ];
+
+    for (const testCase of cases) {
+      const fixture = createFixture(testCase.name, { review: { subject: testCase.name, summary: "names missing parent ref", [testCase.refField]: testCase.ref } });
+      try {
+        assert.throws(
+          () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${testCase.name}-next`, dryRun: true }),
+          testCase.message,
+        );
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
   it("rejects missing parents and missing reviews", () => {
     const missingParent = createFixture("missing-parent-source");
     try {
@@ -484,6 +577,17 @@ function hashArtifactRefs(runDir, refs) {
   return refs.map((ref) => ({ kind: parentArtifactKind(ref), ref, hash: hashFile(join(runDir, ref)) }));
 }
 
+function hashEvidenceRefs(runDir, refs) {
+  return refs.map((ref) => ({ kind: "evidence", ref, hash: hashFile(join(runDir, ref)) }));
+}
+
+function hashReviewRefs(runDir, refs) {
+  return refs
+    .slice()
+    .sort((a, b) => a.localeCompare(b))
+    .map((ref) => ({ kind: "review", ref, hash: hashFile(join(runDir, ref)) }));
+}
+
 function parentArtifactKind(ref) {
   if (ref === "artifacts/story.md") return "story";
   if (ref === "artifacts/research-map.md") return "research_map";
@@ -509,6 +613,13 @@ function childRunFromPayload(continuation) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function updateRun(fixture, update) {
+  const file = join(fixture.runDir, "run.json");
+  const run = JSON.parse(readFileSync(file, "utf8"));
+  update(run);
+  writeJson(file, run);
 }
 
 function cleanup(repo) {

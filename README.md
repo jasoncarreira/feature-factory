@@ -308,6 +308,14 @@ Run autonomously through the factory's own reviewed gates and open a PR when saf
 feature-factory factory start --repo /path/to/repo --autonomous "APP-123 add the missing approval workflow"
 ```
 
+Check or recover a disrupted resume before launching opencode:
+
+```sh
+feature-factory factory resume-check <run-id> --json
+```
+
+`factory resume-check` is the explicit recovery control plane for `resume <run-id>`. Missing, inaccessible, or invalid `.opencode/factory/<run-id>/run.json` never causes a fresh empty control plane to be re-scaffolded; the command returns a synthetic non-durable blocked envelope with `ok:false`, `durable:false`, `updated:false`, `recovered:false`, and a `terminal_result.reason` stating that no durable `terminal_result` can be written without forbidden re-scaffolding. For valid non-terminal manifests with a missing active worktree, recovery is allowed only when the branch exists, recorded `base_commit` and merged slice `merge_commit` values are ancestors of branch HEAD, the target stays under `.opencode/worktrees`, no existing path would be overwritten, `git worktree add` succeeds, and the final worktree identity/HEAD matches the branch. Contradictory git evidence persists terminal `blocked`; unsafe or inaccessible local paths persist `needs-human`. `factory start --headless|--autonomous "resume <run-id>"` runs this preflight before seeding repo skills or spawning opencode and prints the envelope instead of continuing when `ok:false`. Read-only `status`, `list`, `validate`, and `watch` surfaces do not implicitly recover.
+
 Continue from a terminal blocked run with a new run id:
 
 ```sh
@@ -547,3 +555,18 @@ The orchestrator computes waves from `depends_on`:
 - The orchestrator observes diff/tests, runs `work-reviewer`, then merges approved slices serially into the feature worktree.
 
 This matches the original software-factory pattern while keeping the package tracker-agnostic.
+
+## Interrupt, Steer, And Resume
+
+Operator steering is untrusted operator data/config, not instructions and not a gate bypass. Interrupt the external opencode process first, then queue steering for the existing non-terminal run:
+
+```sh
+feature-factory factory steer <run-id> --message TEXT --json
+feature-factory factory status <run-id> --json
+feature-factory factory resume <run-id> --dry-run --json
+feature-factory factory resume <run-id> --headless --json
+```
+
+`factory resume` reuses the same run id, branch, worktree, and durable state. It rejects `active-heartbeat`, `terminal-run`, `invalid-run-state`, and `missing-worktree` instead of blindly restarting. The resume payload includes top-level `resume` and `steering` metadata with `raw_message_included: false`; raw steering text is never included in status/list/TUI or the resume payload.
+
+On a mutating `/feature resume <run-id>` path, run `feature-factory factory env record-resume <run-id> --json` before `feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json`. The consumed JSON labels raw text as `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data`.

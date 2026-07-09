@@ -56,6 +56,13 @@ function sliceLine(slices) {
   return `slices: ${merged}/${total}${blocked}`;
 }
 
+function steeringLine(steering) {
+  if (!steering || typeof steering !== "object") return null;
+  if (steering.pending) return `steering pending: ${truncate(steering.pending.ref || "pending", 34)}`;
+  if (steering.latest_consumed) return `steering consumed: ${steering.consumed_count} latest ${truncate(steering.latest_consumed.ref || "consumed", 24)}`;
+  return null;
+}
+
 function scanRuns(api) {
   return readRuns(factoryRoots(api));
 }
@@ -67,6 +74,7 @@ function runSnapshot(runs) {
     mode: run.mode,
     gate: run.gate,
     current: run.current,
+    steering: run.steering,
     slices: run.slices,
     panel: run.panel,
     pr_url: run.pr_url,
@@ -138,6 +146,7 @@ function View(props) {
               <For each={visibleRuns()}>
                 {(run) => {
                   const slices = sliceLine(run.slices);
+                  const steering = steeringLine(run.steering);
                   return (
                     <box paddingTop={1}>
                       <box flexDirection="row" gap={1}>
@@ -155,6 +164,9 @@ function View(props) {
                       </Show>
                       <Show when={run.current}>
                         <text fg={theme().textMuted}>current: {truncate(run.current, 34)}</text>
+                      </Show>
+                      <Show when={steering}>
+                        <text fg={theme().warning}>{steering}</text>
                       </Show>
                       <Show when={slices}>
                         <text fg={theme().textMuted}>{slices}</text>
