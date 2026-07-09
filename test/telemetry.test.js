@@ -210,6 +210,24 @@ describe("no-op span wrappers", () => {
     assert.equal(value, "ok");
   });
 
+  it("runs the callback without a span when @opentelemetry/api cannot be loaded", async () => {
+    const events = [];
+    const value = await withSpan(
+      "factory.optional",
+      { "feature_factory.run_id": "run-optional" },
+      (span) => {
+        span.setAttribute("k", "v");
+        recordError(span, new Error("boom"));
+        events.push("ran");
+        return "ok";
+      },
+      { importer: () => Promise.reject(new Error("Cannot find package '@opentelemetry/api'")) },
+    );
+
+    assert.equal(value, "ok");
+    assert.deepEqual(events, ["ran"]);
+  });
+
   it("drops secret-shaped attribute keys and scrubs nested secret-shaped keys", () => {
     const honeycombKey = "hc_api_12345678901234567890";
     const hexKey = "0123456789abcdef0123456789abcdef";
