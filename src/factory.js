@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
-import { pendingProtectedGate, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { git, repoRoot } from "./git.js";
@@ -1269,11 +1269,13 @@ function resumeEligibility(runDir, run, opts = {}) {
   if (run.status !== "running") reasons.push(TERMINAL_STATUSES.has(run.status) ? "terminal-run" : "run-not-running");
   const diagnostics = diagnoseRunObject(run, { ...publicDiagnosticOptions(opts, opts.repoRoot || factoryRepoFromRunDir(runDir)), runDir, runFile: join(runDir, "run.json") });
   if (diagnosticsFailClosed(diagnostics)) reasons.push("invalid-run-state");
+  const steeringChecks = steeringConsistencyChecks(runDir, run);
+  if (!steeringChecks.every((item) => item.ok)) reasons.push("invalid-run-state");
   if (Array.isArray(diagnostics.items) && diagnostics.items.some((item) => item?.condition === "missing-worktree")) reasons.push("missing-worktree");
   const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
   if (heartbeat.error) reasons.push("invalid-run-state");
   else if (heartbeat.value && heartbeatIsFresh(heartbeat.value, timestamp(opts.now), opts)) reasons.push("active-heartbeat");
-  return { eligible: reasons.length === 0, reasons, diagnostics, heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null };
+  return { eligible: reasons.length === 0, reasons: [...new Set(reasons)], diagnostics, steering_checks: steeringChecks, heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null };
 }
 
 function assertResumeMutationAllowed(runDir, run, opts = {}) {

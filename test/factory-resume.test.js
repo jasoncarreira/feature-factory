@@ -55,6 +55,48 @@ describe("factory resume", () => {
       cleanup(fixture.repo);
     }
   });
+
+  it("rejects missing pending steering file before dry-run resume or record-resume mutation", async () => {
+    const fixture = createFixture("resume-missing-steering");
+    try {
+      const queued = await writeSteering(fixture.runId, "steer me", { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
+      rmSync(join(fixture.runDir, queued.steering.ref));
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, json: true }),
+        /resume ineligible: invalid-run-state/u,
+      );
+      await assert.rejects(
+        persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:01:00.000Z" }),
+        /record-resume requires resumable run: invalid-run-state/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects pending steering hash mismatch before dry-run resume or record-resume mutation", async () => {
+    const fixture = createFixture("resume-bad-steering");
+    try {
+      const queued = await writeSteering(fixture.runId, "steer me", { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
+      writeFileSync(join(fixture.runDir, queued.steering.ref), "{}\n", "utf8");
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, json: true }),
+        /resume ineligible: invalid-run-state/u,
+      );
+      await assert.rejects(
+        persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:01:00.000Z" }),
+        /record-resume requires resumable run: invalid-run-state/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
 });
 
 function createFixture(runId) {

@@ -193,7 +193,7 @@ export function checkRunConsistency(runDir, run) {
   return { ok: checks.every((item) => item.ok), checks };
 }
 
-function steeringConsistencyChecks(runDir, run) {
+export function steeringConsistencyChecks(runDir, run) {
   const steering = run.steering;
   if (!isRecord(steering)) return [];
   const checks = [];
