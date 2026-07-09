@@ -26,6 +26,33 @@ describe("cli detached process evidence", () => {
     }
   });
 
+  it("does not write run-scoped process evidence for generic detached starts with a user-supplied run id", () => {
+    const repo = tempRepo("generic-detached-start-explicit-run-id");
+    const opencodeBin = installFakeOpencode(repo);
+    const victimRunId = "victim-run";
+    const victimRunDir = join(repo, ".opencode", "factory", victimRunId);
+    mkdirSync(victimRunDir, { recursive: true });
+    writeJson(join(victimRunDir, "run.json"), {
+      schema_version: 1,
+      run_id: victimRunId,
+      status: "running",
+      gates: {},
+    });
+    try {
+      const proc = runCli(repo, ["factory", "start", "--detached", "--run-id", victimRunId, "--json", "unrelated prompt"], opencodeBin);
+
+      assert.equal(proc.status, 0, proc.stderr);
+      const output = JSON.parse(proc.stdout);
+      assert.equal(output.status, "started");
+      assert.equal(existsSync(join(victimRunDir, "process.json")), false);
+      assert.equal(existsSync(join(victimRunDir, "processes")), false);
+      assert.equal(existsSync(join(repo, ".opencode", "factory", "processes")), true);
+      stopProcess(output.pid);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("writes run-scoped process evidence for detached resume with an explicit run id", () => {
     const repo = tempRepo("detached-resume");
     const opencodeBin = installFakeOpencode(repo);

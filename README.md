@@ -334,7 +334,7 @@ Run in the background for external watchers or CI-style adapters:
 feature-factory factory start --repo /path/to/repo --headless --detached "APP-123 add the missing approval workflow"
 ```
 
-Detached mode returns a PID. Generic detached starts without a known explicit run id write stdout/stderr to package-level process logs and do not create `$RUN/process.json`. Run-scoped cancellation evidence is written only when the detached launch has a known explicit run id, such as `factory resume <run-id> --detached` or `factory start --detached --run-id <run-id> ...`; then stdout/stderr goes to `.opencode/factory/<run-id>/processes/<timestamp>.log` and `.opencode/factory/<run-id>/process.json` records the cancellable process identity.
+Detached mode returns a PID. Generic detached starts write stdout/stderr to package-level process logs and do not create `$RUN/process.json`; adding `--run-id <run-id>` to `factory start --detached ...` is only operator input to that generic launch and does not grant process-evidence authority over an existing run. Run-scoped cancellation evidence is written only for validated run-owned detached launches, such as `factory resume <run-id> --detached` (and validated continuation launches), where stdout/stderr goes to `.opencode/factory/<run-id>/processes/<timestamp>.log` and `.opencode/factory/<run-id>/process.json` records the cancellable process identity.
 
 Cancel a detached run before queueing interrupt steering:
 

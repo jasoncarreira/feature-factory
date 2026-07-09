@@ -12,7 +12,7 @@ import { git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
-import { cancelProcessFromEvidence, recordDetachedProcessEvidence } from "./process-evidence.js";
+import { assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, recordDetachedProcessEvidence } from "./process-evidence.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -476,7 +476,7 @@ export function continueFactory(parentRunId, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(JSON.stringify(payload, null, 2));
-  if (opts.detached) return startDetached(repo, commandArgs, detachedProcessOptions(repo, { ...opts, runId: continuation.target.run_id }));
+  if (opts.detached) return startDetached(repo, commandArgs, detachedProcessOptions(repo, { ...opts, runId: continuation.target.run_id, runDir: join(factoryRoot(repo), continuation.target.run_id) }));
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
   } catch (error) {
@@ -1365,6 +1365,13 @@ function allRunDirs(opts = {}) {
 
 function startDetached(repo, commandArgs, opts = {}) {
   const scopedRunDir = opts.runDir || null;
+  const recordsProcessEvidence = Boolean(scopedRunDir && opts.runId);
+  if (recordsProcessEvidence) {
+    assertDetachedProcessEvidenceWritable(scopedRunDir, {
+      runId: opts.runId,
+      inspectorFn: opts.inspectorFn || opts.processInspectorFn,
+    });
+  }
   const processes = scopedRunDir ? join(scopedRunDir, "processes") : join(factoryRoot(repo), "processes");
   mkdirSync(processes, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1379,7 +1386,8 @@ function startDetached(repo, commandArgs, opts = {}) {
   child.on("error", (error) => appendFileSync(log, `\n[feature-factory] failed to start opencode: ${error.message}\n`));
   child.unref();
   closeSync(out);
-  if (scopedRunDir && opts.runId && child.pid) {
+  if (recordsProcessEvidence) {
+    if (!child.pid) throw new Error("failed to record detached process evidence: missing child pid");
     try {
       recordDetachedProcessEvidence(scopedRunDir, {
         runId: opts.runId,
@@ -1393,6 +1401,12 @@ function startDetached(repo, commandArgs, opts = {}) {
       });
     } catch (error) {
       appendFileSync(log, `\n[feature-factory] failed to record process evidence: ${error.message}\n`);
+      try {
+        process.kill(child.pid, "SIGTERM");
+      } catch {
+        // Best-effort cleanup for a detached launch that could not be evidenced.
+      }
+      throw new Error(`failed to record detached process evidence: ${error.message}`);
     }
   }
   return {
@@ -1405,13 +1419,22 @@ function startDetached(repo, commandArgs, opts = {}) {
 }
 
 function detachedProcessOptions(repo, opts = {}) {
-  if (!stringValue(opts.runId)) return opts;
+  if (!opts.runDir) return { ...opts, runDir: null };
+  if (!stringValue(opts.runId)) throw new Error("run-scoped detached process evidence requires a run id");
   const runId = String(opts.runId).trim();
-  if (!SAFE_RUN_ID_PATTERN.test(runId) || runId.includes("..") || runId.endsWith(".lock")) return opts;
+  if (!SAFE_RUN_ID_PATTERN.test(runId) || runId.includes("..") || runId.endsWith(".lock")) throw new Error("run-scoped detached process evidence requires a bare safe run id");
+  const runDir = resolve(opts.runDir);
+  const rootDir = factoryRoot(repo);
+  if (!isLogicalContainedPath(rootDir, runDir, { allowEqual: false })) {
+    throw new Error(`run-scoped detached process evidence requires a run directory inside .opencode/factory: ${runDir}`);
+  }
+  if (basename(runDir) !== runId) {
+    throw new Error("run-scoped detached process evidence run directory must match the run id");
+  }
   return {
     ...opts,
     runId,
-    runDir: opts.runDir || join(factoryRoot(repo), runId),
+    runDir,
   };
 }
 

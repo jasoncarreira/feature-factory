@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { cancelFactoryRun } from "../src/factory.js";
+import { recordDetachedProcessEvidence } from "../src/process-evidence.js";
 
 const NOW = "2026-07-09T15:00:00.000Z";
 
@@ -81,6 +82,57 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         /factory cancel requires exactly one <run-id>/u,
       );
       assert.deepEqual(signals, []);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("refuses to overwrite live valid running process evidence", () => {
+    const fixture = createFixture("record-refuse-live");
+    try {
+      writeProcessEvidence(fixture, { pid: 4242 });
+      const before = readFileSync(join(fixture.runDir, "process.json"), "utf8");
+
+      assert.throws(
+        () => recordDetachedProcessEvidence(fixture.runDir, {
+          runId: fixture.runId,
+          pid: 5252,
+          cwd: fixture.repo,
+          commandName: "opencode",
+          logRef: "processes/opencode.log",
+          inspectorFn: matchingInspector(fixture, 4242),
+        }),
+        /refusing to overwrite live running process evidence/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "process.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("allows replacing running process evidence only when the existing process is proven stale", () => {
+    const fixture = createFixture("record-allow-stale");
+    try {
+      writeProcessEvidence(fixture, { pid: 4242 });
+
+      const evidence = recordDetachedProcessEvidence(fixture.runDir, {
+        runId: fixture.runId,
+        pid: 5252,
+        cwd: fixture.repo,
+        commandName: "opencode",
+        logRef: "processes/opencode.log",
+        inspectorFn: (pid) => {
+          if (pid === 4242) return { ok: false, inspector: "test-inspector", reason: "stale pid" };
+          return { ok: true, inspector: "test-inspector", pid, start_marker: "start-2", command_name: "opencode", cwd: fixture.repo };
+        },
+      });
+
+      assert.equal(evidence.pid, 5252);
+      assert.equal(evidence.state, "running");
+      assert.equal(evidence.identity.start_marker, "start-2");
+      const persisted = readJson(join(fixture.runDir, "process.json"));
+      assert.equal(persisted.pid, 5252);
+      assert.equal(persisted.identity.start_marker, "start-2");
     } finally {
       cleanup(fixture.repo);
     }
