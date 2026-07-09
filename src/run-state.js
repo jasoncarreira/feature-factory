@@ -695,7 +695,9 @@ function normalizeGateDecision(gateName, gate, options = {}) {
   const next = cloneJson(gate);
   if (!stringValue(next.status)) throw new Error(`gate decision '${gateName}' requires status`);
   if (next.status !== "pending") {
-    if (!stringValue(next.answer_ref) && !stringValue(next.answer)) throw new Error(`gate decision '${gateName}' requires answer_ref or answer`);
+    const hasAnswerRef = stringValue(next.answer_ref);
+    const hasAnswer = stringValue(next.answer);
+    if (hasAnswerRef === hasAnswer) throw new Error(`gate decision '${gateName}' requires exactly one of answer_ref or answer`);
     next.approval_source ||= defaultApprovalSource(next, options);
     next.answered_at ||= timestamp(options.now);
   }

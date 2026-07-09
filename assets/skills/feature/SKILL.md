@@ -360,7 +360,7 @@ Autonomous mode is allowed only when the invocation explicitly includes the auto
 Rules:
 
 - Keep writing `gates/<gate>.question.md` files for auditability.
-- Record autonomous approvals in `run.json.gates.<gate>` with `status: approved`, `answer: approve`, `approval_source: autonomous`, `answered_at`, and a short `decision_note` explaining the evidence used.
+- Record autonomous approvals with `feature-factory factory gate-decision <run-id> <gate> approved --artifact artifacts/<file> --question-ref gates/<gate>.question.md --answer approve --approval-source autonomous --decision-note TEXT --json`. Inline `--answer` and `--answer-ref` are mutually exclusive: autonomous decisions use the inline answer and must omit `--answer-ref`. The resulting `run.json.gates.<gate>` records `status: approved`, `answer: approve`, `approval_source: autonomous`, `answered_at`, and the decision note.
 - Gate 1 (story) may be autonomously approved only when the normalized story has clear acceptance criteria, scope, assumptions, and no unresolved product/UX/security/external-policy decision. If not, set `status: needs-human`, write `terminal_result`, and stop.
 - Gate 2 (technical brief and slice plan) may be autonomously approved only after `work-reviewer` approves the spec and decomposition and the plan covers all acceptance criteria with file-disjoint same-wave slices or justified serialization. If not, set `status: needs-human`, write `terminal_result`, and stop.
 - Gate 3 (pre_pr) is decided by the strictest result from the implementation-validator and security-reviewer panel. GO/PASS may approve autonomously. Any validator NO-GO or security-reviewer BLOCK is NO-GO.

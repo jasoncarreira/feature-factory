@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync as runSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +34,24 @@ describe("cli gate-decision", () => {
       const proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer", "approve", "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       assert.equal(readJson(join(fixture.runDir, "run.json")).gates.story.approval_source, "human");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects decisions with both inline and referenced answers without mutating the gate", () => {
+    const fixture = createFixture("cli-ambiguous-gate-answer");
+    try {
+      const pending = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--json"]);
+      assert.equal(pending.status, 0, pending.stderr);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      const proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--answer", "approve", "--approval-source", "autonomous", "--json"]);
+
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /requires exactly one of answer_ref or answer/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      assert.equal(existsSync(join(fixture.runDir, "gates", "story.answer")), false);
     } finally {
       cleanup(fixture.repo);
     }

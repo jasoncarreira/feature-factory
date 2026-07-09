@@ -623,7 +623,7 @@ Top-level `run.json.continuation` is present only for child runs created by `fac
 
 Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before PR creation. Continuation PRs use the same effective configured PR mode as normal runs: `draft` creates and records draft PRs, while `ready` creates and records ready-for-review PRs. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
 
-Gate status values are `pending`, `approved`, `changes_requested`, and `stopped`. `approval_source` values are `human`, `external-driver`, `autonomous`, and `override`.
+Gate status values are `pending`, `approved`, `changes_requested`, and `stopped`. `approval_source` values are `human`, `external-driver`, `autonomous`, and `override`. A non-pending `factory gate-decision` must provide exactly one answer source: inline `--answer` or file-backed `--answer-ref`, never both. Autonomous approvals use inline `--answer approve` and omit `--answer-ref`; external-driver approvals consume the pending gate's answer file through `--answer-ref`.
 
 Validator verdicts are `GO`, `GO-WITH-NITS`, and `NO-GO`. Security verdicts are `PASS` and `BLOCK`.
 
