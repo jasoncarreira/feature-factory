@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,51 @@ const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
 ]);
 
 describe("cli write surface", () => {
+  it("passes a named start run id as driver config", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-start-run-id-"));
+    try {
+      initGitRepo(repo);
+      const capture = join(repo, "opencode-capture.json");
+      const bin = writeFakeOpencode(repo, capture);
+
+      const proc = spawnFactoryStart(repo, ["--run-id", "named-start", "--autonomous", "implement the named feature"], bin, capture);
+
+      assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+      const captured = readJson(capture);
+      const expectedRepo = realpathSync(repo);
+      assert.equal(captured.cwd, expectedRepo);
+      assert.deepEqual(captured.args.slice(0, 6), ["run", "--dir", expectedRepo, "--command", "feature", "--agent"]);
+      assert.equal(captured.args[6], "feature-factory");
+      const payload = JSON.parse(captured.args.at(-1));
+      assert.equal(payload.operator_request, "implement the named feature");
+      assert.equal(payload.driver.mode, "autonomous");
+      assert.equal(payload.driver.run_id, "named-start");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe or resume start run ids before launching opencode", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-start-run-id-invalid-"));
+    try {
+      initGitRepo(repo);
+      const capture = join(repo, "opencode-capture.json");
+      const bin = writeFakeOpencode(repo, capture);
+
+      const unsafe = spawnFactoryStart(repo, ["--run-id", "../bad", "implement"], bin, capture);
+      assert.notEqual(unsafe.status, 0, unsafe.stdout || unsafe.stderr);
+      assert.match(unsafe.stderr, /--run-id must be a bare safe factory run id/u);
+      assert.equal(existsSync(capture), false);
+
+      const resume = spawnFactoryStart(repo, ["--run-id", "named-start", "--headless", "resume named-start"], bin, capture);
+      assert.notEqual(resume.status, 0, resume.stdout || resume.stderr);
+      assert.match(resume.stderr, /--run-id is only for new runs/u);
+      assert.equal(existsSync(capture), false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("drives a run through local state transitions without direct run.json edits", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-write-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
@@ -232,6 +277,33 @@ function spawnFactory(repo, args) {
     env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
     timeout: 15000,
   });
+}
+
+function spawnFactoryStart(repo, args, bin, capture) {
+  return spawnSync(process.execPath, [CLI, "factory", "start", "--repo", repo, ...args], {
+    cwd: repo,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      FEATURE_FACTORY_CAPTURE: capture,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      PATH: `${bin}:${process.env.PATH || ""}`,
+    },
+    timeout: 15000,
+  });
+}
+
+function writeFakeOpencode(repo, capture) {
+  const bin = join(repo, "bin");
+  mkdirSync(bin, { recursive: true });
+  const script = join(bin, "opencode");
+  writeFileSync(script, `#!/usr/bin/env node
+const { writeFileSync } = require("node:fs");
+writeFileSync(process.env.FEATURE_FACTORY_CAPTURE, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }, null, 2) + "\\n");
+`, "utf8");
+  chmodSync(script, 0o755);
+  return bin;
 }
 
 function initGitRepo(repo, branches = []) {

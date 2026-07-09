@@ -45,7 +45,7 @@ function usage(write = console.log) {
 Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] [--telemetry] Check opencode/plugin/provider/tool prerequisites
-  factory start [--repo PATH] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
+  factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory steer <run-id> --message TEXT [--json]

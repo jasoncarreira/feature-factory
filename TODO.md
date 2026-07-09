@@ -24,13 +24,10 @@ covered there.
   - Baseline local current-run attribution is implemented and documented: `factory cost-record` writes provider-supplied usage/cost metadata to `run.json.cost_attribution`, and status/list/TUI expose diagnostic summaries.
   - Future work: richer reporting/export views, provider-specific metadata normalization as opencode exposes it, and correlation with telemetry spans without turning local diagnostics into billing authority.
 
-- TUI active-session refresh hardening
-  - An already-open opencode TUI process can keep rendering stale Feature Factory sidebar data after the plugin bundle changes, requiring a TUI restart/reload to pick up fixes.
-  - Add an explicit reload/debug path or document the active-session limitation so stale sidebar state is easier to diagnose during long factory runs.
-
 ## Operational Notes
 
 - TUI sidebar requires the TUI plugin config in `~/.config/opencode/tui.json`.
 - Server plugin config remains in `~/.config/opencode/opencode.jsonc`.
 - The sidebar only renders on session routes and needs enough terminal width to show the right panel.
+- Plugin bundle changes may require restarting the opencode TUI; the sidebar shows `sidebar vN · plugin changes need TUI restart` when active data is visible.
 - `mimirbot` is expected to review PRs on this repo; treat requested changes as normal PR feedback before merge.
