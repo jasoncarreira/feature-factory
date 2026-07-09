@@ -62,6 +62,41 @@ describe("factory steering queue and consume", () => {
       cleanup(fixture.repo);
     }
   });
+
+  it("rejects consume while a fresh heartbeat is active without mutating steering state", async () => {
+    const fixture = createFixture("steer-consume-heartbeat");
+    try {
+      const queued = await writeSteering(fixture.runId, "hold until orchestrator stops", { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
+      const runBefore = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      const steeringFilesBefore = readdirSync(join(fixture.runDir, "steering")).sort();
+      const pendingPath = join(fixture.runDir, queued.steering.ref);
+      const pendingBefore = readFileSync(pendingPath, "utf8");
+      writeJson(join(fixture.runDir, "heartbeat.json"), {
+        schema_version: 1,
+        run_id: fixture.runId,
+        phase: "orchestrating",
+        pid: 4242,
+        interval_ms: 30000,
+        last_tick_at: "2026-07-08T12:00:30.000Z",
+      });
+
+      await assert.rejects(
+        consumeSteering(fixture.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, {
+          cwd: fixture.repo,
+          now: "2026-07-08T12:01:00.000Z",
+          processAliveFn: (pid) => pid === 4242,
+        }),
+        /active-heartbeat/u,
+      );
+
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), runBefore);
+      assert.deepEqual(readdirSync(join(fixture.runDir, "steering")).sort(), steeringFilesBefore);
+      assert.equal(readFileSync(pendingPath, "utf8"), pendingBefore);
+      assert.equal(validateRunDir(fixture.runDir).ok, true);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
 });
 
 function createFixture(runId, { durable = false } = {}) {
