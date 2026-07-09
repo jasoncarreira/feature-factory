@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -261,6 +261,49 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
+  it("rejects symlinked repo-seeded feature skill parent and skill directories", () => {
+    for (const attack of ["opencode", "parent", "skill"])
+      assertRejectsSeedSymlinkAttack(attack, ({ repo, outside }) => {
+        if (attack === "opencode") {
+          symlinkSync(outside, join(repo, ".opencode"));
+        } else if (attack === "parent") {
+          mkdirSync(join(repo, ".opencode"), { recursive: true });
+          symlinkSync(outside, join(repo, ".opencode", "skills"));
+        } else {
+          mkdirSync(join(repo, ".opencode", "skills"), { recursive: true });
+          symlinkSync(outside, join(repo, ".opencode", "skills", "feature"));
+        }
+      }, ({ outside }) => {
+        assert.equal(existsSync(join(outside, "SKILL.md")), false);
+        assert.equal(existsSync(join(outside, "SCHEMA.md")), false);
+      });
+  });
+
+  it("rejects symlinked repo-seeded feature skill target files", () => {
+    for (const file of ["SKILL.md", "SCHEMA.md"])
+      assertRejectsSeedSymlinkAttack(file, ({ repo, outside }) => {
+        const dest = seedRepoSkill(repo);
+        const outsideFile = join(outside, file);
+        writeFileSync(outsideFile, "outside original\n", "utf8");
+        rmSync(join(dest, file), { force: true });
+        symlinkSync(outsideFile, join(dest, file));
+      }, ({ outside }) => {
+        assert.equal(readFileSync(join(outside, file), "utf8"), "outside original\n");
+      });
+  });
+
+  it("rejects symlinked repo-seeded feature skill seed metadata", () => {
+    assertRejectsSeedSymlinkAttack("seed-hash", ({ repo, outside }) => {
+      const dest = seedRepoSkill(repo);
+      const outsideFile = join(outside, ".seed-hash");
+      writeFileSync(outsideFile, "outside metadata\n", "utf8");
+      rmSync(join(dest, ".seed-hash"), { force: true });
+      symlinkSync(outsideFile, join(dest, ".seed-hash"));
+    }, ({ outside }) => {
+      assert.equal(readFileSync(join(outside, ".seed-hash"), "utf8"), "outside metadata\n");
+    });
+  });
+
   it("cleans terminal run state, branches, and registered worktrees", async () => {
     const fixture = createFixture("cleanup-run", { terminal: true, git: true });
     try {
@@ -428,6 +471,23 @@ function captureWarnings(fn) {
     console.warn = originalWarn;
   }
   return warnings;
+}
+
+function assertRejectsSeedSymlinkAttack(name, arrange, assertAfter = () => {}) {
+  const repo = mkdtempSync(join(tmpdir(), `factory-seed-symlink-${name}-`));
+  const outside = mkdtempSync(join(tmpdir(), `factory-seed-symlink-outside-${name}-`));
+  try {
+    arrange({ repo, outside });
+
+    assert.throws(
+      () => seedRepoSkill(repo),
+      /symlink/u,
+    );
+    assertAfter({ repo, outside });
+  } finally {
+    cleanup(repo);
+    cleanup(outside);
+  }
 }
 
 function cleanup(repo) {
