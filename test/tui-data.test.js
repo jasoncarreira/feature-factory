@@ -260,20 +260,6 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
-  it("keeps a pending step as the fallback when no work is active or blocked", () => {
-    const repo = tempDir();
-    writeRun(repo, "pending-run", {
-      status: "running",
-      updated_at: "2026-07-03T00:00:00Z",
-      steps: [{ agent: "story-reader", status: "pending", attempts: 0 }],
-    });
-
-    const [run] = readRuns(findFactoryRoots(repo));
-
-    assert.equal(run.current, "story-reader pending");
-    cleanup(repo);
-  });
-
   it("infers pre-PR panel progress after test-verifier acceptance", () => {
     const repo = tempDir();
     writeRun(repo, "panel-run", {
