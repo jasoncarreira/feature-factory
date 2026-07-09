@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { cleanupRun, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
+import { cleanupRun, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recoverDisruptedRun, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
@@ -32,6 +32,7 @@ Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] <prompt...>
+  factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--dry-run]
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
@@ -117,7 +118,19 @@ async function factory(args) {
   if (sub === "answer") return answer(rest);
   const opts = options(rest);
   const positional = positionals(rest);
-  if (sub === "start") return print(startFactory(positional, opts), opts);
+  if (sub === "start") {
+    const result = await startFactory(positional, opts);
+    print(result, opts);
+    if (result && typeof result === "object" && result.ok === false) process.exitCode = 1;
+    return;
+  }
+  if (sub === "resume-check") {
+    if (positional.length !== 1) throw new Error("factory resume-check requires exactly one <run-id>");
+    const result = await recoverDisruptedRun(positional[0], opts);
+    print(result, opts);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
   if (sub === "continue") {
     if (positional.length !== 1) throw new Error("factory continue requires exactly one <blocked-run-id>");
     return print(continueFactory(positional[0], opts), opts);
