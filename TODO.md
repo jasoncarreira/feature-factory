@@ -4,13 +4,6 @@ The active engineering work order is `CODEBASE-REVIEW.md` (verified findings + h
 rewrite + CLI write-surface completion + right-sizing). Items below are future work not
 covered there.
 
-## Factory Robustness And Durability
-
-- Non-destructive disrupted-worktree recovery
-  - Make the factory robust when its working directory/worktree disappears or becomes inaccessible mid-run.
-  - Do not silently re-scaffold an empty run control plane if `.opencode/factory/<run-id>` or the active worktree is missing/disrupted.
-  - If prior durable state is available, recover from it and reconcile with git branch/commit evidence; otherwise fail loudly with terminal `blocked` or `needs-human` plus a clear `terminal_result.reason`.
-
 ## Build And Review Workflow
 
 - Interrupt, steer, and resume (implemented baseline)
