@@ -63,6 +63,11 @@ function steeringLine(steering) {
   return null;
 }
 
+function costLine(cost) {
+  if (!cost || typeof cost !== "object") return null;
+  return typeof cost.label === "string" && cost.label.length > 0 ? cost.label : null;
+}
+
 function scanRuns(api) {
   return readRuns(factoryRoots(api));
 }
@@ -75,6 +80,7 @@ function runSnapshot(runs) {
     gate: run.gate,
     current: run.current,
     steering: run.steering,
+    cost: run.cost,
     slices: run.slices,
     panel: run.panel,
     pr_url: run.pr_url,
@@ -147,6 +153,7 @@ function View(props) {
                 {(run) => {
                   const slices = sliceLine(run.slices);
                   const steering = steeringLine(run.steering);
+                  const cost = costLine(run.cost);
                   return (
                     <box paddingTop={1}>
                       <box flexDirection="row" gap={1}>
@@ -170,6 +177,9 @@ function View(props) {
                       </Show>
                       <Show when={slices}>
                         <text fg={theme().textMuted}>{slices}</text>
+                      </Show>
+                      <Show when={cost}>
+                        <text fg={theme().textMuted}>{truncate(cost, 42)}</text>
                       </Show>
                       <Show when={run.panel}>
                         <text fg={theme().textMuted}>panel: {run.panel}</text>
