@@ -1,5 +1,5 @@
 /* @jsxImportSource @opentui/solid */
-import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import { factoryRoots, readRuns } from "./tui-data.js";
 
 const HIDDEN_STATUSES = new Set(["completed"]);
@@ -13,6 +13,7 @@ const DEFAULT_THEME = {
   warning: "yellow",
   info: "cyan",
 };
+let runStore = null;
 
 function currentTheme(api) {
   const theme = api?.theme?.current;
@@ -55,10 +56,24 @@ function sliceLine(slices) {
   return `slices: ${merged}/${total}${blocked}`;
 }
 
+function scanRuns(api) {
+  return readRuns(factoryRoots(api, { noCache: true }));
+}
+
+function sharedRunStore(api) {
+  if (!runStore) {
+    const [runs, setRuns] = createSignal(scanRuns(api), { equals: false });
+    runStore = { api, runs, setRuns };
+    setInterval(() => runStore.setRuns(scanRuns(runStore.api)), REFRESH_INTERVAL_MS);
+    return runs;
+  }
+  runStore.api = api;
+  runStore.setRuns(scanRuns(api));
+  return runStore.runs;
+}
+
 function View(props) {
-  const roots = () => factoryRoots(props.api, { noCache: true });
-  const scanRuns = () => readRuns(roots());
-  const [runs, setRuns] = createSignal(scanRuns());
+  const runs = sharedRunStore(props.api);
   const theme = () => currentTheme(props.api);
   const visible = createMemo(() => runs().length > 0);
   const active = createMemo(() => runs().filter((run) => !HIDDEN_STATUSES.has(run.status) || hasNonOkDiagnostic(run)));
@@ -71,9 +86,6 @@ function View(props) {
   });
   const visibleRuns = createMemo(() => shown().slice(0, MAX_VISIBLE_RUNS));
   const hiddenCount = createMemo(() => Math.max(0, runs().length - visibleRuns().length));
-  const timer = setInterval(() => setRuns(scanRuns()), REFRESH_INTERVAL_MS);
-  onCleanup(() => clearInterval(timer));
-
   return (
     <Show when={visible()}>
       <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
