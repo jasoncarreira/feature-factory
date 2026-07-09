@@ -576,6 +576,22 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("rejects cost usage while a fresh heartbeat is active", async () => {
+    const fixture = createFixture("cost-active-heartbeat");
+    try {
+      writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        transitionCostUsage(fixture.runDir, { agent: "backend-builder", input_tokens: 1 }, { now: NOW, id: "active-cost", processAliveFn: (pid) => pid === process.pid }),
+        /cost-record requires inactive heartbeat: active-heartbeat/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects cost usage beyond the entry cap without rewriting run.json", async () => {
     const fixture = createFixture("cost-cap");
     try {
