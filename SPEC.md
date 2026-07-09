@@ -62,9 +62,9 @@ Future optional shape:
       "opencode-feature-factory",
       {
         "profiles": {
-          "planning": { "model": "openai/gpt-5.5", "variant": "xhigh" },
-          "builder": { "model": "anthropic/claude-sonnet-5", "variant": "medium" },
-          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" }
+          "planning": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "builder": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "reviewer": { "model": "openai/gpt-5.6-sol", "variant": "high" }
         }
       }
     ]
@@ -152,7 +152,7 @@ ok: plugin configured
 ok: /feature command registered
 ok: feature-factory primary agent registered
 ok: 12 subagents registered
-ok: provider openai authenticated for openai/gpt-5.5
+ok: provider openai authenticated for openai/gpt-5.6-sol
 missing: provider anthropic credentials for anthropic/claude-sonnet-4-6
 warn: gh CLI missing; PR creation will fail
 missing: .opencode/worktrees is not gitignored
@@ -357,8 +357,8 @@ Suggested shape:
     "opencode_version": "1.17.13",
     "plugin_spec": "opencode-feature-factory",
     "resolved_models": {
-      "story-reader": "openai/gpt-5.5",
-      "backend-builder": "anthropic/claude-sonnet-4-6"
+      "story-reader": "openai/gpt-5.6-luna",
+      "backend-builder": "openai/gpt-5.6-sol"
     },
       "driver": {
       "kind": "interactive | cli | external",
@@ -576,7 +576,7 @@ Future config idea:
 {
   "profiles": {
     "planning": {
-      "primary": { "model": "openai/gpt-5.5", "variant": "xhigh" },
+      "primary": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
       "fallbacks": [{ "model": "anthropic/claude-sonnet-5", "variant": "high" }]
     }
   }
@@ -603,7 +603,7 @@ Improve `feature-factory install`:
 Non-interactive mode:
 
 ```sh
-feature-factory install --profile '{"model":"openai/gpt-5.5","variant":"xhigh"}'
+feature-factory install --profile '{"model":"openai/gpt-5.6-sol","variant":"xhigh"}'
 feature-factory install --profiles-file profiles.json
 ```
 

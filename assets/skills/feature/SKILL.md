@@ -306,7 +306,7 @@ feature-factory factory cost-record <run-id> \
   --agent implementation-validator \
   --step implementation-validator \
   --provider openai \
-  --model openai/gpt-5.5 \
+  --model openai/gpt-5.6-sol \
   --input-tokens 12000 \
   --output-tokens 900 \
   --total-tokens 12900 \

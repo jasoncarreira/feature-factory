@@ -113,7 +113,7 @@ One profile for all feature-factory agents:
       "opencode-feature-factory",
       {
         "profile": {
-          "model": "openai/gpt-5.5",
+          "model": "openai/gpt-5.6-sol",
           "variant": "xhigh"
         }
       }
@@ -122,7 +122,7 @@ One profile for all feature-factory agents:
 }
 ```
 
-Role-based profiles:
+Role-based profiles (a coarser alternative to the recommended exact-agent mapping below):
 
 ```jsonc
 {
@@ -131,14 +131,14 @@ Role-based profiles:
       "opencode-feature-factory",
       {
         "profiles": {
-          "story": { "model": "openai/gpt-5.4", "variant": "medium" },
-          "research": { "model": "openai/gpt-5.5", "variant": "high" },
-          "design": { "model": "openai/gpt-5.5", "variant": "high" },
-          "planning": { "model": "openai/gpt-5.5", "variant": "xhigh" },
-          "builder": { "model": "openai/gpt-5.4", "variant": "xhigh" },
-          "test": { "model": "openai/gpt-5.4", "variant": "medium" },
-          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" },
-          "security": { "model": "openai/gpt-5.5", "variant": "high" }
+          "story": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "research": { "model": "openai/gpt-5.6-terra", "variant": "high" },
+          "design": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "planning": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "builder": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "test": { "model": "openai/gpt-5.6-terra", "variant": "high" },
+          "reviewer": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "security": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
         }
       }
     ]
@@ -155,10 +155,10 @@ Exact agent profiles take precedence over role/default/top-level profiles:
       "opencode-feature-factory",
       {
         "profiles": {
-          "default": { "model": "anthropic/claude-sonnet-5", "variant": "medium" },
-          "spec-writer": { "model": "openai/gpt-5.5", "variant": "xhigh" },
-          "implementation-validator": { "model": "openai/gpt-5.5", "variant": "xhigh" },
-          "security-reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" }
+          "default": { "model": "openai/gpt-5.6-terra", "variant": "high" },
+          "spec-writer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "implementation-validator": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "security-reviewer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" }
         }
       }
     ]
@@ -188,7 +188,7 @@ Limitations: this catches only git-visible changes in the reviewed worktree afte
 
 For serious feature-factory runs, use the strongest model/effort where architectural mistakes are most expensive: planning, decomposition, review, and final validation. Builders should still run strong, but story normalization and acceptance-test writing can usually run lower.
 
-Recommended mapping, using OpenAI model IDs as examples. If your opencode provider ID differs, keep the same shape and adjust the model strings.
+Recommended exact-agent mapping. These model IDs are registered by the OpenAI provider; if your provider exposes different IDs, keep the same agent/variant shape and adjust only the model strings.
 
 ```jsonc
 {
@@ -197,14 +197,19 @@ Recommended mapping, using OpenAI model IDs as examples. If your opencode provid
       "opencode-feature-factory",
       {
         "profiles": {
-          "story": { "model": "openai/gpt-5.4", "variant": "medium" },
-          "research": { "model": "openai/gpt-5.5", "variant": "high" },
-          "design": { "model": "openai/gpt-5.5", "variant": "high" },
-          "planning": { "model": "openai/gpt-5.5", "variant": "xhigh" },
-          "builder": { "model": "openai/gpt-5.4", "variant": "xhigh" },
-          "test": { "model": "openai/gpt-5.4", "variant": "medium" },
-          "reviewer": { "model": "openai/gpt-5.5", "variant": "xhigh" },
-          "security": { "model": "openai/gpt-5.5", "variant": "high" }
+          "feature-factory": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "backend-builder": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "codebase-researcher": { "model": "openai/gpt-5.6-terra", "variant": "high" },
+          "design-interpreter": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "frontend-builder": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "implementation-validator": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "security-reviewer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "spec-writer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "story-reader": { "model": "openai/gpt-5.6-luna", "variant": "medium" },
+          "story-writer": { "model": "openai/gpt-5.6-sol", "variant": "high" },
+          "test-verifier": { "model": "openai/gpt-5.6-terra", "variant": "high" },
+          "work-decomposer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
+          "work-reviewer": { "model": "openai/gpt-5.6-sol", "variant": "high" }
         }
       }
     ]
@@ -396,7 +401,7 @@ feature-factory factory cost-record <run-id> \
   --agent implementation-validator \
   --step implementation-validator \
   --provider openai \
-  --model openai/gpt-5.5 \
+  --model openai/gpt-5.6-sol \
   --input-tokens 12000 \
   --output-tokens 900 \
   --total-tokens 12900 \

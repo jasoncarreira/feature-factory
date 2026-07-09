@@ -423,7 +423,7 @@ Cost schema:
       "source": "opencode",
       "operation": "invoke_agent",
       "provider": "openai",
-      "model": "openai/gpt-5.5",
+      "model": "openai/gpt-5.6-sol",
       "request_id": "provider-request-id",
       "input_tokens": 12000,
       "output_tokens": 900,
