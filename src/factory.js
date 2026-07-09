@@ -90,6 +90,8 @@ export async function startFactory(args, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const resumeRunId = resumePromptRunId(args, opts);
   if (resumeRunId) {
+    const activeHeartbeatPreflight = startResumeActiveHeartbeatPreflight(resumeRunId, { ...opts, cwd: repo, repoRoot: repo });
+    if (activeHeartbeatPreflight) return activeHeartbeatPreflight;
     const preflight = await recoverDisruptedRun(resumeRunId, { ...opts, cwd: repo });
     if (!preflight.ok) return preflight;
     const eligibility = startResumeEligibility(preflight, { ...opts, cwd: repo, repoRoot: repo });
@@ -212,6 +214,33 @@ function startResumeEligibility(preflight, opts = {}) {
     status: run.status,
     terminal_result: run.terminal_result || null,
     reason: `resume ineligible: ${eligibility.reasons.join(", ")}`,
+    eligibility,
+  };
+}
+
+function startResumeActiveHeartbeatPreflight(runId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const target = resolveRecoveryRunTarget(runId, { ...opts, cwd: repo });
+  if (target.error) return null;
+
+  const readResult = readDurableRecoveryRun(repo, target.runDir, target.runFile);
+  if (readResult.error) return null;
+
+  const run = readResult.run;
+  if (TERMINAL_STATUSES.has(run.status)) return null;
+
+  const eligibility = resumeEligibility(target.runDir, run, { ...opts, cwd: repo, repoRoot: repo });
+  if (!eligibility.reasons.includes("active-heartbeat")) return null;
+
+  return {
+    ...recoveryEnvelope(run, {
+      ok: false,
+      durable: true,
+      updated: false,
+      recovered: false,
+      runDir: target.runDir,
+      reason: `resume ineligible: ${eligibility.reasons.join(", ")}`,
+    }),
     eligibility,
   };
 }

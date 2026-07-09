@@ -45,9 +45,11 @@ describe("cli resume-check and resume preflight", () => {
   });
 
   for (const mode of ["--headless", "--autonomous"]) {
-    it(`rejects active heartbeat before ${mode} factory start resume seeds skills or spawns opencode`, () => {
-      const fixture = createCliRecoveryFixture(`start-resume-active-heartbeat-${mode.slice(2)}`);
+    it(`rejects active heartbeat before ${mode} factory start resume mutates recovery state, seeds skills, or spawns opencode`, () => {
+      const fixture = createCliRecoveryFixture(`start-resume-active-heartbeat-${mode.slice(2)}`, { recordWorktree: false });
       try {
+        const runFile = join(fixture.runDir, "run.json");
+        const originalRunJson = readFileSync(runFile, "utf8");
         writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
 
         const proc = runCli(fixture.repo, ["factory", "start", mode, "--json", `resume ${fixture.runId}`]);
@@ -58,6 +60,10 @@ describe("cli resume-check and resume preflight", () => {
         assert.equal(output.ok, false);
         assert.match(output.reason, /resume ineligible/i);
         assert.match(output.reason, /active-heartbeat/i);
+        assert.equal(output.updated, false);
+        assert.equal(output.recovered, false);
+        assert.equal(existsSync(fixture.worktree), false);
+        assert.equal(readFileSync(runFile, "utf8"), originalRunJson);
         assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature", "SKILL.md")), false);
       } finally {
         cleanup(fixture.repo);
@@ -82,7 +88,7 @@ describe("cli resume-check and resume preflight", () => {
   });
 });
 
-function createCliRecoveryFixture(runId) {
+function createCliRecoveryFixture(runId, options = {}) {
   const repo = tempRepo(runId);
   initGitRepo(repo);
   const baseCommit = gitStdout(repo, ["rev-parse", "HEAD"]);
@@ -90,17 +96,18 @@ function createCliRecoveryFixture(runId) {
   const runDir = join(repo, ".opencode", "factory", runId);
   const worktree = join(repo, ".opencode", "worktrees", runId);
   mkdirSync(runDir, { recursive: true });
-  writeJson(join(runDir, "run.json"), {
+  const run = {
     schema_version: 1,
     run_id: runId,
     status: "running",
     base_ref: "main",
     base_commit: baseCommit,
     branch: runId,
-    worktree,
     gates: {},
     terminal_result: null,
-  });
+  };
+  if (options.recordWorktree !== false) run.worktree = worktree;
+  writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId, worktree };
 }
 
