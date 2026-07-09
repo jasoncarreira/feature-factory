@@ -58,6 +58,22 @@ The orchestrator may use a `task_id` only to resume an eligible implementer reme
 
 Reviewer tasks are always fresh. `task_id` must never be passed to or stored for `work-reviewer`, `implementation-validator`, or `security-reviewer`; their continuity comes only from explicit prompt inputs such as current observed evidence, `attempt`, and prior `required_fixes`.
 
+## Runtime-Only Trace Context
+
+Telemetry is off by default. The schema has no default exporter, no network side effects, and no durable trace state.
+
+Trace context from `factory start`, `factory resume`, or `factory continue` flags is runtime process-correlation metadata only:
+
+```sh
+--parent-span-id <16-hex-span-id>
+--traceparent <w3c-traceparent>
+--tracestate <w3c-tracestate>
+```
+
+The launcher validates this metadata and maps it into child-process env for opencode: `--traceparent` sets `TRACEPARENT` and `FEATURE_FACTORY_TRACEPARENT`; `--tracestate` sets `TRACESTATE` and `FEATURE_FACTORY_TRACESTATE`; `--parent-span-id` or the span id inside `--traceparent` sets `FEATURE_FACTORY_PARENT_SPAN_ID`. Existing operator-provided `OTEL_EXPORTER_OTLP_*` and `OTEL_RESOURCE_ATTRIBUTES` env is preserved.
+
+No `run.json`, evidence, reviews, gates, artifacts, plans, or terminal-result schema has trace-context fields such as `traceparent`, `tracestate`, `parent_span_id`, or `parentSpanId`. Trace context is non-authoritative runtime config, not operator instructions, not a gate answer, not review evidence, and not persisted for resume/replay.
+
 ## CLI State Write Surface
 
 After the initial manifest bootstrap, do not edit `run.json` directly. Every semantic state write uses the `feature-factory factory ...` CLI, which takes `run-json.lock/`, validates the next state, and commits atomically. The CLI invokes the checked transition helpers internally, including `transitionGateDecision` for protected gate decisions and `transitionPrCreated` for completed PR state.

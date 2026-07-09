@@ -549,6 +549,69 @@ describe("cost attribution docs contract", () => {
   });
 });
 
+describe("telemetry readiness docs contract", () => {
+  it("documents doctor --telemetry readiness categories", () => {
+    for (const [name, text] of documentEntries({ README, SPEC })) {
+      assert.match(text, /feature-factory doctor --telemetry/i, `${name} must document doctor --telemetry`);
+      assert.match(text, /experimental\.openTelemetry/i, `${name} must document native opencode OTel readiness`);
+      assert.match(text, /native AI SDK spans?/i, `${name} must document native AI SDK span expectation`);
+      assert.match(text, /OTEL_EXPORTER_OTLP_TRACES_ENDPOINT[\s\S]*OTEL_EXPORTER_OTLP_ENDPOINT|OTEL_EXPORTER_OTLP_ENDPOINT[\s\S]*OTEL_EXPORTER_OTLP_TRACES_ENDPOINT/i, `${name} must document OTLP endpoint readiness`);
+      assert.match(text, /OTEL_EXPORTER_OTLP_TRACES_HEADERS[\s\S]*OTEL_EXPORTER_OTLP_HEADERS|OTEL_EXPORTER_OTLP_HEADERS[\s\S]*OTEL_EXPORTER_OTLP_TRACES_HEADERS/i, `${name} must document OTLP header readiness`);
+      assert.match(text, /OTEL_SERVICE_NAME[\s\S]*OTEL_RESOURCE_ATTRIBUTES|OTEL_RESOURCE_ATTRIBUTES[\s\S]*OTEL_SERVICE_NAME/i, `${name} must document service/resource readiness`);
+      assert.match(text, /companion telemetry plugin[\s\S]*@devtheops\/opencode-plugin-otel|@devtheops\/opencode-plugin-otel[\s\S]*companion telemetry plugin/i, `${name} must document companion plugin check`);
+      assert.match(text, /@opentelemetry\/api[\s\S]*(?:loadable|loadability|exports)/i, `${name} must document instrumentation loadability`);
+      assert.match(text, /FEATURE_FACTORY_OTEL_ENABLED[\s\S]*default-off|default-off[\s\S]*FEATURE_FACTORY_OTEL_ENABLED/i, `${name} must document enablement/default-off status`);
+      assert.match(text, /content-capture risk|content capture risk/i, `${name} must document content capture risk`);
+    }
+  });
+
+  it("documents Honeycomb/native OTel setup, sanitized OTLP env, and prompt capture warnings", () => {
+    for (const [name, text] of documentEntries({ README, SPEC })) {
+      assert.match(text, /Honeycomb/i, `${name} must document Honeycomb setup`);
+      assert.match(text, /x-honeycomb-team/i, `${name} must document Honeycomb OTLP header name`);
+      assert.match(text, /native opencode|native OTel/i, `${name} must document native opencode OTel setup`);
+      assert.match(text, /OpenTelemetry Collector redaction|collector redaction/i, `${name} must document collector redaction option`);
+      assert.match(text, /headers?[\s\S]*(?:without printing values|never .* values|value:\"\[redacted\]\"|value.*\[redacted\])/i, `${name} must document sanitized OTLP header behavior`);
+      assert.match(text, /credential-bearing (?:endpoint )?URLs?[\s\S]*(?:redacted|scrubbed)|redacted[\s\S]*credential-bearing (?:endpoint )?URLs?/i, `${name} must document credential-bearing URL redaction`);
+      assert.match(text, /native opencode\/AI SDK[\s\S]*(?:capture prompts|may capture prompts|prompt\/output)/i, `${name} must warn about prompt/content capture`);
+      for (const flag of ["captureMessages", "captureToolArguments", "captureToolResults", "captureReviews", "captureEvidence"]) {
+        assert.match(text, literalPattern(flag), `${name} must document content capture flag ${flag}`);
+      }
+    }
+  });
+
+  it("documents no-default-telemetry and no durable trace state", () => {
+    for (const [name, text] of documentEntries({ README, SPEC, SKILL, SCHEMA })) {
+      assert.match(text, /(?:off by default|No telemetry enabled by default|no default telemetry)/i, `${name} must document telemetry off by default`);
+      assert.match(text, /no default exporter|no exporter\/network side effects|no default.*network side effects/i, `${name} must document no default exporter/network side effects`);
+      assert.match(text, /no durable trace state|not persisted in `run\.json`|must not be written into `run\.json`/i, `${name} must document no durable trace state`);
+      assert.match(text, /not (?:workflow )?authority|non-authoritative/i, `${name} must document telemetry/trace non-authority`);
+    }
+    assert.doesNotMatch(SCHEMA, /["'](?:traceparent|tracestate|parent_span_id|parentSpanId)["']\s*:/i, "SCHEMA must not add durable trace-context fields");
+  });
+
+  it("documents trace-context launch flags and runtime env mapping", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      for (const flag of ["--parent-span-id", "--traceparent", "--tracestate"]) {
+        assert.match(text, literalPattern(flag), `${name} must document trace flag ${flag}`);
+      }
+      for (const envName of ["TRACEPARENT", "TRACESTATE", "FEATURE_FACTORY_TRACEPARENT", "FEATURE_FACTORY_TRACESTATE", "FEATURE_FACTORY_PARENT_SPAN_ID"]) {
+        assert.match(text, literalPattern(envName), `${name} must document runtime env ${envName}`);
+      }
+      assert.match(text, /non-authoritative runtime (?:config|configuration)|runtime metadata only/i, `${name} must make trace context non-authoritative runtime config`);
+      assert.match(text, /not (?:operator )?instructions|not user instructions/i, `${name} must state trace context is not instructions`);
+      assert.match(text, /not persisted in `run\.json`|must not be written into `run\.json`|No `run\.json`[\s\S]*trace-context/i, `${name} must forbid persisting trace context in run.json`);
+    }
+  });
+
+  it("narrows Honeycomb TODO to future span instrumentation and validation", () => {
+    assert.match(TODO, /Completed readiness\/propagation baseline/i, "TODO must acknowledge completed telemetry readiness/propagation baseline");
+    assert.match(TODO, /Future work:[\s\S]*span taxonomy\/correlation spans/i, "TODO must leave future feature-factory span instrumentation");
+    assert.match(TODO, /Honeycomb Agent Timeline/i, "TODO must leave Honeycomb validation follow-up");
+    assert.doesNotMatch(TODO, /Include `doctor --telemetry` readiness checks/i, "TODO must not leave doctor --telemetry readiness as future work");
+  });
+});
+
 describe("TUI sidebar refresh diagnostics docs contract", () => {
   it("renders the refresh signal directly under the Feature Factory header with muted styling", () => {
     assert.match(TUI, /<b>Feature Factory<\/b>[\s\S]*<text fg=\{theme\(\)\.textMuted\} wrapMode="none">\{refreshMetadata\(\)\.label\}<\/text>/, "TUI must render the muted refresh label directly under the Feature Factory header");

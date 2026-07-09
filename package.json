@@ -38,6 +38,7 @@
     "workflow"
   ],
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
     "@opentui/solid": "^0.4.3",
     "jsonc-parser": "^3.3.1",
     "solid-js": "^1.9.10"

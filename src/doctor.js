@@ -5,7 +5,8 @@ import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { readJsoncConfig, readStrictJsonConfig } from "./config.js";
-import { collectEnv, resolvePluginConfig, scrubSecretEnv } from "./env-snapshot.js";
+import { REDACTED_ENV_VALUE, collectEnv, resolvePluginConfig, scrubSecretEnv } from "./env-snapshot.js";
+import { checkOpenTelemetryApiLoadability, evaluateContentCaptureRisk, sanitizeOtlpEnv } from "./telemetry.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const SUBAGENTS = [
@@ -25,6 +26,19 @@ const SUBAGENTS = [
 const EDIT_AGENTS = new Set(["feature-factory", "backend-builder", "frontend-builder", "test-verifier"]);
 const NON_INTERACTIVE_ALLOW = ["read", "glob", "grep", "list", "bash", "webfetch", "task", "todowrite"];
 const FACTORY_DENY = ["external_directory"];
+const FEATURE_FACTORY_PLUGIN_SPECS = new Set(["opencode-feature-factory"]);
+const COMPANION_TELEMETRY_PLUGIN_SPECS = new Set([
+  "@devtheops/opencode-plugin-otel",
+  "opencode-plugin-otel",
+]);
+const OTEL_ENDPOINT_KEYS = ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"];
+const OTEL_HEADER_KEYS = ["OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"];
+const OTEL_RESOURCE_ATTRIBUTES = "OTEL_RESOURCE_ATTRIBUTES";
+const OTEL_SERVICE_NAME = "OTEL_SERVICE_NAME";
+const ENDPOINT_SECRET_KEY_PATTERN = /(?:key|token|secret|password|authorization|credential|access|team|api[_-]?key)/iu;
+const ENDPOINT_SECRET_VALUE_PATTERN = /(?:hc[a-z0-9_-]*|gh[pousr]|github_pat|sk(?:-proj)?|xox[abp]|glpat)[_-][A-Za-z0-9_-]{10,}/iu;
+const ENDPOINT_BARE_HEX_SECRET_PATTERN = /^[A-Fa-f0-9]{32,}$/u;
+const ENDPOINT_LONG_TOKEN_PATTERN = /^[A-Za-z0-9._~+/-]{16,}$/u;
 
 export async function runDoctor(options = {}) {
   const configPath = join(homedir(), ".config", "opencode", "opencode.jsonc");
@@ -61,6 +75,12 @@ export async function runDoctor(options = {}) {
   add(checks, ".opencode/factory ignored", env.capabilities.factory_gitignored === true, ".opencode/factory/", "warn");
   add(checks, ".opencode/worktrees ignored", env.capabilities.worktrees_gitignored === true, ".opencode/worktrees/", "warn");
 
+  const telemetry = options.telemetry
+    ? await collectTelemetryReadiness({ cfg, pluginOptions, env: process.env })
+    : null;
+
+  if (telemetry) addTelemetryChecks(checks, telemetry);
+
   for (const [agent, model] of Object.entries(env.resolved_models)) {
     if (!model) continue;
     const provider = modelProvider(model);
@@ -80,7 +100,7 @@ export async function runDoctor(options = {}) {
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ checks, env }, null, 2));
+    console.log(JSON.stringify(telemetry ? { checks, env, telemetry } : { checks, env }, null, 2));
   } else {
     if (options.profiles) printProfileMap(env.resolved_models, env.resolved_variants);
     for (const check of checks) console.log(`${check.level}: ${check.label} (${check.detail})`);
@@ -92,8 +112,349 @@ export function readOpencodeConfig(configPath = join(homedir(), ".config", "open
   return readJsoncConfig(configPath, { label: "opencode.jsonc" });
 }
 
+export async function collectTelemetryReadiness({ cfg = {}, pluginOptions = {}, env = process.env, instrumentationLoadability } = {}) {
+  const loadability = instrumentationLoadability || await checkOpenTelemetryApiLoadability();
+  const opencode = evaluateOpenTelemetryConfigReadiness(cfg);
+  return scrubSecretEnv({
+    opencode,
+    otlpEnv: evaluateOtlpEnvReadiness(env),
+    companionPlugin: evaluateCompanionTelemetryPluginReadiness(cfg),
+    instrumentation: evaluatePackageInstrumentationLoadability(loadability),
+    featureFactory: evaluateFeatureFactoryTelemetryReadiness({ cfg, pluginOptions, env, nativeOpenTelemetry: opencode.enabled }),
+  });
+}
+
+export function evaluateOpenTelemetryConfigReadiness(cfg = {}) {
+  const experimental = plainObject(cfg.experimental) ? cfg.experimental : {};
+  const value = experimental.openTelemetry;
+  const enabled = value === true;
+  return {
+    ok: enabled,
+    level: enabled ? "ok" : "warn",
+    enabled,
+    configured: value !== undefined,
+    detail: enabled
+      ? "experimental.openTelemetry=true; native opencode/AI SDK spans may be emitted when an SDK/exporter is initialized"
+      : `experimental.openTelemetry=${value === undefined ? "unset" : safeValue(value)}; enable it for native opencode AI SDK spans`,
+    nativeAiSdkSpansExpected: enabled,
+  };
+}
+
+export function evaluateOtlpEnvReadiness(env = process.env) {
+  const safeOtlp = sanitizeOtlpEnv(env || {});
+  const endpoint = firstPresent(OTEL_ENDPOINT_KEYS, env);
+  const headers = OTEL_HEADER_KEYS
+    .filter((key) => stringValue(env?.[key]))
+    .map((key) => ({ key, headers: safeOtlp[key] || [] }));
+  const resourceAttributes = parseOtelKeyValueList(env?.[OTEL_RESOURCE_ATTRIBUTES]);
+  const serviceNameFromResource = resourceAttributes.find((item) => item.name === "service.name");
+  const serviceName = stringValue(env?.[OTEL_SERVICE_NAME])
+    ? { source: OTEL_SERVICE_NAME, value: safeValue(env[OTEL_SERVICE_NAME]) }
+    : serviceNameFromResource
+      ? { source: OTEL_RESOURCE_ATTRIBUTES, value: safeValue(serviceNameFromResource.value) }
+      : null;
+
+  return {
+    ok: Boolean(endpoint),
+    level: endpoint ? "ok" : "missing",
+    endpoint: endpoint
+      ? { ok: true, key: endpoint.key, value: sanitizeEndpointSummary(endpoint.value) }
+      : { ok: false, missing: OTEL_ENDPOINT_KEYS },
+    headers: {
+      ok: headers.some((item) => item.headers.length > 0),
+      vars: headers,
+      missing: headers.length === 0 ? OTEL_HEADER_KEYS : [],
+      detail: headers.length > 0 ? headerDetail(headers) : "no OTLP header variables configured",
+    },
+    resource: {
+      ok: Boolean(serviceName),
+      serviceName,
+      attributes: resourceAttributes.map((item) => ({ name: item.name, present: true })),
+      detail: serviceName ? `service.name from ${serviceName.source}` : "set OTEL_SERVICE_NAME or service.name in OTEL_RESOURCE_ATTRIBUTES",
+    },
+  };
+}
+
+export function evaluateCompanionTelemetryPluginReadiness(cfg = {}) {
+  const plugins = Array.isArray(cfg.plugin) ? cfg.plugin : [];
+  const matches = plugins
+    .map((entry) => companionPluginCandidate(entry))
+    .filter(Boolean);
+
+  if (matches.length === 0) {
+    return {
+      ok: false,
+      level: "warn",
+      present: false,
+      detail: "no companion telemetry plugin configured; use native opencode OTel or install @devtheops/opencode-plugin-otel",
+      action: "Configure native experimental.openTelemetry or add a companion telemetry plugin that initializes an OpenTelemetry SDK/exporter.",
+    };
+  }
+
+  const unusable = matches.filter((item) => item.unusable);
+  return {
+    ok: unusable.length === 0,
+    level: unusable.length === 0 ? "ok" : "warn",
+    present: true,
+    plugins: matches,
+    detail: unusable.length === 0
+      ? `companion telemetry plugin configured: ${matches.map((item) => item.spec).join(", ")}`
+      : `companion telemetry plugin needs attention: ${unusable.map((item) => `${item.spec} (${item.reason})`).join(", ")}`,
+    action: unusable.length === 0 ? "none" : "Enable or fix the companion telemetry plugin options.",
+  };
+}
+
+export function evaluatePackageInstrumentationLoadability(loadability = {}) {
+  return {
+    ok: loadability.ok === true,
+    level: loadability.ok === true ? "ok" : "missing",
+    package: loadability.package || "@opentelemetry/api",
+    exports: Array.isArray(loadability.exports) ? loadability.exports : [],
+    detail: loadability.ok === true
+      ? `${loadability.package || "@opentelemetry/api"} loadable`
+      : scrubSecretEnv(loadability.error || `${loadability.package || "@opentelemetry/api"} is not loadable`),
+  };
+}
+
+export function evaluateFeatureFactoryTelemetryReadiness({ cfg = {}, pluginOptions = {}, env = process.env, nativeOpenTelemetry } = {}) {
+  const telemetryOptions = plainObject(pluginOptions.telemetry) ? pluginOptions.telemetry : {};
+  const envEnabled = parseBooleanEnv(env?.FEATURE_FACTORY_OTEL_ENABLED);
+  const optionEnabled = telemetryOptions.enabled === true;
+  const enabled = optionEnabled || envEnabled === true;
+  const risk = evaluateContentCaptureRisk({
+    config: cfg,
+    telemetry: telemetryOptions,
+    nativeOpenTelemetry: nativeOpenTelemetry === true,
+  });
+
+  return {
+    ok: risk.ok,
+    level: risk.ok ? "ok" : "warn",
+    enabled,
+    mode: safeValue(telemetryOptions.mode || (nativeOpenTelemetry ? "native-opencode" : "noop")),
+    source: optionEnabled ? "plugin.telemetry.enabled" : envEnabled === true ? "FEATURE_FACTORY_OTEL_ENABLED" : "default-off",
+    redactionActive: risk.redactionActive === true,
+    capture: risk.capture,
+    risks: risk.risks,
+    detail: risk.ok
+      ? `feature-factory telemetry ${enabled ? "enabled" : "off by default"}; content capture disabled and redaction active`
+      : risk.risks.map((item) => item.message).join(" "),
+  };
+}
+
 function add(checks, label, passed, detail, failureLevel = "missing") {
   checks.push({ label, level: passed ? "ok" : failureLevel, detail: String(detail ?? "") });
+}
+
+function addTelemetryChecks(checks, telemetry) {
+  add(checks, "telemetry opencode experimental.openTelemetry", telemetry.opencode.ok, telemetry.opencode.detail, telemetry.opencode.level);
+  add(checks, "telemetry native AI SDK spans", telemetry.opencode.nativeAiSdkSpansExpected, telemetry.opencode.nativeAiSdkSpansExpected ? "expected when SDK/exporter is initialized" : "not expected until experimental.openTelemetry is true", "warn");
+  add(checks, "telemetry OTLP endpoint", telemetry.otlpEnv.endpoint.ok, formatTelemetryEndpointDetail(telemetry.otlpEnv.endpoint), telemetry.otlpEnv.level);
+  add(checks, "telemetry OTLP headers", telemetry.otlpEnv.headers.ok, telemetry.otlpEnv.headers.detail, "warn");
+  add(checks, "telemetry resource service", telemetry.otlpEnv.resource.ok, telemetry.otlpEnv.resource.detail, "warn");
+  add(checks, "telemetry companion plugin", telemetry.companionPlugin.ok, telemetry.companionPlugin.detail, telemetry.companionPlugin.level);
+  add(checks, "telemetry package instrumentation", telemetry.instrumentation.ok, telemetry.instrumentation.detail, telemetry.instrumentation.level);
+  add(checks, "telemetry feature-factory options", telemetry.featureFactory.enabled, telemetry.featureFactory.detail, "warn");
+  add(checks, "telemetry content capture risk", telemetry.featureFactory.ok, telemetry.featureFactory.detail, telemetry.featureFactory.level);
+}
+
+export function formatTelemetryEndpointDetail(endpoint) {
+  if (endpoint.ok) return `${endpoint.key}=${endpoint.value}`;
+  return `missing ${endpoint.missing.join(" or ")}`;
+}
+
+function headerDetail(headers) {
+  return headers
+    .map((item) => {
+      const names = item.headers.map((header) => header.name).join(", ") || "no parseable headers";
+      return `${item.key}: ${names}`;
+    })
+    .join("; ");
+}
+
+function firstPresent(keys, env) {
+  for (const key of keys) {
+    if (stringValue(env?.[key])) return { key, value: env[key] };
+  }
+  return null;
+}
+
+function parseOtelKeyValueList(value) {
+  if (!stringValue(value)) return [];
+  return String(value)
+    .split(",")
+    .map((entry) => {
+      const index = entry.indexOf("=");
+      const rawName = index === -1 ? entry : entry.slice(0, index);
+      const rawValue = index === -1 ? "" : entry.slice(index + 1);
+      const name = sanitizePublicName(rawName);
+      if (!name) return null;
+      return { name, value: safeValue(rawValue), present: true };
+    })
+    .filter(Boolean);
+}
+
+function companionPluginCandidate(entry) {
+  const spec = pluginEntrySpec(entry);
+  if (!stringValue(spec)) return null;
+  const identity = pluginSpecIdentity(spec);
+  if (!identity || FEATURE_FACTORY_PLUGIN_SPECS.has(identity)) return null;
+  if (!COMPANION_TELEMETRY_PLUGIN_SPECS.has(identity)) return null;
+
+  const options = Array.isArray(entry) && plainObject(entry[1]) ? entry[1] : {};
+  const disabled = options.enabled === false || options.telemetry?.enabled === false;
+  return {
+    spec: safeValue(spec),
+    present: true,
+    unusable: disabled,
+    reason: disabled ? "configured disabled" : undefined,
+    action: disabled ? "set enabled=true or remove the disabled companion plugin entry" : "none",
+  };
+}
+
+function pluginEntrySpec(entry) {
+  return Array.isArray(entry) ? entry[0] : entry;
+}
+
+function pluginSpecIdentity(spec) {
+  const raw = String(spec || "").trim();
+  if (!raw) return null;
+  const packageSpec = normalizePackageSpec(raw);
+  if (packageSpec) return packageSpec;
+
+  let pathSpec = raw;
+  try {
+    const parsed = new URL(raw);
+    pathSpec = parsed.pathname || raw;
+  } catch {
+    // Non-URL local paths are handled below.
+  }
+
+  const segments = pathSpec
+    .split(/[\\/]+/u)
+    .map((segment) => safeDecodeURIComponent(segment).trim())
+    .filter(Boolean);
+  if (segments.length === 0) return null;
+
+  if (segments.at(-1) === "plugin.js" && segments.at(-2) === "src") {
+    return normalizePackageSpec(segments.at(-3));
+  }
+  return normalizePackageSpec(segments.at(-1));
+}
+
+function normalizePackageSpec(value) {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/^npm:/iu, "")
+    .toLowerCase()
+    .replace(/\/+$/u, "");
+  if (!normalized) return null;
+
+  const scoped = /^(@[^/@]+\/[^/@]+?)(?:@[^/@]+)?$/u.exec(normalized);
+  if (scoped) return scoped[1];
+
+  const unscoped = /^([^/@:]+)(?:@[^/@]+)?$/u.exec(normalized);
+  return unscoped ? unscoped[1] : null;
+}
+
+function sanitizePublicName(value) {
+  const name = String(value || "").trim();
+  if (!name) return null;
+  return scrubSecretEnv(name);
+}
+
+function safeValue(value) {
+  return scrubSecretEnv(String(value ?? ""));
+}
+
+function sanitizeEndpointSummary(value) {
+  if (!stringValue(value)) return "unset";
+  const raw = String(value).trim();
+
+  try {
+    const parsed = new URL(raw);
+    const safePath = parsed.pathname
+      .split("/")
+      .map((segment) => sanitizeEndpointPathSegment(segment))
+      .join("/") || "/";
+    const safeHost = sanitizeEndpointHost(parsed);
+    const safeQuery = endpointSearchHasValues(parsed.searchParams) ? `?${REDACTED_ENV_VALUE}` : "";
+    return `${parsed.protocol}//${safeHost}${safePath}${safeQuery}`;
+  } catch {
+    return endpointValueLooksSensitive(raw) ? REDACTED_ENV_VALUE : safeValue(raw);
+  }
+}
+
+function sanitizeEndpointHost(parsed) {
+  const hostname = parsed.hostname;
+  const port = parsed.port ? `:${parsed.port}` : "";
+  if (!hostname) return scrubSecretEnv(parsed.host || "");
+  if (hostname.startsWith("[") && hostname.endsWith("]")) return `${hostname}${port}`;
+  const safeHostname = hostname
+    .split(".")
+    .map((label) => sanitizeEndpointHostLabel(label))
+    .join(".");
+  return `${safeHostname}${port}`;
+}
+
+function sanitizeEndpointHostLabel(label) {
+  if (!label) return label;
+  const decoded = safeDecodeURIComponent(label);
+  if (endpointValueLooksSensitive(decoded)) return REDACTED_ENV_VALUE;
+  return scrubSecretEnv(label);
+}
+
+function sanitizeEndpointPathSegment(segment) {
+  if (!segment) return segment;
+  const decoded = safeDecodeURIComponent(segment);
+  if (endpointValueLooksSensitive(decoded)) return REDACTED_ENV_VALUE;
+  return scrubSecretEnv(segment);
+}
+
+function endpointSearchHasValues(searchParams) {
+  for (const [key, value] of searchParams.entries()) {
+    if (key || value) return true;
+  }
+  return false;
+}
+
+function endpointValueLooksSensitive(value) {
+  const string = String(value || "").trim();
+  if (!string) return false;
+  if (scrubSecretEnv(string) === REDACTED_ENV_VALUE) return true;
+  if (ENDPOINT_SECRET_VALUE_PATTERN.test(string)) return true;
+  if (ENDPOINT_BARE_HEX_SECRET_PATTERN.test(string)) return true;
+  if (ENDPOINT_SECRET_KEY_PATTERN.test(string) && /[=:]/u.test(string)) return true;
+  if (ENDPOINT_LONG_TOKEN_PATTERN.test(string) && string.length >= 24 && mixedTokenChars(string)) return true;
+  return false;
+}
+
+function mixedTokenChars(value) {
+  return /[A-Z]/u.test(value) && /[a-z]/u.test(value) && /[0-9]/u.test(value);
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function parseBooleanEnv(value) {
+  if (!stringValue(value)) return undefined;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return undefined;
+}
+
+function plainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringValue(value) {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function missingSubagents(agents = {}) {

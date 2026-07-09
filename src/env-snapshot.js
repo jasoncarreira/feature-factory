@@ -12,6 +12,7 @@ const SENSITIVE_ENV_VALUE_PATTERN = /(?:secret|token|password|passwd|api[_-]?key
 const TOKEN_SHAPED_ENV_VALUE_PATTERNS = [
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/u,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
+  /\bhc_[A-Za-z0-9][A-Za-z0-9_-]{10,}\b/iu,
   /\bsk-proj[-_][A-Za-z0-9_-]{20,}\b/u,
   /\bsk-[A-Za-z0-9_-]{20,}\b/u,
   /\bxox[abp][_-][A-Za-z0-9-]{10,}(?:-[A-Za-z0-9-]{10,})*\b/u,
@@ -19,10 +20,12 @@ const TOKEN_SHAPED_ENV_VALUE_PATTERNS = [
   /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/iu,
   /\beyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
+  /(?:^|[^A-Za-z0-9-])(?:[A-Fa-f0-9]{32,})(?=$|[^A-Za-z0-9-])/u,
   /(?:https?|ssh|git|ftp):\/\/[^/\s:@]+:[^/\s@]+@/iu,
 ];
-const HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH = 40;
+const HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH = 32;
 const HIGH_ENTROPY_MIN_SHANNON = 3.5;
+const SAFE_HIGH_ENTROPY_ENV_KEY_PATTERN = /^(?:OTEL_EXPORTER_OTLP(?:_(?:TRACES|METRICS|LOGS))?_(?:ENDPOINT|HEADERS|PROTOCOL|TIMEOUT|COMPRESSION|INSECURE|CERTIFICATE)|FEATURE_FACTORY_OTEL_ENABLED)$/u;
 export const REDACTED_ENV_VALUE = "[redacted]";
 
 export async function collectEnv(options = {}) {
@@ -85,7 +88,8 @@ export function scrubSecretEnv(value) {
 }
 
 export function isSensitiveEnvKey(key) {
-  return SENSITIVE_ENV_KEY_PATTERN.test(String(key ?? ""));
+  const string = String(key ?? "");
+  return SENSITIVE_ENV_KEY_PATTERN.test(string) || isSecretShapedEnvKey(string);
 }
 
 export function isSensitiveEnvValue(value) {
@@ -96,6 +100,14 @@ export function isSensitiveEnvValue(value) {
     || TOKEN_SHAPED_ENV_VALUE_PATTERNS.some((pattern) => pattern.test(trimmed))
     || credentialBearingUrl(trimmed)
     || highEntropySingleToken(trimmed);
+}
+
+export function isSecretShapedEnvKey(key) {
+  const trimmed = String(key ?? "").trim();
+  if (!trimmed) return false;
+  return TOKEN_SHAPED_ENV_VALUE_PATTERNS.some((pattern) => pattern.test(trimmed))
+    || credentialBearingUrl(trimmed)
+    || highEntropySecretKey(trimmed);
 }
 
 function packageVersion() {
@@ -158,6 +170,11 @@ function highEntropySingleToken(value) {
   if (/\s/u.test(value)) return false;
   if (!/^[A-Za-z0-9._~+/=-]+$/u.test(value)) return false;
   return shannonEntropy(value) >= HIGH_ENTROPY_MIN_SHANNON;
+}
+
+function highEntropySecretKey(value) {
+  if (SAFE_HIGH_ENTROPY_ENV_KEY_PATTERN.test(value)) return false;
+  return highEntropySingleToken(value);
 }
 
 function shannonEntropy(value) {

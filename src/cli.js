@@ -23,8 +23,8 @@ const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
 const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
-const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id"]);
+const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate"]);
 const COST_NUMERIC_FLAGS = new Map([
   ["--input-tokens", "inputTokens"],
   ["--output-tokens", "outputTokens"],
@@ -44,16 +44,16 @@ function usage(write = console.log) {
 
 Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
-  doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
-  factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] <prompt...>
+  doctor [--local] [--profiles] [--telemetry] Check opencode/plugin/provider/tool prerequisites
+  factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
-  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--draft|--ready|--no-draft] [--dry-run]
+  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory cancel <run-id> [--json]
   factory steer <run-id> --message TEXT [--json]
   factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> [--json]
   factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> [--reason TEXT] [--json]
   factory cost-record <run-id> --agent AGENT [--step STEP] [--slice-id ID] [--provider PROVIDER] [--model MODEL] [--source SOURCE] [--operation OP] [--request-id ID] [--input-tokens N] [--output-tokens N] [--total-tokens N] [--cache-creation-input-tokens N] [--cache-read-input-tokens N] [--reasoning-tokens N] [--cost-total N] [--cost-input N] [--cost-output N] [--cost-cache-creation N] [--cost-cache-read N] [--currency CODE] [--recorded-at ISO] [--entry-id ID] [--json]
-  factory resume <run-id> [--headless|--autonomous|--detached] [--dry-run] [--json]
+  factory resume <run-id> [--headless|--autonomous|--detached] [--dry-run] [--json] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory heartbeat <run-id> --start --phase <phase> [--interval MS] [--json]  Start detached liveness ticker
@@ -298,6 +298,7 @@ function options(args) {
     local: args.includes("--local"),
     profiles: args.includes("--profiles"),
     providerSmoke: args.includes("--provider-smoke"),
+    telemetry: args.includes("--telemetry"),
     autonomous: args.includes("--autonomous"),
     detached: args.includes("--detached"),
     all: args.includes("--all"),
@@ -356,6 +357,9 @@ function options(args) {
     if (args[index] === "--currency") opts.currency = args[++index];
     if (args[index] === "--recorded-at") opts.recordedAt = args[++index];
     if (args[index] === "--entry-id") opts.entryId = args[++index];
+    if (args[index] === "--parent-span-id") opts.parentSpanId = args[++index];
+    if (args[index] === "--traceparent") opts.traceparent = args[++index];
+    if (args[index] === "--tracestate") opts.tracestate = args[++index];
     if (COST_NUMERIC_FLAGS.has(args[index])) opts[COST_NUMERIC_FLAGS.get(args[index])] = parseCostNumericOption(args[index], args[++index]);
   }
   return opts;

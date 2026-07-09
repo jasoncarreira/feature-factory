@@ -1,9 +1,25 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hasTuiExport, readOpencodeConfig } from "../src/doctor.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  collectTelemetryReadiness,
+  evaluateCompanionTelemetryPluginReadiness,
+  evaluateFeatureFactoryTelemetryReadiness,
+  evaluateOpenTelemetryConfigReadiness,
+  evaluateOtlpEnvReadiness,
+  evaluatePackageInstrumentationLoadability,
+  formatTelemetryEndpointDetail,
+  hasTuiExport,
+  readOpencodeConfig,
+} from "../src/doctor.js";
+import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
+
+const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const LOCAL_PLUGIN_SPEC = pathToFileURL(fileURLToPath(new URL("..", import.meta.url))).href;
 
 describe("doctor package.json parsing", () => {
   it("returns true when package.json has a TUI export", () => {
@@ -66,6 +82,321 @@ describe("doctor opencode config parsing", () => {
     } finally {
       cleanup(dir);
     }
+  });
+});
+
+describe("doctor telemetry readiness helpers", () => {
+  it("reports doctor --telemetry JSON categories with sanitized OTLP values", () => {
+    const dir = tempDir();
+
+    try {
+      const home = join(dir, "home");
+      const repo = join(dir, "repo");
+      mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      writeFileSync(
+        join(home, ".config", "opencode", "opencode.jsonc"),
+        JSON.stringify({
+          experimental: { openTelemetry: true },
+          plugin: [
+            [LOCAL_PLUGIN_SPEC, { telemetry: { enabled: true } }],
+            "@devtheops/opencode-plugin-otel",
+          ],
+        }, null, 2),
+        "utf8",
+      );
+
+      const proc = spawnSync(process.execPath, [CLI, "doctor", "--local", "--telemetry", "--json"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: home,
+          FEATURE_FACTORY_OTEL_ENABLED: "true",
+          OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+          OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890,hc_api_12345678901234567890,Authorization=Bearer abcdefghijklmnopqrstuvwxyz123456",
+          OTEL_SERVICE_NAME: "feature-factory",
+        },
+      });
+
+      const output = JSON.parse(proc.stdout);
+      assert.equal(typeof output.telemetry, "object");
+      assert.equal(output.telemetry.opencode.ok, true);
+      assert.equal(output.telemetry.companionPlugin.ok, true);
+      assert.equal(output.telemetry.instrumentation.ok, true);
+      assert.equal(output.telemetry.featureFactory.enabled, true);
+      assert.equal(output.telemetry.otlpEnv.endpoint.value, "https://api.honeycomb.io/");
+      assert.deepEqual(output.telemetry.otlpEnv.headers.vars[0].headers.map((header) => header.name), [
+        "x-honeycomb-team",
+        REDACTED_ENV_VALUE,
+      ]);
+      const serialized = JSON.stringify(output);
+      assert.doesNotMatch(serialized, /github_pat_/u);
+      assert.doesNotMatch(serialized, /hc_api_/u);
+      assert.doesNotMatch(serialized, /abcdefghijklmnopqrstuvwxyz/u);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("reports native opencode OpenTelemetry readiness from JSONC config", () => {
+    assert.deepEqual(evaluateOpenTelemetryConfigReadiness({ experimental: { openTelemetry: true } }), {
+      ok: true,
+      level: "ok",
+      enabled: true,
+      configured: true,
+      detail: "experimental.openTelemetry=true; native opencode/AI SDK spans may be emitted when an SDK/exporter is initialized",
+      nativeAiSdkSpansExpected: true,
+    });
+
+    const missing = evaluateOpenTelemetryConfigReadiness({});
+    assert.equal(missing.ok, false);
+    assert.equal(missing.level, "warn");
+    assert.match(missing.detail, /experimental\.openTelemetry=unset/u);
+  });
+
+  it("summarizes OTLP env readiness without leaking header values or credential-shaped endpoints", () => {
+    const readiness = evaluateOtlpEnvReadiness({
+      OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+      OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890,hc_api_12345678901234567890,x-honeycomb-dataset=feature-factory,Authorization=Bearer abcdefghijklmnopqrstuvwxyz123456",
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://user:pass@example.test/v1/traces",
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=test,service.name=feature-factory,api_token=github_pat_123456789012345678901234567890",
+    });
+
+    assert.equal(readiness.ok, true);
+    assert.deepEqual(readiness.endpoint, {
+      ok: true,
+      key: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+      value: "https://example.test/v1/traces",
+    });
+    assert.equal(readiness.headers.ok, true);
+    assert.deepEqual(readiness.headers.vars[0].headers, [
+      { name: "x-honeycomb-team", present: true, value: REDACTED_ENV_VALUE },
+      { name: "x-honeycomb-dataset", present: true, value: REDACTED_ENV_VALUE },
+      { name: REDACTED_ENV_VALUE, present: true, value: REDACTED_ENV_VALUE },
+    ]);
+    assert.equal(readiness.resource.serviceName.value, "feature-factory");
+    assert.deepEqual(readiness.resource.attributes.map((item) => item.name), [
+      "deployment.environment",
+      "service.name",
+      REDACTED_ENV_VALUE,
+    ]);
+    const serialized = JSON.stringify(readiness);
+    assert.doesNotMatch(serialized, /github_pat_/u);
+    assert.doesNotMatch(serialized, /hc_api_/u);
+    assert.doesNotMatch(serialized, /abcdefghijklmnopqrstuvwxyz/u);
+    assert.doesNotMatch(serialized, /user:pass/u);
+  });
+
+  it("redacts OTLP endpoint credentials from JSON and check detail output", async () => {
+    const honeycombEndpointCredential = "hc_api_12345678901234567890";
+    const apiKeyEndpointCredential = "sk-123456789012345678901234567890";
+
+    const endpointReadiness = evaluateOtlpEnvReadiness({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `https://api.honeycomb.io/${honeycombEndpointCredential}/v1/traces?x-honeycomb-team=${honeycombEndpointCredential}`,
+      OTEL_SERVICE_NAME: "feature-factory",
+    });
+    assert.equal(
+      endpointReadiness.endpoint.value,
+      `https://api.honeycomb.io/${REDACTED_ENV_VALUE}/v1/traces?${REDACTED_ENV_VALUE}`,
+    );
+
+    const tracesReadiness = evaluateOtlpEnvReadiness({
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `https://collector:${apiKeyEndpointCredential}@otel.example.test/v1/traces?api_key=${apiKeyEndpointCredential}`,
+      OTEL_SERVICE_NAME: "feature-factory",
+    });
+    assert.equal(
+      tracesReadiness.endpoint.value,
+      `https://otel.example.test/v1/traces?${REDACTED_ENV_VALUE}`,
+    );
+
+    const endpointDetail = formatTelemetryEndpointDetail(endpointReadiness.endpoint);
+    const tracesDetail = formatTelemetryEndpointDetail(tracesReadiness.endpoint);
+    const aggregate = await collectTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true } },
+      env: {
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `https://collector:${apiKeyEndpointCredential}@otel.example.test/${honeycombEndpointCredential}/v1/traces?api_key=${apiKeyEndpointCredential}`,
+        OTEL_SERVICE_NAME: "feature-factory",
+      },
+      instrumentationLoadability: { ok: true, package: "@opentelemetry/api", exports: ["trace"] },
+    });
+    const jsonOutput = JSON.stringify({ telemetry: aggregate });
+
+    assert.doesNotMatch(endpointDetail, new RegExp(escapeRegExp(honeycombEndpointCredential), "u"));
+    assert.doesNotMatch(endpointDetail, /x-honeycomb-team/u);
+    assert.doesNotMatch(tracesDetail, new RegExp(escapeRegExp(apiKeyEndpointCredential), "u"));
+    assert.doesNotMatch(tracesDetail, /collector:/u);
+    assert.doesNotMatch(tracesDetail, /api_key/u);
+    assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(honeycombEndpointCredential), "u"));
+    assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(apiKeyEndpointCredential), "u"));
+    assert.doesNotMatch(jsonOutput, /collector:/u);
+    assert.doesNotMatch(jsonOutput, /api_key/u);
+  });
+
+  it("redacts bare Honeycomb-style endpoint path credentials from JSON and check detail output", async () => {
+    const endpointPathCredential = "0123456789abcdef0123456789abcdef";
+    const tracesPathCredential = "abcdef0123456789abcdef0123456789";
+
+    const endpointReadiness = evaluateOtlpEnvReadiness({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `https://api.honeycomb.io/${endpointPathCredential}/v1/traces`,
+      OTEL_SERVICE_NAME: "feature-factory",
+    });
+    assert.equal(
+      endpointReadiness.endpoint.value,
+      `https://api.honeycomb.io/${REDACTED_ENV_VALUE}/v1/traces`,
+    );
+
+    const tracesReadiness = evaluateOtlpEnvReadiness({
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `https://otel.example.test/v1/${tracesPathCredential}/traces`,
+      OTEL_SERVICE_NAME: "feature-factory",
+    });
+    assert.equal(
+      tracesReadiness.endpoint.value,
+      `https://otel.example.test/v1/${REDACTED_ENV_VALUE}/traces`,
+    );
+
+    const endpointDetail = formatTelemetryEndpointDetail(endpointReadiness.endpoint);
+    const tracesDetail = formatTelemetryEndpointDetail(tracesReadiness.endpoint);
+    const endpointAggregate = await collectTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true } },
+      env: {
+        OTEL_EXPORTER_OTLP_ENDPOINT: `https://api.honeycomb.io/${endpointPathCredential}/v1/traces`,
+        OTEL_SERVICE_NAME: "feature-factory",
+      },
+      instrumentationLoadability: { ok: true, package: "@opentelemetry/api", exports: ["trace"] },
+    });
+    const tracesAggregate = await collectTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true } },
+      env: {
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `https://otel.example.test/v1/${tracesPathCredential}/traces`,
+        OTEL_SERVICE_NAME: "feature-factory",
+      },
+      instrumentationLoadability: { ok: true, package: "@opentelemetry/api", exports: ["trace"] },
+    });
+    const jsonOutput = JSON.stringify({ endpointTelemetry: endpointAggregate, tracesTelemetry: tracesAggregate });
+
+    assert.equal(
+      endpointAggregate.otlpEnv.endpoint.value,
+      `https://api.honeycomb.io/${REDACTED_ENV_VALUE}/v1/traces`,
+    );
+    assert.equal(
+      tracesAggregate.otlpEnv.endpoint.value,
+      `https://otel.example.test/v1/${REDACTED_ENV_VALUE}/traces`,
+    );
+
+    assert.doesNotMatch(endpointDetail, new RegExp(escapeRegExp(endpointPathCredential), "u"));
+    assert.doesNotMatch(tracesDetail, new RegExp(escapeRegExp(tracesPathCredential), "u"));
+    assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(endpointPathCredential), "u"));
+    assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(tracesPathCredential), "u"));
+  });
+
+  it("redacts credential-shaped OTLP endpoint host labels from JSON and check detail output", async () => {
+    const hexHostCredential = "0123456789abcdef0123456789abcdef";
+    const honeycombPathCredential = "hc_api_12345678901234567890";
+
+    const readiness = evaluateOtlpEnvReadiness({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `https://${hexHostCredential}.collector.example.test/${honeycombPathCredential}/v1/traces`,
+      OTEL_SERVICE_NAME: "feature-factory",
+    });
+    assert.equal(
+      readiness.endpoint.value,
+      `https://${REDACTED_ENV_VALUE}.collector.example.test/${REDACTED_ENV_VALUE}/v1/traces`,
+    );
+
+    const detail = formatTelemetryEndpointDetail(readiness.endpoint);
+    const aggregate = await collectTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true } },
+      env: {
+        OTEL_EXPORTER_OTLP_ENDPOINT: `https://${hexHostCredential}.collector.example.test/${honeycombPathCredential}/v1/traces`,
+        OTEL_SERVICE_NAME: "feature-factory",
+      },
+      instrumentationLoadability: { ok: true, package: "@opentelemetry/api", exports: ["trace"] },
+    });
+    const jsonOutput = JSON.stringify({ telemetry: aggregate });
+
+    assert.doesNotMatch(detail, new RegExp(escapeRegExp(hexHostCredential), "u"));
+    assert.doesNotMatch(detail, new RegExp(escapeRegExp(honeycombPathCredential), "u"));
+    assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(hexHostCredential), "u"));
+    assert.doesNotMatch(jsonOutput, new RegExp(escapeRegExp(honeycombPathCredential), "u"));
+  });
+
+  it("reports companion telemetry plugin presence and disabled action", () => {
+    const missing = evaluateCompanionTelemetryPluginReadiness({ plugin: ["opencode-feature-factory"] });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.present, false);
+    assert.match(missing.action, /companion telemetry plugin/u);
+
+    const disabled = evaluateCompanionTelemetryPluginReadiness({
+      plugin: [["@devtheops/opencode-plugin-otel", { enabled: false }]],
+    });
+    assert.equal(disabled.present, true);
+    assert.equal(disabled.ok, false);
+    assert.match(disabled.detail, /configured disabled/u);
+
+    const ready = evaluateCompanionTelemetryPluginReadiness({ plugin: ["@devtheops/opencode-plugin-otel"] });
+    assert.equal(ready.ok, true);
+  });
+
+  it("does not treat local feature-factory paths containing otel as companion telemetry plugins", () => {
+    const readiness = evaluateCompanionTelemetryPluginReadiness({
+      plugin: [
+        "file:///tmp/local-otel-fixture/opencode-feature-factory",
+        "file:///tmp/local-telemetry-fixture/opencode-feature-factory/src/plugin.js",
+      ],
+    });
+
+    assert.equal(readiness.ok, false);
+    assert.equal(readiness.present, false);
+    assert.match(readiness.detail, /no companion telemetry plugin configured/u);
+  });
+
+  it("reports instrumentation loadability and feature-factory content-capture risks safely", async () => {
+    assert.deepEqual(evaluatePackageInstrumentationLoadability({
+      ok: true,
+      package: "@opentelemetry/api",
+      exports: ["trace"],
+    }), {
+      ok: true,
+      level: "ok",
+      package: "@opentelemetry/api",
+      exports: ["trace"],
+      detail: "@opentelemetry/api loadable",
+    });
+
+    const failed = evaluatePackageInstrumentationLoadability({
+      ok: false,
+      package: "@opentelemetry/api",
+      error: "cannot load ghp_123456789012345678901234567890",
+    });
+    assert.equal(failed.detail, REDACTED_ENV_VALUE);
+
+    const risk = evaluateFeatureFactoryTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true } },
+      pluginOptions: { telemetry: { enabled: true, captureMessages: true } },
+      env: {},
+      nativeOpenTelemetry: true,
+    });
+    assert.equal(risk.enabled, true);
+    assert.equal(risk.ok, false);
+    assert.equal(risk.redactionActive, true);
+    assert.deepEqual(risk.risks.map((item) => item.kind), [
+      "native-opencode-content-capture",
+      "feature-factory-content-capture",
+    ]);
+
+    const aggregate = await collectTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true }, plugin: ["@devtheops/opencode-plugin-otel"] },
+      pluginOptions: { telemetry: { enabled: true } },
+      env: {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+        OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890",
+        OTEL_SERVICE_NAME: "feature-factory",
+      },
+      instrumentationLoadability: { ok: true, package: "@opentelemetry/api", exports: ["trace"] },
+    });
+    assert.equal(aggregate.opencode.ok, true);
+    assert.equal(aggregate.otlpEnv.headers.vars[0].headers[0].name, "x-honeycomb-team");
+    assert.doesNotMatch(JSON.stringify(aggregate), /github_pat_/u);
   });
 });
 
