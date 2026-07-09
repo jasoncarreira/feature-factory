@@ -563,11 +563,19 @@ External driver loop:
 
 This lets end users run the workflow interactively from opencode, while automated systems can monitor and drive it without the factory depending on any one tracker.
 
+Use `--run-id <run-id>` on new starts when an external driver needs a predictable factory directory name:
+
+```sh
+feature-factory factory start --repo <repo> --run-id issue-123 --headless "<work order>"
+```
+
+`--run-id` is validated as a bare safe factory run id, rejected for `resume <run-id>` starts, and passed as `driver.run_id` for new-run bootstrap only.
+
 Thin autonomous adapter loop:
 
 1. Claim external work.
 2. Check out the repo.
-3. Run `feature-factory factory start --repo <repo> --autonomous "<work order>"`.
+3. Run `feature-factory factory start --repo <repo> --run-id <run-id> --autonomous "<work order>"`.
 4. Read `run.json.terminal_result`.
 5. Mirror `status`, `pr_url`, and `reason` back to the external system.
 
