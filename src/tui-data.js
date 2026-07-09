@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { formatCostAttributionSummary, publicCostAttributionSummary } from "./cost-attribution.js";
 import { diagnoseRunFile, diagnoseRunObject, diagnosticEnvelope, diagnosticItem } from "./factory-diagnostics.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
@@ -149,6 +150,7 @@ function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
     updated_at: run.updated_at ? String(run.updated_at) : null,
     current: currentSummary(run),
     steering: steeringSummary(run),
+    cost: costSummary(run.cost_attribution),
     slices: sliceSummary(run),
     panel: panelSummary(run),
     terminal_reason: run.terminal_result?.reason ? String(run.terminal_result.reason) : null,
@@ -171,6 +173,7 @@ function fallbackRun(fallbackID, file, diagnostics) {
     updated_at: null,
     current: null,
     steering: null,
+    cost: null,
     slices: null,
     panel: null,
     terminal_reason: null,
@@ -285,6 +288,14 @@ function steeringSummary(run) {
       ref: stringOrNull(latest.ref),
       consumed_at: stringOrNull(latest.consumed_at),
     } : null,
+  };
+}
+
+function costSummary(costAttribution) {
+  if (!costAttribution || typeof costAttribution !== "object" || Array.isArray(costAttribution)) return null;
+  return {
+    ...publicCostAttributionSummary(costAttribution),
+    label: formatCostAttributionSummary(costAttribution),
   };
 }
 
