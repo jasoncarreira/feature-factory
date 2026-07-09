@@ -105,7 +105,8 @@ describe("factory steering queue and consume", () => {
 
       const proc = runCli(success.repo, ["factory", "steer-conflict", success.runId, "--ref", consumed.steering.ref, "--hash", consumed.steering.hash, "--reason", "cli conflict", "--json"]);
 
-      assert.equal(proc.status, 0, proc.stderr);
+      assert.notEqual(proc.status, 0);
+      assert.equal(proc.stderr, "");
       const output = JSON.parse(proc.stdout);
       assert.equal(output.conflict, true);
       assert.equal(output.status, "needs-human");

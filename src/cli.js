@@ -230,7 +230,9 @@ async function steerConflict(args) {
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory steer-conflict requires exactly one <run-id>");
   const ref = requiredOption(opts.ref, "--ref", "factory steer-conflict");
   const hash = requiredOption(opts.hash, "--hash", "factory steer-conflict");
-  return print(await recordSteeringConflict(runId, { ref, hash, reason: opts.reason }, opts), opts);
+  const result = await recordSteeringConflict(runId, { ref, hash, reason: opts.reason }, opts);
+  print(result, opts);
+  if (!result.ok) process.exitCode = 1;
 }
 
 async function costRecord(args) {
