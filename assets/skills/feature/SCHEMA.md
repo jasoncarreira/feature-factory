@@ -115,18 +115,18 @@ Write `run.json` atomically: write a temp file, then rename. The current writer 
 }
 ```
 
-Phase enum values:
+Phase enum values and their conventional long-wait mapping:
 
-- `spec-review`
-- `decomposition-review`
-- `builder-wave`
-- `slice-review`
-- `test-verifier`
-- `test-rerun`
-- `test-review`
-- `implementation-validator`
-- `security-reviewer`
-- `remediation`
+- `spec-review` - `work-reviewer` wait for the technical brief/spec review.
+- `decomposition-review` - `work-reviewer` wait for the decomposition/plan review.
+- `builder-wave` - concurrent builder `Task` dispatch/wait for a dependency wave.
+- `slice-review` - `work-reviewer` wait for one or more slice reviews.
+- `test-verifier` - `test-verifier` dispatch/wait.
+- `test-rerun` - long orchestrator rerun of the named acceptance suite.
+- `test-review` - `work-reviewer` wait for test-verifier evidence review.
+- `implementation-validator` - implementation-validator dispatch/wait.
+- `security-reviewer` - security-reviewer dispatch/wait.
+- `remediation` - routed builder or integration/test remediation dispatch/wait.
 
 `phase` is opaque display data. Use the enum above for consistency, but schema validation accepts any non-empty string.
 
@@ -139,6 +139,14 @@ Lifecycle rules:
 - Do not start heartbeat while the run is stopped at protected gates `story`, `brief`, or `pre_pr`. Pending gates are monitored through `run.json.gates`, not through heartbeat.
 - Stop heartbeat in a `finally`/after-return path with `feature-factory factory heartbeat <run-id> --stop --json`. Stop is best-effort: it sends SIGTERM to a live recorded PID and writes a liveness stamp with `pid: null`.
 - Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat if it is active. The durable terminal write is still controlled by the run-json lock and transition preconditions, not heartbeat state.
+
+Long-wait heartbeat guard:
+
+- Mark in-flight state first when heartbeat requires it. Before heartbeat starts, `run.json` must already show a `running` step, `running` slice, or `review` slice created through the relevant `feature-factory factory ...` state writer.
+- Start heartbeat immediately before long `Task`/subagent dispatch/wait. Start-after-dispatch is too late; start-before-in-flight-state is invalid.
+- Stop heartbeat in the after-return/`finally` path when the wait completes, fails, or is abandoned.
+- Do not perform the next semantic `run.json` / factory CLI state write while the long-wait heartbeat remains active; stop heartbeat, or verify inactive with `feature-factory factory heartbeat <run-id> --status --json`, before writing evidence refs, accepted/rejected steps, slice review/blocked/merged states, verdicts, terminal state, or PR-created state.
+- Protected gates `story`, `brief`, and `pre_pr` stay heartbeat-free. Heartbeat is liveness-only, not authority, and the `phase` string remains opaque/non-enforced by validation beyond being non-empty.
 
 Locked heartbeat-only manifest mutation protocol:
 

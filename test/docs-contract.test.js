@@ -43,6 +43,46 @@ describe("heartbeat docs contract", () => {
     }
   });
 
+  it("documents start-before-dispatch ordering for long subagent waits", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /Mark in-flight state first/i, `${name} must require in-flight state before heartbeat`);
+      assert.match(text, /Start heartbeat immediately before[\s\S]*(?:dispatch\/wait|dispatch)/i, `${name} must start heartbeat before dispatch/wait`);
+      assert.match(text, /Stop heartbeat[\s\S]*(?:after-return|finally)/i, `${name} must stop heartbeat after return/finally`);
+    }
+    assert.match(SKILL, /Step 2[\s\S]*`spec-review`[\s\S]*start heartbeat immediately before[\s\S]*`decomposition-review`[\s\S]*Step 4/i, "SKILL must bracket spec/decomposition review waits");
+    assert.match(SKILL, /Step 4[\s\S]*mark every dispatched slice `running` first[\s\S]*`builder-wave`[\s\S]*`slice-review`[\s\S]*Step 5/i, "SKILL must bracket builder waves and slice reviews");
+    assert.match(SKILL, /Step 5[\s\S]*`test-verifier`[\s\S]*`test-rerun`[\s\S]*`test-review`[\s\S]*`implementation-validator`[\s\S]*`security-reviewer`[\s\S]*`remediation`/i, "SKILL must bracket integration, panel, and remediation waits");
+  });
+
+  it("requires stopping heartbeat before the next semantic state write", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /Do not perform the next semantic `run\.json` \/ factory CLI state write while the long-wait heartbeat remains active/i, `${name} must forbid semantic writes while heartbeat is active`);
+      assert.match(text, /stop heartbeat|verify inactive/i, `${name} must stop or verify inactive before the next state write`);
+    }
+    assert.match(SKILL, /stop heartbeat[\s\S]*before writing evidence/i, "SKILL must stop before evidence writes");
+    assert.match(SKILL, /stop heartbeat[\s\S]*before[\s\S]*(?:verdicts|terminal writes|Gate 3 state)/i, "SKILL must stop before verdict/terminal/gate writes");
+  });
+
+  it("maps every documented phase and keeps phase validation opaque", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      for (const phase of HEARTBEAT_PHASES) assert.match(text, literalPattern(`\`${phase}\``), `${name} missing phase ${phase}`);
+      assert.match(text, /phase[\s\S]*(?:opaque|display convention)[\s\S]*(?:non-enforced|accepts any non-empty string|non-empty)/i, `${name} must keep heartbeat phase opaque/non-enforced`);
+    }
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      for (const phase of HEARTBEAT_PHASES) {
+        assert.match(text, new RegExp(`${escapeRegExp(`\`${phase}\``)}[\\s\\S]{0,180}(?:wait|review|builder|remediation|rerun|validator)`, "i"), `${name} must map phase ${phase} to a wait`);
+      }
+    }
+  });
+
+  it("keeps protected gates heartbeat-free and resolves the heartbeat TODO", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /Protected gates?[\s\S]*`story`[\s\S]*`brief`[\s\S]*`pre_pr`[\s\S]*(?:heartbeat-free|stay off|intentionally absent)/i, `${name} must keep protected gates heartbeat-free`);
+      assert.match(text, /liveness-only[\s\S]*(?:not authority|not.*authority)|not authority[\s\S]*liveness-only/i, `${name} must keep heartbeat liveness-only and non-authoritative`);
+    }
+    assert.doesNotMatch(TODO, /Enforce heartbeat around long factory subagent waits/i, "TODO must not leave the resolved heartbeat enforcement item open");
+  });
+
   it("documents heartbeat as liveness-only around long waits", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
       assert.match(text, /liveness-only|liveness only/i, `${name} must describe heartbeat as liveness-only`);

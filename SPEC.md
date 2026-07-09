@@ -238,6 +238,16 @@ Scripted-mode fallback:
 
 Current state now includes the internal heartbeat helper, `$RUN/heartbeat.json`, and `run-json.lock/` coordination. The helper is for long orchestrator waits only. Start heartbeat immediately before a long `Task` wait begins; `heartbeat.json` is liveness-only data with `{ schema_version, run_id, phase, pid, interval_ms, last_tick_at }`, not authority for workflow state. It must refuse starts unless the manifest already shows real in-flight work, stay off while the factory is stopped at `story`, `brief`, or `pre_pr` gates, and stop heartbeat best-effort before terminal manifest writes.
 
+Long-wait heartbeat guard:
+
+- Mark in-flight state first when heartbeat requires it, so `run.json` already shows a `running` step, `running` slice, or `review` slice created by a factory CLI state writer.
+- Start heartbeat immediately before long `Task`/subagent dispatch/wait; do not start it after dispatch begins.
+- Stop heartbeat in the after-return/`finally` path when the wait completes, fails, or is abandoned.
+- Do not perform the next semantic `run.json` / factory CLI state write while the long-wait heartbeat remains active; stop heartbeat or verify inactive first.
+- Protected gates `story`, `brief`, and `pre_pr` remain heartbeat-free. The phase is opaque/non-enforced by validation beyond being non-empty, and heartbeat remains liveness-only, not authority.
+
+Use these phase labels by convention: `spec-review` for spec review, `decomposition-review` for plan review, `builder-wave` for builder wave waits, `slice-review` for slice reviewer waits, `test-verifier` for test-verifier waits, `test-rerun` for long acceptance-suite reruns, `test-review` for test evidence review, `implementation-validator` and `security-reviewer` for the pre-PR panel, and `remediation` for routed fix waits.
+
 External monitoring semantics:
 
 - `heartbeat.json` + `run.json.heartbeat_at` are liveness only.
