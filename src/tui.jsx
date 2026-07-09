@@ -147,7 +147,7 @@ function View(props) {
         <text fg={theme().text}>
           <b>Feature Factory</b>
         </text>
-        <text fg={theme().textMuted}>{refreshMetadata().label}</text>
+        <text fg={theme().textMuted} wrapMode="none">{refreshMetadata().label}</text>
         <Show keyed when={version()}>
           {() => (
             <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
