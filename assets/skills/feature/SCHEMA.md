@@ -117,8 +117,8 @@ Write `run.json` atomically: write a temp file, then rename. The current writer 
 
 Phase enum values and their conventional long-wait mapping:
 
-- `spec-review` - `work-reviewer` wait for the technical brief/spec review.
-- `decomposition-review` - `work-reviewer` wait for the decomposition/plan review.
+- `spec-review` - `spec-writer` Task dispatch/wait and the following `work-reviewer` wait for the technical brief/spec review.
+- `decomposition-review` - `work-decomposer` Task dispatch/wait and the following `work-reviewer` wait for the decomposition/plan review.
 - `builder-wave` - concurrent builder `Task` dispatch/wait for a dependency wave.
 - `slice-review` - `work-reviewer` wait for one or more slice reviews.
 - `test-verifier` - `test-verifier` dispatch/wait.
@@ -144,6 +144,7 @@ Long-wait heartbeat guard:
 
 - Mark in-flight state first when heartbeat requires it. Before heartbeat starts, `run.json` must already show a `running` step, `running` slice, or `review` slice created through the relevant `feature-factory factory ...` state writer.
 - Start heartbeat immediately before long `Task`/subagent dispatch/wait. Start-after-dispatch is too late; start-before-in-flight-state is invalid.
+- For Step 2, phase `spec-review` brackets both the `spec-writer` Task dispatch/wait and the following `work-reviewer` dispatch/wait; phase `decomposition-review` brackets both the `work-decomposer` Task dispatch/wait and the following `work-reviewer` dispatch/wait. Each long wait gets its own start/stop cycle, and each stop happens in the after-return/`finally` path before the next semantic `run.json` / factory CLI state write.
 - Stop heartbeat in the after-return/`finally` path when the wait completes, fails, or is abandoned.
 - Do not perform the next semantic `run.json` / factory CLI state write while the long-wait heartbeat remains active; stop heartbeat, or verify inactive with `feature-factory factory heartbeat <run-id> --status --json`, before writing evidence refs, accepted/rejected steps, slice review/blocked/merged states, verdicts, terminal state, or PR-created state.
 - Protected gates `story`, `brief`, and `pre_pr` stay heartbeat-free. Heartbeat is liveness-only, not authority, and the `phase` string remains opaque/non-enforced by validation beyond being non-empty.
