@@ -14,8 +14,8 @@ const NOW = "2026-07-08T12:00:00.000Z";
 describe("cost attribution helpers", () => {
   it("normalizes entries and recomputes totals/by_agent/by_slice rollups", () => {
     const attribution = recomputeCostAttribution({ entries: [
-      { id: "one", recorded_at: NOW, run_id: "run", agent: "backend-builder", slice_id: "be", input_tokens: 100, output_tokens: 40, total_tokens: 140, cost_total: 0.21, cost_currency: "USD" },
-      { id: "two", recorded_at: NOW, run_id: "run", agent: "test-verifier", slice_id: "qa", input_tokens: 10, output_tokens: 5, total_tokens: 15, cost_total: 0.03, cost_currency: "USD" },
+      { id: "one", recorded_at: NOW, run_id: "run", agent: "backend-builder", slice_id: "be", provider: "opencode", model: "gpt-5.5", input_tokens: 100, output_tokens: 40, total_tokens: 140, cost_total: 0.21, cost_currency: "USD" },
+      { id: "two", recorded_at: NOW, run_id: "run", agent: "test-verifier", slice_id: "qa", provider: "opencode", model: "gpt-5.5", input_tokens: 10, output_tokens: 5, total_tokens: 15, cost_total: 0.03, cost_currency: "USD" },
     ] }, { now: NOW });
 
     assert.equal(attribution.schema_version, 1);
@@ -29,16 +29,20 @@ describe("cost attribution helpers", () => {
     assert.equal(attribution.by_slice.be.cost_total, 0.21);
   });
 
-  it("marks missing usage/cost metadata as partial or unavailable without zero filling", () => {
+  it("requires provider, model, usage, cost_total, and cost_currency for available entries", () => {
+    const available = normalizeCostUsageEntry({ id: "available", recorded_at: NOW, run_id: "run", agent: "backend-builder", provider: "opencode", model: "gpt-5.5", input_tokens: 25, cost_total: 0.01, cost_currency: "USD" });
+    assert.equal(available.status, "available");
+    assert.deepEqual(available.missing, []);
+
     const partial = normalizeCostUsageEntry({ id: "partial", recorded_at: NOW, run_id: "run", agent: "backend-builder", input_tokens: 25, missing: ["output_tokens", "cost"] });
     assert.equal(partial.status, "partial");
     assert.equal(partial.output_tokens, undefined);
-    assert.deepEqual(partial.missing, ["cost", "output_tokens"]);
+    assert.deepEqual(partial.missing, ["cost", "cost_currency", "cost_total", "model", "output_tokens", "provider"]);
 
     const unavailable = normalizeCostUsageEntry({ id: "none", recorded_at: NOW, run_id: "run", agent: "backend-builder" });
     assert.equal(unavailable.status, "unavailable");
     assert.equal(unavailable.input_tokens, undefined);
-    assert.deepEqual(unavailable.missing, ["usage", "cost"]);
+    assert.deepEqual(unavailable.missing, ["cost_currency", "cost_total", "model", "provider", "usage"]);
 
     const attribution = recomputeCostAttribution({ entries: [partial, unavailable] }, { now: NOW });
     assert.equal(attribution.status, "partial");
@@ -60,7 +64,7 @@ describe("cost attribution helpers", () => {
     assert.equal(attribution.by_agent.a.cost_total, 0.01);
   });
 
-  it("bounds retained entries to the latest 1000", () => {
+  it("rejects entries beyond the cap instead of truncating", () => {
     const entries = Array.from({ length: MAX_COST_ATTRIBUTION_ENTRIES + 3 }, (_, index) => ({
       id: `entry-${index}`,
       recorded_at: NOW,
@@ -69,15 +73,48 @@ describe("cost attribution helpers", () => {
       input_tokens: index,
     }));
 
-    const attribution = recomputeCostAttribution({ entries }, { now: NOW });
+    assert.throws(
+      () => recomputeCostAttribution({ entries }, { now: NOW }),
+      /cost attribution entries must have at most 1000 entries/u,
+    );
+
+    const cappedEntries = entries.slice(0, MAX_COST_ATTRIBUTION_ENTRIES);
+    const attribution = recomputeCostAttribution({ entries: cappedEntries }, { now: NOW });
+    const beforeIds = attribution.entries.map((entry) => entry.id);
+
+    assert.throws(
+      () => appendCostAttributionEntry(attribution, { id: "overflow", recorded_at: NOW, run_id: "run", agent: "backend-builder", input_tokens: 1 }, { now: NOW }),
+      /cost attribution entries must have at most 1000 entries/u,
+    );
 
     assert.equal(attribution.entries.length, MAX_COST_ATTRIBUTION_ENTRIES);
-    assert.equal(attribution.entries[0].id, "entry-3");
+    assert.equal(attribution.entries[0].id, "entry-0");
+    assert.equal(attribution.entries.at(-1).id, `entry-${MAX_COST_ATTRIBUTION_ENTRIES - 1}`);
     assert.equal(attribution.totals.entry_count, MAX_COST_ATTRIBUTION_ENTRIES);
+    assert.deepEqual(attribution.entries.map((entry) => entry.id), beforeIds);
+  });
+
+  it("overrides caller-supplied run_id with the locked run id", () => {
+    const entry = normalizeCostUsageEntry({ id: "entry", recorded_at: NOW, run_id: "caller-run", agent: "backend-builder", provider: "opencode", model: "gpt-5.5", input_tokens: 1, cost_total: 0.01, cost_currency: "USD" }, { runId: "locked-run" });
+    assert.equal(entry.run_id, "locked-run");
+
+    const attribution = appendCostAttributionEntry(null, { run_id: "caller-run", agent: "backend-builder", provider: "opencode", model: "gpt-5.5", input_tokens: 1, cost_total: 0.01, cost_currency: "USD" }, { runId: "locked-run", now: NOW, id: "entry" });
+    assert.equal(attribution.entries[0].run_id, "locked-run");
+  });
+
+  it("rolls up arbitrary valid agent and slice keys safely", () => {
+    const attribution = recomputeCostAttribution({ entries: [
+      { id: "proto", recorded_at: NOW, run_id: "run", agent: "__proto__", slice_id: "__proto__", provider: "opencode", model: "gpt-5.5", input_tokens: 1, cost_total: 0.01, cost_currency: "USD" },
+    ] }, { now: NOW });
+
+    assert.equal(Object.prototype.hasOwnProperty.call(attribution.by_agent, "__proto__"), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(attribution.by_slice, "__proto__"), true);
+    assert.equal(attribution.by_agent["__proto__"].cost_total, 0.01);
+    assert.equal(attribution.by_slice["__proto__"].entry_count, 1);
   });
 
   it("appends one entry and exposes a compact public summary", () => {
-    const attribution = appendCostAttributionEntry(null, { agent: "backend-builder", input_tokens: 2, output_tokens: 3, total_tokens: 5, cost_total: 0.005, cost_currency: "USD" }, { runId: "run", now: NOW, id: "entry" });
+    const attribution = appendCostAttributionEntry(null, { agent: "backend-builder", provider: "opencode", model: "gpt-5.5", input_tokens: 2, output_tokens: 3, total_tokens: 5, cost_total: 0.005, cost_currency: "USD" }, { runId: "run", now: NOW, id: "entry" });
     const summary = publicCostAttributionSummary(attribution);
 
     assert.equal(summary.status, "available");

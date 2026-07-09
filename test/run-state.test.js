@@ -18,6 +18,7 @@ import {
   transitionSliceMerged,
   withRunJsonLock,
 } from "../src/run-state.js";
+import { MAX_COST_ATTRIBUTION_ENTRIES, recomputeCostAttribution } from "../src/cost-attribution.js";
 import { checkRunConsistency } from "../src/validate.js";
 
 const NOW = "2026-07-08T12:00:00.000Z";
@@ -536,6 +537,7 @@ describe("simplified run-state transitions", () => {
     const fixture = createFixture("cost-usage");
     try {
       const result = await transitionCostUsage(fixture.runDir, {
+        run_id: "caller-supplied-wrong-run",
         agent: "backend-builder",
         slice_id: "slice",
         provider: "opencode",
@@ -569,6 +571,36 @@ describe("simplified run-state transitions", () => {
         /terminal run 'blocked' cannot be mutated/u,
       );
       assert.equal(readJson(join(fixture.runDir, "run.json")).cost_attribution, undefined);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects cost usage beyond the entry cap without rewriting run.json", async () => {
+    const fixture = createFixture("cost-cap");
+    try {
+      const cost_attribution = recomputeCostAttribution({ entries: Array.from({ length: MAX_COST_ATTRIBUTION_ENTRIES }, (_, index) => ({
+        id: `usage-${index}`,
+        recorded_at: NOW,
+        run_id: fixture.runId,
+        agent: "backend-builder",
+        slice_id: "slice",
+        provider: "opencode",
+        model: "gpt-5.5",
+        input_tokens: 1,
+        cost_total: 0.001,
+        cost_currency: "USD",
+      })) }, { now: NOW });
+      writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), cost_attribution });
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        transitionCostUsage(fixture.runDir, { agent: "backend-builder", provider: "opencode", model: "gpt-5.5", input_tokens: 1, cost_total: 0.001, cost_currency: "USD" }, { now: NOW, id: "overflow" }),
+        /cost attribution entries must have at most 1000 entries/u,
+      );
+
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).cost_attribution.entries.length, MAX_COST_ATTRIBUTION_ENTRIES);
     } finally {
       cleanup(fixture.repo);
     }

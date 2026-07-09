@@ -31,7 +31,7 @@ export function normalizeCostUsageEntry(input, options = {}) {
 
   entry.id = nonEmptyString(input.id) || nonEmptyString(options.id) || randomUUID();
   entry.recorded_at = normalizeTimestamp(input.recorded_at ?? input.recordedAt ?? options.now);
-  entry.run_id = nonEmptyString(input.run_id ?? input.runId) || nonEmptyString(options.runId);
+  entry.run_id = nonEmptyString(options.runId) || nonEmptyString(input.run_id ?? input.runId);
   entry.agent = nonEmptyString(input.agent);
   if (!entry.run_id) throw new Error("cost usage entry requires run_id");
   if (!entry.agent) throw new Error("cost usage entry requires agent");
@@ -55,12 +55,18 @@ export function normalizeCostUsageEntry(input, options = {}) {
   let missing = normalizeMissing(input.missing);
   const hasUsage = USAGE_NUMERIC_FIELDS.some((field) => entry[field] !== undefined);
   const hasCost = COST_NUMERIC_FIELDS.some((field) => entry[field] !== undefined);
+  const hasCostTotal = entry.cost_total !== undefined;
   if (hasCost && !entry.cost_currency) missing = addMissing(missing, "cost_currency");
+
+  if (!entry.provider) missing = addMissing(missing, "provider");
+  if (!entry.model) missing = addMissing(missing, "model");
+  if (!hasUsage) missing = addMissing(missing, "usage");
+  if (!hasCostTotal) missing = addMissing(missing, "cost_total");
+  if (!entry.cost_currency) missing = addMissing(missing, "cost_currency");
 
   const requestedStatus = STATUS_SET.has(input.status) ? input.status : null;
   if (!hasUsage && !hasCost) {
     entry.status = "unavailable";
-    missing = missing.length > 0 ? missing : ["usage", "cost"];
   } else if (missing.length > 0 || requestedStatus === "partial" || requestedStatus === "unavailable") {
     entry.status = requestedStatus === "unavailable" && !hasUsage && !hasCost ? "unavailable" : "partial";
     if (missing.length === 0) missing = ["metadata"];
@@ -83,9 +89,8 @@ export function normalizeCostAttribution(value = {}, options = {}) {
 
 export function recomputeCostAttribution(value = {}, options = {}) {
   const inputEntries = Array.isArray(value) ? value : Array.isArray(value?.entries) ? value.entries : [];
-  const entries = inputEntries
-    .slice(-MAX_COST_ATTRIBUTION_ENTRIES)
-    .map((entry) => normalizeCostUsageEntry(entry, { ...options, now: entry?.recorded_at ?? entry?.recordedAt ?? options.now, id: entry?.id ?? options.id }));
+  if (inputEntries.length > MAX_COST_ATTRIBUTION_ENTRIES) throw new Error(`cost attribution entries must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries`);
+  const entries = inputEntries.map((entry) => normalizeCostUsageEntry(entry, { ...options, now: entry?.recorded_at ?? entry?.recordedAt ?? options.now, id: entry?.id ?? options.id }));
   const updatedAt = normalizeTimestamp(options.now ?? value?.updated_at ?? value?.updatedAt);
   const totals = rollupEntries(entries);
   return {
@@ -130,14 +135,15 @@ export function formatCostAttributionSummary(runOrAttribution) {
 }
 
 function rollupBy(entries, key) {
-  const groups = {};
+  const groups = new Map();
   for (const entry of entries) {
     const group = nonEmptyString(entry[key]);
     if (!group) continue;
-    groups[group] ||= [];
-    groups[group].push(entry);
+    const groupEntries = groups.get(group) || [];
+    groupEntries.push(entry);
+    groups.set(group, groupEntries);
   }
-  return Object.fromEntries(Object.entries(groups).map(([name, groupEntries]) => [name, rollupEntries(groupEntries)]));
+  return Object.fromEntries([...groups.entries()].map(([name, groupEntries]) => [name, rollupEntries(groupEntries)]));
 }
 
 function rollupEntries(entries) {

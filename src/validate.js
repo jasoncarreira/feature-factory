@@ -652,10 +652,11 @@ function validateCostAttribution(errors, attribution, path, run) {
   }
   if (attribution.entries.length > MAX_COST_ATTRIBUTION_ENTRIES) errors.push({ path: `${path}.entries`, message: `must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries` });
   const knownSlices = knownRunSliceIds(run);
-  for (const [index, entry] of attribution.entries.entries()) validateCostAttributionEntry(errors, entry, `${path}.entries[${index}]`, knownSlices);
+  const runId = stringValue(run?.run_id) ? run.run_id : null;
+  for (const [index, entry] of attribution.entries.entries()) validateCostAttributionEntry(errors, entry, `${path}.entries[${index}]`, knownSlices, runId);
 }
 
-function validateCostAttributionEntry(errors, entry, path, knownSlices) {
+function validateCostAttributionEntry(errors, entry, path, knownSlices, runId) {
   if (!isRecord(entry)) {
     errors.push({ path, message: "must be an object" });
     return;
@@ -670,8 +671,30 @@ function validateCostAttributionEntry(errors, entry, path, knownSlices) {
   for (const field of COST_ATTRIBUTION_ENTRY_OPTIONAL_STRINGS) optionalString(errors, entry, field, `${path}.${field}`);
   validateCostAttributionNumbers(errors, entry, path);
   if (hasCostNumber(entry) && !stringValue(entry.cost_currency)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost fields are present" });
+  if (runId && stringValue(entry.run_id) && entry.run_id !== runId) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
+  validateCostAttributionAvailability(errors, entry, path);
   if ((entry.status === "partial" || entry.status === "unavailable") && Array.isArray(entry.missing) && !hasNonEmptyStringItem(entry.missing)) errors.push({ path: `${path}.missing`, message: `is required when status is ${entry.status}` });
   if (stringValue(entry.slice_id) && knownSlices && !knownSlices.has(entry.slice_id)) errors.push({ path: `${path}.slice_id`, message: `unknown slice '${entry.slice_id}'` });
+}
+
+function validateCostAttributionAvailability(errors, entry, path) {
+  const missing = costAttributionAvailabilityMissing(entry);
+  const hasUsage = hasUsageNumber(entry);
+  const hasCost = hasCostNumber(entry);
+  if (entry.status === "available" && missing.length > 0) {
+    errors.push({ path: `${path}.status`, message: "available requires provider, model, usage, cost_total, and cost_currency" });
+  }
+  if (entry.status === "unavailable" && (hasUsage || hasCost)) errors.push({ path: `${path}.status`, message: "must be partial or available when usage or cost fields are present" });
+}
+
+function costAttributionAvailabilityMissing(entry) {
+  const missing = [];
+  if (!stringValue(entry.provider)) missing.push("provider");
+  if (!stringValue(entry.model)) missing.push("model");
+  if (!hasUsageNumber(entry)) missing.push("usage");
+  if (entry.cost_total === undefined || entry.cost_total === null) missing.push("cost_total");
+  if (!stringValue(entry.cost_currency)) missing.push("cost_currency");
+  return missing;
 }
 
 function validateCostAttributionRollupMap(errors, map, path, options = {}) {
@@ -718,6 +741,10 @@ function knownRunSliceIds(run) {
 
 function hasCostNumber(value) {
   return COST_NUMERIC_FIELDS.some((field) => value[field] !== undefined && value[field] !== null);
+}
+
+function hasUsageNumber(value) {
+  return USAGE_NUMERIC_FIELDS.some((field) => value[field] !== undefined && value[field] !== null);
 }
 
 function validateGateName(errors, name, path) {

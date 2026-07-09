@@ -37,7 +37,7 @@ describe("run schema and consistency", () => {
 
   it("accepts valid cost attribution metadata", () => {
     const costAttribution = recomputeCostAttribution({ entries: [
-      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", input_tokens: 10, output_tokens: 5, total_tokens: 15, cost_total: 0.02, cost_currency: "USD" },
+      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", provider: "opencode", model: "gpt-5.5", input_tokens: 10, output_tokens: 5, total_tokens: 15, cost_total: 0.02, cost_currency: "USD" },
     ] }, { now: "2026-07-08T12:00:01.000Z" });
 
     const run = validateRun({ ...runningRun(), slices: [{ id: "slice", status: "running" }], cost_attribution: costAttribution });
@@ -47,9 +47,20 @@ describe("run schema and consistency", () => {
     assert.equal(run.cost_attribution.totals.total_tokens, 15);
   });
 
+  it("accepts cost attribution rollup keys such as __proto__", () => {
+    const costAttribution = recomputeCostAttribution({ entries: [
+      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "__proto__", slice_id: "__proto__", provider: "opencode", model: "gpt-5.5", input_tokens: 10, cost_total: 0.02, cost_currency: "USD" },
+    ] }, { now: "2026-07-08T12:00:01.000Z" });
+
+    const run = validateRun({ ...runningRun(), slices: [{ id: "__proto__", status: "running" }], cost_attribution: costAttribution });
+
+    assert.equal(run.cost_attribution.by_agent["__proto__"].entry_count, 1);
+    assert.equal(run.cost_attribution.by_slice["__proto__"].cost_total, 0.02);
+  });
+
   it("rejects invalid cost attribution metadata", () => {
     const costAttribution = recomputeCostAttribution({ entries: [
-      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", input_tokens: 10 },
+      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", provider: "opencode", model: "gpt-5.5", input_tokens: 10, cost_total: 0.02, cost_currency: "USD" },
     ] }, { now: "2026-07-08T12:00:01.000Z" });
 
     const unknownSlice = structuredClone(costAttribution);
@@ -71,6 +82,20 @@ describe("run schema and consistency", () => {
     assert.throws(
       () => validateRun({ ...runningRun(), cost_attribution: invalidNumber }),
       (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].input_tokens: must be a finite non-negative number"),
+    );
+
+    const mismatchedRunId = structuredClone(costAttribution);
+    mismatchedRunId.entries[0].run_id = "other-run";
+    assert.throws(
+      () => validateRun({ ...runningRun("run"), cost_attribution: mismatchedRunId }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].run_id: must match run.run_id"),
+    );
+
+    const invalidAvailability = structuredClone(costAttribution);
+    delete invalidAvailability.entries[0].provider;
+    assert.throws(
+      () => validateRun({ ...runningRun(), cost_attribution: invalidAvailability }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].status: available requires provider, model, usage, cost_total, and cost_currency"),
     );
   });
 
