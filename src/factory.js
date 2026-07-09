@@ -10,6 +10,7 @@ import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
+import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -32,6 +33,56 @@ const CONTINUATION_PARENT_ARTIFACT_REFS = [
   { kind: "validation_report", ref: "artifacts/validation-report.md" },
   { kind: "pr_body", ref: "artifacts/pr-body.md" },
 ];
+const REPO_SEEDED_SKILL_FILES = ["SKILL.md", "SCHEMA.md"];
+const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const PACKAGED_SEED_HASHES = {
+  "SKILL.md": new Set([
+    "0c17edd488d75547808af2021a5059de04220d092882391e57d42963d9da29b0",
+    "22c12f49b06efd905c7e444519d14f096ba9ff0d744b3386d992bc21645d16c4",
+    "252a80229a69089a58bc2762050d368074859b1c790e71a00aad332495a203aa",
+    "3b7e1f956db2708b321a7a57155f907f83b84e3f4ff00c5e3590113ffd28718d",
+    "684b651019b5cc75ae55451a7b63e268787906e085f8404986154b9d0c6a64a7",
+    "720e2df21e629d65c347f1f2b5902a35c72f1c85930af67274a08a7ef7dcc657",
+    "896eb046aff2af328d62dc05d847bad2c9dada7574171570ed384c87ca3df1c1",
+    "90939efe1b954979b8423aade0a6f6670b516f3d67e058b1c5a8f0319cbd073f",
+    "9877334428bab57df9f4cdc2aa4518f4d095786a5ca1651f794f9c6d00a65f4e",
+    "9f3948ef2601aaeeb4293d6ec832f41c0c7cb958c3b4727f24272a0dd8373d6b",
+    "a622a118c239cd2990893c22e61abb77cc8f7c590a50582fae8d22dfe06546b3",
+    "ac371f1ff25bc971cb29af8d33f8f9e4c7d125fe1913bb4bc88b2a0ae23fa273",
+    "b0e3bbbce7bda0ebd046144579fc3841e05cebc41e77552fa8a096e186b42a46",
+    "bcd0b29cbe6fad88e6e1d9e034a807982fbafa9cd44e397366b79ac5c07e7e5b",
+    "d939622ea2aaea5eb15e38d515a6b782b4169083c626cb62f325df7adada91e8",
+    "e2eb954d0336a1d8733f99878636e8a06e3952704f27fcce88bdb1a0827e8d89",
+    "ea21a5414569997ad5559f2cd2c567322943840978676aef91958bcaa83ab38a",
+    "eb88d183aeb0def9baa61235eb6cb3ad23f291b0ffef80352a8601b296e8c144",
+    "ee1e300b527602de1f4e64ebb947149fc047e91177245562085f90ced29f7867",
+    "f524c6c8f28d0d2e2915df8eb9920c9dffe89389271beb04b425416aa58b7f7d",
+    "ff6991cb4b7f3b510ab8602d95493738be41df66903a36f453fadadff260f881",
+  ]),
+  "SCHEMA.md": new Set([
+    "0082c43c4f4f82e0e274eac2808d5631795e1473ab215572df1dbd21dfd8843d",
+    "0564971a8faedb937507e8b9e4b01238534befa43b74bffc4aed36d3ad76cb35",
+    "0c1997431d0c6db1b59fee2d59ca7bec2bd1d3944e2afc6e58e823576829c7e6",
+    "1494f72ab398b1582e8e723e82e178388f181a43b24c30e48bc332e640086928",
+    "1d965abebe23b81725b4f6155e51925847362db1f35f3f60dead08da4dc6b702",
+    "34b82f5f9d4a8eb8bbcf861fe4d9533a5e9945df8a068f88b96f1e162df41893",
+    "3c3dd8f078c5e1f2d488856022c9e8d212c4e5b228354b5d387464379d2bac29",
+    "585e4de89b9361e1263aacab3fe5bc0a8d2215af2a31b66e9ab9a6e724b0e8e1",
+    "623f3d3d4fb3be74c3dd86a499069f9cc0fad669568b238300de3fa1524b4fac",
+    "74440b4cbe791686d77a51381fa9e02c4fe4f0a19e2895c9117cbd15c2f194b2",
+    "7976502dc6cae98238232dfb507bb41eece62ac0313dcdbcd8422721c0058eed",
+    "82f969ca7a19d2305c3b27b3c17f99bb3f5f9b40f63c9cc1b2c7e20621194496",
+    "842f5e0dd17c69210c7eaac430122117da8d17bcc45edaebdea4a5787e68c898",
+    "985e240f0928a154469659bb611c7fd376503b883c19c499e1a4e2cd1970a54f",
+    "ba015daa7d57195af8f0c3099fca7f54fd7353caa952b8998d43fb98c36cb355",
+    "d3ff2926643924237cbaacf1d4a4203572eb5927efc58d93f254fa17d920f209",
+    "df9d3977545e3269f07cac0ebc526539a9d3d9c459493d9debfa4a12045e9fc8",
+    "ec08675d7171e66241ec1732a20d5e9bcf896e073a1b719529c39ce830664bf2",
+    "f4b5150ccfdb22fbe0f6424e231fa533e394b85163f0c51e0771b2477ac1d00b",
+    "f921e5dbe4adab07c0e719a675223cc57a19cfe2f17aa4c3525a2dff786c33b6",
+    "fe12fe525e1808b8da85f6e5b420826db7e918049f9a86a3c46b1beefe3d77e3",
+  ]),
+};
 const activeHeartbeatLoops = new Map();
 
 export function startFactory(args, opts = {}) {
@@ -72,14 +123,11 @@ export function continueFactory(parentRunId, opts = {}) {
 }
 
 export function listRuns(opts = {}) {
-  const root = factoryRoot(opts.cwd || process.cwd());
-  const repo = repoRoot(opts.cwd || process.cwd());
-  if (!existsSync(root)) return [];
-  return readdirSync(root)
-    .map((runId) => {
-      const runDir = join(root, runId);
+  return allRunDirs(opts)
+    .map((runDir) => {
+      const repo = factoryRepoFromRunDir(runDir);
+      const runId = basename(runDir);
       const file = join(runDir, "run.json");
-      if (!existsSync(file)) return null;
       const run = tryReadPublicRun(file, { ...opts, repoRoot: repo });
       const diagnostics = run.error ? diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo)) : diagnoseRunObject(run.value, { ...publicDiagnosticOptions(opts, repo), runDir, runFile: file });
       if (run.error || diagnosticsFailClosed(diagnostics)) return invalidListRun(runId, file, diagnostics, run.error);
@@ -104,7 +152,7 @@ function compareRunListItems(a, b) {
 export function status(runId, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const runFile = join(runDir, "run.json");
-  const repo = repoRoot(opts.cwd || process.cwd());
+  const repo = factoryRepoFromRunDir(runDir);
   const runResult = tryReadPublicRun(runFile, { ...opts, repoRoot: repo });
   const diagnostics = runResult.error ? diagnoseRunDir(runDir, publicDiagnosticOptions(opts, repo)) : diagnoseRunObject(runResult.value, { ...publicDiagnosticOptions(opts, repo), runDir, runFile });
   if (diagnosticsFailClosed(diagnostics)) return invalidStatusEnvelope(runId, runDir, runFile, diagnostics);
@@ -280,9 +328,9 @@ export function watchRun(runId, opts = {}) {
 }
 
 export function validateState(runId, opts = {}) {
-  const repo = repoRoot(opts.cwd || process.cwd());
   const runDirs = runId ? [resolveRunDir(runId, opts)] : allRunDirs(opts);
   const runs = runDirs.map((dir) => {
+    const repo = factoryRepoFromRunDir(dir);
     const diagnostics = diagnoseRunDir(dir, publicDiagnosticOptions(opts, repo));
     const validation = validateRunDir(dir, { ...opts, repoRoot: repo });
     return {
@@ -333,8 +381,8 @@ function fallbackRunId(runId, runDir) {
 }
 
 export async function cleanupRun(runId, opts = {}) {
-  const repo = repoRoot(opts.cwd || process.cwd());
-  const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
+  const runDir = resolveRunDir(runId, opts);
+  const repo = factoryRepoFromRunDir(runDir);
   if (!insideFactoryRoot(repo, runDir)) {
     throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
   }
@@ -808,19 +856,22 @@ function relativeRef(from, to) {
 function resolveRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
-  const root = factoryRoot(opts.cwd || process.cwd());
   const value = String(id).trim();
   if (isExplicitRunPath(value)) {
     const asPath = resolve(opts.cwd || process.cwd(), value);
-    if (!insideDirectory(root, asPath)) throw new Error(`run path must be inside .opencode/factory: ${asPath}`);
+    const root = factoryRootsForLookup(opts.cwd || process.cwd()).find((candidate) => insideDirectory(candidate, asPath));
+    if (!root) throw new Error(`run path must be inside .opencode/factory: ${asPath}`);
     if (!existsSync(join(asPath, "run.json"))) throw new Error(`run not found: ${id}`);
     return asPath;
   }
   if (!value || value === "." || value === "..") throw new Error("run id must be a bare factory run id");
-  const dir = resolve(root, value);
-  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
-  if (!insideDirectory(root, dir)) throw new Error(`run directory must be inside .opencode/factory: ${dir}`);
-  return dir;
+  for (const root of factoryRootsForLookup(opts.cwd || process.cwd())) {
+    const dir = resolve(root, value);
+    if (!existsSync(join(dir, "run.json"))) continue;
+    if (!insideDirectory(root, dir)) throw new Error(`run directory must be inside .opencode/factory: ${dir}`);
+    return dir;
+  }
+  throw new Error(`run not found: ${id}`);
 }
 
 function isExplicitRunPath(value) {
@@ -836,26 +887,33 @@ function formatValidationChecks(checks) {
 function resolveHeartbeatRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
-  const root = factoryRoot(opts.cwd || process.cwd());
   const normalized = normalizeHeartbeatRunId(id);
-  const dir = resolve(root, normalized);
-  if (!existsSync(join(dir, "run.json"))) throw new Error(`run not found: ${id}`);
-  if (!insideDirectory(root, dir)) {
-    throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
+  for (const root of factoryRootsForLookup(opts.cwd || process.cwd())) {
+    const dir = resolve(root, normalized);
+    if (!existsSync(join(dir, "run.json"))) continue;
+    if (!insideDirectory(root, dir)) throw new Error(`heartbeat run directory must be inside .opencode/factory: ${dir}`);
+    return dir;
   }
-  return dir;
+  throw new Error(`run not found: ${id}`);
 }
 
 function factoryRoot(cwd) {
-  return join(repoRoot(cwd), ".opencode", "factory");
+  return directFactoryRoot(cwd);
 }
 
 function allRunDirs(opts = {}) {
-  const root = factoryRoot(opts.cwd || process.cwd());
-  if (!existsSync(root)) return [];
-  return readdirSync(root)
-    .map((runId) => join(root, runId))
-    .filter((dir) => existsSync(join(dir, "run.json")));
+  const seen = new Set();
+  const dirs = [];
+  for (const root of factoryRootsForLookup(opts.cwd || process.cwd())) {
+    if (!existsSync(root)) continue;
+    for (const runId of readdirSync(root)) {
+      const dir = join(root, runId);
+      if (!existsSync(join(dir, "run.json")) || seen.has(dir)) continue;
+      seen.add(dir);
+      dirs.push(dir);
+    }
+  }
+  return dirs;
 }
 
 function startDetached(repo, commandArgs) {
@@ -976,28 +1034,36 @@ export function assertFactoryRoot(repo) {
   return existsSync(root) && statSync(root).isDirectory();
 }
 
-export function seedRepoSkill(repo) {
+export function seedRepoSkill(repo, opts = {}) {
   const dest = join(repo, ".opencode", "skills", "feature");
   mkdirSync(dest, { recursive: true });
   const seedHashPath = join(dest, ".seed-hash");
   const recorded = readSeedHashes(seedHashPath);
   const nextHashes = { ...recorded };
   const skipped = [];
-  for (const file of ["SKILL.md", "SCHEMA.md"]) {
+  const refreshed = [];
+  for (const file of REPO_SEEDED_SKILL_FILES) {
     const source = join(root, "assets", "skills", "feature", file);
     const target = join(dest, file);
     const sourceText = readFileSync(source, "utf8");
     const sourceHash = sha256(sourceText);
     const currentText = existsSync(target) ? readFileSync(target, "utf8") : null;
     const currentHash = currentText === null ? null : sha256(currentText);
-    const locallyEdited = currentHash !== null && currentHash !== sourceHash && (!recorded[file] || currentHash !== recorded[file]);
+    const recordedHash = validSha256(recorded[file]);
+    const packagedHash = currentHash !== null && knownSeedHashesFor(opts.knownSeedHashes, file).has(currentHash);
+    const managedSeed = currentHash === null || currentHash === sourceHash || currentHash === recordedHash || packagedHash;
+    const locallyEdited = currentHash !== null && currentHash !== sourceHash && !managedSeed;
     if (locallyEdited) {
       skipped.push(file);
       continue;
     }
-    if (currentHash !== sourceHash) copyFileSync(source, target);
+    if (currentHash !== sourceHash) {
+      copyFileSync(source, target);
+      if (currentHash !== null) refreshed.push(file);
+    }
     nextHashes[file] = sourceHash;
   }
+  if (refreshed.length) console.warn(`feature-factory: refreshed stale repo-seeded feature skill file(s): ${refreshed.join(", ")}`);
   if (skipped.length) console.warn(`feature-factory: preserved locally edited seeded skill file(s): ${skipped.join(", ")}`);
   writeFileSync(seedHashPath, `${JSON.stringify(nextHashes, null, 2)}\n`, "utf8");
   ensureGitInfoExclude(repo, ".opencode/skills/feature/");
@@ -1012,6 +1078,17 @@ function readSeedHashes(file) {
   } catch {
     return {};
   }
+}
+
+function knownSeedHashesFor(knownSeedHashes, file) {
+  const configured = knownSeedHashes || PACKAGED_SEED_HASHES;
+  const hashes = configured[file];
+  if (hashes instanceof Set) return hashes;
+  return Array.isArray(hashes) ? new Set(hashes) : new Set();
+}
+
+function validSha256(value) {
+  return typeof value === "string" && HASH_PATTERN.test(value) ? value : null;
 }
 
 function sha256(value) {
@@ -1226,7 +1303,7 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
   const runPath = join(runDir, "run.json");
   const current = readRunFile(runPath);
   const snapshot = await collectRunDebugSnapshot({
-    cwd: opts.cwd || process.cwd(),
+    cwd: factoryRepoFromRunDir(runDir),
     driverKind: opts.driverKind,
     pluginSpec: opts.pluginSpec,
     pluginOptions: opts.pluginOptions,

@@ -18,7 +18,7 @@ import {
   writeGateAnswer,
 } from "../src/factory.js";
 
-describe("factory public state operations", () => {
+describe("factory public state operations", { concurrency: false }, () => {
   it("lists and reads runs without authority proofs", () => {
     const fixture = createFixture("public-run");
     try {
@@ -124,6 +124,54 @@ describe("factory public state operations", () => {
       seedRepoSkill(repo);
 
       assert.equal(readFileSync(skill, "utf8"), "local edit\n");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("repairs recognized stale seeded feature skills without seed metadata", () => {
+    const repo = mkdtempSync(join(tmpdir(), "factory-seed-skill-stale-"));
+    try {
+      const dest = seedRepoSkill(repo);
+      const skill = join(dest, "SKILL.md");
+      const schema = join(dest, "SCHEMA.md");
+      const seedHash = join(dest, ".seed-hash");
+      const currentSkill = readFileSync(skill, "utf8");
+      const currentSchema = readFileSync(schema, "utf8");
+      const staleSkill = "older packaged skill\n";
+      const staleSchema = "older packaged schema\n";
+      writeFileSync(skill, staleSkill, "utf8");
+      writeFileSync(schema, staleSchema, "utf8");
+      writeFileSync(seedHash, "{}\n", "utf8");
+
+      const warnings = captureWarnings(() => seedRepoSkill(repo, {
+        knownSeedHashes: {
+          "SKILL.md": new Set([sha256(staleSkill)]),
+          "SCHEMA.md": new Set([sha256(staleSchema)]),
+        },
+      }));
+
+      assert.equal(readFileSync(skill, "utf8"), currentSkill);
+      assert.equal(readFileSync(schema, "utf8"), currentSchema);
+      assert.match(warnings.join("\n"), /refreshed stale repo-seeded feature skill file\(s\): SKILL\.md, SCHEMA\.md/u);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("preserves unrecognized local seeded feature edits without seed metadata", () => {
+    const repo = mkdtempSync(join(tmpdir(), "factory-seed-skill-local-"));
+    try {
+      const dest = seedRepoSkill(repo);
+      const skill = join(dest, "SKILL.md");
+      const seedHash = join(dest, ".seed-hash");
+      writeFileSync(skill, "local edit\n", "utf8");
+      rmSync(seedHash, { force: true });
+
+      const warnings = captureWarnings(() => seedRepoSkill(repo));
+
+      assert.equal(readFileSync(skill, "utf8"), "local edit\n");
+      assert.match(warnings.join("\n"), /preserved locally edited seeded skill file\(s\): SKILL\.md/u);
     } finally {
       cleanup(repo);
     }
@@ -280,6 +328,22 @@ function readJson(file) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function captureWarnings(fn) {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    fn();
+  } finally {
+    console.warn = originalWarn;
+  }
+  return warnings;
 }
 
 function cleanup(repo) {
