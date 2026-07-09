@@ -3,7 +3,17 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hasTuiExport, readOpencodeConfig } from "../src/doctor.js";
+import {
+  collectTelemetryReadiness,
+  evaluateCompanionTelemetryPluginReadiness,
+  evaluateFeatureFactoryTelemetryReadiness,
+  evaluateOpenTelemetryConfigReadiness,
+  evaluateOtlpEnvReadiness,
+  evaluatePackageInstrumentationLoadability,
+  hasTuiExport,
+  readOpencodeConfig,
+} from "../src/doctor.js";
+import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 
 describe("doctor package.json parsing", () => {
   it("returns true when package.json has a TUI export", () => {
@@ -66,6 +76,122 @@ describe("doctor opencode config parsing", () => {
     } finally {
       cleanup(dir);
     }
+  });
+});
+
+describe("doctor telemetry readiness helpers", () => {
+  it("reports native opencode OpenTelemetry readiness from JSONC config", () => {
+    assert.deepEqual(evaluateOpenTelemetryConfigReadiness({ experimental: { openTelemetry: true } }), {
+      ok: true,
+      level: "ok",
+      enabled: true,
+      configured: true,
+      detail: "experimental.openTelemetry=true; native opencode/AI SDK spans may be emitted when an SDK/exporter is initialized",
+      nativeAiSdkSpansExpected: true,
+    });
+
+    const missing = evaluateOpenTelemetryConfigReadiness({});
+    assert.equal(missing.ok, false);
+    assert.equal(missing.level, "warn");
+    assert.match(missing.detail, /experimental\.openTelemetry=unset/u);
+  });
+
+  it("summarizes OTLP env readiness without leaking header values or credential-shaped endpoints", () => {
+    const readiness = evaluateOtlpEnvReadiness({
+      OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+      OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890,x-honeycomb-dataset=feature-factory,Authorization=Bearer abcdefghijklmnopqrstuvwxyz123456",
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://user:pass@example.test/v1/traces",
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=test,service.name=feature-factory,api_token=github_pat_123456789012345678901234567890",
+    });
+
+    assert.equal(readiness.ok, true);
+    assert.deepEqual(readiness.endpoint, {
+      ok: true,
+      key: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+      value: REDACTED_ENV_VALUE,
+    });
+    assert.equal(readiness.headers.ok, true);
+    assert.deepEqual(readiness.headers.vars[0].headers, [
+      { name: "x-honeycomb-team", present: true, value: REDACTED_ENV_VALUE },
+      { name: "x-honeycomb-dataset", present: true, value: REDACTED_ENV_VALUE },
+      { name: REDACTED_ENV_VALUE, present: true, value: REDACTED_ENV_VALUE },
+    ]);
+    assert.equal(readiness.resource.serviceName.value, "feature-factory");
+    assert.deepEqual(readiness.resource.attributes.map((item) => item.name), [
+      "deployment.environment",
+      "service.name",
+      REDACTED_ENV_VALUE,
+    ]);
+    const serialized = JSON.stringify(readiness);
+    assert.doesNotMatch(serialized, /github_pat_/u);
+    assert.doesNotMatch(serialized, /abcdefghijklmnopqrstuvwxyz/u);
+    assert.doesNotMatch(serialized, /user:pass/u);
+  });
+
+  it("reports companion telemetry plugin presence and disabled action", () => {
+    const missing = evaluateCompanionTelemetryPluginReadiness({ plugin: ["opencode-feature-factory"] });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.present, false);
+    assert.match(missing.action, /companion telemetry plugin/u);
+
+    const disabled = evaluateCompanionTelemetryPluginReadiness({
+      plugin: [["@devtheops/opencode-plugin-otel", { enabled: false }]],
+    });
+    assert.equal(disabled.present, true);
+    assert.equal(disabled.ok, false);
+    assert.match(disabled.detail, /configured disabled/u);
+
+    const ready = evaluateCompanionTelemetryPluginReadiness({ plugin: ["@devtheops/opencode-plugin-otel"] });
+    assert.equal(ready.ok, true);
+  });
+
+  it("reports instrumentation loadability and feature-factory content-capture risks safely", async () => {
+    assert.deepEqual(evaluatePackageInstrumentationLoadability({
+      ok: true,
+      package: "@opentelemetry/api",
+      exports: ["trace"],
+    }), {
+      ok: true,
+      level: "ok",
+      package: "@opentelemetry/api",
+      exports: ["trace"],
+      detail: "@opentelemetry/api loadable",
+    });
+
+    const failed = evaluatePackageInstrumentationLoadability({
+      ok: false,
+      package: "@opentelemetry/api",
+      error: "cannot load ghp_123456789012345678901234567890",
+    });
+    assert.equal(failed.detail, REDACTED_ENV_VALUE);
+
+    const risk = evaluateFeatureFactoryTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true } },
+      pluginOptions: { telemetry: { enabled: true, captureMessages: true } },
+      env: {},
+      nativeOpenTelemetry: true,
+    });
+    assert.equal(risk.enabled, true);
+    assert.equal(risk.ok, false);
+    assert.equal(risk.redactionActive, true);
+    assert.deepEqual(risk.risks.map((item) => item.kind), [
+      "native-opencode-content-capture",
+      "feature-factory-content-capture",
+    ]);
+
+    const aggregate = await collectTelemetryReadiness({
+      cfg: { experimental: { openTelemetry: true }, plugin: ["@devtheops/opencode-plugin-otel"] },
+      pluginOptions: { telemetry: { enabled: true } },
+      env: {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+        OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890",
+        OTEL_SERVICE_NAME: "feature-factory",
+      },
+      instrumentationLoadability: { ok: true, package: "@opentelemetry/api", exports: ["trace"] },
+    });
+    assert.equal(aggregate.opencode.ok, true);
+    assert.equal(aggregate.otlpEnv.headers.vars[0].headers[0].name, "x-honeycomb-team");
+    assert.doesNotMatch(JSON.stringify(aggregate), /github_pat_/u);
   });
 });
 
