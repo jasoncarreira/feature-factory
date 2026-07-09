@@ -360,7 +360,6 @@ function addRecoveryWorktree(repo, worktree, branch) {
   mkdirSync(resolve(repo, ".opencode", "worktrees"), { recursive: true });
   const postMkdirSafety = verifyRecoveryWorktreePath(repo, worktree);
   if (!postMkdirSafety.ok) return postMkdirSafety;
-  git(repo, ["worktree", "prune"]);
   const proc = git(repo, ["worktree", "add", worktree, branch], { timeout: 30000 });
   if (!proc.ok) return { ok: false, reason: `git worktree add failed for disrupted run recovery: ${(proc.stderr || proc.stdout || "unknown git error").trim()}` };
   return { ok: true };
