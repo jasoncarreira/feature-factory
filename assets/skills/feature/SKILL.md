@@ -9,10 +9,12 @@ You are the orchestrator. Run in the main conversation, not as a subagent, so yo
 
 Two principles make this a durable factory rather than a freeform session:
 
-- State lives in files. Every run has a control plane at `$REPO/.opencode/factory/<run-id>/`: manifest, gates, plan, artifacts, observed evidence, reviews, heartbeat state, and process logs. A dead session or next-day return resumes from `run.json`.
+- State lives in files. Every run has a control plane at `$REPO/.opencode/factory/<run-id>/`: manifest, gates, plan, artifacts, observed evidence, reviews, heartbeat state, cost attribution summaries, and process logs. A dead session or next-day return resumes from `run.json`.
 - Observe, do not trust agent text. A subagent report is a claim. Before accepting build or test work, re-derive the diff and run the named checks yourself. Write observed evidence, then have `work-reviewer` judge that evidence.
 
 The proof layer removed in this simplified factory. Do not create or depend on proof-chain files. `run.json`, evidence, reviews, gate answers, and PR URLs are durable local state, not cryptographic or tamper-proof authority.
+
+`run.json.cost_attribution` is local current-run diagnostic attribution, not billing authority. It records only usage and cost numbers supplied by the active provider/opencode response metadata; do not derive prices from pricing tables, call pricing APIs, estimate missing costs, or coerce missing values to zero.
 
 `run.json.debug_snapshot` records redacted diagnostic-only snapshots of the factory/opencode/plugin environment at run creation and resume. It is useful for debugging version/model/capability skew, but it is never authority for gates, reviews, merges, or PR URLs. Redaction must omit sensitive keys and replace token-shaped or high-entropy credential values with `[redacted]`, including `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, and `xoxb_*`.
 
@@ -124,6 +126,7 @@ Required state-write commands:
 ```sh
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
+feature-factory factory cost-record <run-id> --agent AGENT --step STEP --slice-id ID --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
 feature-factory factory answer --json <run-id> <gate> approve
 feature-factory factory recover <run-id> --reason TEXT --json
 feature-factory factory gate-decision <run-id> <gate> pending --artifact artifacts/<file> --question-ref gates/<gate>.question.md --answer-ref gates/<gate>.answer --json
@@ -142,6 +145,8 @@ feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --reposit
 ```
 
 External drivers write only `gates/<gate>.answer`; they may use `feature-factory factory answer --json <run-id> <gate> approve` or write the answer file directly. The factory consumes answer files through `factory gate-decision`; approved file-sourced answers record `approval_source: external-driver`, and consumed answer files are archived away from the canonical answer path.
+
+Cost attribution writes use `feature-factory factory cost-record <run-id> ... --json`, which appends to `run.json.cost_attribution` and recomputes `totals`, `by_agent`, and `by_slice` summaries under the run-json lock. Record only provider-supplied token and cost fields. If usage exists but cost/model/provider/currency is missing, record the available fields and let the entry become `partial`; if no usage or cost is exposed, omit the record or record `unavailable` with a `missing` reason. Never fill absent token or cost values with `0`.
 
 Disrupted resume recovery is explicit. Use `feature-factory factory resume-check <run-id> --json` before mutating a resumed run unless the invocation came through `factory start --headless|--autonomous "resume <run-id>"`, which runs the same preflight before `seedRepoSkill()` or `opencode run`. Missing, inaccessible, or invalid `.opencode/factory/<run-id>/run.json` must not create or overwrite durable state and must not re-scaffold a fresh empty control plane; the command returns a synthetic non-durable blocked envelope with `ok:false`, `durable:false`, `updated:false`, `recovered:false`, and `terminal_result.reason` explaining that no durable `terminal_result` can be written without forbidden re-scaffolding. For a valid non-terminal manifest with a missing active worktree, recover only when the branch exists, recorded `base_commit` and merged slice `merge_commit` values are ancestors of branch HEAD, the target path stays under `.opencode/worktrees`, no existing path would be overwritten, `git worktree add` succeeds, and the final `checkWorktreeIdentity` plus worktree HEAD match branch HEAD. Contradictory git evidence must persist terminal `blocked`; unsafe or inaccessible local paths must persist terminal `needs-human`. Preserve gates, slices, evidence, reviews, and terminal context; update only `run.worktree` when it was missing or stale. Status/list/validate/watch remain read-only and must not implicitly recover.
 
@@ -206,6 +211,44 @@ Required heartbeat phases:
 - `remediation`
 
 `heartbeat.json` shape is `{ schema_version, run_id, phase, pid, interval_ms, last_tick_at }`. Freshness is derived at read time: `age(last_tick_at) <= max(2 * interval_ms, 120000ms)` and the recorded PID is alive. A stopped helper writes `pid: null`.
+
+## Cost Attribution Protocol
+
+Use `feature-factory factory cost-record <run-id> ... --json` to persist usage/cost data under `run.json.cost_attribution` for the current local run, including `totals`, `by_agent`, and `by_slice` rollups. This is local current-run diagnostic attribution only: it helps operators understand current-run and local agent/slice spend in `factory status`, `factory list`, and TUI views, but it is not billing authority, a billing ledger, invoice source, quota authority, or cross-run accounting system.
+
+Record entries only from provider/opencode metadata available to the orchestrator after an agent/tool wait. Allowed numeric fields are provider-supplied token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `reasoning_tokens`) and provider-supplied cost fields (`cost_total`, `cost_input`, `cost_output`, `cost_cache_creation`, `cost_cache_read`) plus `cost_currency`. Do not maintain model pricing tables, call pricing APIs, estimate missing costs, convert currencies, or coerce missing usage/cost to zero.
+
+Availability semantics:
+
+- `available`: provider, model, at least one usage field, `cost_total`, and `cost_currency` are all present.
+- `partial`: some provider-supplied usage or cost data is present, but provider/model/usage/cost_total/cost_currency is incomplete; preserve a `missing` list.
+- `unavailable`: no provider usage or cost data is exposed. Do not pretend this is zero cost.
+
+Orchestrator attribution points and heartbeat ordering:
+
+1. After each `spec-writer` wait, stop heartbeat or verify inactive, then record any available usage with `factory cost-record` before writing accepted/rejected step state, evidence, terminal state, or PR-created state.
+2. After each `work-reviewer` wait for spec review, decomposition review, slice review, or test review, stop heartbeat or verify inactive, then record usage with `factory cost-record` before review/evidence/slice/step state writes that consume the result.
+3. After each `work-decomposer` wait, stop heartbeat or verify inactive, then record usage with `factory cost-record` before writing plan acceptance state or seeding slices.
+4. After each builder wait in a `builder-wave`, stop heartbeat or verify inactive, then record per-agent and, when applicable, per-slice usage with `factory cost-record --slice-id <slice-id>` before writing evidence or the next slice state.
+5. After each `test-verifier` wait, stop heartbeat or verify inactive, then record usage before writing test artifacts, evidence, or accepted/rejected step state.
+6. After each `implementation-validator` and `security-reviewer` wait, stop heartbeat or verify inactive, then record usage before writing panel artifacts, verdicts, terminal state, Gate 3 state, or PR-created state.
+7. After each remediation wait, stop heartbeat or verify inactive, then record usage before remediation evidence, verdicts, terminal writes, Gate 3 state, or PR-created.
+
+Example:
+
+```sh
+feature-factory factory cost-record <run-id> \
+  --agent implementation-validator \
+  --step implementation-validator \
+  --provider openai \
+  --model openai/gpt-5.5 \
+  --input-tokens 12000 \
+  --output-tokens 900 \
+  --total-tokens 12900 \
+  --cost-total 1.23 \
+  --currency USD \
+  --json
+```
 
 ## Detached-Run Diagnostics
 
@@ -298,13 +341,13 @@ The research map must identify real files, patterns, tests, integration hotspots
 
 ## Step 2 - Spec And Decomposition
 
-Run `spec-writer` with the approved story, research map, and design brief. Mark it running with `feature-factory factory step <run-id> spec-writer running --attempts N --json`. Because this is a long spec-production wait, start heartbeat immediately before the `spec-writer` Task dispatch/wait with phase `spec-review`, then stop heartbeat in the after-return/`finally` path before writing produced artifacts or running the next semantic `run.json` / factory CLI state write. It produces `$RUN/artifacts/technical-brief.md`; after review acceptance, and only after any `spec-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> spec-writer accepted --artifact-ref artifacts/technical-brief.md --review-ref reviews/spec-writer.json --json`.
+Run `spec-writer` with the approved story, research map, and design brief. Mark it running with `feature-factory factory step <run-id> spec-writer running --attempts N --json`. Because this is a long spec-production wait, start heartbeat immediately before the `spec-writer` Task dispatch/wait with phase `spec-review`, then stop heartbeat in the after-return/`finally` path before writing produced artifacts or running the next semantic `run.json` / factory CLI state write. After heartbeat is stopped or verified inactive, record provider-supplied usage with `feature-factory factory cost-record <run-id> --agent spec-writer --step spec-writer ... --json` when available. It produces `$RUN/artifacts/technical-brief.md`; after review acceptance, and only after any `spec-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> spec-writer accepted --artifact-ref artifacts/technical-brief.md --review-ref reviews/spec-writer.json --json`.
 
-Run `work-reviewer` on the brief. Tell the reviewer the reviewed worktree is read-only and must not be modified. Because this is a long spec review wait, start heartbeat immediately before the `work-reviewer` dispatch/wait with phase `spec-review`, then stop heartbeat in the after-return/`finally` path before checking the worktree, writing review artifacts, or running the next `factory step` state write. After it returns, check `git -C "$FEAT_WT" status --porcelain=v1 --untracked-files=all`. If dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, write a blocker review, and re-run it once with a stronger read-only instruction before stopping.
+Run `work-reviewer` on the brief. Tell the reviewer the reviewed worktree is read-only and must not be modified. Because this is a long spec review wait, start heartbeat immediately before the `work-reviewer` dispatch/wait with phase `spec-review`, then stop heartbeat in the after-return/`finally` path before checking the worktree, writing review artifacts, or running the next `factory step` state write. After heartbeat is stopped or verified inactive, record provider-supplied usage with `feature-factory factory cost-record <run-id> --agent work-reviewer --step spec-review ... --json` when available. After it returns, check `git -C "$FEAT_WT" status --porcelain=v1 --untracked-files=all`. If dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, write a blocker review, and re-run it once with a stronger read-only instruction before stopping.
 
-Run `work-decomposer` with the accepted story, research map, technical brief, and design brief. Mark it running with `feature-factory factory step <run-id> work-decomposer running --attempts N --json`. Because this is a long decomposition-production wait, start heartbeat immediately before the `work-decomposer` Task dispatch/wait with phase `decomposition-review`, then stop heartbeat in the after-return/`finally` path before writing produced plan files or running the next semantic `run.json` / factory CLI state write. It produces `$RUN/plan/slices.json` and `$RUN/plan/plan.md`; after review acceptance, and only after any `decomposition-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> work-decomposer accepted --review-ref reviews/work-decomposer.json --json`, then seed durable slices with `feature-factory factory slices-seed <run-id> --from plan/slices.json --json`.
+Run `work-decomposer` with the accepted story, research map, technical brief, and design brief. Mark it running with `feature-factory factory step <run-id> work-decomposer running --attempts N --json`. Because this is a long decomposition-production wait, start heartbeat immediately before the `work-decomposer` Task dispatch/wait with phase `decomposition-review`, then stop heartbeat in the after-return/`finally` path before writing produced plan files or running the next semantic `run.json` / factory CLI state write. After heartbeat is stopped or verified inactive, record provider-supplied usage with `feature-factory factory cost-record <run-id> --agent work-decomposer --step work-decomposer ... --json` when available. It produces `$RUN/plan/slices.json` and `$RUN/plan/plan.md`; after review acceptance, and only after any `decomposition-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> work-decomposer accepted --review-ref reviews/work-decomposer.json --json`, then seed durable slices with `feature-factory factory slices-seed <run-id> --from plan/slices.json --json`.
 
-Review the decomposition the same way. Start heartbeat immediately before the `work-reviewer` decomposition review dispatch/wait with phase `decomposition-review`, stop heartbeat in the after-return/`finally` path, and do not write accepted/rejected step state or seed slices while that heartbeat remains active. The plan must cover every acceptance criterion, keep same-wave slices file-disjoint, serialize shared hotspots, and explain dependencies.
+Review the decomposition the same way. Start heartbeat immediately before the `work-reviewer` decomposition review dispatch/wait with phase `decomposition-review`, stop heartbeat in the after-return/`finally` path, record available provider usage with `factory cost-record --agent work-reviewer --step decomposition-review`, and do not write accepted/rejected step state or seed slices while that heartbeat remains active. The plan must cover every acceptance criterion, keep same-wave slices file-disjoint, serialize shared hotspots, and explain dependencies.
 
 ## Gate 1 And Gate 2
 
@@ -323,7 +366,7 @@ Reuse the feature branch/worktree created during Step 0. Compute waves by topolo
 - Same-wave slices should already be file-disjoint. If you discover overlap, stop and treat it as a decomposition bug.
 - If any slice becomes `blocked`, do not dispatch dependents.
 
-For each slice, create a slice worktree from the current feature branch HEAD, mark the slice `running` with `feature-factory factory slice-status <run-id> <slice-id> running --branch <branch> --worktree <path> --attempts N --json`, dispatch the appropriate builder, then observe the result yourself. For a long builder wave, mark every dispatched slice `running` first, start heartbeat immediately before the builder `Task` dispatch/wait with phase `builder-wave`, and stop heartbeat in the after-return/`finally` path before writing evidence or the next slice state:
+For each slice, create a slice worktree from the current feature branch HEAD, mark the slice `running` with `feature-factory factory slice-status <run-id> <slice-id> running --branch <branch> --worktree <path> --attempts N --json`, dispatch the appropriate builder, then observe the result yourself. For a long builder wave, mark every dispatched slice `running` first, start heartbeat immediately before the builder `Task` dispatch/wait with phase `builder-wave`, and stop heartbeat in the after-return/`finally` path before recording builder usage with `feature-factory factory cost-record <run-id> --agent backend-builder|frontend-builder --slice-id <slice-id> --step builder-wave ... --json`, writing evidence, or the next slice state:
 
 - `git -C $SLICE_WT diff --stat $BRANCH...HEAD`
 - `git -C $SLICE_WT diff --name-only $BRANCH...HEAD`
@@ -332,7 +375,7 @@ For each slice, create a slice worktree from the current feature branch HEAD, ma
 
 Write `$RUN/evidence/<slice-id>.json`. `review_ready` requires non-empty observed diff, diff observed successfully, and tests observed passing or explicitly skipped with a reason. After review output is written to `$RUN/reviews/<slice-id>.json`, record review state with `feature-factory factory slice-status <run-id> <slice-id> review --evidence-ref evidence/<slice-id>.json --review-ref reviews/<slice-id>.json --attempts N --json`. The review state write is the in-flight marker for a `slice-review` heartbeat.
 
-Run `work-reviewer` on each slice, with the slice worktree read-only. Start heartbeat immediately before each long review dispatch/wait with phase `slice-review`, then stop heartbeat in the after-return/`finally` path before checking the worktree, accepting the review, marking the slice blocked, or merging. For every re-review, pass `attempt: <n>` and the prior review's `required_fixes` list so the reviewer applies the delta rule. After it returns, check `git -C "$SLICE_WT" status --porcelain=v1 --untracked-files=all`; if dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, and re-run it once with a stronger read-only instruction before blocking the slice. APPROVE marks the slice ready to merge; REJECT routes fixes back to the builder; repeated failure marks the slice blocked with `feature-factory factory slice-status <run-id> <slice-id> blocked --reason TEXT --json`.
+Run `work-reviewer` on each slice, with the slice worktree read-only. Start heartbeat immediately before each long review dispatch/wait with phase `slice-review`, then stop heartbeat in the after-return/`finally` path before recording reviewer usage with `factory cost-record --agent work-reviewer --step slice-review --slice-id <slice-id>`, checking the worktree, accepting the review, marking the slice blocked, or merging. For every re-review, pass `attempt: <n>` and the prior review's `required_fixes` list so the reviewer applies the delta rule. After it returns, check `git -C "$SLICE_WT" status --porcelain=v1 --untracked-files=all`; if dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, and re-run it once with a stronger read-only instruction before blocking the slice. APPROVE marks the slice ready to merge; REJECT routes fixes back to the builder; repeated failure marks the slice blocked with `feature-factory factory slice-status <run-id> <slice-id> blocked --reason TEXT --json`.
 
 Merge approved slices into the feature worktree one at a time with a normal no-ff merge or the repo's expected merge command. After the merge commit exists, record it through `feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json`; do not mark slices merged by editing `run.json` directly. Then refresh heartbeat and clean up successful slice worktrees/branches. If a merge conflict occurs, mark the slice `blocked`, leave the worktree for inspection, and surface it as a decomposition/coordination bug.
 
@@ -340,14 +383,14 @@ Merge approved slices into the feature worktree one at a time with a normal no-f
 
 Run integration work against `$FEAT_WT`, not slice worktrees.
 
-1. Mark `test-verifier` running with `feature-factory factory step <run-id> test-verifier running --attempts N --json`. Start heartbeat immediately before the `test-verifier` dispatch/wait with phase `test-verifier`, then stop heartbeat in the after-return/`finally` path before writing `$RUN/artifacts/test-report.md`, evidence, or any accepted/rejected step state. It writes/runs acceptance tests and commits test changes if needed.
+1. Mark `test-verifier` running with `feature-factory factory step <run-id> test-verifier running --attempts N --json`. Start heartbeat immediately before the `test-verifier` dispatch/wait with phase `test-verifier`, then stop heartbeat in the after-return/`finally` path before recording test-verifier usage with `factory cost-record --agent test-verifier --step test-verifier`, writing `$RUN/artifacts/test-report.md`, evidence, or any accepted/rejected step state. It writes/runs acceptance tests and commits test changes if needed.
 2. Observe the test step yourself by rerunning the named acceptance suite. If this rerun is a long orchestrator wait, start heartbeat immediately before the rerun with phase `test-rerun`, then stop heartbeat in the after-return/`finally` path before writing `$RUN/evidence/test-verifier.json`.
-3. Record the test evidence, then run `work-reviewer` with subject `test-verifier`. Use the same read-only reviewer check before accepting the result. Start heartbeat immediately before the long test review dispatch/wait with phase `test-review`, then stop heartbeat in the after-return/`finally` path before recording accepted/rejected test-verifier state.
+3. Record the test evidence, then run `work-reviewer` with subject `test-verifier`. Use the same read-only reviewer check before accepting the result. Start heartbeat immediately before the long test review dispatch/wait with phase `test-review`, then stop heartbeat in the after-return/`finally` path before recording reviewer usage with `factory cost-record --agent work-reviewer --step test-review` or accepted/rejected test-verifier state.
 4. Run the pre-PR panel with two independent lenses on `$FEAT_WT` and the full diff. For each long panel wait, mark the corresponding step running first when represented in `run.json`, start heartbeat immediately before dispatch/wait with phase `implementation-validator` or `security-reviewer`, and stop heartbeat in the after-return/`finally` path before writing review artifacts or verdict state:
    - `implementation-validator` for correctness, AC coverage, cross-slice integration, conventions. Accept only `GO` or `GO-WITH-NITS`.
    - `security-reviewer` for adversarial trust-boundary, injection, secrets, auth, and data risks. Accept only `PASS`.
 
-After writing `reviews/implementation-validator.json`, `reviews/security-reviewer.json`, and `artifacts/validation-report.md`, and only after the panel heartbeat is stopped or verified inactive, record panel verdicts with `feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json`. Combine by strictest verdict. Any validator `NO-GO` or security `BLOCK` is NO-GO. On NO-GO, route the top finding to the owning builder or integration/test fix path, observe evidence, and rerun the panel up to `max_retries`; bracket each long remediation dispatch/wait with phase `remediation`, stopping it before evidence, verdicts, terminal writes, or Gate 3 state. For every panel re-run, pass `attempt: <n>` and the prior validator/security `required_fixes` list into the re-review prompt.
+After writing `reviews/implementation-validator.json`, `reviews/security-reviewer.json`, and `artifacts/validation-report.md`, and only after the panel heartbeat is stopped or verified inactive, record panel usage with `factory cost-record --agent implementation-validator --step implementation-validator` and `factory cost-record --agent security-reviewer --step security-reviewer` when provider data is available, then record panel verdicts with `feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json`. Combine by strictest verdict. Any validator `NO-GO` or security `BLOCK` is NO-GO. On NO-GO, route the top finding to the owning builder or integration/test fix path, observe evidence, and rerun the panel up to `max_retries`; bracket each long remediation dispatch/wait with phase `remediation`, stopping it before cost-record usage attribution, evidence, verdicts, terminal writes, Gate 3 state, or PR-created. For every panel re-run, pass `attempt: <n>` and the prior validator/security `required_fixes` list into the re-review prompt.
 
 ## Gate 3 - Pre-PR
 

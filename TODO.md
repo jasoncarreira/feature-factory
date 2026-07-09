@@ -28,13 +28,12 @@ covered there.
 - Honeycomb OpenTelemetry enablement
   - First milestone: enable native opencode OTel export to Honeycomb and verify traces with a small factory run.
   - Estimate: 30-90 minutes for basic export; 1-2 days for feature-factory run correlation; 2-4 days for production-safe redaction/docs/tests.
-  - Follow the design in `SPEC.md#12-opentelemetry-genai-instrumentation`.
+  - Follow the design in `SPEC.md#14-opentelemetry-genai-instrumentation`.
   - Include `doctor --telemetry` readiness checks for `experimental.openTelemetry`, `OTEL_EXPORTER_OTLP_*`, companion plugin presence, and prompt-capture risk.
 
-- Cost attribution
-  - Record per-agent and per-slice token/cost usage.
-  - Persist cost data in durable run artifacts.
-  - Surface cost summaries in CLI/status and eventually TUI.
+- Cost attribution follow-ups
+  - Baseline local current-run attribution is implemented and documented: `factory cost-record` writes provider-supplied usage/cost metadata to `run.json.cost_attribution`, and status/list/TUI expose diagnostic summaries.
+  - Future work: richer reporting/export views, provider-specific metadata normalization as opencode exposes it, and correlation with telemetry spans without turning local diagnostics into billing authority.
 
 - TUI active-session refresh hardening
   - An already-open opencode TUI process can keep rendering stale Feature Factory sidebar data after the plugin bundle changes, requiring a TUI restart/reload to pick up fixes.

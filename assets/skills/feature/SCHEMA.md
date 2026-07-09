@@ -2,6 +2,8 @@
 
 The feature factory persists a per-run control plane so runs are durable, resumable, observable, and externally drivable. The factory writes all files except gate answer files. The proof layer removed in the simplified factory; local files are durable state and diagnostics, not cryptographic authority.
 
+`run.json.cost_attribution` is local current-run diagnostic attribution only. It is not billing authority, an invoice, a quota ledger, or cross-run accounting; it records provider-supplied usage/cost metadata that was available to the orchestrator.
+
 ## Directory
 
 ```text
@@ -66,6 +68,7 @@ feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
 feature-factory factory steer <run-id> --message TEXT --json
 feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json
+feature-factory factory cost-record <run-id> --agent AGENT --step STEP --slice-id ID --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
 feature-factory factory answer --json <run-id> <gate> approve
 feature-factory factory recover <run-id> --reason TEXT --json
 feature-factory factory gate-decision <run-id> <gate> pending --artifact artifacts/<file> --question-ref gates/<gate>.question.md --answer-ref gates/<gate>.answer --json
@@ -84,6 +87,8 @@ feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --reposit
 ```
 
 External drivers write only `gates/<gate>.answer`; they may use `feature-factory factory answer --json <run-id> <gate> approve` or write the answer file directly. The factory consumes answer files through `factory gate-decision`; approved file-sourced answers record `approval_source: "external-driver"` and consumed answer files are archived away from the canonical `gates/<gate>.answer` path.
+
+`factory cost-record` is the only required write surface for cost attribution. It appends one normalized entry under `run.json.cost_attribution.entries[]`, recomputes `totals`, `by_agent`, and `by_slice`, validates the run, and writes under `run-json.lock/`. Use it after agent waits when provider/opencode metadata exposes usage or cost; do not edit `run.json.cost_attribution` directly.
 
 `factory recover` is operator recovery for orphaned/stale running runs; do not use it to bypass active in-flight work or protected gates.
 
@@ -263,6 +268,121 @@ Rules:
 - Sensitive keys are omitted. Token-shaped or high-entropy credential values are replaced with `[redacted]`; raw `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, and `xoxb_*` values are invalid in persisted diagnostic state.
 - If snapshot collection or validation fails, do not persist raw diagnostics.
 
+## cost_attribution Diagnostic State
+
+`run.json.cost_attribution` persists per-run usage and cost observations. `factory status`, `factory list`, and TUI data expose public summaries from it. These surfaces are diagnostic and local to the current run; they are not billing authority and must not be used as the source of truth for invoices, quotas, chargeback, or cross-run finance controls.
+
+Required write command:
+
+```sh
+feature-factory factory cost-record <run-id> \
+  --agent AGENT \
+  [--step STEP] \
+  [--slice-id ID] \
+  [--provider PROVIDER] \
+  [--model MODEL] \
+  [--source SOURCE] \
+  [--operation OP] \
+  [--request-id ID] \
+  [--input-tokens N] \
+  [--output-tokens N] \
+  [--total-tokens N] \
+  [--cache-creation-input-tokens N] \
+  [--cache-read-input-tokens N] \
+  [--reasoning-tokens N] \
+  [--cost-total N] \
+  [--cost-input N] \
+  [--cost-output N] \
+  [--cost-cache-creation N] \
+  [--cost-cache-read N] \
+  [--currency CODE] \
+  [--recorded-at ISO] \
+  [--entry-id ID] \
+  [--json]
+```
+
+Cost schema:
+
+```json
+"cost_attribution": {
+  "schema_version": 1,
+  "updated_at": "2026-07-09T12:00:00Z",
+  "status": "partial",
+  "totals": {
+    "status": "partial",
+    "entry_count": 2,
+    "request_count": 2,
+    "total_tokens": 12900,
+    "cost_total": 1.23,
+    "cost_currency": "USD",
+    "mixed_currency": false,
+    "missing": ["cost_total"]
+  },
+  "by_agent": {
+    "implementation-validator": {
+      "status": "available",
+      "entry_count": 1,
+      "request_count": 1,
+      "total_tokens": 12900,
+      "cost_total": 1.23,
+      "cost_currency": "USD",
+      "mixed_currency": false,
+      "missing": []
+    }
+  },
+  "by_slice": {
+    "be-api": {
+      "status": "partial",
+      "entry_count": 1,
+      "request_count": 1,
+      "input_tokens": 5000,
+      "mixed_currency": false,
+      "missing": ["cost_total", "cost_currency"]
+    }
+  },
+  "entries": [
+    {
+      "id": "uuid-or-provider-request-id",
+      "recorded_at": "2026-07-09T12:00:00Z",
+      "run_id": "app-123",
+      "agent": "implementation-validator",
+      "step": "implementation-validator",
+      "source": "opencode",
+      "operation": "invoke_agent",
+      "provider": "openai",
+      "model": "openai/gpt-5.5",
+      "request_id": "provider-request-id",
+      "input_tokens": 12000,
+      "output_tokens": 900,
+      "total_tokens": 12900,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "reasoning_tokens": 300,
+      "cost_total": 1.23,
+      "cost_input": 0.82,
+      "cost_output": 0.41,
+      "cost_cache_creation": 0,
+      "cost_cache_read": 0,
+      "cost_currency": "USD",
+      "status": "available",
+      "missing": []
+    }
+  ]
+}
+```
+
+Rules:
+
+- Persist only values supplied by the provider/opencode response metadata. No local pricing tables, no pricing APIs, no estimated model prices, no currency conversion, and no missing-to-zero coercion.
+- If a provider omits a field, omit that field and list the missing capability when relevant. Do not write `0` for absent token or cost fields.
+- Entry `status` is `available` only when `provider`, `model`, at least one usage field, `cost_total`, and `cost_currency` are present.
+- Entry `status` is `partial` when some usage or cost data exists but availability requirements are incomplete; `missing` must name the absent provider/model/usage/cost_total/cost_currency or metadata.
+- Entry `status` is `unavailable` when no usage and no cost fields were exposed. This means attribution is unavailable, not zero cost.
+- Rollups use the same `available` / `partial` / `unavailable` status semantics. Mixed `cost_currency` values set `mixed_currency: true`, omit `cost_total`, and record `missing: ["mixed_currency"]`.
+- `by_agent` is keyed by agent name. `by_slice` is keyed by `slice_id`; validation rejects unknown slice ids when slices are known.
+- Orchestrators must call `factory cost-record` only after the heartbeat for that wait has stopped or `factory heartbeat <run-id> --status --json` verifies it inactive, and before terminal writes or `factory pr-created`.
+- Required attribution points are waits for `spec-writer`, `work-reviewer`, `work-decomposer`, `backend-builder`/`frontend-builder`, `test-verifier`, `implementation-validator`, `security-reviewer`, and remediation. Work-reviewer attribution includes spec review, decomposition review, slice review, and test review waits.
+
 ## run.json
 
 ```json
@@ -339,6 +459,15 @@ Rules:
   "max_parallel_slices": 3,
   "max_retries": 3,
   "review_tier": "strict",
+  "cost_attribution": {
+    "schema_version": 1,
+    "updated_at": "2026-07-09T12:00:00Z",
+    "status": "unavailable",
+    "totals": {"status": "unavailable", "entry_count": 0, "request_count": 0, "mixed_currency": false, "missing": ["entries"]},
+    "by_agent": {},
+    "by_slice": {},
+    "entries": []
+  },
   "debug_snapshot": {
     "created_with": {
       "collected_at": "2026-07-04T11:45:00Z",

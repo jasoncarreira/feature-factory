@@ -22,6 +22,7 @@ Active guarantees:
 - PR URLs are written only through `feature-factory factory pr-created ...`, which checks `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and a canonical GitHub PR URL before updating `run.pr_url` and `terminal_result.pr_url`.
 - Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and draft-PR checks.
 - `run.json.debug_snapshot` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
+- `run.json.cost_attribution` is diagnostic-only local current-run usage/cost attribution. It is not billing authority, invoice data, quota enforcement, or cross-run chargeback state. It records provider-supplied usage and cost metadata only; the factory does not maintain pricing tables, call pricing APIs, estimate missing costs, or coerce missing usage/cost to zero.
 
 Limits:
 
@@ -337,10 +338,41 @@ feature-factory factory validate <run-id>
 feature-factory factory env
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
+feature-factory factory cost-record <run-id> --agent AGENT --step STEP --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
 ```
 
 `factory status`, `factory answer`, and `factory validate` apply code-level schema validation to `run.json`; `factory validate` also validates `plan/slices.json` when present. Invalid runs appear as `invalid` in `factory list` instead of crashing the whole list.
+
+### Cost attribution diagnostics
+
+The factory records optional usage and cost attribution under `.opencode/factory/<run-id>/run.json` at `run.json.cost_attribution`, with `totals`, `by_agent`, and `by_slice` rollups. This block is a local current-run diagnostic surface for operators. It is not billing authority: do not use it as an invoice source, quota ledger, cross-run financial record, or chargeback contract.
+
+Write cost attribution only through the CLI so the run-json lock, validation, and rollups stay consistent:
+
+```sh
+feature-factory factory cost-record <run-id> \
+  --agent implementation-validator \
+  --step implementation-validator \
+  --provider openai \
+  --model openai/gpt-5.5 \
+  --input-tokens 12000 \
+  --output-tokens 900 \
+  --total-tokens 12900 \
+  --cost-total 1.23 \
+  --currency USD \
+  --json
+```
+
+Semantics:
+
+- Persist provider-supplied usage/cost metadata only. The factory must not use pricing tables, pricing APIs, local price estimates, currency conversion, or missing-to-zero coercion.
+- `available` means provider, model, usage, `cost_total`, and `cost_currency` are present.
+- `partial` means some usage/cost data is present but provider/model/usage/cost_total/cost_currency is incomplete; missing fields stay missing and are listed in `missing`.
+- `unavailable` means the provider exposed no usage or cost data. It does not mean zero cost.
+- `factory status <run-id> --json`, `factory list`, `factory watch`, and the TUI expose a cost summary (`status`, entry/agent/slice counts, token fields when supplied, `cost_total`/`cost_currency` when supplied, mixed-currency and missing-field indicators).
+
+Orchestrators should record available provider usage with `factory cost-record` after the long waits for `spec-writer`, `work-reviewer`, `work-decomposer`, builders, `test-verifier`, `implementation-validator`, `security-reviewer`, and remediation. Because these waits usually run under heartbeat, stop heartbeat or verify it inactive first, then record cost attribution before terminal writes or `factory pr-created`.
 
 Clean up terminal runs after their PRs are merged or their artifacts are no longer needed:
 
@@ -404,6 +436,8 @@ Long-wait heartbeat guard for operators and maintainers:
 4. Do not perform the next semantic `run.json` / factory CLI state write while the long-wait heartbeat remains active; stop heartbeat or verify inactive first.
 
 Use these phase labels by convention: `spec-review`, `decomposition-review`, `builder-wave`, `slice-review`, `test-verifier`, `test-rerun`, `test-review`, `implementation-validator`, `security-reviewer`, and `remediation`. `spec-review` brackets both the `spec-writer` Task dispatch/wait and the following `work-reviewer` wait; `decomposition-review` brackets both the `work-decomposer` Task dispatch/wait and the following `work-reviewer` wait. Each of those long waits uses its own heartbeat start immediately before dispatch/wait and stop in the after-return/`finally` path before the next semantic `run.json` / factory CLI state write. Protected gates `story`, `brief`, and `pre_pr` stay heartbeat-free. The phase is opaque/non-enforced by validation beyond being non-empty; heartbeat remains liveness-only and not authority.
+
+Cost attribution is one of the semantic writes that must wait until heartbeat is stopped or verified inactive. Record `factory cost-record` entries after each provider-backed long wait and before terminal-result writes or `factory pr-created`.
 
 ## Detached run diagnostics
 
