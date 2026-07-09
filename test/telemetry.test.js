@@ -158,4 +158,37 @@ describe("no-op span wrappers", () => {
     });
     assert.equal(value, "ok");
   });
+
+  it("redacts secret-shaped error messages before recording exceptions", () => {
+    const recorded = { exceptions: [], statuses: [], attributes: [] };
+    const span = {
+      recordException(exception) {
+        recorded.exceptions.push(exception);
+      },
+      setStatus(status) {
+        recorded.statuses.push(status);
+      },
+      setAttribute(key, value) {
+        recorded.attributes.push([key, value]);
+      },
+    };
+    const error = new Error("failed with github_pat_123456789012345678901234567890");
+    error.stack = "Error: failed with github_pat_123456789012345678901234567890\n    at call (sk-123456789012345678901234567890.js:1:1)";
+    error.api_token = "ghp_123456789012345678901234567890";
+
+    recordError(span, error);
+
+    assert.equal(recorded.exceptions.length, 1);
+    assert.notEqual(recorded.exceptions[0], error);
+    assert.equal(recorded.exceptions[0].name, "Error");
+    assert.equal(recorded.exceptions[0].message, REDACTED_ENV_VALUE);
+    assert.equal(recorded.exceptions[0].stack, REDACTED_ENV_VALUE);
+    assert.equal(recorded.statuses[0].message, REDACTED_ENV_VALUE);
+    assert.deepEqual(recorded.attributes[0], ["error.type", "Error"]);
+    const serialized = JSON.stringify(recorded);
+    assert.doesNotMatch(serialized, /github_pat_/u);
+    assert.doesNotMatch(serialized, /ghp_/u);
+    assert.doesNotMatch(serialized, /sk-123/u);
+    assert.doesNotMatch(serialized, /api_token/u);
+  });
 });

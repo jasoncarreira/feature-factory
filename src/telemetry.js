@@ -214,7 +214,7 @@ export function recordError(span, error) {
   if (!span || !error) return;
   const message = error instanceof Error ? error.message : String(error);
   const type = error instanceof Error && error.name ? error.name : typeof error;
-  span.recordException?.(error instanceof Error ? error : { message, name: type });
+  span.recordException?.(sanitizeException(error));
   span.setStatus?.({ code: SpanStatusCode.ERROR, message: sanitizeDiagnosticMessage(message) });
   span.setAttribute?.("error.type", sanitizeDiagnosticMessage(type));
 }
@@ -255,6 +255,19 @@ function sanitizeAttribute(key, value) {
     return safe.length === value.length ? safe : JSON.stringify(scrubSecretEnv(value));
   }
   return JSON.stringify(scrubSecretEnv(value));
+}
+
+function sanitizeException(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const type = error instanceof Error && error.name ? error.name : typeof error;
+  const exception = {
+    name: sanitizeDiagnosticMessage(type),
+    message: sanitizeDiagnosticMessage(message),
+  };
+  if (error instanceof Error && typeof error.stack === "string") {
+    exception.stack = sanitizeDiagnosticMessage(error.stack);
+  }
+  return exception;
 }
 
 function sanitizeDiagnosticMessage(message) {
