@@ -181,6 +181,26 @@ describe("no-op span wrappers", () => {
     assert.equal(value, "ok");
   });
 
+  it("drops secret-shaped attribute keys and scrubs nested secret-shaped keys", () => {
+    const honeycombKey = "hc_api_12345678901234567890";
+    const hexKey = "0123456789abcdef0123456789abcdef";
+    const attrs = runAttributes({
+      "feature_factory.run_id": "run-123",
+      [honeycombKey]: "safe",
+      nested: {
+        keep: "ok",
+        [hexKey]: "safe",
+      },
+    });
+
+    assert.equal(attrs["feature_factory.run_id"], "run-123");
+    assert.equal(Object.hasOwn(attrs, honeycombKey), false);
+    assert.equal(attrs.nested, JSON.stringify({ keep: "ok" }));
+    const serialized = JSON.stringify(attrs);
+    assert.doesNotMatch(serialized, new RegExp(honeycombKey, "u"));
+    assert.doesNotMatch(serialized, new RegExp(hexKey, "u"));
+  });
+
   it("redacts secret-shaped error messages before recording exceptions", () => {
     const recorded = { exceptions: [], statuses: [], attributes: [] };
     const span = {

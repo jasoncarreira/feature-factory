@@ -337,6 +337,19 @@ describe("doctor telemetry readiness helpers", () => {
     assert.equal(ready.ok, true);
   });
 
+  it("does not treat local feature-factory paths containing otel as companion telemetry plugins", () => {
+    const readiness = evaluateCompanionTelemetryPluginReadiness({
+      plugin: [
+        "file:///tmp/local-otel-fixture/opencode-feature-factory",
+        "file:///tmp/local-telemetry-fixture/opencode-feature-factory/src/plugin.js",
+      ],
+    });
+
+    assert.equal(readiness.ok, false);
+    assert.equal(readiness.present, false);
+    assert.match(readiness.detail, /no companion telemetry plugin configured/u);
+  });
+
   it("reports instrumentation loadability and feature-factory content-capture risks safely", async () => {
     assert.deepEqual(evaluatePackageInstrumentationLoadability({
       ok: true,

@@ -87,7 +87,8 @@ export function scrubSecretEnv(value) {
 }
 
 export function isSensitiveEnvKey(key) {
-  return SENSITIVE_ENV_KEY_PATTERN.test(String(key ?? ""));
+  const string = String(key ?? "");
+  return SENSITIVE_ENV_KEY_PATTERN.test(string) || isSecretShapedEnvKey(string);
 }
 
 export function isSensitiveEnvValue(value) {
@@ -98,6 +99,14 @@ export function isSensitiveEnvValue(value) {
     || TOKEN_SHAPED_ENV_VALUE_PATTERNS.some((pattern) => pattern.test(trimmed))
     || credentialBearingUrl(trimmed)
     || highEntropySingleToken(trimmed);
+}
+
+export function isSecretShapedEnvKey(key) {
+  const trimmed = String(key ?? "").trim();
+  if (!trimmed) return false;
+  return TOKEN_SHAPED_ENV_VALUE_PATTERNS.some((pattern) => pattern.test(trimmed))
+    || credentialBearingUrl(trimmed)
+    || highEntropySecretKey(trimmed);
 }
 
 function packageVersion() {
@@ -160,6 +169,11 @@ function highEntropySingleToken(value) {
   if (/\s/u.test(value)) return false;
   if (!/^[A-Za-z0-9._~+/=-]+$/u.test(value)) return false;
   return shannonEntropy(value) >= HIGH_ENTROPY_MIN_SHANNON;
+}
+
+function highEntropySecretKey(value) {
+  if (/^[A-Z0-9_]+$/u.test(value)) return false;
+  return highEntropySingleToken(value);
 }
 
 function shannonEntropy(value) {
