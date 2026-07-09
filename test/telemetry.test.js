@@ -131,6 +131,35 @@ describe("trace-context validation", () => {
     assert.equal(env.FEATURE_FACTORY_TRACESTATE, "vendor=value");
     assert.equal(env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
   });
+
+  it("clears the whole inherited trace context before applying a partial explicit override", () => {
+    const inherited = {
+      OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+      TRACEPARENT: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+      TRACESTATE: "old-vendor=stale",
+      FEATURE_FACTORY_TRACEPARENT: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+      FEATURE_FACTORY_TRACESTATE: "old-vendor=stale",
+      FEATURE_FACTORY_PARENT_SPAN_ID: "bbbbbbbbbbbbbbbb",
+    };
+
+    const newTrace = prepareTelemetryEnv(inherited, { traceparent });
+    assert.equal(newTrace.TRACEPARENT, traceparent);
+    assert.equal(newTrace.FEATURE_FACTORY_TRACEPARENT, traceparent);
+    assert.equal(newTrace.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+    assert.equal("TRACESTATE" in newTrace, false);
+    assert.equal("FEATURE_FACTORY_TRACESTATE" in newTrace, false);
+    assert.equal(newTrace.OTEL_EXPORTER_OTLP_ENDPOINT, inherited.OTEL_EXPORTER_OTLP_ENDPOINT);
+
+    const newParent = prepareTelemetryEnv(inherited, { parentSpanId: "00f067aa0ba902b7" });
+    assert.equal(newParent.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+    assert.equal("TRACEPARENT" in newParent, false);
+    assert.equal("TRACESTATE" in newParent, false);
+    assert.equal("FEATURE_FACTORY_TRACEPARENT" in newParent, false);
+    assert.equal("FEATURE_FACTORY_TRACESTATE" in newParent, false);
+
+    const untouched = prepareTelemetryEnv(inherited, {});
+    assert.deepEqual(untouched, inherited);
+  });
 });
 
 describe("content-capture risk", () => {

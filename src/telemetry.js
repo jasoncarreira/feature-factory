@@ -176,10 +176,29 @@ export function validateTraceContext(input = {}) {
   return { ok: true, ...output };
 }
 
+const TRACE_CONTEXT_ENV_KEYS = Object.freeze([
+  "TRACEPARENT",
+  "TRACESTATE",
+  FEATURE_FACTORY_TRACEPARENT,
+  FEATURE_FACTORY_TRACESTATE,
+  FEATURE_FACTORY_PARENT_SPAN_ID,
+]);
+
 export function prepareTelemetryEnv(baseEnv = process.env, traceContext = {}) {
   const env = { ...(baseEnv || {}) };
   const validated = validateTraceContext(traceContext);
   if (!validated.ok) throw new Error(validated.error);
+
+  const hasExplicitContext = validated.traceparent !== undefined
+    || validated.tracestate !== undefined
+    || validated.parentSpanId !== undefined;
+  if (!hasExplicitContext) return env;
+
+  // An explicit override replaces the whole ambient trace context. Keeping any
+  // inherited field alongside supplied ones can pair a stale TRACESTATE with a
+  // new trace, or a contradictory inherited TRACEPARENT with an explicit parent
+  // span id, leaving the child process with an ambiguous context.
+  for (const key of TRACE_CONTEXT_ENV_KEYS) delete env[key];
 
   if (validated.traceparent) {
     env.TRACEPARENT = validated.traceparent;
