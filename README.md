@@ -453,7 +453,7 @@ Operator-facing condition mapping:
 
 Heartbeat and PID evidence is liveness-only, never authority. `missing-heartbeat-process` refers to the heartbeat helper PID recorded in `heartbeat.json`, not a detached opencode process; there is no durable run-id-to-opencode-PID registry. PID checks are race-prone and may be affected by PID reuse, so diagnostic items from heartbeat/process evidence carry `authoritative: false` and `evidence.liveness_only: true`.
 
-Protected gate waits are intentionally heartbeat-free. A pending protected `story`, `brief`, or `pre_pr` gate uses the exact tuple `needs-human` / `warning` / `warning` everywhere and suppresses stale-heartbeat and missing-heartbeat-process alarms. Valid terminal states suppress heartbeat/worktree liveness alarms.
+Heartbeat diagnostics are emitted only while `run.json` shows heartbeat-bracketed in-flight work: a `running` step, `running` slice, or `review` slice. Idle/bootstrap runs, blocked steps, protected gates, and valid terminal states suppress stale-heartbeat and missing-heartbeat-process alarms because no heartbeat helper should be active for those states.
 
 Diagnostics are fail-closed for invalid local state. `diagnostics.authoritative` is true only when `run.json` schema validation and required sidecars pass. Heartbeat data, PID liveness, process existence, worktree strings, status booleans, and mutable `run.json` claims are not enough to infer a healthy run.
 
