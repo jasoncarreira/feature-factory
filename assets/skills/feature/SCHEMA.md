@@ -45,6 +45,16 @@ Implementation worktrees live under:
 .opencode/worktrees/<feature-branch>--<slice-id>/
 ```
 
+## Runtime-Only Task Context
+
+Task tool `task_id` values are non-durable runtime context for the current orchestrator session only. They are not part of the factory persistence schema and are intentionally excluded from `run.json`, `heartbeat.json`, gates, artifacts, plan files, evidence files, review files, terminal results, and schema validation.
+
+No `run.json`, evidence, or reviews schema has a `task_id` field.
+
+The orchestrator may use a `task_id` only to resume an eligible implementer remediation task (`backend-builder`, `frontend-builder`, or `test-verifier`) while the same role, subject/slice/test owner, worktree, branch, live orchestrator session, and bounded remediation loop are still unchanged. A `task_id` must never be serialized for resume, replay, external-driver coordination, audit evidence, or cross-session recovery.
+
+Reviewer tasks are always fresh. `task_id` must never be passed to or stored for `work-reviewer`, `implementation-validator`, or `security-reviewer`; their continuity comes only from explicit prompt inputs such as current observed evidence, `attempt`, and prior `required_fixes`.
+
 ## CLI State Write Surface
 
 After the initial manifest bootstrap, do not edit `run.json` directly. Every semantic state write uses the `feature-factory factory ...` CLI, which takes `run-json.lock/`, validates the next state, and commits atomically. The CLI invokes the checked transition helpers internally, including `transitionGateDecision` for protected gate decisions and `transitionPrCreated` for completed PR state.

@@ -336,6 +336,22 @@ Detached mode returns a PID and writes stdout/stderr to `.opencode/factory/proce
 
 Autonomous mode is explicit opt-in. It still writes gate question files, observed evidence, reviews, and `run.json`; it records story/brief approvals only when the artifacts are complete and unambiguous, decides pre-PR from the implementation-validator/security-reviewer panel, runs bounded remediation on NO-GO, and never auto-merges.
 
+### Remediation context reuse
+
+During a bounded remediation loop, the orchestrator may reuse an opencode Task `task_id` only as a runtime-only, implementer-only optimization. Reuse is safe only when all of these remain unchanged from the original Task dispatch:
+
+- Same implementer role: `backend-builder`, `frontend-builder`, or `test-verifier`.
+- Same owned remediation subject: the same slice id for a builder, or the same acceptance-test/integration test owner for `test-verifier`.
+- Same slice/test worktree and same branch.
+- Same live orchestrator session; `task_id` values are not portable across process restarts, `factory resume`, detached relaunches, or continuation child runs.
+- Same bounded remediation loop, including the same attempt sequence and remediation owner.
+
+Eligible implementers are only `backend-builder`, `frontend-builder`, and `test-verifier`, and only when that agent owns the remediation being routed. If any safety fact is unknown, omit `task_id` and start a fresh Task.
+
+Reviewers and final panel agents must start fresh every loop. Do not pass a `task_id` to `work-reviewer`, `implementation-validator`, or `security-reviewer`; they remain read-only observers for each review/validation/security pass. Existing re-review behavior still applies: every retry passes the current `attempt` and the prior review or panel `required_fixes` list so reviewers perform the required delta review instead of reopening unchanged scope.
+
+`task_id` is never durable factory state. Do not persist it in `run.json`, evidence records, review files, schema examples, gates, process logs intended as workflow evidence, or external tracker payloads. Persist the attempt number, evidence refs, review refs, and required fixes; keep `task_id` only in orchestrator memory for the live dispatch that may be resumed.
+
 Monitor local state:
 
 ```sh

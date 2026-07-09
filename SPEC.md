@@ -459,6 +459,26 @@ PR completion contract:
 3. The command validates the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and canonical GitHub PR URL, then writes `run.pr_url` / `terminal_result.pr_url` and completed status.
 4. Drivers must not mirror PR URLs from direct manifest edits.
 
+### Remediation context reuse contract
+
+Implementation status: safe context reuse is an orchestrator runtime behavior only. It must not change the durable state protocol, evidence contract, review contract, or schemas.
+
+The orchestrator may reuse a Task `task_id` inside a bounded remediation loop only for the implementer that owns the fix. Reuse is permitted only when every safety dimension is identical to the original dispatch:
+
+- Role is the same eligible implementer: `backend-builder`, `frontend-builder`, or `test-verifier`.
+- Subject ownership is unchanged: the same slice for a builder, or the same acceptance-test/integration test owner for `test-verifier`.
+- Worktree and branch are unchanged.
+- The live orchestrator session is unchanged; `task_id` reuse is invalid after process restart, `factory resume`, detached relaunch, blocked-run continuation, or any handoff to a different orchestrator session.
+- The same bounded remediation loop is still active and has not exceeded its retry budget.
+
+If any dimension is unknown, ambiguous, stale, or mismatched, the orchestrator must omit `task_id` and launch a fresh Task. Reuse is an optimization for continuity of the implementer conversation, not authority to skip observation, evidence, tests, reviews, validation, security review, or remediation bounds.
+
+Review agents are not eligible for context reuse. `work-reviewer`, `implementation-validator`, and `security-reviewer` must start from a fresh Task every loop, must not receive a prior `task_id`, and remain read-only observers of the current worktree/result. This preserves independence for slice re-review, final implementation validation, and adversarial security review.
+
+Existing attempt and delta-review behavior remains required. On every retry, the orchestrator still passes the current `attempt` and the prior applicable `required_fixes` list into the reviewer/validator/security prompt so the review checks whether required fixes landed and whether the fix introduced regressions.
+
+Durability rule: never write `task_id` into `run.json`, `evidence/*`, `reviews/*`, gates, `terminal_result`, schema examples, or blocked-run continuation metadata. Durable state records attempts, refs, hashes, verdicts, and required fixes only. `task_id` is runtime-only and implementer-only; if safety is unknown, omit it.
+
 ## 10. Blocked-Run Continuation
 
 Current planned public command:

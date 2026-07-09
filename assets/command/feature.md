@@ -33,7 +33,7 @@ If the parsed payload has a `driver` object, treat it as operator-supplied mode/
   - Do not stop at `story` or `brief` gates when the producing artifacts are complete, internally consistent, and no product/security/UX/external-policy ambiguity remains. Record these as approved with answer `approve`, `approval_source: "autonomous"`, and a short evidence note in `run.json`.
   - If `story` or `brief` approval would require a human product decision, mark the run status `needs-human` with a clear reason and `terminal_result`, then stop.
   - At `pre_pr`, use the factory's own two-lens panel verdict as the gate decision. GO/PASS may approve `pre_pr` autonomously and proceed to PR creation using the effective PR mode. Any validator NO-GO or security-reviewer BLOCK is NO-GO.
-  - On NO-GO, run the bounded remediation loop described by the feature skill, re-observe, and re-run the panel. Do not exceed `run.json.max_retries` or 3 attempts if unset.
+  - On NO-GO, run the bounded remediation loop described by the feature skill, re-observe, and re-run the panel. You may reuse backend-builder, frontend-builder, or test-verifier implementer context only under the skill's strict runtime `task_id` reuse rules; always dispatch work-reviewer, implementation-validator, and security-reviewer fresh without `task_id`. Do not exceed `run.json.max_retries` or 3 attempts if unset.
   - If remediation is exhausted, mark status `blocked` with the top finding and `terminal_result`, then stop.
   - Never auto-merge. PR creation is the final autonomous side effect.
   - At every terminal state, write `run.json.terminal_result` with status, run_id, pr_url, reason, summary, and artifact references useful to external harnesses.
