@@ -12,6 +12,7 @@ import { git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
+import { prepareTelemetryEnv } from "./telemetry.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -98,13 +99,14 @@ export async function startFactory(args, opts = {}) {
     const eligibility = startResumeEligibility(preflight, { ...opts, cwd: repo, repoRoot: repo });
     if (!eligibility.ok) return eligibility;
   }
+  const launchEnv = factoryLaunchEnv(opts);
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo }));
-  if (opts.detached) return startDetached(repo, commandArgs);
+  if (opts.detached) return startDetached(repo, commandArgs, launchEnv);
   try {
-    execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
+    execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
   } catch (error) {
     throw new Error(`opencode exited ${error.status ?? 1}`);
   }
@@ -469,15 +471,16 @@ export function continueFactory(parentRunId, opts = {}) {
 
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
   const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
+  const launchEnv = factoryLaunchEnv(opts);
   if (opts.dryRun) return { status: "dry-run", payload };
 
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(JSON.stringify(payload, null, 2));
-  if (opts.detached) return startDetached(repo, commandArgs);
+  if (opts.detached) return startDetached(repo, commandArgs, launchEnv);
   try {
-    execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
+    execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
   } catch (error) {
     throw new Error(`opencode exited ${error.status ?? 1}`);
   }
@@ -490,15 +493,16 @@ export async function resumeFactory(runId, opts = {}) {
   const eligibility = resumeEligibility(runDir, run, { ...opts, cwd: repo, repoRoot: repo });
   if (!eligibility.eligible) throw new Error(`resume ineligible: ${eligibility.reasons.join(", ")}`);
   const payload = buildResumePayload(run, { ...opts, repo });
+  const launchEnv = factoryLaunchEnv(opts);
   if (opts.dryRun) return { status: "dry-run", eligible: true, eligibility, payload };
 
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(JSON.stringify(payload, null, 2));
-  if (opts.detached) return startDetached(repo, commandArgs);
+  if (opts.detached) return startDetached(repo, commandArgs, launchEnv);
   try {
-    execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
+    execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
   } catch (error) {
     throw new Error(`opencode exited ${error.status ?? 1}`);
   }
@@ -1340,7 +1344,7 @@ function allRunDirs(opts = {}) {
   return dirs;
 }
 
-function startDetached(repo, commandArgs) {
+function startDetached(repo, commandArgs, env = process.env) {
   const processes = join(factoryRoot(repo), "processes");
   mkdirSync(processes, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1349,6 +1353,7 @@ function startDetached(repo, commandArgs) {
   const child = spawn("opencode", commandArgs, {
     cwd: repo,
     detached: true,
+    env,
     stdio: ["ignore", out, out],
   });
   child.on("error", (error) => appendFileSync(log, `\n[feature-factory] failed to start opencode: ${error.message}\n`));
@@ -1361,6 +1366,18 @@ function startDetached(repo, commandArgs) {
     log,
     command: ["opencode", ...commandArgs].join(" "),
   };
+}
+
+function factoryLaunchEnv(opts = {}) {
+  try {
+    return prepareTelemetryEnv(process.env, {
+      parentSpanId: opts.parentSpanId,
+      traceparent: opts.traceparent,
+      tracestate: opts.tracestate,
+    });
+  } catch (error) {
+    throw new Error(`invalid trace context: ${error.message}`);
+  }
 }
 
 function pendingGate(run) {
