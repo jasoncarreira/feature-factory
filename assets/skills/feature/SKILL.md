@@ -218,7 +218,7 @@ Operator actions must be explicit: inspect stale or missing-helper liveness befo
 
 Heartbeat diagnostic evidence is liveness-only. `missing-heartbeat-process` means the heartbeat helper PID in `heartbeat.json` is not alive; it is not a detached opencode process, and there is no durable run-id-to-opencode-PID registry. Mark heartbeat/PID/process evidence `authoritative: false` with `evidence.liveness_only: true`.
 
-Protected `story`, `brief`, and `pre_pr` gates use exactly `needs-human` / `warning` / `warning` and suppress stale-heartbeat and missing-heartbeat-process alarms. Valid terminal runs suppress heartbeat/worktree liveness alarms.
+Emit stale-heartbeat and missing-heartbeat-process diagnostics only while `run.json` shows heartbeat-bracketed in-flight work: a `running` step, `running` slice, or `review` slice. Idle/bootstrap runs, blocked steps, protected gates, and valid terminal runs suppress heartbeat liveness alarms.
 
 ## Gate Protocol
 

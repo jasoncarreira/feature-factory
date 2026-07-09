@@ -256,6 +256,7 @@ describe("TUI factory scanner", () => {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
       gates: {},
+      slices: [{ id: "slice", status: "running", attempts: 1 }],
     });
     writeHeartbeat(repo, "heartbeat-run");
 
@@ -263,6 +264,24 @@ describe("TUI factory scanner", () => {
 
     assert.equal(run.diagnostic_status, "warning");
     assert.equal(run.diagnostics.items[0]?.condition, "missing-heartbeat-process");
+    cleanup(repo);
+  });
+
+  it("does not project stale heartbeat diagnostics for idle or blocked work", () => {
+    const repo = tempDir();
+    writeRun(repo, "idle-heartbeat-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      steps: [{ agent: "spec-writer", status: "blocked", attempts: 1 }],
+    });
+    writeHeartbeat(repo, "idle-heartbeat-run");
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.diagnostic_status, "ok");
+    assert.equal(run.diagnostic_classification, "healthy");
+    assert.equal(run.diagnostics.items.length, 0);
     cleanup(repo);
   });
 });

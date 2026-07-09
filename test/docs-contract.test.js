@@ -213,6 +213,7 @@ describe("diagnostics docs contract", () => {
       assert.match(text, orderedPattern(conditionOrder), `${name} must document condition order`);
       assert.match(text, /original detection order/i, `${name} must document detection-order tiebreaker`);
       assert.match(text, /do not restart blindly|not restart blindly/i, `${name} must warn against blind restart`);
+      assert.match(text, /`running` step[\s\S]*`running` slice[\s\S]*`review` slice/i, `${name} must document heartbeat diagnostics require in-flight work`);
       assert.match(text, /restore (?:the )?worktree|recover from durable state/i, `${name} must explain missing-worktree action`);
       assert.match(text, /answer (?:the )?pending protected gate|answer or stop/i, `${name} must explain protected-gate action`);
       assert.match(text, /read `terminal_result`|inspect the terminal result/i, `${name} must explain terminal-run action`);
