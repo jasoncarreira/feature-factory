@@ -4,7 +4,7 @@ import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { git } from "./git.js";
-import { canonicalizeGithubPrUrl, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef } from "./refs.js";
+import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef } from "./refs.js";
 import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 
@@ -534,6 +534,7 @@ function assertTerminalTransition(current, next, hooks = {}) {
 
 function assertPrCreatedPreconditions(run, request) {
   if (stringValue(run.pr_url)) throw new Error("pr-created requires run.pr_url to be unset");
+  if (run.continuation?.kind === "blocked-run-continuation" && request.draft === false) throw new Error("pr-created requires draft PR for blocked-run-continuation runs");
   if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
@@ -566,18 +567,20 @@ function assertPassingVerdictArtifacts(runDir, run) {
 }
 
 function assertPrNumberMatchesUrl(prUrl, prNumber) {
-  const canonical = canonicalizeGithubPrUrl(prUrl);
-  const number = Number(canonical.split("/").pop());
-  if (number !== prNumber) throw new Error("pr-created requires pr_number to match the GitHub PR URL");
+  if (githubPrUrlParts(prUrl).number !== prNumber) throw new Error("pr-created requires pr_number to match the GitHub PR URL");
 }
 
 function normalizePrCreatedInput(input) {
   if (!isRecord(input)) throw new Error("transitionPrCreated requires an input object");
+  const prUrl = canonicalizeGithubPrUrl(firstNonEmptyString(input.pr_url, input.prUrl));
+  const repository = requireNonEmptyString(input.repository, "repository");
+  const parts = githubPrUrlParts(prUrl);
+  if (repository !== parts.repository) throw new Error("pr-created requires repository to match the GitHub PR URL");
   return {
     ...cloneJson(input),
-    pr_url: canonicalizeGithubPrUrl(firstNonEmptyString(input.pr_url, input.prUrl)),
+    pr_url: prUrl,
     pr_number: normalizePrNumber(input.pr_number ?? input.prNumber),
-    repository: requireNonEmptyString(input.repository, "repository"),
+    repository,
     draft: input.draft === undefined ? true : normalizeBoolean(input.draft, "draft"),
   };
 }

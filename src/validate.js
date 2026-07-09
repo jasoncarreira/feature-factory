@@ -30,6 +30,8 @@ const VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS", "NO-GO"]);
 const PASSING_VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS"]);
 const SECURITY_VERDICTS = new Set(["PASS", "BLOCK"]);
 const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
+const CONTINUATION_KINDS = new Set(["blocked-run-continuation"]);
+const BLOCKED_CONTINUATION_PARENT_STATUSES = new Set(["blocked"]);
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const DEBUG_SNAPSHOT_KEYS = new Set(["created_with", "last_resumed_with", "resume_count"]);
 const DEBUG_SNAPSHOT_EVENT_KEYS = new Set(["collected_at", "event", "diagnostic_only", "env"]);
@@ -63,6 +65,7 @@ export function validateRun(run) {
   optionalInteger(errors, run, "max_retries", "run.max_retries");
   optionalNonEmptyString(errors, run, "review_tier", "run.review_tier");
   validateDebugSnapshot(errors, run.debug_snapshot, "run.debug_snapshot");
+  validateContinuation(errors, run, "run.continuation");
 
   validateGateMap(errors, run.gates, "run.gates");
   validateRunSlices(errors, run.slices, "run.slices");
@@ -273,6 +276,106 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
   validateRedactedEnv(errors, payload, `${path}.env`);
 }
 
+function validateContinuation(errors, run, path) {
+  const continuation = run.continuation;
+  if (continuation === undefined || continuation === null) return;
+  if (!isRecord(continuation)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+
+  requiredInteger(errors, continuation, "schema_version", `${path}.schema_version`);
+  if (Number.isInteger(continuation.schema_version) && continuation.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredEnum(errors, continuation, "kind", CONTINUATION_KINDS, `${path}.kind`);
+  requiredString(errors, continuation, "created_at", `${path}.created_at`);
+  requiredString(errors, continuation, "operator_summary", `${path}.operator_summary`);
+  validateContinuationParent(errors, continuation.parent, `${path}.parent`);
+  validateContinuationReview(errors, continuation.review, `${path}.review`);
+  validateContinuationTarget(errors, run, continuation.target, `${path}.target`);
+  validateContinuationRefHashArray(errors, continuation.parent_artifacts, `${path}.parent_artifacts`);
+  validateContinuationRefHashArray(errors, continuation.parent_evidence, `${path}.parent_evidence`);
+  validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
+  validateContinuationSelectedReview(errors, continuation, path);
+}
+
+function validateContinuationParent(errors, parent, path) {
+  if (!isRecord(parent)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredString(errors, parent, "run_id", `${path}.run_id`);
+  requiredEnum(errors, parent, "status", BLOCKED_CONTINUATION_PARENT_STATUSES, `${path}.status`);
+  requiredString(errors, parent, "run_ref", `${path}.run_ref`);
+  requiredHash(errors, parent, "run_hash", `${path}.run_hash`);
+  requiredString(errors, parent, "branch", `${path}.branch`);
+  requiredString(errors, parent, "commit", `${path}.commit`);
+  requiredString(errors, parent, "worktree", `${path}.worktree`);
+}
+
+function validateContinuationReview(errors, review, path) {
+  if (!isRecord(review)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredString(errors, review, "ref", `${path}.ref`);
+  requiredString(errors, review, "kind", `${path}.kind`);
+  optionalString(errors, review, "source", `${path}.source`);
+  requiredHash(errors, review, "hash", `${path}.hash`);
+  requiredString(errors, review, "subject", `${path}.subject`);
+  optionalString(errors, review, "verdict", `${path}.verdict`);
+  optionalString(errors, review, "summary", `${path}.summary`);
+  validateStringArray(errors, review.required_fixes, `${path}.required_fixes`, { required: false });
+  if (!stringValue(review.summary) && !hasNonEmptyStringItem(review.required_fixes)) {
+    errors.push({ path, message: "requires summary or required_fixes" });
+  }
+}
+
+function validateContinuationTarget(errors, run, target, path) {
+  if (!isRecord(target)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredString(errors, target, "run_id", `${path}.run_id`);
+  requiredString(errors, target, "branch", `${path}.branch`);
+  requiredString(errors, target, "worktree", `${path}.worktree`);
+  requiredString(errors, target, "base_ref", `${path}.base_ref`);
+  requiredString(errors, target, "base_commit", `${path}.base_commit`);
+  if (stringValue(target.run_id) && stringValue(run.run_id) && target.run_id !== run.run_id) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
+  if (stringValue(target.branch) && stringValue(run.branch) && target.branch !== run.branch) errors.push({ path: `${path}.branch`, message: "must match run.branch" });
+  if (stringValue(target.worktree) && stringValue(run.worktree) && target.worktree !== run.worktree) errors.push({ path: `${path}.worktree`, message: "must match run.worktree" });
+}
+
+function validateContinuationRefHashArray(errors, items, path) {
+  if (!Array.isArray(items)) {
+    errors.push({ path, message: "must be an array" });
+    return;
+  }
+  for (const [index, item] of items.entries()) {
+    const itemPath = `${path}[${index}]`;
+    if (!isRecord(item)) {
+      errors.push({ path: itemPath, message: "must be an object" });
+      continue;
+    }
+    requiredString(errors, item, "kind", `${itemPath}.kind`);
+    requiredString(errors, item, "ref", `${itemPath}.ref`);
+    requiredHash(errors, item, "hash", `${itemPath}.hash`);
+  }
+}
+
+function validateContinuationSelectedReview(errors, continuation, path) {
+  const review = continuation.review;
+  if (!isRecord(review) || !Array.isArray(continuation.parent_reviews)) return;
+  if (!stringValue(review.ref) || typeof review.hash !== "string" || !HASH_PATTERN.test(review.hash)) return;
+  const match = continuation.parent_reviews.find((item) => isRecord(item) && item.ref === review.ref);
+  if (!match) {
+    errors.push({ path: `${path}.parent_reviews`, message: "must include selected review ref" });
+    return;
+  }
+  if (match.hash !== review.hash) {
+    errors.push({ path: `${path}.parent_reviews`, message: "selected review hash must match review.hash" });
+  }
+}
+
 function validateRedactedEnv(errors, value, path) {
   if (Array.isArray(value)) {
     for (const [index, item] of value.entries()) validateRedactedEnv(errors, item, `${path}[${index}]`);
@@ -466,6 +569,22 @@ function validateStringMap(errors, value, path) {
   for (const [key, item] of Object.entries(value)) if (typeof item !== "string") errors.push({ path: `${path}.${key}`, message: "must be a string" });
 }
 
+function validateRequiredStringMap(errors, value, path) {
+  if (!isRecord(value)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) if (!stringValue(item)) errors.push({ path: `${path}.${key}`, message: "must be a non-empty string" });
+}
+
+function validateRequiredHashMap(errors, value, path) {
+  if (!isRecord(value)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) if (typeof item !== "string" || !HASH_PATTERN.test(item)) errors.push({ path: `${path}.${key}`, message: "must be a sha256 hash" });
+}
+
 function validateStringArray(errors, value, path, options = {}) {
   if (value === undefined || value === null) {
     if (options.required) errors.push({ path, message: "must be an array" });
@@ -480,6 +599,10 @@ function validateStringArray(errors, value, path, options = {}) {
     if (!stringValue(item)) errors.push({ path: `${path}[${index}]`, message: "must be a non-empty string" });
     else if (options.values && !options.values.has(item)) errors.push({ path: `${path}[${index}]`, message: `unknown dependency '${item}'` });
   }
+}
+
+function hasNonEmptyStringItem(value) {
+  return Array.isArray(value) && value.some((item) => stringValue(item));
 }
 
 function requiredString(errors, obj, key, path) {

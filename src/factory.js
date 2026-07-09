@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, withRunJsonLock } from "./run-state.js";
@@ -22,7 +22,17 @@ const HEARTBEAT_TICK_LOCK_TIMEOUT_MS = 1000;
 const HEARTBEAT_TICK_LOCK_RETRIES = 3;
 const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
+const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
+const CONTINUATION_PARENT_ARTIFACT_REFS = [
+  { kind: "story", ref: "artifacts/story.md" },
+  { kind: "research_map", ref: "artifacts/research-map.md" },
+  { kind: "design_brief", ref: "artifacts/design-brief.md" },
+  { kind: "technical_brief", ref: "artifacts/technical-brief.md" },
+  { kind: "test_report", ref: "artifacts/test-report.md" },
+  { kind: "validation_report", ref: "artifacts/validation-report.md" },
+  { kind: "pr_body", ref: "artifacts/pr-body.md" },
+];
 const REPO_SEEDED_SKILL_FILES = ["SKILL.md", "SCHEMA.md"];
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const PACKAGED_SEED_HASHES = {
@@ -82,6 +92,28 @@ export function startFactory(args, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo }));
+  if (opts.detached) return startDetached(repo, commandArgs);
+  try {
+    execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
+  } catch (error) {
+    throw new Error(`opencode exited ${error.status ?? 1}`);
+  }
+}
+
+export function continueFactory(parentRunId, opts = {}) {
+  if (opts.ready) throw new Error("factory continue does not accept --ready");
+  if (opts.noDraft) throw new Error("factory continue does not accept --no-draft");
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
+
+  const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
+  const payload = featureCommandPayload(prompt, { ...opts, repo, ready: false, continuation });
+  if (opts.dryRun) return { status: "dry-run", payload };
+
+  seedRepoSkill(repo);
+  const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
+  if (opts.model) commandArgs.push("--model", opts.model);
+  commandArgs.push(JSON.stringify(payload, null, 2));
   if (opts.detached) return startDetached(repo, commandArgs);
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
@@ -514,6 +546,313 @@ function tryReadPublicRun(file, opts = {}) {
   }
 }
 
+function buildContinuation(parentRunId, opts = {}) {
+  if (!stringValue(parentRunId)) throw new Error("factory continue requires exactly one <blocked-run-id>");
+  const repo = opts.cwd || process.cwd();
+  const parentRunDir = resolveRunDir(parentRunId, opts);
+  const parentRunFile = join(parentRunDir, "run.json");
+  lstatRequiredNoSymlinks(repo, parentRunFile, "parent run.json", "parent run.json must not contain symlinks");
+  const parentRun = readRunFile(parentRunFile);
+  if (parentRun.status !== "blocked") {
+    throw new Error(`parent run '${parentRun.run_id}' must have status blocked`);
+  }
+  if (!stringValue(parentRun.branch)) {
+    throw new Error(`parent run '${parentRun.run_id}' must have a local branch`);
+  }
+  if (!branchExists(repo, parentRun.branch)) {
+    throw new Error(`parent run '${parentRun.run_id}' requires existing branch '${parentRun.branch}'`);
+  }
+
+  const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
+  assertContinuationTargetAvailable(repo, targetRunId);
+  const review = resolveContinuationReview(parentRunDir, requiredContinuationReview(opts.review));
+  const reviewSource = resolveContinuationReviewSource(parentRun, review.ref);
+  const reviewMetadata = validateContinuationReview(readReviewJson(review.path), review.ref, reviewSource, parentRunDir);
+  const targetBaseRef = continuationBaseRef(parentRun);
+  const targetBaseCommit = continuationBaseCommit(repo, parentRun, targetBaseRef);
+
+  return {
+    kind: "blocked-run-continuation",
+    schema_version: 1,
+    created_at: timestamp(opts.now),
+    operator_summary: `Continue blocked run '${parentRun.run_id}' from ${review.ref}.`,
+    parent: {
+      run_id: parentRun.run_id,
+      status: parentRun.status,
+      run_ref: relativeRef(repo, parentRunFile),
+      run_hash: sha256File(parentRunFile),
+      branch: parentRun.branch,
+      commit: branchCommit(repo, parentRun.branch),
+      worktree: requiredParentWorktree(parentRun),
+    },
+    review: {
+      kind: reviewSource.kind,
+      ref: review.ref,
+      hash: sha256File(review.path),
+      ...reviewMetadata,
+    },
+    target: {
+      run_id: targetRunId,
+      branch: targetRunId,
+      worktree: resolve(repo, ".opencode", "worktrees", targetRunId),
+      base_ref: targetBaseRef,
+      base_commit: targetBaseCommit,
+    },
+    parent_artifacts: collectContinuationParentArtifacts(parentRunDir),
+    parent_evidence: collectContinuationParentEvidence(parentRunDir, parentRun),
+    parent_reviews: collectContinuationParentReviews(parentRunDir, parentRun),
+  };
+}
+
+function requiredParentWorktree(parentRun) {
+  if (!stringValue(parentRun.worktree)) throw new Error(`parent run '${parentRun.run_id}' must have a recorded worktree`);
+  return parentRun.worktree;
+}
+
+function continuationBaseRef(parentRun) {
+  return stringValue(parentRun.base_ref) ? String(parentRun.base_ref).trim() : "main";
+}
+
+function continuationBaseCommit(repo, parentRun, baseRef) {
+  if (stringValue(parentRun.base_commit)) return String(parentRun.base_commit).trim();
+  return refCommit(repo, baseRef, "target base ref");
+}
+
+function normalizeContinuationTargetRunId(runId, parentRunId) {
+  if (!stringValue(runId)) throw new Error("factory continue requires --run-id");
+  const value = String(runId).trim();
+  if (!SAFE_RUN_ID_PATTERN.test(value) || value.includes("..") || value.endsWith(".lock")) {
+    throw new Error("--run-id must be a bare safe factory run id");
+  }
+  if (value === parentRunId) throw new Error("--run-id must differ from the parent run id");
+  return value;
+}
+
+function assertContinuationTargetAvailable(repo, targetRunId) {
+  const targetRunFile = join(factoryRoot(repo), targetRunId, "run.json");
+  if (existsSync(targetRunFile)) throw new Error(`target run already exists: ${targetRunId}`);
+  if (branchExists(repo, targetRunId)) throw new Error(`target branch already exists: ${targetRunId}`);
+  const targetWorktree = resolve(repo, ".opencode", "worktrees", targetRunId);
+  if (existsSync(targetWorktree)) throw new Error(`target worktree already exists: ${targetWorktree}`);
+}
+
+function requiredContinuationReview(value) {
+  if (!stringValue(value)) throw new Error("factory continue requires --review");
+  return String(value).trim();
+}
+
+function resolveContinuationReview(parentRunDir, reviewRef) {
+  if (isAbsolute(reviewRef) || reviewRef.includes("\\")) {
+    throw new Error("--review must resolve under the parent run reviews/ directory");
+  }
+  const parentRun = resolve(parentRunDir);
+  const parentReviewsDir = join(parentRun, "reviews");
+  const reviewsDirEntry = lstatRequiredNoSymlinks(parentRun, parentReviewsDir, "--review", "--review must resolve under the parent run reviews/ directory without symlinks");
+  if (!reviewsDirEntry.isDirectory()) throw new Error("reviews directory must be a directory");
+  if (!isLogicalContainedPath(parentRun, parentReviewsDir, { allowEqual: false })) {
+    throw new Error("--review must resolve under the parent run reviews/ directory");
+  }
+  const relativeReviewRef = reviewRef.startsWith("reviews/") ? reviewRef : `reviews/${reviewRef}`;
+  const reviewPath = resolve(parentRun, relativeReviewRef);
+  if (!isLogicalContainedPath(parentReviewsDir, reviewPath, { allowEqual: false })) {
+    throw new Error("--review must resolve under the parent run reviews/ directory");
+  }
+  const reviewEntry = lstatRequiredNoSymlinks(parentRun, reviewPath, "--review", "--review must resolve under the parent run reviews/ directory without symlinks");
+  if (!reviewEntry.isFile()) throw new Error(`--review must be a JSON file: ${relativeReviewRef}`);
+  return { ref: relativeRef(parentRun, reviewPath), path: reviewPath };
+}
+
+function readReviewJson(file) {
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("must be a JSON object");
+    return value;
+  } catch (error) {
+    throw new Error(`--review must parse as a JSON object: ${error.message}`);
+  }
+}
+
+function validateContinuationReview(review, ref, source, parentRunDir) {
+  if (!stringValue(review.subject)) throw new Error(`review '${ref}' must have non-empty subject`);
+  const subject = String(review.subject).trim();
+  if (!source.expected_subjects.has(subject)) {
+    throw new Error(`review '${ref}' subject must match parent ${source.kind} source`);
+  }
+  validateContinuationReviewRefs(review, parentRunDir, ref);
+  const summary = stringValue(review.summary) ? String(review.summary).trim() : null;
+  const requiredFixes = normalizeRequiredFixes(review.required_fixes);
+  const hasSummary = summary !== null;
+  const hasRequiredFixes = requiredFixes.length > 0;
+  if (!hasSummary && !hasRequiredFixes) {
+    throw new Error(`review '${ref}' must have non-empty summary or required_fixes[]`);
+  }
+  const result = {
+    subject,
+    summary,
+    required_fixes: requiredFixes,
+  };
+  if (stringValue(review.verdict)) result.verdict = String(review.verdict).trim();
+  if (stringValue(source.source)) result.source = source.source;
+  return result;
+}
+
+function validateContinuationReviewRefs(review, parentRunDir, reviewRef) {
+  if (stringValue(review.evidence_ref)) hashParentRef(parentRunDir, review.evidence_ref, "evidence", "evidence");
+  if (stringValue(review.artifact_ref)) hashParentRef(parentRunDir, review.artifact_ref, "artifacts", "artifact");
+  if (stringValue(review.report)) hashParentRef(parentRunDir, review.report, "artifacts", "artifact");
+  if (stringValue(review.review_ref) && review.review_ref !== reviewRef) hashParentRef(parentRunDir, review.review_ref, "reviews", "review");
+}
+
+function resolveContinuationReviewSource(parentRun, reviewRef) {
+  const candidates = continuationReviewSources(parentRun).filter((candidate) => candidate.ref === reviewRef);
+  if (!candidates.length) throw new Error(`review '${reviewRef}' must be referenced by parent run state`);
+  return candidates[0];
+}
+
+function continuationReviewSources(parentRun) {
+  const parentSubjects = new Set([parentRun.run_id, parentRun.branch, "feature-branch"].filter(stringValue).map((value) => String(value).trim()));
+  const sources = [];
+  if (stringValue(parentRun.validator?.review_ref)) {
+    sources.push({ kind: "validator", source: "run.validator.review_ref", ref: parentRun.validator.review_ref, expected_subjects: parentSubjects });
+  }
+  if (stringValue(parentRun.security_review?.review_ref)) {
+    sources.push({ kind: "security_review", source: "run.security_review.review_ref", ref: parentRun.security_review.review_ref, expected_subjects: parentSubjects });
+  }
+  for (const step of Array.isArray(parentRun.steps) ? parentRun.steps : []) {
+    if (!stringValue(step?.review_ref) || !stringValue(step?.agent)) continue;
+    sources.push({ kind: "step", source: `run.steps.${step.agent}.review_ref`, ref: step.review_ref, expected_subjects: new Set([String(step.agent).trim()]) });
+  }
+  for (const slice of Array.isArray(parentRun.slices) ? parentRun.slices : []) {
+    if (!stringValue(slice?.review_ref) || !stringValue(slice?.id)) continue;
+    sources.push({ kind: "slice", source: `run.slices.${slice.id}.review_ref`, ref: slice.review_ref, expected_subjects: new Set([String(slice.id).trim()]) });
+  }
+  return sources.map((source) => ({ ...source, ref: normalizeParentRef(source.ref, "reviews") }));
+}
+
+function normalizeRequiredFixes(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter(stringValue).map((item) => String(item).trim());
+}
+
+function collectContinuationParentArtifacts(parentRunDir) {
+  const parentRun = resolve(parentRunDir);
+  const artifactsDir = join(parentRun, "artifacts");
+  const artifactsDirEntry = lstatOptionalNoSymlinks(parentRun, artifactsDir, "parent artifacts", "parent artifacts/ directory must not contain symlinks");
+  if (!artifactsDirEntry) return [];
+  if (!artifactsDirEntry.isDirectory()) return [];
+  return CONTINUATION_PARENT_ARTIFACT_REFS.flatMap(({ kind, ref }) => {
+    const hashed = optionalHashParentRef(parentRunDir, ref, "artifacts", kind, `parent artifact '${ref}' must not contain symlinks`);
+    return hashed ? [hashed] : [];
+  }).sort((a, b) => a.ref.localeCompare(b.ref));
+}
+
+function collectContinuationParentEvidence(parentRunDir, parentRun) {
+  const refs = [];
+  for (const step of Array.isArray(parentRun.steps) ? parentRun.steps : []) if (stringValue(step?.evidence_ref)) refs.push(step.evidence_ref);
+  for (const slice of Array.isArray(parentRun.slices) ? parentRun.slices : []) if (stringValue(slice?.evidence_ref)) refs.push(slice.evidence_ref);
+  return hashUniqueParentRefs(parentRunDir, refs, "evidence", "evidence");
+}
+
+function collectContinuationParentReviews(parentRunDir, parentRun) {
+  return hashUniqueParentRefs(parentRunDir, continuationReviewSources(parentRun).map((source) => source.ref), "reviews", "review");
+}
+
+function hashUniqueParentRefs(parentRunDir, refs, rootName, kind) {
+  return [...new Set(refs.filter(stringValue).map((ref) => normalizeParentRef(ref, rootName)))]
+    .map((ref) => hashParentRef(parentRunDir, ref, rootName, kind))
+    .sort((a, b) => a.ref.localeCompare(b.ref));
+}
+
+function optionalHashParentRef(parentRunDir, ref, rootName, kind, symlinkMessage) {
+  const parentRun = resolve(parentRunDir);
+  const normalizedRef = normalizeParentRef(ref, rootName);
+  const path = resolve(parentRun, normalizedRef);
+  const entry = lstatOptionalNoSymlinks(parentRun, path, `parent ${kind} '${normalizedRef}'`, symlinkMessage || `parent ${kind} '${normalizedRef}' must not contain symlinks`);
+  if (!entry || !entry.isFile()) return null;
+  if (!isLogicalContainedPath(join(parentRun, rootName), path, { allowEqual: false })) throw new Error(`parent ${kind} ref must stay under ${rootName}/: ${normalizedRef}`);
+  return { kind, ref: normalizedRef, hash: sha256File(path) };
+}
+
+function hashParentRef(parentRunDir, ref, rootName, kind) {
+  const hashed = optionalHashParentRef(parentRunDir, ref, rootName, kind);
+  if (!hashed) throw new Error(`missing parent ${kind} ref: ${normalizeParentRef(ref, rootName)}`);
+  return hashed;
+}
+
+function normalizeParentRef(ref, rootName) {
+  if (!stringValue(ref)) throw new Error(`parent ${rootName} ref is required`);
+  const value = String(ref).trim();
+  if (isAbsolute(value) || value.includes("\\")) throw new Error(`parent ${rootName} ref must be relative`);
+  return value.startsWith(`${rootName}/`) ? value : `${rootName}/${value}`;
+}
+
+function lstatRequiredNoSymlinks(rootDir, targetPath, label, symlinkMessage) {
+  const result = lstatPathNoSymlinks(rootDir, targetPath, symlinkMessage);
+  if (!result.entry) throw new Error(`${label} is unresolvable: ${targetPath}`);
+  return result.entry;
+}
+
+function lstatOptionalNoSymlinks(rootDir, targetPath, label, symlinkMessage) {
+  return lstatPathNoSymlinks(rootDir, targetPath, symlinkMessage || `${label} must not contain symlinks`).entry;
+}
+
+function lstatPathNoSymlinks(rootDir, targetPath, symlinkMessage) {
+  const root = resolve(rootDir);
+  const target = resolve(targetPath);
+  if (!isLogicalContainedPath(root, target, { allowEqual: false })) return { entry: null };
+  const segments = relative(root, target).split(/[\\/]+/u).filter(Boolean);
+  let current = root;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = join(current, segments[index]);
+    let entry;
+    try {
+      entry = lstatSync(current);
+    } catch (error) {
+      if (error?.code === "ENOENT") return { entry: null };
+      throw error;
+    }
+    if (entry.isSymbolicLink()) {
+      throw new Error(`${symlinkMessage}: ${relativeRef(root, current)}`);
+    }
+    if (index < segments.length - 1 && !entry.isDirectory()) return { entry: null };
+    if (index === segments.length - 1) return { entry };
+  }
+  return { entry: null };
+}
+
+function isLogicalContainedPath(parent, child, options = {}) {
+  const allowEqual = options.allowEqual !== false;
+  const rel = relative(resolve(parent), resolve(child));
+  if (rel === "") return allowEqual;
+  return rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel);
+}
+
+function branchExists(repo, branch) {
+  return git(repo, ["show-ref", "--verify", `refs/heads/${branch}`]).ok;
+}
+
+function branchCommit(repo, branch) {
+  return resolveGitCommit(repo, `refs/heads/${branch}^{commit}`, `parent branch '${branch}'`);
+}
+
+function refCommit(repo, ref, label) {
+  return resolveGitCommit(repo, `${ref}^{commit}`, `${label} '${ref}'`);
+}
+
+function resolveGitCommit(repo, spec, label) {
+  const proc = git(repo, ["rev-parse", "--verify", spec]);
+  if (!proc.ok) throw new Error(`parent run requires resolvable ${label} commit`);
+  return proc.stdout.trim();
+}
+
+function sha256File(file) {
+  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+}
+
+function relativeRef(from, to) {
+  return relative(from, to).replace(/\\/gu, "/");
+}
+
 function resolveRunDir(runId, opts = {}) {
   const id = runId || latestRunId(opts);
   if (!id) throw new Error("no factory runs found");
@@ -776,7 +1115,7 @@ export function validateSlices(plan) {
 
 function featureCommandPayload(prompt, opts) {
   const githubAccount = resolveGithubAccount(opts);
-  return {
+  const payload = {
     operator_request: String(prompt),
     driver: {
       mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
@@ -785,6 +1124,8 @@ function featureCommandPayload(prompt, opts) {
       github_account: githubAccount,
     },
   };
+  if (opts.continuation !== undefined) payload.continuation = opts.continuation;
+  return payload;
 }
 
 function resolveGithubAccount(opts) {

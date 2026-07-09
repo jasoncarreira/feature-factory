@@ -31,6 +31,18 @@ export function canonicalizeGithubPrUrl(value) {
   return `https://github.com/${segments[0]}/${segments[1]}/pull/${segments[3]}`;
 }
 
+export function githubPrUrlParts(value) {
+  const canonical = canonicalizeGithubPrUrl(value);
+  const segments = new URL(canonical).pathname.split("/").filter(Boolean);
+  return {
+    url: canonical,
+    owner: segments[0],
+    repo: segments[1],
+    repository: `${segments[0]}/${segments[1]}`,
+    number: Number(segments[3]),
+  };
+}
+
 export function resolveDurableRoots(runDir) {
   const runRealPath = physicalPath(runDir, "runDir", { mustExist: true });
   const roots = { run_dir: runRealPath };

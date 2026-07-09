@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { cleanupRun, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
+import { cleanupRun, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer } from "./factory.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { canonicalizeGithubPrUrl } from "./refs.js";
+import { canonicalizeGithubPrUrl, githubPrUrlParts } from "./refs.js";
 import { normalizePrNumber as normalizeTransitionPrNumber, transitionGateDecision, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
@@ -23,7 +23,7 @@ const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report"]);
 
 function usage(write = console.log) {
   write(`feature-factory
@@ -32,6 +32,7 @@ Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] <prompt...>
+  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--dry-run]
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory heartbeat <run-id> --start --phase <phase> [--interval MS] [--json]  Start detached liveness ticker
@@ -117,6 +118,10 @@ async function factory(args) {
   const opts = options(rest);
   const positional = positionals(rest);
   if (sub === "start") return print(startFactory(positional, opts), opts);
+  if (sub === "continue") {
+    if (positional.length !== 1) throw new Error("factory continue requires exactly one <blocked-run-id>");
+    return print(continueFactory(positional[0], opts), opts);
+  }
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
   if (sub === "heartbeat") return heartbeat(rest);
@@ -219,6 +224,8 @@ function options(args) {
     if (args[index] === "--interval") opts.intervalMs = Number(args[++index]);
     if (args[index] === "--phase") opts.phase = args[++index];
     if (args[index] === "--reviewer") opts.reviewer = args[++index];
+    if (args[index] === "--review") opts.review = args[++index];
+    if (args[index] === "--run-id") opts.runId = args[++index];
     if (args[index] === "--from") opts.from = args[++index];
     if (args[index] === "--artifact") opts.artifact = args[++index];
     if (args[index] === "--question-ref") opts.questionRef = args[++index];
@@ -445,7 +452,35 @@ async function prCreated(args) {
     draft: opts.noDraft === true ? false : true,
   };
   const runDir = resolveRunDir(runId, opts);
+  verifyContinuationPrIsDraft(readHeartbeatStartRun(runDir), request, opts);
   return print(await transitionPrCreated(runDir, request, opts), opts);
+}
+
+function verifyContinuationPrIsDraft(run, request, opts = {}) {
+  if (run.continuation?.kind !== "blocked-run-continuation") return;
+  if (request.draft !== true) throw new Error("pr-created requires draft PR for blocked-run-continuation runs");
+  const state = githubPrDraftState(request, opts);
+  if (state !== true) throw new Error("pr-created requires GitHub PR isDraft=true for blocked-run-continuation runs");
+}
+
+function githubPrDraftState(request, opts = {}) {
+  const pr = githubPrUrlParts(request.pr_url);
+  const proc = spawnSync("gh", ["pr", "view", String(pr.number), "--repo", pr.repository, "--json", "isDraft"], {
+    cwd: opts.cwd,
+    encoding: "utf8",
+    env: { ...process.env },
+  });
+  if (proc.status !== 0) {
+    const detail = String(proc.stderr || proc.stdout || "").trim();
+    throw new Error(`pr-created could not verify GitHub PR draft state${detail ? `: ${detail}` : ""}`);
+  }
+  try {
+    const value = JSON.parse(proc.stdout || "{}");
+    if (typeof value.isDraft !== "boolean") throw new Error("missing boolean isDraft");
+    return value.isDraft;
+  } catch (error) {
+    throw new Error(`pr-created could not parse GitHub PR draft state: ${error.message}`);
+  }
 }
 
 async function sliceMerged(args) {
