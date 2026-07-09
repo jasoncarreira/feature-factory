@@ -16,6 +16,9 @@ const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
 const TODO = readDoc("../TODO.md");
 const CLI = readDoc("../src/cli.js");
+const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
+const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
+const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
 const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
 const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-created <run-id> --json",
@@ -295,6 +298,65 @@ describe("blocked-run continuation docs contract", () => {
 
   it("does not leave the resolved blocked-run continuation item open in TODO", () => {
     assert.doesNotMatch(TODO, /Automated blocked-run continuation/i, "TODO must not leave the resolved blocked-run continuation item open");
+  });
+});
+
+describe("remediation context reuse docs contract", () => {
+  it("documents implementer-only runtime task_id reuse boundaries", () => {
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA })) {
+      assert.match(text, /task_id/i, `${name} must mention Task task_id reuse`);
+      assert.match(text, /runtime-only|runtime context|orchestrator memory/i, `${name} must make task_id runtime-only`);
+      assert.match(text, /implementer-only|eligible implementer|implementer remediation|implementer that owns the fix/i, `${name} must make reuse implementer-only`);
+      for (const implementer of ["backend-builder", "frontend-builder", "test-verifier"]) {
+        assert.match(text, literalPattern(implementer), `${name} must name eligible implementer ${implementer}`);
+      }
+      assert.match(text, /same (?:eligible )?implementer role|role is the same eligible implementer|same role|same role, subject\/slice\/test owner/i, `${name} must require the same role`);
+      assert.match(text, /subject\/slice\/test owner|same owned remediation subject|same subject|same slice id|same acceptance-test\/integration test owner|same test owner|subject ownership is unchanged/i, `${name} must require the same subject/slice/test owner`);
+      assert.match(text, /same[^.\n]*worktree|worktree[^.\n]*unchanged/i, `${name} must require the same worktree`);
+      assert.match(text, /same[^.\n]*branch|branch[^.\n]*unchanged/i, `${name} must require the same branch`);
+      assert.match(text, /same live orchestrator session|live orchestrator session is unchanged|same[^.\n]*orchestrator session/i, `${name} must require the same live orchestrator session`);
+      assert.match(text, /same[^.\n]*bounded remediation loop|bounded remediation loop[^.\n]*(?:unchanged|only)|current bounded remediation loop/i, `${name} must require the same bounded remediation loop`);
+    }
+
+    assert.match(COMMAND, /bounded remediation loop/i, "COMMAND must route NO-GO through bounded remediation");
+    assert.match(COMMAND, /backend-builder, frontend-builder, or test-verifier implementer context/i, "COMMAND must limit reuse to implementer context");
+    assert.match(COMMAND, /skill's strict runtime `task_id` reuse rules/i, "COMMAND must bind reuse to the skill's strict runtime task_id rules");
+  });
+
+  it("keeps reviewers and final panel agents fresh, task_id-free, and read-only", () => {
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA, COMMAND })) {
+      for (const reviewer of ["work-reviewer", "implementation-validator", "security-reviewer"]) {
+        assert.match(text, literalPattern(reviewer), `${name} must name ${reviewer}`);
+      }
+      assert.match(text, /fresh/i, `${name} must require fresh reviewer/panel tasks`);
+      assert.match(text, /(?:without|no|never|must not)[^\n.]*task_id|task_id[^\n.]*must never/i, `${name} must prohibit reviewer task_id reuse`);
+    }
+
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, WORK_REVIEWER_PROMPT, IMPLEMENTATION_VALIDATOR_PROMPT, SECURITY_REVIEWER_PROMPT })) {
+      assert.match(text, /read-only|read and judge|do not edit|never edit/i, `${name} must keep reviewer/validator/security roles read-only`);
+    }
+  });
+
+  it("does not serialize task_id into durable schema examples or state records", () => {
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA, COMMAND })) {
+      assert.doesNotMatch(text, /["']task_id["']\s*:/i, `${name} must not add a durable task_id JSON field`);
+    }
+    assert.match(SCHEMA, /No `run\.json`, evidence, or reviews schema has a `task_id` field/i, "SCHEMA must explicitly exclude durable task_id fields");
+    assert.match(SCHEMA, /intentionally excluded from `run\.json`[\s\S]*evidence files[\s\S]*review files/i, "SCHEMA must exclude task_id from durable run/evidence/review state");
+  });
+
+  it("preserves attempt and required_fixes for all re-review reruns", () => {
+    assert.match(SKILL, /For every re-review, pass `attempt: <n>` and the prior review's `required_fixes` list[\s\S]*rejected slice remediation/i, "SKILL must preserve slice attempt and required_fixes on re-review");
+    assert.match(SKILL, /test-verifier re-review[\s\S]*fresh `work-reviewer` task[\s\S]*`attempt: <n>`[\s\S]*prior review's `required_fixes` list/i, "SKILL must preserve test-verifier attempt and required_fixes on re-review");
+    assert.match(SKILL, /panel re-run[\s\S]*fresh `implementation-validator` and `security-reviewer` tasks[\s\S]*never pass `task_id`[\s\S]*`attempt: <n>` plus the prior validator\/security `required_fixes` list/i, "SKILL must preserve implementation-validator/security reviewer attempt and required_fixes on panel reruns");
+    assert.match(SPEC, /current `attempt` and the prior applicable `required_fixes` list[\s\S]*review checks whether required fixes landed/i, "SPEC must preserve attempt and required_fixes delta-review behavior");
+    assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*introduced regressions/i, "work-reviewer prompt must preserve delta rule");
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Delta Review Rule[\s\S]*fresh read-only validator task[\s\S]*prior findings[\s\S]*required_fixes[\s\S]*introduced regressions/i, "implementation-validator prompt must preserve fresh delta rule");
+    assert.match(SECURITY_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*introduced regressions/i, "security-reviewer prompt must preserve delta rule");
+  });
+
+  it("does not leave remediation context reuse as an open TODO", () => {
+    assert.doesNotMatch(TODO, /Remediation context reuse/i, "TODO must not leave the resolved remediation context reuse item open");
   });
 });
 
