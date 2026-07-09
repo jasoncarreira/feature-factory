@@ -184,7 +184,8 @@ export function rollupEntries(entries) {
     request_count: entries.length,
   };
   const missing = new Set();
-  const currencyByCostField = new Map();
+  const costCurrencies = new Set();
+  const totalCurrencies = new Set();
   let availableEntries = 0;
   let partial = entries.length === 0;
 
@@ -195,13 +196,14 @@ export function rollupEntries(entries) {
 
     for (const field of NUMERIC_FIELDS) {
       if (entry[field] === undefined || entry[field] === null) continue;
-      rollup[field] = (rollup[field] ?? 0) + entry[field];
+      const aggregate = (rollup[field] ?? 0) + entry[field];
+      if (!Number.isFinite(aggregate)) throw new Error(`cost attribution aggregate overflow for ${field}`);
+      rollup[field] = aggregate;
       if (COST_NUMERIC_FIELDS.includes(field)) {
         const currency = safeCostCurrency(entry.cost_currency);
         if (currency) {
-          const currencies = currencyByCostField.get(field) || new Set();
-          currencies.add(currency);
-          currencyByCostField.set(field, currencies);
+          costCurrencies.add(currency);
+          if (field === "cost_total") totalCurrencies.add(currency);
         } else {
           missing.add("cost_currency");
           partial = true;
@@ -210,9 +212,8 @@ export function rollupEntries(entries) {
     }
   }
 
-  const currenciesForTotal = currencyByCostField.get("cost_total") || new Set();
-  if (currenciesForTotal.size === 1) rollup.cost_currency = [...currenciesForTotal][0];
-  const hasMixedCurrency = [...currencyByCostField.values()].some((currencies) => currencies.size > 1);
+  if (totalCurrencies.size === 1) rollup.cost_currency = [...totalCurrencies][0];
+  const hasMixedCurrency = costCurrencies.size > 1;
   if (hasMixedCurrency) {
     delete rollup.cost_total;
     delete rollup.cost_currency;
@@ -225,7 +226,22 @@ export function rollupEntries(entries) {
   else rollup.status = "unavailable";
   rollup.mixed_currency = hasMixedCurrency;
   rollup.missing = entries.length === 0 ? ["entries"] : [...missing].sort();
-  return rollup;
+  return canonicalRollup(rollup);
+}
+
+function canonicalRollup(rollup) {
+  const ordered = {
+    status: rollup.status,
+    entry_count: rollup.entry_count,
+    request_count: rollup.request_count,
+  };
+  for (const field of NUMERIC_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(rollup, field)) ordered[field] = rollup[field];
+  }
+  if (Object.prototype.hasOwnProperty.call(rollup, "cost_currency")) ordered.cost_currency = rollup.cost_currency;
+  ordered.mixed_currency = rollup.mixed_currency;
+  ordered.missing = rollup.missing;
+  return ordered;
 }
 
 function normalizeMissing(value) {

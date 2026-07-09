@@ -130,7 +130,7 @@ describe("factory cost-report CLI", () => {
         assert.equal(proc.stdout, "", runId);
         assert.match(proc.stderr, /error: factory cost-report requires a bare <run-id>, not a filesystem path/u, runId);
       }
-      for (const runId of ["bad id", "bad..id", "bad.lock", "-bad", "bad-"]) {
+      for (const runId of ["bad id", "bad..id", "bad.lock", "-bad", "bad-", ` ${RUN_ID} `]) {
         const proc = runCostReport(repo, [runId, "--json"]);
         assert.notEqual(proc.status, 0, runId);
         assert.equal(proc.stdout, "", runId);
@@ -181,6 +181,25 @@ describe("factory cost-report CLI", () => {
     } finally {
       cleanup(repo);
       cleanup(external);
+    }
+  });
+
+  it("rejects aggregate overflow with no partial stdout or filesystem mutation", () => {
+    const repo = tempRepo();
+    const runDir = seedRun(repo, { cost_attribution: { entries: [
+      availableEntry({ id: "one", step: "build", input_tokens: Number.MAX_VALUE }),
+      availableEntry({ id: "two", step: "build", input_tokens: Number.MAX_VALUE }),
+    ] } });
+    try {
+      const beforeRunJson = readFileSync(join(runDir, "run.json"));
+      const beforeTree = snapshotTree(runDir);
+      const proc = runCostReport(repo, [RUN_ID, "--json"]);
+
+      assertFailure(proc, /cost attribution aggregate overflow for input_tokens/u);
+      assert.deepEqual(readFileSync(join(runDir, "run.json")), beforeRunJson);
+      assert.deepEqual(snapshotTree(runDir), beforeTree);
+    } finally {
+      cleanup(repo);
     }
   });
 
@@ -266,6 +285,18 @@ describe("factory cost-report CLI", () => {
         env: cleanEnv(),
       });
       assertFailure(missingRepo, /--repo requires a value/u);
+
+      for (const option of [
+        `--unknown\u001B]0;pwned\u0007`,
+        `--unknown\u001B[2J`,
+        `--unknown\u009B2J`,
+        `--unknown\u202Ehidden`,
+      ]) {
+        const proc = runCostReport(repo, [RUN_ID, option]);
+        assertFailure(proc, /unknown option: --unknown/u);
+        assert.match(proc.stderr, /\\u(?:001B|009B|202E)/u);
+        assert.doesNotMatch(proc.stderr, /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/u);
+      }
     } finally {
       cleanup(repo);
     }
