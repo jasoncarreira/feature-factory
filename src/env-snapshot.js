@@ -25,6 +25,7 @@ const TOKEN_SHAPED_ENV_VALUE_PATTERNS = [
 ];
 const HIGH_ENTROPY_SINGLE_TOKEN_MIN_LENGTH = 32;
 const HIGH_ENTROPY_MIN_SHANNON = 3.5;
+const SAFE_HIGH_ENTROPY_ENV_KEY_PATTERN = /^(?:OTEL_EXPORTER_OTLP(?:_[A-Z0-9]+)?_(?:ENDPOINT|HEADERS|PROTOCOL|TIMEOUT|COMPRESSION|INSECURE|CERTIFICATE)|FEATURE_FACTORY_OTEL_ENABLED)$/u;
 export const REDACTED_ENV_VALUE = "[redacted]";
 
 export async function collectEnv(options = {}) {
@@ -172,7 +173,7 @@ function highEntropySingleToken(value) {
 }
 
 function highEntropySecretKey(value) {
-  if (/^[A-Z0-9_]+$/u.test(value)) return false;
+  if (SAFE_HIGH_ENTROPY_ENV_KEY_PATTERN.test(value)) return false;
   return highEntropySingleToken(value);
 }
 
