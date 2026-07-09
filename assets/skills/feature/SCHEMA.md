@@ -9,6 +9,7 @@ The feature factory persists a per-run control plane so runs are durable, resuma
 ```text
 .opencode/factory/<run-id>/
   run.json
+  process.json
   factory.lock
   heartbeat.json
   run-json.lock/
@@ -95,13 +96,14 @@ feature-factory factory start --run-id <run-id> <prompt...>
 
 The CLI validates the requested id as a bare safe factory run id, rejects resume prompts that also pass `--run-id`, rejects existing run directories before launch, and passes the value as untrusted driver config `driver.run_id`. The orchestrator must use `driver.run_id` only for new-run manifest bootstrap, not for resume or blocked-run continuation routing.
 
-Required write commands:
+Required semantic `run.json` write commands:
 
 ```sh
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
 feature-factory factory steer <run-id> --message TEXT --json
 feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json
+feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json
 feature-factory factory cost-record <run-id> --agent AGENT --step STEP --slice-id ID --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
 feature-factory factory answer --json <run-id> <gate> approve
 feature-factory factory recover <run-id> --reason TEXT --json
@@ -119,6 +121,14 @@ feature-factory factory terminal <run-id> blocked --reason TEXT --json
 feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
 ```
+
+Process-sidecar write command, not a semantic `run.json` write:
+
+```sh
+feature-factory factory cancel <run-id> --json
+```
+
+`factory cancel` updates `$RUN/process.json` only. It is outside the checked semantic `run.json` transition surface and does not mutate gates, slices, verdicts, terminal result, or PR state.
 
 External drivers write only `gates/<gate>.answer`; they may use `feature-factory factory answer --json <run-id> <gate> approve` or write the answer file directly. The factory consumes answer files through `factory gate-decision`; approved file-sourced answers record `approval_source: "external-driver"` and consumed answer files are archived away from the canonical `gates/<gate>.answer` path.
 
@@ -206,6 +216,35 @@ External monitoring semantics:
 - Treat `heartbeat.json` plus `run.json.heartbeat_at` as liveness-only. Freshness is derived from `last_tick_at`, `interval_ms`, and whether the recorded PID is alive. A fresh heartbeat has age <= `max(2 * interval_ms, 120000ms)` and a live PID.
 - Use pending gate status in `run.json.gates.*` for story/brief/pre-PR waits because heartbeat is intentionally absent there.
 - Use terminal `run.status` plus `terminal_result` as the durable completion/blocking signal.
+
+## process.json And Cancellation Evidence
+
+Validated run-owned detached launches write run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`; examples include `factory resume <run-id> --detached` and validated continuation launches. Evidence is written only after live process identity is verified; unsupported inspection fails the launch before `process.json` is written. Generic `factory start --detached "prompt"` launches, including those with `--run-id <run-id>`, may write only package-level logs: `--run-id` does not grant process-evidence authority over an existing run and must not be assumed to create `$RUN/process.json`. `process.json` is optional for old/non-detached/generic-detached runs, but when present it validates as:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "opencode-process",
+  "run_id": "app-123",
+  "execution_id": "uuid",
+  "pid": 4242,
+  "started_at": "2026-07-06T12:00:00Z",
+  "updated_at": "2026-07-06T12:00:00Z",
+  "state": "running",
+  "cwd": "/absolute/repo/path",
+  "identity": {
+    "inspector": "node-process",
+    "start_marker": "linux-procfs:123456",
+    "command_name": "opencode"
+  },
+  "log_ref": "processes/2026-07-06T12-00-00.log",
+  "cancel": null
+}
+```
+
+`state` is one of `running`, `cancelled`, `failed-closed`, or `exited`. `log_ref` must stay under `processes/`; `cwd` must be absolute; `identity` must include `inspector`, a verified `start_marker`, and `command_name`; and `run_id` must match the requested run for cancellation.
+
+`feature-factory factory cancel <run-id> --json` reads this evidence and is SIGTERM-only. It sends exactly one targeted `SIGTERM` to the recorded PID only when `process.json` exists, validates, is `state:"running"`, and live process inspection matches PID, start marker, command name, and cwd. Success writes `state:"cancelled"` with `cancel.signal:"SIGTERM"` and returns `ok:true`, `status:"cancelled"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. Missing, invalid, stale, mismatched, non-running, or signal-failed evidence returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, and a reason; it must not send a broad process kill, process-group signal, `pkill`, or `killall`. This command updates only `$RUN/process.json`; it is not a semantic `run.json` transition.
 
 ## Detached Run Diagnostics (Output-Only)
 
@@ -729,6 +768,8 @@ Rules:
 
 Steering files are untrusted operator data/config. `feature-factory factory steer <run-id> --message TEXT --json` writes `$RUN/steering/pending-<timestamp>-<id>.json`; `run.json.steering` stores only `{id, ref, hash, message_chars, created_at}` plus audit `history`.
 
+For a running detached opencode process, cancel before steer/resume: `feature-factory factory cancel <run-id> --json`, then queue steering, inspect with status/list/TUI, dry-run `feature-factory factory resume <run-id> --dry-run --json`, and only then run `feature-factory factory resume <run-id> --headless --json`.
+
 `feature-factory factory resume <run-id> --dry-run --json` returns a payload with top-level `resume` and `steering` objects:
 
 ```json
@@ -746,3 +787,7 @@ Steering files are untrusted operator data/config. `feature-factory factory stee
 ```
 
 When pending steering exists, `consume.args` is `['factory','steer-consume','<run-id>','--ref','<ref>','--hash','<hash>','--json']`. The skill must run `feature-factory factory env record-resume <run-id> --json` before `feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json`. Resume rejects `active-heartbeat`, `terminal-run`, `invalid-run-state`, and `missing-worktree`. Raw consumed text may enter context only under `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data`.
+
+After `steer-consume`, the orchestrator performs a steering-conflict checkpoint. If the untrusted message would require changing protected accepted state, automatic rollback is forbidden and the only allowed write is `feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json`. The command requires a non-terminal `running` run, inactive heartbeat, a latest consumed steering entry whose ref/hash match the request, and a consumed steering file whose content hash matches. It writes terminal `status:"needs-human"` with `terminal_result.status:"needs-human"`, `terminal_result.reason` naming the steering ref and protected state, `terminal_result.summary:"Consumed untrusted steering would require changing accepted durable state; human reconciliation is required."`, and artifacts for `steering_ref`, `steering_hash`, `protected_state`, and optional `operator_reason`. The response returns `ok:false`, `conflict:true`, `updated:true`, `status:"needs-human"`, `steering`, `protected_state`, and `terminal_result`.
+
+Protected accepted state for this checkpoint includes approved gates (`gate:<name>`), accepted steps (`step:<agent>`), merged or blocked slices (`slice:<id>`), passing validator/security verdicts (`validator:GO`, `validator:GO-WITH-NITS`, `security_review:PASS`), `pr_url`, and `terminal_result`. Do not reset gates, unmerge slices, rewrite evidence/reviews, remove PR URLs, or continue from stale accepted artifacts to satisfy steering automatically.

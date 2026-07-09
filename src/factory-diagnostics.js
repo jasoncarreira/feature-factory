@@ -5,9 +5,11 @@ import {
   pendingProtectedGate,
   validateFactoryLock,
   validateHeartbeatState,
+  validateProcessSidecar,
   validateRun,
   validateSlicesPlan,
 } from "./validate.js";
+import { PROCESS_EVIDENCE_FILE } from "./process-evidence.js";
 import { hasInFlightHeartbeatWork } from "./run-state.js";
 import { physicalPath, timestamp } from "./utils.js";
 
@@ -216,12 +218,15 @@ function inspectSidecars(runDir, checkedAt, run) {
   const checks = [
     { path: join(runDir, HEARTBEAT_FILE), source: HEARTBEAT_FILE, validator: validateHeartbeatState },
     { path: join(runDir, "factory.lock"), source: "factory.lock", validator: validateFactoryLock },
+    { path: join(runDir, PROCESS_EVIDENCE_FILE), source: PROCESS_EVIDENCE_FILE, validator: (value) => validateProcessSidecar(value, { runDir, runId: run.run_id }), failClosed: true },
     { path: join(runDir, "plan", "slices.json"), source: "plan/slices.json", validator: validateSlicesPlan },
   ];
   for (const check of checks) {
     if (!existsSync(check.path)) continue;
+    let parsed = null;
     try {
-      const sidecar = check.validator(JSON.parse(readFileSync(check.path, "utf8")));
+      parsed = JSON.parse(readFileSync(check.path, "utf8"));
+      const sidecar = check.validator(parsed);
       if ((check.source === HEARTBEAT_FILE || check.source === "factory.lock") && sidecar.run_id !== run.run_id) {
         return diagnosticItem("invalid-run-state", {
           checkedAt,
@@ -238,11 +243,23 @@ function inspectSidecars(runDir, checkedAt, run) {
         });
       }
     } catch (error) {
+      const failClosed = Boolean(check.failClosed);
       return diagnosticItem("invalid-run-state", {
         checkedAt,
         authoritative: false,
-        message: `Factory sidecar state is invalid: ${error.message}`,
-        evidence: { source: check.source, run_dir: runDir, path: check.path, error: error.message },
+        message: failClosed
+          ? `Factory process sidecar state is invalid; cancellation must fail closed: ${error.message}`
+          : `Factory sidecar state is invalid: ${error.message}`,
+        action: failClosed
+          ? "Treat process evidence as untrusted; do not signal any process until the sidecar is repaired or manually verified."
+          : undefined,
+        evidence: {
+          source: check.source,
+          run_dir: runDir,
+          path: check.path,
+          error: error.message,
+          ...(failClosed ? { fail_closed: true, sidecar_run_id: parsed?.run_id || null } : {}),
+        },
       });
     }
   }

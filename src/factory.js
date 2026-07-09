@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
-import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -13,6 +13,7 @@ import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.j
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv } from "./telemetry.js";
+import { assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, recordDetachedProcessEvidence } from "./process-evidence.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -107,7 +108,7 @@ export async function startFactory(args, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo, requestedRunId }));
-  if (opts.detached) return startDetached(repo, commandArgs, launchEnv);
+  if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, opts), env: launchEnv });
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
   } catch (error) {
@@ -498,7 +499,7 @@ export function continueFactory(parentRunId, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(JSON.stringify(payload, null, 2));
-  if (opts.detached) return startDetached(repo, commandArgs, launchEnv);
+  if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: continuation.target.run_id, runDir: join(factoryRoot(repo), continuation.target.run_id) }), env: launchEnv });
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
   } catch (error) {
@@ -520,7 +521,7 @@ export async function resumeFactory(runId, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(JSON.stringify(payload, null, 2));
-  if (opts.detached) return startDetached(repo, commandArgs, launchEnv);
+  if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir }), env: launchEnv });
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
   } catch (error) {
@@ -538,6 +539,28 @@ export async function consumeSteering(runId, input, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const result = await transitionSteeringConsumed(runDir, input, opts);
   return { run_id: result.run.run_id, steering: result.steering };
+}
+
+export async function recordSteeringConflict(runId, input, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringConflict(runDir, input, opts);
+  return {
+    ok: result.ok,
+    conflict: result.conflict,
+    run_id: result.run_id,
+    updated: result.updated,
+    status: result.status,
+    steering: result.steering,
+    protected_state: result.protected_state,
+    terminal_result: result.terminal_result,
+  };
+}
+
+export function cancelFactoryRun(runId, opts = {}) {
+  if (!stringValue(runId)) throw new Error("factory cancel requires exactly one <run-id>");
+  const runDir = resolveRunDir(runId, opts);
+  const run = readRunFile(join(runDir, "run.json"));
+  return cancelProcessFromEvidence(runDir, { ...opts, runId: run.run_id });
 }
 
 export async function recordCostUsage(runId, input, opts = {}) {
@@ -1364,11 +1387,21 @@ function allRunDirs(opts = {}) {
   return dirs;
 }
 
-function startDetached(repo, commandArgs, env = process.env) {
-  const processes = join(factoryRoot(repo), "processes");
+function startDetached(repo, commandArgs, opts = {}) {
+  const env = opts.env || process.env;
+  const scopedRunDir = opts.runDir || null;
+  const recordsProcessEvidence = Boolean(scopedRunDir && opts.runId);
+  if (recordsProcessEvidence) {
+    assertDetachedProcessEvidenceWritable(scopedRunDir, {
+      runId: opts.runId,
+      inspectorFn: opts.inspectorFn || opts.processInspectorFn,
+    });
+  }
+  const processes = scopedRunDir ? join(scopedRunDir, "processes") : join(factoryRoot(repo), "processes");
   mkdirSync(processes, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const log = join(processes, `${stamp}.log`);
+  const executionId = opts.executionId || randomUUID();
+  const log = join(processes, scopedRunDir ? `${stamp}-${executionId}.log` : `${stamp}.log`);
   const out = openSync(log, "a");
   const child = spawn("opencode", commandArgs, {
     cwd: repo,
@@ -1379,6 +1412,29 @@ function startDetached(repo, commandArgs, env = process.env) {
   child.on("error", (error) => appendFileSync(log, `\n[feature-factory] failed to start opencode: ${error.message}\n`));
   child.unref();
   closeSync(out);
+  if (recordsProcessEvidence) {
+    if (!child.pid) throw new Error("failed to record detached process evidence: missing child pid");
+    try {
+      recordDetachedProcessEvidence(scopedRunDir, {
+        runId: opts.runId,
+        executionId,
+        pid: child.pid,
+        cwd: repo,
+        commandName: "opencode",
+        logRef: relativeRef(scopedRunDir, log),
+        now: opts.now,
+        inspectorFn: opts.inspectorFn || opts.processInspectorFn,
+      });
+    } catch (error) {
+      appendFileSync(log, `\n[feature-factory] failed to record process evidence: ${error.message}\n`);
+      try {
+        process.kill(child.pid, "SIGTERM");
+      } catch {
+        // Best-effort cleanup for a detached launch that could not be evidenced.
+      }
+      throw new Error(`failed to record detached process evidence: ${error.message}`);
+    }
+  }
   return {
     status: "started",
     pid: child.pid,
@@ -1398,6 +1454,26 @@ function factoryLaunchEnv(opts = {}) {
   } catch (error) {
     throw new Error(`invalid trace context: ${error.message}`);
   }
+}
+
+function detachedProcessOptions(repo, opts = {}) {
+  if (!opts.runDir) return { ...opts, runDir: null };
+  if (!stringValue(opts.runId)) throw new Error("run-scoped detached process evidence requires a run id");
+  const runId = String(opts.runId).trim();
+  if (!SAFE_RUN_ID_PATTERN.test(runId) || runId.includes("..") || runId.endsWith(".lock")) throw new Error("run-scoped detached process evidence requires a bare safe run id");
+  const runDir = resolve(opts.runDir);
+  const rootDir = factoryRoot(repo);
+  if (!isLogicalContainedPath(rootDir, runDir, { allowEqual: false })) {
+    throw new Error(`run-scoped detached process evidence requires a run directory inside .opencode/factory: ${runDir}`);
+  }
+  if (basename(runDir) !== runId) {
+    throw new Error("run-scoped detached process evidence run directory must match the run id");
+  }
+  return {
+    ...opts,
+    runId,
+    runDir,
+  };
 }
 
 function pendingGate(run) {

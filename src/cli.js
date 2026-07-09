@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { cancelFactoryRun, cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
@@ -48,8 +48,10 @@ Commands:
   factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
+  factory cancel <run-id> [--json]
   factory steer <run-id> --message TEXT [--json]
   factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> [--json]
+  factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> [--reason TEXT] [--json]
   factory cost-record <run-id> --agent AGENT [--step STEP] [--slice-id ID] [--provider PROVIDER] [--model MODEL] [--source SOURCE] [--operation OP] [--request-id ID] [--input-tokens N] [--output-tokens N] [--total-tokens N] [--cache-creation-input-tokens N] [--cache-read-input-tokens N] [--reasoning-tokens N] [--cost-total N] [--cost-input N] [--cost-output N] [--cost-cache-creation N] [--cost-cache-read N] [--currency CODE] [--recorded-at ISO] [--entry-id ID] [--json]
   factory resume <run-id> [--headless|--autonomous|--detached] [--dry-run] [--json] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory list                  List local factory runs
@@ -153,8 +155,10 @@ async function factory(args) {
     if (positional.length !== 1) throw new Error("factory continue requires exactly one <blocked-run-id>");
     return print(continueFactory(positional[0], opts), opts);
   }
+  if (sub === "cancel") return cancel(rest);
   if (sub === "steer") return steer(rest);
   if (sub === "steer-consume") return steerConsume(rest);
+  if (sub === "steer-conflict") return steerConflict(rest);
   if (sub === "cost-record") return costRecord(rest);
   if (sub === "resume") return resume(rest);
   if (sub === "list") return print(listRuns(opts), opts);
@@ -207,6 +211,28 @@ async function steerConsume(args) {
   const ref = requiredOption(opts.ref, "--ref", "factory steer-consume");
   const hash = requiredOption(opts.hash, "--hash", "factory steer-consume");
   return print(await consumeSteering(runId, { ref, hash }, opts), opts);
+}
+
+function cancel(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) throw new Error("factory cancel requires exactly one <run-id>");
+  const result = cancelFactoryRun(runId, opts);
+  print(result, opts);
+  if (!result.ok) process.exitCode = 1;
+}
+
+async function steerConflict(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) throw new Error("factory steer-conflict requires exactly one <run-id>");
+  const ref = requiredOption(opts.ref, "--ref", "factory steer-conflict");
+  const hash = requiredOption(opts.hash, "--hash", "factory steer-conflict");
+  const result = await recordSteeringConflict(runId, { ref, hash, reason: opts.reason }, opts);
+  print(result, opts);
+  if (!result.ok) process.exitCode = 1;
 }
 
 async function costRecord(args) {
