@@ -23,6 +23,7 @@ Active guarantees:
 - Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and configured PR checks.
 - `run.json.debug_snapshot` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
 - `run.json.cost_attribution` is diagnostic-only local current-run usage/cost attribution. It is not billing authority, invoice data, quota enforcement, or cross-run chargeback state. It records provider-supplied usage and cost metadata only; the factory does not maintain pricing tables, call pricing APIs, estimate missing costs, or coerce missing usage/cost to zero.
+- Trace-context launch metadata from `--parent-span-id`, `--traceparent`, and `--tracestate` is non-authoritative runtime configuration for process correlation only. It is not user instructions, not gate/review/PR authority, and not persisted in `run.json` or other durable factory state.
 
 Limits:
 
@@ -76,10 +77,11 @@ Use doctor checks when diagnosing a developer machine or local opencode install;
 
 ```sh
 feature-factory doctor --local
+feature-factory doctor --telemetry
 npm run doctor:local
 ```
 
-Both commands run the local doctor path; the npm script is a convenience wrapper around `feature-factory doctor --local` for this checkout.
+`feature-factory doctor --local` and `npm run doctor:local` run the local doctor path; the npm script is a convenience wrapper around `feature-factory doctor --local` for this checkout. `feature-factory doctor --telemetry` runs the telemetry-readiness checks described in the Doctor section without requiring a factory run.
 
 ## Use In opencode
 
@@ -579,11 +581,60 @@ Thin autonomous adapter loop:
 feature-factory doctor --local
 feature-factory doctor --local --profiles
 feature-factory doctor --local --provider-smoke
+feature-factory doctor --telemetry
 ```
 
 It checks opencode run support, plugin registration, command/agent/skill registration, provider auth visibility, `HOME`, `git`, `gh`, base branch detection, and whether `.opencode/factory/` / `.opencode/worktrees/` are gitignored.
 
 `--provider-smoke` runs a lightweight opencode call for each configured model provider. Use it when you want stronger credential validation and accept that it may consume model quota.
+
+### Telemetry readiness and trace propagation
+
+Telemetry is off by default. The factory has no default exporter, no default network side effects, and no durable telemetry state; local `run.json`, gates, evidence, reviews, and transition checks remain the workflow contract. Enable telemetry explicitly with plugin option `telemetry.enabled: true` or `FEATURE_FACTORY_OTEL_ENABLED=true`, and initialize an OpenTelemetry SDK/exporter through native opencode, a companion plugin, or operator runtime setup.
+
+Honeycomb / native OTel setup uses standard OTLP environment variables and opencode's native switch:
+
+```sh
+FEATURE_FACTORY_OTEL_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
+OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=${HONEYCOMB_API_KEY},x-honeycomb-dataset=feature-factory
+OTEL_RESOURCE_ATTRIBUTES=service.name=feature-factory,deployment.environment=dev
+```
+
+```jsonc
+{
+  "experimental": { "openTelemetry": true },
+  "plugin": [
+    ["opencode-feature-factory", { "telemetry": { "enabled": true, "mode": "native-opencode" } }]
+  ]
+}
+```
+
+`feature-factory doctor --telemetry` reports these readiness categories:
+
+- native opencode `experimental.openTelemetry` status and whether native AI SDK spans are expected;
+- OTLP endpoint readiness from `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`;
+- sanitized OTLP header presence from `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS`, showing only header names and replacing values with `[redacted]`;
+- service/resource readiness from `OTEL_SERVICE_NAME` or `service.name` in `OTEL_RESOURCE_ATTRIBUTES`;
+- companion telemetry plugin presence, such as `@devtheops/opencode-plugin-otel`;
+- package instrumentation loadability for `@opentelemetry/api`, proving the package is loadable and exports `trace`, `context`, and `SpanStatusCode` without requiring an SDK/exporter;
+- feature-factory telemetry enablement source (`plugin.telemetry.enabled`, `FEATURE_FACTORY_OTEL_ENABLED`, or default-off);
+- content-capture risk and redaction status.
+
+Sanitized OTLP env behavior is diagnostic-only: `doctor --telemetry` never prints OTLP header values or credential-bearing endpoint URLs. Header values such as Honeycomb API keys are reported as present and redacted; token-shaped values (`ghp_*`, `github_pat_*`, `sk-*`, bearer/JWT/AWS-shaped strings, credential-bearing URLs, and high-entropy secrets) are scrubbed before display.
+
+Native opencode/AI SDK telemetry may capture prompts, completions, tool arguments, or tool results outside feature-factory's redaction path. `doctor --telemetry` warns when native opencode OTel is enabled or when feature-factory content-capture flags (`captureMessages`, `captureToolArguments`, `captureToolResults`, `captureReviews`, or `captureEvidence`) are enabled. Production telemetry should use upstream prompt/output suppression, an OpenTelemetry Collector redaction processor, a trusted non-production telemetry environment, or feature-factory-only metadata spans.
+
+The launch commands accept trace-context flags for runtime correlation:
+
+```sh
+feature-factory factory start --traceparent 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01 --tracestate vendor=value "APP-123 add workflow"
+feature-factory factory start --parent-span-id 00f067aa0ba902b7 "APP-123 add workflow"
+feature-factory factory resume <run-id> --traceparent <w3c-traceparent> --tracestate <w3c-tracestate>
+feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> --parent-span-id <16-hex-span-id>
+```
+
+Runtime env mapping preserves operator-provided OTel env and adds trace context only when supplied: `--traceparent` sets `TRACEPARENT` and `FEATURE_FACTORY_TRACEPARENT`; `--tracestate` sets `TRACESTATE` and `FEATURE_FACTORY_TRACESTATE`; `--parent-span-id` or the span id inside `--traceparent` sets `FEATURE_FACTORY_PARENT_SPAN_ID`. If both `--parent-span-id` and `--traceparent` are supplied, the parent span ids must match. These values are non-authoritative runtime launch metadata, not instructions, not persisted in `run.json`, and not used to approve gates, reviews, PRs, or terminal state.
 
 ## Slice Execution Model
 
