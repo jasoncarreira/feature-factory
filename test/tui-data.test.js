@@ -70,6 +70,51 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("projects public cost attribution summary fields from durable run.json", () => {
+    const repo = tempDir();
+    writeRun(repo, "costed-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      cost_attribution: costAttributionFixture("costed-run"),
+    });
+    writeRun(repo, "legacy-run", { status: "running", updated_at: "2026-07-04T00:00:00Z" });
+
+    const runs = readRuns(findFactoryRoots(repo), { diagnostics: false });
+    const costedRun = runs.find((run) => run.run_id === "costed-run");
+    const legacyRun = runs.find((run) => run.run_id === "legacy-run");
+
+    assert.equal(costedRun.cost.status, "available");
+    assert.equal(costedRun.cost.entry_count, 1);
+    assert.equal(costedRun.cost.total_tokens, 5);
+    assert.equal(costedRun.cost.cost_total, 0.005);
+    assert.equal(costedRun.cost.cost_currency, "USD");
+    assert.equal(costedRun.cost.label, "cost available · 1 entry · 5 tokens · 0.005 USD");
+    assert.equal(Object.hasOwn(costedRun.cost, "entries"), false);
+    assert.equal(legacyRun.cost, null);
+    cleanup(repo);
+  });
+
+  it("projects cost labels without terminal controls from legacy durable metadata", () => {
+    const repo = tempDir();
+    const costAttribution = costAttributionFixture("cost-control-run");
+    costAttribution.status = "available\u001b[2J";
+    costAttribution.totals.cost_currency = "USD\u001b]0;pwned\u0007";
+    costAttribution.totals.missing = ["provider\u001b]52;c;U0VDUkVU\u0007"];
+    writeRun(repo, "cost-control-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      cost_attribution: costAttribution,
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(hasTerminalControl(run.cost.label), false);
+    assert.equal(hasTerminalControl(run.cost.status), false);
+    assert.equal(hasTerminalControl(run.cost.missing.join(",")), false);
+    assert.equal(run.cost.cost_currency, undefined);
+    cleanup(repo);
+  });
+
   it("projects steering metadata without raw message text", () => {
     const repo = tempDir();
     writeRun(repo, "steered-run", {
@@ -189,6 +234,7 @@ describe("TUI factory scanner", () => {
     assert.equal(run.run_id, "bad-json");
     assert.equal(run.status, "invalid");
     assert.equal(run.branch, null);
+    assert.equal(run.cost, null);
     assert.equal(run.diagnostic_status, "error");
     assert.equal(run.diagnostic_severity, "critical");
     assert.equal(run.diagnostic_classification, "invalid");
@@ -309,6 +355,7 @@ function writeRun(repo, id, input) {
   if (input.validator !== undefined) run.validator = input.validator;
   if (input.security_review !== undefined) run.security_review = input.security_review;
   if (input.steering !== undefined) run.steering = input.steering;
+  if (input.cost_attribution !== undefined) run.cost_attribution = input.cost_attribution;
   if (["completed", "blocked", "partial", "needs-human"].includes(input.status)) {
     run.terminal_result = {
       run_id: id,
@@ -320,6 +367,44 @@ function writeRun(repo, id, input) {
     join(dir, "run.json"),
     `${JSON.stringify(run, null, 2)}\n`,
   );
+}
+
+function costAttributionFixture(runID) {
+  const rollup = {
+    status: "available",
+    entry_count: 1,
+    request_count: 1,
+    missing: [],
+    mixed_currency: false,
+    input_tokens: 2,
+    output_tokens: 3,
+    total_tokens: 5,
+    cost_total: 0.005,
+    cost_currency: "USD",
+  };
+  return {
+    schema_version: 1,
+    updated_at: "2026-07-05T00:00:00.000Z",
+    status: "available",
+    totals: rollup,
+    by_agent: { "frontend-builder": rollup },
+    by_slice: {},
+    entries: [{
+      id: "usage-1",
+      recorded_at: "2026-07-05T00:00:00.000Z",
+      run_id: runID,
+      agent: "frontend-builder",
+      provider: "openai",
+      model: "gpt-5.5",
+      input_tokens: 2,
+      output_tokens: 3,
+      total_tokens: 5,
+      cost_total: 0.005,
+      cost_currency: "USD",
+      status: "available",
+      missing: [],
+    }],
+  };
 }
 
 function writeRawRun(repo, id, contents) {
@@ -342,4 +427,8 @@ function writeHeartbeat(repo, id, input = {}) {
       ...input,
     }, null, 2)}\n`,
   );
+}
+
+function hasTerminalControl(value) {
+  return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
 }

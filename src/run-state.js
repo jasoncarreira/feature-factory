@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { appendCostAttributionEntry } from "./cost-attribution.js";
 import { git } from "./git.js";
 import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
@@ -262,6 +263,20 @@ export async function transitionTerminalResult(runDir, terminalResult, options =
   return { ...result, terminal_result: result.run.terminal_result };
 }
 
+export async function transitionCostUsage(runDir, input, options = {}) {
+  const result = await transitionRunJson(runDir, (draft, { current }) => {
+    if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot be mutated`);
+    assertNoFreshHeartbeatForCostRecord(runDir, options);
+    draft.cost_attribution = appendCostAttributionEntry(draft.cost_attribution, input, {
+      runId: draft.run_id,
+      now: options.now,
+      id: options.id,
+    });
+    draft.updated_at = draft.cost_attribution.updated_at;
+  }, options);
+  return { ...result, cost_attribution: result.run.cost_attribution };
+}
+
 export async function transitionRecoverOrphan(runDir, reason = "orphaned factory run", options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
@@ -417,16 +432,24 @@ function inspectRecoverableHeartbeat(runDir, options = {}) {
 }
 
 function assertNoFreshHeartbeatForSteeringConsume(runDir, options = {}) {
+  assertNoFreshHeartbeat(runDir, options, "steer-consume requires resumable run");
+}
+
+function assertNoFreshHeartbeatForCostRecord(runDir, options = {}) {
+  assertNoFreshHeartbeat(runDir, options, "cost-record requires inactive heartbeat");
+}
+
+function assertNoFreshHeartbeat(runDir, options = {}, prefix) {
   const heartbeatPath = join(runDir, HEARTBEAT_FILE);
   if (!existsSync(heartbeatPath)) return;
   let heartbeat;
   try {
     heartbeat = validateHeartbeatState(JSON.parse(readFileSync(heartbeatPath, "utf8")));
   } catch (error) {
-    throw new Error(`steer-consume requires resumable run: invalid-run-state (${error.message})`);
+    throw new Error(`${prefix}: invalid-run-state (${error.message})`);
   }
   if (inspectHeartbeatLiveness(heartbeat, options).fresh) {
-    throw new Error("steer-consume requires resumable run: active-heartbeat");
+    throw new Error(`${prefix}: active-heartbeat`);
   }
 }
 

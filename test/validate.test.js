@@ -4,10 +4,16 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 import { ValidationError, checkRunConsistency, validateRun, validateRunDir } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
+const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
+  "USD\u001b]0;pwned\u0007",
+  "USD\u001b[2J",
+  "USD\u001b]52;c;U0VDUkVU\u0007",
+]);
 
 describe("run schema and consistency", () => {
   it("accepts debug snapshots", () => {
@@ -31,6 +37,99 @@ describe("run schema and consistency", () => {
     assert.throws(
       () => validateRun({ ...runningRun(), review_tier: { selected: "strict" } }),
       (error) => error instanceof ValidationError && error.message.includes("run.review_tier: must be a non-empty string"),
+    );
+  });
+
+  it("accepts valid cost attribution metadata", () => {
+    const costAttribution = recomputeCostAttribution({ entries: [
+      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", provider: "opencode", model: "gpt-5.5", input_tokens: 10, output_tokens: 5, total_tokens: 15, cost_total: 0.02, cost_currency: "USD" },
+    ] }, { now: "2026-07-08T12:00:01.000Z" });
+
+    const run = validateRun({ ...runningRun(), slices: [{ id: "slice", status: "running" }], cost_attribution: costAttribution });
+
+    assert.equal(run.cost_attribution.schema_version, 1);
+    assert.equal(run.cost_attribution.status, "available");
+    assert.equal(run.cost_attribution.totals.total_tokens, 15);
+  });
+
+  it("accepts cost attribution rollup keys such as __proto__", () => {
+    const costAttribution = recomputeCostAttribution({ entries: [
+      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "__proto__", slice_id: "__proto__", provider: "opencode", model: "gpt-5.5", input_tokens: 10, cost_total: 0.02, cost_currency: "USD" },
+    ] }, { now: "2026-07-08T12:00:01.000Z" });
+
+    const run = validateRun({ ...runningRun(), slices: [{ id: "__proto__", status: "running" }], cost_attribution: costAttribution });
+
+    assert.equal(run.cost_attribution.by_agent["__proto__"].entry_count, 1);
+    assert.equal(run.cost_attribution.by_slice["__proto__"].cost_total, 0.02);
+  });
+
+  it("rejects invalid cost attribution metadata", () => {
+    const costAttribution = recomputeCostAttribution({ entries: [
+      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", provider: "opencode", model: "gpt-5.5", input_tokens: 10, cost_total: 0.02, cost_currency: "USD" },
+    ] }, { now: "2026-07-08T12:00:01.000Z" });
+
+    const unknownSlice = structuredClone(costAttribution);
+    unknownSlice.entries[0].slice_id = "missing-slice";
+    assert.throws(
+      () => validateRun({ ...runningRun(), slices: [{ id: "slice", status: "running" }], cost_attribution: unknownSlice }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].slice_id: unknown slice 'missing-slice'"),
+    );
+
+    const tooMany = structuredClone(costAttribution);
+    tooMany.entries = Array.from({ length: 1001 }, (_, index) => ({ ...costAttribution.entries[0], id: `cost-${index}` }));
+    assert.throws(
+      () => validateRun({ ...runningRun(), cost_attribution: tooMany }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries: must have at most 1000 entries"),
+    );
+
+    const invalidNumber = structuredClone(costAttribution);
+    invalidNumber.entries[0].input_tokens = -1;
+    assert.throws(
+      () => validateRun({ ...runningRun(), cost_attribution: invalidNumber }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].input_tokens: must be a finite non-negative number"),
+    );
+
+    const mismatchedRunId = structuredClone(costAttribution);
+    mismatchedRunId.entries[0].run_id = "other-run";
+    assert.throws(
+      () => validateRun({ ...runningRun("run"), cost_attribution: mismatchedRunId }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].run_id: must match run.run_id"),
+    );
+
+    const invalidAvailability = structuredClone(costAttribution);
+    delete invalidAvailability.entries[0].provider;
+    assert.throws(
+      () => validateRun({ ...runningRun(), cost_attribution: invalidAvailability }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].status: available requires provider, model, usage, cost_total, and cost_currency"),
+    );
+  });
+
+  it("rejects terminal control cost currency metadata", () => {
+    for (const payload of TERMINAL_CURRENCY_PAYLOADS) {
+      const costAttribution = recomputeCostAttribution({ entries: [
+        { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", provider: "opencode", model: "gpt-5.5", input_tokens: 10, cost_total: 0.02, cost_currency: "USD" },
+      ] }, { now: "2026-07-08T12:00:01.000Z" });
+      costAttribution.entries[0].cost_currency = payload;
+      costAttribution.totals.cost_currency = payload;
+      costAttribution.by_agent["backend-builder"].cost_currency = payload;
+      costAttribution.by_slice.slice.cost_currency = payload;
+
+      assert.throws(
+        () => validateRun({ ...runningRun(), slices: [{ id: "slice", status: "running" }], cost_attribution: costAttribution }),
+        (error) => error instanceof ValidationError && error.message.includes("cost_currency: must be an uppercase currency code (3-12 letters) with no control characters"),
+      );
+    }
+  });
+
+  it("rejects terminal controls in cost attribution missing metadata", () => {
+    const costAttribution = recomputeCostAttribution({ entries: [
+      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", input_tokens: 10 },
+    ] }, { now: "2026-07-08T12:00:01.000Z" });
+    costAttribution.totals.missing = ["provider\u001b[2J"];
+
+    assert.throws(
+      () => validateRun({ ...runningRun(), cost_attribution: costAttribution }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.totals.missing[0]: must not contain control characters"),
     );
   });
 

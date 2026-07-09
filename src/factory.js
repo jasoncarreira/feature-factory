@@ -3,7 +3,8 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
-import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
@@ -515,6 +516,19 @@ export async function consumeSteering(runId, input, opts = {}) {
   return { run_id: result.run.run_id, steering: result.steering };
 }
 
+export async function recordCostUsage(runId, input, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionCostUsage(runDir, input, { ...opts, id: opts.entryId || opts.id });
+  const entries = Array.isArray(result.cost_attribution?.entries) ? result.cost_attribution.entries : [];
+  return {
+    run_id: result.run.run_id,
+    status: result.status,
+    updated: result.updated,
+    entry: entries[entries.length - 1] || null,
+    cost_summary: publicCostSummaryOrNull(result.run),
+  };
+}
+
 export function listRuns(opts = {}) {
   return allRunDirs(opts)
     .map((runDir) => {
@@ -529,6 +543,7 @@ export function listRuns(opts = {}) {
         status: run.value.status || "unknown",
         gate: pendingGate(run.value),
         steering: steeringSummary(run.value),
+        cost_summary: publicCostSummaryOrNull(run.value),
         review_tier: selectedReviewTier(run.value),
         updated_at: run.value.updated_at || null,
         path: file,
@@ -563,6 +578,7 @@ export function status(runId, opts = {}) {
     github_account: run.github_account || null,
     pending_gate: pendingGate(run),
     steering: steeringSummary(run),
+    cost_summary: publicCostSummaryOrNull(run),
     gates: run.gates || {},
     pr_url: run.pr_url || null,
     review_tier: run.review_tier || null,
@@ -742,11 +758,23 @@ function publicDiagnosticOptions(opts, repo) {
   return { ...opts, repoRoot: repo };
 }
 
+function publicCostSummaryOrNull(run) {
+  if (!run?.cost_attribution) return null;
+  try {
+    const summary = publicCostAttributionSummary(run);
+    return summary.entry_count > 0 ? summary : null;
+  } catch {
+    return null;
+  }
+}
+
 function invalidListRun(runId, file, diagnostics, error) {
   return {
     run_id: runId,
     status: "invalid",
     gate: null,
+    steering: null,
+    cost_summary: null,
     review_tier: null,
     updated_at: null,
     path: file,
@@ -760,6 +788,7 @@ function invalidStatusEnvelope(runId, runDir, runFile, diagnostics) {
     run_id: fallbackRunId(runId, runDir),
     status: "invalid",
     path: runFile,
+    cost_summary: null,
     error: diagnostics.summary || "run diagnostics failed closed",
     diagnostics,
   };

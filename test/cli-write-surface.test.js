@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const RUN_ID = "cli-write-surface";
+const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
+  "USD\u001b]0;pwned\u0007",
+  "USD\u001b[2J",
+  "USD\u001b]52;c;U0VDUkVU\u0007",
+]);
 
 describe("cli write surface", () => {
   it("drives a run through local state transitions without direct run.json edits", () => {
@@ -24,6 +29,14 @@ describe("cli write surface", () => {
       validateFactory(repo);
 
       runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+      validateFactory(repo);
+      const costRecorded = JSON.parse(runFactory(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--step", "build", "--slice-id", "slice", "--provider", "opencode", "--model", "gpt-5.5", "--source", "usage-log", "--operation", "completion", "--request-id", "req-1", "--input-tokens", "10", "--output-tokens", "5", "--total-tokens", "15", "--cost-total", "0.02", "--currency", "USD", "--recorded-at", "2026-07-08T12:30:00.000Z", "--entry-id", "cli-cost", "--json"]).stdout);
+      assert.equal(costRecorded.entry.id, "cli-cost");
+      assert.equal(costRecorded.entry.slice_id, "slice");
+      assert.equal(costRecorded.cost_summary.total_tokens, 15);
+      assert.equal(JSON.parse(runFactory(repo, ["status", RUN_ID, "--json"]).stdout).cost_summary.cost_total, 0.02);
+      assert.equal(JSON.parse(runFactory(repo, ["list", "--json"]).stdout)[0].cost_summary.entry_count, 1);
+      assert.match(runFactory(repo, ["list"]).stdout, /cost available · 1 entry · 15 tokens · 0\.02 USD/u);
       validateFactory(repo);
       runFactory(repo, ["slice-status", RUN_ID, "slice", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/slice", "--attempts", "1", "--json"]);
       validateFactory(repo);
@@ -60,6 +73,42 @@ describe("cli write surface", () => {
       assert.equal(completed.status, "completed");
       assert.equal(validation.ok, true, JSON.stringify(validation, null, 2));
       assert.equal(readJson(join(runDir, "run.json")).status, "completed");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects blank cost numeric flags without mutating run.json", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-cost-invalid-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      initGitRepo(repo);
+      seedRun(runDir);
+      const before = readFileSync(join(runDir, "run.json"), "utf8");
+
+      for (const [flag, value] of [["--input-tokens", ""], ["--cost-total", "   "]]) {
+        const failed = runFactoryFail(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", flag, value, "--json"]);
+        assert.match(failed.stderr, new RegExp(`${flag} must be a finite non-negative number`, "u"));
+        assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects terminal control currency flags without mutating run.json", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-cost-currency-invalid-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      initGitRepo(repo);
+      seedRun(runDir);
+      const before = readFileSync(join(runDir, "run.json"), "utf8");
+
+      for (const payload of TERMINAL_CURRENCY_PAYLOADS) {
+        const failed = runFactoryFail(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--input-tokens", "1", "--cost-total", "0.01", "--currency", payload, "--json"]);
+        assert.match(failed.stderr, /cost_currency must be an uppercase currency code \(3-12 letters\) with no control characters/u);
+        assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
+      }
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
