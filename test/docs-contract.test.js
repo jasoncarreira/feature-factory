@@ -290,6 +290,10 @@ describe("blocked-run continuation docs contract", () => {
       assert.match(text, /no PR URL|pr_url:\s*null/i, `${name} must document no PR URL on exhausted remediation`);
     }
   });
+
+  it("does not leave the resolved blocked-run continuation item open in TODO", () => {
+    assert.doesNotMatch(TODO, /Automated blocked-run continuation/i, "TODO must not leave the resolved blocked-run continuation item open");
+  });
 });
 
 function documentEntries(map) {
