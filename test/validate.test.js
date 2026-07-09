@@ -155,6 +155,41 @@ describe("run schema and consistency", () => {
     }
   });
 
+  it("does not expose duplicate planned slice ids with terminal controls in validation errors", () => {
+    for (const payload of TERMINAL_LABEL_PAYLOADS) {
+      let error;
+      assert.throws(
+        () => validateSlicesPlan({ slices: [
+          { id: payload, stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["safe"], test_plan: ["node --test"] },
+          { id: payload, stack: "backend", paths: ["test/**"], depends_on: [], acceptance: ["safe"], test_plan: ["node --test"] },
+        ] }),
+        (caught) => {
+          error = caught;
+          return caught instanceof ValidationError;
+        },
+      );
+
+      assert.match(error.message, /plan\.slices\[1\]\.id: duplicate id/u);
+      assert.equal(validationErrorHasTerminalControl(error), false);
+    }
+  });
+
+  it("does not expose duplicate durable slice ids with terminal controls in validation errors", () => {
+    for (const payload of TERMINAL_LABEL_PAYLOADS) {
+      let error;
+      assert.throws(
+        () => validateRun({ ...runningRun(), slices: [{ id: payload, status: "running" }, { id: payload, status: "blocked" }] }),
+        (caught) => {
+          error = caught;
+          return caught instanceof ValidationError;
+        },
+      );
+
+      assert.match(error.message, /run\.slices\[1\]\.id: duplicate id/u);
+      assert.equal(validationErrorHasTerminalControl(error), false);
+    }
+  });
+
   it("treats pr_mode as optional persisted PR creation mode", () => {
     assert.equal(validateRun({ ...runningRun(), pr_mode: "draft" }).pr_mode, "draft");
     assert.equal(validateRun({ ...runningRun(), pr_mode: "ready" }).pr_mode, "ready");
@@ -449,6 +484,15 @@ function createRunDir(repo, runId) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function validationErrorHasTerminalControl(error) {
+  return hasTerminalControl(error.message)
+    || error.errors.some((item) => hasTerminalControl(item.path) || hasTerminalControl(item.message));
+}
+
+function hasTerminalControl(value) {
+  return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
 }
 
 function hashFile(file) {

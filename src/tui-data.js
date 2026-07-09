@@ -238,7 +238,7 @@ function safeDiagnoseRunObject(run, file, options) {
 }
 
 function diagnosticSummary(diagnostics) {
-  const envelope = diagnostics || healthyDiagnostics();
+  const envelope = sanitizeDiagnosticProjection(diagnostics || healthyDiagnostics());
   return {
     diagnostics: envelope,
     diagnostic_status: stringOrDefault(envelope.status, "ok"),
@@ -246,6 +246,13 @@ function diagnosticSummary(diagnostics) {
     diagnostic_classification: stringOrDefault(envelope.classification, "healthy"),
     diagnostic_summary: truncateDiagnosticSummary(stringOrDefault(envelope.summary, "No diagnostics")),
   };
+}
+
+function sanitizeDiagnosticProjection(value) {
+  if (typeof value === "string") return sanitizePublicCostText(value);
+  if (Array.isArray(value)) return value.map(sanitizeDiagnosticProjection);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeDiagnosticProjection(item)]));
 }
 
 function healthyDiagnostics() {

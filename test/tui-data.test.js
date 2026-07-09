@@ -343,6 +343,25 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("projects duplicate-id diagnostics without terminal controls and preserves safe context", () => {
+    const repo = tempDir();
+    const maliciousID = "duplicate\u001b[2J\u009b31m\u0007";
+    writeRun(repo, "duplicate-diagnostic", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      slices: [{ id: maliciousID, status: "running" }, { id: maliciousID, status: "blocked" }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.status, "invalid");
+    assert.match(run.diagnostic_summary, /Factory run state is invalid: run\.slices\[1\]\.id: duplicate id/u);
+    assert.match(run.diagnostics.items[0].evidence.error, /must not contain control characters/u);
+    assert.equal(diagnosticStrings(run.diagnostics).some(hasTerminalControl), false);
+    cleanup(repo);
+  });
+
   it("can skip expensive diagnostics for responsive sidebar refreshes", () => {
     const repo = tempDir();
     writeRun(repo, "light-run", { status: "running", updated_at: "2026-07-05T00:00:00Z", gates: {} });
@@ -562,4 +581,11 @@ function writeHeartbeat(repo, id, input = {}) {
 
 function hasTerminalControl(value) {
   return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
+}
+
+function diagnosticStrings(value) {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(diagnosticStrings);
+  if (!value || typeof value !== "object") return [];
+  return Object.values(value).flatMap(diagnosticStrings);
 }

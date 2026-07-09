@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
-import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency } from "./cost-attribution.js";
+import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency, sanitizePublicCostText } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
 import { PROCESS_EVIDENCE_FILE, processEvidenceProcessesDir, validateProcessEvidence } from "./process-evidence.js";
 import { hashFile, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
@@ -44,9 +44,14 @@ const COST_ATTRIBUTION_NUMERIC_FIELDS = new Set([...USAGE_NUMERIC_FIELDS, ...COS
 
 export class ValidationError extends Error {
   constructor(errors) {
-    super(errors.map((item) => `${item.path}: ${item.message}`).join("; "));
+    const safeErrors = errors.map((item) => ({
+      ...item,
+      path: safeValidationText(item.path),
+      message: safeValidationText(item.message),
+    }));
+    super(safeErrors.map((item) => `${item.path}: ${item.message}`).join("; "));
     this.name = "ValidationError";
-    this.errors = errors;
+    this.errors = safeErrors;
   }
 }
 
@@ -567,7 +572,7 @@ function validateSliceIDs(errors, slices, path) {
   const ids = new Set();
   for (const [index, slice] of slices.entries()) {
     if (!isRecord(slice) || typeof slice.id !== "string" || !slice.id.trim()) continue;
-    if (ids.has(slice.id)) errors.push({ path: `${path}[${index}].id`, message: `duplicate id '${slice.id}'` });
+    if (ids.has(slice.id)) errors.push({ path: `${path}[${index}].id`, message: `duplicate id '${safeValidationIdentifier(slice.id)}'` });
     ids.add(slice.id);
   }
   return ids;
@@ -892,6 +897,15 @@ function optionalHash(errors, obj, key, path) {
 
 function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function safeValidationIdentifier(value) {
+  return safeValidationText(value) || "<control characters removed>";
+}
+
+function safeValidationText(value) {
+  if (!hasTerminalControl(value)) return value;
+  return sanitizePublicCostText(value);
 }
 
 function fail(errors) {
