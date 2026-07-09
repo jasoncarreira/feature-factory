@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { git } from "./git.js";
 import plugin from "./plugin.js";
 import { timestamp } from "./utils.js";
@@ -138,8 +138,23 @@ function commandOutput(command, args, cwd = process.cwd()) {
 }
 
 function opencodeRunSupports(flag) {
-  const help = commandOutput("opencode", ["run", "--help"]);
+  const help = opencodeRunHelpText();
   return Boolean(help && help.includes(flag));
+}
+
+// `opencode run --help` prints its usage to stderr and may exit non-zero, so
+// capture both streams instead of relying on stdout-only commandOutput().
+function opencodeRunHelpText() {
+  try {
+    const proc = spawnSync("opencode", ["run", "--help"], {
+      encoding: "utf8",
+      timeout: 10000,
+      maxBuffer: 1024 * 1024,
+    });
+    return `${proc.stdout || ""}\n${proc.stderr || ""}`.trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 function detectBaseBranch(cwd) {
