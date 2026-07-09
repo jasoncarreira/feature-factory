@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
 import { git } from "./git.js";
 import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
+import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 
@@ -223,6 +224,46 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
   }, options);
 }
 
+export async function transitionSteeringConflict(runDir, input, options = {}) {
+  const requestedRef = requireNonEmptyString(input?.ref, "steering ref");
+  const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot record steering conflict`);
+    if (current.status !== "running") throw new Error(`steer-conflict requires a running run, found '${current.status}'`);
+    assertNoFreshHeartbeatForSteeringConflict(runDir, options);
+
+    const consumed = latestConsumedSteering(current);
+    if (!consumed) throw new Error("run has no consumed steering");
+    if (consumed.ref !== requestedRef || consumed.hash !== requestedHash) throw new Error("consumed steering ref/hash mismatch");
+
+    const consumedResolved = resolveSteeringRef(runDir, consumed.ref);
+    const actualHash = hashFile(consumedResolved.path, { mode: "raw" });
+    if (actualHash !== consumed.hash) throw new Error("consumed steering file hash mismatch");
+
+    const protectedState = collectProtectedSteeringState(runDir, current);
+    const terminalResult = buildSteeringConflictTerminalResult(current, { ref: consumed.ref, hash: consumed.hash }, protectedState, input);
+    const next = validateRun({
+      ...cloneJson(current),
+      status: "needs-human",
+      terminal_result: terminalResult,
+    });
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return {
+      ok: false,
+      conflict: true,
+      run_id: next.run_id,
+      updated: true,
+      status: next.status,
+      run: next,
+      steering: { ref: consumed.ref, hash: consumed.hash },
+      protected_state: protectedState,
+      terminal_result: next.terminal_result,
+    };
+  }, options);
+}
+
 export function resolveGateAnswerTarget(runDir, gateName, gate) {
   if (!stringValue(gateName)) throw new Error("resolveGateAnswerTarget requires a gate name");
   assertSafeGateName(gateName);
@@ -435,6 +476,10 @@ function assertNoFreshHeartbeatForSteeringConsume(runDir, options = {}) {
   assertNoFreshHeartbeat(runDir, options, "steer-consume requires resumable run");
 }
 
+function assertNoFreshHeartbeatForSteeringConflict(runDir, options = {}) {
+  assertNoFreshHeartbeat(runDir, options, "steer-conflict requires inactive heartbeat");
+}
+
 function assertNoFreshHeartbeatForCostRecord(runDir, options = {}) {
   assertNoFreshHeartbeat(runDir, options, "cost-record requires inactive heartbeat");
 }
@@ -492,6 +537,15 @@ function assertExpectedCurrentHash(run, expectedCurrentHash) {
   if (!stringValue(expectedCurrentHash)) throw new Error("expectedCurrentHash must be a non-empty string");
   const actualCurrentHash = hashValue(run);
   if (actualCurrentHash !== expectedCurrentHash) throw new Error(`stale run.json transition: expected current hash ${expectedCurrentHash}, found ${actualCurrentHash}`);
+}
+
+function latestConsumedSteering(run) {
+  const history = Array.isArray(run.steering?.history) ? run.steering.history : [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index];
+    if (isRecord(entry) && entry.event === "consumed") return entry;
+  }
+  return null;
 }
 
 function prepareGateDecisionTransition(runDir, gateName, currentGate, gate, onAnswerArchive) {
