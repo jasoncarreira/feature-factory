@@ -6,11 +6,6 @@ covered there.
 
 ## Factory Robustness And Durability
 
-- Enforce heartbeat around long factory subagent waits
-  - In an autonomous test run, the orchestrator dispatched `spec-writer` with `run.json.steps[].status = running` but did not start `factory heartbeat`, leaving diagnostics at `missing-heartbeat-process` / `stale-heartbeat` while the detached opencode process was still alive.
-  - Add a guard, helper, or docs/test contract so long `Task`/subagent waits start heartbeat before dispatch and stop it before the next semantic `run.json` write.
-  - Consider making stale heartbeat diagnostics reference process logs more clearly when no heartbeat was ever started.
-
 - Non-destructive disrupted-worktree recovery
   - Make the factory robust when its working directory/worktree disappears or becomes inaccessible mid-run.
   - Do not silently re-scaffold an empty run control plane if `.opencode/factory/<run-id>` or the active worktree is missing/disrupted.

@@ -1,5 +1,5 @@
 /* @jsxImportSource @opentui/solid */
-import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import { factoryRoots, readRuns } from "./tui-data.js";
 
 const HIDDEN_STATUSES = new Set(["completed"]);
@@ -13,6 +13,7 @@ const DEFAULT_THEME = {
   warning: "yellow",
   info: "cyan",
 };
+let runStore = null;
 
 function currentTheme(api) {
   const theme = api?.theme?.current;
@@ -55,10 +56,64 @@ function sliceLine(slices) {
   return `slices: ${merged}/${total}${blocked}`;
 }
 
+function scanRuns(api) {
+  return readRuns(factoryRoots(api));
+}
+
+function runSnapshot(runs) {
+  return JSON.stringify(runs.map((run) => ({
+    run_id: run.run_id,
+    status: run.status,
+    mode: run.mode,
+    gate: run.gate,
+    current: run.current,
+    slices: run.slices,
+    panel: run.panel,
+    pr_url: run.pr_url,
+    terminal_reason: run.terminal_reason,
+    branch: run.branch,
+    diagnostic_status: run.diagnostic_status,
+    diagnostic_classification: run.diagnostic_classification,
+    diagnostic_summary: run.diagnostic_summary,
+    updated_at: run.updated_at,
+  })));
+}
+
+function sharedRunStore(api) {
+  if (!runStore) {
+    const initialRuns = scanRuns(api);
+    const [runs, setRuns] = createSignal(initialRuns, { equals: false });
+    const [version, setVersion] = createSignal(1);
+    runStore = { api, runs, setRuns, version, setVersion, snapshot: runSnapshot(initialRuns), refreshing: false };
+    setInterval(() => refreshRunStore(), REFRESH_INTERVAL_MS);
+    return runStore;
+  }
+  runStore.api = api;
+  refreshRunStore();
+  return runStore;
+}
+
+function refreshRunStore() {
+  if (!runStore || runStore.refreshing) return;
+  runStore.refreshing = true;
+  let nextRuns;
+  let nextSnapshot;
+  try {
+    nextRuns = scanRuns(runStore.api);
+    nextSnapshot = runSnapshot(nextRuns);
+  } finally {
+    runStore.refreshing = false;
+  }
+  if (nextSnapshot === runStore.snapshot) return;
+  runStore.snapshot = nextSnapshot;
+  runStore.setRuns(nextRuns);
+  runStore.setVersion((value) => value + 1);
+}
+
 function View(props) {
-  const roots = () => factoryRoots(props.api, { noCache: true });
-  const scanRuns = () => readRuns(roots());
-  const [runs, setRuns] = createSignal(scanRuns());
+  const store = sharedRunStore(props.api);
+  const runs = store.runs;
+  const version = store.version;
   const theme = () => currentTheme(props.api);
   const visible = createMemo(() => runs().length > 0);
   const active = createMemo(() => runs().filter((run) => !HIDDEN_STATUSES.has(run.status) || hasNonOkDiagnostic(run)));
@@ -71,65 +126,66 @@ function View(props) {
   });
   const visibleRuns = createMemo(() => shown().slice(0, MAX_VISIBLE_RUNS));
   const hiddenCount = createMemo(() => Math.max(0, runs().length - visibleRuns().length));
-  const timer = setInterval(() => setRuns(scanRuns()), REFRESH_INTERVAL_MS);
-  onCleanup(() => clearInterval(timer));
-
   return (
     <Show when={visible()}>
       <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         <text fg={theme().text}>
           <b>Feature Factory</b>
         </text>
-        <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
-          <For each={visibleRuns()}>
-            {(run) => {
-              const slices = sliceLine(run.slices);
-              return (
-                <box paddingTop={1}>
-                  <box flexDirection="row" gap={1}>
-                    <text fg={statusColor(theme(), run.status)}>*</text>
-                    <text fg={theme().text} wrapMode="none">
-                      {truncate(run.run_id, 31)}
-                    </text>
-                  </box>
-                  <text fg={theme().textMuted}>
-                    {run.status}
-                    <Show when={run.mode}> | {run.mode}</Show>
-                  </text>
-                  <Show when={run.gate}>
-                    <text fg={theme().warning}>gate: {run.gate}</text>
-                  </Show>
-                  <Show when={run.current}>
-                    <text fg={theme().textMuted}>current: {truncate(run.current, 34)}</text>
-                  </Show>
-                  <Show when={slices}>
-                    <text fg={theme().textMuted}>{slices}</text>
-                  </Show>
-                  <Show when={run.panel}>
-                    <text fg={theme().textMuted}>panel: {run.panel}</text>
-                  </Show>
-                  <Show when={run.pr_url}>
-                    <text fg={theme().success}>PR: {truncate(run.pr_url, 34)}</text>
-                  </Show>
-                  <Show when={run.terminal_reason}>
-                    <text fg={theme().warning}>reason: {truncate(run.terminal_reason, 30)}</text>
-                  </Show>
-                  <Show when={hasNonOkDiagnostic(run)}>
-                    <text fg={diagnosticColor(theme(), run.diagnostic_status)}>
-                      diagnostic: {truncate(diagnosticLine(run), 42)}
-                    </text>
-                  </Show>
-                  <Show when={run.branch}>
-                    <text fg={theme().textMuted}>branch: {truncate(run.branch, 30)}</text>
-                  </Show>
-                </box>
-              );
-            }}
-          </For>
-          <Show when={hiddenCount() > 0}>
-            <text fg={theme().textMuted}>+ {hiddenCount()} more runs</text>
-          </Show>
-        </box>
+        <Show keyed when={version()}>
+          {() => (
+            <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
+              <For each={visibleRuns()}>
+                {(run) => {
+                  const slices = sliceLine(run.slices);
+                  return (
+                    <box paddingTop={1}>
+                      <box flexDirection="row" gap={1}>
+                        <text fg={statusColor(theme(), run.status)}>*</text>
+                        <text fg={theme().text} wrapMode="none">
+                          {truncate(run.run_id, 31)}
+                        </text>
+                      </box>
+                      <text fg={theme().textMuted}>
+                        {run.status}
+                        <Show when={run.mode}> | {run.mode}</Show>
+                      </text>
+                      <Show when={run.gate}>
+                        <text fg={theme().warning}>gate: {run.gate}</text>
+                      </Show>
+                      <Show when={run.current}>
+                        <text fg={theme().textMuted}>current: {truncate(run.current, 34)}</text>
+                      </Show>
+                      <Show when={slices}>
+                        <text fg={theme().textMuted}>{slices}</text>
+                      </Show>
+                      <Show when={run.panel}>
+                        <text fg={theme().textMuted}>panel: {run.panel}</text>
+                      </Show>
+                      <Show when={run.pr_url}>
+                        <text fg={theme().success}>PR: {truncate(run.pr_url, 34)}</text>
+                      </Show>
+                      <Show when={run.terminal_reason}>
+                        <text fg={theme().warning}>reason: {truncate(run.terminal_reason, 30)}</text>
+                      </Show>
+                      <Show when={hasNonOkDiagnostic(run)}>
+                        <text fg={diagnosticColor(theme(), run.diagnostic_status)}>
+                          diagnostic: {truncate(diagnosticLine(run), 42)}
+                        </text>
+                      </Show>
+                      <Show when={run.branch}>
+                        <text fg={theme().textMuted}>branch: {truncate(run.branch, 30)}</text>
+                      </Show>
+                    </box>
+                  );
+                }}
+              </For>
+              <Show when={hiddenCount() > 0}>
+                <text fg={theme().textMuted}>+ {hiddenCount()} more runs</text>
+              </Show>
+            </box>
+          )}
+        </Show>
       </box>
     </Show>
   );
