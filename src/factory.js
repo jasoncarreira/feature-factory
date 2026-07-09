@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
-import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -515,6 +515,21 @@ export async function consumeSteering(runId, input, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const result = await transitionSteeringConsumed(runDir, input, opts);
   return { run_id: result.run.run_id, steering: result.steering };
+}
+
+export async function recordSteeringConflict(runId, input, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringConflict(runDir, input, opts);
+  return {
+    ok: result.ok,
+    conflict: result.conflict,
+    run_id: result.run_id,
+    updated: result.updated,
+    status: result.status,
+    steering: result.steering,
+    protected_state: result.protected_state,
+    terminal_result: result.terminal_result,
+  };
 }
 
 export function cancelFactoryRun(runId, opts = {}) {

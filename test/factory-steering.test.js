@@ -1,10 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { consumeSteering, listRuns, status, writeSteering } from "../src/factory.js";
+import { fileURLToPath } from "node:url";
+import { consumeSteering, listRuns, recordSteeringConflict, status, writeSteering } from "../src/factory.js";
 import { validateRunDir } from "../src/validate.js";
+
+const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 describe("factory steering queue and consume", () => {
   it("queues pending steering with metadata only in run.json and status/list", async () => {
@@ -56,10 +60,79 @@ describe("factory steering queue and consume", () => {
       assert.equal(run.steering.history.at(-1).event, "consumed");
       assert.deepEqual(snapshotDurable(fixture.runDir), before);
       await assert.rejects(consumeSteering(fixture.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, { cwd: fixture.repo }), /no pending steering/u);
-      assert.equal(status(fixture.runId, { cwd: fixture.repo }).steering.consumed_count, 1);
+      const publicStatus = status(fixture.runId, { cwd: fixture.repo });
+      const publicList = listRuns({ cwd: fixture.repo });
+      assert.equal(publicStatus.steering.consumed_count, 1);
+      assert.equal(JSON.stringify(publicStatus).includes("raw operator text"), false);
+      assert.equal(JSON.stringify(publicList).includes("raw operator text"), false);
       assert.equal(validateRunDir(fixture.runDir).ok, true);
     } finally {
       cleanup(fixture.repo);
+    }
+  });
+
+  it("records steering conflict through the public wrapper without exposing raw steering", async () => {
+    const fixture = createFixture("steer-conflict-wrapper");
+    try {
+      const queued = await writeSteering(fixture.runId, "raw conflict text must stay in consumed file", { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
+      const consumed = await consumeSteering(fixture.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, { cwd: fixture.repo, now: "2026-07-08T12:01:00.000Z" });
+
+      const result = await recordSteeringConflict(
+        fixture.runId,
+        { ref: consumed.steering.ref, hash: consumed.steering.hash, reason: "operator reported conflict" },
+        { cwd: fixture.repo, now: "2026-07-08T12:02:00.000Z" },
+      );
+      const run = readJson(join(fixture.runDir, "run.json"));
+
+      assert.equal(result.ok, false);
+      assert.equal(result.conflict, true);
+      assert.equal(result.status, "needs-human");
+      assert.equal(result.terminal_result.artifacts.operator_reason, "operator reported conflict");
+      assert.equal(run.status, "needs-human");
+      assert.equal(Object.hasOwn(result, "run"), false);
+      assert.equal(JSON.stringify(result).includes("raw conflict text"), false);
+      assert.equal(JSON.stringify(status(fixture.runId, { cwd: fixture.repo })).includes("raw conflict text"), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("routes steer-conflict CLI successes and failures without mutating on failure", async () => {
+    const success = createFixture("steer-conflict-cli-success");
+    try {
+      const queued = await writeSteering(success.runId, "raw cli conflict text", { cwd: success.repo, now: "2026-07-08T12:00:00.000Z" });
+      const consumed = await consumeSteering(success.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, { cwd: success.repo, now: "2026-07-08T12:01:00.000Z" });
+
+      const proc = runCli(success.repo, ["factory", "steer-conflict", success.runId, "--ref", consumed.steering.ref, "--hash", consumed.steering.hash, "--reason", "cli conflict", "--json"]);
+
+      assert.notEqual(proc.status, 0);
+      assert.equal(proc.stderr, "");
+      const output = JSON.parse(proc.stdout);
+      assert.equal(output.conflict, true);
+      assert.equal(output.status, "needs-human");
+      assert.equal(output.terminal_result.artifacts.operator_reason, "cli conflict");
+      assert.equal(JSON.stringify(output).includes("raw cli conflict text"), false);
+    } finally {
+      cleanup(success.repo);
+    }
+
+    const failure = createFixture("steer-conflict-cli-failure");
+    try {
+      const queued = await writeSteering(failure.runId, "raw failed conflict text", { cwd: failure.repo, now: "2026-07-08T12:00:00.000Z" });
+      const consumed = await consumeSteering(failure.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, { cwd: failure.repo, now: "2026-07-08T12:01:00.000Z" });
+      const before = readFileSync(join(failure.runDir, "run.json"), "utf8");
+
+      const missing = runCli(failure.repo, ["factory", "steer-conflict", failure.runId, "--ref", consumed.steering.ref, "--json"]);
+      assert.notEqual(missing.status, 0);
+      assert.match(missing.stderr, /factory steer-conflict requires --hash/u);
+      assert.equal(readFileSync(join(failure.runDir, "run.json"), "utf8"), before);
+
+      const stale = runCli(failure.repo, ["factory", "steer-conflict", failure.runId, "--ref", consumed.steering.ref, "--hash", `sha256:${"0".repeat(64)}`, "--json"]);
+      assert.notEqual(stale.status, 0);
+      assert.match(stale.stderr, /consumed steering ref\/hash mismatch/u);
+      assert.equal(readFileSync(join(failure.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(failure.repo);
     }
   });
 
@@ -129,6 +202,16 @@ function readJson(file) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function runCli(repo, args) {
+  const proc = spawnSync(process.execPath, [CLI, ...args], {
+    cwd: repo,
+    encoding: "utf8",
+    timeout: 15000,
+  });
+  if (proc.error) throw proc.error;
+  return proc;
 }
 
 function cleanup(repo) {
