@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { readJsoncConfig, readStrictJsonConfig } from "./config.js";
-import { collectEnv, resolvePluginConfig, scrubSecretEnv } from "./env-snapshot.js";
+import { REDACTED_ENV_VALUE, collectEnv, resolvePluginConfig, scrubSecretEnv } from "./env-snapshot.js";
 import { checkOpenTelemetryApiLoadability, evaluateContentCaptureRisk, sanitizeOtlpEnv } from "./telemetry.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -38,6 +38,9 @@ const OTEL_ENDPOINT_KEYS = ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER
 const OTEL_HEADER_KEYS = ["OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"];
 const OTEL_RESOURCE_ATTRIBUTES = "OTEL_RESOURCE_ATTRIBUTES";
 const OTEL_SERVICE_NAME = "OTEL_SERVICE_NAME";
+const ENDPOINT_SECRET_KEY_PATTERN = /(?:key|token|secret|password|authorization|credential|access|team|api[_-]?key)/iu;
+const ENDPOINT_SECRET_VALUE_PATTERN = /(?:hc[a-z0-9_-]*|gh[pousr]|github_pat|sk(?:-proj)?|xox[abp]|glpat)[_-][A-Za-z0-9_-]{10,}/iu;
+const ENDPOINT_LONG_TOKEN_PATTERN = /^[A-Za-z0-9._~+/-]{16,}$/u;
 
 export async function runDoctor(options = {}) {
   const configPath = join(homedir(), ".config", "opencode", "opencode.jsonc");
@@ -157,7 +160,7 @@ export function evaluateOtlpEnvReadiness(env = process.env) {
     ok: Boolean(endpoint),
     level: endpoint ? "ok" : "missing",
     endpoint: endpoint
-      ? { ok: true, key: endpoint.key, value: safeOtlp[endpoint.key] || safeValue(endpoint.value) }
+      ? { ok: true, key: endpoint.key, value: sanitizeEndpointSummary(endpoint.value) }
       : { ok: false, missing: OTEL_ENDPOINT_KEYS },
     headers: {
       ok: headers.some((item) => item.headers.length > 0),
@@ -248,7 +251,7 @@ function add(checks, label, passed, detail, failureLevel = "missing") {
 function addTelemetryChecks(checks, telemetry) {
   add(checks, "telemetry opencode experimental.openTelemetry", telemetry.opencode.ok, telemetry.opencode.detail, telemetry.opencode.level);
   add(checks, "telemetry native AI SDK spans", telemetry.opencode.nativeAiSdkSpansExpected, telemetry.opencode.nativeAiSdkSpansExpected ? "expected when SDK/exporter is initialized" : "not expected until experimental.openTelemetry is true", "warn");
-  add(checks, "telemetry OTLP endpoint", telemetry.otlpEnv.endpoint.ok, endpointDetail(telemetry.otlpEnv.endpoint), telemetry.otlpEnv.level);
+  add(checks, "telemetry OTLP endpoint", telemetry.otlpEnv.endpoint.ok, formatTelemetryEndpointDetail(telemetry.otlpEnv.endpoint), telemetry.otlpEnv.level);
   add(checks, "telemetry OTLP headers", telemetry.otlpEnv.headers.ok, telemetry.otlpEnv.headers.detail, "warn");
   add(checks, "telemetry resource service", telemetry.otlpEnv.resource.ok, telemetry.otlpEnv.resource.detail, "warn");
   add(checks, "telemetry companion plugin", telemetry.companionPlugin.ok, telemetry.companionPlugin.detail, telemetry.companionPlugin.level);
@@ -257,7 +260,7 @@ function addTelemetryChecks(checks, telemetry) {
   add(checks, "telemetry content capture risk", telemetry.featureFactory.ok, telemetry.featureFactory.detail, telemetry.featureFactory.level);
 }
 
-function endpointDetail(endpoint) {
+export function formatTelemetryEndpointDetail(endpoint) {
   if (endpoint.ok) return `${endpoint.key}=${endpoint.value}`;
   return `missing ${endpoint.missing.join(" or ")}`;
 }
@@ -323,6 +326,59 @@ function sanitizePublicName(value) {
 
 function safeValue(value) {
   return scrubSecretEnv(String(value ?? ""));
+}
+
+function sanitizeEndpointSummary(value) {
+  if (!stringValue(value)) return "unset";
+  const raw = String(value).trim();
+
+  try {
+    const parsed = new URL(raw);
+    const safePath = parsed.pathname
+      .split("/")
+      .map((segment) => sanitizeEndpointPathSegment(segment))
+      .join("/") || "/";
+    const safeQuery = endpointSearchHasValues(parsed.searchParams) ? `?${REDACTED_ENV_VALUE}` : "";
+    return `${parsed.protocol}//${parsed.host}${safePath}${safeQuery}`;
+  } catch {
+    return endpointValueLooksSensitive(raw) ? REDACTED_ENV_VALUE : safeValue(raw);
+  }
+}
+
+function sanitizeEndpointPathSegment(segment) {
+  if (!segment) return segment;
+  const decoded = safeDecodeURIComponent(segment);
+  if (endpointValueLooksSensitive(decoded)) return REDACTED_ENV_VALUE;
+  return scrubSecretEnv(segment);
+}
+
+function endpointSearchHasValues(searchParams) {
+  for (const [key, value] of searchParams.entries()) {
+    if (key || value) return true;
+  }
+  return false;
+}
+
+function endpointValueLooksSensitive(value) {
+  const string = String(value || "").trim();
+  if (!string) return false;
+  if (scrubSecretEnv(string) === REDACTED_ENV_VALUE) return true;
+  if (ENDPOINT_SECRET_VALUE_PATTERN.test(string)) return true;
+  if (ENDPOINT_SECRET_KEY_PATTERN.test(string) && /[=:]/u.test(string)) return true;
+  if (ENDPOINT_LONG_TOKEN_PATTERN.test(string) && string.length >= 24 && mixedTokenChars(string)) return true;
+  return false;
+}
+
+function mixedTokenChars(value) {
+  return /[A-Z]/u.test(value) && /[a-z]/u.test(value) && /[0-9]/u.test(value);
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function parseBooleanEnv(value) {
