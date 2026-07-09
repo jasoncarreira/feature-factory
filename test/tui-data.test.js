@@ -231,6 +231,49 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("prefers review work over a blocked step", () => {
+    const repo = tempDir();
+    writeRun(repo, "review-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [{ id: "docs-authority-contract", status: "review", attempts: 2 }],
+      steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.current, "docs-authority-contract review a2");
+    cleanup(repo);
+  });
+
+  it("keeps a blocked step as the fallback when no slice is blocked", () => {
+    const repo = tempDir();
+    writeRun(repo, "blocked-step-run", {
+      status: "running",
+      updated_at: "2026-07-04T00:00:00Z",
+      steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.current, "work-decomposer blocked");
+    cleanup(repo);
+  });
+
+  it("keeps a pending step as the fallback when no work is active or blocked", () => {
+    const repo = tempDir();
+    writeRun(repo, "pending-run", {
+      status: "running",
+      updated_at: "2026-07-03T00:00:00Z",
+      steps: [{ agent: "story-reader", status: "pending", attempts: 0 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.current, "story-reader pending");
+    cleanup(repo);
+  });
+
   it("infers pre-PR panel progress after test-verifier acceptance", () => {
     const repo = tempDir();
     writeRun(repo, "panel-run", {
