@@ -216,6 +216,38 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("sanitizes a legacy active slice before it outranks safe blocked work", () => {
+    const repo = tempDir();
+    writeRun(repo, "active-control-slice", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [{ id: "active\u001b[2J-slice\u009b", status: "running", attempts: 2 }],
+      steps: [{ agent: "safe-blocked-step", status: "blocked", attempts: 1 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(run.current, "active[2J-slice running a2");
+    assert.equal(hasTerminalControl(run.current), false);
+    cleanup(repo);
+  });
+
+  it("sanitizes a legacy active step before it outranks a safe blocked slice", () => {
+    const repo = tempDir();
+    writeRun(repo, "active-control-step", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      slices: [{ id: "safe-blocked-slice", status: "blocked", attempts: 1 }],
+      steps: [{ agent: "active\u001b]0;pwned\u0007-step\u0085", status: "running", attempts: 3 }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(run.current, "active]0;pwned-step running a3");
+    assert.equal(hasTerminalControl(run.current), false);
+    cleanup(repo);
+  });
+
   it("keeps blocked work as the fallback when no work is active", () => {
     const repo = tempDir();
     writeRun(repo, "blocked-run", {
@@ -308,6 +340,25 @@ describe("TUI factory scanner", () => {
     assert.equal(run.diagnostic_severity, "warning");
     assert.equal(run.diagnostic_classification, "needs-human");
     assert.match(run.diagnostic_summary, /protected gate 'story'/i);
+    cleanup(repo);
+  });
+
+  it("projects duplicate-id diagnostics without terminal controls and preserves safe context", () => {
+    const repo = tempDir();
+    const maliciousID = "duplicate\u001b[2J\u009b31m\u0007";
+    writeRun(repo, "duplicate-diagnostic", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      slices: [{ id: maliciousID, status: "running" }, { id: maliciousID, status: "blocked" }],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.status, "invalid");
+    assert.match(run.diagnostic_summary, /Factory run state is invalid: run\.slices\[1\]\.id: duplicate id/u);
+    assert.match(run.diagnostics.items[0].evidence.error, /must not contain control characters/u);
+    assert.equal(diagnosticStrings(run.diagnostics).some(hasTerminalControl), false);
     cleanup(repo);
   });
 
@@ -530,4 +581,11 @@ function writeHeartbeat(repo, id, input = {}) {
 
 function hasTerminalControl(value) {
   return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
+}
+
+function diagnosticStrings(value) {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(diagnosticStrings);
+  if (!value || typeof value !== "object") return [];
+  return Object.values(value).flatMap(diagnosticStrings);
 }

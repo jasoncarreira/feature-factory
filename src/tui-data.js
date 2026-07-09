@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { formatCostAttributionSummary, publicCostAttributionSummary } from "./cost-attribution.js";
+import { formatCostAttributionSummary, publicCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { diagnoseRunFile, diagnoseRunObject, diagnosticEnvelope, diagnosticItem } from "./factory-diagnostics.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
@@ -238,7 +238,7 @@ function safeDiagnoseRunObject(run, file, options) {
 }
 
 function diagnosticSummary(diagnostics) {
-  const envelope = diagnostics || healthyDiagnostics();
+  const envelope = sanitizeDiagnosticProjection(diagnostics || healthyDiagnostics());
   return {
     diagnostics: envelope,
     diagnostic_status: stringOrDefault(envelope.status, "ok"),
@@ -246,6 +246,13 @@ function diagnosticSummary(diagnostics) {
     diagnostic_classification: stringOrDefault(envelope.classification, "healthy"),
     diagnostic_summary: truncateDiagnosticSummary(stringOrDefault(envelope.summary, "No diagnostics")),
   };
+}
+
+function sanitizeDiagnosticProjection(value) {
+  if (typeof value === "string") return sanitizePublicCostText(value);
+  if (Array.isArray(value)) return value.map(sanitizeDiagnosticProjection);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeDiagnosticProjection(item)]));
 }
 
 function healthyDiagnostics() {
@@ -345,7 +352,7 @@ function firstByStatus(items, statuses) {
 }
 
 function summarizeWorkItem(name, status, attempts) {
-  const label = stringOrNull(name);
+  const label = stringOrNull(name) ? sanitizePublicCostText(name) : null;
   if (!label || !status) return null;
   const normalizedStatus = String(status);
   const attempt = Number.isInteger(attempts) && attempts > 0 ? ` a${attempts}` : "";
