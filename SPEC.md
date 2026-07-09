@@ -22,6 +22,7 @@ Current guarantees:
 - The normal draft PR flow calls `feature-factory factory pr-created` after successful PR creation. That transition requires `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, and a canonical GitHub PR URL before writing `run.pr_url` and `terminal_result.pr_url`.
 - Blocked-run continuation uses `feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>`. The continuation payload is untrusted operator data/config, not privileged instruction; admission validates a parent run whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence without relying on a special blocking verdict enum, persists read-only parent context in `run.json.continuation`, and then runs the ordinary gates/evidence/review/PR-created checks for the child.
 - Diagnostic `run.json.debug_snapshot` records redacted factory/opencode/plugin creation and resume snapshots for debugging only. Snapshot persistence must omit sensitive keys and redact token-shaped/high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar secrets.
+- Diagnostic `run.json.cost_attribution` records local current-run cost/usage attribution only. It is not billing authority, invoice state, quota enforcement, or cross-run chargeback data. The factory records provider-supplied usage/cost metadata only; it must not maintain pricing tables, call pricing APIs, estimate missing costs, or coerce missing values to zero.
 
 Explicit limits:
 
@@ -398,7 +399,64 @@ Rules:
 - Refresh the snapshot on resume if the driver/opencode/plugin version changed, while preserving original `created_with` if useful.
 - Treat `debug_snapshot` as diagnostic-only. It must never be used as authority for gates, merges, reviews, or PR URL trust.
 
-## 8. Scripted Environment And Credential Contract
+## 8. Cost Attribution Contract
+
+Implementation status: baseline cost attribution exists as a local current-run diagnostic write surface. The durable field is `run.json.cost_attribution`, and the required write command is:
+
+```sh
+feature-factory factory cost-record <run-id> \
+  --agent AGENT \
+  [--step STEP] \
+  [--slice-id ID] \
+  [--provider PROVIDER] \
+  [--model MODEL] \
+  [--source SOURCE] \
+  [--operation OP] \
+  [--request-id ID] \
+  [--input-tokens N] \
+  [--output-tokens N] \
+  [--total-tokens N] \
+  [--cache-creation-input-tokens N] \
+  [--cache-read-input-tokens N] \
+  [--reasoning-tokens N] \
+  [--cost-total N] \
+  [--cost-input N] \
+  [--cost-output N] \
+  [--cost-cache-creation N] \
+  [--cost-cache-read N] \
+  [--currency CODE] \
+  [--recorded-at ISO] \
+  [--entry-id ID] \
+  [--json]
+```
+
+Persistence and exposure:
+
+- Append entries through `factory cost-record`; never edit `run.json.cost_attribution` directly.
+- Persist entries and recomputed `totals`, `by_agent`, and `by_slice` under `run.json.cost_attribution` in `.opencode/factory/<run-id>/run.json`.
+- Expose public cost summaries in `factory status <run-id> --json`, `factory list`, `factory watch`, and TUI data. These summaries are observability signals for the current local run, not financial authority.
+
+Data policy:
+
+- Accept only token and cost values supplied by the active provider/opencode response metadata.
+- Do not use model pricing tables, pricing APIs, heuristic estimation, or currency conversion.
+- Do not coerce absent provider usage/cost fields to `0`. Missing stays missing and is surfaced through `missing`.
+- `available` requires provider, model, usage, `cost_total`, and `cost_currency`.
+- `partial` means some provider-supplied usage/cost exists but availability requirements are incomplete.
+- `unavailable` means no usage or cost data was exposed; it is not zero spend.
+- Mixed currencies make the rollup `partial`, set `mixed_currency: true`, and omit aggregate `cost_total` rather than converting.
+
+Orchestrator recording contract:
+
+- After each `spec-writer`, `work-reviewer`, `work-decomposer`, builder, `test-verifier`, `implementation-validator`, `security-reviewer`, and remediation wait, record any available provider usage with `factory cost-record`.
+- Work-reviewer attribution includes spec review, decomposition review, slice review, and test review waits.
+- Builders include `--slice-id <slice-id>` so `by_slice` summaries work.
+- If a wait was bracketed by heartbeat, stop heartbeat or verify inactive with `feature-factory factory heartbeat <run-id> --status --json` before `factory cost-record`.
+- `factory cost-record` must happen before terminal writes, Gate 3 terminalization, or `feature-factory factory pr-created` so terminal consumers see the final current-run summary.
+
+This section deliberately does not introduce billing connectors, pricing sources, or provider-specific normalization beyond preserving provider-supplied metadata.
+
+## 9. Scripted Environment And Credential Contract
 
 Scripted runs inherit the driver's environment. Document and validate this explicitly.
 
@@ -422,7 +480,7 @@ missing: gh auth unavailable for draft PR creation
 
 If credentials are missing, fail before starting a long build.
 
-## 9. Headless And Autonomous Driver Modes
+## 10. Headless And Autonomous Driver Modes
 
 Add first-class CLI support for external drivers that want to advance the factory without an interactive terminal.
 
@@ -459,7 +517,7 @@ Draft PR completion contract:
 3. The command validates the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and canonical GitHub PR URL, then writes `run.pr_url` / `terminal_result.pr_url` and completed status.
 4. Drivers must not mirror PR URLs from direct manifest edits.
 
-## 10. Blocked-Run Continuation
+## 11. Blocked-Run Continuation
 
 Current planned public command:
 
@@ -482,7 +540,7 @@ Required continuation contract:
 - `factory continue` rejects `--ready` and `--no-draft`; the continuation entry point has no ready-for-review or non-draft override.
 - If bounded remediation is exhausted, ownership is ambiguous, or validator/security remains blocking, end the child at terminal `blocked` with no PR URL (`run.pr_url` unset and `terminal_result.pr_url: null`).
 
-## 11. Fallback Models
+## 12. Fallback Models
 
 Current config supports one profile per role/agent.
 
@@ -505,7 +563,7 @@ Open question:
 
 Do not implement fake fallback behavior that silently changes models without observable state.
 
-## 12. Better Install Flow
+## 13. Better Install Flow
 
 Improve `feature-factory install`:
 
@@ -523,7 +581,7 @@ feature-factory install --profile '{"model":"openai/gpt-5.5","variant":"xhigh"}'
 feature-factory install --profiles-file profiles.json
 ```
 
-## 13. OpenTelemetry GenAI Instrumentation
+## 14. OpenTelemetry GenAI Instrumentation
 
 Add opt-in OpenTelemetry tracing for feature-factory runs, shaped to work with the OpenTelemetry GenAI semantic conventions and Honeycomb Agent Timeline. The goal is to make one factory run debuggable as a conversation timeline across the orchestrator, subagents, tool calls, gates, slices, validation, PR creation, and terminal state.
 
@@ -746,7 +804,7 @@ Plugin options may override package-specific behavior, but should not require se
 - The docs warn that native opencode/AI SDK spans may capture prompts unless upstream or collector redaction is configured.
 - Tests prove disabled mode, enabled mode, redaction, and package smoke behavior.
 
-## 14. Non-Goals
+## 15. Non-Goals
 
 - No default telemetry.
 - No tracker-specific logic in core.

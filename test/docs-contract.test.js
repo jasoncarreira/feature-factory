@@ -22,6 +22,7 @@ const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-resume <run-id> --json",
   "factory steer <run-id> --message TEXT --json",
   "factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json",
+  "factory cost-record <run-id> --agent AGENT --step STEP --slice-id ID --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json",
   "factory answer --json <run-id> <gate> approve",
   "factory recover <run-id> --reason TEXT --json",
   "factory gate-decision <run-id> <gate> pending",
@@ -310,6 +311,57 @@ describe("interrupt steer resume docs contract", () => {
       assert.match(text, /record-resume[\s\S]*before[\s\S]*steer-consume/i, `${name} must document record-resume before steer-consume`);
       assert.match(text, /active-heartbeat/i, `${name} must document active-heartbeat rejection`);
     }
+  });
+});
+
+describe("cost attribution docs contract", () => {
+  it("documents the cost-record command and run.json cost_attribution schema", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
+      assert.match(text, /factory cost-record <run-id>/i, `${name} must document factory cost-record`);
+      assert.match(text, /run\.json\.cost_attribution|"cost_attribution"/i, `${name} must document run.json.cost_attribution`);
+      assert.match(text, /by_agent/i, `${name} must document by_agent cost rollup`);
+      assert.match(text, /by_slice/i, `${name} must document by_slice cost rollup`);
+      for (const status of ["available", "partial", "unavailable"]) assert.match(text, literalPattern(status), `${name} must document ${status} cost status`);
+    }
+    for (const field of ["input_tokens", "output_tokens", "total_tokens", "cost_total", "cost_currency", "mixed_currency", "missing"]) {
+      assert.match(SCHEMA, literalPattern(field), `SCHEMA must document cost field ${field}`);
+    }
+  });
+
+  it("keeps cost attribution diagnostic and provider-supplied only", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
+      assert.match(text, /local current-run diagnostic|current-run diagnostics|diagnostic(?:-only)? local current-run/i, `${name} must scope cost attribution to local current-run diagnostics`);
+      assert.match(text, /not billing authority/i, `${name} must deny billing authority`);
+      assert.match(text, /provider-supplied|supplied by (?:the )?(?:active )?provider/i, `${name} must require provider-supplied costs`);
+      assert.match(text, /pricing tables/i, `${name} must forbid pricing tables`);
+      assert.match(text, /pricing APIs/i, `${name} must forbid pricing APIs`);
+      assert.match(text, /missing-to-zero|coerce missing/i, `${name} must forbid missing-to-zero coercion`);
+      assert.match(text, /unavailable[\s\S]*(?:not zero|not.*zero cost)/i, `${name} must say unavailable is not zero`);
+    }
+  });
+
+  it("documents status/list/TUI exposure for cost summaries", () => {
+    for (const [name, text] of documentEntries({ README, SPEC, COMMAND })) {
+      assert.match(text, /status[\s\S]*list[\s\S]*TUI|status\/list\/TUI|status[\s\S]*TUI/i, `${name} must document status/list/TUI cost summary exposure`);
+    }
+  });
+
+  it("documents orchestration attribution points and heartbeat ordering", () => {
+    for (const [name, text] of documentEntries({ SKILL, COMMAND, README, SPEC, SCHEMA })) {
+      for (const agent of ["spec-writer", "work-reviewer", "work-decomposer", "test-verifier", "implementation-validator", "security-reviewer"]) {
+        assert.match(text, literalPattern(agent), `${name} must document ${agent} cost attribution`);
+      }
+      assert.match(text, /builder/i, `${name} must document builder cost attribution`);
+      assert.match(text, /remediation/i, `${name} must document remediation cost attribution`);
+      assert.match(text, /stop heartbeat|heartbeat[^.]+stopped|verify inactive/i, `${name} must require heartbeat stopped/verified inactive before cost-record`);
+      assert.match(text, /cost-record[\s\S]*(?:before terminal|before[\s\S]*terminal writes|before[\s\S]*pr-created)|terminal[\s\S]*before[\s\S]*pr-created/i, `${name} must order cost-record before terminal writes/PR-created`);
+    }
+  });
+
+  it("does not leave baseline cost attribution as an open TODO", () => {
+    assert.doesNotMatch(TODO, /Record per-agent and per-slice token\/cost usage/i, "TODO must not leave baseline cost recording open");
+    assert.doesNotMatch(TODO, /Persist cost data in durable run artifacts/i, "TODO must not leave baseline cost persistence open");
+    assert.doesNotMatch(TODO, /Surface cost summaries in CLI\/status and eventually TUI/i, "TODO must not leave baseline cost surfacing open");
   });
 });
 
