@@ -99,6 +99,26 @@ describe("factory disrupted run recovery", () => {
       cleanup(fixture.repo);
     }
   });
+
+  it("does not treat an inaccessible recorded worktree path as healthy", async () => {
+    const fixture = createRecoveryFixture("inaccessible-worktree-run");
+    try {
+      mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+      writeFileSync(fixture.worktree, "not a directory\n", "utf8");
+
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo });
+      const run = readJson(join(fixture.runDir, "run.json"));
+
+      assert.equal(result.ok, false);
+      assert.equal(result.recovered, false);
+      assert.equal(result.status, "needs-human");
+      assert.match(result.terminal_result.reason, /recorded worktree path exists but is not a directory/i);
+      assert.equal(run.status, "needs-human");
+      assert.match(run.terminal_result.reason, /recorded worktree path exists but is not a directory/i);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
 });
 
 function createRecoveryFixture(runId, { baseMismatch = false, worktree } = {}) {
