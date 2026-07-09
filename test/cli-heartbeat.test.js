@@ -187,10 +187,11 @@ describe("cli heartbeat routing", () => {
       assert.equal(proc.status, 0, proc.stderr);
       const line = proc.stdout.trim();
       const columns = line.split("\t");
-      assert.equal(columns.length, 5);
+      assert.equal(columns.length, 6);
       assert.equal(columns[0], RUN_ID);
       assert.equal(columns[1], "running");
-      assert.match(columns[4], /recoverable\/warning:Heartbeat has not advanced/u);
+      assert.equal(columns[4], "-");
+      assert.match(columns[5], /recoverable\/warning:Heartbeat has not advanced/u);
     } finally {
       cleanup(repo);
     }
