@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const specializedAgents = [
@@ -93,9 +93,11 @@ function verifyImportSurfaces(consumer, home) {
       const server = await import("opencode-feature-factory/server");
       const tui = await import("opencode-feature-factory/tui");
       await import("opencode-feature-factory/cli");
+      const telemetry = await import(${JSON.stringify(pathToFileURL(join(consumer, "node_modules", "opencode-feature-factory", "src", "telemetry.js")).href)});
       if (typeof root.default !== "function") throw new Error("root export should be plugin function");
       if (root.default !== server.default) throw new Error("server export should match root plugin");
       if (tui.default?.id !== "opencode-feature-factory") throw new Error("tui export should expose plugin id");
+      if (typeof telemetry.withSpan !== "function") throw new Error("telemetry helper should import from installed package");
     `,
     { cwd: consumer, env: isolatedEnv(home) },
   );
@@ -108,7 +110,11 @@ function verifyExportMap(consumer) {
 
 function verifyCliInstallIdempotence(consumer, home) {
   const cli = join(consumer, "node_modules", ".bin", "feature-factory");
-  execFileSync(cli, ["--help"], { cwd: consumer, env: isolatedEnv(home), encoding: "utf8" });
+  const help = execFileSync(cli, ["--help"], { cwd: consumer, env: isolatedEnv(home), encoding: "utf8" });
+  assert.match(help, /doctor \[--local\] \[--profiles\] \[--telemetry\]/u);
+  assert.match(help, /--parent-span-id ID/u);
+  assert.match(help, /--traceparent VALUE/u);
+  assert.match(help, /--tracestate VALUE/u);
   execFileSync(cli, ["install"], { cwd: consumer, env: isolatedEnv(home), encoding: "utf8" });
   execFileSync(cli, ["install"], { cwd: consumer, env: isolatedEnv(home), encoding: "utf8" });
 
