@@ -70,6 +70,25 @@ describe("factory diagnostics", () => {
     }
   });
 
+  it("suppresses stale heartbeat alarms when no heartbeat-bracketed work is in flight", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({
+      heartbeat_at: "2026-07-08T11:00:00.000Z",
+      steps: [{ agent: "spec-writer", status: "blocked", attempts: 1 }],
+      slices: [],
+    }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatState({ last_tick_at: "2026-07-08T11:00:00.000Z", pid: 987654321 }));
+
+    try {
+      const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => false });
+      assert.deepEqual(diagnostics.items, []);
+      assert.equal(diagnostics.classification, "healthy");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("suppresses heartbeat alarms while protected gates are pending", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);

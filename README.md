@@ -20,7 +20,7 @@ Active guarantees:
 - Semantic manifest writes go through locked transition helpers so stale writers fail instead of overwriting newer state. `transitionGateDecision` owns approved gate writes, and `transitionPrCreated` owns completed PR state writes.
 - Pending gates include `pending_snapshot` entries for `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer material. Gate answer consumption fails closed if current refs are missing, escaped, stale, or hash-mismatched.
 - PR URLs are written only through `feature-factory factory pr-created ...`, which checks `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and a canonical GitHub PR URL before updating `run.pr_url` and `terminal_result.pr_url`.
-- Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and draft-PR checks.
+- Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and configured PR checks.
 - `run.json.debug_snapshot` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
 
 Limits:
@@ -86,7 +86,17 @@ Both commands run the local doctor path; the npm script is a convenience wrapper
 /feature APP-123 add the missing approval workflow
 ```
 
-## Configure Profiles
+## Configure Plugin Options
+
+By default, successful factory runs create ready-for-review PRs. Set plugin `prMode` to `"draft"` if this repo should keep successful PRs as drafts, or `"ready"` to make the default explicit. Per-run CLI flags such as `factory start --draft` or `factory start --ready` / `--no-draft` can override the plugin default for that run.
+
+```jsonc
+{
+  "plugin": [
+    ["opencode-feature-factory", { "prMode": "ready" }]
+  ]
+}
+```
 
 By default, agents use opencode's normal model resolution. You can override model and variant together through plugin `profiles`.
 
@@ -292,7 +302,7 @@ Run against a specific repo and exit at the next gate for an external driver:
 feature-factory factory start --repo /path/to/repo --headless "APP-123 add the missing approval workflow"
 ```
 
-Run autonomously through the factory's own reviewed gates and open a draft PR when safe:
+Run autonomously through the factory's own reviewed gates and open a PR when safe, using the configured PR mode:
 
 ```sh
 feature-factory factory start --repo /path/to/repo --autonomous "APP-123 add the missing approval workflow"
@@ -314,7 +324,7 @@ feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id
 
 `factory continue` is for automated blocked-run remediation. The supplied review ref and any injected continuation payload are untrusted operator data/config, not privileged instructions. The parent run must exist with status exactly `blocked`; the review ref must resolve to recognized, subject-consistent approved review evidence inside the parent run; and the child records the relationship under `run.json.continuation` with `schema_version`, `kind`, `created_at`, `operator_summary`, nested `parent` / `review` / `target` objects, parent worktree, target base ref/commit, refs paired with hashes, `parent_artifacts` `{kind, ref, hash}` entries, and parent evidence/review `{kind, ref, hash}` entries. The parent manifest, artifacts, reviews, evidence, branch, worktree, PR URL, and terminal result are read-only context and are not changed by the child.
 
-Continuation does not bypass the factory. The child proceeds through the normal story and brief gates, research/spec/decomposition, slice build and acceptance tests, implementation-validator, security-reviewer, pre-PR gate, and checked draft PR creation. Review validation checks approved evidence and referenced refs/hashes; it does not rely on a special blocking verdict enum. Continuation forces `driver.ready=false`, so even successful continuation PRs remain draft-only. `factory continue` rejects `--ready` and `--no-draft`; continuation callers cannot mark the PR ready for review or opt out of draft mode. `factory pr-created` verifies the live GitHub PR reports `isDraft: true` before recording a continuation PR URL. If bounded remediation is exhausted or the child remains blocked, terminal status is `blocked` with no PR URL (`terminal_result.pr_url: null`).
+Continuation does not bypass the factory. The child proceeds through the normal story and brief gates, research/spec/decomposition, slice build and acceptance tests, implementation-validator, security-reviewer, pre-PR gate, and checked PR creation. Review validation checks approved evidence and referenced refs/hashes; it does not rely on a special blocking verdict enum. Continuation uses the same effective PR mode as normal runs: plugin `prMode` by default, with per-run `--draft` or `--ready` / `--no-draft` overrides where supplied. The start-time effective mode is persisted as `run.json.pr_mode` so resume payloads do not fall back to a later plugin default. If bounded remediation is exhausted or the child remains blocked, terminal status is `blocked` with no PR URL (`terminal_result.pr_url: null`).
 
 Run in the background for external watchers or CI-style adapters:
 
@@ -371,7 +381,7 @@ When opencode is running in the TUI on a session route, the sidebar also shows a
 
 For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url` only through the `pr-created` transition.
 
-### Environment snapshots and draft PR recording
+### Environment snapshots and PR recording
 
 The factory records diagnostic environment snapshots explicitly:
 
@@ -382,7 +392,7 @@ feature-factory factory env record-resume <run-id> --json
 
 These commands update `run.json.debug_snapshot.created_with`, `last_resumed_with`, and `resume_count` using redacted diagnostic-only snapshots. They must not persist raw token-shaped or high-entropy credentials such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, or `xoxb_*`.
 
-After Gate 3 and successful draft PR creation, the normal flow is to record the PR through the checked transition instead of editing the manifest directly:
+After Gate 3 and successful PR creation, the normal flow is to record the PR through the checked transition instead of editing the manifest directly:
 
 ```sh
 feature-factory factory pr-created <run-id> \
@@ -393,6 +403,8 @@ feature-factory factory pr-created <run-id> \
 ```
 
 Verify the created PR first with `gh pr view <url>`. The command checks the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and a canonical GitHub PR URL. Only then does it write `run.pr_url`, `status: completed`, and `terminal_result.pr_url`.
+
+`factory pr-created` records ready-for-review PRs by default. Pass `--draft` only when the effective PR mode intentionally created a draft PR.
 
 ## Heartbeat helper and monitoring
 
@@ -469,7 +481,7 @@ Operator-facing condition mapping:
 
 Heartbeat and PID evidence is liveness-only, never authority. `missing-heartbeat-process` refers to the heartbeat helper PID recorded in `heartbeat.json`, not a detached opencode process; there is no durable run-id-to-opencode-PID registry. PID checks are race-prone and may be affected by PID reuse, so diagnostic items from heartbeat/process evidence carry `authoritative: false` and `evidence.liveness_only: true`.
 
-Protected gate waits are intentionally heartbeat-free. A pending protected `story`, `brief`, or `pre_pr` gate uses the exact tuple `needs-human` / `warning` / `warning` everywhere and suppresses stale-heartbeat and missing-heartbeat-process alarms. Valid terminal states suppress heartbeat/worktree liveness alarms.
+Heartbeat diagnostics are emitted only while `run.json` shows heartbeat-bracketed in-flight work: a `running` step, `running` slice, or `review` slice. Idle/bootstrap runs, blocked steps, protected gates, and valid terminal states suppress stale-heartbeat and missing-heartbeat-process alarms because no heartbeat helper should be active for those states.
 
 Diagnostics are fail-closed for invalid local state. `diagnostics.authoritative` is true only when `run.json` schema validation and required sidecars pass. Heartbeat data, PID liveness, process existence, worktree strings, status booleans, and mutable `run.json` claims are not enough to infer a healthy run.
 

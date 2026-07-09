@@ -20,6 +20,22 @@ describe("cli pr-created", () => {
       assert.equal(output.pr_url, PR_URL);
       assert.equal(run.status, "completed");
       assert.equal(run.terminal_result.pr_url, PR_URL);
+      assert.equal(run.terminal_result.draft, false);
+      assert.equal(run.terminal_result.summary, "PR created.");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("allows explicit draft PR recording for ordinary runs", () => {
+    const fixture = createFixture("cli-pr-created-draft");
+    try {
+      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--draft", "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(run.status, "completed");
+      assert.equal(run.terminal_result.draft, true);
+      assert.equal(run.terminal_result.summary, "Draft PR created.");
     } finally {
       cleanup(fixture.repo);
     }
@@ -37,42 +53,27 @@ describe("cli pr-created", () => {
     }
   });
 
-  it("rejects --no-draft for blocked-run continuations without recording PR state", () => {
-    const fixture = createFixture("cli-pr-continuation-no-draft", { continuation: true });
-    try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--no-draft"]);
-      assert.notEqual(proc.status, 0);
-      assert.match(proc.stderr, /requires draft PR for blocked-run-continuation/u);
-      const run = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(run.status, "running");
-      assert.equal(run.pr_url, undefined);
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
-  it("keeps default draft PR creation available for blocked-run continuations", () => {
-    const fixture = createFixture("cli-pr-continuation-draft", { continuation: true });
+  it("records ready PR creation by default for blocked-run continuations", () => {
+    const fixture = createFixture("cli-pr-continuation-ready", { continuation: true });
     try {
       const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       const run = readJson(join(fixture.runDir, "run.json"));
       assert.equal(run.status, "completed");
-      assert.equal(run.terminal_result.draft, true);
+      assert.equal(run.terminal_result.draft, false);
     } finally {
       cleanup(fixture.repo);
     }
   });
 
-  it("rejects blocked-run continuation PRs when GitHub reports a non-draft PR", () => {
-    const fixture = createFixture("cli-pr-continuation-github-ready", { continuation: true, ghIsDraft: false });
+  it("records explicit draft PR creation for blocked-run continuations", () => {
+    const fixture = createFixture("cli-pr-continuation-draft", { continuation: true });
     try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--json"]);
-      assert.notEqual(proc.status, 0);
-      assert.match(proc.stderr, /isDraft=true/u);
+      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--draft", "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
       const run = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(run.status, "running");
-      assert.equal(run.pr_url, undefined);
+      assert.equal(run.status, "completed");
+      assert.equal(run.terminal_result.draft, true);
     } finally {
       cleanup(fixture.repo);
     }
@@ -119,7 +120,7 @@ describe("cli pr-created", () => {
   });
 });
 
-function createFixture(runId, { ready = true, continuation = false, ghIsDraft = true } = {}) {
+function createFixture(runId, { ready = true, continuation = false, ghIsDraft = false } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "cli-pr-simplified-"));
   writeFakeGh(repo, { isDraft: ghIsDraft, expectedRepository: "jasoncarreira/opencode-feature-factory", expectedNumber: "99" });
   const runDir = join(repo, ".opencode", "factory", runId);

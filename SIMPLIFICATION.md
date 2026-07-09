@@ -280,7 +280,7 @@ Rewrite:
 
 - Slice acceptance: observe evidence → work-reviewer → on APPROVE merge; on REJECT the
   remediation flow above.
-- PR step: push, `gh pr create --draft`, verify with `gh pr view`, then
+- PR step: push, create the PR with the configured PR mode, verify with `gh pr view`, then
   `feature-factory factory pr-created <run> --pr-url ... --pr-number ...`.
 - Keep: intent gate, gate protocol, wave scheduling, observe-don't-trust, bounded loops,
   resume rules, guardrails.
@@ -419,7 +419,6 @@ inherits the trap it is fixing. Steps 1–2 are hand-written PRs.
 
 What is *not* lost: agents still cannot self-approve (reviewer verdict files are still
 required at merge time), builder claims are still distrusted (observed evidence is still
-the review input), gates still block, PR is still draft-only, and every state write is
-still schema-validated and atomic. The enforcement moves from "prove history continuously"
-to "check preconditions once at each transition" — which is all a human-reviewed draft PR
-ever needed.
+the review input), gates still block, PR mode is explicit and configurable, and every state
+write is still schema-validated and atomic. The enforcement moves from "prove history
+continuously" to "check preconditions once at each transition".
