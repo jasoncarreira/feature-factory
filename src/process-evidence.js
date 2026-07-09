@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { timestamp } from "./utils.js";
 
 export const PROCESS_EVIDENCE_FILE = "process.json";
@@ -59,6 +60,7 @@ export function validateProcessEvidence(evidence, opts = {}) {
   } else {
     if (!nonEmptyString(evidence.identity.inspector)) errors.push("identity.inspector must be a non-empty string");
     if (!nonEmptyString(evidence.identity.start_marker)) errors.push("identity.start_marker must be a non-empty string");
+    else if (String(evidence.identity.start_marker).startsWith("unverified:")) errors.push("identity.start_marker must be verifiable process evidence");
     if (!nonEmptyString(evidence.identity.command_name)) errors.push("identity.command_name must be a non-empty string");
   }
   if (!validProcessLogRef(evidence.log_ref)) errors.push("log_ref must stay under processes/");
@@ -87,15 +89,12 @@ export function recordDetachedProcessEvidence(runDir, input = {}) {
   const startedAt = timestamp(input.now);
   const inspector = resolveInspector(input);
   const inspected = inspector(input.pid);
-  const commandName = normalizeCommandName(input.commandName || input.command || "opencode");
-  const identity = inspected?.ok ? {
+  const cwd = resolve(input.cwd || process.cwd());
+  const verified = requireVerifiedProcessIdentity(inspected, cwd);
+  const identity = {
     inspector: stringOrDefault(inspected.inspector, DEFAULT_INSPECTOR),
-    start_marker: String(inspected.start_marker),
-    command_name: normalizeCommandName(inspected.command_name || commandName),
-  } : {
-    inspector: DEFAULT_INSPECTOR,
-    start_marker: `unverified:${input.pid}:${startedAt}`,
-    command_name: commandName,
+    start_marker: verified.startMarker,
+    command_name: verified.commandName,
   };
   const evidence = {
     schema_version: PROCESS_EVIDENCE_SCHEMA_VERSION,
@@ -106,7 +105,7 @@ export function recordDetachedProcessEvidence(runDir, input = {}) {
     started_at: startedAt,
     updated_at: startedAt,
     state: "running",
-    cwd: resolve(input.cwd || process.cwd()),
+    cwd,
     identity,
     log_ref: input.logRef,
     cancel: null,
@@ -160,11 +159,17 @@ export function cancelProcessFromEvidence(runDir, opts = {}) {
   };
 }
 
-export function inspectProcessIdentity(pid) {
+export function inspectProcessIdentity(pid, opts = {}) {
   if (!positivePid(pid)) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "pid must be a positive integer" };
-  const liveness = inspectPidLiveness(pid);
+  const liveness = inspectPidLiveness(pid, opts);
   if (!liveness.alive) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: liveness.reason };
-  if (process.platform !== "linux") return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "process inspector unsupported on this platform" };
+  const platform = opts.platform || process.platform;
+  if (platform === "linux") return inspectLinuxProcessIdentity(pid);
+  if (platform === "darwin") return inspectDarwinProcessIdentity(pid, opts);
+  return { ok: false, inspector: DEFAULT_INSPECTOR, reason: `process inspector unsupported on platform ${platform}` };
+}
+
+function inspectLinuxProcessIdentity(pid) {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const end = stat.lastIndexOf(") ");
@@ -187,6 +192,34 @@ export function inspectProcessIdentity(pid) {
   }
 }
 
+function inspectDarwinProcessIdentity(pid, opts = {}) {
+  const runCommand = resolveCommandRunner(opts);
+  try {
+    const lstart = runCommand("ps", ["-p", String(pid), "-o", "lstart="]).trim().replace(/\s+/gu, " ");
+    const command = runCommand("ps", ["-p", String(pid), "-o", "comm="]).trim().split(/\r?\n/u)[0] || "";
+    const cwd = darwinProcessCwd(pid, runCommand);
+    if (!lstart) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "missing process start marker" };
+    if (!command) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "missing process command" };
+    if (!cwd) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "missing process cwd" };
+    return {
+      ok: true,
+      inspector: DEFAULT_INSPECTOR,
+      pid,
+      start_marker: `darwin-ps:${lstart}`,
+      command_name: normalizeCommandName(command),
+      cwd: resolve(cwd),
+    };
+  } catch (error) {
+    return { ok: false, inspector: DEFAULT_INSPECTOR, reason: `process inspection failed: ${error.message}` };
+  }
+}
+
+function darwinProcessCwd(pid, runCommand) {
+  const output = runCommand("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
+  const line = output.split(/\r?\n/u).find((item) => item.startsWith("n"));
+  return line ? line.slice(1) : null;
+}
+
 function compareProcessIdentity(evidence, inspected) {
   if (!inspected?.ok) return { ok: false, reason: inspected?.reason || "stale pid" };
   if (positivePid(inspected.pid) && inspected.pid !== evidence.pid) return { ok: false, reason: "inspected pid mismatch" };
@@ -202,10 +235,21 @@ function processIsProvenStale(inspected) {
   return /\b(?:ESRCH|no such process)\b/iu.test(String(inspected.reason || ""));
 }
 
+function requireVerifiedProcessIdentity(inspected, expectedCwd) {
+  if (!inspected?.ok) throw new Error(`process evidence requires verifiable live process identity: ${inspected?.reason || "stale pid"}`);
+  const startMarker = String(inspected.start_marker ?? "").trim();
+  if (!startMarker) throw new Error("process evidence requires verifiable live process identity: missing process start marker");
+  const commandName = normalizeCommandName(inspected.command_name || "");
+  if (!commandName) throw new Error("process evidence requires verifiable live process identity: missing process command");
+  if (!nonEmptyString(inspected.cwd)) throw new Error("process evidence requires verifiable live process identity: missing process cwd");
+  if (resolve(String(inspected.cwd)) !== expectedCwd) throw new Error("process evidence requires verifiable live process identity: process cwd mismatch");
+  return { startMarker, commandName };
+}
+
 function resolveInspector(opts = {}) {
   return typeof opts.inspectorFn === "function" ? opts.inspectorFn
     : typeof opts.processInspectorFn === "function" ? opts.processInspectorFn
-      : inspectProcessIdentity;
+      : (pid) => inspectProcessIdentity(pid, opts);
 }
 
 function resolveSignalFn(opts = {}) {
@@ -269,7 +313,10 @@ function invalid(reason) {
   return { ok: false, reason, evidence: null };
 }
 
-function inspectPidLiveness(pid) {
+function inspectPidLiveness(pid, opts = {}) {
+  if (typeof opts.processAliveFn === "function") {
+    return opts.processAliveFn(pid) ? { alive: true, reason: null } : { alive: false, reason: "stale pid (no such process)" };
+  }
   try {
     process.kill(pid, 0);
     return { alive: true, reason: null };
@@ -277,6 +324,11 @@ function inspectPidLiveness(pid) {
     if (error?.code === "ESRCH") return { alive: false, reason: "stale pid (ESRCH: no such process)" };
     return { alive: false, reason: `process liveness unknown: ${error?.code || error?.message || "unknown error"}` };
   }
+}
+
+function resolveCommandRunner(opts = {}) {
+  if (typeof opts.commandRunnerFn === "function") return opts.commandRunnerFn;
+  return (command, args) => execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000, maxBuffer: 1024 * 1024 });
 }
 
 function writeJsonAtomic(file, value) {

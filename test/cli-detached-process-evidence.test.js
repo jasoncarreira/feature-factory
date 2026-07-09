@@ -83,6 +83,7 @@ describe("cli detached process evidence", () => {
       assert.equal(processEvidence.run_id, runId);
       assert.equal(processEvidence.kind, "opencode-process");
       assert.equal(processEvidence.state, "running");
+      assert.doesNotMatch(processEvidence.identity.start_marker, /^unverified:/u);
       assert.match(processEvidence.log_ref, /^processes\/.+\.log$/u);
       stopProcess(output.pid);
     } finally {

@@ -195,7 +195,7 @@ External monitoring semantics:
 
 ## process.json And Cancellation Evidence
 
-Validated run-owned detached launches write run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`; examples include `factory resume <run-id> --detached` and validated continuation launches. Generic `factory start --detached "prompt"` launches, including those with `--run-id <run-id>`, may write only package-level logs: `--run-id` does not grant process-evidence authority over an existing run and must not be assumed to create `$RUN/process.json`. `process.json` is optional for old/non-detached/generic-detached runs, but when present it validates as:
+Validated run-owned detached launches write run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`; examples include `factory resume <run-id> --detached` and validated continuation launches. Evidence is written only after live process identity is verified; unsupported inspection fails the launch before `process.json` is written. Generic `factory start --detached "prompt"` launches, including those with `--run-id <run-id>`, may write only package-level logs: `--run-id` does not grant process-evidence authority over an existing run and must not be assumed to create `$RUN/process.json`. `process.json` is optional for old/non-detached/generic-detached runs, but when present it validates as:
 
 ```json
 {
@@ -218,7 +218,7 @@ Validated run-owned detached launches write run-scoped process evidence to `$RUN
 }
 ```
 
-`state` is one of `running`, `cancelled`, `failed-closed`, or `exited`. `log_ref` must stay under `processes/`; `cwd` must be absolute; `identity` must include `inspector`, `start_marker`, and `command_name`; and `run_id` must match the requested run for cancellation.
+`state` is one of `running`, `cancelled`, `failed-closed`, or `exited`. `log_ref` must stay under `processes/`; `cwd` must be absolute; `identity` must include `inspector`, a verified `start_marker`, and `command_name`; and `run_id` must match the requested run for cancellation.
 
 `feature-factory factory cancel <run-id> --json` reads this evidence and is SIGTERM-only. It sends exactly one targeted `SIGTERM` to the recorded PID only when `process.json` exists, validates, is `state:"running"`, and live process inspection matches PID, start marker, command name, and cwd. Success writes `state:"cancelled"` with `cancel.signal:"SIGTERM"` and returns `ok:true`, `status:"cancelled"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. Missing, invalid, stale, mismatched, non-running, or signal-failed evidence returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, and a reason; it must not send a broad process kill, process-group signal, `pkill`, or `killall`. This command updates only `$RUN/process.json`; it is not a semantic `run.json` transition.
 

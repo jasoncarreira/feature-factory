@@ -299,6 +299,7 @@ describe("run schema and consistency", () => {
         { name: "non-positive pid", value: processEvidence("process-valid", { cwd: repo, pid: 0 }), match: /pid must be a positive integer/u },
         { name: "invalid state", value: processEvidence("process-valid", { cwd: repo, state: "stopping" }), match: /state must be one of running, cancelled, failed-closed, exited/u },
         { name: "invalid identity", value: processEvidence("process-valid", { cwd: repo, identity: null }), match: /identity must be an object/u },
+        { name: "unverified identity", value: processEvidence("process-valid", { cwd: repo, identity: { start_marker: "unverified:4242:2026-07-09T15:00:00.000Z" } }), match: /identity\.start_marker must be verifiable process evidence/u },
         { name: "escaping log ref", value: processEvidence("process-valid", { cwd: repo, log_ref: "processes/../outside.log" }), match: /log_ref must stay under processes/u },
       ];
 
