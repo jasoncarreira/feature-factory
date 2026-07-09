@@ -23,8 +23,8 @@ the remaining future work.
   - Do not add default telemetry or persist trace context in `run.json`.
 
 - Cost attribution follow-ups
-  - Baseline local current-run attribution is implemented and documented: `factory cost-record` writes provider-supplied usage/cost metadata to `run.json.cost_attribution`, and status/list/TUI expose diagnostic summaries.
-  - Future work: richer reporting/export views, provider-specific metadata normalization as opencode exposes it, and correlation with telemetry spans without turning local diagnostics into billing authority.
+  - Baseline local current-run attribution and read-only reporting are implemented and documented: `factory cost-record` writes provider-supplied usage/cost metadata to `run.json.cost_attribution`; status/list/TUI expose diagnostic summaries; and `factory cost-report` provides human, JSON report-v1, and invocation-correlation modes.
+  - Future work: provider-specific metadata normalization as opencode exposes it. Genuine telemetry span taxonomy/correlation and SDK/export validation remain tracked above; report invocation IDs alone are not entry-to-span proof. Keep all cost surfaces local diagnostics rather than billing authority.
 
 - TUI current-status projection
   - `src/tui-data.js currentSummary()` currently prefers `blocked` work before active `running`/`review` work, so downstream placeholder steps such as `work-decomposer blocked` with `attempts: 0` can hide the real active step such as `spec-writer running`.

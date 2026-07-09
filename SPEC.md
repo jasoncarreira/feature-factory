@@ -462,6 +462,56 @@ Orchestrator recording contract:
 
 This section deliberately does not introduce billing connectors, pricing sources, or provider-specific normalization beyond preserving provider-supplied metadata.
 
+### Read-only cost report (report-v1)
+
+The supported report invocations are:
+
+```sh
+feature-factory factory cost-report <run-id>
+feature-factory factory cost-report <run-id> --json
+feature-factory factory cost-report <run-id> --telemetry [--json]
+```
+
+Without `--json`, the command emits a human-readable terminal report. With `--json`, it emits the stable report-v1 response. `--telemetry` is opt-in report-invocation correlation only and may be combined with either output mode.
+
+The report is computed exclusively from a projected copy of `run.json.cost_attribution.entries` at read time. A missing/null attribution block, an empty object, or missing/null/empty `entries` means zero persisted entries. Validate only the attribution entries against the resolved run-directory basename, then delete every own usage/cost numeric property whose value is exactly `null` from the copy before aggregation; do not mutate the persisted entry. Recompute `totals`, `by_agent`, `by_step`, and `by_slice` from those entries and ignore persisted attribution `status`, `totals`, `by_agent`, and `by_slice` caches. Do not call cost normalization/recomputation on read. `by_step`, report totals, and the report itself are never persisted.
+
+The stable JSON keys and count contract are:
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "run-123",
+  "status": "partial",
+  "entry_count": 3,
+  "request_count": 3,
+  "agent_count": 2,
+  "step_count": 2,
+  "slice_count": 1,
+  "unattributed_step_entry_count": 1,
+  "totals": {},
+  "by_agent": {},
+  "by_step": {},
+  "by_slice": {}
+}
+```
+
+Every rollup requires `status`, `entry_count`, `request_count`, `mixed_currency`, and `missing`, then conditionally includes the aggregated numeric fields `input_tokens`, `output_tokens`, `total_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `reasoning_tokens`, `cost_total`, `cost_input`, `cost_output`, `cost_cache_creation`, and `cost_cache_read`, followed by `cost_currency` when valid. Top-level `status` equals `totals.status`; top-level entry/request counts equal totals; `request_count` is one per persisted entry and does not deduplicate `request_id`.
+
+An empty rollup is `unavailable` with zero entries/requests and `missing: ["entries"]`. A nonempty rollup is `available` only when every entry is available and no missing currency or mixed-currency condition is discovered. Any available/partial contribution otherwise makes it `partial`; a validator-accepted data-less `partial` entry remains `partial` even with no usage or cost numeric fields and contributes no fabricated numeric field. All-unavailable entries remain `unavailable`, and available plus unavailable is `partial`. `unavailable` always means attribution is absent, not zero. Explicit numeric `null` in every usage/cost field is compatible persisted absence and is omitted, never added as zero; explicit numeric `0` remains present and aggregatable. Missing fields stay absent and are reflected through the sorted `missing` union.
+
+Group membership for `agent`, `step`, and `slice_id` requires a string whose trimmed length is nonzero, but the exact untrimmed, unsanitized persisted string is the raw JSON map key. Values such as `"agent"`, `" agent "`, `"agent\nx"`, literal escape-looking strings, and `"agent x"` remain distinct; `__proto__` is an ordinary safe key. Missing, `null`, empty, or whitespace-only steps are omitted from `by_step` and counted exactly in `unattributed_step_entry_count`; no synthetic step group is created. Missing slice IDs remain omitted from `by_slice`.
+
+Human labels use an injective terminal-safe encoding for every raw group key and `missing` value. They are double-quoted, preserve printable ASCII except escaped quote/backslash, and encode every other UTF-16 code unit as uppercase `\uXXXX`. The completed multiline report is not passed through a lossy sanitizer. JSON serialization preserves raw decoded keys while escaping literal controls/line separators safely, so display collisions never merge identities.
+
+Mixed currencies set the rollup to `partial`, set `mixed_currency: true`, include `mixed_currency` in `missing`, and omit both `cost_total` and `cost_currency`. Existing compatibility behavior may still separately sum `cost_input`, `cost_output`, `cost_cache_creation`, and `cost_cache_read`. Those components are not a normalized monetary total, and consumers must not infer or reconstruct a combined amount from them. The report performs no pricing-table/API lookup, pricing, estimation, currency conversion, currency coercion, or missing-to-zero coercion.
+
+The command resolves one contained bare run ID and reads only its `run.json`. It does not call full-run validation, inspect or require gates/steps/slices/verdicts/terminal state, require accepted attestations, acquire or wait for `run-json.lock`, require an active/inactive heartbeat, mutate any file, normalize provider metadata, generate IDs/timestamps, or persist derived state. It makes no network calls. A racing atomic writer may yield the old or new snapshot only. This is strictly local diagnostic output, not billing authority, an invoice, a quota or chargeback ledger, a finance control, or cross-run accounting.
+
+Telemetry behavior is deliberately narrower than factory tracing. Without `--telemetry`, all ambient trace variables are ignored and output is byte-equivalent whether they exist or not. With `--telemetry`, valid matching inherited context may append only `telemetry.trace_id` and `telemetry.parent_span_id`; absent context adds no section, and invalid/conflicting explicitly enabled context fails locally. Never expose full `traceparent`, `tracestate`, flags, headers, or exporter configuration. The IDs correlate only this cost-report invocation with inherited runtime context: they do not prove any attribution entry, agent, step, slice, provider request, or aggregate originated from that trace or span. The command does not create spans, initialize SDKs/exporters, inspect OTLP endpoints, persist trace context, or make network calls.
+
+Errors are local and write no partial stdout or state. The command requires exactly one bare safe run ID; missing runs, malformed `run.json`, invalid attribution/entries, more than 1000 entries, invalid non-null numeric/status/currency/missing fields, and mismatched entry run IDs fail before aggregation. Numeric `null` alone is projected to absence rather than rejected or coerced.
+
 ## 9. Scripted Environment And Credential Contract
 
 Scripted runs inherit the driver's environment. Document and validate this explicitly.
