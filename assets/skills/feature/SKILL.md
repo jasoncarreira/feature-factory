@@ -325,7 +325,8 @@ Parse the invocation and determine whether the input is an existing work item, r
 
 Establish the run:
 
-- `run-id` = lowercased external ref if one exists, otherwise a short kebab slug.
+- If the structured driver config has `driver.run_id` from `feature-factory factory start --run-id <run-id>`, validate it as a bare safe factory run id and use it for a new run instead of deriving a slug. Do not use `driver.run_id` to route resumes or blocked-run continuations. If a different existing run would be overwritten, stop before mutation and report the conflict.
+- Otherwise, `run-id` = lowercased external ref if one exists, or a short kebab slug.
 - Determine `BASE` from the repo default branch, `BRANCH=<run-id>-<short-slug>`, and `FEAT_WT=$REPO/.opencode/worktrees/$BRANCH`.
 - Fetch `origin/$BASE` when available and create or reuse the feature branch/worktree. Reuse existing paths only after checking they point at the intended branch.
 - Initialize `run.json` with `schema_version`, `run_id`, `external_ref`, `base_ref`, `base_commit`, `branch`, `worktree`, `status: running`, timestamps, `heartbeat_at`, `max_parallel_slices: 3`, `max_retries: 3`, optional top-level `review_tier`, top-level `pr_mode` holding the effective PR mode (`draft` or `ready`), top-level `github_account` when provided by the driver, `debug_snapshot`, expected step placeholders, empty `slices`, gate refs, and null `validator`/`pr_url`.
