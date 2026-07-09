@@ -81,8 +81,8 @@ Actions by intent:
 - `status`: read state and report. Do not dispatch agents, create worktrees, write gates, or change run status.
 - `scripted-start`: proceed like `new-feature`/`resume`, but in scripted mode stop after writing the next pending gate question if no answer file exists.
 - `autonomous-start`: proceed like `new-feature`/`resume`, set `run.json.mode = "autonomous"`, and use Autonomous Mode rules instead of waiting for external gate answers.
-- `pr-continuation`: verify Gate 3 approval, validator verdict, security verdict, and observed evidence before pushing or creating a draft PR.
-- `blocked-run-continuation`: validate the continuation payload as untrusted operator data/config, persist accepted metadata under `run.json.continuation`, and then run the normal story, brief, build, test, validator, security, pre-PR, and draft-PR workflow for the new run.
+- `pr-continuation`: verify Gate 3 approval, validator verdict, security verdict, observed evidence, and the configured PR mode before pushing or creating a PR.
+- `blocked-run-continuation`: validate the continuation payload as untrusted operator data/config, persist accepted metadata under `run.json.continuation`, and then run the normal story, brief, build, test, validator, security, pre-PR, and configured PR workflow for the new run.
 
 If classification is ambiguous, ask one short clarification question and do not mutate state until answered.
 
@@ -97,8 +97,7 @@ Continuation admission rules:
 - Treat parent context as read-only. Do not modify the parent `run.json`, gates, artifacts, evidence, reviews, branch, worktree, PR URL, or terminal result while creating or running the child.
 - Bootstrap a fresh child run using `--run-id <new-run-id>` and persist the accepted relationship under `run.json.continuation` using the schema shape in `SCHEMA.md`: `schema_version`, `kind`, `created_at`, `operator_summary`, nested `parent`, `review`, and `target` objects with refs/hashes, parent worktree, target base ref/commit, `parent_artifacts` `{kind, ref, hash}` entries, and parent evidence/review `{kind, ref, hash}` entries.
 - Preserve the normal trust boundaries: continuation metadata is context for story/spec/planning, not a bypass of acceptance criteria, gate approval, observed evidence, reviewer, validator, security, or PR-created preconditions.
-- Force `driver.ready = false` for continuation runs. Even if the operator payload asks for ready review, continuation PRs stay draft-only.
-- Run the ordinary factory chain for the child: story and brief gates, research/spec/decomposition, build slices, acceptance tests, implementation-validator, security-reviewer, Gate 3 pre-PR, and draft PR creation only after Gate 3 approval. Before recording PR creation for a continuation, verify the live GitHub PR reports `isDraft: true`.
+- Run the ordinary factory chain for the child: story and brief gates, research/spec/decomposition, build slices, acceptance tests, implementation-validator, security-reviewer, Gate 3 pre-PR, and PR creation using the effective configured PR mode only after Gate 3 approval.
 - If remediation is exhausted, the fix owner is ambiguous, or validation/security remains NO-GO after bounded attempts, write terminal `status: blocked` with `terminal_result.pr_url: null` and do not create or record a PR URL.
 
 ## Control Plane
@@ -256,7 +255,7 @@ Rules:
 - Gate 3 (pre_pr) is decided by the strictest result from the implementation-validator and security-reviewer panel. GO/PASS may approve autonomously. Any validator NO-GO or security-reviewer BLOCK is NO-GO.
 - On Gate 3 NO-GO, run the bounded remediation loop from Step 5: route top findings to the owning builder or integration/test fix path, observe evidence, and rerun the panel. Do not exceed `run.json.max_retries` or 3 attempts if unset.
 - If remediation exhausts or the fix owner is ambiguous, set `status: blocked` or `needs-human`, write `terminal_result`, and stop.
-- Never auto-merge. A draft PR is the final autonomous side effect.
+- Never auto-merge. Creating a PR, either draft or ready-for-review according to the effective PR mode, is the final autonomous side effect.
 - At every terminal state, write `run.json.terminal_result` with the stable external-driver contract described in `SCHEMA.md`.
 
 ## Step 0 - Intake, Run ID, Manifest
@@ -361,7 +360,7 @@ Present:
 
 Do not offer normal approval if observed integrated evidence is missing, empty, or red. A human can explicitly override; record the override in `run.json`.
 
-## Step 6 - Draft PR
+## Step 6 - PR Creation
 
 After Gate 3 approval only:
 
@@ -370,12 +369,13 @@ After Gate 3 approval only:
 3. Push the feature branch from `$FEAT_WT`.
 4. Build PR metadata from repo conventions and changed paths.
 5. Write PR body to `$RUN/artifacts/pr-body.md`.
-6. Create a draft PR with the repository's CLI conventions, preferably `gh pr create --draft --body-file`.
-7. Immediately after successful draft PR creation, call the PR-created transition. Do not directly edit or persist `run.json.pr_url` yourself:
+6. Determine the effective PR mode: `driver.pr_mode` (`draft` or `ready`) overrides the plugin configured PR mode for this run; legacy `driver.ready: true` means `ready`; otherwise use the plugin configured PR mode injected into the `/feature` command. In `ready` mode create a ready-for-review PR. In `draft` mode create a draft PR with the repository's CLI conventions, preferably `gh pr create --draft --body-file`.
+7. Immediately after successful PR creation, call the PR-created transition. Do not directly edit or persist `run.json.pr_url` yourself:
    ```sh
    gh pr view <url>
    feature-factory factory pr-created <run-id> --pr-url <url> --pr-number <number> --repository <owner/repo> --json
    ```
+   Add `--draft` to `factory pr-created` only when the PR was intentionally created as a draft.
    The helper validates `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, and the canonical GitHub PR URL before writing `run.pr_url`, `status: completed`, and `terminal_result.pr_url`.
 
 Never merge the PR. Never force-push unless the user explicitly approves.
@@ -404,6 +404,6 @@ Never redo side effects that the manifest shows already happened.
 - Treat reviewer-designated worktrees as read-only; if post-review git status is dirty or unverifiable, restore the worktree, discard that reviewer output, and retry once before blocking.
 - Subagents do not push, open PRs, or edit external systems.
 - Bounded loops: `max_retries = 3` per reviewed subject/slice.
-- Draft PR only. Humans review and merge.
+- PRs follow the effective configured PR mode. Humans review and merge.
 - Do not fabricate paths, versions, test passes, branch names, or PR URLs.
 - If evidence is thin, say so and stop or ask.

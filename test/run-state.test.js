@@ -362,6 +362,8 @@ describe("simplified run-state transitions", () => {
 
       assert.equal(result.run.status, "completed");
       assert.equal(result.run.pr_url, "https://github.com/jasoncarreira/opencode-feature-factory/pull/99");
+      assert.equal(result.run.terminal_result.draft, false);
+      assert.equal(result.run.terminal_result.summary, "PR created.");
       await assert.rejects(
         transitionRunJson(fixture.runDir, (run) => {
           run.updated_at = NOW;
@@ -373,8 +375,8 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("allows default draft PR creation for blocked-run continuations", async () => {
-    const fixture = createFixture("pr-continuation-default-draft");
+  it("allows default ready PR creation for blocked-run continuations", async () => {
+    const fixture = createFixture("pr-continuation-default-ready");
     try {
       writeReadyPrRun(fixture, {
         branch: "continuation-branch",
@@ -389,14 +391,14 @@ describe("simplified run-state transitions", () => {
       });
 
       assert.equal(result.run.status, "completed");
-      assert.equal(result.run.terminal_result.draft, true);
+      assert.equal(result.run.terminal_result.draft, false);
     } finally {
       cleanup(fixture.repo);
     }
   });
 
-  it("rejects non-draft PR creation for blocked-run continuations", async () => {
-    const fixture = createFixture("pr-continuation-no-draft");
+  it("allows explicit draft PR creation for blocked-run continuations", async () => {
+    const fixture = createFixture("pr-continuation-draft");
     try {
       writeReadyPrRun(fixture, {
         branch: "continuation-branch",
@@ -404,18 +406,15 @@ describe("simplified run-state transitions", () => {
         continuation: continuationMetadata(fixture.runId),
       });
 
-      await assert.rejects(
-        transitionPrCreated(fixture.runDir, {
-          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
-          pr_number: 104,
-          repository: "jasoncarreira/opencode-feature-factory",
-          draft: false,
-        }),
-        /requires draft PR for blocked-run-continuation/u,
-      );
-      const run = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(run.status, "running");
-      assert.equal(run.pr_url, undefined);
+      const result = await transitionPrCreated(fixture.runDir, {
+        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
+        pr_number: 104,
+        repository: "jasoncarreira/opencode-feature-factory",
+        draft: true,
+      });
+
+      assert.equal(result.run.status, "completed");
+      assert.equal(result.run.terminal_result.draft, true);
     } finally {
       cleanup(fixture.repo);
     }

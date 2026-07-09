@@ -272,7 +272,7 @@ function inferredPrePrPanelSummary(run) {
   if (validatorVerdict === "NO-GO" || securityVerdict === "BLOCK") return "panel remediation running";
   if (!validatorVerdict) return "implementation-validator running";
   if (!securityVerdict) return "security-reviewer running";
-  if (!run.pr_url) return "draft PR pending";
+  if (!run.pr_url) return "PR pending";
   return null;
 }
 

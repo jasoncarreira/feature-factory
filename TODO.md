@@ -17,7 +17,7 @@ covered there.
   - Use the final/blocking review as the remediation spec seed while preserving the original story/brief as scope boundaries.
   - Record parent run, blocked branch/commit, review ref, and original artifact refs in continuation metadata.
   - Refuse to continue if the blocked branch or review cannot be found.
-  - Open a draft PR only after the normal validator/security gates pass.
+  - Open a PR using the configured PR mode only after the normal validator/security gates pass.
 
 ## Build And Review Workflow
 

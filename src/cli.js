@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -9,7 +9,7 @@ import { cleanupRun, continueFactory, heartbeatStatus, listRuns, persistFactoryR
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { canonicalizeGithubPrUrl, githubPrUrlParts } from "./refs.js";
+import { canonicalizeGithubPrUrl } from "./refs.js";
 import { normalizePrNumber as normalizeTransitionPrNumber, transitionGateDecision, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
@@ -31,8 +31,8 @@ function usage(write = console.log) {
 Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] Check opencode/plugin/provider/tool prerequisites
-  factory start [--repo PATH] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] <prompt...>
-  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--dry-run]
+  factory start [--repo PATH] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] <prompt...>
+  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--draft|--ready|--no-draft] [--dry-run]
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
   factory heartbeat <run-id> --start --phase <phase> [--interval MS] [--json]  Start detached liveness ticker
@@ -449,38 +449,9 @@ async function prCreated(args) {
     pr_url: canonicalizeGithubPrUrl(requiredOption(opts.prUrl, "--pr-url")),
     pr_number: normalizeCliPrNumber(requiredOption(opts.prNumber, "--pr-number")),
     repository: requiredOption(opts.repository, "--repository"),
-    draft: opts.noDraft === true ? false : true,
+    draft: opts.draft === true,
   };
-  const runDir = resolveRunDir(runId, opts);
-  verifyContinuationPrIsDraft(readHeartbeatStartRun(runDir), request, opts);
-  return print(await transitionPrCreated(runDir, request, opts), opts);
-}
-
-function verifyContinuationPrIsDraft(run, request, opts = {}) {
-  if (run.continuation?.kind !== "blocked-run-continuation") return;
-  if (request.draft !== true) throw new Error("pr-created requires draft PR for blocked-run-continuation runs");
-  const state = githubPrDraftState(request, opts);
-  if (state !== true) throw new Error("pr-created requires GitHub PR isDraft=true for blocked-run-continuation runs");
-}
-
-function githubPrDraftState(request, opts = {}) {
-  const pr = githubPrUrlParts(request.pr_url);
-  const proc = spawnSync("gh", ["pr", "view", String(pr.number), "--repo", pr.repository, "--json", "isDraft"], {
-    cwd: opts.cwd,
-    encoding: "utf8",
-    env: { ...process.env },
-  });
-  if (proc.status !== 0) {
-    const detail = String(proc.stderr || proc.stdout || "").trim();
-    throw new Error(`pr-created could not verify GitHub PR draft state${detail ? `: ${detail}` : ""}`);
-  }
-  try {
-    const value = JSON.parse(proc.stdout || "{}");
-    if (typeof value.isDraft !== "boolean") throw new Error("missing boolean isDraft");
-    return value.isDraft;
-  } catch (error) {
-    throw new Error(`pr-created could not parse GitHub PR draft state: ${error.message}`);
-  }
+  return print(await transitionPrCreated(resolveRunDir(runId, opts), request, opts), opts);
 }
 
 async function sliceMerged(args) {

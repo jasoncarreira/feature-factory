@@ -31,6 +31,7 @@ describe("factory continue", () => {
 
       assert.equal(result.status, "dry-run");
       assert.equal(result.payload.driver.ready, false);
+      assert.equal(result.payload.driver.pr_mode, null);
       assert.equal(result.payload.driver.github_account, "octo-org");
       const parentCommit = gitStdout(fixture.repo, ["rev-parse", "--verify", `refs/heads/${fixture.runId}^{commit}`]);
       assert.deepEqual(result.payload.continuation, {
@@ -400,7 +401,7 @@ describe("factory continue", () => {
     }
   });
 
-  it("CLI routes factory continue, rejects --ready and --no-draft, and prints dry-run JSON", () => {
+  it("CLI routes factory continue and carries per-run PR mode overrides", () => {
     const fixture = createFixture("cli-parent");
     try {
       const proc = runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "cli-parent-next", "--dry-run", "--json"]);
@@ -409,15 +410,16 @@ describe("factory continue", () => {
       assert.equal(output.status, "dry-run");
       assert.equal(output.payload.continuation.target.run_id, "cli-parent-next");
       assert.equal(output.payload.driver.ready, false);
+      assert.equal(output.payload.driver.pr_mode, null);
 
-      assert.match(
-        runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "ready-next", "--ready", "--dry-run"]).stderr,
-        /does not accept --ready/u,
-      );
-      assert.match(
-        runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "draft-next", "--no-draft", "--dry-run"]).stderr,
-        /does not accept --no-draft/u,
-      );
+      const ready = JSON.parse(runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "ready-next", "--ready", "--dry-run", "--json"]).stdout);
+      assert.equal(ready.payload.driver.pr_mode, "ready");
+
+      const noDraft = JSON.parse(runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "no-draft-next", "--no-draft", "--dry-run", "--json"]).stdout);
+      assert.equal(noDraft.payload.driver.pr_mode, "ready");
+
+      const draft = JSON.parse(runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "draft-next", "--draft", "--dry-run", "--json"]).stdout);
+      assert.equal(draft.payload.driver.pr_mode, "draft");
     } finally {
       cleanup(fixture.repo);
     }

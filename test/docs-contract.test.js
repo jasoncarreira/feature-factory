@@ -272,20 +272,21 @@ describe("blocked-run continuation docs contract", () => {
     assert.match(SCHEMA, /refs paired with hashes|ref.*hash/i, "SCHEMA must require validated refs and hashes");
   });
 
-  it("documents rejected ready/non-draft flags for factory continue", () => {
+  it("documents configurable PR mode for factory continue", () => {
     for (const [name, text] of documentEntries({ README, SPEC })) {
-      assert.match(text, /factory continue[\s\S]*rejects?[\s\S]*`--ready`[\s\S]*`--no-draft`/i, `${name} must document rejecting --ready and --no-draft`);
-      assert.match(text, /draft-only|draft mode/i, `${name} must document draft-only continuation behavior`);
+      assert.match(text, /factory continue[\s\S]*prMode|Continuation[\s\S]*effective PR mode/i, `${name} must document continuation PR mode`);
+      assert.match(text, /`--draft`[\s\S]*`--ready`|`--ready`[\s\S]*`--draft`/i, `${name} must document per-run PR mode overrides`);
     }
   });
 
-  it("documents normal gates, draft-only PRs, and exhausted-remediation terminal blocked outcome", () => {
+  it("documents normal gates, configurable PRs, and exhausted-remediation terminal blocked outcome", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
       for (const term of ["story", "brief", "build", "test", "validator", "security", "pre-PR"]) {
         assert.match(text, new RegExp(escapeRegExp(term), "i"), `${name} must include normal ${term} gate/step`);
       }
-      assert.match(text, /draft-only/i, `${name} must require draft-only continuation PRs`);
-      assert.match(text, /driver\.ready\s*=\s*false/i, `${name} must force driver.ready=false`);
+      assert.match(text, /configured PR mode|effective PR mode|prMode/i, `${name} must document configurable PR mode`);
+      assert.match(text, /ready-for-review|ready/i, `${name} must document ready PR mode`);
+      assert.match(text, /draft/i, `${name} must document draft PR mode`);
       assert.match(text, /terminal[\s\S]*blocked|status:\s*"blocked"/i, `${name} must document terminal blocked outcome`);
       assert.match(text, /no PR URL|pr_url:\s*null/i, `${name} must document no PR URL on exhausted remediation`);
     }
