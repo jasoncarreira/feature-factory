@@ -17,6 +17,7 @@ const ZERO_SPAN_ID = "0".repeat(16);
 const PARENT_SPAN_ID_PATTERN = /^[0-9a-f]{16}$/iu;
 const CONTROL_CHAR_PATTERN = /[\u0000-\u001f\u007f]/u;
 const OTLP_ENV_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9_]+)?$/u;
+const OTLP_ENDPOINT_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9]+)?_ENDPOINT$/u;
 const OTLP_HEADERS_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9]+)?_HEADERS$/u;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 const SAFE_ATTRIBUTE_ARRAY_TYPES = new Set(["string", "number", "boolean"]);
@@ -75,7 +76,9 @@ export function sanitizeOtlpHeaders(value) {
 export function sanitizeTelemetryValue(key, value) {
   if (value === undefined || value === null) return value;
   const string = String(value);
-  if (isSensitiveEnvKey(key) || isSensitiveEnvValue(string)) return REDACTED_ENV_VALUE;
+  if (isSensitiveEnvKey(key)) return REDACTED_ENV_VALUE;
+  if (OTLP_ENDPOINT_PATTERN.test(key)) return sanitizeOtlpEndpointValue(string);
+  if (isSensitiveEnvValue(string)) return REDACTED_ENV_VALUE;
   return string;
 }
 
@@ -230,10 +233,71 @@ export function runAttributes(input = {}) {
 }
 
 function sanitizeOtlpHeaderEntry(entry) {
-  const [rawName] = String(entry).split("=", 1);
+  const index = String(entry).indexOf("=");
+  if (index <= 0) return null;
+  const rawName = String(entry).slice(0, index);
   const name = sanitizeHeaderName(rawName);
   if (!name) return null;
   return { name, present: true, value: REDACTED_ENV_VALUE };
+}
+
+function sanitizeOtlpEndpointValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return raw;
+
+  try {
+    const parsed = new URL(raw);
+    const safeHost = sanitizeEndpointHost(parsed);
+    const safePath = sanitizeEndpointPath(parsed.pathname, raw);
+    const safeQuery = endpointSearchHasValues(parsed.searchParams) ? `?${REDACTED_ENV_VALUE}` : "";
+    const safeHash = parsed.hash ? `#${REDACTED_ENV_VALUE}` : "";
+    return `${parsed.protocol}//${safeHost}${safePath}${safeQuery}${safeHash}`;
+  } catch {
+    return scrubSecretEnv(raw);
+  }
+}
+
+function sanitizeEndpointHost(parsed) {
+  const hostname = parsed.hostname;
+  const port = parsed.port ? `:${parsed.port}` : "";
+  if (!hostname) return scrubSecretEnv(parsed.host || "");
+  if (hostname.startsWith("[") && hostname.endsWith("]")) return `${hostname}${port}`;
+  const safeHostname = hostname
+    .split(".")
+    .map((label) => sanitizeEndpointComponent(label))
+    .join(".");
+  return `${safeHostname}${port}`;
+}
+
+function sanitizeEndpointPath(pathname, raw) {
+  const safePath = String(pathname || "/")
+    .split("/")
+    .map((segment) => sanitizeEndpointComponent(segment))
+    .join("/") || "/";
+  if (safePath === "/" && !/^[a-z][a-z0-9+.-]*:\/\/[^/?#]+\//iu.test(raw)) return "";
+  return safePath;
+}
+
+function sanitizeEndpointComponent(value) {
+  if (!value) return value;
+  const decoded = safeDecodeURIComponent(value);
+  if (isSensitiveEnvValue(decoded) || scrubSecretEnv(decoded) === REDACTED_ENV_VALUE) return REDACTED_ENV_VALUE;
+  return scrubSecretEnv(value);
+}
+
+function endpointSearchHasValues(searchParams) {
+  for (const [key, value] of searchParams.entries()) {
+    if (key || value) return true;
+  }
+  return false;
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function sanitizeHeaderName(value) {
