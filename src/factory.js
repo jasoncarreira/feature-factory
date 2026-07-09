@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
@@ -8,7 +8,7 @@ import { pendingProtectedGate, validateHeartbeatState, validateRun, validateRunD
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { git, repoRoot } from "./git.js";
-import { checkWorktreeIdentity } from "./worktrees.js";
+import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 
@@ -85,9 +85,14 @@ const PACKAGED_SEED_HASHES = {
 };
 const activeHeartbeatLoops = new Map();
 
-export function startFactory(args, opts = {}) {
+export async function startFactory(args, opts = {}) {
   if (!args.length) throw new Error("factory start requires a feature prompt");
   const repo = repoRoot(opts.cwd || process.cwd());
+  const resumeRunId = resumePromptRunId(args, opts);
+  if (resumeRunId) {
+    const preflight = await recoverDisruptedRun(resumeRunId, { ...opts, cwd: repo });
+    if (!preflight.ok) return preflight;
+  }
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
@@ -97,6 +102,306 @@ export function startFactory(args, opts = {}) {
     execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
   } catch (error) {
     throw new Error(`opencode exited ${error.status ?? 1}`);
+  }
+}
+
+export async function recoverDisruptedRun(runId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const target = resolveRecoveryRunTarget(runId, { ...opts, cwd: repo });
+  if (target.error) return syntheticDisruptedTerminal(runId, target.runDir, target.runFile, target.error, opts);
+
+  const readResult = readDurableRecoveryRun(repo, target.runDir, target.runFile);
+  if (readResult.error) return syntheticDisruptedTerminal(target.runId, target.runDir, target.runFile, readResult.error, opts);
+
+  const run = readResult.run;
+  if (TERMINAL_STATUSES.has(run.status)) return recoveryEnvelope(run, {
+    ok: false,
+    durable: true,
+    updated: false,
+    recovered: false,
+    runDir: target.runDir,
+    reason: `run '${run.run_id}' is already terminal with status '${run.status}'`,
+  });
+
+  const worktree = resolveRecoveryWorktree(repo, run);
+  if (!worktree.ok) {
+    return persistRecoveryTerminal(target.runDir, run, "needs-human", worktree.reason, opts);
+  }
+
+  const evidence = reconcileRecoveryGitEvidence(repo, run);
+  if (!evidence.ok) {
+    return persistRecoveryTerminal(target.runDir, run, "blocked", evidence.reason, opts);
+  }
+
+  const current = checkExistingRecoveryWorktree(repo, worktree.path, run.branch);
+  if (current.status === "healthy") return recoveryEnvelope(run, {
+    ok: true,
+    durable: true,
+    updated: false,
+    recovered: false,
+    runDir: target.runDir,
+    worktree: current.worktree,
+    branchHead: evidence.branchHead,
+  });
+  if (current.status === "unsafe") {
+    return persistRecoveryTerminal(target.runDir, run, "needs-human", current.reason, opts);
+  }
+
+  const addResult = addRecoveryWorktree(repo, worktree.path, run.branch);
+  if (!addResult.ok) {
+    return persistRecoveryTerminal(target.runDir, run, "blocked", addResult.reason, opts);
+  }
+
+  const finalIdentity = checkWorktreeIdentity(repo, worktree.path, { branch: run.branch });
+  if (!finalIdentity.ok) {
+    return persistRecoveryTerminal(target.runDir, run, "blocked", `recovery created an invalid worktree identity: ${finalIdentity.reason}`, opts);
+  }
+  const finalBranchHead = branchHeadCommit(repo, run.branch);
+  if (!finalBranchHead.ok) {
+    return persistRecoveryTerminal(target.runDir, run, "blocked", finalBranchHead.reason, opts);
+  }
+  const worktreeHead = git(worktree.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!worktreeHead.ok || worktreeHead.stdout.trim() !== finalBranchHead.commit) {
+    return persistRecoveryTerminal(target.runDir, run, "blocked", `recovered worktree HEAD does not match branch '${run.branch}' HEAD`, opts);
+  }
+
+  let updated = false;
+  let nextRun = run;
+  if (run.worktree !== worktree.path) {
+    nextRun = await withRunJsonLock(target.runDir, async () => {
+      const currentRun = readRunFile(target.runFile);
+      const next = validateRun({ ...currentRun, worktree: worktree.path });
+      writeJsonAtomic(target.runFile, next);
+      return next;
+    }, opts);
+    updated = true;
+  }
+
+  return recoveryEnvelope(nextRun, {
+    ok: true,
+    durable: true,
+    updated,
+    recovered: true,
+    runDir: target.runDir,
+    worktree: worktree.path,
+    branchHead: finalBranchHead.commit,
+  });
+}
+
+function resumePromptRunId(args, opts = {}) {
+  if (!opts.headless && !opts.autonomous) return null;
+  const prompt = args.join(" ").trim();
+  const match = /^resume\s+([^\s]+)$/iu.exec(prompt);
+  return match ? match[1] : null;
+}
+
+function resolveRecoveryRunTarget(runId, opts = {}) {
+  if (!stringValue(runId)) return { error: "resume-check requires a non-empty run id" };
+  const value = String(runId).trim();
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const roots = factoryRootsForLookup(repo);
+  if (isExplicitRunPath(value)) {
+    const runDir = resolve(opts.cwd || repo, value);
+    const root = roots.find((candidate) => isLogicalContainedPath(candidate, runDir, { allowEqual: false }));
+    const runFile = join(runDir, "run.json");
+    if (!root) return { runId: basename(runDir), runDir, runFile, error: `run path must be inside .opencode/factory: ${runDir}` };
+    return { runId: basename(runDir), runDir, runFile };
+  }
+  if (!SAFE_RUN_ID_PATTERN.test(value) || value === "." || value === ".." || value.includes("..") || value.endsWith(".lock")) {
+    const runDir = resolve(directFactoryRoot(repo), value || "invalid-run-id");
+    return { runId: value || null, runDir, runFile: join(runDir, "run.json"), error: "run id must be a bare safe factory run id" };
+  }
+  for (const rootPath of roots) {
+    const candidate = resolve(rootPath, value);
+    const file = join(candidate, "run.json");
+    if (existsSync(file)) return { runId: value, runDir: candidate, runFile: file };
+  }
+  const runDir = resolve(directFactoryRoot(repo), value);
+  return { runId: value, runDir, runFile: join(runDir, "run.json") };
+}
+
+function readDurableRecoveryRun(repo, runDir, runFile) {
+  try {
+    const entry = lstatPathNoSymlinks(repo, runFile, "factory recovery run.json must not contain symlinks").entry;
+    if (!entry) return { error: `missing run.json at ${runFile}` };
+    if (!entry.isFile()) return { error: `run.json is not a file at ${runFile}` };
+    return { run: readRunFile(runFile) };
+  } catch (error) {
+    return { error: `inaccessible or invalid run.json at ${runFile}: ${error.message}` };
+  }
+}
+
+function syntheticDisruptedTerminal(runId, runDir, runFile, detail, opts = {}) {
+  const id = stringValue(runId) ? String(runId).trim() : fallbackRunId(runId, runDir || "unknown-run");
+  const reason = `Factory run '${id}' is disrupted: ${detail}. No durable terminal_result can be written without forbidden re-scaffolding or overwriting missing/inaccessible/invalid durable state.`;
+  return {
+    ok: false,
+    durable: false,
+    updated: false,
+    recovered: false,
+    run_id: id,
+    status: "blocked",
+    run_dir: runDir || null,
+    run_file: runFile || null,
+    worktree: null,
+    branch: null,
+    checked_at: timestamp(opts.now),
+    terminal_result: terminalResult(id, "blocked", reason),
+  };
+}
+
+function recoveryEnvelope(run, details = {}) {
+  return {
+    ok: Boolean(details.ok),
+    durable: details.durable !== false,
+    updated: Boolean(details.updated),
+    recovered: Boolean(details.recovered),
+    run_id: run.run_id,
+    status: run.status,
+    run_dir: details.runDir || null,
+    run_file: details.runDir ? join(details.runDir, "run.json") : null,
+    worktree: details.worktree || run.worktree || null,
+    branch: run.branch || null,
+    branch_head: details.branchHead || null,
+    terminal_result: run.terminal_result || null,
+    reason: details.reason || run.terminal_result?.reason || null,
+  };
+}
+
+function resolveRecoveryWorktree(repo, run) {
+  if (!stringValue(run.branch)) return { ok: false, reason: `run '${run.run_id}' has no branch, so disrupted worktree recovery needs human reconciliation` };
+  const target = stringValue(run.worktree) ? resolve(repo, run.worktree) : deriveExpectedWorktreePath(repo, run.branch);
+  const rootPath = resolve(repo, ".opencode", "worktrees");
+  if (!isLogicalContainedPath(canonicalRecoveryPath(rootPath), canonicalRecoveryPath(target), { allowEqual: false })) {
+    return { ok: false, reason: `recorded recovery worktree path is unsafe because it is outside .opencode/worktrees: ${target}` };
+  }
+  try {
+    lstatPathNoSymlinks(repo, target, "factory recovery worktree path must not contain symlinks");
+  } catch (error) {
+    return { ok: false, reason: `recorded recovery worktree path is inaccessible or unsafe: ${error.message}` };
+  }
+  return { ok: true, path: target };
+}
+
+function canonicalRecoveryPath(path) {
+  const resolved = resolve(path);
+  if (existsSync(resolved)) return realpathSync.native(resolved);
+  const segments = [];
+  let cursor = resolved;
+  while (!existsSync(cursor)) {
+    segments.unshift(basename(cursor));
+    const parent = dirname(cursor);
+    if (parent === cursor) return resolved;
+    cursor = parent;
+  }
+  return resolve(realpathSync.native(cursor), ...segments);
+}
+
+function reconcileRecoveryGitEvidence(repo, run) {
+  if (!stringValue(run.branch)) return { ok: false, reason: `run '${run.run_id}' has no branch to recover` };
+  if (!isSafeCleanupBranchName(run.branch)) return { ok: false, reason: `run '${run.run_id}' has unsafe branch name '${run.branch}'` };
+  const branchHead = branchHeadCommit(repo, run.branch);
+  if (!branchHead.ok) return branchHead;
+  if (stringValue(run.base_commit) && !commitIsAncestor(repo, run.base_commit, branchHead.commit)) {
+    return { ok: false, reason: `base_commit '${run.base_commit}' is not an ancestor of branch '${run.branch}' HEAD '${branchHead.commit}'` };
+  }
+  for (const mergeCommit of mergedSliceCommits(run)) {
+    if (!commitIsAncestor(repo, mergeCommit, branchHead.commit)) {
+      return { ok: false, reason: `merged slice merge_commit '${mergeCommit}' is not an ancestor of branch '${run.branch}' HEAD '${branchHead.commit}'` };
+    }
+  }
+  return { ok: true, branchHead: branchHead.commit };
+}
+
+function branchHeadCommit(repo, branch) {
+  const proc = git(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (!proc.ok) return { ok: false, reason: `branch '${branch}' does not exist or has no resolvable HEAD commit` };
+  return { ok: true, commit: proc.stdout.trim() };
+}
+
+function commitIsAncestor(repo, ancestor, descendant) {
+  return git(repo, ["merge-base", "--is-ancestor", ancestor, descendant]).ok;
+}
+
+function mergedSliceCommits(run) {
+  return [...new Set((Array.isArray(run.slices) ? run.slices : [])
+    .filter((slice) => slice?.status === "merged" && stringValue(slice.merge_commit))
+    .map((slice) => String(slice.merge_commit).trim()))];
+}
+
+function checkExistingRecoveryWorktree(repo, worktree, branch) {
+  let entry;
+  try {
+    entry = lstatSync(worktree);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { status: "missing" };
+    return { status: "unsafe", reason: `recorded worktree path is inaccessible: ${error.message}` };
+  }
+  if (!entry.isDirectory()) return { status: "unsafe", reason: `recorded worktree path exists but is not a directory: ${worktree}` };
+  const identity = checkWorktreeIdentity(repo, worktree, { branch });
+  if (!identity.ok) return { status: "unsafe", reason: `recorded worktree path exists but is not the expected worktree: ${identity.reason}` };
+  return { status: "healthy", worktree: identity.worktree };
+}
+
+function addRecoveryWorktree(repo, worktree, branch) {
+  mkdirSync(resolve(repo, ".opencode", "worktrees"), { recursive: true });
+  git(repo, ["worktree", "prune"]);
+  const proc = git(repo, ["worktree", "add", worktree, branch], { timeout: 30000 });
+  if (!proc.ok) return { ok: false, reason: `git worktree add failed for disrupted run recovery: ${(proc.stderr || proc.stdout || "unknown git error").trim()}` };
+  return { ok: true };
+}
+
+async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, opts = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const runPath = join(runDir, "run.json");
+    const current = readRunFile(runPath);
+    if (TERMINAL_STATUSES.has(current.status)) return recoveryEnvelope(current, {
+      ok: false,
+      durable: true,
+      updated: false,
+      recovered: false,
+      runDir,
+      reason: current.terminal_result?.reason || reason,
+    });
+    bestEffortStopHeartbeatForTerminal(runDir, opts);
+    const next = validateRun({
+      ...current,
+      status: statusValue,
+      updated_at: timestamp(opts.now),
+      terminal_result: terminalResult(current.run_id || priorRun.run_id, statusValue, reason),
+    });
+    writeJsonAtomic(runPath, next);
+    return recoveryEnvelope(next, {
+      ok: false,
+      durable: true,
+      updated: true,
+      recovered: false,
+      runDir,
+      reason,
+    });
+  }, opts);
+}
+
+function terminalResult(runId, statusValue, reason) {
+  return { status: statusValue, run_id: runId, pr_url: null, reason, summary: null, artifacts: {} };
+}
+
+function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
+  try {
+    const file = heartbeatPath(runDir);
+    const heartbeat = tryReadHeartbeatFile(file);
+    if (heartbeat.error || !heartbeat.value) return;
+    stopActiveHeartbeatLoop(runDir);
+    if (heartbeat.value.pid && heartbeat.value.pid !== process.pid && isProcessAlive(heartbeat.value.pid, opts)) {
+      try {
+        process.kill(heartbeat.value.pid, "SIGTERM");
+      } catch {
+        // Best-effort disruption recovery stop.
+      }
+    }
+    writeHeartbeatFile(file, validateHeartbeatState({ ...heartbeat.value, pid: null, last_tick_at: timestamp(opts.now) }));
+  } catch {
+    // Recovery terminal writes are best-effort about heartbeat cleanup.
   }
 }
 
