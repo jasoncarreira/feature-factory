@@ -483,6 +483,19 @@ describe("cost attribution docs contract", () => {
   });
 });
 
+describe("TUI sidebar refresh diagnostics docs contract", () => {
+  it("documents the sidebar data-version label and restart limitation", () => {
+    assert.match(README, /Feature Factory` panel[\s\S]*`sidebar vN · plugin changes need TUI restart`/i, "README must document the sidebar refresh metadata label");
+    assert.match(README, /30s root-cache TTL|30-second root-cache TTL|30 second root-cache TTL/i, "README must document the root-cache TTL behind sidebar refreshes");
+    assert.match(README, /already-open opencode TUI process[\s\S]*stale Feature Factory sidebar data[\s\S]*restart or reload the TUI/i, "README must document the active-session plugin-change limitation");
+  });
+
+  it("resolves the open TUI refresh hardening TODO while retaining the operational note", () => {
+    assert.doesNotMatch(TODO, /TUI active-session refresh hardening/i, "TODO must not leave the resolved TUI refresh hardening item open");
+    assert.match(TODO, /plugin bundle changes[\s\S]*restart(?:ing)? the opencode TUI|restart(?:ing)? the opencode TUI[\s\S]*plugin bundle changes/i, "TODO must retain the operational restart note");
+  });
+});
+
 function documentEntries(map) {
   return Object.entries(map);
 }

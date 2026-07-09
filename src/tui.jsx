@@ -1,6 +1,6 @@
 /* @jsxImportSource @opentui/solid */
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { factoryRoots, readRuns } from "./tui-data.js";
+import { factoryRoots, readRuns, tuiSidebarRefreshMetadata } from "./tui-data.js";
 
 const HIDDEN_STATUSES = new Set(["completed"]);
 const REFRESH_INTERVAL_MS = 5000;
@@ -130,6 +130,7 @@ function View(props) {
   const version = store.version;
   const theme = () => currentTheme(props.api);
   const visible = createMemo(() => runs().length > 0);
+  const refreshMetadata = createMemo(() => tuiSidebarRefreshMetadata({ version: version() }));
   const active = createMemo(() => runs().filter((run) => !HIDDEN_STATUSES.has(run.status) || hasNonOkDiagnostic(run)));
   const latestCompleted = createMemo(() => runs().find((run) => run.status === "completed"));
   const shown = createMemo(() => {
@@ -146,6 +147,7 @@ function View(props) {
         <text fg={theme().text}>
           <b>Feature Factory</b>
         </text>
+        <text fg={theme().textMuted}>{refreshMetadata().label}</text>
         <Show keyed when={version()}>
           {() => (
             <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
