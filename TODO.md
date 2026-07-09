@@ -25,6 +25,11 @@ covered there.
   - Baseline local current-run attribution is implemented and documented: `factory cost-record` writes provider-supplied usage/cost metadata to `run.json.cost_attribution`, and status/list/TUI expose diagnostic summaries.
   - Future work: richer reporting/export views, provider-specific metadata normalization as opencode exposes it, and correlation with telemetry spans without turning local diagnostics into billing authority.
 
+- TUI current-status projection
+  - `src/tui-data.js currentSummary()` currently prefers `blocked` work before active `running`/`review` work, so downstream placeholder steps such as `work-decomposer blocked` with `attempts: 0` can hide the real active step such as `spec-writer running`.
+  - Future work: prefer active `running`/`review` slices or steps over blocked downstream placeholders; keep real blocked slices/steps visible when no active work is running.
+  - Add tests for the observed shape: `spec-writer running` plus downstream `work-decomposer`/test/panel `blocked` placeholders should render `spec-writer running` as current.
+
 ## Operational Notes
 
 - TUI sidebar requires the TUI plugin config in `~/.config/opencode/tui.json`.
