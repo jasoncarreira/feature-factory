@@ -17,6 +17,12 @@ describe("cli write surface", () => {
       initGitRepo(repo, ["slice-branch"]);
       seedRun(runDir);
 
+      const steered = JSON.parse(runFactory(repo, ["steer", RUN_ID, "--message", "operator steering", "--json"]).stdout);
+      assert.equal(steered.steering.message_chars, 17);
+      const consumed = JSON.parse(runFactory(repo, ["steer-consume", RUN_ID, "--ref", steered.steering.ref, "--hash", steered.steering.hash, "--json"]).stdout);
+      assert.equal(consumed.steering.trust, "untrusted-operator-data");
+      validateFactory(repo);
+
       runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
       validateFactory(repo);
       runFactory(repo, ["slice-status", RUN_ID, "slice", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/slice", "--attempts", "1", "--json"]);

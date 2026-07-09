@@ -13,10 +13,10 @@ covered there.
 
 ## Build And Review Workflow
 
-- Interrupt, steer, and resume
-  - Add a correction-file or command contract for redirecting running factory work.
-  - Ensure resumed runs consume steering input without losing durable state.
-  - Avoid restarting from scratch when only direction changes.
+- Interrupt, steer, and resume (implemented baseline)
+  - Baseline commands exist: `feature-factory factory steer <run-id> --message TEXT --json`, `feature-factory factory resume <run-id> --dry-run --json`, and `feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json`.
+  - Resume rejects `active-heartbeat` and preserves durable state; raw steering is labeled `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data` only at one-time consume.
+  - Future work: live cancellation/kill of running opencode and semantic rollback when steering conflicts with completed artifacts.
 
 - Remediation context reuse
   - Reuse implementer context across remediation loops where safe.
