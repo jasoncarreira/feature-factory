@@ -1,8 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectTelemetryReadiness,
   evaluateCompanionTelemetryPluginReadiness,
@@ -15,6 +17,9 @@ import {
   readOpencodeConfig,
 } from "../src/doctor.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
+
+const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const LOCAL_PLUGIN_SPEC = pathToFileURL(fileURLToPath(new URL("..", import.meta.url))).href;
 
 describe("doctor package.json parsing", () => {
   it("returns true when package.json has a TUI export", () => {
@@ -81,6 +86,58 @@ describe("doctor opencode config parsing", () => {
 });
 
 describe("doctor telemetry readiness helpers", () => {
+  it("reports doctor --telemetry JSON categories with sanitized OTLP values", () => {
+    const dir = tempDir();
+
+    try {
+      const home = join(dir, "home");
+      const repo = join(dir, "repo");
+      mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      writeFileSync(
+        join(home, ".config", "opencode", "opencode.jsonc"),
+        JSON.stringify({
+          experimental: { openTelemetry: true },
+          plugin: [
+            [LOCAL_PLUGIN_SPEC, { telemetry: { enabled: true } }],
+            "@devtheops/opencode-plugin-otel",
+          ],
+        }, null, 2),
+        "utf8",
+      );
+
+      const proc = spawnSync(process.execPath, [CLI, "doctor", "--local", "--telemetry", "--json"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: home,
+          FEATURE_FACTORY_OTEL_ENABLED: "true",
+          OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+          OTEL_EXPORTER_OTLP_HEADERS: "x-honeycomb-team=github_pat_123456789012345678901234567890,Authorization=Bearer abcdefghijklmnopqrstuvwxyz123456",
+          OTEL_SERVICE_NAME: "feature-factory",
+        },
+      });
+
+      const output = JSON.parse(proc.stdout);
+      assert.equal(typeof output.telemetry, "object");
+      assert.equal(output.telemetry.opencode.ok, true);
+      assert.equal(output.telemetry.companionPlugin.ok, true);
+      assert.equal(output.telemetry.instrumentation.ok, true);
+      assert.equal(output.telemetry.featureFactory.enabled, true);
+      assert.equal(output.telemetry.otlpEnv.endpoint.value, "https://api.honeycomb.io/");
+      assert.deepEqual(output.telemetry.otlpEnv.headers.vars[0].headers.map((header) => header.name), [
+        "x-honeycomb-team",
+        REDACTED_ENV_VALUE,
+      ]);
+      const serialized = JSON.stringify(output);
+      assert.doesNotMatch(serialized, /github_pat_/u);
+      assert.doesNotMatch(serialized, /abcdefghijklmnopqrstuvwxyz/u);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
   it("reports native opencode OpenTelemetry readiness from JSONC config", () => {
     assert.deepEqual(evaluateOpenTelemetryConfigReadiness({ experimental: { openTelemetry: true } }), {
       ok: true,

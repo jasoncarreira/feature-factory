@@ -48,6 +48,22 @@ describe("factory trace-context propagation", () => {
     }
   });
 
+  it("propagates a validated parent span id into foreground start", async () => {
+    const fixture = createLaunchFixture("start-parent-span");
+    try {
+      await withLaunchEnv(fixture, {}, async () => {
+        await startFactory(["build parent span telemetry"], { cwd: fixture.repo, parentSpanId: "00F067AA0BA902B7" });
+      });
+
+      const launched = readJson(fixture.captureFile);
+      assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.TRACEPARENT, undefined);
+      assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
   it("propagates a validated parent span id into foreground resume", async () => {
     const fixture = createResumeLaunchFixture("resume-parent-span");
     try {
