@@ -56,7 +56,7 @@ function sliceLine(slices) {
 }
 
 function View(props) {
-  const roots = () => factoryRoots(props.api);
+  const roots = () => factoryRoots(props.api, { noCache: true });
   const scanRuns = () => readRuns(roots());
   const [runs, setRuns] = createSignal(scanRuns());
   const theme = () => currentTheme(props.api);

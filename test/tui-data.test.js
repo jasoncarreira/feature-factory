@@ -97,6 +97,42 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("infers pre-PR panel progress after test-verifier acceptance", () => {
+    const repo = tempDir();
+    writeRun(repo, "panel-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      gates: {},
+      steps: [{ agent: "test-verifier", status: "accepted", attempts: 3 }],
+      slices: [{ id: "backend", status: "merged", attempts: 1 }],
+    });
+    writeRun(repo, "security-run", {
+      status: "running",
+      updated_at: "2026-07-04T00:00:00Z",
+      gates: {},
+      steps: [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
+      validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+    });
+    writeRun(repo, "remediation-run", {
+      status: "running",
+      updated_at: "2026-07-03T00:00:00Z",
+      gates: {},
+      steps: [{ agent: "test-verifier", status: "accepted", attempts: 1 }],
+      validator: { verdict: "NO-GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+      security_review: { verdict: "BLOCK", review_ref: "reviews/security-reviewer.json" },
+    });
+
+    const runs = readRuns(findFactoryRoots(repo));
+    const panelRun = runs.find((run) => run.run_id === "panel-run");
+    const securityRun = runs.find((run) => run.run_id === "security-run");
+    const remediationRun = runs.find((run) => run.run_id === "remediation-run");
+
+    assert.equal(panelRun.current, "pre-PR panel running");
+    assert.equal(securityRun.current, "security-reviewer running");
+    assert.equal(remediationRun.current, "panel remediation running");
+    cleanup(repo);
+  });
+
   it("projects shared diagnostic envelope fields for TUI rows", () => {
     const repo = tempDir();
     writeRun(repo, "gate-run", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
@@ -232,6 +268,8 @@ function writeRun(repo, id, input) {
   if (input.review_tier !== undefined) run.review_tier = input.review_tier;
   if (input.slices !== undefined) run.slices = input.slices;
   if (input.steps !== undefined) run.steps = input.steps;
+  if (input.validator !== undefined) run.validator = input.validator;
+  if (input.security_review !== undefined) run.security_review = input.security_review;
   if (["completed", "blocked", "partial", "needs-human"].includes(input.status)) {
     run.terminal_result = {
       run_id: id,
