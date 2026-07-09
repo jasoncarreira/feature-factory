@@ -171,6 +171,7 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot consume steering`);
+    assertNoFreshHeartbeatForSteeringConsume(runDir, options);
     const pending = current.steering?.pending;
     if (!isRecord(pending)) throw new Error("run has no pending steering");
     if (pending.ref !== requestedRef || pending.hash !== requestedHash) throw new Error("pending steering ref/hash mismatch");
@@ -413,6 +414,20 @@ function inspectRecoverableHeartbeat(runDir, options = {}) {
   const liveness = inspectHeartbeatLiveness(heartbeat, options);
   if (!liveness.fresh) return { ok: true, reason: liveness.reason, heartbeat };
   return { ok: false, reason: "fresh-heartbeat", heartbeat };
+}
+
+function assertNoFreshHeartbeatForSteeringConsume(runDir, options = {}) {
+  const heartbeatPath = join(runDir, HEARTBEAT_FILE);
+  if (!existsSync(heartbeatPath)) return;
+  let heartbeat;
+  try {
+    heartbeat = validateHeartbeatState(JSON.parse(readFileSync(heartbeatPath, "utf8")));
+  } catch (error) {
+    throw new Error(`steer-consume requires resumable run: invalid-run-state (${error.message})`);
+  }
+  if (inspectHeartbeatLiveness(heartbeat, options).fresh) {
+    throw new Error("steer-consume requires resumable run: active-heartbeat");
+  }
 }
 
 async function stopHeartbeatForRecovery(runDir, heartbeat, now) {
