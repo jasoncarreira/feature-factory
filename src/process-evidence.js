@@ -67,7 +67,23 @@ export function validateProcessEvidence(evidence, opts = {}) {
   return { ok: true, reason: null, evidence };
 }
 
+export function assertDetachedProcessEvidenceWritable(runDir, input = {}) {
+  const current = readProcessEvidence(runDir, { ...input, runId: input.runId });
+  if (current.missing) return;
+  if (!current.ok) throw new Error(`refusing to overwrite invalid process evidence: ${current.reason}`);
+  if (current.evidence.state !== "running") return;
+
+  const inspected = resolveInspector(input)(current.evidence.pid);
+  if (processIsProvenStale(inspected)) return;
+  const identity = compareProcessIdentity(current.evidence, inspected);
+  if (identity.ok) {
+    throw new Error(`refusing to overwrite live running process evidence for run '${current.evidence.run_id}' pid ${current.evidence.pid}`);
+  }
+  throw new Error(`refusing to overwrite running process evidence because stale/exited state could not be proven: ${identity.reason}`);
+}
+
 export function recordDetachedProcessEvidence(runDir, input = {}) {
+  assertDetachedProcessEvidenceWritable(runDir, input);
   const startedAt = timestamp(input.now);
   const inspector = resolveInspector(input);
   const inspected = inspector(input.pid);
@@ -146,7 +162,8 @@ export function cancelProcessFromEvidence(runDir, opts = {}) {
 
 export function inspectProcessIdentity(pid) {
   if (!positivePid(pid)) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "pid must be a positive integer" };
-  if (!pidExists(pid)) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "stale pid" };
+  const liveness = inspectPidLiveness(pid);
+  if (!liveness.alive) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: liveness.reason };
   if (process.platform !== "linux") return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "process inspector unsupported on this platform" };
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -178,6 +195,11 @@ function compareProcessIdentity(evidence, inspected) {
   if (normalizeCommandName(inspected.command_name || "") !== normalizeCommandName(evidence.identity.command_name)) return { ok: false, reason: "process command mismatch" };
   if (resolve(String(inspected.cwd || "")) !== resolve(evidence.cwd)) return { ok: false, reason: "process cwd mismatch" };
   return { ok: true };
+}
+
+function processIsProvenStale(inspected) {
+  if (!inspected || inspected.ok !== false) return false;
+  return /\b(?:ESRCH|no such process)\b/iu.test(String(inspected.reason || ""));
 }
 
 function resolveInspector(opts = {}) {
@@ -247,12 +269,13 @@ function invalid(reason) {
   return { ok: false, reason, evidence: null };
 }
 
-function pidExists(pid) {
+function inspectPidLiveness(pid) {
   try {
     process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+    return { alive: true, reason: null };
+  } catch (error) {
+    if (error?.code === "ESRCH") return { alive: false, reason: "stale pid (ESRCH: no such process)" };
+    return { alive: false, reason: `process liveness unknown: ${error?.code || error?.message || "unknown error"}` };
   }
 }
 

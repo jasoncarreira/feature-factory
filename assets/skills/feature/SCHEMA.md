@@ -195,7 +195,7 @@ External monitoring semantics:
 
 ## process.json And Cancellation Evidence
 
-Detached launches with a known explicit run id write run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`. Examples include `factory resume <run-id> --detached` and `factory start --detached --run-id <run-id> ...`. Generic `factory start --detached "prompt"` without an explicit run id may write only package-level logs and must not be assumed to create `$RUN/process.json`. `process.json` is optional for old/non-detached/generic-detached runs, but when present it validates as:
+Validated run-owned detached launches write run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`; examples include `factory resume <run-id> --detached` and validated continuation launches. Generic `factory start --detached "prompt"` launches, including those with `--run-id <run-id>`, may write only package-level logs: `--run-id` does not grant process-evidence authority over an existing run and must not be assumed to create `$RUN/process.json`. `process.json` is optional for old/non-detached/generic-detached runs, but when present it validates as:
 
 ```json
 {

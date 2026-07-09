@@ -438,8 +438,10 @@ describe("interrupt steer resume docs contract", () => {
     for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
       assert.match(text, /process\.json/i, `${name} must document process.json`);
       assert.match(text, /processes\/<timestamp>\.log|processes\/\S+\.log/i, `${name} must document run-scoped process logs`);
-      assert.match(text, /known explicit run id|explicit run id/i, `${name} must require an explicit run id for run-scoped process evidence`);
+      assert.match(text, /validated run-owned/i, `${name} must require validated run-owned launches for run-scoped process evidence`);
       assert.match(text, /generic[\s\S]*detached[\s\S]*(?:not|must not|without)[\s\S]*(?:process\.json|run-scoped)/i, `${name} must not guarantee process.json for generic detached starts`);
+      assert.match(text, /--run-id <run-id>[\s\S]*(?:does not|do not|not)[\s\S]*(?:process-evidence authority|process evidence|process\.json)|(?:does not|do not|not)[\s\S]*(?:process-evidence authority|process evidence|process\.json)[\s\S]*--run-id <run-id>/i, `${name} must document that generic --run-id does not grant process-evidence authority`);
+      assert.doesNotMatch(text, /factory start --detached --run-id <run-id>[\s\S]{0,160}(?:writes|records|creates)[\s\S]{0,80}(?:process\.json|run-scoped process evidence)/i, `${name} must not document generic start --detached --run-id as process evidence authority`);
       assert.match(text, /factory cancel <run-id> --json/i, `${name} must document factory cancel`);
       assert.match(text, /SIGTERM/i, `${name} must document SIGTERM cancellation`);
       assert.match(text, /fail-closed|failed-closed/i, `${name} must document fail-closed cancellation`);
