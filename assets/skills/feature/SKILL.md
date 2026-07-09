@@ -165,6 +165,31 @@ Use the internal heartbeat helper only for long `Task`/subagent waits that happe
 - Do not start heartbeat while stopped at protected gates `story`, `brief`, or `pre_pr`. Gate waits are intentionally heartbeat-free.
 - Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat if it is active and then use the appropriate CLI state writer.
 
+### Long-wait heartbeat guard
+
+When a long factory subagent wait uses heartbeat, preserve this ordering exactly:
+
+1. Mark in-flight state first. Use the relevant CLI state writer so `run.json` already shows a `running` step, `running` slice, or `review` slice before heartbeat starts. Protected gates `story`, `brief`, and `pre_pr` stay heartbeat-free.
+2. Start heartbeat immediately before long `Task`/subagent dispatch/wait, with the phase mapped below. Do not start it before the in-flight state write, and do not delay it until after the dispatch.
+3. Await the long `Task`/subagent in a `try` block. `heartbeat.json` and `run.json.heartbeat_at` remain liveness-only and never become workflow authority.
+4. Stop heartbeat in the after-return/`finally` path when the wait completes, fails, or is abandoned.
+5. Do not perform the next semantic `run.json` / factory CLI state write while the long-wait heartbeat remains active; stop heartbeat (or verify inactive with `feature-factory factory heartbeat <run-id> --status --json`) before writing evidence refs, accepted/rejected steps, slice review/blocked/merged states, verdicts, terminal state, or PR-created state.
+
+Phase mapping is a display convention for operators and monitors; validation keeps `phase` opaque and accepts any non-empty string. Use these phases for consistency:
+
+| Phase | Long wait it brackets |
+|---|---|
+| `spec-review` | `spec-writer` Task dispatch/wait and the following `work-reviewer` wait for the technical brief/spec review |
+| `decomposition-review` | `work-decomposer` Task dispatch/wait and the following `work-reviewer` wait for the decomposition/plan review |
+| `builder-wave` | concurrent builder `Task` dispatch/wait for a dependency wave |
+| `slice-review` | `work-reviewer` wait for one or more slice reviews |
+| `test-verifier` | `test-verifier` dispatch/wait |
+| `test-rerun` | long orchestrator rerun of the named acceptance suite |
+| `test-review` | `work-reviewer` wait for test-verifier evidence review |
+| `implementation-validator` | implementation-validator dispatch/wait |
+| `security-reviewer` | security-reviewer dispatch/wait |
+| `remediation` | routed builder or integration/test remediation dispatch/wait |
+
 Required heartbeat phases:
 
 - `spec-review`
@@ -271,13 +296,13 @@ The research map must identify real files, patterns, tests, integration hotspots
 
 ## Step 2 - Spec And Decomposition
 
-Run `spec-writer` with the approved story, research map, and design brief. Mark it running with `feature-factory factory step <run-id> spec-writer running --attempts N --json`. It produces `$RUN/artifacts/technical-brief.md`; after review acceptance, record the accepted step with `feature-factory factory step <run-id> spec-writer accepted --artifact-ref artifacts/technical-brief.md --review-ref reviews/spec-writer.json --json`.
+Run `spec-writer` with the approved story, research map, and design brief. Mark it running with `feature-factory factory step <run-id> spec-writer running --attempts N --json`. Because this is a long spec-production wait, start heartbeat immediately before the `spec-writer` Task dispatch/wait with phase `spec-review`, then stop heartbeat in the after-return/`finally` path before writing produced artifacts or running the next semantic `run.json` / factory CLI state write. It produces `$RUN/artifacts/technical-brief.md`; after review acceptance, and only after any `spec-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> spec-writer accepted --artifact-ref artifacts/technical-brief.md --review-ref reviews/spec-writer.json --json`.
 
-Run `work-reviewer` on the brief. Tell the reviewer the reviewed worktree is read-only and must not be modified. After it returns, check `git -C "$FEAT_WT" status --porcelain=v1 --untracked-files=all`. If dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, write a blocker review, and re-run it once with a stronger read-only instruction before stopping.
+Run `work-reviewer` on the brief. Tell the reviewer the reviewed worktree is read-only and must not be modified. Because this is a long spec review wait, start heartbeat immediately before the `work-reviewer` dispatch/wait with phase `spec-review`, then stop heartbeat in the after-return/`finally` path before checking the worktree, writing review artifacts, or running the next `factory step` state write. After it returns, check `git -C "$FEAT_WT" status --porcelain=v1 --untracked-files=all`. If dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, write a blocker review, and re-run it once with a stronger read-only instruction before stopping.
 
-Run `work-decomposer` with the accepted story, research map, technical brief, and design brief. Mark it running with `feature-factory factory step <run-id> work-decomposer running --attempts N --json`. It produces `$RUN/plan/slices.json` and `$RUN/plan/plan.md`; after review acceptance, record the accepted step with `feature-factory factory step <run-id> work-decomposer accepted --review-ref reviews/work-decomposer.json --json`, then seed durable slices with `feature-factory factory slices-seed <run-id> --from plan/slices.json --json`.
+Run `work-decomposer` with the accepted story, research map, technical brief, and design brief. Mark it running with `feature-factory factory step <run-id> work-decomposer running --attempts N --json`. Because this is a long decomposition-production wait, start heartbeat immediately before the `work-decomposer` Task dispatch/wait with phase `decomposition-review`, then stop heartbeat in the after-return/`finally` path before writing produced plan files or running the next semantic `run.json` / factory CLI state write. It produces `$RUN/plan/slices.json` and `$RUN/plan/plan.md`; after review acceptance, and only after any `decomposition-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> work-decomposer accepted --review-ref reviews/work-decomposer.json --json`, then seed durable slices with `feature-factory factory slices-seed <run-id> --from plan/slices.json --json`.
 
-Review the decomposition the same way. The plan must cover every acceptance criterion, keep same-wave slices file-disjoint, serialize shared hotspots, and explain dependencies.
+Review the decomposition the same way. Start heartbeat immediately before the `work-reviewer` decomposition review dispatch/wait with phase `decomposition-review`, stop heartbeat in the after-return/`finally` path, and do not write accepted/rejected step state or seed slices while that heartbeat remains active. The plan must cover every acceptance criterion, keep same-wave slices file-disjoint, serialize shared hotspots, and explain dependencies.
 
 ## Gate 1 And Gate 2
 
@@ -296,16 +321,16 @@ Reuse the feature branch/worktree created during Step 0. Compute waves by topolo
 - Same-wave slices should already be file-disjoint. If you discover overlap, stop and treat it as a decomposition bug.
 - If any slice becomes `blocked`, do not dispatch dependents.
 
-For each slice, create a slice worktree from the current feature branch HEAD, mark the slice `running` with `feature-factory factory slice-status <run-id> <slice-id> running --branch <branch> --worktree <path> --attempts N --json`, dispatch the appropriate builder, then observe the result yourself:
+For each slice, create a slice worktree from the current feature branch HEAD, mark the slice `running` with `feature-factory factory slice-status <run-id> <slice-id> running --branch <branch> --worktree <path> --attempts N --json`, dispatch the appropriate builder, then observe the result yourself. For a long builder wave, mark every dispatched slice `running` first, start heartbeat immediately before the builder `Task` dispatch/wait with phase `builder-wave`, and stop heartbeat in the after-return/`finally` path before writing evidence or the next slice state:
 
 - `git -C $SLICE_WT diff --stat $BRANCH...HEAD`
 - `git -C $SLICE_WT diff --name-only $BRANCH...HEAD`
 - `git -C $SLICE_WT rev-parse HEAD`
 - Run the slice's named test command(s) from `test_plan`.
 
-Write `$RUN/evidence/<slice-id>.json`. `review_ready` requires non-empty observed diff, diff observed successfully, and tests observed passing or explicitly skipped with a reason. After review output is written to `$RUN/reviews/<slice-id>.json`, record review state with `feature-factory factory slice-status <run-id> <slice-id> review --evidence-ref evidence/<slice-id>.json --review-ref reviews/<slice-id>.json --attempts N --json`.
+Write `$RUN/evidence/<slice-id>.json`. `review_ready` requires non-empty observed diff, diff observed successfully, and tests observed passing or explicitly skipped with a reason. After review output is written to `$RUN/reviews/<slice-id>.json`, record review state with `feature-factory factory slice-status <run-id> <slice-id> review --evidence-ref evidence/<slice-id>.json --review-ref reviews/<slice-id>.json --attempts N --json`. The review state write is the in-flight marker for a `slice-review` heartbeat.
 
-Run `work-reviewer` on each slice, with the slice worktree read-only. For every re-review, pass `attempt: <n>` and the prior review's `required_fixes` list so the reviewer applies the delta rule. After it returns, check `git -C "$SLICE_WT" status --porcelain=v1 --untracked-files=all`; if dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, and re-run it once with a stronger read-only instruction before blocking the slice. APPROVE marks the slice ready to merge; REJECT routes fixes back to the builder; repeated failure marks the slice blocked with `feature-factory factory slice-status <run-id> <slice-id> blocked --reason TEXT --json`.
+Run `work-reviewer` on each slice, with the slice worktree read-only. Start heartbeat immediately before each long review dispatch/wait with phase `slice-review`, then stop heartbeat in the after-return/`finally` path before checking the worktree, accepting the review, marking the slice blocked, or merging. For every re-review, pass `attempt: <n>` and the prior review's `required_fixes` list so the reviewer applies the delta rule. After it returns, check `git -C "$SLICE_WT" status --porcelain=v1 --untracked-files=all`; if dirty or unverifiable, restore with `git checkout -- . && git clean -fd`, discard the review output, and re-run it once with a stronger read-only instruction before blocking the slice. APPROVE marks the slice ready to merge; REJECT routes fixes back to the builder; repeated failure marks the slice blocked with `feature-factory factory slice-status <run-id> <slice-id> blocked --reason TEXT --json`.
 
 Merge approved slices into the feature worktree one at a time with a normal no-ff merge or the repo's expected merge command. After the merge commit exists, record it through `feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json`; do not mark slices merged by editing `run.json` directly. Then refresh heartbeat and clean up successful slice worktrees/branches. If a merge conflict occurs, mark the slice `blocked`, leave the worktree for inspection, and surface it as a decomposition/coordination bug.
 
@@ -313,14 +338,14 @@ Merge approved slices into the feature worktree one at a time with a normal no-f
 
 Run integration work against `$FEAT_WT`, not slice worktrees.
 
-1. Run `test-verifier` with the story ACs, technical brief, slice plan, merged builder reports, and `$FEAT_WT`. It writes/runs acceptance tests and commits test changes if needed. Write `$RUN/artifacts/test-report.md`.
-2. Observe the test step yourself by rerunning the named acceptance suite. Write `$RUN/evidence/test-verifier.json`.
-3. Run `work-reviewer` with subject `test-verifier`. Use the same read-only reviewer check before accepting the result.
-4. Run the pre-PR panel with two independent lenses on `$FEAT_WT` and the full diff:
+1. Mark `test-verifier` running with `feature-factory factory step <run-id> test-verifier running --attempts N --json`. Start heartbeat immediately before the `test-verifier` dispatch/wait with phase `test-verifier`, then stop heartbeat in the after-return/`finally` path before writing `$RUN/artifacts/test-report.md`, evidence, or any accepted/rejected step state. It writes/runs acceptance tests and commits test changes if needed.
+2. Observe the test step yourself by rerunning the named acceptance suite. If this rerun is a long orchestrator wait, start heartbeat immediately before the rerun with phase `test-rerun`, then stop heartbeat in the after-return/`finally` path before writing `$RUN/evidence/test-verifier.json`.
+3. Record the test evidence, then run `work-reviewer` with subject `test-verifier`. Use the same read-only reviewer check before accepting the result. Start heartbeat immediately before the long test review dispatch/wait with phase `test-review`, then stop heartbeat in the after-return/`finally` path before recording accepted/rejected test-verifier state.
+4. Run the pre-PR panel with two independent lenses on `$FEAT_WT` and the full diff. For each long panel wait, mark the corresponding step running first when represented in `run.json`, start heartbeat immediately before dispatch/wait with phase `implementation-validator` or `security-reviewer`, and stop heartbeat in the after-return/`finally` path before writing review artifacts or verdict state:
    - `implementation-validator` for correctness, AC coverage, cross-slice integration, conventions. Accept only `GO` or `GO-WITH-NITS`.
    - `security-reviewer` for adversarial trust-boundary, injection, secrets, auth, and data risks. Accept only `PASS`.
 
-After writing `reviews/implementation-validator.json`, `reviews/security-reviewer.json`, and `artifacts/validation-report.md`, record panel verdicts with `feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json`. Combine by strictest verdict. Any validator `NO-GO` or security `BLOCK` is NO-GO. On NO-GO, route the top finding to the owning builder or integration/test fix path, observe evidence, and rerun the panel up to `max_retries`. For every panel re-run, pass `attempt: <n>` and the prior validator/security `required_fixes` list into the re-review prompt.
+After writing `reviews/implementation-validator.json`, `reviews/security-reviewer.json`, and `artifacts/validation-report.md`, and only after the panel heartbeat is stopped or verified inactive, record panel verdicts with `feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json`. Combine by strictest verdict. Any validator `NO-GO` or security `BLOCK` is NO-GO. On NO-GO, route the top finding to the owning builder or integration/test fix path, observe evidence, and rerun the panel up to `max_retries`; bracket each long remediation dispatch/wait with phase `remediation`, stopping it before evidence, verdicts, terminal writes, or Gate 3 state. For every panel re-run, pass `attempt: <n>` and the prior validator/security `required_fixes` list into the re-review prompt.
 
 ## Gate 3 - Pre-PR
 
