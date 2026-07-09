@@ -25,12 +25,14 @@ describe("environment snapshot redaction", () => {
     const honeycombKey = "hc_api_12345678901234567890";
     const hexKey = "0123456789abcdef0123456789abcdef";
     const uppercaseKey = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    const otelishUppercaseKey = `OTEL_EXPORTER_OTLP_${uppercaseKey}_HEADERS`;
 
     assert.equal(isSensitiveEnvKey("api_token"), true);
     assert.equal(isSensitiveEnvKey(honeycombKey), true);
     assert.equal(isSensitiveEnvKey(hexKey), true);
     assert.equal(isSensitiveEnvKey(uppercaseKey), true);
-    assert.deepEqual(scrubSecretEnv({ keep: "ok", api_token: "secret", [honeycombKey]: "safe", [uppercaseKey]: "safe", nested: { password: "secret", [hexKey]: "safe", [uppercaseKey]: "safe", safe: "value" } }), {
+    assert.equal(isSensitiveEnvKey(otelishUppercaseKey), true);
+    assert.deepEqual(scrubSecretEnv({ keep: "ok", api_token: "secret", [honeycombKey]: "safe", [uppercaseKey]: "safe", [otelishUppercaseKey]: "safe", nested: { password: "secret", [hexKey]: "safe", [uppercaseKey]: "safe", [otelishUppercaseKey]: "safe", safe: "value" } }), {
       keep: "ok",
       nested: { safe: "value" },
     });
@@ -40,11 +42,15 @@ describe("environment snapshot redaction", () => {
     const env = {
       OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io/v1/traces",
       OTEL_EXPORTER_OTLP_HEADERS: "present",
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://api.honeycomb.io/v1/traces",
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: "present",
       FEATURE_FACTORY_OTEL_ENABLED: "true",
     };
 
     assert.equal(isSensitiveEnvKey("OTEL_EXPORTER_OTLP_ENDPOINT"), false);
     assert.equal(isSensitiveEnvKey("OTEL_EXPORTER_OTLP_HEADERS"), false);
+    assert.equal(isSensitiveEnvKey("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"), false);
+    assert.equal(isSensitiveEnvKey("OTEL_EXPORTER_OTLP_TRACES_HEADERS"), false);
     assert.equal(isSensitiveEnvKey("FEATURE_FACTORY_OTEL_ENABLED"), false);
     assert.deepEqual(scrubSecretEnv(env), env);
   });

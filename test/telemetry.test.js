@@ -185,25 +185,30 @@ describe("no-op span wrappers", () => {
     const honeycombKey = "hc_api_12345678901234567890";
     const hexKey = "0123456789abcdef0123456789abcdef";
     const uppercaseKey = "Q7M4Z9N2C8V5B1X6L3K0P7R2T9Y4U8I5";
+    const otelishUppercaseKey = `OTEL_EXPORTER_OTLP_${uppercaseKey}_HEADERS`;
     const attrs = runAttributes({
       "feature_factory.run_id": "run-123",
       [honeycombKey]: "safe",
       [uppercaseKey]: "safe",
+      [otelishUppercaseKey]: "safe",
       nested: {
         keep: "ok",
         [hexKey]: "safe",
         [uppercaseKey]: "safe",
+        [otelishUppercaseKey]: "safe",
       },
     });
 
     assert.equal(attrs["feature_factory.run_id"], "run-123");
     assert.equal(Object.hasOwn(attrs, honeycombKey), false);
     assert.equal(Object.hasOwn(attrs, uppercaseKey), false);
+    assert.equal(Object.hasOwn(attrs, otelishUppercaseKey), false);
     assert.equal(attrs.nested, JSON.stringify({ keep: "ok" }));
     const serialized = JSON.stringify(attrs);
     assert.doesNotMatch(serialized, new RegExp(honeycombKey, "u"));
     assert.doesNotMatch(serialized, new RegExp(hexKey, "u"));
     assert.doesNotMatch(serialized, new RegExp(uppercaseKey, "u"));
+    assert.doesNotMatch(serialized, new RegExp(otelishUppercaseKey, "u"));
   });
 
   it("redacts secret-shaped error messages before recording exceptions", () => {
