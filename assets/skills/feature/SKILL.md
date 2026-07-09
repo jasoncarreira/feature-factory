@@ -138,12 +138,11 @@ Use the repo-local schema at `$REPO/.opencode/skills/feature/SCHEMA.md`. The fac
 
 After the initial manifest bootstrap, do not edit `run.json` directly. Write durable state through the CLI verbs below; they acquire `run-json.lock/`, run validation, and call the checked transition helpers internally. `factory gate-decision` is the reachable wrapper for `transitionGateDecision`, and `factory pr-created` is the reachable wrapper for `transitionPrCreated`.
 
-Required state-write commands:
+Required semantic `run.json` state-write commands:
 
 ```sh
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
-feature-factory factory cancel <run-id> --json
 feature-factory factory cost-record <run-id> --agent AGENT --step STEP --slice-id ID --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
 feature-factory factory answer --json <run-id> <gate> approve
 feature-factory factory recover <run-id> --reason TEXT --json
@@ -162,6 +161,14 @@ feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --js
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
 feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json
 ```
+
+Process-sidecar write command, not a semantic `run.json` state transition:
+
+```sh
+feature-factory factory cancel <run-id> --json
+```
+
+`factory cancel` updates `$RUN/process.json` only. `factory cancel` is not a semantic `run.json` state transition, does not go through checked semantic `run.json` transitions, does not mutate gates/slices/verdicts/terminal state, and must not be used as run-state authority.
 
 External drivers write only `gates/<gate>.answer`; they may use `feature-factory factory answer --json <run-id> <gate> approve` or write the answer file directly. The factory consumes answer files through `factory gate-decision`; approved file-sourced answers record `approval_source: external-driver`, and consumed answer files are archived away from the canonical answer path.
 
@@ -233,7 +240,7 @@ Required heartbeat phases:
 
 ## Process Evidence And Cancellation
 
-Detached factory starts record run-scoped process evidence and logs so an operator can interrupt safely before steering. `$RUN/process.json` is a single-process sidecar with `{ schema_version, kind: "opencode-process", run_id, execution_id, pid, started_at, updated_at, state, cwd, identity, log_ref, cancel }`; `log_ref` must stay under `$RUN/processes/<timestamp>.log` and `identity` records the inspector, start marker, and command name used to distinguish PID reuse. This process sidecar is local cancellation evidence only, not authority for gates, reviews, PRs, or merges.
+Detached factory launches with a known explicit run id record run-scoped process evidence and logs so an operator can interrupt safely before steering. `$RUN/process.json` is a single-process sidecar with `{ schema_version, kind: "opencode-process", run_id, execution_id, pid, started_at, updated_at, state, cwd, identity, log_ref, cancel }`; `log_ref` must stay under `$RUN/processes/<timestamp>.log` and `identity` records the inspector, start marker, and command name used to distinguish PID reuse. Generic detached starts without a known explicit run id may have only package-level logs and must not be assumed to write `$RUN/process.json`. This process sidecar is local cancellation evidence only, not authority for gates, reviews, PRs, or merges.
 
 Use cancellation before steering/resume when a detached opencode process is still running:
 

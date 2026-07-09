@@ -72,12 +72,11 @@ It starts a fresh child run from a parent run whose `run.status` is exactly `blo
 
 The corresponding `/feature` intent is `blocked-run-continuation`.
 
-Required write commands:
+Required semantic `run.json` write commands:
 
 ```sh
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
-feature-factory factory cancel <run-id> --json
 feature-factory factory steer <run-id> --message TEXT --json
 feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json
 feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json
@@ -98,6 +97,14 @@ feature-factory factory terminal <run-id> blocked --reason TEXT --json
 feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
 ```
+
+Process-sidecar write command, not a semantic `run.json` write:
+
+```sh
+feature-factory factory cancel <run-id> --json
+```
+
+`factory cancel` updates `$RUN/process.json` only. It is outside the checked semantic `run.json` transition surface and does not mutate gates, slices, verdicts, terminal result, or PR state.
 
 External drivers write only `gates/<gate>.answer`; they may use `feature-factory factory answer --json <run-id> <gate> approve` or write the answer file directly. The factory consumes answer files through `factory gate-decision`; approved file-sourced answers record `approval_source: "external-driver"` and consumed answer files are archived away from the canonical `gates/<gate>.answer` path.
 
@@ -188,7 +195,7 @@ External monitoring semantics:
 
 ## process.json And Cancellation Evidence
 
-Detached `factory start` writes run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`. `process.json` is optional for old/non-detached runs, but when present it validates as:
+Detached launches with a known explicit run id write run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`. Examples include `factory resume <run-id> --detached` and `factory start --detached --run-id <run-id> ...`. Generic `factory start --detached "prompt"` without an explicit run id may write only package-level logs and must not be assumed to create `$RUN/process.json`. `process.json` is optional for old/non-detached/generic-detached runs, but when present it validates as:
 
 ```json
 {
@@ -213,7 +220,7 @@ Detached `factory start` writes run-scoped process evidence to `$RUN/process.jso
 
 `state` is one of `running`, `cancelled`, `failed-closed`, or `exited`. `log_ref` must stay under `processes/`; `cwd` must be absolute; `identity` must include `inspector`, `start_marker`, and `command_name`; and `run_id` must match the requested run for cancellation.
 
-`feature-factory factory cancel <run-id> --json` reads this evidence and is SIGTERM-only. It sends exactly one targeted `SIGTERM` to the recorded PID only when `process.json` exists, validates, is `state:"running"`, and live process inspection matches PID, start marker, command name, and cwd. Success writes `state:"cancelled"` with `cancel.signal:"SIGTERM"` and returns `ok:true`, `status:"cancelled"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. Missing, invalid, stale, mismatched, non-running, or signal-failed evidence returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, and a reason; it must not send a broad process kill, process-group signal, `pkill`, or `killall`.
+`feature-factory factory cancel <run-id> --json` reads this evidence and is SIGTERM-only. It sends exactly one targeted `SIGTERM` to the recorded PID only when `process.json` exists, validates, is `state:"running"`, and live process inspection matches PID, start marker, command name, and cwd. Success writes `state:"cancelled"` with `cancel.signal:"SIGTERM"` and returns `ok:true`, `status:"cancelled"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. Missing, invalid, stale, mismatched, non-running, or signal-failed evidence returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, and a reason; it must not send a broad process kill, process-group signal, `pkill`, or `killall`. This command updates only `$RUN/process.json`; it is not a semantic `run.json` transition.
 
 ## Detached Run Diagnostics (Output-Only)
 

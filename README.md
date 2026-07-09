@@ -19,7 +19,7 @@ Active guarantees:
 - `run.json`, gate answers, `evidence/*`, `reviews/*`, and `terminal_result` are durable local workflow state.
 - Semantic manifest writes go through locked transition helpers so stale writers fail instead of overwriting newer state. `transitionGateDecision` owns approved gate writes, and `transitionPrCreated` owns completed PR state writes.
 - Pending gates include `pending_snapshot` entries for `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer material. Gate answer consumption fails closed if current refs are missing, escaped, stale, or hash-mismatched.
-- Detached opencode processes are cancellable only through run-scoped evidence: `$RUN/process.json` points at one process identity and `$RUN/processes/<timestamp>.log` records stdout/stderr. `factory cancel` sends a single targeted `SIGTERM` only when that evidence validates; missing, invalid, stale, mismatched, or non-running evidence returns a fail-closed response and sends no signal. There is no broad process kill, process-group kill, `pkill`, or `killall` fallback.
+- Detached opencode processes are cancellable only when they have run-scoped evidence from a known explicit run id: `$RUN/process.json` points at one process identity and `$RUN/processes/<timestamp>.log` records stdout/stderr. `factory cancel` sends a single targeted `SIGTERM` only when that evidence validates; missing, invalid, stale, mismatched, or non-running evidence returns a fail-closed response and sends no signal. There is no broad process kill, process-group kill, `pkill`, or `killall` fallback.
 - PR URLs are written only through `feature-factory factory pr-created ...`, which checks `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and a canonical GitHub PR URL before updating `run.pr_url` and `terminal_result.pr_url`.
 - Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and configured PR checks.
 - `run.json.debug_snapshot` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
@@ -334,7 +334,7 @@ Run in the background for external watchers or CI-style adapters:
 feature-factory factory start --repo /path/to/repo --headless --detached "APP-123 add the missing approval workflow"
 ```
 
-Detached mode returns a PID, writes stdout/stderr to `.opencode/factory/<run-id>/processes/<timestamp>.log`, and records the cancellable process identity in `.opencode/factory/<run-id>/process.json`.
+Detached mode returns a PID. Generic detached starts without a known explicit run id write stdout/stderr to package-level process logs and do not create `$RUN/process.json`. Run-scoped cancellation evidence is written only when the detached launch has a known explicit run id, such as `factory resume <run-id> --detached` or `factory start --detached --run-id <run-id> ...`; then stdout/stderr goes to `.opencode/factory/<run-id>/processes/<timestamp>.log` and `.opencode/factory/<run-id>/process.json` records the cancellable process identity.
 
 Cancel a detached run before queueing interrupt steering:
 
@@ -343,6 +343,8 @@ feature-factory factory cancel <run-id> --json
 ```
 
 `factory cancel` is evidence-bound and fail-closed. On valid running `process.json` identity it sends exactly one `SIGTERM` to the recorded PID, marks `process.json.state` as `cancelled`, and returns `ok:true`, `status:"cancelled"`, `signal:"SIGTERM"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. If `process.json` is missing, invalid, stale, mismatched, already non-running, or the signal fails, it returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, a `reason`, and no broad process kill, process-group signal, `pkill`, or `killall` fallback is attempted.
+
+`factory cancel` updates only the process sidecar (`$RUN/process.json`). It is not a semantic `run.json` state transition and does not approve gates, change slices, write verdicts, or terminalize the run.
 
 Autonomous mode is explicit opt-in. It still writes gate question files, observed evidence, reviews, and `run.json`; it records story/brief approvals only when the artifacts are complete and unambiguous, decides pre-PR from the implementation-validator/security-reviewer panel, runs bounded remediation on NO-GO, and never auto-merges. Humans review and merge PRs outside the factory.
 

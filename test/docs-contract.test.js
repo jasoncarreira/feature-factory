@@ -23,7 +23,6 @@ const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-
 const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-created <run-id> --json",
   "factory env record-resume <run-id> --json",
-  "factory cancel <run-id> --json",
   "factory steer <run-id> --message TEXT --json",
   "factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json",
   "factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json",
@@ -42,6 +41,9 @@ const STATE_WRITE_COMMANDS = Object.freeze([
   "factory terminal <run-id> blocked --reason TEXT",
   "factory slice-merged <run-id> <slice-id> --merge-commit SHA",
   "factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO",
+]);
+const PROCESS_SIDECAR_COMMANDS = Object.freeze([
+  "factory cancel <run-id> --json",
 ]);
 
 describe("heartbeat docs contract", () => {
@@ -168,6 +170,18 @@ describe("simplified state contract docs", () => {
     }
     for (const forbidden of ["transitionRunStep", "transitionRunSlice", "transitionTerminalResult", "transitionLifecycleRun", "mutateRunJsonLocked", "run-state.js"]) {
       assert.doesNotMatch(SKILL, literalPattern(forbidden), `SKILL must not instruct unreachable helper ${forbidden}`);
+    }
+  });
+
+  it("keeps process-sidecar writes separate from semantic run.json writes", () => {
+    for (const command of PROCESS_SIDECAR_COMMANDS) assertCliSurfaceIncludes(command);
+    for (const command of PROCESS_SIDECAR_COMMANDS) {
+      assert.ok(!documentedStateWriteVerbs().has(command.split(/\s+/u)[1]), `${command} must not be in semantic run.json state-write commands`);
+    }
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /Process-sidecar write command[\s\S]*factory cancel <run-id> --json/i, `${name} must document cancel as process-sidecar write`);
+      assert.match(text, /factory cancel[\s\S]*(?:not a semantic `run\.json`|outside the checked semantic `run\.json`)/i, `${name} must keep cancel out of semantic run.json transitions`);
+      assert.doesNotMatch(firstFencedBlockAfter(text, /Required semantic `run\.json` .*write commands:/i), /factory cancel <run-id> --json/i, `${name} must not list cancel in semantic run.json write commands`);
     }
   });
 
@@ -424,6 +438,8 @@ describe("interrupt steer resume docs contract", () => {
     for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
       assert.match(text, /process\.json/i, `${name} must document process.json`);
       assert.match(text, /processes\/<timestamp>\.log|processes\/\S+\.log/i, `${name} must document run-scoped process logs`);
+      assert.match(text, /known explicit run id|explicit run id/i, `${name} must require an explicit run id for run-scoped process evidence`);
+      assert.match(text, /generic[\s\S]*detached[\s\S]*(?:not|must not|without)[\s\S]*(?:process\.json|run-scoped)/i, `${name} must not guarantee process.json for generic detached starts`);
       assert.match(text, /factory cancel <run-id> --json/i, `${name} must document factory cancel`);
       assert.match(text, /SIGTERM/i, `${name} must document SIGTERM cancellation`);
       assert.match(text, /fail-closed|failed-closed/i, `${name} must document fail-closed cancellation`);
@@ -570,6 +586,14 @@ function assertCliSurfaceIncludes(command) {
 
 function documentedStateWriteVerbs() {
   return new Set(STATE_WRITE_COMMANDS.map((command) => command.split(/\s+/u)[1]));
+}
+
+function firstFencedBlockAfter(text, pattern) {
+  const match = pattern.exec(text);
+  if (!match) return "";
+  const rest = text.slice(match.index + match[0].length);
+  const block = /```[a-z]*\n([\s\S]*?)\n```/i.exec(rest);
+  return block ? block[1] : "";
 }
 
 function implementedStateWriteVerbs() {
