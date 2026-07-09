@@ -6,11 +6,6 @@ covered there.
 
 ## Factory Robustness And Durability
 
-- Repo-seeded skill freshness repair
-  - `factory start` currently preserves `.opencode/skills/feature/SKILL.md` and `SCHEMA.md` when `.seed-hash` is missing or empty, which can leave a repo stuck on stale workflow instructions after plugin updates.
-  - Add an explicit repair path, freshness diagnostic, or safe overwrite rule that distinguishes old seeded files from operator-edited files.
-  - Surface the stale seeded-skill condition before launching opencode so a restarted session actually picks up the latest factory contract.
-
 - Non-destructive disrupted-worktree recovery
   - Make the factory robust when its working directory/worktree disappears or becomes inaccessible mid-run.
   - Do not silently re-scaffold an empty run control plane if `.opencode/factory/<run-id>` or the active worktree is missing/disrupted.

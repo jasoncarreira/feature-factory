@@ -158,6 +158,8 @@ Factory agents are configured with scoped non-interactive permissions (`bash`, `
 
 Before each `factory start`, the CLI seeds the feature skill into the target repo at `.opencode/skills/feature/SKILL.md` and `.opencode/skills/feature/SCHEMA.md`, and adds `.opencode/skills/feature/` to the repo-local `.git/info/exclude` when available. The schema is the authoritative control-plane reference for `run.json`, `factory.lock`, `heartbeat.json`, `plan/slices.json`, `evidence/*`, `reviews/*`, and `run-json.lock/`; keeping it repo-local lets agents read it without relaxing `external_directory: deny`.
 
+Seed repair is intentionally narrow. The CLI manages only `SKILL.md` and `SCHEMA.md` in `.opencode/skills/feature/`. If `.seed-hash` is missing, empty, invalid, or `{}`, those two files are treated as absent metadata: files matching the current packaged source, their recorded seed hash, or a known previously packaged seed hash are refreshed to the current package content, while unrecognized differing content is preserved as an operator edit. Each seed pass rewrites `.seed-hash` with only the current packaged hashes for `SKILL.md` and `SCHEMA.md`; unrelated files in the skill directory are not changed or recorded.
+
 Profile precedence is exact agent, then role, then `profiles.default`, then top-level `profile`, then opencode default. A profile may contain `model`, `variant`, or both.
 
 ### Reviewer Read-Only Guard

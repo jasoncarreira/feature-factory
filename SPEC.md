@@ -108,6 +108,8 @@ Implementation status: first pass implemented. It checks opencode run flags, plu
 
 `factory start` also seeds `.opencode/skills/feature/SKILL.md` and `.opencode/skills/feature/SCHEMA.md` into the target repo before invoking opencode, and excludes `.opencode/skills/feature/` through the repo-local `.git/info/exclude` when available. This keeps the authoritative control-plane schema readable inside the repo while `external_directory` remains denied.
 
+Repo-seeded skill repair is implemented in `seedRepoSkill(repo, opts = {})` and is deliberately limited to `SKILL.md` and `SCHEMA.md`. Missing, empty, invalid, or `{}` `.seed-hash` metadata is treated as absent metadata. A target file is managed and refreshable only when it is missing, matches the current packaged source, matches its recorded seed hash, or matches a known previously packaged seed hash. Differing unrecognized content is treated as an operator edit and preserved. Every seed pass rewrites `.seed-hash` with only the current packaged hashes for `SKILL.md` and `SCHEMA.md`, so stale recognized files can be repaired and unrelated files are neither modified nor recorded.
+
 This is the highest-leverage next item. It directly prevents long factory runs from failing late because the subprocess cannot authenticate a provider, cannot open a PR, or lacks the expected opencode run surface.
 
 Add checks for:
