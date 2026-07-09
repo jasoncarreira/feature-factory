@@ -40,6 +40,7 @@ const OTEL_RESOURCE_ATTRIBUTES = "OTEL_RESOURCE_ATTRIBUTES";
 const OTEL_SERVICE_NAME = "OTEL_SERVICE_NAME";
 const ENDPOINT_SECRET_KEY_PATTERN = /(?:key|token|secret|password|authorization|credential|access|team|api[_-]?key)/iu;
 const ENDPOINT_SECRET_VALUE_PATTERN = /(?:hc[a-z0-9_-]*|gh[pousr]|github_pat|sk(?:-proj)?|xox[abp]|glpat)[_-][A-Za-z0-9_-]{10,}/iu;
+const ENDPOINT_BARE_HEX_SECRET_PATTERN = /^[A-Fa-f0-9]{32,}$/u;
 const ENDPOINT_LONG_TOKEN_PATTERN = /^[A-Za-z0-9._~+/-]{16,}$/u;
 
 export async function runDoctor(options = {}) {
@@ -364,6 +365,7 @@ function endpointValueLooksSensitive(value) {
   if (!string) return false;
   if (scrubSecretEnv(string) === REDACTED_ENV_VALUE) return true;
   if (ENDPOINT_SECRET_VALUE_PATTERN.test(string)) return true;
+  if (ENDPOINT_BARE_HEX_SECRET_PATTERN.test(string)) return true;
   if (ENDPOINT_SECRET_KEY_PATTERN.test(string) && /[=:]/u.test(string)) return true;
   if (ENDPOINT_LONG_TOKEN_PATTERN.test(string) && string.length >= 24 && mixedTokenChars(string)) return true;
   return false;
