@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   heartbeatOnce,
+  transitionCostUsage,
   transitionGateDecision,
   transitionPrCreated,
   transitionRecoverOrphan,
@@ -528,6 +529,48 @@ describe("simplified run-state transitions", () => {
       } finally {
         cleanup(fixture.repo);
       }
+    }
+  });
+
+  it("persists cost usage through a locked run.json transition", async () => {
+    const fixture = createFixture("cost-usage");
+    try {
+      const result = await transitionCostUsage(fixture.runDir, {
+        agent: "backend-builder",
+        slice_id: "slice",
+        provider: "opencode",
+        model: "gpt-5.5",
+        input_tokens: 100,
+        output_tokens: 25,
+        total_tokens: 125,
+        cost_total: 0.42,
+        cost_currency: "USD",
+      }, { now: NOW, id: "usage-1" });
+
+      assert.equal(result.updated, true);
+      assert.equal(result.run.updated_at, NOW);
+      assert.equal(result.cost_attribution.entries[0].id, "usage-1");
+      assert.equal(result.cost_attribution.entries[0].run_id, fixture.runId);
+      assert.equal(result.cost_attribution.totals.total_tokens, 125);
+      assert.equal(result.cost_attribution.by_slice.slice.cost_total, 0.42);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")).cost_attribution, result.cost_attribution);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("does not mutate terminal runs when recording cost usage", async () => {
+    const fixture = createFixture("cost-terminal");
+    try {
+      await transitionTerminalResult(fixture.runDir, { status: "blocked", reason: "done", artifacts: {} }, { now: NOW });
+
+      await assert.rejects(
+        transitionCostUsage(fixture.runDir, { agent: "backend-builder", input_tokens: 1 }, { now: NOW, id: "late-cost" }),
+        /terminal run 'blocked' cannot be mutated/u,
+      );
+      assert.equal(readJson(join(fixture.runDir, "run.json")).cost_attribution, undefined);
+    } finally {
+      cleanup(fixture.repo);
     }
   });
 
