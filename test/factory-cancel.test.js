@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { cancelFactoryRun } from "../src/factory.js";
-import { recordDetachedProcessEvidence } from "../src/process-evidence.js";
+import { inspectProcessIdentity, recordDetachedProcessEvidence } from "../src/process-evidence.js";
 
 const NOW = "2026-07-09T15:00:00.000Z";
 
@@ -122,7 +122,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         commandName: "opencode",
         logRef: "processes/opencode.log",
         inspectorFn: (pid) => {
-          if (pid === 4242) return { ok: false, inspector: "test-inspector", reason: "stale pid" };
+          if (pid === 4242) return { ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" };
           return { ok: true, inspector: "test-inspector", pid, start_marker: "start-2", command_name: "opencode", cwd: fixture.repo };
         },
       });
@@ -135,6 +135,74 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
       assert.equal(persisted.identity.start_marker, "start-2");
     } finally {
       cleanup(fixture.repo);
+    }
+  });
+
+  it("refuses to overwrite running evidence when liveness is uninspectable", () => {
+    const fixture = createFixture("record-refuse-uninspectable");
+    try {
+      writeProcessEvidence(fixture, { pid: 4242 });
+      const before = readFileSync(join(fixture.runDir, "process.json"), "utf8");
+
+      assert.throws(
+        () => recordDetachedProcessEvidence(fixture.runDir, {
+          runId: fixture.runId,
+          pid: 5252,
+          cwd: fixture.repo,
+          commandName: "opencode",
+          logRef: "processes/opencode.log",
+          inspectorFn: () => ({ ok: false, inspector: "test-inspector", reason: "process liveness unknown: EPERM" }),
+        }),
+        /stale\/exited state could not be proven/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "process.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("refuses to overwrite invalid process evidence", () => {
+    const fixture = createFixture("record-refuse-invalid");
+    try {
+      writeJson(join(fixture.runDir, "process.json"), { invalid: true });
+      const before = readFileSync(join(fixture.runDir, "process.json"), "utf8");
+
+      assert.throws(
+        () => recordDetachedProcessEvidence(fixture.runDir, {
+          runId: fixture.runId,
+          pid: 5252,
+          cwd: fixture.repo,
+          commandName: "opencode",
+          logRef: "processes/opencode.log",
+          inspectorFn: matchingInspector(fixture, 5252),
+        }),
+        /refusing to overwrite invalid process evidence/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "process.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("default liveness treats EPERM as unknown rather than proven stale", () => {
+    const originalKill = process.kill;
+    try {
+      process.kill = (pid, signal) => {
+        if (pid === 4242 && signal === 0) {
+          const error = new Error("operation not permitted");
+          error.code = "EPERM";
+          throw error;
+        }
+        return originalKill(pid, signal);
+      };
+
+      const result = inspectProcessIdentity(4242);
+
+      assert.equal(result.ok, false);
+      assert.match(result.reason, /liveness unknown: EPERM/u);
+      assert.doesNotMatch(result.reason, /stale pid/u);
+    } finally {
+      process.kill = originalKill;
     }
   });
 

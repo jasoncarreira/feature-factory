@@ -162,7 +162,8 @@ export function cancelProcessFromEvidence(runDir, opts = {}) {
 
 export function inspectProcessIdentity(pid) {
   if (!positivePid(pid)) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "pid must be a positive integer" };
-  if (!pidExists(pid)) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "stale pid" };
+  const liveness = inspectPidLiveness(pid);
+  if (!liveness.alive) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: liveness.reason };
   if (process.platform !== "linux") return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "process inspector unsupported on this platform" };
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -198,7 +199,7 @@ function compareProcessIdentity(evidence, inspected) {
 
 function processIsProvenStale(inspected) {
   if (!inspected || inspected.ok !== false) return false;
-  return /\b(?:stale pid|exited|dead process|no such process|not alive)\b/iu.test(String(inspected.reason || ""));
+  return /\b(?:ESRCH|no such process)\b/iu.test(String(inspected.reason || ""));
 }
 
 function resolveInspector(opts = {}) {
@@ -268,12 +269,13 @@ function invalid(reason) {
   return { ok: false, reason, evidence: null };
 }
 
-function pidExists(pid) {
+function inspectPidLiveness(pid) {
   try {
     process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+    return { alive: true, reason: null };
+  } catch (error) {
+    if (error?.code === "ESRCH") return { alive: false, reason: "stale pid (ESRCH: no such process)" };
+    return { alive: false, reason: `process liveness unknown: ${error?.code || error?.message || "unknown error"}` };
   }
 }
 
