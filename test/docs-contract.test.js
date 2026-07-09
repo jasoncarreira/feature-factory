@@ -25,6 +25,7 @@ const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-resume <run-id> --json",
   "factory steer <run-id> --message TEXT --json",
   "factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json",
+  "factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json",
   "factory cost-record <run-id> --agent AGENT --step STEP --slice-id ID --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json",
   "factory answer --json <run-id> <gate> approve",
   "factory recover <run-id> --reason TEXT --json",
@@ -40,6 +41,9 @@ const STATE_WRITE_COMMANDS = Object.freeze([
   "factory terminal <run-id> blocked --reason TEXT",
   "factory slice-merged <run-id> <slice-id> --merge-commit SHA",
   "factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO",
+]);
+const PROCESS_SIDECAR_COMMANDS = Object.freeze([
+  "factory cancel <run-id> --json",
 ]);
 
 describe("heartbeat docs contract", () => {
@@ -166,6 +170,18 @@ describe("simplified state contract docs", () => {
     }
     for (const forbidden of ["transitionRunStep", "transitionRunSlice", "transitionTerminalResult", "transitionLifecycleRun", "mutateRunJsonLocked", "run-state.js"]) {
       assert.doesNotMatch(SKILL, literalPattern(forbidden), `SKILL must not instruct unreachable helper ${forbidden}`);
+    }
+  });
+
+  it("keeps process-sidecar writes separate from semantic run.json writes", () => {
+    for (const command of PROCESS_SIDECAR_COMMANDS) assertCliSurfaceIncludes(command);
+    for (const command of PROCESS_SIDECAR_COMMANDS) {
+      assert.ok(!documentedStateWriteVerbs().has(command.split(/\s+/u)[1]), `${command} must not be in semantic run.json state-write commands`);
+    }
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /Process-sidecar write command[\s\S]*factory cancel <run-id> --json/i, `${name} must document cancel as process-sidecar write`);
+      assert.match(text, /factory cancel[\s\S]*(?:not a semantic `run\.json`|outside the checked semantic `run\.json`)/i, `${name} must keep cancel out of semantic run.json transitions`);
+      assert.doesNotMatch(firstFencedBlockAfter(text, /Required semantic `run\.json` .*write commands:/i), /factory cancel <run-id> --json/i, `${name} must not list cancel in semantic run.json write commands`);
     }
   });
 
@@ -418,8 +434,27 @@ describe("remediation context reuse docs contract", () => {
 });
 
 describe("interrupt steer resume docs contract", () => {
+  it("documents run-scoped process evidence and SIGTERM-only fail-closed cancellation", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /process\.json/i, `${name} must document process.json`);
+      assert.match(text, /processes\/<timestamp>\.log|processes\/\S+\.log/i, `${name} must document run-scoped process logs`);
+      assert.match(text, /known explicit run id|explicit run id/i, `${name} must require an explicit run id for run-scoped process evidence`);
+      assert.match(text, /generic[\s\S]*detached[\s\S]*(?:not|must not|without)[\s\S]*(?:process\.json|run-scoped)/i, `${name} must not guarantee process.json for generic detached starts`);
+      assert.match(text, /factory cancel <run-id> --json/i, `${name} must document factory cancel`);
+      assert.match(text, /SIGTERM/i, `${name} must document SIGTERM cancellation`);
+      assert.match(text, /fail-closed|failed-closed/i, `${name} must document fail-closed cancellation`);
+      assert.match(text, /missing[\s\S]*invalid[\s\S]*stale[\s\S]*mismatch|missing[\s\S]*stale[\s\S]*invalid[\s\S]*mismatch/i, `${name} must fail closed on bad process evidence`);
+      assert.match(text, /broad process kill|process-group signal|pkill|killall/i, `${name} must forbid broad cancellation fallback`);
+      assert.match(text, /signaled:false[\s\S]*updated:false|updated:false[\s\S]*signaled:false/i, `${name} must document non-signaling failed response`);
+    }
+    for (const field of ["schema_version", "kind", "opencode-process", "execution_id", "pid", "started_at", "updated_at", "state", "cwd", "identity", "log_ref", "cancel"]) {
+      assert.match(SCHEMA, literalPattern(field), `SCHEMA must document process evidence field ${field}`);
+    }
+  });
+
   it("documents steering/resume workflow, payload, and untrusted label", () => {
     for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /cancel[\s\S]*(?:before|first)[\s\S]*(?:steer|steering|resume)|(?:before|first)[\s\S]*(?:steer|steering|resume)[\s\S]*cancel/i, `${name} must document cancel-before-steer/resume`);
       assert.match(text, /factory steer <run-id> --message TEXT/i, `${name} must document factory steer`);
       assert.match(text, /factory steer-consume <run-id> --ref steering\/<file>\.json --hash sha256:<hash>/i, `${name} must document steer-consume`);
       assert.match(text, /factory resume <run-id>[\s\S]*--dry-run/i, `${name} must document resume dry-run`);
@@ -429,6 +464,34 @@ describe("interrupt steer resume docs contract", () => {
       assert.match(text, /record-resume[\s\S]*before[\s\S]*steer-consume/i, `${name} must document record-resume before steer-consume`);
       assert.match(text, /active-heartbeat/i, `${name} must document active-heartbeat rejection`);
     }
+  });
+
+  it("documents steering conflict checkpoint after steer-consume and no automatic rollback", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /after `?steer-consume`?[\s\S]*(?:steering-conflict|conflict checkpoint)/i, `${name} must require conflict checkpoint after steer-consume`);
+      assert.match(text, /factory steer-conflict <run-id> --ref steering\/<file>\.json --hash sha256:<hash>/i, `${name} must document steer-conflict CLI`);
+      assert.match(text, /accepted durable state|protected accepted state|protected state/i, `${name} must document protected accepted state`);
+      assert.match(text, /approved gates[\s\S]*accepted steps[\s\S]*(?:merged|blocked) slices/i, `${name} must list protected gates/steps/slices`);
+      assert.match(text, /validator[\s\S]*security/i, `${name} must include validator/security in protected state`);
+      assert.match(text, /automatic rollback is forbidden|do not automatically roll back|must not.*rollback/i, `${name} must forbid automatic rollback`);
+      assert.match(text, /needs-human/i, `${name} must document needs-human steering conflict outcome`);
+    }
+    assert.match(SCHEMA, /ok:false[\s\S]*conflict:true[\s\S]*updated:true[\s\S]*status:\"needs-human\"/i, "SCHEMA must document steer-conflict response semantics");
+    assert.match(SCHEMA, /inactive heartbeat/i, "SCHEMA must require inactive heartbeat for steer-conflict");
+    assert.match(SCHEMA, /consumed steering file[\s\S]*hash matches/i, "SCHEMA must verify consumed steering file hash");
+  });
+
+  it("preserves PR review boundary and no-merge rule in docs", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, README, SPEC })) {
+      assert.match(text, /Never auto-merge|Never merge the PR|never auto-merges/i, `${name} must forbid automatic merge`);
+      assert.match(text, /Humans review and merge|human PR review boundary|review and merge/i, `${name} must keep PR human review boundary`);
+      assert.match(text, /implementation-validator[\s\S]*security-reviewer|security-reviewer[\s\S]*implementation-validator/i, `${name} must require final review panel before PR`);
+    }
+  });
+
+  it("does not leave cancellation rollback as an open TODO", () => {
+    assert.doesNotMatch(TODO, /Future work: live cancellation\/kill/i, "TODO must not leave live cancellation as future work");
+    assert.doesNotMatch(TODO, /semantic rollback when steering conflicts/i, "TODO must not leave steering rollback as future work");
   });
 });
 
@@ -523,6 +586,14 @@ function assertCliSurfaceIncludes(command) {
 
 function documentedStateWriteVerbs() {
   return new Set(STATE_WRITE_COMMANDS.map((command) => command.split(/\s+/u)[1]));
+}
+
+function firstFencedBlockAfter(text, pattern) {
+  const match = pattern.exec(text);
+  if (!match) return "";
+  const rest = text.slice(match.index + match[0].length);
+  const block = /```[a-z]*\n([\s\S]*?)\n```/i.exec(rest);
+  return block ? block[1] : "";
 }
 
 function implementedStateWriteVerbs() {
