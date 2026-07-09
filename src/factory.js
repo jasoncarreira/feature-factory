@@ -12,6 +12,7 @@ import { git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
+import { cancelProcessFromEvidence, recordDetachedProcessEvidence } from "./process-evidence.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -102,7 +103,7 @@ export async function startFactory(args, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo }));
-  if (opts.detached) return startDetached(repo, commandArgs);
+  if (opts.detached) return startDetached(repo, commandArgs, detachedProcessOptions(repo, opts));
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
   } catch (error) {
@@ -475,7 +476,7 @@ export function continueFactory(parentRunId, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(JSON.stringify(payload, null, 2));
-  if (opts.detached) return startDetached(repo, commandArgs);
+  if (opts.detached) return startDetached(repo, commandArgs, detachedProcessOptions(repo, { ...opts, runId: continuation.target.run_id }));
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
   } catch (error) {
@@ -496,7 +497,7 @@ export async function resumeFactory(runId, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(JSON.stringify(payload, null, 2));
-  if (opts.detached) return startDetached(repo, commandArgs);
+  if (opts.detached) return startDetached(repo, commandArgs, detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir }));
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, stdio: "inherit" });
   } catch (error) {
@@ -514,6 +515,13 @@ export async function consumeSteering(runId, input, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const result = await transitionSteeringConsumed(runDir, input, opts);
   return { run_id: result.run.run_id, steering: result.steering };
+}
+
+export function cancelFactoryRun(runId, opts = {}) {
+  if (!stringValue(runId)) throw new Error("factory cancel requires exactly one <run-id>");
+  const runDir = resolveRunDir(runId, opts);
+  const run = readRunFile(join(runDir, "run.json"));
+  return cancelProcessFromEvidence(runDir, { ...opts, runId: run.run_id });
 }
 
 export async function recordCostUsage(runId, input, opts = {}) {
@@ -1340,11 +1348,13 @@ function allRunDirs(opts = {}) {
   return dirs;
 }
 
-function startDetached(repo, commandArgs) {
-  const processes = join(factoryRoot(repo), "processes");
+function startDetached(repo, commandArgs, opts = {}) {
+  const scopedRunDir = opts.runDir || null;
+  const processes = scopedRunDir ? join(scopedRunDir, "processes") : join(factoryRoot(repo), "processes");
   mkdirSync(processes, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const log = join(processes, `${stamp}.log`);
+  const executionId = opts.executionId || randomUUID();
+  const log = join(processes, scopedRunDir ? `${stamp}-${executionId}.log` : `${stamp}.log`);
   const out = openSync(log, "a");
   const child = spawn("opencode", commandArgs, {
     cwd: repo,
@@ -1354,12 +1364,39 @@ function startDetached(repo, commandArgs) {
   child.on("error", (error) => appendFileSync(log, `\n[feature-factory] failed to start opencode: ${error.message}\n`));
   child.unref();
   closeSync(out);
+  if (scopedRunDir && opts.runId && child.pid) {
+    try {
+      recordDetachedProcessEvidence(scopedRunDir, {
+        runId: opts.runId,
+        executionId,
+        pid: child.pid,
+        cwd: repo,
+        commandName: "opencode",
+        logRef: relativeRef(scopedRunDir, log),
+        now: opts.now,
+        inspectorFn: opts.inspectorFn || opts.processInspectorFn,
+      });
+    } catch (error) {
+      appendFileSync(log, `\n[feature-factory] failed to record process evidence: ${error.message}\n`);
+    }
+  }
   return {
     status: "started",
     pid: child.pid,
     repo,
     log,
     command: ["opencode", ...commandArgs].join(" "),
+  };
+}
+
+function detachedProcessOptions(repo, opts = {}) {
+  if (!stringValue(opts.runId)) return opts;
+  const runId = String(opts.runId).trim();
+  if (!SAFE_RUN_ID_PATTERN.test(runId) || runId.includes("..") || runId.endsWith(".lock")) return opts;
+  return {
+    ...opts,
+    runId,
+    runDir: opts.runDir || join(factoryRoot(repo), runId),
   };
 }
 
