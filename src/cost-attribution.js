@@ -165,11 +165,11 @@ export function sanitizePublicCostText(value) {
   return String(value).replace(/[\t\r\n]+/gu, " ").replace(TERMINAL_CONTROL_PATTERN, "").replace(/\s+/gu, " ").trim();
 }
 
-function rollupBy(entries, key) {
+export function rollupBy(entries, key) {
   const groups = new Map();
   for (const entry of entries) {
-    const group = nonEmptyString(entry[key]);
-    if (!group) continue;
+    const group = entry[key];
+    if (typeof group !== "string" || group.trim().length === 0) continue;
     const groupEntries = groups.get(group) || [];
     groupEntries.push(entry);
     groups.set(group, groupEntries);
@@ -177,13 +177,11 @@ function rollupBy(entries, key) {
   return Object.fromEntries([...groups.entries()].map(([name, groupEntries]) => [name, rollupEntries(groupEntries)]));
 }
 
-function rollupEntries(entries) {
+export function rollupEntries(entries) {
   const rollup = {
     status: "unavailable",
     entry_count: entries.length,
     request_count: entries.length,
-    missing: [],
-    mixed_currency: false,
   };
   const missing = new Set();
   const currencyByCostField = new Map();
@@ -196,7 +194,7 @@ function rollupEntries(entries) {
     for (const item of Array.isArray(entry.missing) ? entry.missing : []) missing.add(item);
 
     for (const field of NUMERIC_FIELDS) {
-      if (entry[field] === undefined) continue;
+      if (entry[field] === undefined || entry[field] === null) continue;
       rollup[field] = (rollup[field] ?? 0) + entry[field];
       if (COST_NUMERIC_FIELDS.includes(field)) {
         const currency = safeCostCurrency(entry.cost_currency);
@@ -218,16 +216,15 @@ function rollupEntries(entries) {
   if (hasMixedCurrency) {
     delete rollup.cost_total;
     delete rollup.cost_currency;
-    rollup.mixed_currency = true;
     missing.add("mixed_currency");
     partial = true;
   }
 
-  rollup.missing = [...missing].sort();
-  if (entries.length === 0) rollup.missing = ["entries"];
   if (availableEntries === entries.length && entries.length > 0 && !partial) rollup.status = "available";
   else if (entries.some((entry) => entry.status === "available" || entry.status === "partial")) rollup.status = "partial";
   else rollup.status = "unavailable";
+  rollup.mixed_currency = hasMixedCurrency;
+  rollup.missing = entries.length === 0 ? ["entries"] : [...missing].sort();
   return rollup;
 }
 

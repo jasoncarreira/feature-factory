@@ -7,6 +7,8 @@ import {
   normalizeCostUsageEntry,
   publicCostAttributionSummary,
   recomputeCostAttribution,
+  rollupBy,
+  rollupEntries,
 } from "../src/cost-attribution.js";
 
 const NOW = "2026-07-08T12:00:00.000Z";
@@ -129,6 +131,39 @@ describe("cost attribution helpers", () => {
     assert.equal(Object.prototype.hasOwnProperty.call(attribution.by_slice, "__proto__"), true);
     assert.equal(attribution.by_agent["__proto__"].cost_total, 0.01);
     assert.equal(attribution.by_slice["__proto__"].entry_count, 1);
+  });
+
+  it("groups on exact raw identities without sanitizer collisions", () => {
+    const entries = ["agent", " agent ", "agent\nx", "agent x", "__proto__"].map((agent) => ({
+      agent,
+      status: "partial",
+      missing: ["cost_total"],
+      input_tokens: 1,
+    }));
+
+    const groups = rollupBy(entries, "agent");
+
+    assert.deepEqual(Object.keys(groups), ["agent", " agent ", "agent\nx", "agent x", "__proto__"]);
+    for (const agent of Object.keys(groups)) assert.equal(groups[agent].entry_count, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(groups, "__proto__"), true);
+  });
+
+  it("skips null numeric fields defensively while preserving explicit zero and partial status", () => {
+    const nullEntry = Object.fromEntries([
+      ...["input_tokens", "output_tokens", "total_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "reasoning_tokens"],
+      ...["cost_total", "cost_input", "cost_output", "cost_cache_creation", "cost_cache_read"],
+    ].map((field) => [field, null]));
+    const rollup = rollupEntries([
+      { status: "partial", missing: ["usage"], ...nullEntry },
+      { status: "available", missing: [], input_tokens: 0, cost_total: 0, cost_currency: "USD" },
+    ]);
+
+    assert.equal(rollup.status, "partial");
+    assert.equal(rollup.input_tokens, 0);
+    assert.equal(rollup.cost_total, 0);
+    assert.equal(rollup.cost_currency, "USD");
+    assert.equal(rollup.output_tokens, undefined);
+    assert.deepEqual(rollup.missing, ["usage"]);
   });
 
   it("appends one entry and exposes a compact public summary", () => {
