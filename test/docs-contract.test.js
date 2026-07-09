@@ -281,6 +281,13 @@ describe("blocked-run continuation docs contract", () => {
     }
   });
 
+  it("documents persisted PR mode across resume", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /run\.json\.pr_mode/i, `${name} must document persisted run.pr_mode`);
+      assert.match(text, /run\.json\.pr_mode[\s\S]*resume|resume[\s\S]*run\.json\.pr_mode/i, `${name} must document preserving PR mode on resume`);
+    }
+  });
+
   it("documents normal gates, configurable PRs, and exhausted-remediation terminal blocked outcome", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
       for (const term of ["story", "brief", "build", "test", "validator", "security", "pre-PR"]) {

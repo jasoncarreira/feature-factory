@@ -1563,6 +1563,7 @@ function buildResumePayload(run, opts) {
     driver: {
       mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
       ready: false,
+      pr_mode: run.pr_mode || null,
       reviewer: null,
       github_account: resolveGithubAccount(opts),
     },

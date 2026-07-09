@@ -339,6 +339,7 @@ Rules:
   "max_parallel_slices": 3,
   "max_retries": 3,
   "review_tier": "strict",
+  "pr_mode": "draft",
   "debug_snapshot": {
     "created_with": {
       "collected_at": "2026-07-04T11:45:00Z",
@@ -413,6 +414,8 @@ Rules:
 Top-level `status` values are `running`, `completed`, `blocked`, `partial`, and `needs-human`. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`.
 
 Top-level `run.json.review_tier` is an optional opaque display string. It may contain labels such as `light`, `standard`, or `strict`, but it does not change gates, agents, PR behavior, validation behavior, or workflow control. It does not change `schema_version`; it remains `1`.
+
+Top-level `run.json.pr_mode` is an optional durable PR creation mode with value `draft` or `ready`. Persist the effective start-time mode there after applying `driver.pr_mode`, legacy `driver.ready`, or the plugin configured default; resume payloads carry this value as `driver.pr_mode` so a run created with a per-run override does not fall back to a later plugin default. It does not change `schema_version`; it remains `1`.
 
 Top-level `run.json.continuation` is present only for child runs created by `factory continue`. Accepted continuation metadata has `schema_version: 1`, `kind: "blocked-run-continuation"`, `created_at`, `operator_summary`, nested `parent`, `review`, and `target` objects, and refs paired with hashes for the parent manifest, approved review evidence, target base commit, and every read-only parent context file. `parent.status` must be exactly `blocked`; `parent.worktree`, branch, and commit identify the source worktree. `review.ref` resolves under the parent run's `reviews/` directory, is paired with `review.hash`, must be referenced by parent run state, and must have a subject consistent with that source. `target.run_id`, `target.branch`, `target.worktree`, `target.base_ref`, and `target.base_commit` describe the fresh child run. `parent_artifacts` is an array of `{kind, ref, hash}` entries for source artifacts such as story and technical brief, and `parent_evidence` / `parent_reviews` arrays carry `{kind, ref, hash}` entries for additional source context; `parent_reviews` includes the selected review with the same hash as `review.hash`. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits/hashes; it must not rely on a special blocking verdict enum as the authorization mechanism.
 
