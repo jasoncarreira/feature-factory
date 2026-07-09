@@ -22,6 +22,7 @@ export const HEARTBEAT_PROTECTED_GATES = Object.freeze(["story", "brief", "pre_p
 const RUN_STATUSES = new Set(["running", ...TERMINAL_RUN_STATUSES]);
 const TERMINAL_STATUSES = new Set(TERMINAL_RUN_STATUSES);
 const RUN_MODES = new Set(["interactive", "headless", "autonomous"]);
+const PR_MODES = new Set(["draft", "ready"]);
 const GATE_STATUSES = new Set(["pending", "approved", "changes_requested", "stopped"]);
 const APPROVAL_SOURCES = new Set(["human", "external-driver", "autonomous", "override"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
@@ -64,6 +65,7 @@ export function validateRun(run) {
   optionalString(errors, run, "branch", "run.branch");
   optionalString(errors, run, "worktree", "run.worktree");
   optionalNonEmptyString(errors, run, "github_account", "run.github_account");
+  optionalEnum(errors, run, "pr_mode", PR_MODES, "run.pr_mode");
   optionalString(errors, run, "pr_url", "run.pr_url");
   optionalInteger(errors, run, "max_parallel_slices", "run.max_parallel_slices");
   optionalInteger(errors, run, "max_retries", "run.max_retries");

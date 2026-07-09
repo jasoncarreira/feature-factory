@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { recoverDisruptedRun } from "../src/factory.js";
+import { listRuns, recoverDisruptedRun, status, validateState } from "../src/factory.js";
 
 describe("factory disrupted run recovery", () => {
   it("does not re-scaffold a missing run.json and returns a synthetic non-durable terminal result", async () => {
@@ -20,6 +20,31 @@ describe("factory disrupted run recovery", () => {
       assert.match(result.terminal_result.reason, /missing run\.json/i);
       assert.match(result.terminal_result.reason, /No durable terminal_result can be written without forbidden re-scaffolding/i);
       assert.equal(existsSync(join(repo, ".opencode", "factory", "missing-run", "run.json")), false);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("does not overwrite malformed run.json and returns a synthetic non-durable terminal result", async () => {
+    const repo = tempRepo("malformed-run");
+    const runDir = join(repo, ".opencode", "factory", "malformed-run");
+    const runFile = join(runDir, "run.json");
+    try {
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(runFile, "{ malformed durable state\n", "utf8");
+      const before = readFileSync(runFile, "utf8");
+
+      const result = await recoverDisruptedRun("malformed-run", { cwd: repo, now: "2026-07-08T12:00:00.000Z" });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.durable, false);
+      assert.equal(result.updated, false);
+      assert.equal(result.recovered, false);
+      assert.equal(result.status, "blocked");
+      assert.match(result.terminal_result.reason, /invalid run\.json/i);
+      assert.match(result.terminal_result.reason, /No durable terminal_result can be written without forbidden re-scaffolding/i);
+      assert.equal(readFileSync(runFile, "utf8"), before);
+      assert.equal(existsSync(join(repo, ".opencode", "worktrees", "malformed-run")), false);
     } finally {
       cleanup(repo);
     }
@@ -56,6 +81,137 @@ describe("factory disrupted run recovery", () => {
       assert.equal(gitStdout(fixture.worktree, ["branch", "--show-current"]), fixture.runId);
       assert.equal(gitStdout(fixture.worktree, ["rev-parse", "HEAD"]), gitStdout(fixture.repo, ["rev-parse", fixture.runId]));
       assert.equal(readJson(join(fixture.runDir, "run.json")).status, "running");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("blocks recovery when the durable branch is missing", async () => {
+    const fixture = createRecoveryFixture("missing-branch-run");
+    try {
+      runGit(fixture.repo, ["branch", "-D", fixture.runId]);
+
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo });
+      const run = readJson(join(fixture.runDir, "run.json"));
+
+      assert.equal(result.ok, false);
+      assert.equal(result.durable, true);
+      assert.equal(result.updated, true);
+      assert.equal(result.status, "blocked");
+      assert.match(result.terminal_result.reason, /branch 'missing-branch-run' does not exist/i);
+      assert.match(run.terminal_result.reason, /branch 'missing-branch-run' does not exist/i);
+      assert.equal(existsSync(fixture.worktree), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("blocks recovery when a merged slice merge_commit contradicts branch history", async () => {
+    const fixture = createRecoveryFixture("merge-contradiction-run");
+    try {
+      writeFileSync(join(fixture.repo, "main-only.txt"), "main only\n", "utf8");
+      runGit(fixture.repo, ["add", "main-only.txt"]);
+      runGit(fixture.repo, ["commit", "-m", "main only"]);
+      const nonAncestorMergeCommit = gitStdout(fixture.repo, ["rev-parse", "HEAD"]);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.slices[0].merge_commit = nonAncestorMergeCommit;
+      writeJson(join(fixture.runDir, "run.json"), run);
+
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo });
+      const updated = readJson(join(fixture.runDir, "run.json"));
+
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "blocked");
+      assert.match(result.terminal_result.reason, /merged slice merge_commit/i);
+      assert.match(result.terminal_result.reason, /not an ancestor/i);
+      assert.match(updated.terminal_result.reason, /merged slice merge_commit/i);
+      assert.equal(existsSync(fixture.worktree), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("derives a safe worktree for valid non-terminal runs without worktree and preserves durable fields", async () => {
+    const repo = tempRepo("derive-worktree-run");
+    const runId = "derive-worktree-run";
+    try {
+      initGitRepo(repo);
+      const baseCommit = gitStdout(repo, ["rev-parse", "HEAD"]);
+      runGit(repo, ["branch", runId]);
+      const runDir = join(repo, ".opencode", "factory", runId);
+      const runFile = join(runDir, "run.json");
+      mkdirSync(runDir, { recursive: true });
+      const original = {
+        schema_version: 1,
+        run_id: runId,
+        mode: "headless",
+        status: "running",
+        created_at: "2026-07-08T11:00:00.000Z",
+        updated_at: "2026-07-08T11:30:00.000Z",
+        heartbeat_at: "2026-07-08T11:59:00.000Z",
+        base_ref: "main",
+        base_commit: baseCommit,
+        branch: runId,
+        github_account: "octo-org",
+        max_parallel_slices: 2,
+        max_retries: 1,
+        review_tier: "standard",
+        debug_snapshot: {
+          created_with: {
+            collected_at: "2026-07-08T11:00:00.000Z",
+            event: "created",
+            diagnostic_only: true,
+            env: { PATH: "/usr/bin", GITHUB_TOKEN: "[redacted]" },
+          },
+          last_resumed_with: null,
+          resume_count: 1,
+        },
+        gates: {
+          story: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve", answered_at: "2026-07-08T11:05:00.000Z" },
+          pre_pr: { status: "pending", artifact: "artifacts/pre-pr.md", question_ref: "gates/pre_pr.question.md", pending_snapshot: { question_ref: "gates/pre_pr.question.md", question_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", artifact_ref: "artifacts/pre-pr.md", artifact_hash: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", created_at: "2026-07-08T11:50:00.000Z" } },
+        },
+        slices: [
+          { id: "research", stack: "backend", depends_on: [], status: "merged", attempts: 1, evidence_ref: "evidence/research.md", review_ref: "reviews/research.json", merge_commit: baseCommit },
+          { id: "backend", stack: "backend", depends_on: ["research"], status: "running", attempts: 2, evidence_ref: "evidence/backend.md" },
+        ],
+        steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md", evidence_ref: "evidence/story.md", review_ref: "reviews/story.json" }],
+        validator: { verdict: "GO-WITH-NITS", report: "artifacts/validation.md", loops: 1 },
+        security_review: { verdict: "PASS", review_ref: "reviews/security.json", loops: 1 },
+        terminal_result: null,
+      };
+      writeJson(runFile, original);
+
+      const result = await recoverDisruptedRun(runId, { cwd: repo });
+      const expectedWorktree = gitListedPath(join(repo, ".opencode", "worktrees", runId));
+      const after = readJson(runFile);
+
+      assert.equal(result.ok, true);
+      assert.equal(result.updated, true);
+      assert.equal(result.recovered, true);
+      assert.equal(result.worktree, expectedWorktree);
+      assert.equal(gitStdout(expectedWorktree, ["branch", "--show-current"]), runId);
+      assert.deepEqual(after, { ...original, worktree: expectedWorktree });
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("does not prune or clean unrelated stale worktree metadata during recovery", async () => {
+    const fixture = createRecoveryFixture("non-destructive-prune-run");
+    const staleBranch = "unrelated-stale-worktree";
+    const staleWorktree = join(fixture.repo, ".opencode", "worktrees", staleBranch);
+    try {
+      runGit(fixture.repo, ["branch", staleBranch]);
+      mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+      runGit(fixture.repo, ["worktree", "add", staleWorktree, staleBranch]);
+      rmSync(staleWorktree, { recursive: true, force: true });
+      assert.match(gitStdout(fixture.repo, ["worktree", "list", "--porcelain"]), new RegExp(`worktree ${escapeRegExp(gitListedPath(staleWorktree))}`));
+
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.recovered, true);
+      assert.match(gitStdout(fixture.repo, ["worktree", "list", "--porcelain"]), new RegExp(`worktree ${escapeRegExp(gitListedPath(staleWorktree))}`));
     } finally {
       cleanup(fixture.repo);
     }
@@ -195,6 +351,33 @@ describe("factory disrupted run recovery", () => {
       cleanup(fixture.repo);
     }
   });
+
+  it("keeps status, listRuns, and validateState read-only for missing manifests and worktrees", () => {
+    const fixture = createRecoveryFixture("read-only-state-run");
+    const runFile = join(fixture.runDir, "run.json");
+    const orphanRunDir = join(fixture.repo, ".opencode", "factory", "missing-manifest-run");
+    try {
+      mkdirSync(orphanRunDir, { recursive: true });
+      const before = readFileSync(runFile, "utf8");
+
+      const current = status(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
+      const runs = listRuns({ cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
+      const validation = validateState(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
+
+      assert.equal(current.status, "running");
+      assert.equal(current.diagnostics.items.some((item) => item.condition === "missing-worktree"), true);
+      assert.equal(runs.some((item) => item.run_id === fixture.runId), true);
+      assert.equal(runs.some((item) => item.run_id === "missing-manifest-run"), false);
+      assert.equal(validation.runs.length, 1);
+      assert.throws(() => status("missing-manifest-run", { cwd: fixture.repo }), /run not found/i);
+      assert.throws(() => validateState("missing-manifest-run", { cwd: fixture.repo }), /run not found/i);
+      assert.equal(readFileSync(runFile, "utf8"), before);
+      assert.equal(existsSync(fixture.worktree), false);
+      assert.equal(existsSync(join(orphanRunDir, "run.json")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
 });
 
 function createRecoveryFixture(runId, { baseMismatch = false, worktree } = {}) {
@@ -265,6 +448,14 @@ function readDoc(relativePath) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function gitListedPath(path) {
+  return process.platform === "darwin" && path.startsWith("/var/") ? `/private${path}` : path;
 }
 
 function cleanup(path) {

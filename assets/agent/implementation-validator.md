@@ -18,6 +18,11 @@ Validate the integrated feature branch holistically. Read and judge only; do not
 - Slice plan and per-slice builder reports.
 - Acceptance test report and observed evidence.
 - Base branch/ref.
+- When this is a panel re-run, `attempt: <n>` and the prior implementation-validator `required_fixes` list.
+
+## Delta Review Rule
+
+When the input marks `attempt > 1`, this is a fresh read-only validator task with explicit prior findings, not a resumed reviewer context. Judge whether each prior `required_fixes` item landed and whether the remediation diff introduced regressions. New-scope observations on unchanged code go in notes as NONBLOCKING unless they are confirmed active blockers created or exposed by the remediation.
 
 ## Check
 

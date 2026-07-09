@@ -133,6 +133,15 @@ describe("run schema and consistency", () => {
     );
   });
 
+  it("treats pr_mode as optional persisted PR creation mode", () => {
+    assert.equal(validateRun({ ...runningRun(), pr_mode: "draft" }).pr_mode, "draft");
+    assert.equal(validateRun({ ...runningRun(), pr_mode: "ready" }).pr_mode, "ready");
+    assert.throws(
+      () => validateRun({ ...runningRun(), pr_mode: "published" }),
+      (error) => error instanceof ValidationError && error.message.includes("run.pr_mode: must be one of draft, ready"),
+    );
+  });
+
   it("accepts blocked-run continuation metadata without bumping run schema", () => {
     const run = validateRun({
       ...runningRun("continuation-run"),

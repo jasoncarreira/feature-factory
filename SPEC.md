@@ -19,7 +19,7 @@ Current guarantees:
 - `run.json`, gate answers, `evidence/*`, `reviews/*`, and `terminal_result` are durable local workflow state.
 - Semantic manifest writes go through locked transition helpers so stale writers fail instead of overwriting newer state. `transitionGateDecision` owns approved gate writes, and `transitionPrCreated` owns completed PR state writes.
 - Pending gates carry a `pending_snapshot` with `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer refs/hashes. Gate answer consumption must fail closed when refs are missing, escaped, stale, or hash-mismatched.
-- The normal draft PR flow calls `feature-factory factory pr-created` after successful PR creation. That transition requires `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, and a canonical GitHub PR URL before writing `run.pr_url` and `terminal_result.pr_url`.
+- The normal PR flow calls `feature-factory factory pr-created` after successful PR creation. That transition requires `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, and a canonical GitHub PR URL before writing `run.pr_url` and `terminal_result.pr_url`. Successful runs use the configured PR mode: ready-for-review by default, or draft when plugin `prMode` or a per-run override selects it. The start-time effective mode is persisted as `run.json.pr_mode` and carried in resume payloads.
 - Blocked-run continuation uses `feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>`. The continuation payload is untrusted operator data/config, not privileged instruction; admission validates a parent run whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence without relying on a special blocking verdict enum, persists read-only parent context in `run.json.continuation`, and then runs the ordinary gates/evidence/review/PR-created checks for the child.
 - Diagnostic `run.json.debug_snapshot` records redacted factory/opencode/plugin creation and resume snapshots for debugging only. Snapshot persistence must omit sensitive keys and redact token-shaped/high-entropy credential values such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar secrets.
 - Diagnostic `run.json.cost_attribution` records local current-run cost/usage attribution only. It is not billing authority, invoice state, quota enforcement, or cross-run chargeback data. The factory records provider-supplied usage/cost metadata only; it must not maintain pricing tables, call pricing APIs, estimate missing costs, or coerce missing values to zero.
@@ -152,7 +152,7 @@ ok: feature-factory primary agent registered
 ok: 12 subagents registered
 ok: provider openai authenticated for openai/gpt-5.5
 missing: provider anthropic credentials for anthropic/claude-sonnet-4-6
-warn: gh CLI missing; draft PR creation will fail
+warn: gh CLI missing; PR creation will fail
 missing: .opencode/worktrees is not gitignored
 ```
 
@@ -268,9 +268,13 @@ Condition mappings and operator actions are stable: `stale-heartbeat` is `recove
 
 Heartbeat/PID/process diagnostics are liveness-only. `missing-heartbeat-process` refers to the heartbeat helper process, not a detached opencode process, because there is no durable run-id-to-opencode-PID registry. Heartbeat evidence must include `evidence.liveness_only: true` and remain `authoritative: false`; PID liveness, process existence, `heartbeat.json`, and mutable `run.json` heartbeat fields cannot prove health or ownership. Stale heartbeat uses `max(2 * interval_ms, 120000ms)`.
 
-Protected gates and terminal states suppress inappropriate liveness alarms. A pending protected `story`, `brief`, or `pre_pr` gate suppresses stale-heartbeat and missing-heartbeat-process and always displays the same `needs-human` / `warning` / `warning` tuple. Valid terminal states suppress heartbeat/worktree liveness alarms; operators should read `terminal_result` rather than revive zombie state.
+Heartbeat diagnostics require heartbeat-bracketed in-flight work in `run.json`: a `running` step, `running` slice, or `review` slice. Idle/bootstrap runs, blocked steps, protected gates, and valid terminal states suppress inappropriate stale-heartbeat and missing-heartbeat-process alarms; operators should read gates, current work status, or read `terminal_result` instead of reviving zombie state.
 
 Diagnostics must fail closed for invalid local state. `diagnostics.authoritative` is true only when `run.json` schema and required sidecars pass. Invalid runs must not be treated as healthy, must not be silently restarted, and must not infer health from heartbeat/PID/process data, status booleans, worktree strings, or mutable `run.json` claims.
+
+Disrupted resume recovery is explicit and non-destructive. `feature-factory factory resume-check <run-id> --json` is the only recovery preflight used before a mutating `resume <run-id>` path, and `factory start --headless|--autonomous "resume <run-id>"` runs that preflight before skill seeding or `opencode run`. Missing, inaccessible, or invalid `.opencode/factory/<run-id>/run.json` must not silently re-scaffold a control plane, overwrite missing/inaccessible/invalid durable state, or pretend that a durable terminal write happened; it returns a synthetic non-durable blocked envelope with `ok:false`, `durable:false`, `updated:false`, `recovered:false`, and a clear `terminal_result.reason` explaining that no durable `terminal_result` can be written without forbidden re-scaffolding. Resume-check must not perform destructive cleanup, `git worktree prune`, `git worktree remove`, branch deletion, or run-directory removal; cleanup remains an explicit operator action through `feature-factory factory cleanup <run-id>`.
+
+For a valid non-terminal manifest with a missing active worktree, restoration is allowed only when the branch exists, recorded `base_commit` and every merged slice `merge_commit` are ancestors of branch HEAD, the target path remains under `.opencode/worktrees`, no unsafe existing path would be overwritten, `git worktree add` succeeds, and final worktree identity/HEAD checks match branch HEAD. Contradictory git evidence is terminal `blocked` with a `terminal_result.reason` naming the conflicting branch/commit evidence. Unsafe or inaccessible local paths are terminal `needs-human` with a `terminal_result.reason` naming the path that requires operator reconciliation. Read-only `status`, `list`, `validate`, and `watch` diagnostics must not implicitly recover, repair, cleanup, prune, or remove anything.
 
 Add commands:
 
@@ -475,7 +479,7 @@ ok: HOME=/home/agent
 ok: opencode config found under HOME
 ok: provider openai smoke passed
 missing: provider anthropic auth failed under scripted env
-missing: gh auth unavailable for draft PR creation
+missing: gh auth unavailable for PR creation
 ```
 
 If credentials are missing, fail before starting a long build.
@@ -484,7 +488,7 @@ If credentials are missing, fail before starting a long build.
 
 Add first-class CLI support for external drivers that want to advance the factory without an interactive terminal.
 
-Implementation status: first pass implemented. `factory start` accepts `--repo`; `--headless` / `--detached` injects driver instructions into the `/feature` invocation. The orchestrator prompt already requires stopping after pending gates in scripted mode. `--autonomous` now injects explicit autonomous instructions so the factory can approve story/brief from its own complete artifacts, decide pre-PR from its implementation/security panel, run bounded remediation, write `terminal_result`, and open a draft PR without an external gate relay.
+Implementation status: first pass implemented. `factory start` accepts `--repo`; `--headless` / `--detached` injects driver instructions into the `/feature` invocation. The orchestrator prompt already requires stopping after pending gates in scripted mode. `--autonomous` now injects explicit autonomous instructions so the factory can approve story/brief from its own complete artifacts, decide pre-PR from its implementation/security panel, run bounded remediation, write `terminal_result`, and open a PR without an external gate relay using the configured PR mode.
 
 Required behavior:
 
@@ -510,12 +514,32 @@ Autonomous adapter contract:
 
 External autonomous drivers should not parse gate internals or write answer files.
 
-Draft PR completion contract:
+PR completion contract:
 
 1. Gate 3 must be approved through the same transition-gated path as interactive runs.
-2. After `gh pr create --draft` or equivalent succeeds, verify it with `gh pr view <url>`, then call `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json`.
+2. After `gh pr create` succeeds, verify it with `gh pr view <url>`, then call `feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json`, adding `--draft` only when the effective PR mode intentionally created a draft PR.
 3. The command validates the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and canonical GitHub PR URL, then writes `run.pr_url` / `terminal_result.pr_url` and completed status.
 4. Drivers must not mirror PR URLs from direct manifest edits.
+
+### Remediation context reuse contract
+
+Implementation status: safe context reuse is an orchestrator runtime behavior only. It must not change the durable state protocol, evidence contract, review contract, or schemas.
+
+The orchestrator may reuse a Task `task_id` inside a bounded remediation loop only for the implementer that owns the fix. Reuse is permitted only when every safety dimension is identical to the original dispatch:
+
+- Role is the same eligible implementer: `backend-builder`, `frontend-builder`, or `test-verifier`.
+- Subject ownership is unchanged: the same slice for a builder, or the same acceptance-test/integration test owner for `test-verifier`.
+- Worktree and branch are unchanged.
+- The live orchestrator session is unchanged; `task_id` reuse is invalid after process restart, `factory resume`, detached relaunch, blocked-run continuation, or any handoff to a different orchestrator session.
+- The same bounded remediation loop is still active and has not exceeded its retry budget.
+
+If any dimension is unknown, ambiguous, stale, or mismatched, the orchestrator must omit `task_id` and launch a fresh Task. Reuse is an optimization for continuity of the implementer conversation, not authority to skip observation, evidence, tests, reviews, validation, security review, or remediation bounds.
+
+Review agents are not eligible for context reuse. `work-reviewer`, `implementation-validator`, and `security-reviewer` must start from a fresh Task every loop, must not receive a prior `task_id`, and remain read-only observers of the current worktree/result. This preserves independence for slice re-review, final implementation validation, and adversarial security review.
+
+Existing attempt and delta-review behavior remains required. On every retry, the orchestrator still passes the current `attempt` and the prior applicable `required_fixes` list into the reviewer/validator/security prompt so the review checks whether required fixes landed and whether the fix introduced regressions.
+
+Durability rule: never write `task_id` into `run.json`, `evidence/*`, `reviews/*`, gates, `terminal_result`, schema examples, or blocked-run continuation metadata. Durable state records attempts, refs, hashes, verdicts, and required fixes only. `task_id` is runtime-only and implementer-only; if safety is unknown, omit it.
 
 ## 11. Blocked-Run Continuation
 
@@ -535,9 +559,8 @@ Required continuation contract:
 - Persist `run.continuation` / `run.json.continuation` in the child with `schema_version: 1`, `kind: "blocked-run-continuation"`, nested `parent`, `review`, and `target` objects, parent worktree, target base ref/commit, hashes for validated refs, `parent_artifacts` `{kind, ref, hash}` entries, parent evidence/review `{kind, ref, hash}` entries, `created_at`, and `operator_summary`.
 - Treat all parent context as read-only. The child must not edit the parent manifest, gates, artifacts, evidence, reviews, branch, worktree, PR URL, or terminal result.
 - Run the normal factory flow for the child: story gate, research/design, brief/spec/decomposition gate, build slices, acceptance tests, implementation-validator, security-reviewer, pre-PR gate, and PR-created transition.
-- Continuation PRs are always draft-only. Force `driver.ready=false` even if operator payload asks to mark ready.
-- Before recording PR creation for a continuation, verify the live GitHub PR reports `isDraft: true`.
-- `factory continue` rejects `--ready` and `--no-draft`; the continuation entry point has no ready-for-review or non-draft override.
+- Continuation PRs use the same effective PR mode as normal runs: plugin `prMode` by default, with per-run `--draft` or `--ready` / `--no-draft` overrides when supplied. Persist the resulting mode as `run.json.pr_mode` so resume preserves the original override.
+- Before recording PR creation for a continuation, record `terminal_result.draft` to match the effective PR mode used to create the PR.
 - If bounded remediation is exhausted, ownership is ambiguous, or validator/security remains blocking, end the child at terminal `blocked` with no PR URL (`run.pr_url` unset and `terminal_result.pr_url: null`).
 
 ## 12. Fallback Models

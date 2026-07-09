@@ -91,8 +91,12 @@ export async function startFactory(args, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const resumeRunId = resumePromptRunId(args, opts);
   if (resumeRunId) {
+    const activeHeartbeatPreflight = startResumeActiveHeartbeatPreflight(resumeRunId, { ...opts, cwd: repo, repoRoot: repo });
+    if (activeHeartbeatPreflight) return activeHeartbeatPreflight;
     const preflight = await recoverDisruptedRun(resumeRunId, { ...opts, cwd: repo });
     if (!preflight.ok) return preflight;
+    const eligibility = startResumeEligibility(preflight, { ...opts, cwd: repo, repoRoot: repo });
+    if (!eligibility.ok) return eligibility;
   }
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
@@ -194,6 +198,52 @@ function resumePromptRunId(args, opts = {}) {
   const prompt = args.join(" ").trim();
   const match = /^resume\s+([^\s]+)$/iu.exec(prompt);
   return match ? match[1] : null;
+}
+
+function startResumeEligibility(preflight, opts = {}) {
+  const runDir = preflight.run_dir;
+  const runFile = preflight.run_file || (runDir ? join(runDir, "run.json") : null);
+  if (!runDir || !runFile) {
+    return { ...preflight, ok: false, reason: "resume ineligible: missing recovered run metadata" };
+  }
+  const run = readRunFile(runFile);
+  const eligibility = resumeEligibility(runDir, run, opts);
+  if (eligibility.eligible) return { ...preflight, eligibility };
+  return {
+    ...preflight,
+    ok: false,
+    status: run.status,
+    terminal_result: run.terminal_result || null,
+    reason: `resume ineligible: ${eligibility.reasons.join(", ")}`,
+    eligibility,
+  };
+}
+
+function startResumeActiveHeartbeatPreflight(runId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const target = resolveRecoveryRunTarget(runId, { ...opts, cwd: repo });
+  if (target.error) return null;
+
+  const readResult = readDurableRecoveryRun(repo, target.runDir, target.runFile);
+  if (readResult.error) return null;
+
+  const run = readResult.run;
+  if (TERMINAL_STATUSES.has(run.status)) return null;
+
+  const eligibility = resumeEligibility(target.runDir, run, { ...opts, cwd: repo, repoRoot: repo });
+  if (!eligibility.reasons.includes("active-heartbeat")) return null;
+
+  return {
+    ...recoveryEnvelope(run, {
+      ok: false,
+      durable: true,
+      updated: false,
+      recovered: false,
+      runDir: target.runDir,
+      reason: `resume ineligible: ${eligibility.reasons.join(", ")}`,
+    }),
+    eligibility,
+  };
 }
 
 function resolveRecoveryRunTarget(runId, opts = {}) {
@@ -361,7 +411,6 @@ function addRecoveryWorktree(repo, worktree, branch) {
   mkdirSync(resolve(repo, ".opencode", "worktrees"), { recursive: true });
   const postMkdirSafety = verifyRecoveryWorktreePath(repo, worktree);
   if (!postMkdirSafety.ok) return postMkdirSafety;
-  git(repo, ["worktree", "prune"]);
   const proc = git(repo, ["worktree", "add", worktree, branch], { timeout: 30000 });
   if (!proc.ok) return { ok: false, reason: `git worktree add failed for disrupted run recovery: ${(proc.stderr || proc.stdout || "unknown git error").trim()}` };
   return { ok: true };
@@ -415,13 +464,11 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 }
 
 export function continueFactory(parentRunId, opts = {}) {
-  if (opts.ready) throw new Error("factory continue does not accept --ready");
-  if (opts.noDraft) throw new Error("factory continue does not accept --no-draft");
   const repo = repoRoot(opts.cwd || process.cwd());
   const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
 
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
-  const payload = featureCommandPayload(prompt, { ...opts, repo, ready: false, continuation });
+  const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
   if (opts.dryRun) return { status: "dry-run", payload };
 
   seedRepoSkill(repo);
@@ -1594,6 +1641,7 @@ function buildResumePayload(run, opts) {
     driver: {
       mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
       ready: false,
+      pr_mode: run.pr_mode || null,
       reviewer: null,
       github_account: resolveGithubAccount(opts),
     },
@@ -1663,12 +1711,19 @@ function featureCommandPayload(prompt, opts) {
     driver: {
       mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
       ready: Boolean(opts.ready),
+      pr_mode: runPrModeOverride(opts),
       reviewer: stringValue(opts.reviewer) ? opts.reviewer : null,
       github_account: githubAccount,
     },
   };
   if (opts.continuation !== undefined) payload.continuation = opts.continuation;
   return payload;
+}
+
+function runPrModeOverride(opts = {}) {
+  if (opts.draft === true) return "draft";
+  if (opts.noDraft === true || opts.ready === true) return "ready";
+  return null;
 }
 
 function resolveGithubAccount(opts) {

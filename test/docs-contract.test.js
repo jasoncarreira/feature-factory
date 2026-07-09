@@ -16,6 +16,9 @@ const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
 const TODO = readDoc("../TODO.md");
 const CLI = readDoc("../src/cli.js");
+const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
+const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
+const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
 const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
 const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-created <run-id> --json",
@@ -214,6 +217,7 @@ describe("diagnostics docs contract", () => {
       assert.match(text, orderedPattern(conditionOrder), `${name} must document condition order`);
       assert.match(text, /original detection order/i, `${name} must document detection-order tiebreaker`);
       assert.match(text, /do not restart blindly|not restart blindly/i, `${name} must warn against blind restart`);
+      assert.match(text, /`running` step[\s\S]*`running` slice[\s\S]*`review` slice/i, `${name} must document heartbeat diagnostics require in-flight work`);
       assert.match(text, /restore (?:the )?worktree|recover from durable state/i, `${name} must explain missing-worktree action`);
       assert.match(text, /answer (?:the )?pending protected gate|answer or stop/i, `${name} must explain protected-gate action`);
       assert.match(text, /read `terminal_result`|inspect the terminal result/i, `${name} must explain terminal-run action`);
@@ -275,20 +279,28 @@ describe("blocked-run continuation docs contract", () => {
     assert.match(SCHEMA, /refs paired with hashes|ref.*hash/i, "SCHEMA must require validated refs and hashes");
   });
 
-  it("documents rejected ready/non-draft flags for factory continue", () => {
+  it("documents configurable PR mode for factory continue", () => {
     for (const [name, text] of documentEntries({ README, SPEC })) {
-      assert.match(text, /factory continue[\s\S]*rejects?[\s\S]*`--ready`[\s\S]*`--no-draft`/i, `${name} must document rejecting --ready and --no-draft`);
-      assert.match(text, /draft-only|draft mode/i, `${name} must document draft-only continuation behavior`);
+      assert.match(text, /factory continue[\s\S]*prMode|Continuation[\s\S]*effective PR mode/i, `${name} must document continuation PR mode`);
+      assert.match(text, /`--draft`[\s\S]*`--ready`|`--ready`[\s\S]*`--draft`/i, `${name} must document per-run PR mode overrides`);
     }
   });
 
-  it("documents normal gates, draft-only PRs, and exhausted-remediation terminal blocked outcome", () => {
+  it("documents persisted PR mode across resume", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /run\.json\.pr_mode/i, `${name} must document persisted run.pr_mode`);
+      assert.match(text, /run\.json\.pr_mode[\s\S]*resume|resume[\s\S]*run\.json\.pr_mode/i, `${name} must document preserving PR mode on resume`);
+    }
+  });
+
+  it("documents normal gates, configurable PRs, and exhausted-remediation terminal blocked outcome", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
       for (const term of ["story", "brief", "build", "test", "validator", "security", "pre-PR"]) {
         assert.match(text, new RegExp(escapeRegExp(term), "i"), `${name} must include normal ${term} gate/step`);
       }
-      assert.match(text, /draft-only/i, `${name} must require draft-only continuation PRs`);
-      assert.match(text, /driver\.ready\s*=\s*false/i, `${name} must force driver.ready=false`);
+      assert.match(text, /configured PR mode|effective PR mode|prMode/i, `${name} must document configurable PR mode`);
+      assert.match(text, /ready-for-review|ready/i, `${name} must document ready PR mode`);
+      assert.match(text, /draft/i, `${name} must document draft PR mode`);
       assert.match(text, /terminal[\s\S]*blocked|status:\s*"blocked"/i, `${name} must document terminal blocked outcome`);
       assert.match(text, /no PR URL|pr_url:\s*null/i, `${name} must document no PR URL on exhausted remediation`);
     }
@@ -296,6 +308,112 @@ describe("blocked-run continuation docs contract", () => {
 
   it("does not leave the resolved blocked-run continuation item open in TODO", () => {
     assert.doesNotMatch(TODO, /Automated blocked-run continuation/i, "TODO must not leave the resolved blocked-run continuation item open");
+  });
+});
+
+describe("non-destructive disrupted-worktree recovery docs contract", () => {
+  it("requires explicit resume-check recovery and forbids silent re-scaffolding", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /feature-factory factory resume-check <run-id> --json/i, `${name} must document resume-check`);
+      assert.match(text, /factory start --headless\|--autonomous "resume <run-id>"/i, `${name} must document start resume preflight`);
+      assert.match(text, /missing[\s\S]*inaccessible[\s\S]*invalid[\s\S]*(?:run\.json|\.opencode\/factory\/\<run-id\>\/run\.json)/i, `${name} must name missing/inaccessible/invalid durable state`);
+      assert.match(text, /must not[\s\S]*(?:re-scaffold|re-scaffolded)|never[\s\S]*(?:re-scaffold|re-scaffolded)/i, `${name} must forbid re-scaffolding`);
+      assert.match(text, /synthetic non-durable[\s\S]*blocked[\s\S]*ok:false[\s\S]*durable:false[\s\S]*updated:false[\s\S]*recovered:false/i, `${name} must describe non-durable blocked envelope`);
+      assert.match(text, /terminal_result\.reason[\s\S]*no durable `?terminal_result`?[\s\S]*(?:forbidden re-scaffolding|without forbidden re-scaffolding)/i, `${name} must explain why no durable terminal_result can be written`);
+    }
+  });
+
+  it("forbids destructive cleanup, prune, and remove during recovery", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /resume-check[\s\S]*(?:must not|never)[\s\S]*destructive cleanup/i, `${name} must forbid recovery cleanup`);
+      assert.match(text, /resume-check[\s\S]*(?:must not|never)[\s\S]*git worktree prune/i, `${name} must forbid recovery prune`);
+      assert.match(text, /resume-check[\s\S]*(?:must not|never)[\s\S]*git worktree remove/i, `${name} must forbid recovery worktree remove`);
+      assert.match(text, /cleanup remains an explicit operator action/i, `${name} must reserve cleanup for explicit operator action`);
+      assert.match(text, /status[\s\S]*list[\s\S]*validate[\s\S]*watch[\s\S]*(?:read-only|read only)[\s\S]*(?:cleanup|prune|remove)/i, `${name} must keep diagnostics non-destructive`);
+    }
+  });
+
+  it("documents safe missing-worktree restoration criteria", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /missing active worktree|missing \.opencode\/worktrees/i, `${name} must scope recovery to missing active worktrees`);
+      assert.match(text, /branch exists/i, `${name} must require branch existence`);
+      assert.match(text, /base_commit[\s\S]*merge_commit[\s\S]*ancestors? of branch HEAD/i, `${name} must require base and merged commits to be ancestors`);
+      assert.match(text, /target[\s\S]*(?:under|stays under|remains under)[\s\S]*\.opencode\/worktrees/i, `${name} must constrain the target path`);
+      assert.match(text, /no (?:unsafe )?existing path would be overwritten/i, `${name} must forbid overwriting existing paths`);
+      assert.match(text, /git worktree add[\s\S]*succeeds/i, `${name} must require successful git worktree add`);
+      assert.match(text, /(?:final )?(?:checkWorktreeIdentity|worktree identity)[\s\S]*HEAD[\s\S]*(?:match|matches)/i, `${name} must require final identity and HEAD checks`);
+    }
+  });
+
+  it("distinguishes blocked and needs-human terminal outcomes with clear reasons", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /contradictory git evidence[\s\S]*terminal `?blocked`?|terminal `?blocked`?[\s\S]*contradictory git evidence/i, `${name} must map contradictory git evidence to blocked`);
+      assert.match(text, /unsafe or inaccessible local paths?[\s\S]*terminal `?needs-human`?|terminal `?needs-human`?[\s\S]*unsafe or inaccessible local paths?/i, `${name} must map unsafe paths to needs-human`);
+      assert.match(text, /terminal_result\.reason[\s\S]*(?:conflicting branch\/commit evidence|path that requires operator reconciliation)/i, `${name} must require clear terminal_result.reason details`);
+    }
+  });
+
+  it("does not leave disrupted recovery as open future TODO work", () => {
+    assert.doesNotMatch(TODO, /Non-destructive disrupted-worktree recovery/i, "TODO must not leave disrupted recovery open");
+  });
+});
+
+describe("remediation context reuse docs contract", () => {
+  it("documents implementer-only runtime task_id reuse boundaries", () => {
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA })) {
+      assert.match(text, /task_id/i, `${name} must mention Task task_id reuse`);
+      assert.match(text, /runtime-only|runtime context|orchestrator memory/i, `${name} must make task_id runtime-only`);
+      assert.match(text, /implementer-only|eligible implementer|implementer remediation|implementer that owns the fix/i, `${name} must make reuse implementer-only`);
+      for (const implementer of ["backend-builder", "frontend-builder", "test-verifier"]) {
+        assert.match(text, literalPattern(implementer), `${name} must name eligible implementer ${implementer}`);
+      }
+      assert.match(text, /same (?:eligible )?implementer role|role is the same eligible implementer|same role|same role, subject\/slice\/test owner/i, `${name} must require the same role`);
+      assert.match(text, /subject\/slice\/test owner|same owned remediation subject|same subject|same slice id|same acceptance-test\/integration test owner|same test owner|subject ownership is unchanged/i, `${name} must require the same subject/slice/test owner`);
+      assert.match(text, /same[^.\n]*worktree|worktree[^.\n]*unchanged/i, `${name} must require the same worktree`);
+      assert.match(text, /same[^.\n]*branch|branch[^.\n]*unchanged/i, `${name} must require the same branch`);
+      assert.match(text, /same live orchestrator session|live orchestrator session is unchanged|same[^.\n]*orchestrator session/i, `${name} must require the same live orchestrator session`);
+      assert.match(text, /same[^.\n]*bounded remediation loop|bounded remediation loop[^.\n]*(?:unchanged|only)|current bounded remediation loop/i, `${name} must require the same bounded remediation loop`);
+    }
+
+    assert.match(COMMAND, /bounded remediation loop/i, "COMMAND must route NO-GO through bounded remediation");
+    assert.match(COMMAND, /backend-builder, frontend-builder, or test-verifier implementer context/i, "COMMAND must limit reuse to implementer context");
+    assert.match(COMMAND, /skill's strict runtime `task_id` reuse rules/i, "COMMAND must bind reuse to the skill's strict runtime task_id rules");
+  });
+
+  it("keeps reviewers and final panel agents fresh, task_id-free, and read-only", () => {
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA, COMMAND })) {
+      for (const reviewer of ["work-reviewer", "implementation-validator", "security-reviewer"]) {
+        assert.match(text, literalPattern(reviewer), `${name} must name ${reviewer}`);
+      }
+      assert.match(text, /fresh/i, `${name} must require fresh reviewer/panel tasks`);
+      assert.match(text, /(?:without|no|never|must not)[^\n.]*task_id|task_id[^\n.]*must never/i, `${name} must prohibit reviewer task_id reuse`);
+    }
+
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, WORK_REVIEWER_PROMPT, IMPLEMENTATION_VALIDATOR_PROMPT, SECURITY_REVIEWER_PROMPT })) {
+      assert.match(text, /read-only|read and judge|do not edit|never edit/i, `${name} must keep reviewer/validator/security roles read-only`);
+    }
+  });
+
+  it("does not serialize task_id into durable schema examples or state records", () => {
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA, COMMAND })) {
+      assert.doesNotMatch(text, /["']task_id["']\s*:/i, `${name} must not add a durable task_id JSON field`);
+    }
+    assert.match(SCHEMA, /No `run\.json`, evidence, or reviews schema has a `task_id` field/i, "SCHEMA must explicitly exclude durable task_id fields");
+    assert.match(SCHEMA, /intentionally excluded from `run\.json`[\s\S]*evidence files[\s\S]*review files/i, "SCHEMA must exclude task_id from durable run/evidence/review state");
+  });
+
+  it("preserves attempt and required_fixes for all re-review reruns", () => {
+    assert.match(SKILL, /For every re-review, pass `attempt: <n>` and the prior review's `required_fixes` list[\s\S]*rejected slice remediation/i, "SKILL must preserve slice attempt and required_fixes on re-review");
+    assert.match(SKILL, /test-verifier re-review[\s\S]*fresh `work-reviewer` task[\s\S]*`attempt: <n>`[\s\S]*prior review's `required_fixes` list/i, "SKILL must preserve test-verifier attempt and required_fixes on re-review");
+    assert.match(SKILL, /panel re-run[\s\S]*fresh `implementation-validator` and `security-reviewer` tasks[\s\S]*never pass `task_id`[\s\S]*`attempt: <n>` plus the prior validator\/security `required_fixes` list/i, "SKILL must preserve implementation-validator/security reviewer attempt and required_fixes on panel reruns");
+    assert.match(SPEC, /current `attempt` and the prior applicable `required_fixes` list[\s\S]*review checks whether required fixes landed/i, "SPEC must preserve attempt and required_fixes delta-review behavior");
+    assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*introduced regressions/i, "work-reviewer prompt must preserve delta rule");
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Delta Review Rule[\s\S]*fresh read-only validator task[\s\S]*prior findings[\s\S]*required_fixes[\s\S]*introduced regressions/i, "implementation-validator prompt must preserve fresh delta rule");
+    assert.match(SECURITY_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*introduced regressions/i, "security-reviewer prompt must preserve delta rule");
+  });
+
+  it("does not leave remediation context reuse as an open TODO", () => {
+    assert.doesNotMatch(TODO, /Remediation context reuse/i, "TODO must not leave the resolved remediation context reuse item open");
   });
 });
 

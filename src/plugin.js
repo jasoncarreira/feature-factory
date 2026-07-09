@@ -53,15 +53,32 @@ function coerce(value) {
   return trimmed.replace(/^['"]|['"]$/g, "");
 }
 
-function registerCommand(cfg) {
+function registerCommand(cfg, options = {}) {
   const source = readAsset("command", "feature.md");
   const { meta, body } = parseFrontmatter(source);
   cfg.command ??= {};
   cfg.command.feature = {
     description: meta.description || "Run the durable feature-factory workflow.",
     agent: meta.agent || "build",
-    template: body.trim(),
+    template: commandTemplate(body, options),
   };
+}
+
+function commandTemplate(body, options = {}) {
+  const prMode = normalizePrMode(options.prMode ?? options.pr_mode ?? options.pullRequests?.mode);
+  const config = [
+    "Plugin configuration defaults:",
+    `- PR mode: \`${prMode}\`. Use this as the default for successful PR creation when the driver payload has no \`pr_mode\` override.`,
+  ].join("\n");
+  const marker = "UNTRUSTED_OPERATOR_PAYLOAD_START";
+  if (!body.includes(marker)) return `${body.trim()}\n\n${config}`;
+  return body.replace(marker, `${config}\n\n${marker}`).trim();
+}
+
+function normalizePrMode(value) {
+  const mode = value === undefined || value === null || value === "" ? "ready" : String(value).trim();
+  if (mode === "ready" || mode === "draft") return mode;
+  throw new Error("opencode-feature-factory option prMode must be 'ready' or 'draft'");
 }
 
 function registerAgents(cfg) {
@@ -155,7 +172,7 @@ function registerSkills(cfg) {
 export default async function featureFactoryPlugin(_input, options = {}) {
   return {
     config(cfg) {
-      registerCommand(cfg);
+      registerCommand(cfg, options);
       registerAgents(cfg);
       applyProfileOptions(cfg, options);
       registerSkills(cfg);

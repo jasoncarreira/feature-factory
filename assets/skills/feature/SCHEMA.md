@@ -47,6 +47,16 @@ Implementation worktrees live under:
 .opencode/worktrees/<feature-branch>--<slice-id>/
 ```
 
+## Runtime-Only Task Context
+
+Task tool `task_id` values are non-durable runtime context for the current orchestrator session only. They are not part of the factory persistence schema and are intentionally excluded from `run.json`, `heartbeat.json`, gates, artifacts, plan files, evidence files, review files, terminal results, and schema validation.
+
+No `run.json`, evidence, or reviews schema has a `task_id` field.
+
+The orchestrator may use a `task_id` only to resume an eligible implementer remediation task (`backend-builder`, `frontend-builder`, or `test-verifier`) while the same role, subject/slice/test owner, worktree, branch, live orchestrator session, and bounded remediation loop are still unchanged. A `task_id` must never be serialized for resume, replay, external-driver coordination, audit evidence, or cross-session recovery.
+
+Reviewer tasks are always fresh. `task_id` must never be passed to or stored for `work-reviewer`, `implementation-validator`, or `security-reviewer`; their continuity comes only from explicit prompt inputs such as current observed evidence, `attempt`, and prior `required_fixes`.
+
 ## CLI State Write Surface
 
 After the initial manifest bootstrap, do not edit `run.json` directly. Every semantic state write uses the `feature-factory factory ...` CLI, which takes `run-json.lock/`, validates the next state, and commits atomically. The CLI invokes the checked transition helpers internally, including `transitionGateDecision` for protected gate decisions and `transitionPrCreated` for completed PR state.
@@ -92,7 +102,7 @@ External drivers write only `gates/<gate>.answer`; they may use `feature-factory
 
 `factory recover` is operator recovery for orphaned/stale running runs; do not use it to bypass active in-flight work or protected gates.
 
-`feature-factory factory resume-check <run-id> --json` is the disrupted-resume recovery surface. It may restore a missing `.opencode/worktrees/<run>` worktree or write a terminal failure, but it must never re-scaffold a missing/disrupted `.opencode/factory/<run-id>` control plane. If `.opencode/factory/<run-id>/run.json` is missing, inaccessible, or invalid, return a synthetic non-durable terminal-shaped blocked result with `ok:false`, `durable:false`, `updated:false`, `recovered:false`, `status:"blocked"`, and `terminal_result.reason` explaining that no durable `terminal_result` can be written without forbidden re-scaffolding. Valid terminal manifests are returned unchanged. Valid non-terminal manifests recover a missing active worktree only when branch/base/merged-slice commit evidence reconciles with branch HEAD, the target is under `.opencode/worktrees`, no unsafe existing path would be overwritten, `git worktree add` succeeds, and final `checkWorktreeIdentity` plus HEAD checks match. Contradictory git evidence writes durable terminal `blocked`; unsafe or inaccessible local paths write durable terminal `needs-human`. Read-only `status`, `list`, `validate`, and `watch` do not call this implicitly.
+`feature-factory factory resume-check <run-id> --json` is the disrupted-resume recovery surface. `factory start --headless|--autonomous "resume <run-id>"` runs the same preflight before mutating resume state. It may restore a missing `.opencode/worktrees/<run>` worktree or write a terminal failure, but it must never re-scaffold a missing/disrupted `.opencode/factory/<run-id>` control plane. It also must not perform destructive cleanup, `git worktree prune`, `git worktree remove`, branch deletion, or run-directory removal; cleanup remains an explicit operator action through `feature-factory factory cleanup <run-id>`. If `.opencode/factory/<run-id>/run.json` is missing, inaccessible, or invalid, return a synthetic non-durable terminal-shaped blocked result with `ok:false`, `durable:false`, `updated:false`, `recovered:false`, `status:"blocked"`, and a clear `terminal_result.reason` explaining that no durable `terminal_result` can be written without forbidden re-scaffolding. Valid terminal manifests are returned unchanged. Valid non-terminal manifests recover a missing active worktree only when the branch exists, recorded `base_commit` and merged slice `merge_commit` values are ancestors of branch HEAD, the target is under `.opencode/worktrees`, no unsafe existing path would be overwritten, `git worktree add` succeeds, and final `checkWorktreeIdentity` plus HEAD checks match. Contradictory git evidence writes durable terminal `blocked` with a `terminal_result.reason` naming the conflicting branch/commit evidence; unsafe or inaccessible local paths write durable terminal `needs-human` with a `terminal_result.reason` naming the path that requires operator reconciliation. The `status`, `list`, `validate`, and `watch` surfaces are read-only diagnostics; they do not call this implicitly and must not recover, repair, cleanup, prune, or remove anything.
 
 `factory slice-status` updates only slices that already exist in `run.json.slices[]`; use `factory slices-seed` to create slices from `plan/slices.json`. `factory step` updates only step placeholders bootstrapped in the initial manifest.
 
@@ -233,7 +243,7 @@ Condition mappings and operator actions:
 
 Heartbeat/PID/process semantics are liveness-only. `missing-heartbeat-process` refers to the heartbeat helper process recorded in `heartbeat.json`, not to a detached opencode process; no durable run-id-to-opencode-PID registry exists. Heartbeat evidence is always `authoritative: false` with `evidence.liveness_only: true`; PID liveness, process existence, `heartbeat.json`, and mutable `run.json` heartbeat fields cannot prove health or ownership.
 
-Protected gates suppress stale-heartbeat and missing-heartbeat-process diagnostics because `story`, `brief`, and `pre_pr` waits are intentionally heartbeat-free. Valid terminal states suppress heartbeat/worktree liveness alarms.
+Heartbeat diagnostics require heartbeat-bracketed in-flight work in `run.json`: a `running` step, `running` slice, or `review` slice. Idle/bootstrap runs, blocked steps, protected gates, and valid terminal states suppress stale-heartbeat and missing-heartbeat-process diagnostics because no heartbeat helper should be active for those states.
 
 ## debug_snapshot Diagnostic State
 
@@ -459,6 +469,7 @@ Rules:
   "max_parallel_slices": 3,
   "max_retries": 3,
   "review_tier": "strict",
+  "pr_mode": "draft",
   "cost_attribution": {
     "schema_version": 1,
     "updated_at": "2026-07-09T12:00:00Z",
@@ -543,9 +554,11 @@ Top-level `status` values are `running`, `completed`, `blocked`, `partial`, and 
 
 Top-level `run.json.review_tier` is an optional opaque display string. It may contain labels such as `light`, `standard`, or `strict`, but it does not change gates, agents, PR behavior, validation behavior, or workflow control. It does not change `schema_version`; it remains `1`.
 
+Top-level `run.json.pr_mode` is an optional durable PR creation mode with value `draft` or `ready`. Persist the effective start-time mode there after applying `driver.pr_mode`, legacy `driver.ready`, or the plugin configured default; resume payloads carry this value as `driver.pr_mode` so a run created with a per-run override does not fall back to a later plugin default. It does not change `schema_version`; it remains `1`.
+
 Top-level `run.json.continuation` is present only for child runs created by `factory continue`. Accepted continuation metadata has `schema_version: 1`, `kind: "blocked-run-continuation"`, `created_at`, `operator_summary`, nested `parent`, `review`, and `target` objects, and refs paired with hashes for the parent manifest, approved review evidence, target base commit, and every read-only parent context file. `parent.status` must be exactly `blocked`; `parent.worktree`, branch, and commit identify the source worktree. `review.ref` resolves under the parent run's `reviews/` directory, is paired with `review.hash`, must be referenced by parent run state, and must have a subject consistent with that source. `target.run_id`, `target.branch`, `target.worktree`, `target.base_ref`, and `target.base_commit` describe the fresh child run. `parent_artifacts` is an array of `{kind, ref, hash}` entries for source artifacts such as story and technical brief, and `parent_evidence` / `parent_reviews` arrays carry `{kind, ref, hash}` entries for additional source context; `parent_reviews` includes the selected review with the same hash as `review.hash`. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits/hashes; it must not rely on a special blocking verdict enum as the authorization mechanism.
 
-Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before draft PR creation. Continuation PRs are draft-only; the driver contract forces `driver.ready = false`, and `factory pr-created` verifies GitHub `isDraft: true` before recording a continuation PR URL. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
+Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before PR creation. Continuation PRs use the same effective configured PR mode as normal runs: `draft` creates and records draft PRs, while `ready` creates and records ready-for-review PRs. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
 
 Gate status values are `pending`, `approved`, `changes_requested`, and `stopped`. `approval_source` values are `human`, `external-driver`, `autonomous`, and `override`.
 
@@ -562,9 +575,9 @@ Terminal result shape:
   "pr_url": "https://github.com/owner/repo/pull/123",
   "pr_number": 123,
   "repository": "owner/repo",
-  "draft": true,
+  "draft": false,
   "reason": null,
-  "summary": "Draft PR created.",
+  "summary": "PR created.",
   "artifacts": {
     "story": "artifacts/story.md",
     "technical_brief": "artifacts/technical-brief.md",

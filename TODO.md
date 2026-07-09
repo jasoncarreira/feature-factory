@@ -4,24 +4,12 @@ The active engineering work order is `CODEBASE-REVIEW.md` (verified findings + h
 rewrite + CLI write-surface completion + right-sizing). Items below are future work not
 covered there.
 
-## Factory Robustness And Durability
-
-- Non-destructive disrupted-worktree recovery
-  - Make the factory robust when its working directory/worktree disappears or becomes inaccessible mid-run.
-  - Do not silently re-scaffold an empty run control plane if `.opencode/factory/<run-id>` or the active worktree is missing/disrupted.
-  - If prior durable state is available, recover from it and reconcile with git branch/commit evidence; otherwise fail loudly with terminal `blocked` or `needs-human` plus a clear `terminal_result.reason`.
-
 ## Build And Review Workflow
 
 - Interrupt, steer, and resume (implemented baseline)
   - Baseline commands exist: `feature-factory factory steer <run-id> --message TEXT --json`, `feature-factory factory resume <run-id> --dry-run --json`, and `feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json`.
   - Resume rejects `active-heartbeat` and preserves durable state; raw steering is labeled `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data` only at one-time consume.
   - Future work: live cancellation/kill of running opencode and semantic rollback when steering conflicts with completed artifacts.
-
-- Remediation context reuse
-  - Reuse implementer context across remediation loops where safe.
-  - Keep reviewers fresh and read-only. (Prior findings are already fed forward via the
-    `attempt` + `required_fixes` delta-review wiring.)
 
 ## Observability And Cost
 

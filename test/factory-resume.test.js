@@ -17,12 +17,26 @@ describe("factory resume", () => {
       assert.deepEqual(result.payload.resume, { schema_version: 1, kind: "existing-run-resume", run_id: fixture.runId });
       assert.equal(result.payload.driver.mode, "headless");
       assert.equal(result.payload.driver.ready, false);
+      assert.equal(result.payload.driver.pr_mode, null);
       assert.equal(result.payload.steering.raw_message_included, false);
       assert.deepEqual(result.payload.steering.pending, queued.steering);
       assert.deepEqual(result.payload.steering.consume.args, ["factory", "steer-consume", fixture.runId, "--ref", queued.steering.ref, "--hash", queued.steering.hash, "--json"]);
       assert.equal(JSON.stringify(result.payload).includes("raw steering"), false);
       assert.equal(readdirSync(join(fixture.repo, ".opencode", "factory")).length, 1);
       assert.equal(readJson(join(fixture.runDir, "run.json")).run_id, fixture.runId);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("carries a persisted start PR mode override through resume payloads", async () => {
+    const fixture = createFixture("resume-draft-pr-mode", { prMode: "draft" });
+    try {
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, json: true, headless: true });
+
+      assert.equal(result.status, "dry-run");
+      assert.equal(result.payload.driver.ready, false);
+      assert.equal(result.payload.driver.pr_mode, "draft");
     } finally {
       cleanup(fixture.repo);
     }
@@ -99,13 +113,13 @@ describe("factory resume", () => {
   });
 });
 
-function createFixture(runId) {
+function createFixture(runId, { prMode } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "factory-resume-"));
   const runDir = join(repo, ".opencode", "factory", runId);
   const worktree = join(repo, ".opencode", "worktrees", runId);
   mkdirSync(runDir, { recursive: true });
   mkdirSync(worktree, { recursive: true });
-  writeJson(join(runDir, "run.json"), {
+  const run = {
     schema_version: 1,
     run_id: runId,
     status: "running",
@@ -113,7 +127,9 @@ function createFixture(runId) {
     worktree,
     gates: {},
     slices: [{ id: "slice", status: "running", attempts: 1, branch: runId, worktree }],
-  });
+  };
+  if (prMode !== undefined) run.pr_mode = prMode;
+  writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId, worktree };
 }
 
