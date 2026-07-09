@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const RUN_ID = "cli-write-surface";
+const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
+  "USD\u001b]0;pwned\u0007",
+  "USD\u001b[2J",
+  "USD\u001b]52;c;U0VDUkVU\u0007",
+]);
 
 describe("cli write surface", () => {
   it("drives a run through local state transitions without direct run.json edits", () => {
@@ -84,6 +89,24 @@ describe("cli write surface", () => {
       for (const [flag, value] of [["--input-tokens", ""], ["--cost-total", "   "]]) {
         const failed = runFactoryFail(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", flag, value, "--json"]);
         assert.match(failed.stderr, new RegExp(`${flag} must be a finite non-negative number`, "u"));
+        assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects terminal control currency flags without mutating run.json", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-cost-currency-invalid-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      initGitRepo(repo);
+      seedRun(runDir);
+      const before = readFileSync(join(runDir, "run.json"), "utf8");
+
+      for (const payload of TERMINAL_CURRENCY_PAYLOADS) {
+        const failed = runFactoryFail(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--input-tokens", "1", "--cost-total", "0.01", "--currency", payload, "--json"]);
+        assert.match(failed.stderr, /cost_currency must be an uppercase currency code \(3-12 letters\) with no control characters/u);
         assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
       }
     } finally {

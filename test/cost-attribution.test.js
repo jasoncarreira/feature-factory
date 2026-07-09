@@ -10,6 +10,11 @@ import {
 } from "../src/cost-attribution.js";
 
 const NOW = "2026-07-08T12:00:00.000Z";
+const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
+  "USD\u001b]0;pwned\u0007",
+  "USD\u001b[2J",
+  "USD\u001b]52;c;U0VDUkVU\u0007",
+]);
 
 describe("cost attribution helpers", () => {
   it("normalizes entries and recomputes totals/by_agent/by_slice rollups", () => {
@@ -49,6 +54,19 @@ describe("cost attribution helpers", () => {
     assert.equal(attribution.totals.input_tokens, 25);
     assert.equal(attribution.totals.output_tokens, undefined);
     assert.match(attribution.totals.missing.join(","), /cost/u);
+  });
+
+  it("rejects terminal control currency payloads during normalization", () => {
+    for (const payload of TERMINAL_CURRENCY_PAYLOADS) {
+      assert.throws(
+        () => normalizeCostUsageEntry({ id: "bad", recorded_at: NOW, run_id: "run", agent: "backend-builder", provider: "opencode", model: "gpt-5.5", input_tokens: 1, cost_total: 0.01, cost_currency: payload }),
+        /cost_currency must be an uppercase currency code \(3-12 letters\) with no control characters/u,
+      );
+      assert.throws(
+        () => recomputeCostAttribution({ entries: [{ id: "bad", recorded_at: NOW, run_id: "run", agent: "backend-builder", input_tokens: 1, cost_total: 0.01, currency: payload }] }, { now: NOW }),
+        /cost_currency must be an uppercase currency code \(3-12 letters\) with no control characters/u,
+      );
+    }
   });
 
   it("suppresses aggregate cost_total for mixed currencies", () => {
@@ -122,4 +140,33 @@ describe("cost attribution helpers", () => {
     assert.equal(summary.total_tokens, 5);
     assert.equal(formatCostAttributionSummary(attribution), "cost available · 1 entry · 5 tokens · 0.005 USD");
   });
+
+  it("sanitizes public summaries from legacy terminal-control metadata", () => {
+    const attribution = {
+      updated_at: `${NOW}\u001b[2J`,
+      status: "available\u001b[2J",
+      totals: {
+        status: "available",
+        entry_count: 1,
+        request_count: 1,
+        missing: ["provider\u001b]0;pwned\u0007"],
+        mixed_currency: false,
+        cost_total: 0.02,
+        cost_currency: "USD\u001b]52;c;U0VDUkVU\u0007",
+      },
+    };
+
+    const summary = publicCostAttributionSummary(attribution);
+    const label = formatCostAttributionSummary(attribution);
+
+    assert.equal(summary.status, "available");
+    assert.equal(summary.cost_currency, undefined);
+    assert.equal(hasTerminalControl(summary.updated_at), false);
+    assert.equal(hasTerminalControl(summary.missing.join(",")), false);
+    assert.equal(hasTerminalControl(label), false);
+  });
 });
+
+function hasTerminalControl(value) {
+  return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
+}

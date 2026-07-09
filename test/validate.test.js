@@ -9,6 +9,11 @@ import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 import { ValidationError, checkRunConsistency, validateRun, validateRunDir } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
+const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
+  "USD\u001b]0;pwned\u0007",
+  "USD\u001b[2J",
+  "USD\u001b]52;c;U0VDUkVU\u0007",
+]);
 
 describe("run schema and consistency", () => {
   it("accepts debug snapshots", () => {
@@ -96,6 +101,35 @@ describe("run schema and consistency", () => {
     assert.throws(
       () => validateRun({ ...runningRun(), cost_attribution: invalidAvailability }),
       (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].status: available requires provider, model, usage, cost_total, and cost_currency"),
+    );
+  });
+
+  it("rejects terminal control cost currency metadata", () => {
+    for (const payload of TERMINAL_CURRENCY_PAYLOADS) {
+      const costAttribution = recomputeCostAttribution({ entries: [
+        { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", provider: "opencode", model: "gpt-5.5", input_tokens: 10, cost_total: 0.02, cost_currency: "USD" },
+      ] }, { now: "2026-07-08T12:00:01.000Z" });
+      costAttribution.entries[0].cost_currency = payload;
+      costAttribution.totals.cost_currency = payload;
+      costAttribution.by_agent["backend-builder"].cost_currency = payload;
+      costAttribution.by_slice.slice.cost_currency = payload;
+
+      assert.throws(
+        () => validateRun({ ...runningRun(), slices: [{ id: "slice", status: "running" }], cost_attribution: costAttribution }),
+        (error) => error instanceof ValidationError && error.message.includes("cost_currency: must be an uppercase currency code (3-12 letters) with no control characters"),
+      );
+    }
+  });
+
+  it("rejects terminal controls in cost attribution missing metadata", () => {
+    const costAttribution = recomputeCostAttribution({ entries: [
+      { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", input_tokens: 10 },
+    ] }, { now: "2026-07-08T12:00:01.000Z" });
+    costAttribution.totals.missing = ["provider\u001b[2J"];
+
+    assert.throws(
+      () => validateRun({ ...runningRun(), cost_attribution: costAttribution }),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.totals.missing[0]: must not contain control characters"),
     );
   });
 

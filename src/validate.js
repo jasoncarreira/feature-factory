@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS } from "./cost-attribution.js";
+import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
 import { hashFile, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 
@@ -666,9 +666,10 @@ function validateCostAttributionEntry(errors, entry, path, knownSlices, runId) {
   requiredString(errors, entry, "run_id", `${path}.run_id`);
   requiredString(errors, entry, "agent", `${path}.agent`);
   requiredEnum(errors, entry, "status", COST_ATTRIBUTION_STATUS_SET, `${path}.status`);
-  validateStringArray(errors, entry.missing, `${path}.missing`, { required: true });
+  validateStringArray(errors, entry.missing, `${path}.missing`, { required: true, noControlChars: true });
 
   for (const field of COST_ATTRIBUTION_ENTRY_OPTIONAL_STRINGS) optionalString(errors, entry, field, `${path}.${field}`);
+  optionalCostCurrency(errors, entry, "cost_currency", `${path}.cost_currency`);
   validateCostAttributionNumbers(errors, entry, path);
   if (hasCostNumber(entry) && !stringValue(entry.cost_currency)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost fields are present" });
   if (runId && stringValue(entry.run_id) && entry.run_id !== runId) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
@@ -717,9 +718,10 @@ function validateCostAttributionRollup(errors, rollup, path, options = {}) {
   requiredEnum(errors, rollup, "status", COST_ATTRIBUTION_STATUS_SET, `${path}.status`);
   requiredInteger(errors, rollup, "entry_count", `${path}.entry_count`);
   optionalInteger(errors, rollup, "request_count", `${path}.request_count`);
-  validateStringArray(errors, rollup.missing, `${path}.missing`, { required: true });
+  validateStringArray(errors, rollup.missing, `${path}.missing`, { required: true, noControlChars: true });
   optionalBoolean(errors, rollup, "mixed_currency", `${path}.mixed_currency`);
   optionalString(errors, rollup, "cost_currency", `${path}.cost_currency`);
+  optionalCostCurrency(errors, rollup, "cost_currency", `${path}.cost_currency`);
   validateCostAttributionNumbers(errors, rollup, path);
   if (rollup.mixed_currency === true && rollup.cost_total !== undefined && rollup.cost_total !== null) errors.push({ path: `${path}.cost_total`, message: "must be omitted when mixed_currency is true" });
   if (hasCostNumber(rollup) && rollup.mixed_currency !== true && rollup.cost_total !== undefined && !stringValue(rollup.cost_currency)) errors.push({ path: `${path}.cost_currency`, message: "is required when cost_total is present" });
@@ -788,6 +790,7 @@ function validateStringArray(errors, value, path, options = {}) {
   if (options.nonEmpty && value.length === 0) errors.push({ path, message: "must not be empty" });
   for (const [index, item] of value.entries()) {
     if (!stringValue(item)) errors.push({ path: `${path}[${index}]`, message: "must be a non-empty string" });
+    else if (options.noControlChars && hasTerminalControl(item)) errors.push({ path: `${path}[${index}]`, message: "must not contain control characters" });
     else if (options.values && !options.values.has(item)) errors.push({ path: `${path}[${index}]`, message: `unknown dependency '${item}'` });
   }
 }
@@ -803,6 +806,11 @@ function requiredString(errors, obj, key, path) {
 function optionalString(errors, obj, key, path) {
   if (obj[key] === undefined || obj[key] === null) return;
   if (typeof obj[key] !== "string") errors.push({ path, message: "must be a string or null" });
+}
+
+function optionalCostCurrency(errors, obj, key, path) {
+  if (obj[key] === undefined || obj[key] === null) return;
+  if (typeof obj[key] === "string" && !isSafeCostCurrency(obj[key])) errors.push({ path, message: "must be an uppercase currency code (3-12 letters) with no control characters" });
 }
 
 function optionalNonEmptyString(errors, obj, key, path) {

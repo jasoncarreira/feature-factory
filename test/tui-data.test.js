@@ -94,6 +94,27 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("projects cost labels without terminal controls from legacy durable metadata", () => {
+    const repo = tempDir();
+    const costAttribution = costAttributionFixture("cost-control-run");
+    costAttribution.status = "available\u001b[2J";
+    costAttribution.totals.cost_currency = "USD\u001b]0;pwned\u0007";
+    costAttribution.totals.missing = ["provider\u001b]52;c;U0VDUkVU\u0007"];
+    writeRun(repo, "cost-control-run", {
+      status: "running",
+      updated_at: "2026-07-05T00:00:00Z",
+      cost_attribution: costAttribution,
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(hasTerminalControl(run.cost.label), false);
+    assert.equal(hasTerminalControl(run.cost.status), false);
+    assert.equal(hasTerminalControl(run.cost.missing.join(",")), false);
+    assert.equal(run.cost.cost_currency, undefined);
+    cleanup(repo);
+  });
+
   it("projects steering metadata without raw message text", () => {
     const repo = tempDir();
     writeRun(repo, "steered-run", {
@@ -387,4 +408,8 @@ function writeHeartbeat(repo, id, input = {}) {
       ...input,
     }, null, 2)}\n`,
   );
+}
+
+function hasTerminalControl(value) {
+  return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
 }

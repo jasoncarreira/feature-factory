@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
-import { formatCostAttributionSummary } from "./cost-attribution.js";
+import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
@@ -716,7 +716,7 @@ function formatDiagnosticColumn(diagnostics) {
 }
 
 function cleanDiagnosticText(value) {
-  const text = String(value).replace(/[\t\r\n]+/gu, " ").replace(/\s+/gu, " ").trim();
+  const text = sanitizePublicCostText(value);
   return text.length > 80 ? `${text.slice(0, 77)}...` : text;
 }
 
