@@ -501,20 +501,9 @@ function processVerificationOptions(opts = {}) {
     options.livenessProbe = (pid) => ({ status: opts.processAliveFn(pid) ? "live" : "absent" });
   }
   if (typeof opts.commandRunnerFn === "function" && typeof opts.commandRunner !== "function") {
-    options.commandRunner = legacyCommandRunner(opts.commandRunnerFn);
+    options.commandRunner = opts.commandRunnerFn;
   }
   return options;
-}
-
-function legacyCommandRunner(runCommand) {
-  let cachedStart = null;
-  return (command, args, options) => {
-    const isStart = command === "ps" && args.at(-1) === "lstart=";
-    if (isStart && cachedStart !== null) return cachedStart;
-    const output = runCommand(command, args, options);
-    if (isStart) cachedStart = output;
-    return output;
-  };
 }
 
 function failClosed(runId, reason, processRef, pid = null) {

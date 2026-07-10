@@ -140,6 +140,46 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
     }
   });
 
+  it("fails closed when legacy Darwin commandRunnerFn observes a changed final start marker", async () => {
+    const fixture = createFixture("darwin-final-marker-change");
+    const signals = [];
+    const starts = ["Fri Jul 10 10:00:00 2026", "Fri Jul 10 10:00:01 2026"];
+    let startProbe = 0;
+    try {
+      writeProcessEvidence(fixture.runDir, evidence(fixture, {
+        identity: {
+          inspector: "node-process",
+          start_marker: `darwin-ps:${starts[0]}`,
+          command_name: "opencode",
+        },
+      }));
+
+      const result = await cancelProcessFromEvidence(fixture.runDir, {
+        runId: fixture.runId,
+        cancelWaitMs: 0,
+        platform: "darwin",
+        processAliveFn: () => true,
+        commandRunnerFn: (command, args) => {
+          if (command === "ps" && args.at(-1) === "lstart=") return `${starts[startProbe++]}\n`;
+          if (command === "ps" && args.at(-1) === "comm=") return "/usr/local/bin/opencode\n";
+          if (command === "lsof") return `p${PID}\nfcwd\nn${fixture.runDir}\n`;
+          throw new Error("unexpected command");
+        },
+        signalFn: (pid, signal) => signals.push({ pid, signal }),
+      });
+
+      assert.equal(startProbe, 2);
+      assert.equal(result.ok, false);
+      assert.equal(result.status, "failed-closed");
+      assert.equal(result.signaled, false);
+      assert.equal(result.updated, false);
+      assert.deepEqual(signals, []);
+      assert.equal(readProcessEvidence(fixture.runDir, { runId: fixture.runId }).evidence.state, "running");
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
   it("confirms post-signal cancellation only for absence; mismatch and unknown stay pending", async () => {
     for (const item of [
       { name: "absent", postStatus: "absent", expectedStatus: "cancelled", expectedState: "cancelled" },
