@@ -468,9 +468,13 @@ Run `codebase-researcher` with the approved story and `$FEAT_WT` as the reposito
 
 The research map must identify real files, patterns, tests, integration hotspots, generated code, migration/schema risks, and open questions. Do not proceed to spec from guessed paths.
 
+When acceptance criteria use terms such as `all`, `every`, `centralize`, or `across` to quantify a class-wide change, or cover a whole vulnerability/behavior class, require the researcher to produce a finite in-scope surface inventory: each source, sink/call site, existing guard, required policy, compatibility decision or explicit exclusion, and mapped test. If the inventory cannot be established from repository evidence, send it back for targeted research instead of treating one example as representative.
+
 ## Step 2 - Spec And Decomposition
 
 Apply the Live-Run Steering Drain Protocol before each standalone agent dispatch and after each heartbeat-bracketed wait before cost recording or post-wait state writes.
+
+For class-wide work, require the technical brief to convert the research inventory into a closed implementation matrix with one row per sink/call site, exact primitive or policy, compatibility/exclusion decision, and test. Do not dispatch builders with unresolved instructions such as "apply everywhere." On the first spec review, require `work-reviewer` to inspect the complete inventory and consolidate every currently discoverable same-class issue into one `required_fixes` list; later reviews still follow the delta rule.
 
 Run `spec-writer` with the approved story, research map, and design brief. Mark it running with `feature-factory factory step <run-id> spec-writer running --attempts N --json`. Because this is a long spec-production wait, start heartbeat immediately before the `spec-writer` Task dispatch/wait with phase `spec-review`, then stop heartbeat in the after-return/`finally` path before writing produced artifacts or running the next semantic `run.json` / factory CLI state write. After heartbeat is stopped or verified inactive, record provider-supplied usage with `feature-factory factory cost-record <run-id> --agent spec-writer --step spec-writer ... --json` when available. It produces `$RUN/artifacts/technical-brief.md`; after review acceptance, and only after any `spec-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> spec-writer accepted --artifact-ref artifacts/technical-brief.md --review-ref reviews/spec-writer.json --json`.
 

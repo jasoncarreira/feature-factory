@@ -6,12 +6,33 @@ the remaining future work.
 
 ## Build And Review Workflow
 
+- `factory start --dry-run` safety
+  - Dogfooding showed that `factory start` accepts the globally recognized `--dry-run` flag but ignores it and launches opencode, creating detached processes when combined with `--detached`.
+  - Future work: either implement a true side-effect-free start preview or reject `--dry-run` as unsupported for `factory start`. Never accept the flag and launch a process silently; add CLI regression coverage for foreground and detached starts.
+
 - Interrupt, steer, resume, and cancellation rollback (implemented)
   - Baseline commands exist: `feature-factory factory steer <run-id> --message TEXT --json`, `feature-factory factory resume <run-id> --dry-run --json`, and `feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json`.
   - Resume rejects `active-heartbeat` and preserves durable state; raw steering is labeled `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data` only at one-time consume.
   - Cancellation now records run-scoped `$RUN/process.json` evidence for detached opencode launches with a known explicit run id plus `$RUN/processes/<timestamp>.log`, sends only one targeted `SIGTERM` when identity matches, and fails closed without broad process killing when evidence is absent, stale, invalid, or mismatched.
   - Steering conflicts are explicit: after `steer-consume`, the orchestrator checks accepted durable state and uses `feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --json` to stop as `needs-human` instead of attempting automatic rollback.
   - Live-run draining is implemented at exactly five safe boundaries: after heartbeat-bracketed waits, before autonomous gate approval, before dispatching the next agent or build wave, before remediation, and before terminalization or PR creation. Runtime guards persist consumed-but-uncheckpointed delivery for crash-safe replay, require prospective-application acknowledgement, reject stale lock-protected boundary tokens, retain dispatch/remediation action claims through durable action-start acknowledgement, and fence every `run.json` writer across the external PR side effect; low-level transitions, heartbeat helpers, cost writes, and read-only paths remain non-consuming.
+
+## Runnable Dogfood Epics
+
+These epics replace the over-broad `lifecycle-cleanup-recovery` and `git-test-harness-hardening` runs while preserving their material review constraints below. Keep each run bounded to its named outcome, and consume shared primitives from `centralized-hardening-primitives` when available instead of reimplementing them.
+
+### Lifecycle Cleanup And Recovery
+
+- [ ] **Safe cleanup lock claims** (`cleanup-lock-claim-recovery`) - Define and implement an ownership-stable, crash-recoverable cleanup mutation-claim protocol with deterministic concurrency and orphaned-claim recovery coverage. An orphaned claim must be recoverable through verified dead-local ownership without deleting a live or replacement claim.
+- [ ] **Orphan lifecycle assessment** (`orphan-lifecycle-assessment`) - Centralize read-only process/heartbeat/run-state classification and checked orphan recovery so missing, dead, live, stale, contradictory, and uncertain evidence remain fail-closed and actionable.
+- [ ] **Cleanup inventory and execution engine** (`cleanup-inventory-execution`) - Build conservative per-run and repository-wide inventory, planning, revalidation, execution, and partial-failure behavior for recorded and legacy factory resources. Depends on the lock-claim and orphan-assessment epics.
+- [ ] **Cleanup operator surface** (`cleanup-operator-surface`) - Integrate the engine into per-run and sweep CLI workflows, package-log retention, stable human/JSON output, compatibility behavior, and operational documentation. Depends on the cleanup engine.
+
+### Git And Test Harness Hardening
+
+- [ ] **Hermetic Git fixture isolation** (`git-fixture-isolation`) - Centralize repository-owned fixture Git execution, ignore host global/system configuration, disable signing for fixture commits, migrate duplicate helpers, and enforce the boundary structurally without changing production Git behavior.
+- [ ] **Owned test process supervision** (`owned-test-process-supervisor`) - Provide a bounded, identity-verified process ownership and termination protocol with complete cross-module message/result contracts, parent-held descendant identity after supervisor exit, coherent escalation, and no-survivor outcomes across supported platforms.
+- [ ] **Leak attribution and bounded test runner** (`test-leak-attribution-runner`) - Attribute unresolved tests and completed-handle leaks through file/worker lifecycle correlation that remains correct under normal concurrency, apply measured phase/check deadlines, and integrate non-destructive package smoke plus actionable diagnostics. Depends on owned process supervision.
 
 ## Observability And Cost
 
@@ -25,11 +46,6 @@ the remaining future work.
 - Cost attribution follow-ups
   - Baseline local current-run attribution and read-only reporting are implemented and documented: `factory cost-record` writes provider-supplied usage/cost metadata to `run.json.cost_attribution`; status/list/TUI expose diagnostic summaries; and `factory cost-report` provides human, JSON report-v1, and invocation-correlation modes.
   - Future work: provider-specific metadata normalization as opencode exposes it. Genuine telemetry span taxonomy/correlation and SDK/export validation remain tracked above; report invocation IDs alone are not entry-to-span proof. Keep all cost surfaces local diagnostics rather than billing authority.
-
-- TUI current-status projection
-  - `src/tui-data.js currentSummary()` currently prefers `blocked` work before active `running`/`review` work, so downstream placeholder steps such as `work-decomposer blocked` with `attempts: 0` can hide the real active step such as `spec-writer running`.
-  - Future work: prefer active `running`/`review` slices or steps over blocked downstream placeholders; keep real blocked slices/steps visible when no active work is running.
-  - Add tests for the observed shape: `spec-writer running` plus downstream `work-decomposer`/test/panel `blocked` placeholders should render `spec-writer running` as current.
 
 ## Operational Notes
 
