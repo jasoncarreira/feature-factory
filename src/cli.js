@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { acknowledgeSteering, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport, serializeCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
@@ -25,7 +25,7 @@ const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--fence-token", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate"]);
 const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
 const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
 const COST_NUMERIC_FLAGS = new Map([
@@ -59,6 +59,8 @@ Commands:
   factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> [--reason TEXT] [--json]
   factory boundary-open <run-id> <gate|dispatch|remediation|terminal> [--json]
   factory boundary-cross <run-id> <dispatch|remediation> --boundary-token TOKEN [--json]
+  factory action-started <run-id> <dispatch|remediation> --action-token TOKEN [--json]
+  factory action-abort <run-id> <dispatch|remediation> --action-token TOKEN [--json]
   factory pr-fence <run-id> [--clear --fence-token TOKEN] [--json]
   factory cost-record <run-id> --agent AGENT [--step STEP] [--slice-id ID] [--provider PROVIDER] [--model MODEL] [--source SOURCE] [--operation OP] [--request-id ID] [--input-tokens N] [--output-tokens N] [--total-tokens N] [--cache-creation-input-tokens N] [--cache-read-input-tokens N] [--reasoning-tokens N] [--cost-total N] [--cost-input N] [--cost-output N] [--cost-cache-creation N] [--cost-cache-read N] [--currency CODE] [--recorded-at ISO] [--entry-id ID] [--json]
   factory cost-report <run-id> [--json] [--telemetry]
@@ -172,6 +174,8 @@ async function factory(args) {
   if (sub === "steer-conflict") return steerConflict(rest);
   if (sub === "boundary-open") return boundaryOpen(rest);
   if (sub === "boundary-cross") return boundaryCross(rest);
+  if (sub === "action-started") return actionStarted(rest);
+  if (sub === "action-abort") return actionAbort(rest);
   if (sub === "pr-fence") return prFence(rest);
   if (sub === "cost-record") return costRecord(rest);
   if (sub === "resume") return resume(rest);
@@ -251,6 +255,22 @@ async function boundaryCross(args) {
   const [runId, kind] = positional;
   if (!stringValue(runId) || !stringValue(kind) || positional.length !== 2) throw new Error("factory boundary-cross requires <run-id> <dispatch|remediation>");
   return print(await crossSteeringBoundary(runId, kind, requiredOption(opts.boundaryToken, "--boundary-token", "factory boundary-cross"), opts), opts);
+}
+
+async function actionStarted(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId, kind] = positional;
+  if (!stringValue(runId) || !stringValue(kind) || positional.length !== 2) throw new Error("factory action-started requires <run-id> <dispatch|remediation>");
+  return print(await acknowledgeSteeringActionStart(runId, kind, requiredOption(opts.actionToken, "--action-token", "factory action-started"), opts), opts);
+}
+
+async function actionAbort(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId, kind] = positional;
+  if (!stringValue(runId) || !stringValue(kind) || positional.length !== 2) throw new Error("factory action-abort requires <run-id> <dispatch|remediation>");
+  return print(await abortSteeringAction(runId, kind, requiredOption(opts.actionToken, "--action-token", "factory action-abort"), opts), opts);
 }
 
 async function prFence(args) {
@@ -418,6 +438,7 @@ function options(args) {
     if (args[index] === "--ref") opts.ref = args[++index];
     if (args[index] === "--hash") opts.hash = args[++index];
     if (args[index] === "--boundary-token") opts.boundaryToken = args[++index];
+    if (args[index] === "--action-token") opts.actionToken = args[++index];
     if (args[index] === "--fence-token") opts.fenceToken = args[++index];
     if (args[index] === "--agent") opts.agent = args[++index];
     if (args[index] === "--step") opts.step = args[++index];

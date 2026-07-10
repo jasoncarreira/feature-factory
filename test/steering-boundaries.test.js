@@ -4,12 +4,16 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHeartbeat, writeSteering } from "../src/factory.js";
+import { persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, startHeartbeat, stopHeartbeat, writeSteering } from "../src/factory.js";
 import {
+  heartbeatOnce,
+  transitionCostUsage,
   transitionPrePrFenceEstablished,
   transitionPrCreated,
   transitionRunJson,
   transitionSteeringAcknowledged,
+  transitionSteeringActionAborted,
+  transitionSteeringActionStarted,
   transitionSteeringBoundaryCrossed,
   transitionSteeringBoundaryOpened,
   transitionSteeringConsumed,
@@ -34,7 +38,21 @@ describe("lock-protected steering boundaries", () => {
       const token = JSON.parse(proc.stdout).boundary.token;
       proc = runCli(fixture.repo, ["factory", "boundary-cross", fixture.runId, "dispatch", "--boundary-token", token, "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
-      assert.equal(JSON.parse(proc.stdout).boundary.kind, "dispatch");
+      const claim = JSON.parse(proc.stdout).action_claim;
+      assert.equal(claim.kind, "dispatch");
+      proc = runCli(fixture.repo, ["factory", "action-started", fixture.runId, "dispatch", "--action-token", claim.token, "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.equal(JSON.parse(proc.stdout).action.outcome, "started");
+
+      proc = runCli(fixture.repo, ["factory", "boundary-open", fixture.runId, "remediation", "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      const remediationToken = JSON.parse(proc.stdout).boundary.token;
+      proc = runCli(fixture.repo, ["factory", "boundary-cross", fixture.runId, "remediation", "--boundary-token", remediationToken, "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      const remediationClaim = JSON.parse(proc.stdout).action_claim;
+      proc = runCli(fixture.repo, ["factory", "action-abort", fixture.runId, "remediation", "--action-token", remediationClaim.token, "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.equal(JSON.parse(proc.stdout).action.outcome, "aborted");
     } finally {
       cleanup(fixture.repo);
     }
@@ -65,11 +83,48 @@ describe("lock-protected steering boundaries", () => {
 
       const remediation = await transitionSteeringBoundaryOpened(fixture.runDir, "remediation", { token: "remediation-token-1" });
       const crossed = await transitionSteeringBoundaryCrossed(fixture.runDir, "remediation", remediation.boundary.token);
-      assert.equal(crossed.boundary.kind, "remediation");
+      assert.equal(crossed.action_claim.kind, "remediation");
+      await transitionSteeringActionStarted(fixture.runDir, "remediation", crossed.action_claim.token);
     } finally {
       cleanup(fixture.repo);
     }
   });
+
+  for (const kind of ["dispatch", "remediation"]) {
+    it(`retains the ${kind} claim through action start and supports explicit recovery`, async () => {
+      const fixture = createFixture(`action-claim-${kind}`);
+      try {
+        const opened = await transitionSteeringBoundaryOpened(fixture.runDir, kind, { token: `${kind}-action-token` });
+        const crossed = await transitionSteeringBoundaryCrossed(fixture.runDir, kind, opened.boundary.token);
+        assert.equal(readJson(join(fixture.runDir, "run.json")).steering.action_claim.token, crossed.action_claim.token);
+        await assert.rejects(transitionSteeringQueued(fixture.runDir, "queue before action start"), /awaiting start acknowledgement/u);
+        await assert.rejects(transitionRunJson(fixture.runDir, (run) => { run.updated_at = NOW; }), /action start acknowledgement is pending/u);
+        await startHeartbeat(fixture.runId, { phase: `${kind}-wait`, intervalMs: 1000 }, { cwd: fixture.repo, now: "2026-07-10T12:05:00.000Z" });
+        assert.equal(readJson(join(fixture.runDir, "run.json")).steering.action_claim.token, crossed.action_claim.token, "heartbeat start must preserve the action claim");
+
+        if (kind === "dispatch") {
+          await assert.rejects(transitionSteeringActionStarted(fixture.runDir, kind, "wrong-action-token"), /token mismatch/u);
+          const started = await transitionSteeringActionStarted(fixture.runDir, kind, crossed.action_claim.token);
+          assert.equal(started.action.outcome, "started");
+          await stopHeartbeat(fixture.runId, {}, { cwd: fixture.repo });
+        } else {
+          await assert.rejects(
+            transitionSteeringActionAborted(fixture.runDir, kind, crossed.action_claim.token, { now: "2026-07-10T12:05:01.000Z" }),
+            /active-heartbeat/u,
+          );
+          await stopHeartbeat(fixture.runId, {}, { cwd: fixture.repo, now: "2026-07-10T12:05:02.000Z" });
+          const aborted = await transitionSteeringActionAborted(fixture.runDir, kind, crossed.action_claim.token);
+          assert.equal(aborted.action.outcome, "aborted");
+        }
+
+        const queued = await transitionSteeringQueued(fixture.runDir, "queue after durable resolution", { id: `${kind}-after` });
+        assert.equal(queued.steering.id, `${kind}-after`);
+        assert.equal(queued.run.steering.action_claim, null);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  }
 
   it("serializes a queue race with boundary observation so no stale token can cross", async () => {
     const fixture = createFixture("boundary-race");
@@ -107,7 +162,7 @@ describe("lock-protected steering boundaries", () => {
     try {
       const established = await transitionPrePrFenceEstablished(fenced.runDir, { token: "pre-pr-fence-token" });
       await assert.rejects(writeSteering(fenced.runId, "late steering", { cwd: fenced.repo }), /active pre-PR fence/u);
-      await assert.rejects(transitionRunJson(fenced.runDir, (run) => { run.updated_at = NOW; }), /permits only pr-created/u);
+      await assert.rejects(transitionRunJson(fenced.runDir, (run) => { run.updated_at = NOW; }), /active pre-PR fence/u);
       await assert.rejects(transitionPrCreated(fenced.runDir, prInput(), { fenceToken: "wrong-fence-token" }), /token mismatch/u);
       const completed = await transitionPrCreated(fenced.runDir, prInput(), { fenceToken: established.fence.token });
       assert.equal(completed.run.status, "completed");
@@ -123,6 +178,52 @@ describe("lock-protected steering boundaries", () => {
       await assert.rejects(transitionPrCreated(stale.runDir, prInput(), { fenceToken: established.fence.token }), /fence is stale/u);
     } finally {
       cleanup(stale.repo);
+    }
+  });
+
+  it("holds a pre-PR fence across sibling run writers without hash churn and remains recoverable", async () => {
+    const fixture = createReadyPrFixture("pr-fence-writers");
+    try {
+      const established = await transitionPrePrFenceEstablished(fixture.runDir, { token: "writer-fence-token" });
+      const runPath = join(fixture.runDir, "run.json");
+      const fencedBytes = readFileSync(runPath, "utf8");
+
+      const rejected = [
+        () => transitionRunJson(fixture.runDir, (run) => { run.updated_at = NOW; }),
+        () => transitionCostUsage(fixture.runDir, { agent: "validator", total_tokens: 1 }),
+        () => heartbeatOnce(fixture.runDir, { now: Date.parse(NOW) }),
+        () => startHeartbeat(fixture.runId, { phase: "builder-wave" }, { cwd: fixture.repo }),
+        () => persistFactoryRunCreatedEnv(fixture.runId, { cwd: fixture.repo, now: NOW }),
+        () => persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: NOW }),
+      ];
+      for (const writer of rejected) {
+        await assert.rejects(writer(), /active pre-PR fence/u);
+        assert.equal(readFileSync(runPath, "utf8"), fencedBytes);
+      }
+
+      assert.equal(await stopHeartbeat(fixture.runId, {}, { cwd: fixture.repo }), null);
+      assert.equal(readFileSync(runPath, "utf8"), fencedBytes, "heartbeat stop must not write run.json or invalidate the fence");
+      const completed = await transitionPrCreated(fixture.runDir, prInput(), { fenceToken: established.fence.token });
+      assert.equal(completed.run.status, "completed");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("clears an exact stale fence for recovery when no external PR was created", async () => {
+    const fixture = createReadyPrFixture("pr-fence-clear-recovery");
+    try {
+      const established = await transitionPrePrFenceEstablished(fixture.runDir, { token: "recover-fence-token" });
+      const runPath = join(fixture.runDir, "run.json");
+      writeJson(runPath, { ...readJson(runPath), updated_at: "2026-07-10T12:05:00.000Z" });
+      await assert.rejects(transitionPrCreated(fixture.runDir, prInput(), { fenceToken: established.fence.token }), /fence is stale/u);
+      const cleared = runCli(fixture.repo, ["factory", "pr-fence", fixture.runId, "--clear", "--fence-token", established.fence.token, "--json"]);
+      assert.equal(cleared.status, 0, cleared.stderr);
+      assert.equal(JSON.parse(cleared.stdout).fence, null);
+      const queued = await transitionSteeringQueued(fixture.runDir, "recovered after failed PR start", { id: "post-clear" });
+      assert.equal(queued.steering.id, "post-clear");
+    } finally {
+      cleanup(fixture.repo);
     }
   });
 

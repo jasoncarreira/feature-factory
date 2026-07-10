@@ -396,6 +396,8 @@ function validateSteering(errors, steering, path) {
   if (steering.uncheckpointed !== undefined && steering.uncheckpointed !== null) validateSteeringEntry(errors, steering.uncheckpointed, `${path}.uncheckpointed`, { consumed: true });
   if (steering.uncheckpointed !== undefined && steering.uncheckpointed !== null && !isRecord(steering.uncheckpointed)) errors.push({ path: `${path}.uncheckpointed`, message: "must be an object or null" });
   validateSteeringBoundary(errors, steering.boundary, `${path}.boundary`, { fence: false });
+  validateSteeringAction(errors, steering.action_claim, `${path}.action_claim`, { claim: true });
+  validateSteeringAction(errors, steering.last_action, `${path}.last_action`, { resolved: true });
   validateSteeringBoundary(errors, steering.pr_fence, `${path}.pr_fence`, { fence: true });
   if (steering.pending !== undefined && steering.pending !== null && steering.uncheckpointed !== undefined && steering.uncheckpointed !== null) {
     errors.push({ path, message: "cannot have both pending and uncheckpointed steering" });
@@ -403,8 +405,11 @@ function validateSteering(errors, steering, path) {
   if (steering.boundary !== undefined && steering.boundary !== null && (steering.pending !== undefined && steering.pending !== null || steering.uncheckpointed !== undefined && steering.uncheckpointed !== null)) {
     errors.push({ path, message: "boundary cannot coexist with pending or uncheckpointed steering" });
   }
-  if (steering.pr_fence !== undefined && steering.pr_fence !== null && (steering.pending !== undefined && steering.pending !== null || steering.uncheckpointed !== undefined && steering.uncheckpointed !== null || steering.boundary !== undefined && steering.boundary !== null)) {
-    errors.push({ path, message: "pre-PR fence cannot coexist with pending, uncheckpointed, or boundary steering state" });
+  if (steering.action_claim !== undefined && steering.action_claim !== null && (steering.pending !== undefined && steering.pending !== null || steering.uncheckpointed !== undefined && steering.uncheckpointed !== null || steering.boundary !== undefined && steering.boundary !== null)) {
+    errors.push({ path, message: "action claim cannot coexist with pending, uncheckpointed, or boundary steering state" });
+  }
+  if (steering.pr_fence !== undefined && steering.pr_fence !== null && (steering.pending !== undefined && steering.pending !== null || steering.uncheckpointed !== undefined && steering.uncheckpointed !== null || steering.boundary !== undefined && steering.boundary !== null || steering.action_claim !== undefined && steering.action_claim !== null)) {
+    errors.push({ path, message: "pre-PR fence cannot coexist with pending, uncheckpointed, boundary, or action claim steering state" });
   }
   if (steering.history === undefined || steering.history === null) return;
   if (!Array.isArray(steering.history)) {
@@ -450,6 +455,24 @@ function validateSteeringBoundary(errors, boundary, path, options = {}) {
   if (Number.isInteger(boundary.generation) && boundary.generation < 0) errors.push({ path: `${path}.generation`, message: "must be non-negative" });
   requiredHash(errors, boundary, "state_hash", `${path}.state_hash`);
   requiredString(errors, boundary, "created_at", `${path}.created_at`);
+}
+
+function validateSteeringAction(errors, action, path, options = {}) {
+  if (action === undefined || action === null) return;
+  if (!isRecord(action)) {
+    errors.push({ path, message: "must be an object or null" });
+    return;
+  }
+  requiredEnum(errors, action, "kind", new Set(["dispatch", "remediation"]), `${path}.kind`);
+  requiredString(errors, action, "token", `${path}.token`);
+  if (stringValue(action.token) && !/^[A-Za-z0-9_-]{8,128}$/u.test(action.token)) errors.push({ path: `${path}.token`, message: "must use 8-128 safe characters" });
+  requiredInteger(errors, action, "generation", `${path}.generation`);
+  if (Number.isInteger(action.generation) && action.generation < 0) errors.push({ path: `${path}.generation`, message: "must be non-negative" });
+  requiredString(errors, action, "claimed_at", `${path}.claimed_at`);
+  if (options.resolved) {
+    requiredEnum(errors, action, "outcome", new Set(["started", "aborted"]), `${path}.outcome`);
+    requiredString(errors, action, "resolved_at", `${path}.resolved_at`);
+  }
 }
 
 function validateContinuationParent(errors, parent, path) {

@@ -27,6 +27,7 @@ const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
 const HEARTBEAT_FILE = "heartbeat.json";
 const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "terminal"]);
+const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation"]);
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
@@ -95,6 +96,13 @@ export function hashRunState(run) {
   return hashValue(validateRun(cloneJson(run)));
 }
 
+export function assertRunJsonWriterAllowed(run, label, options = {}) {
+  const operation = stringValue(label) ? label : "run.json writer";
+  if (!options.allowPrePrFence && isRecord(run?.steering?.pr_fence)) throw new Error(`${operation} rejected: active pre-PR fence`);
+  if (!options.allowActionClaim && isRecord(run?.steering?.action_claim)) throw new Error(`${operation} rejected: action start acknowledgement is pending`);
+  if (!options.allowUncheckpointed && isRecord(run?.steering?.uncheckpointed)) throw new Error(`${operation} rejected: consumed steering acknowledgement is pending`);
+}
+
 export async function transitionRunJson(runDir, mutator, options = {}) {
   if (typeof mutator !== "function") throw new Error("transitionRunJson requires a mutator");
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, mutator, options), options);
@@ -131,6 +139,7 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
     if (current.status !== "running") throw new Error(`steer requires a running run, found '${current.status}'`);
     if (isRecord(current.steering?.pending)) throw new Error("run already has pending steering");
     if (isRecord(current.steering?.uncheckpointed)) throw new Error("run has consumed steering awaiting acknowledgement");
+    if (isRecord(current.steering?.action_claim)) throw new Error("run has an action awaiting start acknowledgement");
     if (isRecord(current.steering?.pr_fence)) throw new Error("run has an active pre-PR fence and cannot be steered");
 
     const createdAt = timestamp(options.now);
@@ -163,6 +172,8 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
         pending: metadata,
         uncheckpointed: null,
         boundary: null,
+        action_claim: null,
+        last_action: cloneJson(current.steering?.last_action ?? null),
         pr_fence: null,
         history,
       },
@@ -181,6 +192,7 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot consume steering`);
     assertNoFreshHeartbeatForSteeringConsume(runDir, options);
     if (isRecord(current.steering?.pr_fence)) throw new Error("steer-consume rejected: active pre-PR fence");
+    if (isRecord(current.steering?.action_claim)) throw new Error("steer-consume rejected: action start acknowledgement is pending");
     const uncheckpointed = current.steering?.uncheckpointed;
     if (isRecord(uncheckpointed)) {
       if (uncheckpointed.ref !== requestedRef || uncheckpointed.hash !== requestedHash) throw new Error("uncheckpointed steering ref/hash mismatch");
@@ -229,6 +241,8 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
           consumed_at: consumedAt,
         },
         boundary: null,
+        action_claim: null,
+        last_action: cloneJson(current.steering?.last_action ?? null),
         pr_fence: null,
         history,
       },
@@ -287,6 +301,7 @@ export async function transitionSteeringAcknowledged(runDir, input, options = {}
         pending: null,
         uncheckpointed: null,
         boundary: null,
+        action_claim: null,
         pr_fence: null,
         history,
       },
@@ -325,6 +340,7 @@ export async function transitionSteeringConflict(runDir, input, options = {}) {
         generation: steeringGeneration(current) + 1,
         uncheckpointed: null,
         boundary: null,
+        action_claim: null,
         pr_fence: null,
       },
     });
@@ -371,17 +387,67 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
 
 export async function transitionSteeringBoundaryCrossed(runDir, kind, token, options = {}) {
   const boundaryKind = normalizeSteeringBoundaryKind(kind);
-  if (!new Set(["dispatch", "remediation"]).has(boundaryKind)) throw new Error("boundary-cross supports dispatch or remediation");
+  if (!STEERING_ACTION_KINDS.has(boundaryKind)) throw new Error("boundary-cross supports dispatch or remediation");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-cross ${boundaryKind}`);
     const draft = cloneJson(current);
     consumeSteeringBoundary(draft, boundaryKind, token);
-    draft.updated_at = timestamp(options.now);
+    const claimedAt = timestamp(options.now);
+    draft.updated_at = claimedAt;
+    draft.steering = normalizedSteeringState(draft, {
+      boundary: null,
+      action_claim: {
+        kind: boundaryKind,
+        token: safeBoundaryToken(token),
+        generation: steeringGeneration(draft),
+        claimed_at: claimedAt,
+      },
+    });
     const next = validateRun(draft);
     await writeJsonAtomically(join(runDir, RUN_FILE), next);
-    return { updated: true, status: next.status, run: next, boundary: { kind: boundaryKind, token: requireNonEmptyString(token, "boundary token"), crossed_at: next.updated_at } };
+    return { updated: true, status: next.status, run: next, action_claim: cloneJson(next.steering.action_claim) };
+  }, options);
+}
+
+export async function transitionSteeringActionStarted(runDir, kind, token, options = {}) {
+  return transitionSteeringActionResolved(runDir, kind, token, "started", options);
+}
+
+export async function transitionSteeringActionAborted(runDir, kind, token, options = {}) {
+  return transitionSteeringActionResolved(runDir, kind, token, "aborted", options);
+}
+
+async function transitionSteeringActionResolved(runDir, kind, token, outcome, options = {}) {
+  const actionKind = normalizeSteeringActionKind(kind);
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (outcome === "aborted") {
+      const recoverable = inspectRecoverableHeartbeat(runDir, options);
+      if (!recoverable.ok) throw new Error("action-abort requires inactive heartbeat: active-heartbeat");
+      await stopHeartbeatForRecovery(runDir, recoverable.heartbeat, timestamp(options.now));
+    }
+    const claim = assertSteeringActionClaim(current, actionKind, token);
+    const resolvedAt = timestamp(options.now);
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: resolvedAt,
+      steering: normalizedSteeringState(current, {
+        action_claim: null,
+        last_action: {
+          kind: actionKind,
+          token: claim.token,
+          generation: claim.generation,
+          outcome,
+          claimed_at: claim.claimed_at,
+          resolved_at: resolvedAt,
+        },
+      }),
+    });
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, action: cloneJson(next.steering.last_action) };
   }, options);
 }
 
@@ -414,7 +480,7 @@ export async function transitionPrePrFenceCleared(runDir, token, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
-    assertPrFence(current, token);
+    assertPrFenceToken(current, token);
     const next = validateRun({
       ...cloneJson(current),
       updated_at: timestamp(options.now),
@@ -596,6 +662,7 @@ export async function heartbeatOnce(runDir, { now } = {}, options = {}) {
 
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    if (isRecord(current.steering?.pr_fence)) throw new Error("heartbeat tick rejected: active pre-PR fence");
     if (TERMINAL_RUN_STATUSES.has(current.status)) return { updated: false, reason: "terminal-status", status: current.status, run: current };
     if (current.status !== "running") return { updated: false, reason: "run-not-running", status: current.status, run: current };
     const protectedGate = pendingProtectedGate(current);
@@ -617,6 +684,7 @@ export function hasInFlightHeartbeatWork(run) {
 async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}) {
   const current = await readRunJson(runDir);
   assertExpectedCurrentHash(current, options.expectedCurrentHash);
+  assertRunJsonWriterAllowed(current, "run.json transition", { allowPrePrFence: hooks.prCreated === true });
 
   const draft = cloneJson(current);
   let nextValue = await mutator(draft, { current, runDir });
@@ -626,8 +694,6 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   }
 
   const next = validateRun(nextValue);
-  if (isRecord(current.steering?.pr_fence) && hooks.prCreated !== true) throw new Error("active pre-PR fence permits only pr-created or explicit fence clear");
-  if (isRecord(current.steering?.uncheckpointed)) throw new Error("consumed steering acknowledgement is pending");
   assertGateDecisionTransitions(current, next, hooks);
   assertTerminalTransition(current, next, hooks);
   if (typeof hooks.beforeWrite === "function") await hooks.beforeWrite(next, current);
@@ -734,6 +800,8 @@ function normalizedSteeringState(run, overrides = {}) {
     pending: current.pending ?? null,
     uncheckpointed: current.uncheckpointed ?? null,
     boundary: current.boundary ?? null,
+    action_claim: current.action_claim ?? null,
+    last_action: current.last_action ?? null,
     pr_fence: current.pr_fence ?? null,
     history: Array.isArray(current.history) ? current.history : [],
     ...cloneJson(overrides),
@@ -743,6 +811,7 @@ function normalizedSteeringState(run, overrides = {}) {
 function assertSteeringBoundaryClear(run, label) {
   if (isRecord(run?.steering?.pending)) throw new Error(`${label} rejected: pending steering`);
   if (isRecord(run?.steering?.uncheckpointed)) throw new Error(`${label} rejected: consumed steering acknowledgement is pending`);
+  if (isRecord(run?.steering?.action_claim)) throw new Error(`${label} rejected: action start acknowledgement is pending`);
 }
 
 function assertBoundaryClean(runDir, run, options, label) {
@@ -759,6 +828,12 @@ function normalizeSteeringBoundaryKind(kind) {
   return value;
 }
 
+function normalizeSteeringActionKind(kind) {
+  const value = requireNonEmptyString(kind, "action kind").trim();
+  if (!STEERING_ACTION_KINDS.has(value)) throw new Error("action kind must be dispatch or remediation");
+  return value;
+}
+
 function safeBoundaryToken(value) {
   const token = requireNonEmptyString(value, "boundary token").trim();
   if (!/^[A-Za-z0-9_-]{8,128}$/u.test(token)) throw new Error("boundary token must use 8-128 safe characters");
@@ -769,6 +844,20 @@ function steeringBoundaryStateHash(run) {
   const copy = cloneJson(run);
   copy.steering = normalizedSteeringState(copy, { boundary: null, pr_fence: null });
   return hashValue(validateRun(copy));
+}
+
+function assertSteeringActionClaim(run, kind, token) {
+  if (TERMINAL_RUN_STATUSES.has(run.status)) throw new Error(`action acknowledgement rejected: terminal run '${run.status}'`);
+  if (run.status !== "running") throw new Error(`action acknowledgement requires a running run, found '${run.status}'`);
+  if (isRecord(run.steering?.pending)) throw new Error("action acknowledgement rejected: pending steering");
+  if (isRecord(run.steering?.uncheckpointed)) throw new Error("action acknowledgement rejected: consumed steering acknowledgement is pending");
+  if (isRecord(run.steering?.pr_fence)) throw new Error("action acknowledgement rejected: active pre-PR fence");
+  const claim = run.steering?.action_claim;
+  if (!isRecord(claim)) throw new Error("run has no action start claim");
+  const requestedToken = safeBoundaryToken(token);
+  if (claim.kind !== kind || claim.token !== requestedToken) throw new Error("action start claim token mismatch");
+  if (claim.generation !== steeringGeneration(run)) throw new Error("action start claim is stale");
+  return claim;
 }
 
 function consumeSteeringBoundary(draft, kind, token) {
@@ -785,12 +874,17 @@ function consumeSteeringBoundary(draft, kind, token) {
 
 function assertPrFence(run, token) {
   assertSteeringBoundaryClear(run, "pr-created");
-  const fence = run.steering?.pr_fence;
-  if (!isRecord(fence)) throw new Error("pr-created requires an active pre-PR fence");
-  const requestedToken = safeBoundaryToken(token);
-  if (fence.token !== requestedToken) throw new Error("pre-PR fence token mismatch");
+  const fence = assertPrFenceToken(run, token);
   if (fence.generation !== steeringGeneration(run)) throw new Error("pre-PR fence is stale");
   if (fence.state_hash !== steeringBoundaryStateHash(run)) throw new Error("pre-PR fence is stale");
+}
+
+function assertPrFenceToken(run, token) {
+  const fence = run.steering?.pr_fence;
+  if (!isRecord(fence)) throw new Error("run requires an active pre-PR fence");
+  const requestedToken = safeBoundaryToken(token);
+  if (fence.token !== requestedToken) throw new Error("pre-PR fence token mismatch");
+  return fence;
 }
 
 function readConsumedSteeringEnvelope(runDir, run, consumed) {
