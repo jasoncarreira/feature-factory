@@ -233,14 +233,29 @@ launching runs from `origin/main`.
    the builder fixes the whole class in one remediation instead of one edge case per round.
    The reviewers already converge; it is remediation *completeness* that needs the
    checklist.
-3. **Harden the test/git harness** (no LLM required, biggest reliability win): unconditional
-   `commit.gpgsign=false` + `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1`; fix the
-   async leaks; right-size the `npm run check` timeout above the observed ~20s/file worst
+3. **Keep commit-signing out of automation** (no LLM required, biggest reliability win).
+   Signing is fine for interactive commits, but detached/headless runs cannot reach the
+   1Password GUI agent, so every git commit made *inside a run* must be unsigned regardless
+   of the operator's global config. Two sites:
+   - **Launched-run environment — the one open code site.** Post-simplification `src/factory.js`
+     makes no commits of its own; the run's commits/merges are the orchestrator *agent's*,
+     executed inside the spawned `opencode` process. `factoryLaunchEnv()` (feeding the
+     `start`/`continue`/`resume` launches) currently injects only telemetry trace context —
+     extend it to disable commit/tag signing in the child env so the agent's git never
+     consults the signing agent. Do it surgically (inject `commit.gpgsign=false` /
+     `tag.gpgsign=false` via `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`)
+     rather than blanking `GIT_CONFIG_GLOBAL`, so the operator's committer identity survives.
+   - **Test harness — already done.** The git-fixture helpers already set
+     `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` (which also neutralizes signing);
+     keep that the standard for any new test that commits.
+4. **Fix the test-suite async leaks and check timeout** (distinct from signing). Whole test
+   files leak async ops and are cancelled at ~20s (§2, point 2), blowing opencode's 120s
+   bash timeout; fix the leaks and right-size the `npm run check` timeout above that worst
    case.
-4. **Wire post-terminal cleanup and orphan recovery** (auto-invoke on terminal, or a sweep
+5. **Wire post-terminal cleanup and orphan recovery** (auto-invoke on terminal, or a sweep
    command) so completed runs do not strand hundreds of MB, and so `running`-with-dead-pid
    runs self-heal.
-5. **Normalize run.json production** — base_ref (`main` vs `origin/main`, never a
+6. **Normalize run.json production** — base_ref (`main` vs `origin/main`, never a
    non-merged branch), timestamps, `debug_snapshot` schema, and `pre_pr` artifact naming —
    to remove the cross-version drift.
 
