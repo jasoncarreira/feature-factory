@@ -39,6 +39,8 @@ const NOW = "2026-07-10T12:00:00.000Z";
 const LATER = "2026-07-10T12:10:00.000Z";
 const PR_URL = "https://github.com/acme/project/pull/77";
 const CLI = new URL("../src/cli.js", import.meta.url).pathname;
+const BARRIER_FAILURE_TIMEOUT_MS = 30000;
+const CONTENDER_LOCK_TIMEOUT_MS = 45000;
 
 describe("lock-protected steering boundaries", () => {
   it("exposes validated boundary commands and rejects direct terminal CLI bypass", () => {
@@ -349,7 +351,7 @@ describe("lock-protected steering boundaries", () => {
       const fenceLane = lane(`${writer.name}-fence`);
       const siblingLane = lane(`${writer.name}-sibling`);
       const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, laneOptions(fenceLane, { ...writer.options, token: `fence-${safeName(writer.name)}-token`, now: LATER })));
-      const sibling = tracked(writer.invoke(fixture, laneOptions(siblingLane, { ...writer.options, timeoutMs: 5000 })));
+      const sibling = tracked(writer.invoke(fixture, laneOptions(siblingLane, writer.options)));
       try {
         await allEntered(fenceLane, siblingLane);
         fenceLane.release.resolve();
@@ -708,7 +710,9 @@ function lane(name) {
 
 function laneOptions(contenderLane, overrides = {}) {
   return {
-    timeoutMs: 5000,
+    // Env persistence and recovery perform real pre-lock work. This generous
+    // deadline is only a hang bound; lane releases still establish all order.
+    timeoutMs: CONTENDER_LOCK_TIMEOUT_MS,
     retryDelayMs: 1,
     ...overrides,
     lockHooks: {
@@ -763,7 +767,7 @@ function deferred() {
   };
 }
 
-async function bounded(promise, label, timeoutMs = 3000) {
+async function bounded(promise, label, timeoutMs = BARRIER_FAILURE_TIMEOUT_MS) {
   let timer;
   try {
     return await Promise.race([
