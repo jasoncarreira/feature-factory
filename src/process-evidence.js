@@ -11,6 +11,8 @@ export const PROCESS_EVIDENCE_SIGNAL = "SIGTERM";
 
 const PROCESS_STATES = new Set(["running", "cancelled", "failed-closed", "exited"]);
 const DEFAULT_INSPECTOR = "node-process";
+const DEFAULT_CANCEL_WAIT_MS = 5000;
+const CANCEL_POLL_INTERVAL_MS = 200;
 
 export function processEvidencePath(runDir) {
   return join(resolve(runDir), PROCESS_EVIDENCE_FILE);
@@ -114,15 +116,36 @@ export function recordDetachedProcessEvidence(runDir, input = {}) {
   return evidence;
 }
 
-export function cancelProcessFromEvidence(runDir, opts = {}) {
+export async function cancelProcessFromEvidence(runDir, opts = {}) {
   const read = readProcessEvidence(runDir, opts);
   if (!read.ok) return failClosed(opts.runId, read.reason, read.missing ? null : PROCESS_EVIDENCE_FILE);
 
   const evidence = read.evidence;
+  if (evidence.state === "cancelled") {
+    return {
+      ok: true,
+      run_id: evidence.run_id,
+      status: "cancelled",
+      pid: evidence.pid,
+      signal: PROCESS_EVIDENCE_SIGNAL,
+      process_ref: PROCESS_EVIDENCE_FILE,
+      updated: false,
+      signaled: false,
+    };
+  }
   if (evidence.state !== "running") return failClosed(evidence.run_id, `process evidence state is ${evidence.state}`, PROCESS_EVIDENCE_FILE);
 
   const inspector = resolveInspector(opts);
   const inspected = inspector(evidence.pid);
+  if (processIsProvenStale(inspected)) {
+    // Already gone (including a prior cancel that was signaled but not yet
+    // confirmed): confirm the cancellation without signaling anything.
+    return confirmCancelled(runDir, evidence, {
+      requestedAt: evidence.cancel?.requested_at ?? timestamp(opts.now),
+      confirmedAt: timestamp(opts.now),
+      signaled: false,
+    });
+  }
   const identity = compareProcessIdentity(evidence, inspected);
   if (!identity.ok) return failClosed(evidence.run_id, identity.reason, PROCESS_EVIDENCE_FILE, evidence.pid);
 
@@ -133,8 +156,47 @@ export function cancelProcessFromEvidence(runDir, opts = {}) {
     return failClosed(evidence.run_id, `signal failed: ${error.message}`, PROCESS_EVIDENCE_FILE, evidence.pid);
   }
 
-  const confirmedAt = timestamp(opts.confirmedAt || opts.now);
-  const next = {
+  // SIGTERM is a request, not an exit. Recording state 'cancelled' unblocks a
+  // relaunch, so only do it once the process is proven gone; a hung process
+  // that ignores SIGTERM must not fail open into concurrent duplicate runs.
+  const waitMs = normalizeCancelWait(opts.cancelWaitMs);
+  const deadline = Date.now() + waitMs;
+  while (true) {
+    if (processIsProvenStale(inspector(evidence.pid))) {
+      return confirmCancelled(runDir, evidence, { requestedAt, confirmedAt: timestamp(), signaled: true });
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(CANCEL_POLL_INTERVAL_MS, remaining));
+  }
+
+  const pendingAt = timestamp();
+  writeProcessEvidence(runDir, {
+    ...evidence,
+    updated_at: pendingAt,
+    cancel: {
+      requested_at: requestedAt,
+      signal: PROCESS_EVIDENCE_SIGNAL,
+      confirmed_at: null,
+      result: "pending",
+      reason: `process still alive ${waitMs}ms after ${PROCESS_EVIDENCE_SIGNAL}`,
+    },
+  });
+  return {
+    ok: false,
+    run_id: evidence.run_id,
+    status: "cancel-pending",
+    reason: `pid ${evidence.pid} is still alive ${waitMs}ms after ${PROCESS_EVIDENCE_SIGNAL}; re-run factory cancel to confirm exit, or stop the process manually`,
+    pid: evidence.pid,
+    signal: PROCESS_EVIDENCE_SIGNAL,
+    process_ref: PROCESS_EVIDENCE_FILE,
+    updated: true,
+    signaled: true,
+  };
+}
+
+function confirmCancelled(runDir, evidence, { requestedAt, confirmedAt, signaled }) {
+  writeProcessEvidence(runDir, {
     ...evidence,
     updated_at: confirmedAt,
     state: "cancelled",
@@ -145,8 +207,7 @@ export function cancelProcessFromEvidence(runDir, opts = {}) {
       result: "cancelled",
       reason: null,
     },
-  };
-  writeProcessEvidence(runDir, next);
+  });
   return {
     ok: true,
     run_id: evidence.run_id,
@@ -155,8 +216,19 @@ export function cancelProcessFromEvidence(runDir, opts = {}) {
     signal: PROCESS_EVIDENCE_SIGNAL,
     process_ref: PROCESS_EVIDENCE_FILE,
     updated: true,
-    signaled: true,
+    signaled,
   };
+}
+
+function normalizeCancelWait(value) {
+  if (value === undefined || value === null) return DEFAULT_CANCEL_WAIT_MS;
+  const wait = Number(value);
+  if (!Number.isInteger(wait) || wait < 0) throw new Error("cancelWaitMs must be a non-negative integer");
+  return wait;
+}
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
 export function inspectProcessIdentity(pid, opts = {}) {

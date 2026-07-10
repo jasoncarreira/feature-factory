@@ -139,7 +139,12 @@ function commandOutput(command, args, cwd = process.cwd()) {
 
 function opencodeRunSupports(flag) {
   const help = opencodeRunHelpText();
-  return Boolean(help && help.includes(flag));
+  if (!help) return false;
+  // Token-boundary match: a bare substring test would let '--dir' match a
+  // future '--directory' (or '--command' match '--commands') and report
+  // support that does not exist.
+  const escaped = flag.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?:^|[\\s,=])${escaped}(?:$|[\\s,=])`, "mu").test(help);
 }
 
 // `opencode run --help` prints its usage to stderr and may exit non-zero, so

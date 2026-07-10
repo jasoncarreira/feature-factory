@@ -9,17 +9,20 @@ import { inspectProcessIdentity, recordDetachedProcessEvidence } from "../src/pr
 const NOW = "2026-07-09T15:00:00.000Z";
 
 describe("factory cancellation process evidence", { concurrency: false }, () => {
-  it("sends one targeted SIGTERM when run-scoped evidence matches live identity", () => {
+  it("sends one targeted SIGTERM and confirms exit before recording cancelled", async () => {
     const fixture = createFixture("cancel-valid");
     const beforeRun = readFileSync(join(fixture.runDir, "run.json"), "utf8");
     const signals = [];
     try {
       writeProcessEvidence(fixture, { pid: 4242 });
+      const live = matchingInspector(fixture, 4242);
 
-      const result = cancelFactoryRun(fixture.runId, {
+      const result = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
         now: NOW,
-        inspectorFn: matchingInspector(fixture, 4242),
+        cancelWaitMs: 500,
+        // The process stays alive until it receives the signal, then exits.
+        inspectorFn: (pid) => (signals.length > 0 ? { ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" } : live(pid)),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -36,7 +39,69 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
     }
   });
 
-  it("fails closed for missing evidence and ignores heartbeat pids", () => {
+  it("keeps state running and reports cancel-pending while the process ignores SIGTERM", async () => {
+    const fixture = createFixture("cancel-hung");
+    const signals = [];
+    try {
+      writeProcessEvidence(fixture, { pid: 4242 });
+
+      const pending = await cancelFactoryRun(fixture.runId, {
+        cwd: fixture.repo,
+        now: NOW,
+        cancelWaitMs: 0,
+        inspectorFn: matchingInspector(fixture, 4242),
+        signalFn: (pid, signal) => signals.push({ pid, signal }),
+      });
+
+      assert.equal(pending.ok, false);
+      assert.equal(pending.status, "cancel-pending");
+      assert.equal(pending.signaled, true);
+      assert.match(pending.reason, /still alive/u);
+      const processState = readJson(join(fixture.runDir, "process.json"));
+      assert.equal(processState.state, "running");
+      assert.equal(processState.cancel.result, "pending");
+      assert.equal(processState.cancel.confirmed_at, null);
+
+      // Once the process is actually gone, a re-run confirms without signaling.
+      const confirmed = await cancelFactoryRun(fixture.runId, {
+        cwd: fixture.repo,
+        now: NOW,
+        inspectorFn: () => ({ ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" }),
+        signalFn: (pid, signal) => signals.push({ pid, signal }),
+      });
+
+      assert.equal(confirmed.ok, true);
+      assert.equal(confirmed.status, "cancelled");
+      assert.equal(confirmed.signaled, false);
+      assert.deepEqual(signals, [{ pid: 4242, signal: "SIGTERM" }]);
+      assert.equal(readJson(join(fixture.runDir, "process.json")).state, "cancelled");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("re-running cancel after success is an idempotent no-op", async () => {
+    const fixture = createFixture("cancel-idempotent");
+    const signals = [];
+    try {
+      writeProcessEvidence(fixture, { pid: 4242, state: "cancelled", cancel: { requested_at: NOW, signal: "SIGTERM", confirmed_at: NOW, result: "cancelled", reason: null } });
+
+      const result = await cancelFactoryRun(fixture.runId, {
+        cwd: fixture.repo,
+        inspectorFn: matchingInspector(fixture, 4242),
+        signalFn: (pid, signal) => signals.push({ pid, signal }),
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.status, "cancelled");
+      assert.equal(result.updated, false);
+      assert.deepEqual(signals, []);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed for missing evidence and ignores heartbeat pids", async () => {
     const fixture = createFixture("cancel-missing");
     const beforeRun = readFileSync(join(fixture.runDir, "run.json"), "utf8");
     const signals = [];
@@ -50,7 +115,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         last_tick_at: NOW,
       });
 
-      const result = cancelFactoryRun(fixture.runId, {
+      const result = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
         inspectorFn: () => ({ ok: true, inspector: "test-inspector", pid: 9876, start_marker: "heartbeat", command_name: "opencode", cwd: fixture.repo }),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
@@ -68,12 +133,12 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
     }
   });
 
-  it("requires an explicit run id instead of using latest-run authority", () => {
+  it("requires an explicit run id instead of using latest-run authority", async () => {
     const fixture = createFixture("cancel-require-run-id");
     const signals = [];
     try {
       writeProcessEvidence(fixture, { pid: 4242 });
-      assert.throws(
+      await assert.rejects(
         () => cancelFactoryRun(undefined, {
           cwd: fixture.repo,
           inspectorFn: matchingInspector(fixture, 4242),
@@ -268,7 +333,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
     }
   });
 
-  it("records and cancels only matching Darwin process identity", () => {
+  it("records and cancels only matching Darwin process identity", async () => {
     const fixture = createFixture("darwin-record-cancel");
     const signals = [];
     try {
@@ -285,7 +350,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
       assert.equal(evidence.identity.start_marker, "darwin-ps:Thu Jul 9 15:00:00 2026");
       assert.doesNotMatch(evidence.identity.start_marker, /^unverified:/u);
 
-      const mismatch = cancelFactoryRun(fixture.runId, {
+      const mismatch = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
         inspectorFn: darwinInspector(5252, { cwd: resolve(tmpdir()) }),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
@@ -295,9 +360,11 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
       assert.match(mismatch.reason, /cwd mismatch/u);
       assert.deepEqual(signals, []);
 
-      const result = cancelFactoryRun(fixture.runId, {
+      const live = darwinInspector(5252, { cwd: fixture.repo });
+      const result = await cancelFactoryRun(fixture.runId, {
         cwd: fixture.repo,
-        inspectorFn: darwinInspector(5252, { cwd: fixture.repo }),
+        cancelWaitMs: 500,
+        inspectorFn: (pid) => (signals.length > 0 ? { ok: false, inspector: "node-process", reason: "ESRCH: no such process" } : live(pid)),
         signalFn: (pid, signal) => signals.push({ pid, signal }),
       });
 
@@ -308,7 +375,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
     }
   });
 
-  it("fails closed for stale, mismatched, or non-run-scoped evidence without mutating run.json", () => {
+  it("fails closed for stale, mismatched, or non-run-scoped evidence without mutating run.json", async () => {
     const cases = [
       {
         name: "run-id-mismatch",
@@ -362,7 +429,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
       const signals = [];
       try {
         writeProcessEvidence(fixture, item.evidence || {});
-        const result = cancelFactoryRun(fixture.runId, {
+        const result = await cancelFactoryRun(fixture.runId, {
           cwd: fixture.repo,
           inspectorFn: item.inspector(fixture),
           signalFn: (pid, signal) => signals.push({ pid, signal }),

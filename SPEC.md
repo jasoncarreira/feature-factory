@@ -278,12 +278,18 @@ Disrupted resume recovery is explicit and non-destructive. `feature-factory fact
 
 For a valid non-terminal manifest with a missing active worktree, restoration is allowed only when the branch exists, recorded `base_commit` and every merged slice `merge_commit` are ancestors of branch HEAD, the target path remains under `.opencode/worktrees`, no unsafe existing path would be overwritten, `git worktree add` succeeds, and final worktree identity/HEAD checks match branch HEAD. Contradictory git evidence is terminal `blocked` with a `terminal_result.reason` naming the conflicting branch/commit evidence. Unsafe or inaccessible local paths are terminal `needs-human` with a `terminal_result.reason` naming the path that requires operator reconciliation. Read-only `status`, `list`, `validate`, and `watch` diagnostics must not implicitly recover, repair, cleanup, prune, or remove anything.
 
-Add commands:
+Shipped command:
+
+```sh
+feature-factory factory recover <run-id>
+```
+
+Proposed, not yet implemented (`factory stale` and `watch --summary` do not exist in the
+current CLI):
 
 ```sh
 feature-factory factory stale [--after 30m]
 feature-factory factory watch <run-id> --summary
-feature-factory factory recover <run-id>
 ```
 
 `stale` should report:
