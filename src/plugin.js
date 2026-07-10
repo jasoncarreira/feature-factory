@@ -222,7 +222,7 @@ function registerSkills(cfg) {
   if (!cfg.skills.paths.includes(skillPath)) cfg.skills.paths.push(skillPath);
 }
 
-export default async function featureFactoryPlugin(_input, options = {}) {
+export default async function featureFactoryPlugin(pluginInput, options = {}) {
   return {
     config(cfg) {
       registerCommand(cfg, options);
@@ -232,7 +232,7 @@ export default async function featureFactoryPlugin(_input, options = {}) {
     },
     "command.execute.before": async (input, output) => {
       if (input.command !== "feature") return;
-      injectParsedPayload(output.parts, decodeFeatureCommandPayload(input.arguments));
+      injectParsedPayload(output.parts, decodeFeatureCommandPayload(input.arguments, { repo: pluginInput?.directory || pluginInput?.worktree }));
     },
   };
 }

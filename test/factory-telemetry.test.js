@@ -76,8 +76,8 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
       assert.equal(launched.env.TRACEPARENT, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
-      const decoded = decodeFeatureCommandPayload(launched.argv.at(-1));
-      assert.equal(decoded.ok, true);
+      const decoded = decodeFeatureCommandPayload(launched.argv.at(-1), { repo: fixture.repo });
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
       assert.equal(decoded.payload.resume.run_id, fixture.runId);
       assert.equal(decoded.payload.driver.mode, "interactive");
     } finally {
@@ -104,8 +104,9 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
-      const decoded = decodeFeatureCommandPayload(launched.argv.at(-1));
-      assert.equal(decoded.ok, true);
+      const launchedRepo = launched.argv[launched.argv.indexOf("--dir") + 1];
+      const decoded = decodeFeatureCommandPayload(launched.argv.at(-1), { repo: launchedRepo });
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
       const payload = decoded.payload;
       assert.equal(JSON.stringify(payload).includes("TRACEPARENT"), false);
       assert.equal(JSON.stringify(payload).includes("4bf92f3577b34da6a3ce929d0e0e4736"), false);

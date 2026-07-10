@@ -1,3 +1,4 @@
+import { basename, resolve } from "node:path";
 import { validateRun } from "./validate.js";
 
 const PREFIX = "ffpayload-v1:";
@@ -13,12 +14,22 @@ const STEERING_KEYS = new Set(["schema_version", "kind", "run_id", "pending", "c
 const STEERING_PENDING_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at"]);
 const STEERING_CONSUME_KEYS = new Set(["command", "args"]);
 const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice"]);
+const CONTINUATION_ARTIFACT_KINDS = new Map([
+  ["artifacts/story.md", "story"],
+  ["artifacts/research-map.md", "research_map"],
+  ["artifacts/design-brief.md", "design_brief"],
+  ["artifacts/technical-brief.md", "technical_brief"],
+  ["artifacts/test-report.md", "test_report"],
+  ["artifacts/validation-report.md", "validation_report"],
+  ["artifacts/pr-body.md", "pr_body"],
+]);
+const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu;
 
 export function encodeFeatureCommandPayload(payload) {
   return `${PREFIX}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
 }
 
-export function decodeFeatureCommandPayload(argumentsText) {
+export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   const text = String(argumentsText || "").trim();
   if (!text.startsWith(PREFIX)) return { ok: false, reason: "unencoded" };
   const encoded = text.slice(PREFIX.length);
@@ -60,7 +71,7 @@ export function decodeFeatureCommandPayload(argumentsText) {
 
   let continuation = null;
   if (hasContinuation) {
-    const result = normalizeContinuation(payload.continuation, payload.operator_request.trim());
+    const result = normalizeContinuation(payload.continuation, payload.operator_request.trim(), options.repo);
     if (!result.ok) return result;
     continuation = result.value;
   }
@@ -146,7 +157,7 @@ function normalizeSteering(steering, runId) {
   };
 }
 
-function normalizeContinuation(continuation, operatorRequest) {
+function normalizeContinuation(continuation, operatorRequest, repo) {
   if (!plainObject(continuation) || !hasOnlyKeys(continuation, CONTINUATION_KEYS)) return { ok: false, reason: "invalid-continuation" };
   const { parent, review, target } = continuation;
   if (!plainObject(parent) || !hasOnlyKeys(parent, CONTINUATION_PARENT_KEYS)
@@ -173,19 +184,61 @@ function normalizeContinuation(continuation, operatorRequest) {
   }
 
   if (!safeRunId(parent.run_id) || !safeRunId(target.run_id) || target.branch !== target.run_id || parent.run_id === target.run_id) return { ok: false, reason: "invalid-continuation-route" };
+  const targetWorktree = continuationTargetWorktree(repo, target.run_id);
+  if (!targetWorktree) return { ok: false, reason: "invalid-continuation-context" };
   if (!CONTINUATION_REVIEW_KINDS.has(review.kind) || !validContinuationReviewSource(review.kind, review.source)) return { ok: false, reason: "invalid-continuation-review" };
   if (parent.run_ref !== `.opencode/factory/${parent.run_id}/run.json`
-    || !safeRelativeRef(review.ref, "reviews/")
-    || continuation.parent_artifacts.some((item) => !safeRelativeRef(item.ref, "artifacts/"))
-    || continuation.parent_evidence.some((item) => !safeRelativeRef(item.ref, "evidence/"))
-    || continuation.parent_reviews.some((item) => !safeRelativeRef(item.ref, "reviews/"))) {
+    || !canonicalJsonRef(review.ref, "reviews/")
+    || target.worktree !== targetWorktree
+    || !COMMIT_PATTERN.test(parent.commit)
+    || !COMMIT_PATTERN.test(target.base_commit)
+    || continuation.parent_artifacts.some((item) => CONTINUATION_ARTIFACT_KINDS.get(item.ref) !== item.kind)
+    || continuation.parent_evidence.some((item) => item.kind !== "evidence" || !canonicalJsonRef(item.ref, "evidence/"))
+    || continuation.parent_reviews.some((item) => item.kind !== "review" || !canonicalJsonRef(item.ref, "reviews/"))) {
     return { ok: false, reason: "invalid-continuation-refs" };
   }
   const expectedRequest = `Continue blocked feature-factory run '${parent.run_id}' as '${target.run_id}' using review '${review.ref}'.`;
   if (operatorRequest !== expectedRequest || continuation.operator_summary !== `Continue blocked run '${parent.run_id}' from ${review.ref}.`) {
     return { ok: false, reason: "continuation-request-mismatch" };
   }
-  return { ok: true, value: continuation };
+  return {
+    ok: true,
+    value: {
+      kind: "blocked-run-continuation",
+      schema_version: 1,
+      created_at: continuation.created_at,
+      operator_summary: continuation.operator_summary,
+      parent: {
+        run_id: parent.run_id,
+        status: "blocked",
+        run_ref: parent.run_ref,
+        run_hash: parent.run_hash,
+        branch: parent.branch,
+        commit: parent.commit,
+        worktree: parent.worktree,
+      },
+      review: {
+        kind: review.kind,
+        ref: review.ref,
+        hash: review.hash,
+        subject: review.subject,
+        summary: review.summary ?? null,
+        required_fixes: Array.isArray(review.required_fixes) ? [...review.required_fixes] : [],
+        ...(review.source === undefined ? {} : { source: review.source }),
+        ...(review.verdict === undefined ? {} : { verdict: review.verdict }),
+      },
+      target: {
+        run_id: target.run_id,
+        branch: target.branch,
+        worktree: targetWorktree,
+        base_ref: target.base_ref,
+        base_commit: target.base_commit,
+      },
+      parent_artifacts: continuation.parent_artifacts.map(normalizedRefHash),
+      parent_evidence: continuation.parent_evidence.map(normalizedRefHash),
+      parent_reviews: continuation.parent_reviews.map(normalizedRefHash),
+    },
+  };
 }
 
 function hasOnlyKeys(value, allowed) {
@@ -198,6 +251,25 @@ function safeRunId(value) {
 
 function safeRelativeRef(value, prefix) {
   return nonEmptyString(value) && value.startsWith(prefix) && !value.includes("\\") && !value.split("/").includes("..");
+}
+
+function canonicalJsonRef(value, prefix) {
+  return canonicalFileRef(value, prefix) && value.endsWith(".json");
+}
+
+function canonicalFileRef(value, prefix) {
+  if (!safeRelativeRef(value, prefix) || value !== value.trim()) return false;
+  const segments = value.split("/");
+  return segments.length >= 2 && segments.every((segment) => segment !== "" && segment !== "." && segment !== "..") && basename(value).includes(".") && !basename(value).endsWith(".");
+}
+
+function continuationTargetWorktree(repo, runId) {
+  if (!nonEmptyString(repo)) return null;
+  return resolve(repo, ".opencode", "worktrees", runId);
+}
+
+function normalizedRefHash(item) {
+  return { kind: item.kind, ref: item.ref, hash: item.hash };
 }
 
 function safePendingRef(value) {

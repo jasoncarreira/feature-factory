@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import plugin, { parseFrontmatter } from "../src/plugin.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadValue } from "../src/feature-command-payload.js";
 
@@ -169,6 +170,40 @@ describe("feature command payload parsing", () => {
     assert.deepEqual(forged, { ok: false, reason: "invalid-steering-consume" });
   });
 
+  it("requires canonical factory-generated continuation refs and target worktree", async () => {
+    const continuation = validContinuation();
+    assert.deepEqual(decodeFeatureCommandPayload(continuationToken(continuation)), { ok: false, reason: "invalid-continuation-context" });
+    const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
+    assert.equal(decoded.ok, true);
+    assert.deepEqual(decoded.payload.continuation, continuation);
+
+    const directoryReview = structuredClone(continuation);
+    directoryReview.review.ref = "reviews/";
+    directoryReview.parent_reviews[0].ref = "reviews/";
+    directoryReview.operator_summary = `Continue blocked run '${directoryReview.parent.run_id}' from reviews/.`;
+
+    const directoryArtifact = structuredClone(continuation);
+    directoryArtifact.parent_artifacts[0].ref = "artifacts/";
+
+    const directoryEvidence = structuredClone(continuation);
+    directoryEvidence.parent_evidence[0].ref = "evidence/";
+
+    const arbitraryWorktree = structuredClone(continuation);
+    arbitraryWorktree.target.worktree = "/etc";
+
+    const wrongRunWorktree = structuredClone(continuation);
+    wrongRunWorktree.target.worktree = resolve(process.cwd(), ".opencode", "worktrees", "other-run");
+
+    for (const malformed of [directoryReview, directoryArtifact, directoryEvidence, arbitraryWorktree, wrongRunWorktree]) {
+      assert.deepEqual(decodeFeatureCommandPayload(continuationToken(malformed), { repo: process.cwd() }), { ok: false, reason: "invalid-continuation-refs" });
+    }
+
+    const instance = await plugin({ directory: process.cwd() });
+    const output = { parts: [{ type: "text", text: `command\n\nUNTRUSTED_OPERATOR_PAYLOAD_START\n${continuationToken(continuation)}` }] };
+    await instance["command.execute.before"]({ command: "feature", sessionID: "session", arguments: continuationToken(continuation) }, output);
+    assert.match(output.parts[0].text, /PLUGIN_PARSED_OPERATOR_PAYLOAD_START\nparse_status: valid/u);
+  });
+
   it("treats explicit null routes as absent and preserves hook idempotency", async () => {
     const instance = await plugin({});
     const cfg = {};
@@ -248,6 +283,55 @@ describe("review tier contract docs", () => {
     assert.match(skillDoc, /Existing mandatory gates, observed evidence, `work-reviewer`, `implementation-validator`, and `security-reviewer` behavior still applies\./);
   });
 });
+
+function continuationToken(continuation) {
+  return encodeFeatureCommandPayload({
+    operator_request: `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`,
+    driver: { mode: "headless" },
+    continuation,
+  });
+}
+
+function validContinuation() {
+  const hash = `sha256:${"a".repeat(64)}`;
+  const parentRunId = "parent-run";
+  const targetRunId = "target-run";
+  const reviewRef = "reviews/reviewer.json";
+  return {
+    kind: "blocked-run-continuation",
+    schema_version: 1,
+    created_at: "2026-07-09T12:00:00.000Z",
+    operator_summary: `Continue blocked run '${parentRunId}' from ${reviewRef}.`,
+    parent: {
+      run_id: parentRunId,
+      status: "blocked",
+      run_ref: `.opencode/factory/${parentRunId}/run.json`,
+      run_hash: hash,
+      branch: parentRunId,
+      commit: "b".repeat(40),
+      worktree: resolve(process.cwd(), ".opencode", "worktrees", parentRunId),
+    },
+    review: {
+      kind: "validator",
+      ref: reviewRef,
+      hash,
+      subject: parentRunId,
+      summary: "continue with fixes",
+      required_fixes: [],
+      source: "run.validator.review_ref",
+    },
+    target: {
+      run_id: targetRunId,
+      branch: targetRunId,
+      worktree: resolve(process.cwd(), ".opencode", "worktrees", targetRunId),
+      base_ref: "main",
+      base_commit: "c".repeat(40),
+    },
+    parent_artifacts: [{ kind: "story", ref: "artifacts/story.md", hash }],
+    parent_evidence: [{ kind: "evidence", ref: "evidence/build.json", hash }],
+    parent_reviews: [{ kind: "review", ref: reviewRef, hash }],
+  };
+}
 
 async function pluginConfig(options) {
   const cfg = {};
