@@ -134,6 +134,8 @@ External drivers write only `gates/<gate>.answer`; they may use `feature-factory
 
 `factory cost-record` is the only required write surface for cost attribution. It appends one normalized entry under `run.json.cost_attribution.entries[]`, recomputes `totals`, `by_agent`, and `by_slice`, validates the run, and writes under `run-json.lock/`. Use it after agent waits when provider/opencode metadata exposes usage or cost; do not edit `run.json.cost_attribution` directly.
 
+`feature-factory factory cost-report <run-id> [--json] [--telemetry]` is a read-only response surface, not a semantic state-write command. It does not acquire or wait for `run-json.lock` and does not add report fields to `run.json`.
+
 `factory recover` is operator recovery for orphaned/stale running runs; do not use it to bypass active in-flight work or protected gates.
 
 `feature-factory factory resume-check <run-id> --json` is the disrupted-resume recovery surface. `factory start --headless|--autonomous "resume <run-id>"` runs the same preflight before mutating resume state. It may restore a missing `.opencode/worktrees/<run>` worktree or write a terminal failure, but it must never re-scaffold a missing/disrupted `.opencode/factory/<run-id>` control plane. It also must not perform destructive cleanup, `git worktree prune`, `git worktree remove`, branch deletion, or run-directory removal; cleanup remains an explicit operator action through `feature-factory factory cleanup <run-id>`. If `.opencode/factory/<run-id>/run.json` is missing, inaccessible, or invalid, return a synthetic non-durable terminal-shaped blocked result with `ok:false`, `durable:false`, `updated:false`, `recovered:false`, `status:"blocked"`, and a clear `terminal_result.reason` explaining that no durable `terminal_result` can be written without forbidden re-scaffolding. Valid terminal manifests are returned unchanged. Valid non-terminal manifests recover a missing active worktree only when the branch exists, recorded `base_commit` and merged slice `merge_commit` values are ancestors of branch HEAD, the target is under `.opencode/worktrees`, no unsafe existing path would be overwritten, `git worktree add` succeeds, and final `checkWorktreeIdentity` plus HEAD checks match. Contradictory git evidence writes durable terminal `blocked` with a `terminal_result.reason` naming the conflicting branch/commit evidence; unsafe or inaccessible local paths write durable terminal `needs-human` with a `terminal_result.reason` naming the path that requires operator reconciliation. The `status`, `list`, `validate`, and `watch` surfaces are read-only diagnostics; they do not call this implicitly and must not recover, repair, cleanup, prune, or remove anything.
@@ -455,6 +457,70 @@ Rules:
 - `by_agent` is keyed by agent name. `by_slice` is keyed by `slice_id`; validation rejects unknown slice ids when slices are known.
 - Orchestrators must call `factory cost-record` only after the heartbeat for that wait has stopped or `factory heartbeat <run-id> --status --json` verifies it inactive, and before terminal writes or `factory pr-created`.
 - Required attribution points are waits for `spec-writer`, `work-reviewer`, `work-decomposer`, `backend-builder`/`frontend-builder`, `test-verifier`, `implementation-validator`, `security-reviewer`, and remediation. Work-reviewer attribution includes spec review, decomposition review, slice review, and test review waits.
+
+### cost-report report-v1 response (not persisted)
+
+Invocation modes:
+
+```sh
+feature-factory factory cost-report <run-id>
+feature-factory factory cost-report <run-id> --json
+feature-factory factory cost-report <run-id> --telemetry [--json]
+```
+
+The first form is human-readable; `--json` emits this stable response shape:
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "app-123",
+  "status": "partial",
+  "entry_count": 3,
+  "request_count": 3,
+  "agent_count": 2,
+  "step_count": 2,
+  "slice_count": 1,
+  "unattributed_step_entry_count": 1,
+  "totals": {
+    "status": "partial",
+    "entry_count": 3,
+    "request_count": 3,
+    "input_tokens": 100,
+    "output_tokens": 20,
+    "total_tokens": 120,
+    "cost_total": 0.25,
+    "cost_currency": "USD",
+    "mixed_currency": false,
+    "missing": ["model"]
+  },
+  "by_agent": {"backend-builder": {}},
+  "by_step": {"build": {}},
+  "by_slice": {"be-api": {}}
+}
+```
+
+Every rollup has required `status`, `entry_count`, `request_count`, `mixed_currency`, and `missing`. It conditionally includes only persisted-and-aggregated numeric fields, in order: `input_tokens`, `output_tokens`, `total_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `reasoning_tokens`, `cost_total`, `cost_input`, `cost_output`, `cost_cache_creation`, `cost_cache_read`, then valid `cost_currency`. Top-level status/counts derive from totals; one persisted entry is one request even when request IDs repeat.
+
+The response is recomputed at read time exclusively from a projected copy of `run.json.cost_attribution.entries`. Persisted attribution `status`, `totals`, `by_agent`, and `by_slice` are ignored as possibly stale caches. `by_step`, report totals, report telemetry, and the response are not persisted and do not change the `run.json.cost_attribution` schema. Missing/null/empty attribution or entries yields an unavailable report with zero counts, `missing: ["entries"]`, and empty dimension maps.
+
+For `agent`, `step`, and `slice_id`, a group exists only for a string with nonzero trimmed length, but its exact untrimmed and unsanitized persisted value is the raw JSON key. `"agent"`, `" agent "`, control-containing/literal-escape strings, and `__proto__` remain distinct identities. Missing, `null`, empty, or whitespace-only `step` values are excluded from `by_step`, counted by `unattributed_step_entry_count`, and never represented by a synthetic key. Human output uses double-quoted injective terminal-safe labels: quote/backslash are escaped, and every other non-printable/non-ASCII UTF-16 code unit is uppercase `\uXXXX`; display encoding never changes raw JSON keys or merges groups.
+
+Empty/all-unavailable rollups are `unavailable`, meaning absence rather than zero. A validator-accepted data-less `partial` entry stays `partial` and contributes no invented numeric field. Every own usage/cost numeric property whose persisted value is exactly `null` is projected to absence and omitted before aggregation; numeric `null` is never zero, while explicit numeric `0` remains present.
+
+Mixed-currency rollups are `partial`, set `mixed_currency: true`, include `mixed_currency` in `missing`, and omit both `cost_total` and `cost_currency`. Compatibility component fields (`cost_input`, `cost_output`, `cost_cache_creation`, `cost_cache_read`) may still be summed separately, but they are not normalized monetary totals; consumers must not infer or reconstruct a combined total.
+
+`cost-report` is strictly local read-only diagnostics and non-billing output. It does not mutate files, persist derived data, acquire/wait for `run-json.lock`, require heartbeat state or accepted attestations, invoke full-run/gate/review validation, normalize provider metadata, inspect pricing tables/APIs, price or estimate costs, convert/coerce currency, coerce missing values to zero, or make network calls. It is not invoice, quota, chargeback, finance-control, or cross-run accounting authority.
+
+`--telemetry` is an opt-in for report-invocation correlation only. Without it, ambient context cannot change output. With valid inherited context it may append only:
+
+```json
+"telemetry": {
+  "trace_id": "0123456789abcdef0123456789abcdef",
+  "parent_span_id": "0123456789abcdef"
+}
+```
+
+Absent context adds no field. The IDs do not prove that an attribution entry, agent, step, slice, provider request, or aggregate originated from that trace/span. The command creates no span, initializes no SDK/exporter, exposes no full trace context/headers, persists no context, and makes no network call.
 
 ## run.json
 

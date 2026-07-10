@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { formatCostAttributionSummary, publicCostAttributionSummary } from "./cost-attribution.js";
+import { formatCostAttributionSummary, publicCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { diagnoseRunFile, diagnoseRunObject, diagnosticEnvelope, diagnosticItem } from "./factory-diagnostics.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
@@ -238,7 +238,7 @@ function safeDiagnoseRunObject(run, file, options) {
 }
 
 function diagnosticSummary(diagnostics) {
-  const envelope = diagnostics || healthyDiagnostics();
+  const envelope = sanitizeDiagnosticProjection(diagnostics || healthyDiagnostics());
   return {
     diagnostics: envelope,
     diagnostic_status: stringOrDefault(envelope.status, "ok"),
@@ -246,6 +246,13 @@ function diagnosticSummary(diagnostics) {
     diagnostic_classification: stringOrDefault(envelope.classification, "healthy"),
     diagnostic_summary: truncateDiagnosticSummary(stringOrDefault(envelope.summary, "No diagnostics")),
   };
+}
+
+function sanitizeDiagnosticProjection(value) {
+  if (typeof value === "string") return sanitizePublicCostText(value);
+  if (Array.isArray(value)) return value.map(sanitizeDiagnosticProjection);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeDiagnosticProjection(item)]));
 }
 
 function healthyDiagnostics() {
@@ -276,9 +283,13 @@ function sliceSummary(run) {
 }
 
 function currentSummary(run) {
-  const slice = firstByStatus(run.slices, ["blocked", "running", "review"]);
-  if (slice) return summarizeWorkItem(slice.id, slice.status, slice.attempts);
-  const step = firstByStatus(run.steps, ["blocked", "running", "review", "pending"]);
+  const activeSlice = firstByStatus(run.slices, ["running", "review"]);
+  if (activeSlice) return summarizeWorkItem(activeSlice.id, activeSlice.status, activeSlice.attempts);
+  const activeStep = firstByStatus(run.steps, ["running", "review"]);
+  if (activeStep) return summarizeWorkItem(activeStep.agent, activeStep.status, activeStep.attempts);
+  const blockedSlice = firstByStatus(run.slices, ["blocked"]);
+  if (blockedSlice) return summarizeWorkItem(blockedSlice.id, blockedSlice.status, blockedSlice.attempts);
+  const step = firstByStatus(run.steps, ["blocked", "pending"]);
   if (step) return summarizeWorkItem(step.agent, step.status, step.attempts);
   const panel = inferredPrePrPanelSummary(run);
   if (panel) return panel;
@@ -341,7 +352,7 @@ function firstByStatus(items, statuses) {
 }
 
 function summarizeWorkItem(name, status, attempts) {
-  const label = stringOrNull(name);
+  const label = stringOrNull(name) ? sanitizePublicCostText(name) : null;
   if (!label || !status) return null;
   const normalizedStatus = String(status);
   const attempt = Number.isInteger(attempts) && attempts > 0 ? ` a${attempts}` : "";

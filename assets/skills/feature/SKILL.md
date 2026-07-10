@@ -176,6 +176,8 @@ External drivers write only `gates/<gate>.answer`; they may use `feature-factory
 
 Cost attribution writes use `feature-factory factory cost-record <run-id> ... --json`, which appends to `run.json.cost_attribution` and recomputes `totals`, `by_agent`, and `by_slice` summaries under the run-json lock. Record only provider-supplied token and cost fields. If usage exists but cost/model/provider/currency is missing, record the available fields and let the entry become `partial`; if no usage or cost is exposed, omit the record or record `unavailable` with a `missing` reason. Never fill absent token or cost values with `0`.
 
+Cost reporting is not a state write. Use `feature-factory factory cost-report <run-id>` for human output, add `--json` for report-v1 JSON, or add `--telemetry` for opt-in report-invocation correlation. Unlike `cost-record`, `cost-report` never acquires the run-json write lock and never mutates or persists factory state.
+
 Disrupted resume recovery is explicit. Use `feature-factory factory resume-check <run-id> --json` before mutating a resumed run unless the invocation came through `factory start --headless|--autonomous "resume <run-id>"`, which runs the same preflight before `seedRepoSkill()` or `opencode run`. Missing, inaccessible, or invalid `.opencode/factory/<run-id>/run.json` must not create or overwrite durable state and must not re-scaffold a fresh empty control plane; the command returns a synthetic non-durable blocked envelope with `ok:false`, `durable:false`, `updated:false`, `recovered:false`, and a clear `terminal_result.reason` explaining that no durable `terminal_result` can be written without forbidden re-scaffolding. Resume-check must not perform destructive cleanup, `git worktree prune`, `git worktree remove`, branch deletion, or run-directory removal; cleanup remains an explicit operator action through `feature-factory factory cleanup <run-id>` and is not part of disrupted-resume recovery. For a valid non-terminal manifest with a missing active worktree, recover only when the branch exists, recorded `base_commit` and merged slice `merge_commit` values are ancestors of branch HEAD, the target path stays under `.opencode/worktrees`, no existing path would be overwritten, `git worktree add` succeeds, and the final `checkWorktreeIdentity` plus worktree HEAD match branch HEAD. Contradictory git evidence must persist terminal `blocked` with a `terminal_result.reason` naming the conflicting branch/commit evidence; unsafe or inaccessible local paths must persist terminal `needs-human` with a `terminal_result.reason` naming the path that requires operator reconciliation. Preserve gates, slices, evidence, reviews, and terminal context; update only `run.worktree` when it was missing or stale. Status/list/validate/watch remain read-only and must not implicitly recover, repair, cleanup, prune, or remove anything.
 
 `factory recover` is operator recovery for orphaned/stale running runs; do not use it to bypass active in-flight work or protected gates.
@@ -314,6 +316,28 @@ feature-factory factory cost-record <run-id> \
   --currency USD \
   --json
 ```
+
+### Read-only report contract
+
+Supported forms are:
+
+```sh
+feature-factory factory cost-report <run-id>
+feature-factory factory cost-report <run-id> --json
+feature-factory factory cost-report <run-id> --telemetry [--json]
+```
+
+The report reads one contained run's `run.json` and recomputes report-v1 `totals`, `by_agent`, `by_step`, and `by_slice` exclusively from `cost_attribution.entries` at read time. Ignore persisted attribution `status`, `totals`, `by_agent`, and `by_slice`; never persist `by_step`, report totals, or output. The response includes `schema_version: 1`, `run_id`, `status`, `entry_count`, `request_count`, `agent_count`, `step_count`, `slice_count`, `unattributed_step_entry_count`, and the four views. `request_count` remains one per persisted entry, not unique request IDs.
+
+For every agent, step, and slice group, accept only nonblank string dimensions but preserve the exact untrimmed and unsanitized persisted string as the raw JSON key. Keep collision-prone values and `__proto__` distinct. Human labels must be quoted and injective terminal-safe: escape quote/backslash and encode every non-printable/non-ASCII UTF-16 code unit as uppercase `\uXXXX`; never merge groups through lossy sanitization. Missing, `null`, empty, or whitespace-only steps are excluded from `by_step`, counted by `unattributed_step_entry_count`, and never assigned a synthetic step.
+
+Preserve `available`, `partial`, and `unavailable` semantics and the `missing` union. Empty/all-unavailable means unavailable attribution, never zero. A validator-accepted data-less `partial` entry remains `partial` and contributes no fabricated numeric field. Treat explicit `null` in every usage/cost numeric field as absence and omit it rather than coercing it to zero; preserve explicit numeric `0`.
+
+For mixed currencies, emit `status: partial`, `mixed_currency: true`, include `mixed_currency` in `missing`, and omit `cost_total` and `cost_currency`. Compatibility component sums (`cost_input`, `cost_output`, `cost_cache_creation`, `cost_cache_read`) may remain, but they are not normalized monetary totals and must not be combined or reconstructed by consumers.
+
+This is strictly local, non-billing diagnostics. The command must not mutate `run.json` or any file, acquire or wait for `run-json.lock`, require a heartbeat state or accepted attestations, inspect unrelated gates/reviews/verdicts, normalize provider metadata, use pricing tables/APIs, price or estimate costs, convert currencies, coerce missing values, create spans, initialize exporters, persist trace context, or make network calls. It is not invoice, quota, chargeback, finance-control, or cross-run accounting authority.
+
+`--telemetry` opts in for this report invocation only. Without it, ignore ambient trace context and keep output unchanged. With it, valid inherited context may add only `telemetry.trace_id` and `telemetry.parent_span_id`; absent context adds nothing. Those IDs correlate the invocation only. They are not proof that any attribution entry, agent, step, slice, provider request, or aggregate came from that trace/span. Do not expose full trace context or exporter configuration.
 
 ## Detached-Run Diagnostics
 

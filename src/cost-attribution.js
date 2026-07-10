@@ -96,8 +96,10 @@ export function normalizeCostAttribution(value = {}, options = {}) {
 
 export function recomputeCostAttribution(value = {}, options = {}) {
   const inputEntries = Array.isArray(value) ? value : Array.isArray(value?.entries) ? value.entries : [];
-  if (inputEntries.length > MAX_COST_ATTRIBUTION_ENTRIES) throw new Error(`cost attribution entries must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries`);
+  // Dedupe before enforcing the cap so an identical retry at capacity stays a
+  // no-op instead of tripping the entry limit.
   const entries = dedupeCostEntries(inputEntries.map((entry) => normalizeCostUsageEntry(entry, { ...options, now: entry?.recorded_at ?? entry?.recordedAt ?? options.now, id: entry?.id ?? options.id })));
+  if (entries.length > MAX_COST_ATTRIBUTION_ENTRIES) throw new Error(`cost attribution entries must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries`);
   const updatedAt = normalizeTimestamp(options.now ?? value?.updated_at ?? value?.updatedAt);
   const totals = rollupEntries(entries);
   return {
@@ -175,11 +177,22 @@ function dedupeCostEntries(entries) {
       deduped.push(entry);
       continue;
     }
-    if (JSON.stringify(existing) !== JSON.stringify(entry)) {
+    // Same id = same logical event. `recorded_at` is server-generated when the
+    // caller omits --recorded-at, so an identical retry must compare equal
+    // regardless of the retry's timestamp; keep the first entry (its original
+    // timestamp) and treat the retry as a no-op. Only genuinely different
+    // content is a conflict.
+    if (costEntryContentSignature(existing) !== costEntryContentSignature(entry)) {
       throw new Error(`cost usage entry id '${entry.id}' already recorded with different content`);
     }
   }
   return deduped;
+}
+
+function costEntryContentSignature(entry) {
+  const { recorded_at, ...rest } = entry;
+  void recorded_at;
+  return JSON.stringify(rest);
 }
 
 export function hasTerminalControl(value) {
@@ -191,11 +204,11 @@ export function sanitizePublicCostText(value) {
   return String(value).replace(/[\t\r\n]+/gu, " ").replace(TERMINAL_CONTROL_PATTERN, "").replace(/\s+/gu, " ").trim();
 }
 
-function rollupBy(entries, key) {
+export function rollupBy(entries, key) {
   const groups = new Map();
   for (const entry of entries) {
-    const group = nonEmptyString(entry[key]);
-    if (!group) continue;
+    const group = entry[key];
+    if (typeof group !== "string" || group.trim().length === 0) continue;
     const groupEntries = groups.get(group) || [];
     groupEntries.push(entry);
     groups.set(group, groupEntries);
@@ -203,16 +216,15 @@ function rollupBy(entries, key) {
   return Object.fromEntries([...groups.entries()].map(([name, groupEntries]) => [name, rollupEntries(groupEntries)]));
 }
 
-function rollupEntries(entries) {
+export function rollupEntries(entries) {
   const rollup = {
     status: "unavailable",
     entry_count: entries.length,
     request_count: entries.length,
-    missing: [],
-    mixed_currency: false,
   };
   const missing = new Set();
   const costCurrencies = new Set();
+  const totalCurrencies = new Set();
   let availableEntries = 0;
   let partial = entries.length === 0;
 
@@ -222,12 +234,15 @@ function rollupEntries(entries) {
     for (const item of Array.isArray(entry.missing) ? entry.missing : []) missing.add(item);
 
     for (const field of NUMERIC_FIELDS) {
-      if (entry[field] === undefined) continue;
-      rollup[field] = (rollup[field] ?? 0) + entry[field];
+      if (entry[field] === undefined || entry[field] === null) continue;
+      const aggregate = (rollup[field] ?? 0) + entry[field];
+      if (!Number.isFinite(aggregate)) throw new Error(`cost attribution aggregate overflow for ${field}`);
+      rollup[field] = aggregate;
       if (COST_NUMERIC_FIELDS.includes(field)) {
         const currency = safeCostCurrency(entry.cost_currency);
         if (currency) {
           costCurrencies.add(currency);
+          if (field === "cost_total") totalCurrencies.add(currency);
         } else {
           missing.add("cost_currency");
           partial = true;
@@ -236,24 +251,36 @@ function rollupEntries(entries) {
     }
   }
 
-  // Mixing currencies anywhere in the cost fields poisons every summed cost
-  // number, not just the field where both currencies appear — a USD cost_total
-  // beside a EUR cost_input must not be reported as a single-currency rollup.
-  if (costCurrencies.size === 1) rollup.cost_currency = [...costCurrencies][0];
-  if (costCurrencies.size > 1) {
-    for (const field of COST_NUMERIC_FIELDS) delete rollup[field];
+  if (totalCurrencies.size === 1) rollup.cost_currency = [...totalCurrencies][0];
+  const hasMixedCurrency = costCurrencies.size > 1;
+  if (hasMixedCurrency) {
+    delete rollup.cost_total;
     delete rollup.cost_currency;
-    rollup.mixed_currency = true;
     missing.add("mixed_currency");
     partial = true;
   }
 
-  rollup.missing = [...missing].sort();
-  if (entries.length === 0) rollup.missing = ["entries"];
   if (availableEntries === entries.length && entries.length > 0 && !partial) rollup.status = "available";
   else if (entries.some((entry) => entry.status === "available" || entry.status === "partial")) rollup.status = "partial";
   else rollup.status = "unavailable";
-  return rollup;
+  rollup.mixed_currency = hasMixedCurrency;
+  rollup.missing = entries.length === 0 ? ["entries"] : [...missing].sort();
+  return canonicalRollup(rollup);
+}
+
+function canonicalRollup(rollup) {
+  const ordered = {
+    status: rollup.status,
+    entry_count: rollup.entry_count,
+    request_count: rollup.request_count,
+  };
+  for (const field of NUMERIC_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(rollup, field)) ordered[field] = rollup[field];
+  }
+  if (Object.prototype.hasOwnProperty.call(rollup, "cost_currency")) ordered.cost_currency = rollup.cost_currency;
+  ordered.mixed_currency = rollup.mixed_currency;
+  ordered.missing = rollup.missing;
+  return ordered;
 }
 
 function normalizeMissing(value) {
