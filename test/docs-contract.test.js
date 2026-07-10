@@ -469,6 +469,18 @@ describe("interrupt steer resume docs contract", () => {
     }
   });
 
+  it("documents deterministic plugin parsing for feature command envelopes", () => {
+    for (const [name, text] of documentEntries({ COMMAND, README, SPEC })) {
+      assert.match(text, /command\.execute\.before|before model execution/i, `${name} must parse before model execution`);
+      assert.match(text, /PLUGIN_PARSED_OPERATOR_PAYLOAD/i, `${name} must document the normalized payload block`);
+      assert.match(text, /deterministic(?:ally)? pars|structurally validate/i, `${name} must require deterministic parsing`);
+      assert.match(text, /untrusted operator data\/config/i, `${name} must keep parsed values untrusted`);
+      assert.match(text, /ffpayload-v1:<base64url>/i, `${name} must document the preprocessing-safe versioned transport`);
+      assert.match(text, /fail closed|routing_authority: none|must not authorize/i, `${name} must reject invalid envelopes without routing authority`);
+      assert.match(text, /(?:never|not|must not)[\s\S]*(?:parse|authorize)[\s\S]*(?:autonomous|resume|routing)|raw[\s\S]*(?:never|must not)[\s\S]*(?:autonomous|resume|routing)/i, `${name} must not recover autonomous routing from raw transport text`);
+    }
+  });
+
   it("documents steering conflict checkpoint after steer-consume and no automatic rollback", () => {
     for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {
       assert.match(text, /after `?steer-consume`?[\s\S]*(?:steering-conflict|conflict checkpoint)/i, `${name} must require conflict checkpoint after steer-consume`);

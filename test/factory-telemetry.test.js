@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { continueFactory, resumeFactory, startFactory } from "../src/factory.js";
+import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 
 const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
@@ -75,6 +76,10 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
       assert.equal(launched.env.TRACEPARENT, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
+      const decoded = decodeFeatureCommandPayload(launched.argv.at(-1));
+      assert.equal(decoded.ok, true);
+      assert.equal(decoded.payload.resume.run_id, fixture.runId);
+      assert.equal(decoded.payload.driver.mode, "interactive");
     } finally {
       cleanup(fixture.root);
     }
@@ -99,7 +104,9 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
-      const payload = JSON.parse(launched.argv.at(-1));
+      const decoded = decodeFeatureCommandPayload(launched.argv.at(-1));
+      assert.equal(decoded.ok, true);
+      const payload = decoded.payload;
       assert.equal(JSON.stringify(payload).includes("TRACEPARENT"), false);
       assert.equal(JSON.stringify(payload).includes("4bf92f3577b34da6a3ce929d0e0e4736"), false);
     } finally {

@@ -1,9 +1,13 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { decodeFeatureCommandPayload, safePayloadValue } from "./feature-command-payload.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const assets = join(root, "assets");
+const OPERATOR_PAYLOAD_MARKER = "UNTRUSTED_OPERATOR_PAYLOAD_START";
+const PARSED_PAYLOAD_START = "PLUGIN_PARSED_OPERATOR_PAYLOAD_START";
+const PARSED_PAYLOAD_END = "PLUGIN_PARSED_OPERATOR_PAYLOAD_END";
 
 function readAsset(...parts) {
   return readFileSync(join(assets, ...parts), "utf8");
@@ -70,9 +74,51 @@ function commandTemplate(body, options = {}) {
     "Plugin configuration defaults:",
     `- PR mode: \`${prMode}\`. Use this as the default for successful PR creation when the driver payload has no \`pr_mode\` override.`,
   ].join("\n");
-  const marker = "UNTRUSTED_OPERATOR_PAYLOAD_START";
-  if (!body.includes(marker)) return `${body.trim()}\n\n${config}`;
-  return body.replace(marker, `${config}\n\n${marker}`).trim();
+  if (!body.includes(OPERATOR_PAYLOAD_MARKER)) return `${body.trim()}\n\n${config}`;
+  return body.replace(OPERATOR_PAYLOAD_MARKER, `${config}\n\n${OPERATOR_PAYLOAD_MARKER}`).trim();
+}
+
+function parsedPayloadBlock(parsed) {
+  if (!parsed.ok) {
+    return [
+      PARSED_PAYLOAD_START,
+      "parse_status: invalid",
+      "trust: untrusted-operator-data",
+      `reason: ${parsed.reason}`,
+      "driver.mode: interactive",
+      "routing_authority: none",
+      PARSED_PAYLOAD_END,
+    ].join("\n");
+  }
+  const payload = parsed.payload;
+  const lines = [
+    PARSED_PAYLOAD_START,
+    "parse_status: valid",
+    "trust: untrusted-operator-data",
+    `operator_request: ${safePayloadValue(payload.operator_request)}`,
+    `driver.mode: ${payload.driver.mode}`,
+    `driver.ready: ${payload.driver.ready}`,
+    `driver.pr_mode: ${safePayloadValue(payload.driver.pr_mode)}`,
+    `driver.reviewer: ${safePayloadValue(payload.driver.reviewer)}`,
+    `driver.github_account: ${safePayloadValue(payload.driver.github_account)}`,
+    `driver.run_id: ${safePayloadValue(payload.driver.run_id)}`,
+    `resume: ${safePayloadValue(payload.resume)}`,
+    `steering: ${safePayloadValue(payload.steering)}`,
+    `continuation: ${safePayloadValue(payload.continuation)}`,
+    PARSED_PAYLOAD_END,
+  ];
+  return lines.join("\n");
+}
+
+function injectParsedPayload(parts, parsed) {
+  const block = parsedPayloadBlock(parsed);
+  for (const part of parts || []) {
+    if (part?.type !== "text" || typeof part.text !== "string") continue;
+    const markerIndex = part.text.indexOf(OPERATOR_PAYLOAD_MARKER);
+    if (markerIndex < 0 || part.text.slice(0, markerIndex).includes(`${PARSED_PAYLOAD_START}\nparse_status:`)) continue;
+    part.text = `${part.text.slice(0, markerIndex)}${block}\n\n${part.text.slice(markerIndex)}`;
+    return;
+  }
 }
 
 function normalizePrMode(value) {
@@ -176,6 +222,10 @@ export default async function featureFactoryPlugin(_input, options = {}) {
       registerAgents(cfg);
       applyProfileOptions(cfg, options);
       registerSkills(cfg);
+    },
+    "command.execute.before": async (input, output) => {
+      if (input.command !== "feature") return;
+      injectParsedPayload(output.parts, decodeFeatureCommandPayload(input.arguments));
     },
   };
 }
