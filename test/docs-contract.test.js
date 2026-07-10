@@ -19,6 +19,7 @@ const CLI = readDoc("../src/cli.js");
 const TUI = readDoc("../src/tui.jsx");
 const CODEBASE_RESEARCHER_PROMPT = readDoc("../assets/agent/codebase-researcher.md");
 const SPEC_WRITER_PROMPT = readDoc("../assets/agent/spec-writer.md");
+const WORK_DECOMPOSER_PROMPT = readDoc("../assets/agent/work-decomposer.md");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
@@ -85,6 +86,22 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SKILL, /Step 1 - Research And Design[\s\S]*finite in-scope surface inventory[\s\S]*Step 2 - Spec And Decomposition/i);
     assert.match(SKILL, /Step 2 - Spec And Decomposition[\s\S]*closed implementation matrix[\s\S]*Do not dispatch builders with unresolved instructions/i);
     assert.match(SKILL, /first spec review[\s\S]*every currently discoverable same-class issue[\s\S]*one `required_fixes` list/i);
+  });
+});
+
+describe("decomposition depth contract", () => {
+  it("requires the decomposer and reviewer to enforce a three-wave maximum", () => {
+    assert.match(WORK_DECOMPOSER_PROMPT, /longest dependency path may span at most three waves; a root slice is wave 1/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /combine tightly serialized work into one coherent slice instead of creating a fourth wave/i);
+    assert.match(WORK_REVIEWER_PROMPT, /dependency path deeper than three waves \(root is wave 1\)/i);
+  });
+
+  it("documents derived depth separately from concurrency", () => {
+    for (const [name, text] of Object.entries({ SKILL, SCHEMA, README })) {
+      assert.match(text, /root(?: slice)? is wave 1/i, `${name} must define root depth`);
+      assert.match(text, /(?:at most|capped at) three waves/i, `${name} must document the depth cap`);
+      assert.match(text, /max_parallel_slices[\s\S]{0,120}(?:concurrency|concurrently)[\s\S]{0,120}(?:does not|not)[\s\S]{0,80}(?:depth cap|cap)/i, `${name} must distinguish concurrency from depth`);
+    }
   });
 });
 

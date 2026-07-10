@@ -204,6 +204,31 @@ describe("cli write surface", () => {
     }
   });
 
+  it("rejects an over-depth slice plan without mutating run state", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-slice-depth-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      seedRun(runDir);
+      writeJson(join(runDir, "plan", "slices.json"), {
+        slices: [
+          plannedSlice("root"),
+          plannedSlice("second", ["root"]),
+          plannedSlice("third", ["second"]),
+          plannedSlice("fourth", ["third"]),
+        ],
+      });
+      const runBefore = readFileSync(join(runDir, "run.json"), "utf8");
+
+      const result = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+
+      assert.match(result.stderr, /dependency depth 4 exceeds maximum 3 waves: root -> second -> third -> fourth/u);
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), runBefore);
+      assert.deepEqual(readJson(join(runDir, "run.json")).slices, []);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("resolves state commands from a managed git worktree cwd without --repo", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-worktree-cwd-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
@@ -241,6 +266,10 @@ function seedRun(runDir) {
   writeJson(join(runDir, "plan", "slices.json"), {
     slices: [{ id: "slice", stack: "backend", paths: ["src/example.js"], depends_on: [], acceptance: ["works"], test_plan: ["unit"] }],
   });
+}
+
+function plannedSlice(id, dependsOn = []) {
+  return { id, stack: "backend", paths: [`src/${id}.js`], depends_on: dependsOn, acceptance: [id], test_plan: ["unit"] };
 }
 
 function validateFactory(repo) {

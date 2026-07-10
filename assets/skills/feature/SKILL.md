@@ -441,7 +441,7 @@ Run `work-reviewer` on the brief. Tell the reviewer the reviewed worktree is rea
 
 Run `work-decomposer` with the accepted story, research map, technical brief, and design brief. Mark it running with `feature-factory factory step <run-id> work-decomposer running --attempts N --json`. Because this is a long decomposition-production wait, start heartbeat immediately before the `work-decomposer` Task dispatch/wait with phase `decomposition-review`, then stop heartbeat in the after-return/`finally` path before writing produced plan files or running the next semantic `run.json` / factory CLI state write. After heartbeat is stopped or verified inactive, record provider-supplied usage with `feature-factory factory cost-record <run-id> --agent work-decomposer --step work-decomposer ... --json` when available. It produces `$RUN/plan/slices.json` and `$RUN/plan/plan.md`; after review acceptance, and only after any `decomposition-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> work-decomposer accepted --review-ref reviews/work-decomposer.json --json`, then seed durable slices with `feature-factory factory slices-seed <run-id> --from plan/slices.json --json`.
 
-Review the decomposition the same way. Start heartbeat immediately before the `work-reviewer` decomposition review dispatch/wait with phase `decomposition-review`, stop heartbeat in the after-return/`finally` path, record available provider usage with `factory cost-record --agent work-reviewer --step decomposition-review`, and do not write accepted/rejected step state or seed slices while that heartbeat remains active. The plan must cover every acceptance criterion, keep same-wave slices file-disjoint, serialize shared hotspots, and explain dependencies.
+Review the decomposition the same way. Start heartbeat immediately before the `work-reviewer` decomposition review dispatch/wait with phase `decomposition-review`, stop heartbeat in the after-return/`finally` path, record available provider usage with `factory cost-record --agent work-reviewer --step decomposition-review`, and do not write accepted/rejected step state or seed slices while that heartbeat remains active. The plan must cover every acceptance criterion, keep same-wave slices file-disjoint, serialize shared hotspots, explain dependencies, and keep every dependency path within three waves (root is wave 1). Combine tightly serialized work into fewer coherent slices rather than adding a fourth wave.
 
 ## Gate 1 And Gate 2
 
@@ -457,6 +457,7 @@ Reuse the feature branch/worktree created during Step 0. Compute waves by topolo
 
 - A wave is every `pending` slice whose dependencies are all `merged`.
 - Cap concurrent slices at `run.json.max_parallel_slices`.
+- The longest dependency path is capped at three waves, with roots in wave 1; `max_parallel_slices` controls concurrency only and does not change that cap.
 - Same-wave slices should already be file-disjoint. If you discover overlap, stop and treat it as a decomposition bug.
 - If any slice becomes `blocked`, do not dispatch dependents.
 
