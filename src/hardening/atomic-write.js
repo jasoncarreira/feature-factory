@@ -289,11 +289,20 @@ export function openProtectedAppendFileSync(rootDir, relativePath, options = {})
     if (!opened.isFile() || opened.nlink !== 1) throw protectedError("TARGET_TYPE");
     invokeSyncHook(hooks.afterTempOpen);
     recheckParentsSync(context, ops);
+    const reopened = ops.fstat(descriptor);
     const current = lstatRequiredSync(context.targetPath, ops, "TARGET_CHANGED");
-    if (!current.isFile() || current.isSymbolicLink() || !sameIdentity(current, opened)) {
+    if (
+      !reopened.isFile()
+      || reopened.nlink !== 1
+      || !current.isFile()
+      || current.isSymbolicLink()
+      || current.nlink !== 1
+      || !sameIdentity(reopened, opened)
+      || !sameIdentity(current, reopened)
+    ) {
       throw protectedError("TARGET_CHANGED");
     }
-    if (initial && !sameIdentity(initial.entry, opened)) throw protectedError("TARGET_CHANGED");
+    if (initial && !sameIdentity(initial.entry, reopened)) throw protectedError("TARGET_CHANGED");
     return descriptor;
   } catch (error) {
     try {

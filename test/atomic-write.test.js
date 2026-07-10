@@ -401,6 +401,27 @@ describe("protected atomic writes", () => {
     assert.equal(readFileSync(outside, "utf8"), "outside");
   }));
 
+  it("fails closed when the append target gains an outside hard link after open", () => withRoot((root) => {
+    const outside = mkdtempSync(join(tmpdir(), "feature-factory-append-outside-"));
+    const target = join(root, "log");
+    const outsideLink = join(outside, "log-link");
+    writeFileSync(target, "before\n");
+    try {
+      assert.throws(() => openProtectedAppendFileSync(root, "log", {
+        hooks: {
+          afterTempOpen() {
+            linkSync(target, outsideLink);
+          },
+        },
+      }), assertCode("TARGET_CHANGED"));
+      assert.equal(readFileSync(target, "utf8"), "before\n");
+      assert.equal(readFileSync(outsideLink, "utf8"), "before\n");
+      assert.equal(statSync(target).nlink, 2);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  }));
+
   it("exposes injected filesystem operations without weakening no-follow flags", () => withRoot((root) => {
     let observedFlags = 0;
     const descriptor = openProtectedAppendFileSync(root, "log", {
