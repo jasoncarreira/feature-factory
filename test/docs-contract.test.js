@@ -73,12 +73,20 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SPEC_WRITER_PROMPT, /Do not use open-ended phrases such as "apply everywhere"/i);
   });
 
-  it("requires first review to consolidate same-class findings", () => {
+  it("requires first review to consolidate same-class findings across every dimension", () => {
     assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule/i);
-    assert.match(WORK_REVIEWER_PROMPT, /On `attempt: 1`[\s\S]*all currently discoverable in-scope instances/i);
-    assert.match(WORK_REVIEWER_PROMPT, /do not cite one example while withholding equivalent findings for later rounds/i);
+    assert.match(WORK_REVIEWER_PROMPT, /On `attempt: 1`[\s\S]*every dimension of under-specification/i);
+    assert.match(WORK_REVIEWER_PROMPT, /do not surface one example, or one category, while withholding equivalent findings for later rounds/i);
+    assert.match(WORK_REVIEWER_PROMPT, /new category that was discoverable at `attempt: 1`[\s\S]*first-pass miss/i);
     assert.match(WORK_REVIEWER_PROMPT, /class-wide spec that lacks a finite source\/sink inventory/i);
     assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*attempt > 1/i);
+  });
+
+  it("gives the spec review an acceptance bar so it converges", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /Spec acceptance bar/i);
+    assert.match(WORK_REVIEWER_PROMPT, /assigned policy or an explicit reasoned deferral[\s\S]*maps to a test/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Reject only for a genuinely missing sink, policy, deferral, or test — not for achievable-but-absent depth/i);
+    assert.match(SKILL, /Accept the brief once the inventory is finite[\s\S]*per-sink policy or explicit reasoned deferral[\s\S]*bounded residual detail to build-time remediation/i);
   });
 
   it("puts the closed-scope guard in workflow steps 1 and 2", () => {
