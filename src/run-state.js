@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,7 +7,7 @@ import { appendCostAttributionEntry } from "./cost-attribution.js";
 import { git } from "./git.js";
 import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
-import { pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -15,8 +15,6 @@ export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial",
 const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
 const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
-const PASSING_VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS"]);
-const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
 const GATE_DECISION_STATUSES = new Set(["approved", "changes_requested", "stopped"]);
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
@@ -178,18 +176,17 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
     if (!isRecord(pending)) throw new Error("run has no pending steering");
     if (pending.ref !== requestedRef || pending.hash !== requestedHash) throw new Error("pending steering ref/hash mismatch");
 
-    const pendingResolved = resolveSteeringRef(runDir, pending.ref);
-    const actualHash = hashFile(pendingResolved.path, { mode: "raw" });
+    const source = resolvePendingSteeringSource(runDir, pending);
+    const actualHash = hashFile(source.path, { mode: "raw" });
     if (actualHash !== pending.hash) throw new Error("pending steering file hash mismatch");
-    const steeringFile = parseJsonObjectFile(pendingResolved.path, "pending steering");
+    const steeringFile = parseJsonObjectFile(source.path, "pending steering");
     if (steeringFile.kind !== "operator-steering") throw new Error("pending steering kind mismatch");
     if (steeringFile.run_id !== current.run_id) throw new Error("pending steering run_id mismatch");
     if (steeringFile.id !== pending.id) throw new Error("pending steering id mismatch");
     const message = requireNonEmptyString(steeringFile.message, "pending steering message");
 
     const consumedAt = timestamp(options.now);
-    const consumedRef = nextConsumedSteeringRef(runDir, pending.id, consumedAt);
-    const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
+    const consumedRef = source.consumedRef ?? nextConsumedSteeringRef(runDir, pending.id, consumedAt);
     const history = Array.isArray(current.steering?.history) ? cloneJson(current.steering.history) : [];
     history.push({
       event: "consumed",
@@ -210,7 +207,10 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
         history,
       },
     });
-    await rename(pendingResolved.path, consumedResolved.path);
+    if (!source.consumedRef) {
+      const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
+      await rename(source.path, consumedResolved.path);
+    }
     await writeJsonAtomically(join(runDir, RUN_FILE), next);
     const steering = {
       kind: "operator-steering-consumed",
@@ -369,10 +369,21 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     const hadSlices = Array.isArray(draft.slices);
     const slices = hadSlices ? draft.slices : [];
     if (options.mustExist && !collectionHasItem(slices, sliceId, "id")) throw new Error(`slice '${formatSelector(sliceId)}' not found`);
+    // `merged` is a one-way state owned by transitionSliceMerged. Reject any
+    // generic mutation of an already-merged slice so its durable merged state
+    // (merge_commit, review_ref) cannot be rolled back to running/review/blocked
+    // through the public slice-status path.
+    const priorIndex = selectCollectionItemIndex(slices, sliceId, "slice selector", "id");
+    if (priorIndex >= 0 && slices[priorIndex]?.status === "merged") {
+      throw new Error(`slice '${slices[priorIndex].id || formatSelector(sliceId)}' is already merged; merged slices are immutable via transitionRunSlice`);
+    }
     const update = await applyCollectionItemUpdate({ items: slices, selector: sliceId, updater, selectorLabel: "slice selector", seed: seedRunSlice(sliceId), identityKey: "id" });
     sliceIndex = update.index;
     if (!update.changed) return;
     if (!hadSlices) draft.slices = slices;
+    if (sliceIndex >= 0 && slices[sliceIndex].status === "merged") {
+      throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' merges must use transitionSliceMerged`);
+    }
     if (sliceIndex >= 0) assertSliceReviewPreconditions(runDir, slices[sliceIndex].id || sliceId, slices[sliceIndex]);
   }, options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
@@ -650,6 +661,37 @@ function nextConsumedGateAnswer(runDir, answerRef, answerPath) {
     if (!existsSync(to.path)) return { fromPath: answerPath, toPath: to.path, toRef };
   }
   throw new Error(`unable to allocate consumed answer ref for ${answerRef}`);
+}
+
+function resolvePendingSteeringSource(runDir, pending) {
+  const pendingResolved = resolveSteeringRef(runDir, pending.ref, { mustExist: false });
+  if (existsSync(pendingResolved.path)) return { path: pendingResolved.path, consumedRef: null };
+  // Crash recovery: a prior consume renamed the pending file to its consumed
+  // path but died before recording the consumption in run.json. Locate it by
+  // the consumed naming convention plus the recorded hash and finish the
+  // interrupted consume instead of stranding the run.
+  const recovered = findConsumedSteeringByHash(runDir, pending);
+  if (recovered) return recovered;
+  throw new Error(`missing pending steering file: ${pending.ref}`);
+}
+
+function findConsumedSteeringByHash(runDir, pending) {
+  const safeId = safeSteeringId(pending.id);
+  let names;
+  try {
+    names = readdirSync(join(runDir, "steering"));
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    if (!name.startsWith("consumed-") || !name.endsWith(".json") || !name.includes(`-${safeId}`)) continue;
+    const ref = `steering/${name}`;
+    const resolved = resolveSteeringRef(runDir, ref, { mustExist: false });
+    if (!existsSync(resolved.path)) continue;
+    if (hashFile(resolved.path, { mode: "raw" }) !== pending.hash) continue;
+    return { path: resolved.path, consumedRef: ref };
+  }
+  return null;
 }
 
 function nextConsumedSteeringRef(runDir, id, consumedAt) {

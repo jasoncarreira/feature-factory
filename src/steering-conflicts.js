@@ -1,6 +1,7 @@
-const PASSING_VALIDATOR_VERDICTS = new Set(["GO", "GO-WITH-NITS"]);
-const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
-const PROTECTED_SLICE_STATUSES = new Set(["merged", "blocked"]);
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS } from "./validate.js";
+
+const PROTECTED_GATE_STATUSES = new Set(["approved", "stopped"]);
+const PROTECTED_SLICE_STATUSES = new Set(["merged", "blocked", "review"]);
 
 export const STEERING_CONFLICT_SUMMARY = "Consumed untrusted steering would require changing accepted durable state; human reconciliation is required.";
 
@@ -10,7 +11,7 @@ export function collectProtectedSteeringState(runDir, run) {
 
   const protectedState = [];
   for (const [gateName, gate] of Object.entries(isRecord(run.gates) ? run.gates : {})) {
-    if (isRecord(gate) && gate.status === "approved") protectedState.push(`gate:${gateName}`);
+    if (isRecord(gate) && PROTECTED_GATE_STATUSES.has(gate.status)) protectedState.push(`gate:${gateName}`);
   }
 
   for (const step of Array.isArray(run.steps) ? run.steps : []) {

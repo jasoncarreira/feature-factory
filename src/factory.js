@@ -13,7 +13,7 @@ import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.j
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv } from "./telemetry.js";
-import { assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, recordDetachedProcessEvidence } from "./process-evidence.js";
+import { PROCESS_EVIDENCE_FILE, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, readProcessEvidence, recordDetachedProcessEvidence } from "./process-evidence.js";
 import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -222,6 +222,11 @@ function assertStartRunIdAvailable(repo, runId) {
     const candidate = resolve(rootPath, runId);
     if (existsSync(candidate)) throw new Error(`factory start --run-id '${runId}' already exists at ${candidate}`);
   }
+  // The run id becomes the feature branch and worktree name, so a leftover
+  // branch or worktree collides mid-run even when no run dir exists.
+  if (branchExists(repo, runId)) throw new Error(`factory start --run-id '${runId}' collides with existing branch '${runId}'`);
+  const worktree = resolve(repo, ".opencode", "worktrees", runId);
+  if (existsSync(worktree)) throw new Error(`factory start --run-id '${runId}' collides with existing worktree ${worktree}`);
 }
 
 function startResumeEligibility(preflight, opts = {}) {
@@ -557,11 +562,29 @@ export async function recordSteeringConflict(runId, input, opts = {}) {
   };
 }
 
-export function cancelFactoryRun(runId, opts = {}) {
+export async function cancelFactoryRun(runId, opts = {}) {
   if (!stringValue(runId)) throw new Error("factory cancel requires exactly one <run-id>");
-  const runDir = resolveRunDir(runId, opts);
-  const run = readRunFile(join(runDir, "run.json"));
-  return cancelProcessFromEvidence(runDir, { ...opts, runId: run.run_id });
+  const target = resolveCancelRunDir(runId, opts);
+  return cancelProcessFromEvidence(target.runDir, { ...opts, runId: target.runId });
+}
+
+// A detached launch records process.json before the agent writes run.json, so
+// cancel must be able to target a factory run dir that has process evidence
+// but no manifest yet — otherwise a pre-manifest launch is uncancellable.
+function resolveCancelRunDir(runId, opts = {}) {
+  try {
+    const runDir = resolveRunDir(runId, opts);
+    const run = readRunFile(join(runDir, "run.json"));
+    return { runDir, runId: run.run_id };
+  } catch (error) {
+    for (const rootPath of factoryRootsForLookup(opts.cwd || process.cwd())) {
+      const candidate = resolve(rootPath, String(runId));
+      if (isContainedPath(rootPath, candidate) && existsSync(join(candidate, PROCESS_EVIDENCE_FILE))) {
+        return { runDir: candidate, runId: String(runId) };
+      }
+    }
+    throw error;
+  }
 }
 
 export async function recordCostUsage(runId, input, opts = {}) {
@@ -750,7 +773,8 @@ export function latestRunId(opts = {}) {
 }
 
 export function watchRun(runId, opts = {}) {
-  const intervalMs = Number(opts.intervalMs || 2000);
+  const requestedInterval = Number(opts.intervalMs ?? 2000);
+  const intervalMs = Number.isFinite(requestedInterval) && requestedInterval >= 100 ? Math.floor(requestedInterval) : 2000;
   let last = "";
   let timer = null;
   let stopped = false;
@@ -816,6 +840,43 @@ function publicCostSummaryOrNull(run) {
   }
 }
 
+// A failed detached launch must not strand a pre-manifest run dir: only remove
+// it when it never gained a manifest or process evidence (nothing to recover).
+function removeFailedDetachedLaunchDir(scopedRunDir) {
+  if (!scopedRunDir) return;
+  if (existsSync(join(scopedRunDir, "run.json")) || existsSync(join(scopedRunDir, PROCESS_EVIDENCE_FILE))) return;
+  rmSync(scopedRunDir, { recursive: true, force: true });
+}
+
+// A detached launch can die before the agent writes run.json, leaving a run
+// dir holding only process evidence and logs. Such dirs are invisible to the
+// normal cleanup path (which requires a manifest); remove them here once their
+// process is no longer recorded as running (factory cancel confirms that).
+function cleanupPreManifestRunDir(runId, opts = {}) {
+  for (const rootPath of factoryRootsForLookup(opts.cwd || process.cwd())) {
+    const candidate = resolve(rootPath, String(runId));
+    if (!isContainedPath(rootPath, candidate)) continue;
+    if (existsSync(join(candidate, "run.json")) || !existsSync(join(candidate, PROCESS_EVIDENCE_FILE))) continue;
+    const evidence = readProcessEvidence(candidate, { runId: String(runId) });
+    if (evidence.ok && evidence.evidence.state === "running") {
+      throw new Error(`pre-manifest run '${runId}' has running process evidence; run 'factory cancel ${runId}' first`);
+    }
+    if (!opts.dryRun) rmSync(candidate, { recursive: true, force: true });
+    return {
+      run_id: String(runId),
+      status: "pre-manifest",
+      dry_run: Boolean(opts.dryRun),
+      removed_worktrees: [],
+      skipped_worktrees: [],
+      deleted_branches: [],
+      skipped_branches: [],
+      removed_run_dir: !opts.dryRun,
+      run_dir: candidate,
+    };
+  }
+  return null;
+}
+
 function invalidListRun(runId, file, diagnostics, error) {
   return {
     run_id: runId,
@@ -853,7 +914,14 @@ function fallbackRunId(runId, runDir) {
 }
 
 export async function cleanupRun(runId, opts = {}) {
-  const runDir = resolveRunDir(runId, opts);
+  let runDir;
+  try {
+    runDir = resolveRunDir(runId, opts);
+  } catch (error) {
+    const preManifest = cleanupPreManifestRunDir(runId, opts);
+    if (preManifest) return preManifest;
+    throw error;
+  }
   const repo = factoryRepoFromRunDir(runDir);
   if (!insideFactoryRoot(repo, runDir)) {
     throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
@@ -1086,7 +1154,18 @@ function continuationBaseRef(parentRun) {
 }
 
 function continuationBaseCommit(repo, parentRun, baseRef) {
-  if (stringValue(parentRun.base_commit)) return String(parentRun.base_commit).trim();
+  // The parent-recorded base_commit is a claim. Resolving it proves only that
+  // the object exists — an unrelated or orphan-branch commit would resolve too.
+  // Require it to be an ancestor of the (separately validated) parent branch so
+  // the continuation base genuinely belongs to the parent's history; fall back
+  // to the base ref when no base_commit was recorded.
+  if (stringValue(parentRun.base_commit)) {
+    const baseCommit = refCommit(repo, String(parentRun.base_commit).trim(), "parent base commit");
+    if (!commitIsAncestor(repo, baseCommit, parentRun.branch)) {
+      throw new Error(`parent run base commit ${baseCommit} is not an ancestor of parent branch '${parentRun.branch}'`);
+    }
+    return baseCommit;
+  }
   return refCommit(repo, baseRef, "target base ref");
 }
 
@@ -1410,11 +1489,20 @@ function startDetached(repo, commandArgs, opts = {}) {
     env,
     stdio: ["ignore", out, out],
   });
-  child.on("error", (error) => appendFileSync(log, `\n[feature-factory] failed to start opencode: ${error.message}\n`));
+  child.on("error", (error) => {
+    try {
+      appendFileSync(log, `\n[feature-factory] failed to start opencode: ${error.message}\n`);
+    } catch {
+      // The launch dir may already have been cleaned up after a spawn failure.
+    }
+  });
   child.unref();
   closeSync(out);
   if (recordsProcessEvidence) {
-    if (!child.pid) throw new Error("failed to record detached process evidence: missing child pid");
+    if (!child.pid) {
+      removeFailedDetachedLaunchDir(scopedRunDir);
+      throw new Error("failed to record detached process evidence: missing child pid");
+    }
     try {
       recordDetachedProcessEvidence(scopedRunDir, {
         runId: opts.runId,
@@ -1433,6 +1521,7 @@ function startDetached(repo, commandArgs, opts = {}) {
       } catch {
         // Best-effort cleanup for a detached launch that could not be evidenced.
       }
+      removeFailedDetachedLaunchDir(scopedRunDir);
       throw new Error(`failed to record detached process evidence: ${error.message}`);
     }
   }

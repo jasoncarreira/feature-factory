@@ -81,14 +81,23 @@ export async function runDoctor(options = {}) {
 
   if (telemetry) addTelemetryChecks(checks, telemetry);
 
+  // Auth is per provider and smoke is per model; without dedup a dozen agents
+  // sharing one model would repeat the auth row and fire a dozen billable
+  // `opencode run` smoke calls.
+  const checkedProviders = new Set();
+  const smokedModels = new Set();
   for (const [agent, model] of Object.entries(env.resolved_models)) {
     if (!model) continue;
     const provider = modelProvider(model);
     add(checks, `model ${agent}`, Boolean(provider), model);
     if (provider) {
-      const auth = providersAuthenticated(provider, providers);
-      add(checks, `provider ${provider} auth`, auth.ok, auth.detail, auth.ok ? "ok" : "missing");
-      if (options.providerSmoke) {
+      if (!checkedProviders.has(provider)) {
+        checkedProviders.add(provider);
+        const auth = providersAuthenticated(provider, providers);
+        add(checks, `provider ${provider} auth`, auth.ok, auth.detail, auth.ok ? "ok" : "missing");
+      }
+      if (options.providerSmoke && !smokedModels.has(model)) {
+        smokedModels.add(model);
         const smoke = smokeProvider(model, options.cwd || process.cwd());
         add(checks, `provider ${provider} smoke`, smoke.ok, smoke.detail, smoke.ok ? "ok" : "missing");
       }

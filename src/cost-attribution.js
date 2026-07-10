@@ -31,10 +31,10 @@ export function normalizeCostUsageEntry(input, options = {}) {
   if (!isRecord(input)) throw new Error("cost usage entry must be an object");
   const entry = {};
 
-  entry.id = nonEmptyString(input.id) || nonEmptyString(options.id) || randomUUID();
+  entry.id = safeMetadataString(nonEmptyString(input.id) || nonEmptyString(options.id) || randomUUID(), "id");
   entry.recorded_at = normalizeTimestamp(input.recorded_at ?? input.recordedAt ?? options.now);
   entry.run_id = nonEmptyString(options.runId) || nonEmptyString(input.run_id ?? input.runId);
-  entry.agent = nonEmptyString(input.agent);
+  entry.agent = safeMetadataString(nonEmptyString(input.agent), "agent");
   if (!entry.run_id) throw new Error("cost usage entry requires run_id");
   if (!entry.agent) throw new Error("cost usage entry requires agent");
 
@@ -51,7 +51,7 @@ export function normalizeCostUsageEntry(input, options = {}) {
       continue;
     }
     const text = nonEmptyString(value);
-    if (text) entry[field] = text;
+    if (text) entry[field] = safeMetadataString(text, field);
   }
 
   for (const field of NUMERIC_FIELDS) {
@@ -96,8 +96,10 @@ export function normalizeCostAttribution(value = {}, options = {}) {
 
 export function recomputeCostAttribution(value = {}, options = {}) {
   const inputEntries = Array.isArray(value) ? value : Array.isArray(value?.entries) ? value.entries : [];
-  if (inputEntries.length > MAX_COST_ATTRIBUTION_ENTRIES) throw new Error(`cost attribution entries must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries`);
-  const entries = inputEntries.map((entry) => normalizeCostUsageEntry(entry, { ...options, now: entry?.recorded_at ?? entry?.recordedAt ?? options.now, id: entry?.id ?? options.id }));
+  // Dedupe before enforcing the cap so an identical retry at capacity stays a
+  // no-op instead of tripping the entry limit.
+  const entries = dedupeCostEntries(inputEntries.map((entry) => normalizeCostUsageEntry(entry, { ...options, now: entry?.recorded_at ?? entry?.recordedAt ?? options.now, id: entry?.id ?? options.id })));
+  if (entries.length > MAX_COST_ATTRIBUTION_ENTRIES) throw new Error(`cost attribution entries must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries`);
   const updatedAt = normalizeTimestamp(options.now ?? value?.updated_at ?? value?.updatedAt);
   const totals = rollupEntries(entries);
   return {
@@ -154,6 +156,43 @@ export function normalizeCostCurrency(value, field = "cost_currency") {
 
 export function isSafeCostCurrency(value) {
   return safeCostCurrency(value) !== null;
+}
+
+function safeMetadataString(value, field) {
+  if (value === null || value === undefined) return value;
+  if (hasTerminalControl(value)) throw new Error(`${field} must not contain terminal control characters`);
+  return value;
+}
+
+// Entry ids act as idempotency keys: an exact retry of an already-recorded
+// entry is a no-op, while reusing an id with different content is an error
+// rather than a silent double-count.
+function dedupeCostEntries(entries) {
+  const byId = new Map();
+  const deduped = [];
+  for (const entry of entries) {
+    const existing = byId.get(entry.id);
+    if (existing === undefined) {
+      byId.set(entry.id, entry);
+      deduped.push(entry);
+      continue;
+    }
+    // Same id = same logical event. `recorded_at` is server-generated when the
+    // caller omits --recorded-at, so an identical retry must compare equal
+    // regardless of the retry's timestamp; keep the first entry (its original
+    // timestamp) and treat the retry as a no-op. Only genuinely different
+    // content is a conflict.
+    if (costEntryContentSignature(existing) !== costEntryContentSignature(entry)) {
+      throw new Error(`cost usage entry id '${entry.id}' already recorded with different content`);
+    }
+  }
+  return deduped;
+}
+
+function costEntryContentSignature(entry) {
+  const { recorded_at, ...rest } = entry;
+  void recorded_at;
+  return JSON.stringify(rest);
 }
 
 export function hasTerminalControl(value) {

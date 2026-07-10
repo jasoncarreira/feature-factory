@@ -17,8 +17,11 @@ const ZERO_SPAN_ID = "0".repeat(16);
 const PARENT_SPAN_ID_PATTERN = /^[0-9a-f]{16}$/iu;
 const CONTROL_CHAR_PATTERN = /[\u0000-\u001f\u007f]/u;
 const OTLP_ENV_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9_]+)?$/u;
-const OTLP_ENDPOINT_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9]+)?_ENDPOINT$/u;
-const OTLP_HEADERS_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9]+)?_HEADERS$/u;
+const OTLP_ENDPOINT_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9_]+)?_ENDPOINT$/u;
+const OTLP_HEADERS_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9_]+)?_HEADERS$/u;
+// W3C trace-context caps tracestate at 512 characters; oversized values get
+// truncated or dropped by downstream propagators, so reject them up front.
+const MAX_TRACESTATE_LENGTH = 512;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 const SAFE_ATTRIBUTE_ARRAY_TYPES = new Set(["string", "number", "boolean"]);
 // @opentelemetry/api SpanStatusCode.ERROR is the stable enum value 2. Inlined so
@@ -176,6 +179,7 @@ export function validateTracestate(value) {
   if (value === undefined || value === null) return { ok: true, value: undefined };
   const tracestate = String(value);
   if (CONTROL_CHAR_PATTERN.test(tracestate)) return validationError("tracestate must not contain control characters or newlines");
+  if (tracestate.length > MAX_TRACESTATE_LENGTH) return validationError(`tracestate must be at most ${MAX_TRACESTATE_LENGTH} characters`);
   return { ok: true, value: tracestate, tracestate };
 }
 
@@ -373,7 +377,10 @@ function sanitizeAttribute(key, value) {
     const safe = value
       .filter((item) => SAFE_ATTRIBUTE_ARRAY_TYPES.has(typeof item))
       .map((item) => (typeof item === "string" && isSensitiveEnvValue(item) ? REDACTED_ENV_VALUE : item));
-    return safe.length === value.length ? safe : JSON.stringify(scrubSecretEnv(value));
+    // OTel attribute arrays must be homogeneous; mixed primitive types get
+    // dropped or rejected by SDKs, so coerce them to a JSON string instead.
+    const homogeneous = new Set(safe.map((item) => typeof item)).size <= 1;
+    return safe.length === value.length && homogeneous ? safe : JSON.stringify(scrubSecretEnv(value));
   }
   return JSON.stringify(scrubSecretEnv(value));
 }
