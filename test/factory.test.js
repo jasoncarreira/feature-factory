@@ -1,13 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   cleanupRun,
-  consumeSteering,
   latestRunId,
   listRuns,
   persistFactoryRunCreatedEnv,
@@ -37,18 +36,49 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
-  it("exposes steering metadata in status and list without raw messages", async () => {
+  it("keeps pending steering read-only and redacted across public projections", async () => {
     const fixture = createFixture("public-steering");
+    const rawSteering = "raw operator steering must remain in its pending file";
+    const logs = [];
+    const originalLog = console.log;
+    let timer = null;
     try {
-      const queued = await writeSteering(fixture.runId, "raw message hidden", { cwd: fixture.repo });
+      const queued = await writeSteering(fixture.runId, rawSteering, {
+        cwd: fixture.repo,
+        now: "2026-07-08T12:00:00.000Z",
+        id: "public-read-only",
+      });
+      const before = snapshotPendingSteering(fixture);
       const current = status(fixture.runId, { cwd: fixture.repo });
       const listed = listRuns({ cwd: fixture.repo })[0];
-      assert.equal(current.steering.pending.ref, queued.steering.ref);
-      assert.equal(listed.steering.pending.hash, queued.steering.hash);
-      assert.equal(JSON.stringify(current).includes("raw message hidden"), false);
-      await consumeSteering(fixture.runId, { ref: queued.steering.ref, hash: queued.steering.hash }, { cwd: fixture.repo });
-      assert.equal(status(fixture.runId, { cwd: fixture.repo }).steering.consumed_count, 1);
+      const validation = validateState(fixture.runId, { cwd: fixture.repo });
+
+      console.log = (value) => logs.push(String(value));
+      timer = watchRun(fixture.runId, { cwd: fixture.repo, intervalMs: 60000 });
+      assert.equal(logs.length, 1, "watch must emit its first projection synchronously");
+      const watched = JSON.parse(logs[0]);
+      clearInterval(timer);
+      timer = null;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      for (const projection of [current, listed, watched]) {
+        assert.deepEqual(projection.steering.pending, queued.steering);
+        assert.deepEqual(Object.keys(projection.steering.pending).sort(), ["created_at", "hash", "id", "message_chars", "ref"]);
+        assert.equal(projection.steering.consumed_count, 0);
+        assert.equal(projection.steering.latest_consumed, null);
+      }
+      const pendingCheck = validation.runs[0].checks.find((check) => check.name === "run.steering.pending.ref");
+      assert.equal(validation.ok, true);
+      assert.equal(pendingCheck?.ok, true);
+      assert.equal(pendingCheck?.details.ref, queued.steering.ref);
+
+      for (const output of [current, listed, validation, watched, logs]) {
+        assert.equal(JSON.stringify(output).includes(rawSteering), false);
+      }
+      assertPendingSteeringUnchanged(fixture, before);
     } finally {
+      if (timer) clearInterval(timer);
+      console.log = originalLog;
       cleanup(fixture.repo);
     }
   });
@@ -557,6 +587,33 @@ function hashFile(file) {
 
 function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
+}
+
+function snapshotPendingSteering(fixture) {
+  const runFile = join(fixture.runDir, "run.json");
+  const run = readJson(runFile);
+  const steeringDir = join(fixture.runDir, "steering");
+  assert.ok(run.steering?.pending, "fixture must have pending steering metadata");
+  return {
+    runText: readFileSync(runFile, "utf8"),
+    pending: run.steering.pending,
+    history: run.steering.history,
+    pendingText: readFileSync(join(fixture.runDir, run.steering.pending.ref), "utf8"),
+    files: readdirSync(steeringDir).sort(),
+  };
+}
+
+function assertPendingSteeringUnchanged(fixture, before) {
+  const runFile = join(fixture.runDir, "run.json");
+  const run = readJson(runFile);
+  const files = readdirSync(join(fixture.runDir, "steering")).sort();
+
+  assert.equal(readFileSync(runFile, "utf8"), before.runText);
+  assert.deepEqual(run.steering.pending, before.pending);
+  assert.deepEqual(run.steering.history, before.history);
+  assert.equal(readFileSync(join(fixture.runDir, before.pending.ref), "utf8"), before.pendingText);
+  assert.deepEqual(files, before.files);
+  assert.equal(files.some((file) => file.startsWith("consumed-")), false);
 }
 
 function writeJson(file, value) {
