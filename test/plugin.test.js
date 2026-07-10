@@ -44,6 +44,18 @@ describe("plugin agent edit permissions", () => {
       assert.equal(cfg.agent[agent].permission.edit, "deny", `${agent} must remain read-only`);
     }
   });
+
+  it("allows delegation only from the primary orchestrator", async () => {
+    const cfg = await pluginConfig();
+
+    assert.equal(cfg.agent["feature-factory"].permission.task, "allow");
+    for (const [name, agent] of Object.entries(cfg.agent)) {
+      if (name === "feature-factory") continue;
+      assert.equal(agent.permission.task, "deny", `${name} must not recursively delegate tasks`);
+    }
+    assert.match(cfg.agent["feature-factory"].prompt, /classify intent and behavioral review tier first/u);
+    assert.match(cfg.agent["feature-factory"].prompt, /light bounded-maintenance path without factory state only when every eligibility condition holds/u);
+  });
 });
 
 describe("plugin PR mode", () => {
@@ -271,16 +283,18 @@ describe("telemetry module import", () => {
 });
 
 describe("review tier contract docs", () => {
-  it("documents top-level run.json.review_tier in the schema", () => {
-    assert.match(schemaDoc, /Top-level `run\.json\.review_tier` is an optional opaque display string/i);
-    assert.match(schemaDoc, /does not change gates, agents, PR behavior, validation behavior, or workflow control/i);
+  it("documents behavioral run review tiers with a compatibility fallback", () => {
+    assert.match(schemaDoc, /Top-level `run\.json\.review_tier` is an optional non-empty string/i);
+    assert.match(schemaDoc, /New durable runs use `standard` or `strict`/i);
+    assert.match(schemaDoc, /persisted `light` or unknown legacy label resumes with `standard` behavior for safety/i);
     assert.match(schemaDoc, /schema_version`; it remains `1`/i);
   });
 
-  it("documents review tier as display-only metadata in the skill", () => {
-    assert.match(skillDoc, /Review tier is optional display-only metadata/i);
-    assert.match(skillDoc, /do not branch workflow behavior on it/i);
-    assert.match(skillDoc, /Existing mandatory gates, observed evidence, `work-reviewer`, `implementation-validator`, and `security-reviewer` behavior still applies\./);
+  it("documents behavioral tier selection in the skill", () => {
+    assert.match(skillDoc, /Review tier is behavioral/i);
+    assert.match(skillDoc, /New durable runs persist `standard` or `strict`/i);
+    assert.match(skillDoc, /unknown legacy non-empty label resumes with `standard` behavior for safety/i);
+    assert.match(skillDoc, /never weakens durable gate, evidence, validator, security, PR, or no-auto-merge requirements/i);
   });
 });
 

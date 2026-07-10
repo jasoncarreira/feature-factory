@@ -63,6 +63,34 @@ Never reuse or pass `task_id` to `work-reviewer`, `implementation-validator`, or
 
 Autonomous mode does not remove evidence, review, security, or PR boundaries. It only removes the external gate relay when the factory already has enough evidence to decide.
 
+## Behavioral Review Tiers
+
+Select a behavioral tier before creating factory state:
+
+- `light` is the bounded-maintenance fast path below. It is not a durable factory run and does not create `.opencode/factory` state.
+- `standard` is the default durable story/research/spec/decompose/build/review workflow.
+- `strict` uses the standard durable workflow and requires closed-world inventory treatment for class-wide, security-boundary, migration, generated-code, or cross-system work.
+
+An explicit `/feature` invocation, scripted/headless/autonomous driver, ticket/product idea, resume, continuation, or operator-supplied factory run id is never `light`. Persist `standard` or `strict` in `run.json.review_tier` for durable runs. Legacy or unknown non-empty tier labels behave as `standard` so old state remains resumable.
+
+### Light Bounded-Maintenance Fast Path
+
+Use `light` only when every condition is true:
+
+- The ordinary interactive request already states a concrete outcome and testable completion condition.
+- One scoped discovery pass can identify the implementation and tests.
+- The change is one coherent maintenance slice with no product/UX ambiguity, cross-stack coordination, public API/schema contract, persistence/migration, generated/subtree ownership, auth/security/trust-boundary change, or class-wide `all`/`every`/`centralize`/`across` requirement.
+- The work does not need a design, story, research, spec, decomposition, or test-authoring decision from another agent.
+
+For eligible light work:
+
+1. Create an isolated branch/worktree from the current base.
+2. Perform one direct scoped discovery pass. Use at most 4 searches and 8 file reads, never repeat an equivalent search or reread an unchanged file, and do not dispatch `story-*`, `codebase-researcher`, `spec-writer`, `work-decomposer`, or any reviewer task.
+3. Implement the single coherent change directly, run focused checks and the repository's full required check, inspect the complete diff, and keep the worktree clean except for intended files.
+4. Commit, push, and open a ready-for-review PR with the configured human/GitHub reviewer. Never merge automatically.
+
+If any eligibility condition fails or discovery exposes broader scope, stop the light path before further implementation and use `standard` or `strict`. Do not chain a light task into additional agents and do not create a partial shadow factory run.
+
 ## Chain
 
 ```text
@@ -85,6 +113,7 @@ Classify every `/feature` invocation before Step 0 and before mutating any run s
 Intent types:
 
 - `new-feature`: start a new factory run from a feature idea, ticket/work item, or product request.
+- `bounded-maintenance`: execute an eligible `light` ordinary interactive request without creating factory state.
 - `resume`: continue an existing run by explicit run id, by `resume <run-id>`, or by latest run when unambiguous.
 - `gate-answer`: answer the currently pending gate with `approve`, `stop`, or `changes: <...>`.
 - `status`: inspect/list/summarize current factory state without advancing the run.
@@ -96,6 +125,7 @@ Intent types:
 Actions by intent:
 
 - `new-feature`: proceed to Step 0.
+- `bounded-maintenance`: follow the Light Bounded-Maintenance Fast Path and do not proceed to Step 0.
 - `resume`: first verify/recover with `feature-factory factory resume-check <run-id> --json` (or rely on the CLI preflight in `factory start --headless|--autonomous "resume <run-id>"`), then load `run.json` and continue from the first incomplete point only when the envelope is `ok:true`.
 - `gate-answer`: write the answer to `gates/<pending-gate>.answer`, consume it with `feature-factory factory gate-decision <run-id> <gate> <status> --answer-ref gates/<gate>.answer`, then continue or stop according to the answer.
 - `status`: read state and report. Do not dispatch agents, create worktrees, write gates, or change run status.
@@ -182,7 +212,7 @@ Disrupted resume recovery is explicit. Use `feature-factory factory resume-check
 
 `factory recover` is operator recovery for orphaned/stale running runs; do not use it to bypass active in-flight work or protected gates.
 
-Review tier is optional display-only metadata. If present, `run.json.review_tier` is a non-empty opaque string such as `light`, `standard`, or `strict`, but do not branch workflow behavior on it. Existing mandatory gates, observed evidence, `work-reviewer`, `implementation-validator`, and `security-reviewer` behavior still applies.
+Review tier is behavioral. New durable runs persist `standard` or `strict`; a persisted `light` or unknown legacy non-empty label resumes with `standard` behavior for safety. Tier selection changes planning/review depth only as defined above and never weakens durable gate, evidence, validator, security, PR, or no-auto-merge requirements.
 
 ## Telemetry Readiness And Trace Context
 

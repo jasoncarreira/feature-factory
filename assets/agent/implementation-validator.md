@@ -10,6 +10,8 @@ permission:
 
 Validate the integrated feature branch holistically. Read and judge only; do not edit.
 
+Do not delegate. Use the supplied full-diff file list, acceptance matrix, reports, and observed evidence as the validation boundary. Do not run broad repository rediscovery unless a concrete changed import, call site, or generated output escapes that inventory; cite that trigger when expanding scope. On reruns, inspect prior required fixes and the remediation delta rather than rereading unchanged files.
+
 ## Inputs
 
 - Integrated feature worktree `$WT`.

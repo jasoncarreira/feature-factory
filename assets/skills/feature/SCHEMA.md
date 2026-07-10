@@ -58,6 +58,8 @@ The orchestrator may use a `task_id` only to resume an eligible implementer reme
 
 Reviewer tasks are always fresh. `task_id` must never be passed to or stored for `work-reviewer`, `implementation-validator`, or `security-reviewer`; their continuity comes only from explicit prompt inputs such as current observed evidence, `attempt`, and prior `required_fixes`.
 
+Only the primary `feature-factory` agent may use the Task tool. Every registered subagent has `permission.task: "deny"`, so researchers, spec writers, decomposers, builders, test verifiers, and reviewers cannot recursively delegate or create hidden agent chains.
+
 ## Runtime-Only Trace Context
 
 Telemetry is off by default. The schema has no default exporter, no network side effects, and no durable trace state.
@@ -688,7 +690,7 @@ Absent context adds no field. The IDs do not prove that an attribution entry, ag
 
 Top-level `status` values are `running`, `completed`, `blocked`, `partial`, and `needs-human`. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`.
 
-Top-level `run.json.review_tier` is an optional opaque display string. It may contain labels such as `light`, `standard`, or `strict`, but it does not change gates, agents, PR behavior, validation behavior, or workflow control. It does not change `schema_version`; it remains `1`.
+Top-level `run.json.review_tier` is an optional non-empty string. New durable runs use `standard` or `strict`; those values select the behavioral workflow documented in `SKILL.md`. A persisted `light` or unknown legacy label resumes with `standard` behavior for safety. The field does not change `schema_version`; it remains `1`. The pre-run `light` bounded-maintenance path creates no factory manifest and therefore persists no `review_tier`.
 
 Top-level `run.json.pr_mode` is an optional durable PR creation mode with value `draft` or `ready`. Persist the effective start-time mode there after applying `driver.pr_mode`, legacy `driver.ready`, or the plugin configured default; resume payloads carry this value as `driver.pr_mode` so a run created with a per-run override does not fall back to a later plugin default. It does not change `schema_version`; it remains `1`.
 

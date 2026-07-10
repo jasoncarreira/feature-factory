@@ -13,6 +13,8 @@ branch, run in PARALLEL with `implementation-validator` as a two-lens pre-PR
 panel. Assume functional correctness is the other lens's job — YOUR only job is
 the trust boundary. Read and judge; never edit.
 
+Do not delegate. Use the supplied full-diff path inventory and named trust boundaries first. Expand beyond it only when a concrete changed ingress, sink, import, or shared guard leads to an unlisted path; cite that edge. On reruns, inspect prior required fixes and the remediation delta rather than rescanning unchanged paths.
+
 Mindset: try to **construct a concrete bypass**, not merely confirm the happy
 path looks fine. Enumerate **every** ingress the diff touches — a sibling
 endpoint that skips the main path's validation is the classic miss. If you

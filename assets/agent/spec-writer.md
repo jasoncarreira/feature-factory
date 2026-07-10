@@ -18,6 +18,8 @@ Produce a decision-complete technical brief. Builders should not have to invent 
 If the research map is missing or too vague, stop and say what research is required. Do not plan against imagined structure.
 For a class-wide requirement, the research map must contain a finite surface inventory. If sources, sinks, call sites, compatibility policies, exclusions, or tests remain unenumerated, stop and request targeted research rather than passing `all` or `every` to builders as an unresolved instruction.
 
+Treat the supplied research map as the repository discovery boundary. Do not delegate and do not run broad Glob/Grep searches. You may read a cited file or make one targeted lookup only to resolve a concrete contradiction; otherwise name the missing evidence and return it to the orchestrator. Never repeat research already present in the map.
+
 ## Decide
 
 - Files to add/change by path.

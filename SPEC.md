@@ -727,7 +727,7 @@ Every feature-factory GenAI span should include:
 - `gen_ai.operation.name`: one of `invoke_agent`, `chat`, `execute_tool`, `gate_decision`, `validate`, `create_pr`, `cleanup`, or `heartbeat`.
 - `feature_factory.run_id`: duplicate run id under the package namespace for non-GenAI queries.
 - `feature_factory.mode`: `interactive`, `headless`, or `autonomous`.
-- `feature_factory.review_tier`: optional display-only review tier label when known.
+- `feature_factory.review_tier`: selected behavioral review tier (`standard` or `strict`) when known; unknown legacy labels execute as standard.
 - `feature_factory.status`: current run/slice/gate status when relevant.
 
 Native opencode spans may only carry generic attributes such as `session.id` or AI SDK span names. For phase 1, it is acceptable if those spans live in the same trace but do not independently satisfy Agent Timeline grouping, as long as feature-factory emits adjacent/parent spans with `gen_ai.conversation.id` and stable artifact refs. Phase 2 should pursue native span enrichment if Honeycomb Agent Timeline requires every model/tool span to carry the conversation id.
