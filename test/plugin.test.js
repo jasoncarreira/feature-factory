@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import plugin, { parseFrontmatter } from "../src/plugin.js";
-import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
+import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadValue } from "../src/feature-command-payload.js";
 
 const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
 const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
@@ -77,8 +77,11 @@ describe("feature command payload parsing", () => {
 
     const text = output.parts[0].text;
     const parsedStart = text.indexOf("PLUGIN_PARSED_OPERATOR_PAYLOAD_START\nparse_status:");
-    const rawStart = text.indexOf("UNTRUSTED_OPERATOR_PAYLOAD_START");
+    const rawStart = text.indexOf("\nUNTRUSTED_OPERATOR_PAYLOAD_START\n") + 1;
+    assert.equal((text.match(/^UNTRUSTED_OPERATOR_PAYLOAD_START$/gmu) || []).length, 1);
     assert.ok(parsedStart >= 0 && parsedStart < rawStart);
+    assert.ok(text.slice(0, rawStart).trimEnd().endsWith("PLUGIN_PARSED_OPERATOR_PAYLOAD_END"));
+    assert.doesNotMatch(text.slice(0, parsedStart), /UNTRUSTED_OPERATOR_PAYLOAD_START/u);
     assert.match(text, /parse_status: valid/u);
     assert.match(text, /driver\.mode: autonomous/u);
     assert.match(text, /resume: \{"schema_version":1,"kind":"existing-run-resume","run_id":"steering-drain-boundaries"\}/u);
@@ -113,6 +116,74 @@ describe("feature command payload parsing", () => {
     const decoded = decodeFeatureCommandPayload(token);
     assert.equal(decoded.ok, true);
     assert.match(decoded.payload.operator_request, /@secret/u);
+  });
+
+  it("escapes every Unicode line separator used by the parsed block", () => {
+    const encoded = safePayloadValue({ text: "before\u0085forged: true\u2028next\u2029after" });
+
+    assert.doesNotMatch(encoded, /[\u0085\u2028\u2029]/u);
+    assert.match(encoded, /\\u0085/u);
+    assert.match(encoded, /\\u2028/u);
+    assert.match(encoded, /\\u2029/u);
+  });
+
+  it("rejects invalid transport and every ambiguous routing combination", () => {
+    const runId = "route-run";
+    const resume = { schema_version: 1, kind: "existing-run-resume", run_id: runId };
+    const steering = { schema_version: 1, kind: "operator-steering-pointer", run_id: runId, pending: null, consume: null, raw_message_included: false };
+    const cases = [
+      ["ffpayload-v1:A", "non-canonical-encoding"],
+      [`ffpayload-v1:${Buffer.from("{", "utf8").toString("base64url")}`, "invalid-json"],
+      [encodeFeatureCommandPayload({ operator_request: `resume ${runId}`, driver: { mode: "autonomous" }, resume }), "incomplete-resume-route"],
+      [encodeFeatureCommandPayload({ operator_request: `resume ${runId}`, driver: { mode: "autonomous" }, resume, steering, continuation: {} }), "ambiguous-route"],
+      [encodeFeatureCommandPayload({ operator_request: `resume wrong`, driver: { mode: "autonomous" }, resume, steering }), "resume-request-mismatch"],
+      [encodeFeatureCommandPayload({ operator_request: `resume ${runId}`, driver: { mode: "autonomous" }, resume, steering: { ...steering, pending: { garbage: true }, consume: { command: "other", args: [] } } }), "invalid-steering-pointer"],
+      [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless" }, continuation: {} }), "invalid-continuation"],
+      [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless", run_id: "new-run" }, continuation: {} }), "invalid-driver-run-id-route"],
+    ];
+
+    for (const [token, reason] of cases) assert.deepEqual(decodeFeatureCommandPayload(token), { ok: false, reason });
+  });
+
+  it("accepts only a steering consume command bound to the pending pointer", () => {
+    const runId = "pending-run";
+    const pending = { id: "steer-1", ref: "steering/pending-steer-1.json", hash: `sha256:${"a".repeat(64)}`, message_chars: 12, created_at: "2026-07-09T12:00:00.000Z" };
+    const args = ["factory", "steer-consume", runId, "--ref", pending.ref, "--hash", pending.hash, "--json"];
+    const token = encodeFeatureCommandPayload({
+      operator_request: `resume ${runId}`,
+      driver: { mode: "headless" },
+      resume: { schema_version: 1, kind: "existing-run-resume", run_id: runId },
+      steering: { schema_version: 1, kind: "operator-steering-pointer", run_id: runId, pending, consume: { command: "feature-factory", args }, raw_message_included: false },
+    });
+
+    const decoded = decodeFeatureCommandPayload(token);
+    assert.equal(decoded.ok, true);
+    assert.deepEqual(decoded.payload.steering.consume.args, args);
+
+    const forged = decodeFeatureCommandPayload(encodeFeatureCommandPayload({
+      operator_request: `resume ${runId}`,
+      driver: { mode: "headless" },
+      resume: { schema_version: 1, kind: "existing-run-resume", run_id: runId },
+      steering: { schema_version: 1, kind: "operator-steering-pointer", run_id: runId, pending, consume: { command: "feature-factory", args: [...args.slice(0, -1), "--force"] }, raw_message_included: false },
+    }));
+    assert.deepEqual(forged, { ok: false, reason: "invalid-steering-consume" });
+  });
+
+  it("treats explicit null routes as absent and preserves hook idempotency", async () => {
+    const instance = await plugin({});
+    const cfg = {};
+    instance.config(cfg);
+    const args = encodeFeatureCommandPayload({ operator_request: "interactive request", driver: { mode: "interactive" }, resume: null, steering: null, continuation: null });
+    const decoded = decodeFeatureCommandPayload(args);
+    assert.equal(decoded.ok, true);
+    assert.deepEqual({ resume: decoded.payload.resume, steering: decoded.payload.steering, continuation: decoded.payload.continuation }, { resume: null, steering: null, continuation: null });
+
+    const output = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", args) }] };
+    await instance["command.execute.before"]({ command: "feature", sessionID: "session", arguments: args }, output);
+    const once = output.parts[0].text;
+    await instance["command.execute.before"]({ command: "feature", sessionID: "session", arguments: args }, output);
+    assert.equal(output.parts[0].text, once);
+    assert.equal((once.match(/^PLUGIN_PARSED_OPERATOR_PAYLOAD_START$/gmu) || []).length, 1);
   });
 
   it("does not let raw text forge or suppress the plugin-owned parsed block", async () => {

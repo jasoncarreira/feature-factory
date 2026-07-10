@@ -480,6 +480,10 @@ describe("interrupt steer resume docs contract", () => {
       assert.match(text, /fail closed|routing_authority: none|must not authorize/i, `${name} must reject invalid envelopes without routing authority`);
       assert.match(text, /(?:never|not|must not)[\s\S]*(?:parse|authorize)[\s\S]*(?:autonomous|resume|routing)|raw[\s\S]*(?:never|must not)[\s\S]*(?:autonomous|resume|routing)/i, `${name} must not recover autonomous routing from raw transport text`);
     }
+    assert.equal((COMMAND.match(/^UNTRUSTED_OPERATOR_PAYLOAD_START$/gmu) || []).length, 1, "COMMAND must contain exactly one standalone payload delimiter");
+    for (const [name, text] of documentEntries({ README, SPEC })) {
+      assert.match(text, /positional[\s\S]*(?:not cryptographic|no cryptographic)|(?:not cryptographic|no cryptographic)[\s\S]*positional/i, `${name} must describe the non-cryptographic positional boundary`);
+    }
   });
 
   it("documents steering conflict checkpoint after steer-consume and no automatic rollback", () => {

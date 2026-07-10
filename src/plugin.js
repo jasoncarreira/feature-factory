@@ -74,8 +74,9 @@ function commandTemplate(body, options = {}) {
     "Plugin configuration defaults:",
     `- PR mode: \`${prMode}\`. Use this as the default for successful PR creation when the driver payload has no \`pr_mode\` override.`,
   ].join("\n");
-  if (!body.includes(OPERATOR_PAYLOAD_MARKER)) return `${body.trim()}\n\n${config}`;
-  return body.replace(OPERATOR_PAYLOAD_MARKER, `${config}\n\n${OPERATOR_PAYLOAD_MARKER}`).trim();
+  const markerIndex = operatorPayloadMarkerIndex(body);
+  if (markerIndex < 0) return `${body.trim()}\n\n${config}`;
+  return `${body.slice(0, markerIndex)}${config}\n\n${body.slice(markerIndex)}`.trim();
 }
 
 function parsedPayloadBlock(parsed) {
@@ -114,11 +115,17 @@ function injectParsedPayload(parts, parsed) {
   const block = parsedPayloadBlock(parsed);
   for (const part of parts || []) {
     if (part?.type !== "text" || typeof part.text !== "string") continue;
-    const markerIndex = part.text.indexOf(OPERATOR_PAYLOAD_MARKER);
+    const markerIndex = operatorPayloadMarkerIndex(part.text);
     if (markerIndex < 0 || part.text.slice(0, markerIndex).includes(`${PARSED_PAYLOAD_START}\nparse_status:`)) continue;
     part.text = `${part.text.slice(0, markerIndex)}${block}\n\n${part.text.slice(markerIndex)}`;
     return;
   }
+}
+
+function operatorPayloadMarkerIndex(text) {
+  if (text.startsWith(`${OPERATOR_PAYLOAD_MARKER}\n`)) return 0;
+  const index = text.indexOf(`\n${OPERATOR_PAYLOAD_MARKER}\n`);
+  return index < 0 ? -1 : index + 1;
 }
 
 function normalizePrMode(value) {
