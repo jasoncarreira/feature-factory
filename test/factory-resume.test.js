@@ -58,13 +58,31 @@ describe("factory resume", () => {
   it("record-resume locks and rejects active heartbeat before mutating debug snapshot", async () => {
     const fixture = createFixture("record-resume-active-heartbeat");
     try {
+      const rawSteering = "raw active-heartbeat steering must remain pending";
+      const queued = await writeSteering(fixture.runId, rawSteering, { cwd: fixture.repo, now: "2026-07-08T11:59:00.000Z" });
       writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
-      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      const runBefore = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      const steeringBefore = snapshotSteeringFiles(fixture.runDir);
+      const debugSnapshotBefore = readJson(join(fixture.runDir, "run.json")).debug_snapshot;
+      let rejection;
       await assert.rejects(
         persistFactoryRunResumeEnv(fixture.runId, { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z", processAliveFn: (pid) => pid === process.pid }),
-        /active-heartbeat/u,
+        (error) => {
+          rejection = error;
+          return /active-heartbeat/u.test(error.message);
+        },
       );
-      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+
+      const runAfter = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(String(rejection).includes(rawSteering), false);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), runBefore);
+      assert.deepEqual(runAfter.debug_snapshot, debugSnapshotBefore);
+      assert.deepEqual(runAfter.steering.pending, queued.steering);
+      assert.equal(runAfter.steering.history.at(-1).event, "queued");
+      assert.deepEqual(snapshotSteeringFiles(fixture.runDir), steeringBefore);
+      assert.equal(existsSync(join(fixture.runDir, queued.steering.ref)), true);
+      assert.equal(Object.keys(steeringBefore).some((name) => name.startsWith("consumed-")), false);
+      assert.equal(JSON.stringify(runAfter).includes(rawSteering), false);
     } finally {
       cleanup(fixture.repo);
     }
@@ -142,6 +160,11 @@ function heartbeat(runId) {
     interval_ms: 30000,
     last_tick_at: new Date().toISOString(),
   };
+}
+
+function snapshotSteeringFiles(runDir) {
+  const steeringDir = join(runDir, "steering");
+  return Object.fromEntries(readdirSync(steeringDir).sort().map((name) => [name, readFileSync(join(steeringDir, name), "utf8")]));
 }
 
 function readJson(file) {
