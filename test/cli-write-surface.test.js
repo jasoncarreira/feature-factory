@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const RUN_ID = "cli-write-surface";
@@ -30,7 +31,10 @@ describe("cli write surface", () => {
       assert.equal(captured.cwd, expectedRepo);
       assert.deepEqual(captured.args.slice(0, 6), ["run", "--dir", expectedRepo, "--command", "feature", "--agent"]);
       assert.equal(captured.args[6], "feature-factory");
-      const payload = JSON.parse(captured.args.at(-1));
+      assert.match(captured.args.at(-1), /^ffpayload-v1:[A-Za-z0-9_-]+$/u);
+      const decoded = decodeFeatureCommandPayload(captured.args.at(-1));
+      assert.equal(decoded.ok, true);
+      const payload = decoded.payload;
       assert.equal(payload.operator_request, "implement the named feature");
       assert.equal(payload.driver.mode, "autonomous");
       assert.equal(payload.driver.run_id, "named-start");

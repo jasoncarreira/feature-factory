@@ -14,6 +14,7 @@ import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv } from "./telemetry.js";
 import { PROCESS_EVIDENCE_FILE, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, readProcessEvidence, recordDetachedProcessEvidence } from "./process-evidence.js";
+import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -503,7 +504,7 @@ export function continueFactory(parentRunId, opts = {}) {
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
-  commandArgs.push(JSON.stringify(payload, null, 2));
+  commandArgs.push(encodeFeatureCommandPayload(payload));
   if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: continuation.target.run_id, runDir: join(factoryRoot(repo), continuation.target.run_id) }), env: launchEnv });
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
@@ -525,7 +526,7 @@ export async function resumeFactory(runId, opts = {}) {
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
-  commandArgs.push(JSON.stringify(payload, null, 2));
+  commandArgs.push(encodeFeatureCommandPayload(payload));
   if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir }), env: launchEnv });
   try {
     execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
@@ -1814,7 +1815,7 @@ function ensureGitInfoExclude(repo, pattern) {
 }
 
 function formatPrompt(prompt, opts) {
-  return JSON.stringify(featureCommandPayload(prompt, opts), null, 2);
+  return encodeFeatureCommandPayload(featureCommandPayload(prompt, opts));
 }
 
 export function validateSlices(plan) {
