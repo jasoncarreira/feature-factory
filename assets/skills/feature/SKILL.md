@@ -102,7 +102,7 @@ Actions by intent:
 - `scripted-start`: proceed like `new-feature`/`resume`, but in scripted mode stop after writing the next pending gate question if no answer file exists.
 - `autonomous-start`: proceed like `new-feature`/`resume`, set `run.json.mode = "autonomous"`, and use Autonomous Mode rules instead of waiting for external gate answers.
 - `pr-continuation`: verify Gate 3 approval, validator verdict, security verdict, observed evidence, and the configured PR mode before pushing or creating a PR.
-- `blocked-run-continuation`: validate the continuation payload as untrusted operator data/config, persist accepted metadata under `run.json.continuation`, and then run the normal story, brief, build, test, validator, security, pre-PR, and configured PR workflow for the new run.
+- `blocked-run-continuation`: validate the continuation payload as untrusted operator data/config, persist accepted metadata under `run.json.continuation`. `feature-factory factory continue` has already seeded the parent's accepted planning artifacts (`story.md`, `research-map.md`, `design-brief.md`, `technical-brief.md`) into `$RUN/artifacts/` — reuse them as the approved story/research/brief and do NOT re-run `story-*`, `codebase-researcher`, or `spec-writer` unless the blocking review's `required_fixes` require story/spec/plan changes. Then run the build, test, validator, security, pre-PR, and configured PR workflow for the new run.
 
 If classification is ambiguous, ask one short clarification question and do not mutate state until answered.
 
@@ -427,6 +427,8 @@ Run the story agent and write `$RUN/artifacts/story.md`. If design input exists,
 
 Run `codebase-researcher` with the approved story and `$FEAT_WT` as the repository context. Write `$RUN/artifacts/research-map.md`. If design input exists, run or finish `design-interpreter` and write `$RUN/artifacts/design-brief.md`.
 
+For a `blocked-run-continuation`, `$RUN/artifacts/research-map.md` (plus `story.md` and `design-brief.md`) is already seeded from the accepted parent run — verify the files are present and reuse them. Do not re-run `codebase-researcher` unless the blocking review's `required_fixes` require new research.
+
 The research map must identify real files, patterns, tests, integration hotspots, generated code, migration/schema risks, and open questions. Do not proceed to spec from guessed paths.
 
 When acceptance criteria use terms such as `all`, `every`, `centralize`, or `across` to quantify a class-wide change, or cover a whole vulnerability/behavior class, require the researcher to produce a finite in-scope surface inventory: each source, sink/call site, existing guard, required policy, compatibility decision or explicit exclusion, and mapped test. If the inventory cannot be established from repository evidence, send it back for targeted research instead of treating one example as representative.
@@ -434,6 +436,8 @@ When acceptance criteria use terms such as `all`, `every`, `centralize`, or `acr
 ## Step 2 - Spec And Decomposition
 
 For class-wide work, require the technical brief to convert the research inventory into a closed implementation matrix with one row per sink/call site, exact primitive or policy, compatibility/exclusion decision, and test. Do not dispatch builders with unresolved instructions such as "apply everywhere." On the first spec review, require `work-reviewer` to inspect the complete inventory and consolidate every currently discoverable same-class issue into one `required_fixes` list; later reviews still follow the delta rule.
+
+For a `blocked-run-continuation`, reuse the seeded `$RUN/artifacts/technical-brief.md` from the accepted parent brief and record `spec-writer` accepted from that carried artifact (`feature-factory factory step <run-id> spec-writer accepted --artifact-ref artifacts/technical-brief.md --review-ref <parent review ref> --json`) — skip regeneration. Re-run `spec-writer` only if the blocking review's `required_fixes` require spec/plan changes, and then feed it the parent brief plus those `required_fixes` as a targeted amendment, not a blank-slate rewrite.
 
 Run `spec-writer` with the approved story, research map, and design brief. Mark it running with `feature-factory factory step <run-id> spec-writer running --attempts N --json`. Because this is a long spec-production wait, start heartbeat immediately before the `spec-writer` Task dispatch/wait with phase `spec-review`, then stop heartbeat in the after-return/`finally` path before writing produced artifacts or running the next semantic `run.json` / factory CLI state write. After heartbeat is stopped or verified inactive, record provider-supplied usage with `feature-factory factory cost-record <run-id> --agent spec-writer --step spec-writer ... --json` when available. It produces `$RUN/artifacts/technical-brief.md`; after review acceptance, and only after any `spec-review` heartbeat has stopped or is verified inactive, record the accepted step with `feature-factory factory step <run-id> spec-writer accepted --artifact-ref artifacts/technical-brief.md --review-ref reviews/spec-writer.json --json`.
 

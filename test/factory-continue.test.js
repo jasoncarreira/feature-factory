@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { continueFactory } from "../src/factory.js";
+import { continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
@@ -513,6 +513,54 @@ describe("factory continue", () => {
 
       const draft = JSON.parse(runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "draft-next", "--draft", "--dry-run", "--json"]).stdout);
       assert.equal(draft.payload.driver.pr_mode, "draft");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+});
+
+describe("continuation planning-artifact reuse", () => {
+  it("seeds the parent's accepted planning artifacts into the child, excluding outcome artifacts", () => {
+    const fixture = createFixture("reuse-seed");
+    try {
+      writeFileSync(join(fixture.runDir, "artifacts", "research-map.md"), "research\n", "utf8");
+      writeFileSync(join(fixture.runDir, "artifacts", "design-brief.md"), "design\n", "utf8");
+      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
+      writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "tests\n", "utf8");
+      writeFileSync(join(fixture.runDir, "artifacts", "pr-body.md"), "pr\n", "utf8");
+
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-seed-next", dryRun: true });
+      const targetArtifacts = join(fixture.repo, ".opencode", "factory", "reuse-seed-next", "artifacts");
+
+      // dry-run reports the plan but must not seed anything
+      assert.deepEqual([...payload.continuation.parent_artifacts.filter((a) => ["story", "research_map", "design_brief", "technical_brief"].includes(a.kind)).map((a) => a.ref)].sort(),
+        ["artifacts/design-brief.md", "artifacts/research-map.md", "artifacts/story.md", "artifacts/technical-brief.md"]);
+      assert.equal(existsSync(targetArtifacts), false, "dry-run must not seed");
+
+      const seeded = seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation);
+      assert.deepEqual([...seeded].sort(), ["artifacts/design-brief.md", "artifacts/research-map.md", "artifacts/story.md", "artifacts/technical-brief.md"]);
+      // planning artifacts copied with identical content
+      assert.equal(readFileSync(join(targetArtifacts, "technical-brief.md"), "utf8"), "brief\n");
+      assert.equal(readFileSync(join(targetArtifacts, "research-map.md"), "utf8"), "research\n");
+      // outcome artifacts NOT seeded
+      assert.equal(existsSync(join(targetArtifacts, "test-report.md")), false);
+      assert.equal(existsSync(join(targetArtifacts, "pr-body.md")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("refuses to seed when a parent artifact changed since the payload was built", () => {
+    const fixture = createFixture("reuse-mismatch");
+    try {
+      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-mismatch-next", dryRun: true });
+      // tamper with the parent artifact after the payload (with its hash) was built
+      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "tampered\n", "utf8");
+      assert.throws(
+        () => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation),
+        /changed since payload build/u,
+      );
     } finally {
       cleanup(fixture.repo);
     }

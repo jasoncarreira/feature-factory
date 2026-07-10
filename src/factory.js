@@ -37,6 +37,11 @@ const CONTINUATION_PARENT_ARTIFACT_REFS = [
   { kind: "validation_report", ref: "artifacts/validation-report.md" },
   { kind: "pr_body", ref: "artifacts/pr-body.md" },
 ];
+// Planning artifacts the parent already had accepted. A blocked-run continuation
+// reuses these verbatim instead of regenerating story/research/spec from scratch.
+// Outcome artifacts (test-report, validation-report, pr-body) are intentionally
+// NOT seeded — the child must produce its own.
+const CONTINUATION_SEED_ARTIFACT_KINDS = new Set(["story", "research_map", "design_brief", "technical_brief"]);
 const REPO_SEEDED_SKILL_FILES = ["SKILL.md", "SCHEMA.md"];
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const PACKAGED_SEED_HASHES = {
@@ -495,13 +500,18 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 export function continueFactory(parentRunId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
+  const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
 
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
   const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
   const launchEnv = factoryLaunchEnv(opts);
-  if (opts.dryRun) return { status: "dry-run", payload };
+  if (opts.dryRun) return { status: "dry-run", payload, seed_artifacts: continuationSeedPlan(continuation) };
 
   seedRepoSkill(repo);
+  // Seed the accepted parent planning artifacts into the child run up front so the
+  // orchestrator reuses the approved brief/research/story instead of regenerating
+  // them (the dominant wall-clock cost of a continuation).
+  seedContinuationPlanningArtifacts(repo, parentRunDir, continuation);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(encodeFeatureCommandPayload(payload));
@@ -1283,6 +1293,41 @@ function continuationReviewSources(parentRun) {
 function normalizeRequiredFixes(value) {
   if (!Array.isArray(value)) return [];
   return value.filter(stringValue).map((item) => String(item).trim());
+}
+
+function continuationSeedPlan(continuation) {
+  return (Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : [])
+    .filter((entry) => CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind))
+    .map((entry) => entry.ref);
+}
+
+// Copy the parent's accepted planning artifacts (story/research/design/brief) into
+// the child run's artifacts/ so a continuation reuses them instead of regenerating.
+// Each is hash-verified against the payload before copying; outcome artifacts are
+// excluded by CONTINUATION_SEED_ARTIFACT_KINDS. Returns the seeded refs.
+export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuation) {
+  const parentRun = resolve(parentRunDir);
+  const parentArtifactsDir = join(parentRun, "artifacts");
+  const targetRunDir = join(factoryRoot(repo), continuation.target.run_id);
+  const targetArtifactsDir = join(targetRunDir, "artifacts");
+  const seeded = [];
+  for (const entry of Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : []) {
+    if (!CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind)) continue;
+    const src = resolve(parentRun, entry.ref);
+    if (!isLogicalContainedPath(parentArtifactsDir, src, { allowEqual: false })) continue;
+    if (!existsSync(src)) continue;
+    if (sha256File(src) !== entry.hash) {
+      throw new Error(`continuation parent artifact '${entry.ref}' changed since payload build (hash mismatch)`);
+    }
+    const dest = resolve(targetRunDir, entry.ref);
+    if (!isLogicalContainedPath(targetArtifactsDir, dest, { allowEqual: false })) {
+      throw new Error(`continuation artifact ref escapes target artifacts/: ${entry.ref}`);
+    }
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, readFileSync(src));
+    seeded.push(entry.ref);
+  }
+  return seeded;
 }
 
 function collectContinuationParentArtifacts(parentRunDir) {
