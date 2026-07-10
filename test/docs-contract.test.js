@@ -121,7 +121,7 @@ describe("class-wide planning prompt contract", () => {
     );
   });
 
-  it("keeps a required late-discovered omission blocking despite the delta rule", () => {
+  it("keeps a required late-discovered omission blocking until fixed despite the delta rule", () => {
     // Precedence: a genuinely required sink/policy/compat/test omission is blocking regardless of
     // attempt number; the delta rule's NONBLOCKING carve-out is only for unrelated new scope or
     // optional depth — otherwise an attempt-2 discovery could be approved as nonblocking.
@@ -131,10 +131,16 @@ describe("class-wide planning prompt contract", () => {
       "work-reviewer must state that required omissions stay blocking regardless of attempt",
     );
     assert.match(
-      SKILL,
-      /genuinely required sink, policy, compatibility decision, or test stays blocking regardless of attempt number, and only unrelated new scope or optional depth is nonblocking/i,
-      "SKILL must mirror the late-discovery precedence rule",
+      WORK_REVIEWER_PROMPT,
+      /Record it once in `required_fixes`, carry it into every later review, and REJECT until observed evidence proves it landed/i,
+      "work-reviewer must carry a required omission forward and reject until it lands",
     );
+    assert.match(
+      SKILL,
+      /recorded once and carried in prior `required_fixes` until observed fixed[\s\S]*each review must REJECT until it lands/i,
+      "SKILL must carry a required omission forward and reject until it lands",
+    );
+    assert.doesNotMatch(WORK_REVIEWER_PROMPT, /blocking-once|do not reopen it/i);
   });
 
   it("puts the closed-scope guard in workflow steps 1 and 2", () => {
