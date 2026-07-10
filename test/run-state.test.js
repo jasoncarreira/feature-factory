@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   heartbeatOnce,
@@ -806,7 +806,7 @@ describe("simplified run-state transitions", () => {
     try {
       const lockDir = join(fixture.runDir, "run-json.lock");
       mkdirSync(lockDir);
-      writeJson(join(lockDir, "owner.json"), { pid: 999999, hostname: "old-host", acquired_at: NOW, nonce: "11111111-1111-4111-8111-111111111111" });
+      writeJson(join(lockDir, "owner.json"), { pid: 999999, hostname: hostname(), acquired_at: NOW, nonce: "11111111-1111-4111-8111-111111111111" });
 
       let observedOwner = null;
       await withRunJsonLock(fixture.runDir, ({ owner }) => {
@@ -814,7 +814,7 @@ describe("simplified run-state transitions", () => {
       }, { timeoutMs: 5, retryDelayMs: 1, processAliveFn: () => false });
 
       assert.equal(observedOwner.stolen_from.pid, 999999);
-      assert.equal(observedOwner.stolen_from.hostname, "old-host");
+      assert.equal(observedOwner.stolen_from.hostname, hostname());
       assert.equal(observedOwner.stolen_from.nonce, undefined);
       assert.match(observedOwner.nonce, /^[0-9a-f-]{36}$/u);
     } finally {
@@ -827,7 +827,7 @@ describe("simplified run-state transitions", () => {
     try {
       const lockDir = join(fixture.runDir, "run-json.lock");
       mkdirSync(lockDir);
-      writeJson(join(lockDir, "owner.json"), { pid: process.pid, hostname: "live-host", acquired_at: "2000-01-01T00:00:00.000Z", nonce: "22222222-2222-4222-8222-222222222222" });
+      writeJson(join(lockDir, "owner.json"), { pid: process.pid, hostname: hostname(), acquired_at: "2000-01-01T00:00:00.000Z", nonce: "22222222-2222-4222-8222-222222222222" });
 
       await assert.rejects(
         withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, processAliveFn: () => true }),
@@ -925,6 +925,176 @@ describe("simplified run-state transitions", () => {
       release.resolve();
       rmSync(lockDir, { recursive: true, force: true });
       cleanup(fixture.repo);
+    }
+  });
+
+  it("allows only one exact-lock reclaimer and never removes its successor", async () => {
+    const fixture = createFixture("two-reclaimers");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    const firstClaimed = deferredPromise();
+    const releaseFirstClaim = deferredPromise();
+    const firstRenamed = deferredPromise();
+    const releaseFirstRename = deferredPromise();
+    const secondContended = deferredPromise();
+    const secondCreated = deferredPromise();
+    const releaseSecondPublication = deferredPromise();
+    const secondEntered = deferredPromise();
+    const releaseSecondCallback = deferredPromise();
+    const secondCleaning = deferredPromise();
+    const releaseSecondCleanup = deferredPromise();
+    const firstEntered = deferredPromise();
+    let activeCallbacks = 0;
+    let maxActiveCallbacks = 0;
+    try {
+      mkdirSync(lockDir);
+      writeJson(join(lockDir, "owner.json"), {
+        pid: 999999,
+        hostname: hostname(),
+        acquired_at: NOW,
+        nonce: "55555555-5555-4555-8555-555555555555",
+      });
+      const callback = async (entered, release = null) => {
+        activeCallbacks += 1;
+        maxActiveCallbacks = Math.max(maxActiveCallbacks, activeCallbacks);
+        entered.resolve();
+        if (release) await release.promise;
+        activeCallbacks -= 1;
+      };
+      const first = withRunJsonLock(fixture.runDir, () => callback(firstEntered), {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        processAliveFn: () => false,
+        lockHooks: {
+          onReclaimClaimed: async () => { firstClaimed.resolve(); await releaseFirstClaim.promise; },
+          onReclaimRenamed: async () => { firstRenamed.resolve(); await releaseFirstRename.promise; },
+        },
+      });
+      await firstClaimed.promise;
+      const second = withRunJsonLock(fixture.runDir, () => callback(secondEntered, releaseSecondCallback), {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        processAliveFn: () => false,
+        lockHooks: {
+          onContended: () => secondContended.resolve(),
+          onLockCreated: async () => { secondCreated.resolve(); await releaseSecondPublication.promise; },
+          onBeforeCleanup: async () => { secondCleaning.resolve(); await releaseSecondCleanup.promise; },
+        },
+      });
+      await secondContended.promise;
+      releaseFirstClaim.resolve();
+      await firstRenamed.promise;
+      await secondCreated.promise;
+      releaseSecondPublication.resolve();
+      await secondEntered.promise;
+      releaseFirstRename.resolve();
+      releaseSecondCallback.resolve();
+      await secondCleaning.promise;
+      assert.equal(activeCallbacks, 0);
+      assert.equal(existsSync(lockDir), true, "successor lock must remain during its cleanup barrier");
+      releaseSecondCleanup.resolve();
+      await second;
+      await firstEntered.promise;
+      await first;
+      assert.equal(maxActiveCallbacks, 1);
+      assert.equal(existsSync(lockDir), false);
+    } finally {
+      for (const barrier of [releaseFirstClaim, releaseFirstRename, releaseSecondPublication, releaseSecondCallback, releaseSecondCleanup]) barrier.resolve();
+      rmSync(lockDir, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("binds a delayed reclaim claim outside the replaceable lock pathname", async () => {
+    const fixture = createFixture("observation-claim-race");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    const delayedObserved = deferredPromise();
+    const releaseDelayedClaim = deferredPromise();
+    const winnerRemoved = deferredPromise();
+    const releaseWinnerRemoved = deferredPromise();
+    const delayedAbandoned = deferredPromise();
+    const successorEntered = deferredPromise();
+    const releaseSuccessor = deferredPromise();
+    let delayedCallbackEntered = false;
+    let winnerCallbackEntered = false;
+    try {
+      mkdirSync(lockDir);
+      writeJson(join(lockDir, "owner.json"), {
+        pid: 999999,
+        hostname: hostname(),
+        acquired_at: NOW,
+        nonce: "88888888-8888-4888-8888-888888888888",
+      });
+      const delayed = withRunJsonLock(fixture.runDir, () => { delayedCallbackEntered = true; }, {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        processAliveFn: () => false,
+        lockHooks: {
+          onBeforeReclaimClaim: async () => { delayedObserved.resolve(); await releaseDelayedClaim.promise; },
+          onReclaimAbandoned: () => delayedAbandoned.resolve(),
+        },
+      });
+      await delayedObserved.promise;
+      const winner = withRunJsonLock(fixture.runDir, () => { winnerCallbackEntered = true; }, {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        processAliveFn: () => false,
+        lockHooks: { onReclaimRemoved: async () => { winnerRemoved.resolve(); await releaseWinnerRemoved.promise; } },
+      });
+      await winnerRemoved.promise;
+      const successor = withRunJsonLock(fixture.runDir, async () => {
+        successorEntered.resolve();
+        await releaseSuccessor.promise;
+      }, { timeoutMs: 5000 });
+      await successorEntered.promise;
+      const successorOwner = readFileSync(join(lockDir, "owner.json"));
+      releaseDelayedClaim.resolve();
+      await delayedAbandoned.promise;
+      assert.deepEqual(readFileSync(join(lockDir, "owner.json")), successorOwner);
+      assert.deepEqual(readdirSync(lockDir), ["owner.json"]);
+      assert.equal(delayedCallbackEntered, false);
+      assert.equal(winnerCallbackEntered, false);
+
+      releaseWinnerRemoved.resolve();
+      releaseSuccessor.resolve();
+      await successor;
+      await Promise.all([winner, delayed]);
+      assert.equal(winnerCallbackEntered, true);
+      assert.equal(delayedCallbackEntered, true);
+      assert.equal(existsSync(lockDir), false);
+    } finally {
+      for (const barrier of [releaseDelayedClaim, releaseWinnerRemoved, releaseSuccessor]) barrier.resolve();
+      rmSync(lockDir, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed for remote and indeterminate owner liveness", async () => {
+    const cases = [
+      ["remote", "remote-host.invalid", () => false],
+      ["undefined", hostname(), () => undefined],
+      ["unknown-status", hostname(), () => ({ status: "unknown" })],
+      ["eperm", hostname(), () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); }],
+      ["probe-error", hostname(), () => { throw new Error("probe failed"); }],
+    ];
+    for (const [name, ownerHostname, processAliveFn] of cases) {
+      const fixture = createFixture(`indeterminate-${name}`);
+      const lockDir = join(fixture.runDir, "run-json.lock");
+      try {
+        mkdirSync(lockDir);
+        writeJson(join(lockDir, "owner.json"), {
+          pid: 999999,
+          hostname: ownerHostname,
+          acquired_at: NOW,
+          nonce: "66666666-6666-4666-8666-666666666666",
+        });
+        await assert.rejects(
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, processAliveFn }),
+          /timed out waiting for run\.json lock/u,
+        );
+        assert.equal(readJson(join(lockDir, "owner.json")).nonce, "66666666-6666-4666-8666-666666666666");
+      } finally {
+        cleanup(fixture.repo);
+      }
     }
   });
 });

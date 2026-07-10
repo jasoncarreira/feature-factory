@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   persistFactoryRunCreatedEnv,
@@ -164,6 +164,109 @@ describe("lock-protected steering boundaries", () => {
         rmSync(fixture.lockPath, { recursive: true, force: true });
         cleanupFixture(fixture);
       }
+    }
+  });
+
+  it("serializes gate, steering, and fence writers behind one exclusive dead-lock reclaimer", async () => {
+    const gateFixture = await createPendingGateFixture("reclaim-gate-writer");
+    const steeringFixture = createFixture("reclaim-steering-writer");
+    const fenceFixture = createReadyPrFixture("reclaim-fence-writer");
+    const cases = [
+      {
+        fixture: gateFixture,
+        invoke: (hooks) => transitionGateDecision(gateFixture.runDir, "story", gateFixture.approval, {
+          boundaryToken: gateFixture.boundary.token,
+          timeoutMs: 5000,
+          retryDelayMs: 1,
+          processAliveFn: () => false,
+          lockHooks: hooks,
+        }),
+        assertMutation: (run) => assert.equal(run.gates.story.status, "approved"),
+      },
+      {
+        fixture: steeringFixture,
+        invoke: (hooks) => transitionSteeringQueued(steeringFixture.runDir, "serialized steering", {
+          id: "serialized-steering",
+          timeoutMs: 5000,
+          retryDelayMs: 1,
+          processAliveFn: () => false,
+          lockHooks: hooks,
+        }),
+        assertMutation: (run) => assert.equal(run.steering.pending.id, "serialized-steering"),
+      },
+      {
+        fixture: fenceFixture,
+        invoke: (hooks) => transitionPrePrFenceEstablished(fenceFixture.runDir, {
+          token: "serialized-fence-token",
+          timeoutMs: 5000,
+          retryDelayMs: 1,
+          processAliveFn: () => false,
+          lockHooks: hooks,
+        }),
+        assertMutation: (run) => assert.equal(run.steering.pr_fence.token, "serialized-fence-token"),
+      },
+    ];
+    try {
+      for (const spec of cases) {
+        const { fixture } = spec;
+        seedDeadLock(fixture);
+        const reclaimerClaimed = deferred();
+        const releaseReclaimerClaim = deferred();
+        const reclaimerRenamed = deferred();
+        const releaseReclaimerRename = deferred();
+        const reclaimerRemoved = deferred();
+        const releaseReclaimerRemoved = deferred();
+        const reclaimerEntered = deferred();
+        let reclaimerCallbackEntered = false;
+        const writerContended = deferred();
+        const writerCreated = deferred();
+        const releaseWriterPublication = deferred();
+        const writerCleaning = deferred();
+        const releaseWriterCleanup = deferred();
+        const reclaimer = tracked(withRunJsonLock(fixture.runDir, () => { reclaimerCallbackEntered = true; reclaimerEntered.resolve(); }, {
+          timeoutMs: 5000,
+          retryDelayMs: 1,
+          processAliveFn: () => false,
+          lockHooks: {
+            onReclaimClaimed: async () => { reclaimerClaimed.resolve(); await releaseReclaimerClaim.promise; },
+            onReclaimRenamed: async () => { reclaimerRenamed.resolve(); await releaseReclaimerRename.promise; },
+            onReclaimRemoved: async () => { reclaimerRemoved.resolve(); await releaseReclaimerRemoved.promise; },
+          },
+        }));
+        await bounded(reclaimerClaimed.promise, "exclusive reclaimer claim");
+        const before = bytes(fixture.runPath);
+        const writer = tracked(spec.invoke({
+          onContended: () => writerContended.resolve(),
+          onLockCreated: async () => { writerCreated.resolve(); await releaseWriterPublication.promise; },
+          onBeforeCleanup: async () => { writerCleaning.resolve(); await releaseWriterCleanup.promise; },
+        }));
+        try {
+          await bounded(writerContended.promise, "writer contention on claimed dead lock");
+          releaseReclaimerClaim.resolve();
+          await bounded(reclaimerRenamed.promise, "dead lock quarantine rename");
+          await bounded(writerCreated.promise, "successor writer publication barrier");
+          assertBytes(fixture.runPath, before);
+          releaseWriterPublication.resolve();
+          await bounded(writerCleaning.promise, "successor writer cleanup barrier");
+          spec.assertMutation(readJson(fixture.runPath));
+          releaseReclaimerRename.resolve();
+          await bounded(reclaimerRemoved.promise, "old quarantine removal");
+          assert.equal(reclaimerCallbackEntered, false);
+          assert.equal(existsSync(fixture.lockPath), true, "writer lock must survive stale reclaimer cleanup");
+          releaseReclaimerRemoved.resolve();
+          releaseWriterCleanup.resolve();
+          await writer.promise;
+          await bounded(reclaimerEntered.promise, "reclaimer serialized callback");
+          await reclaimer.promise;
+          spec.assertMutation(readJson(fixture.runPath));
+        } finally {
+          for (const barrier of [releaseReclaimerClaim, releaseReclaimerRename, releaseReclaimerRemoved, releaseWriterPublication, releaseWriterCleanup]) barrier.resolve();
+          await Promise.allSettled([reclaimer.promise, writer.promise]);
+          rmSync(fixture.lockPath, { recursive: true, force: true });
+        }
+      }
+    } finally {
+      for (const fixture of [gateFixture, steeringFixture, fenceFixture]) cleanupFixture(fixture);
     }
   });
 
@@ -878,9 +981,19 @@ function seedAgedLiveLock(fixture) {
   mkdirSync(fixture.lockPath);
   writeJson(join(fixture.lockPath, "owner.json"), {
     pid: process.pid,
-    hostname: "aged-live-owner",
+    hostname: hostname(),
     acquired_at: "2000-01-01T00:00:00.000Z",
     nonce: "44444444-4444-4444-8444-444444444444",
+  });
+}
+
+function seedDeadLock(fixture) {
+  mkdirSync(fixture.lockPath);
+  writeJson(join(fixture.lockPath, "owner.json"), {
+    pid: 987654321,
+    hostname: hostname(),
+    acquired_at: NOW,
+    nonce: "77777777-7777-4777-8777-777777777777",
   });
 }
 

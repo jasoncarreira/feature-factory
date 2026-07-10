@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { lstat, open, readFile, rename, rm, mkdir, stat, writeFile } from "node:fs/promises";
+import { lstat, open, readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
@@ -45,6 +45,7 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
   let createdIdentity = null;
   let owner = null;
   let ownerPublished = false;
+  let publishedEvidence = null;
 
   while (true) {
     try {
@@ -57,18 +58,20 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
         contentionReported = true;
         await runContendedLockHook(lockHooks.onContended, { runDir, lockDir }, deadline, ownerPath);
       }
+      if (!stealAttempted) {
+        const observedIdentity = await lockDirectoryIdentity(lockDir);
+        const observedEvidence = await readLockOwnerEvidence(ownerPath);
+        if (canStealRunJsonLock(observedEvidence?.owner, options)) {
+          stealAttempted = true;
+          const reclaimed = await reclaimRunJsonLock(runDir, lockDir, observedIdentity, observedEvidence, options, lockHooks, deadline);
+          if (reclaimed) {
+            stolenFrom = reclaimed;
+            continue;
+          }
+        }
+      }
       if (Date.now() >= deadline) {
         const observedOwner = await readLockOwner(ownerPath);
-        if (!stealAttempted && canStealRunJsonLock(observedOwner, options)) {
-          const confirmedOwner = await readLockOwner(ownerPath);
-          if (!sameLockOwner(observedOwner, confirmedOwner) || !canStealRunJsonLock(confirmedOwner, options)) {
-            throw new Error(formatLockTimeout(lockDir, confirmedOwner));
-          }
-          await rm(lockDir, { recursive: true, force: true });
-          stolenFrom = confirmedOwner;
-          stealAttempted = true;
-          continue;
-        }
         throw new Error(formatLockTimeout(lockDir, observedOwner));
       }
       await delay(Math.min(retryDelayMs, Math.max(1, deadline - Date.now())));
@@ -86,17 +89,16 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
       throw new Error(`run.json lock ownership changed before owner publication at ${lockDir}`);
     }
     await writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-    const publishedOwner = await readLockOwner(ownerPath);
-    if (!sameLockOwner(owner, publishedOwner)) throw new Error(`run.json lock owner publication failed at ${lockDir}`);
+    publishedEvidence = await readLockOwnerEvidence(ownerPath);
+    if (!sameLockOwner(owner, publishedEvidence?.owner)) throw new Error(`run.json lock owner publication failed at ${lockDir}`);
     ownerPublished = true;
     return await fn({ lock_dir: lockDir, owner });
   } finally {
-    if (ownerPublished && sameLockOwner(owner, await readLockOwner(ownerPath))) {
-      await rm(lockDir, { recursive: true, force: true });
+    if (ownerPublished) {
+      if (lockHooks.onBeforeCleanup) await lockHooks.onBeforeCleanup({ runDir, lockDir });
+      await releaseOwnedRunJsonLock(runDir, lockDir, createdIdentity, publishedEvidence);
     } else if (!ownerPublished && !(await lockOwnerEntryExists(ownerPath))) {
-      if (sameLockDirectoryIdentity(createdIdentity, await lockDirectoryIdentity(lockDir))) {
-        await rm(lockDir, { recursive: true, force: true });
-      }
+      await quarantineAndRemoveOwnedLock(runDir, lockDir, createdIdentity);
     }
   }
 }
@@ -109,6 +111,11 @@ function validateRunJsonLockHooks(lockHooks) {
   }
   if (lockHooks.onLockCreated !== undefined && typeof lockHooks.onLockCreated !== "function") {
     throw new Error("lockHooks.onLockCreated must be a function");
+  }
+  for (const name of ["onBeforeReclaimClaim", "onReclaimClaimed", "onReclaimAbandoned", "onReclaimRenamed", "onReclaimRemoved", "onBeforeCleanup"]) {
+    if (lockHooks[name] !== undefined && typeof lockHooks[name] !== "function") {
+      throw new Error(`lockHooks.${name} must be a function`);
+    }
   }
   return lockHooks;
 }
@@ -136,19 +143,149 @@ async function runRunJsonLockHook(hook, context, deadline, ownerPath) {
 }
 
 function canStealRunJsonLock(owner, options = {}) {
-  return isDurableLockOwner(owner) && !isProcessAlive(owner.pid, options);
+  return isDurableLockOwner(owner) && inspectLockOwnerLiveness(owner, options) === "dead";
 }
 
-async function readLockOwner(ownerPath) {
+async function readLockOwnerEvidence(ownerPath) {
   let handle;
   try {
     handle = await open(ownerPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
     const parsed = JSON.parse(await handle.readFile("utf8"));
-    return isDurableLockOwner(parsed) ? parsed : null;
+    if (!isDurableLockOwner(parsed)) return null;
+    const value = await handle.stat();
+    return { owner: parsed, identity: { dev: value.dev, ino: value.ino } };
   } catch {
     return null;
   } finally {
     await handle?.close();
+  }
+}
+
+async function readLockOwner(ownerPath) {
+  return (await readLockOwnerEvidence(ownerPath))?.owner ?? null;
+}
+
+async function reclaimRunJsonLock(runDir, lockDir, observedIdentity, observedEvidence, options, lockHooks, deadline) {
+  if (!observedIdentity || !observedEvidence) return null;
+  const claimPath = reclaimClaimPath(runDir, observedIdentity, observedEvidence.owner.nonce);
+  const claim = { owner_nonce: observedEvidence.owner.nonce, reclaim_nonce: randomUUID() };
+  if (lockHooks.onBeforeReclaimClaim) {
+    await runRunJsonLockHook(lockHooks.onBeforeReclaimClaim, { runDir, lockDir }, deadline, join(lockDir, LOCK_OWNER_FILE));
+  }
+  try {
+    await writeFile(claimPath, `${JSON.stringify(claim)}\n`, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if (error?.code === "EEXIST" || error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (lockHooks.onReclaimClaimed) {
+    await runRunJsonLockHook(lockHooks.onReclaimClaimed, { runDir, lockDir }, deadline, join(lockDir, LOCK_OWNER_FILE));
+  }
+  const confirmedIdentity = await lockDirectoryIdentity(lockDir);
+  const confirmedEvidence = await readLockOwnerEvidence(join(lockDir, LOCK_OWNER_FILE));
+  if (!sameLockDirectoryIdentity(observedIdentity, confirmedIdentity)
+    || !sameLockOwnerEvidence(observedEvidence, confirmedEvidence)
+    || !canStealRunJsonLock(confirmedEvidence?.owner, options)
+    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
+    await removeOwnedReclaimClaim(claimPath, claim);
+    if (lockHooks.onReclaimAbandoned) await lockHooks.onReclaimAbandoned({ runDir, lockDir });
+    return null;
+  }
+
+  const quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, observedIdentity);
+  const movedOwnerPath = join(quarantine, LOCK_OWNER_FILE);
+  if (!sameLockOwnerEvidence(observedEvidence, await readLockOwnerEvidence(movedOwnerPath))
+    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
+    throw new Error(`run.json lock reclamation identity changed at ${quarantine}`);
+  }
+  if (lockHooks.onReclaimRenamed) await lockHooks.onReclaimRenamed({ runDir, lockDir, quarantine });
+  if (!sameLockDirectoryIdentity(observedIdentity, await lockDirectoryIdentity(quarantine))
+    || !sameLockOwnerEvidence(observedEvidence, await readLockOwnerEvidence(movedOwnerPath))
+    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
+    throw new Error(`run.json lock reclamation identity changed before removal at ${quarantine}`);
+  }
+  await rm(quarantine, { recursive: true, force: true });
+  await removeOwnedReclaimClaim(claimPath, claim);
+  if (lockHooks.onReclaimRemoved) await lockHooks.onReclaimRemoved({ runDir, lockDir });
+  return observedEvidence.owner;
+}
+
+function reclaimClaimPath(runDir, identity, ownerNonce) {
+  const key = createHash("sha256").update(`${identity.dev}:${identity.ino}:${ownerNonce}`).digest("hex");
+  return join(runDir, `.run-json.lock-reclaim-${key}.json`);
+}
+
+async function removeOwnedReclaimClaim(claimPath, claim) {
+  if (!sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) return;
+  await rm(claimPath, { force: true });
+}
+
+async function releaseOwnedRunJsonLock(runDir, lockDir, expectedIdentity, expectedEvidence) {
+  if (!sameLockDirectoryIdentity(expectedIdentity, await lockDirectoryIdentity(lockDir))) return;
+  if (!sameLockOwnerEvidence(expectedEvidence, await readLockOwnerEvidence(join(lockDir, LOCK_OWNER_FILE)))) return;
+  const quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, expectedIdentity);
+  if (!sameLockOwnerEvidence(expectedEvidence, await readLockOwnerEvidence(join(quarantine, LOCK_OWNER_FILE)))) {
+    throw new Error(`run.json lock cleanup identity changed at ${quarantine}`);
+  }
+  if (!sameLockDirectoryIdentity(expectedIdentity, await lockDirectoryIdentity(quarantine))
+    || !sameLockOwnerEvidence(expectedEvidence, await readLockOwnerEvidence(join(quarantine, LOCK_OWNER_FILE)))) return;
+  await rm(quarantine, { recursive: true, force: true });
+}
+
+async function quarantineAndRemoveOwnedLock(runDir, lockDir, expectedIdentity) {
+  if (!sameLockDirectoryIdentity(expectedIdentity, await lockDirectoryIdentity(lockDir))) return;
+  const quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, expectedIdentity);
+  if (!sameLockDirectoryIdentity(expectedIdentity, await lockDirectoryIdentity(quarantine))) return;
+  await rm(quarantine, { recursive: true, force: true });
+}
+
+async function renameOwnedLockToQuarantine(runDir, lockDir, expectedIdentity) {
+  if (!sameLockDirectoryIdentity(expectedIdentity, await lockDirectoryIdentity(lockDir))) {
+    throw new Error(`run.json lock directory identity changed at ${lockDir}`);
+  }
+  const quarantine = join(runDir, `.run-json.lock-quarantine-${randomUUID()}`);
+  await rename(lockDir, quarantine);
+  if (!sameLockDirectoryIdentity(expectedIdentity, await lockDirectoryIdentity(quarantine))) {
+    throw new Error(`run.json lock quarantine identity changed at ${quarantine}`);
+  }
+  return quarantine;
+}
+
+async function readJsonNoFollow(path) {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    return JSON.parse(await handle.readFile("utf8"));
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+
+function sameReclaimClaim(left, right) {
+  return isRecord(left) && isRecord(right)
+    && left.owner_nonce === right.owner_nonce
+    && left.reclaim_nonce === right.reclaim_nonce;
+}
+
+function inspectLockOwnerLiveness(owner, options = {}) {
+  if (!isDurableLockOwner(owner) || owner.hostname !== hostname()) return "indeterminate";
+  if (typeof options.processAliveFn === "function") {
+    try {
+      const result = options.processAliveFn(owner.pid);
+      if (result === true || result === "alive" || result?.status === "alive") return "alive";
+      if (result === false || result === "dead" || result?.status === "dead") return "dead";
+      return "indeterminate";
+    } catch {
+      return "indeterminate";
+    }
+  }
+  try {
+    process.kill(owner.pid, 0);
+    return "alive";
+  } catch (error) {
+    return error?.code === "ESRCH" ? "dead" : "indeterminate";
   }
 }
 
@@ -181,9 +318,17 @@ function sameLockOwner(left, right) {
   return isDurableLockOwner(left) && isDurableLockOwner(right) && left.nonce === right.nonce;
 }
 
+function sameLockOwnerEvidence(left, right) {
+  return Boolean(left && right
+    && sameLockOwner(left.owner, right.owner)
+    && left.identity.dev === right.identity.dev
+    && left.identity.ino === right.identity.ino);
+}
+
 async function lockDirectoryIdentity(lockDir) {
   try {
-    const value = await stat(lockDir);
+    const value = await lstat(lockDir);
+    if (!value.isDirectory() || value.isSymbolicLink()) return null;
     return { dev: value.dev, ino: value.ino };
   } catch {
     return null;
