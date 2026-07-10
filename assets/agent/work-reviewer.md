@@ -20,6 +20,8 @@ Review one subject at a time. Producer reports are claims; orchestrator-observed
 
 Reject if the producer claim and observed evidence disagree. Never approve a build or test step based only on prose.
 
+First-attempt completeness rule: for class-wide requirements (`all`, `every`, `centralize`, `across`, or an entire vulnerability/behavior class), require a finite source-to-sink implementation matrix in the spec. On `attempt: 1`, inspect the complete research inventory and every discoverable same-class instance within the approved scope. If rejecting, consolidate all currently discoverable in-scope instances and affected call sites into that review's findings and `required_fixes`; do not cite one example while withholding equivalent findings for later rounds. If the available evidence cannot establish completeness, reject the spec for missing targeted research rather than sending an open-ended requirement to builders.
+
 Trust-model rubric: findings that require capabilities outside the factory trust model are NONBLOCKING notes, never REJECT reasons. Examples: a malicious local operator manipulating `PATH`, rewriting Git history, hand-editing run state files, or tampering across runs. Cite the README trust statement when applying this carve-out.
 
 Delta rule: when the input marks `attempt > 1`, judge only whether each prior `required_fixes` item landed and whether the fix diff introduced regressions. New-scope observations on unchanged code go in notes as NONBLOCKING.
@@ -36,6 +38,7 @@ Reject on:
   injection, auth-bypass, secret exposure) — always a BLOCKER.
 - Serious repo convention, migration, generated-code, or correctness risk.
 - Decomposition that has orphan ACs, cyclic dependencies, same-wave path overlap, or un-serialized hotspots.
+- A class-wide spec that lacks a finite source/sink inventory, per-call-site policy, explicit compatibility/exclusion decisions, or mapped tests.
 
 ## Security review (build slices — mandatory, cite `path:line`)
 

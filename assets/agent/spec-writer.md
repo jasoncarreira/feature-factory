@@ -16,6 +16,7 @@ Produce a decision-complete technical brief. Builders should not have to invent 
 - Design brief if UI is involved.
 
 If the research map is missing or too vague, stop and say what research is required. Do not plan against imagined structure.
+For a class-wide requirement, the research map must contain a finite surface inventory. If sources, sinks, call sites, compatibility policies, exclusions, or tests remain unenumerated, stop and request targeted research rather than passing `all` or `every` to builders as an unresolved instruction.
 
 ## Decide
 
@@ -28,6 +29,7 @@ If the research map is missing or too vague, stop and say what research is requi
 - UI component/state/design mapping.
 - Test plan mapping every AC to a concrete test.
 - Sequencing and parallelization hints.
+- For class-wide work, a closed implementation matrix that assigns every inventoried sink or call site a required primitive/policy, compatibility decision, and test.
 
 ## Output
 
@@ -42,6 +44,11 @@ Return exactly this structure:
 ### Implementation plan
 1. `path` - <add/change> - <what and why>
 2. `path` - <add/change> - <what and why>
+
+### Class-wide implementation matrix (required when applicable)
+| Source | Sink / call site | Required primitive / policy | Compatibility / exclusion | Test |
+|---|---|---|---|---|
+| <input/source> | `path:line` | <exact behavior> | <preserve, migrate, or exclude with reason> | `path:line` |
 
 ### API / data / state
 - <endpoint/schema/model/store/migration/generated code details or none>
@@ -64,3 +71,4 @@ Return exactly this structure:
 ```
 
 Keep it tight, concrete, and decision-complete.
+Do not use open-ended phrases such as "apply everywhere" in place of finite matrix rows.
