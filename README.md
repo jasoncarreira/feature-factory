@@ -385,6 +385,7 @@ feature-factory factory env record-resume <run-id> --json
 feature-factory factory cancel <run-id> --json
 feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json
 feature-factory factory cost-record <run-id> --agent AGENT --step STEP --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
+feature-factory factory cost-report <run-id> [--json] [--telemetry]
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
 ```
 
@@ -417,6 +418,26 @@ Semantics:
 - `partial` means some usage/cost data is present but provider/model/usage/cost_total/cost_currency is incomplete; missing fields stay missing and are listed in `missing`.
 - `unavailable` means the provider exposed no usage or cost data. It does not mean zero cost.
 - `factory status <run-id> --json`, `factory list`, `factory watch`, and the TUI expose a cost summary (`status`, entry/agent/slice counts, token fields when supplied, `cost_total`/`cost_currency` when supplied, mixed-currency and missing-field indicators).
+
+Read the complete current-run attribution as a report without changing factory state:
+
+```sh
+feature-factory factory cost-report <run-id>
+feature-factory factory cost-report <run-id> --json
+feature-factory factory cost-report <run-id> --telemetry [--json]
+```
+
+The default mode is a human-readable terminal report. `--json` emits the stable report-v1 response (`schema_version: 1`) for scripts. Both modes contain run totals and `by_agent`, `by_step`, and `by_slice` rollups, plus top-level `entry_count`, `request_count`, `agent_count`, `step_count`, `slice_count`, and `unattributed_step_entry_count`. Request count is one per persisted entry; it does not deduplicate `request_id`. Entries whose `step` is missing, `null`, empty, or whitespace-only are excluded from `by_step`, counted by `unattributed_step_entry_count`, and never placed in a synthetic group.
+
+Every report view is recomputed at read time exclusively from `run.json.cost_attribution.entries`. Persisted attribution `status`, `totals`, `by_agent`, and `by_slice` caches are ignored, and `by_step` and report totals are never persisted. Exact, untrimmed, unsanitized nonblank agent, step, and slice strings remain distinct raw JSON map keys, including `__proto__`. Human output uses quoted, injective terminal-safe labels: printable ASCII remains readable with quote/backslash escaping, and every other UTF-16 code unit is encoded as uppercase `\uXXXX`. Display encoding never changes or merges the raw JSON identities.
+
+Report rollups preserve the attribution contract. Empty data is `unavailable`, never zero; a validator-accepted `partial` entry with no usage or cost numeric fields remains `partial` and contributes no fabricated number. An explicit `null` in any usage or cost numeric field is treated as absence and omitted, not coerced to zero; an explicit numeric `0` remains present. `available`, `partial`, `unavailable`, `missing`, entry counts, and request counts use the existing rollup semantics.
+
+Mixed currencies make the affected rollup `partial`, set `mixed_currency: true`, add `mixed_currency` to `missing`, and suppress both `cost_total` and `cost_currency`. Component fields such as `cost_input`, `cost_output`, `cost_cache_creation`, and `cost_cache_read` may remain separately summed for compatibility, but they are not normalized monetary totals. Consumers must not reconstruct a combined total from those components.
+
+`factory cost-report` is a strictly local, read-only diagnostic, not billing authority. It does not mutate `run.json` or any factory file, persist derived output, acquire or wait for `run-json.lock`, require heartbeat state or accepted attestations, inspect pricing tables/APIs, price or estimate costs, convert currencies, coerce missing values, normalize provider metadata, or make network calls. It is not an invoice, quota, chargeback, finance-control, or cross-run accounting surface.
+
+`--telemetry` opts in only for that report invocation. When valid inherited trace context exists, the response may append `telemetry.trace_id` and `telemetry.parent_span_id`; without the flag, ambient context is ignored and output is unchanged. This metadata correlates the report invocation only. It is not proof that any attribution entry, agent, step, slice, provider request, or aggregate came from that trace/span. It does not create a span, enable an exporter, persist context, or cause network traffic.
 
 Orchestrators should record available provider usage with `factory cost-record` after the long waits for `spec-writer`, `work-reviewer`, `work-decomposer`, builders, `test-verifier`, `implementation-validator`, `security-reviewer`, and remediation. Because these waits usually run under heartbeat, stop heartbeat or verify it inactive first, then record cost attribution before terminal writes or `factory pr-created`.
 

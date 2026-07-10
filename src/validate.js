@@ -92,6 +92,20 @@ export function validateRun(run) {
   return run;
 }
 
+export function validateCostAttributionEntries(entries, runId) {
+  const errors = [];
+  const path = "run.cost_attribution.entries";
+  if (!Array.isArray(entries)) {
+    errors.push({ path, message: "must be an array" });
+  } else {
+    if (entries.length > MAX_COST_ATTRIBUTION_ENTRIES) errors.push({ path, message: `must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries` });
+    const expectedRunId = stringValue(runId) ? runId : null;
+    for (const [index, entry] of entries.entries()) validateCostAttributionEntry(errors, entry, `${path}[${index}]`, null, expectedRunId);
+  }
+  if (errors.length) fail(errors);
+  return entries;
+}
+
 export function validateSlicesPlan(plan) {
   const errors = [];
   if (!isRecord(plan)) return fail([{ path: "plan", message: "must be an object" }]);
@@ -666,13 +680,13 @@ function validateCostAttribution(errors, attribution, path, run) {
   validateCostAttributionRollupMap(errors, attribution.by_agent, `${path}.by_agent`, { required: true });
   validateCostAttributionRollupMap(errors, attribution.by_slice, `${path}.by_slice`, { required: true, knownKeys: knownRunSliceIds(run) });
 
+  const knownSlices = knownRunSliceIds(run);
+  const runId = stringValue(run?.run_id) ? run.run_id : null;
   if (!Array.isArray(attribution.entries)) {
     errors.push({ path: `${path}.entries`, message: "must be an array" });
     return;
   }
   if (attribution.entries.length > MAX_COST_ATTRIBUTION_ENTRIES) errors.push({ path: `${path}.entries`, message: `must have at most ${MAX_COST_ATTRIBUTION_ENTRIES} entries` });
-  const knownSlices = knownRunSliceIds(run);
-  const runId = stringValue(run?.run_id) ? run.run_id : null;
   for (const [index, entry] of attribution.entries.entries()) validateCostAttributionEntry(errors, entry, `${path}.entries[${index}]`, knownSlices, runId);
 }
 
@@ -702,6 +716,9 @@ function validateCostAttributionAvailability(errors, entry, path) {
   const missing = costAttributionAvailabilityMissing(entry);
   const hasUsage = hasUsageNumber(entry);
   const hasCost = hasCostNumber(entry);
+  if (entry.status === "available" && Array.isArray(entry.missing) && entry.missing.length > 0) {
+    errors.push({ path: `${path}.missing`, message: "must be empty when status is available" });
+  }
   if (entry.status === "available" && missing.length > 0) {
     errors.push({ path: `${path}.status`, message: "available requires provider, model, usage, cost_total, and cost_currency" });
   }

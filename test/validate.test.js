@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
-import { ValidationError, checkRunConsistency, validateRun, validateRunDir, validateSlicesPlan } from "../src/validate.js";
+import { ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSlicesPlan } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
@@ -136,6 +136,57 @@ describe("run schema and consistency", () => {
       () => validateRun({ ...runningRun(), cost_attribution: costAttribution }),
       (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.totals.missing[0]: must not contain control characters"),
     );
+  });
+
+  it("validates cost entries independently of full-run and known-slice state", () => {
+    const entry = {
+      id: "cost-1",
+      recorded_at: "2026-07-08T12:00:00.000Z",
+      run_id: "run",
+      agent: "backend-builder",
+      slice_id: "not-in-a-plan",
+      provider: "unknown-provider",
+      model: "unknown-model",
+      input_tokens: 10,
+      cost_total: 0.02,
+      cost_currency: "USD",
+      status: "available",
+      missing: [],
+    };
+
+    assert.equal(validateCostAttributionEntries([entry], "run")[0], entry);
+    assert.throws(
+      () => validateCostAttributionEntries([{ ...entry, run_id: "other" }], "run"),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].run_id: must match run.run_id"),
+    );
+    assert.throws(
+      () => validateCostAttributionEntries(Array.from({ length: 1001 }, () => entry), "run"),
+      (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries: must have at most 1000 entries"),
+    );
+  });
+
+  it("accepts persisted numeric nulls and data-less partial entries but rejects invalid non-null values", () => {
+    const numericFields = [
+      "input_tokens", "output_tokens", "total_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "reasoning_tokens",
+      "cost_total", "cost_input", "cost_output", "cost_cache_creation", "cost_cache_read",
+    ];
+    const entry = {
+      id: "cost-null",
+      recorded_at: "2026-07-08T12:00:00.000Z",
+      run_id: "run",
+      agent: "backend-builder",
+      status: "partial",
+      missing: ["usage"],
+      ...Object.fromEntries(numericFields.map((field) => [field, null])),
+    };
+
+    assert.equal(validateCostAttributionEntries([entry], "run")[0], entry);
+    for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, "1"]) {
+      assert.throws(
+        () => validateCostAttributionEntries([{ ...entry, input_tokens: value }], "run"),
+        (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].input_tokens: must be a finite non-negative number"),
+      );
+    }
   });
 
   it("rejects terminal controls in planned and durable work labels", () => {
