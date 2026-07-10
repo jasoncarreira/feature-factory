@@ -213,12 +213,12 @@ async function steerConsume(args) {
   return print(await consumeSteering(runId, { ref, hash }, opts), opts);
 }
 
-function cancel(args) {
+async function cancel(args) {
   const opts = options(args);
   const positional = positionals(args);
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory cancel requires exactly one <run-id>");
-  const result = cancelFactoryRun(runId, opts);
+  const result = await cancelFactoryRun(runId, opts);
   print(result, opts);
   if (!result.ok) process.exitCode = 1;
 }
