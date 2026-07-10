@@ -9,7 +9,7 @@ import { transitionRunSlice, transitionSteeringQueued, transitionSteeringConsume
 import { normalizeCostAttribution } from "../src/cost-attribution.js";
 import { runAttributes, sanitizeOtlpEnv, validateTracestate } from "../src/telemetry.js";
 import { collectProtectedSteeringState } from "../src/steering-conflicts.js";
-import { cancelFactoryRun, cleanupRun, continueFactory, startFactory } from "../src/factory.js";
+import { cancelFactoryRun, cleanupRun, continueFactory, recordCostUsage, startFactory } from "../src/factory.js";
 
 const NOW = "2026-07-09T15:00:00.000Z";
 
@@ -56,6 +56,24 @@ describe("slice merge transition guard", () => {
       cleanupDir(runDir);
     }
   });
+
+  it("refuses to roll a merged slice back to running/review/blocked via transitionRunSlice", async () => {
+    const runDir = createRunDir("slice-merged-immutable", {
+      slices: [{ id: "s1", status: "merged", merge_commit: "abc1234", review_ref: "reviews/s1.json", evidence_ref: "evidence/s1.json", attempts: 1 }],
+    });
+    try {
+      for (const status of ["running", "review", "blocked"]) {
+        await assert.rejects(
+          transitionRunSlice(runDir, "s1", { status }, { mustExist: true }),
+          /already merged; merged slices are immutable/u,
+          `status=${status}`,
+        );
+      }
+      assert.equal(readJson(join(runDir, "run.json")).slices[0].status, "merged");
+    } finally {
+      cleanupDir(runDir);
+    }
+  });
 });
 
 describe("cost attribution hardening", () => {
@@ -96,6 +114,42 @@ describe("cost attribution hardening", () => {
       }, { now: NOW }),
       /model must not contain terminal control characters/u,
     );
+  });
+
+  it("is idempotent for a retry that omits recorded_at, even at a later time", () => {
+    // Reviewer's repro: record {id:'retry', agent, input_tokens:1} at T1, then
+    // append the same object at T2 with no --recorded-at. The stored entry keeps
+    // its original timestamp; the retry must not be treated as different content.
+    const entry = { ...base, id: "retry", input_tokens: 1 };
+    const first = normalizeCostAttribution({ entries: [entry] }, { now: "2026-07-10T00:00:00.000Z" });
+    const retried = normalizeCostAttribution({ entries: [...first.entries, { ...entry }] }, { now: "2026-07-10T01:00:00.000Z" });
+    assert.equal(retried.entries.length, 1);
+    assert.equal(retried.entries[0].recorded_at, first.entries[0].recorded_at);
+  });
+
+  it("dedupes before the entry cap so an identical retry at capacity is a no-op", () => {
+    const entries = [];
+    for (let i = 0; i < 1000; i += 1) entries.push({ ...base, id: `e${i}`, recorded_at: NOW, input_tokens: 1 });
+    const atCap = normalizeCostAttribution({ entries: [...entries, { ...entries[0] }] }, { now: NOW });
+    assert.equal(atCap.entries.length, 1000);
+    assert.throws(
+      () => normalizeCostAttribution({ entries: [...entries, { ...base, id: "e1000", recorded_at: NOW, input_tokens: 1 }] }, { now: NOW }),
+      /at most 1000 entries/u,
+    );
+  });
+
+  it("is idempotent through recordCostUsage (the cost-record CLI path) with no --recorded-at", async () => {
+    const runDir = createRunDir("cost-record-retry");
+    const repo = join(runDir, "..", "..", "..");
+    try {
+      await recordCostUsage("cost-record-retry", { agent: "a", input_tokens: 1 }, { cwd: repo, entryId: "retry", now: "2026-07-10T00:00:00.000Z" });
+      await recordCostUsage("cost-record-retry", { agent: "a", input_tokens: 1 }, { cwd: repo, entryId: "retry", now: "2026-07-10T01:00:00.000Z" });
+      const run = readJson(join(runDir, "run.json"));
+      assert.equal(run.cost_attribution.entries.length, 1);
+      assert.equal(run.cost_attribution.entries[0].id, "retry");
+    } finally {
+      cleanupDir(runDir);
+    }
   });
 });
 
@@ -208,6 +262,47 @@ describe("continuation and named-start git preflight", () => {
       assert.throws(
         () => continueFactory(runId, { cwd: repo, review: "reviewer.json", runId: `${runId}-next`, dryRun: true }),
         /parent base commit/u,
+      );
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a parent base_commit that resolves but is not an ancestor of the parent branch", () => {
+    const repo = mkdtempSync(join(tmpdir(), "review-continue-orphan-"));
+    const runId = "orphan-base-parent";
+    try {
+      initGitRepo(repo);
+      runGit(repo, ["branch", runId]);
+      // A commit that exists but belongs to an unrelated orphan branch — it
+      // resolves via rev-parse yet is not in the parent branch's history.
+      runGit(repo, ["checkout", "--orphan", "unrelated"]);
+      writeFileSync(join(repo, "other.txt"), "unrelated\n", "utf8");
+      runGit(repo, ["add", "other.txt"]);
+      runGit(repo, ["commit", "-m", "orphan"]);
+      const orphanSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+      runGit(repo, ["checkout", "main"]);
+
+      const runDir = join(repo, ".opencode", "factory", runId);
+      mkdirSync(join(runDir, "artifacts"), { recursive: true });
+      mkdirSync(join(runDir, "reviews"), { recursive: true });
+      writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
+      writeJson(join(runDir, "reviews", "reviewer.json"), { subject: runId, summary: "needs continuation" });
+      writeJson(join(runDir, "run.json"), {
+        schema_version: 1,
+        run_id: runId,
+        status: "blocked",
+        branch: runId,
+        base_commit: orphanSha,
+        worktree: join(repo, ".opencode", "worktrees", runId),
+        validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
+        gates: {},
+        terminal_result: { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} },
+      });
+
+      assert.throws(
+        () => continueFactory(runId, { cwd: repo, review: "reviewer.json", runId: `${runId}-next`, dryRun: true }),
+        /not an ancestor of parent branch/u,
       );
     } finally {
       rmSync(repo, { recursive: true, force: true });

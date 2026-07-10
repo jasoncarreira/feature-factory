@@ -369,6 +369,14 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     const hadSlices = Array.isArray(draft.slices);
     const slices = hadSlices ? draft.slices : [];
     if (options.mustExist && !collectionHasItem(slices, sliceId, "id")) throw new Error(`slice '${formatSelector(sliceId)}' not found`);
+    // `merged` is a one-way state owned by transitionSliceMerged. Reject any
+    // generic mutation of an already-merged slice so its durable merged state
+    // (merge_commit, review_ref) cannot be rolled back to running/review/blocked
+    // through the public slice-status path.
+    const priorIndex = selectCollectionItemIndex(slices, sliceId, "slice selector", "id");
+    if (priorIndex >= 0 && slices[priorIndex]?.status === "merged") {
+      throw new Error(`slice '${slices[priorIndex].id || formatSelector(sliceId)}' is already merged; merged slices are immutable via transitionRunSlice`);
+    }
     const update = await applyCollectionItemUpdate({ items: slices, selector: sliceId, updater, selectorLabel: "slice selector", seed: seedRunSlice(sliceId), identityKey: "id" });
     sliceIndex = update.index;
     if (!update.changed) return;

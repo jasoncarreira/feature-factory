@@ -1153,10 +1153,18 @@ function continuationBaseRef(parentRun) {
 }
 
 function continuationBaseCommit(repo, parentRun, baseRef) {
-  // The parent-recorded base_commit is a claim; verify it still resolves in
-  // this repo before anchoring the continuation on it (a rebased or pruned
-  // commit must fail here, not mid-run).
-  if (stringValue(parentRun.base_commit)) return refCommit(repo, String(parentRun.base_commit).trim(), "parent base commit");
+  // The parent-recorded base_commit is a claim. Resolving it proves only that
+  // the object exists — an unrelated or orphan-branch commit would resolve too.
+  // Require it to be an ancestor of the (separately validated) parent branch so
+  // the continuation base genuinely belongs to the parent's history; fall back
+  // to the base ref when no base_commit was recorded.
+  if (stringValue(parentRun.base_commit)) {
+    const baseCommit = refCommit(repo, String(parentRun.base_commit).trim(), "parent base commit");
+    if (!commitIsAncestor(repo, baseCommit, parentRun.branch)) {
+      throw new Error(`parent run base commit ${baseCommit} is not an ancestor of parent branch '${parentRun.branch}'`);
+    }
+    return baseCommit;
+  }
   return refCommit(repo, baseRef, "target base ref");
 }
 
