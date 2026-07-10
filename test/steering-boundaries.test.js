@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -200,6 +201,7 @@ describe("lock-protected steering boundaries", () => {
         assert.equal(run.steering.pending.id, `${kind}-replacement`);
         assert.equal(run.steering.action_claim, null);
         assert.equal(readJson(sidecarPath).id, run.steering.pending.id);
+        assert.equal(rawSha256(sidecarBeforeLoser), run.steering.pending.hash);
       } finally {
         await finishRace(fixture, holder, queueLane, crossLane, queue, cross);
         cleanupFixture(fixture);
@@ -215,15 +217,19 @@ describe("lock-protected steering boundaries", () => {
         const holder = await acquireHolder(startFixture.runDir);
         const queueLane = lane(`${kind}-blocked-queue`);
         const startLane = lane(`${kind}-exact-start`);
-        const queue = tracked(transitionSteeringQueued(startFixture.runDir, "must wait for action start", laneOptions(queueLane, { id: `${kind}-blocked-start` })));
+        const queueId = `${kind}-blocked-start`;
+        const queueSidecarPath = pendingSidecarPath(startFixture.runDir, queueId, NOW);
+        const queue = tracked(transitionSteeringQueued(startFixture.runDir, "must wait for action start", laneOptions(queueLane, { id: queueId, now: NOW })));
         const started = tracked(transitionSteeringActionStarted(startFixture.runDir, kind, claim.token, laneOptions(startLane)));
         startRace = [holder, queueLane, startLane, queue, started];
         await allEntered(queueLane, startLane);
+        const runBeforeQueue = bytes(startFixture.runPath);
+        const sidecarBeforeQueue = bytes(queueSidecarPath);
         queueLane.release.resolve();
         holder.release.resolve();
-        const beforeQueue = bytes(startFixture.runPath);
         await assert.rejects(queue.promise, /awaiting start acknowledgement/u);
-        assertBytes(startFixture.runPath, beforeQueue);
+        assertBytes(startFixture.runPath, runBeforeQueue);
+        assertBytes(queueSidecarPath, sidecarBeforeQueue);
         assert.equal(started.settled, false);
         assert.equal(readJson(startFixture.runPath).steering.action_claim.token, claim.token);
         assert.equal(pendingSidecars(startFixture.runDir).length, 0);
@@ -249,10 +255,10 @@ describe("lock-protected steering boundaries", () => {
         const aborted = tracked(transitionSteeringActionAborted(abortFixture.runDir, kind, claim.token, laneOptions(abortLane, { now: "2026-07-10T12:05:00.000Z" })));
         abortRace = [holder, genericLane, abortLane, generic, aborted];
         await allEntered(genericLane, abortLane);
-        genericLane.release.resolve();
-        holder.release.resolve();
         const runBeforeGeneric = bytes(abortFixture.runPath);
         const heartbeatBeforeGeneric = bytes(abortFixture.heartbeatPath);
+        genericLane.release.resolve();
+        holder.release.resolve();
         await assert.rejects(generic.promise, /action start acknowledgement is pending/u);
         assertBytes(abortFixture.runPath, runBeforeGeneric);
         assertBytes(abortFixture.heartbeatPath, heartbeatBeforeGeneric);
@@ -322,23 +328,28 @@ describe("lock-protected steering boundaries", () => {
       },
       {
         name: "orphan recovery",
+        setup: (fixture) => seedInactiveHeartbeat(fixture, NOW, 987654321, 60000),
+        options: { processAliveFn: () => false },
         invoke: (fixture, options) => transitionRecoverOrphan(fixture.runDir, "must not recover", { ...options, now: LATER }),
         rejected: /recover rejected: active pre-PR fence/u,
-        absent: (_fixture, run) => {
+        absent: (fixture, run) => {
           assert.equal(run.status, "running");
           assert.equal(run.terminal_result ?? null, null);
+          assert.equal(readJson(fixture.heartbeatPath).pid, 987654321);
         },
       },
     ];
 
     for (const writer of cases) {
       const fixture = createReadyPrFixture(`fence-${safeName(writer.name)}`);
+      writer.setup?.(fixture);
       const original = readJson(fixture.runPath);
+      const originalHeartbeat = bytes(fixture.heartbeatPath);
       const holder = await acquireHolder(fixture.runDir);
       const fenceLane = lane(`${writer.name}-fence`);
       const siblingLane = lane(`${writer.name}-sibling`);
-      const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, laneOptions(fenceLane, { token: `fence-${safeName(writer.name)}-token`, now: LATER })));
-      const sibling = tracked(writer.invoke(fixture, laneOptions(siblingLane, { timeoutMs: 5000 })));
+      const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, laneOptions(fenceLane, { ...writer.options, token: `fence-${safeName(writer.name)}-token`, now: LATER })));
+      const sibling = tracked(writer.invoke(fixture, laneOptions(siblingLane, { ...writer.options, timeoutMs: 5000 })));
       try {
         await allEntered(fenceLane, siblingLane);
         fenceLane.release.resolve();
@@ -351,6 +362,7 @@ describe("lock-protected steering boundaries", () => {
         await assert.rejects(sibling.promise, writer.rejected, writer.name);
         assertBytes(fixture.runPath, runBeforeLoser, writer.name);
         assertBytes(fixture.heartbeatPath, heartbeatBeforeLoser, writer.name);
+        assertBytes(fixture.heartbeatPath, originalHeartbeat, `${writer.name} original heartbeat`);
         const run = readJson(fixture.runPath);
         assert.equal(run.steering.pr_fence.token, established.fence.token, writer.name);
         assert.equal(run.steering.pr_fence.state_hash, established.fence.state_hash, writer.name);
@@ -505,12 +517,15 @@ describe("lock-protected steering boundaries", () => {
       });
       race = [holder, ...specs.flatMap((spec) => [spec.lane, spec.contender])];
       await allEntered(...specs.map((spec) => spec.lane));
+      const missingBefore = bytes(fixture.runPath);
       specs[0].lane.release.resolve();
       holder.release.resolve();
 
       for (const spec of specs.slice(0, 4)) {
-        const before = bytes(fixture.runPath);
-        if (spec !== specs[0]) spec.lane.release.resolve();
+        const before = spec === specs[0] ? missingBefore : bytes(fixture.runPath);
+        if (spec !== specs[0]) {
+          spec.lane.release.resolve();
+        }
         await assert.rejects(spec.contender.promise, spec.rejected, spec.name);
         assertBytes(fixture.runPath, before, spec.name);
         assert.equal(readJson(fixture.runPath).steering.pr_fence.token, active.fence.token);
@@ -785,6 +800,15 @@ function pendingSidecars(runDir) {
   const steeringDir = join(runDir, "steering");
   if (!existsSync(steeringDir)) return [];
   return readdirSync(steeringDir).filter((name) => name.startsWith("pending-"));
+}
+
+function pendingSidecarPath(runDir, id, createdAt) {
+  const safeTimestamp = createdAt.replace(/[^0-9A-Za-z]/gu, "-").replace(/-+/gu, "-").replace(/^-|-$/gu, "");
+  return join(runDir, "steering", `pending-${safeTimestamp}-${id}.json`);
+}
+
+function rawSha256(content) {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
 function bytes(file) {
