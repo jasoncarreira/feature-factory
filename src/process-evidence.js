@@ -1,8 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { basename, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { timestamp } from "./utils.js";
+import { writeProtectedJsonAtomicSync } from "./hardening/atomic-write.js";
+import {
+  PROCESS_INSPECTOR,
+  inspectProcessIdentity as inspectVerifiedProcessIdentity,
+  signalVerifiedProcess,
+  verifyProcessIdentity,
+} from "./hardening/process-verification.js";
 
 export const PROCESS_EVIDENCE_FILE = "process.json";
 export const PROCESS_EVIDENCE_KIND = "opencode-process";
@@ -10,7 +16,7 @@ export const PROCESS_EVIDENCE_SCHEMA_VERSION = 1;
 export const PROCESS_EVIDENCE_SIGNAL = "SIGTERM";
 
 const PROCESS_STATES = new Set(["running", "cancelled", "failed-closed", "exited"]);
-const DEFAULT_INSPECTOR = "node-process";
+const DEFAULT_INSPECTOR = PROCESS_INSPECTOR;
 const DEFAULT_CANCEL_WAIT_MS = 5000;
 const CANCEL_POLL_INTERVAL_MS = 200;
 
@@ -40,7 +46,10 @@ export function writeProcessEvidence(runDir, evidence) {
   mkdirSync(resolve(runDir), { recursive: true });
   const validation = validateProcessEvidence(evidence, { runDir });
   if (!validation.ok) throw new Error(validation.reason);
-  writeJsonAtomic(file, validation.evidence);
+  writeProtectedJsonAtomicSync(resolve(runDir), PROCESS_EVIDENCE_FILE, validation.evidence, {
+    commit: "replace-regular",
+    mode: 0o666,
+  });
   return file;
 }
 
@@ -77,20 +86,18 @@ export function assertDetachedProcessEvidenceWritable(runDir, input = {}) {
   if (!current.ok) throw new Error(`refusing to overwrite invalid process evidence: ${current.reason}`);
   if (current.evidence.state !== "running") return;
 
-  const inspected = resolveInspector(input)(current.evidence.pid);
-  if (processIsProvenStale(inspected)) return;
-  const identity = compareProcessIdentity(current.evidence, inspected);
-  if (identity.ok) {
+  const verification = verifyEvidenceProcess(current.evidence, input);
+  if (verification.status === "absent") return;
+  if (verification.status === "live-and-matching") {
     throw new Error(`refusing to overwrite live running process evidence for run '${current.evidence.run_id}' pid ${current.evidence.pid}`);
   }
-  throw new Error(`refusing to overwrite running process evidence because stale/exited state could not be proven: ${identity.reason}`);
+  throw new Error(`refusing to overwrite running process evidence because stale/exited state could not be proven: ${verification.reason}`);
 }
 
 export function recordDetachedProcessEvidence(runDir, input = {}) {
   assertDetachedProcessEvidenceWritable(runDir, input);
   const startedAt = timestamp(input.now);
-  const inspector = resolveInspector(input);
-  const inspected = inspector(input.pid);
+  const inspected = inspectProcessForEvidence(input.pid, input);
   const cwd = resolve(input.cwd || process.cwd());
   const verified = requireVerifiedProcessIdentity(inspected, cwd);
   const identity = {
@@ -135,9 +142,9 @@ export async function cancelProcessFromEvidence(runDir, opts = {}) {
   }
   if (evidence.state !== "running") return failClosed(evidence.run_id, `process evidence state is ${evidence.state}`, PROCESS_EVIDENCE_FILE);
 
-  const inspector = resolveInspector(opts);
-  const inspected = inspector(evidence.pid);
-  if (processIsProvenStale(inspected)) {
+  const signalResult = await signalEvidenceProcess(evidence, opts);
+  const verification = signalResult.verification;
+  if (verification?.status === "absent") {
     // Already gone (including a prior cancel that was signaled but not yet
     // confirmed): confirm the cancellation without signaling anything.
     return confirmCancelled(runDir, evidence, {
@@ -146,28 +153,38 @@ export async function cancelProcessFromEvidence(runDir, opts = {}) {
       signaled: false,
     });
   }
-  const identity = compareProcessIdentity(evidence, inspected);
-  if (!identity.ok) return failClosed(evidence.run_id, identity.reason, PROCESS_EVIDENCE_FILE, evidence.pid);
+  if (signalResult.status === "not-signaled") {
+    return failClosed(evidence.run_id, verification?.reason || signalResult.reason, PROCESS_EVIDENCE_FILE, evidence.pid);
+  }
+  if (signalResult.status === "signal-failed") {
+    return failClosed(evidence.run_id, `signal failed: ${signalResult.reason}`, PROCESS_EVIDENCE_FILE, evidence.pid);
+  }
 
   const requestedAt = timestamp(opts.now);
-  try {
-    resolveSignalFn(opts)(evidence.pid, PROCESS_EVIDENCE_SIGNAL);
-  } catch (error) {
-    return failClosed(evidence.run_id, `signal failed: ${error.message}`, PROCESS_EVIDENCE_FILE, evidence.pid);
-  }
 
   // SIGTERM is a request, not an exit. Recording state 'cancelled' unblocks a
   // relaunch, so only do it once the process is proven gone; a hung process
   // that ignores SIGTERM must not fail open into concurrent duplicate runs.
   const waitMs = normalizeCancelWait(opts.cancelWaitMs);
-  const deadline = Date.now() + waitMs;
-  while (true) {
-    if (processIsProvenStale(inspector(evidence.pid))) {
+  const pollClock = resolvePollClock(opts);
+  const pollSleep = resolvePollSleep(opts);
+  const started = readPollClock(pollClock);
+  const deadline = started === null ? null : started + waitMs;
+  const maximumPolls = Math.ceil(waitMs / CANCEL_POLL_INTERVAL_MS) + 1;
+  for (let count = 0; count < maximumPolls; count += 1) {
+    const observed = verifyEvidenceProcess(evidence, opts);
+    if (observed.status === "absent") {
       return confirmCancelled(runDir, evidence, { requestedAt, confirmedAt: timestamp(), signaled: true });
     }
-    const remaining = deadline - Date.now();
+    const current = readPollClock(pollClock);
+    if (deadline === null || current === null) break;
+    const remaining = deadline - current;
     if (remaining <= 0) break;
-    await sleep(Math.min(CANCEL_POLL_INTERVAL_MS, remaining));
+    try {
+      await pollSleep(Math.min(CANCEL_POLL_INTERVAL_MS, remaining));
+    } catch {
+      break;
+    }
   }
 
   const pendingAt = timestamp();
@@ -227,84 +244,233 @@ function normalizeCancelWait(value) {
   return wait;
 }
 
-function sleep(ms) {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+function resolvePollClock(opts) {
+  if (typeof opts.clock === "function") return opts.clock;
+  if (typeof opts.clockFn === "function") return opts.clockFn;
+  return Date.now;
+}
+
+function resolvePollSleep(opts) {
+  if (typeof opts.sleep === "function") return opts.sleep;
+  if (typeof opts.sleepFn === "function") return opts.sleepFn;
+  return (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function readPollClock(clock) {
+  try {
+    const value = clock();
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 export function inspectProcessIdentity(pid, opts = {}) {
-  if (!positivePid(pid)) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "pid must be a positive integer" };
-  const liveness = inspectPidLiveness(pid, opts);
-  if (!liveness.alive) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: liveness.reason };
-  const platform = opts.platform || process.platform;
-  if (platform === "linux") return inspectLinuxProcessIdentity(pid);
-  if (platform === "darwin") return inspectDarwinProcessIdentity(pid, opts);
-  return { ok: false, inspector: DEFAULT_INSPECTOR, reason: `process inspector unsupported on platform ${platform}` };
-}
-
-function inspectLinuxProcessIdentity(pid) {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const end = stat.lastIndexOf(") ");
-    if (end === -1) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "invalid process stat" };
-    const fields = stat.slice(end + 2).trim().split(/\s+/u);
-    const start = fields[19];
-    if (!start) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "missing process start marker" };
-    const command = readFileSync(`/proc/${pid}/comm`, "utf8").trim();
-    const cwd = readlinkSync(`/proc/${pid}/cwd`);
-    return {
-      ok: true,
-      inspector: DEFAULT_INSPECTOR,
-      pid,
-      start_marker: `linux-procfs:${start}`,
-      command_name: normalizeCommandName(command),
-      cwd: resolve(cwd),
-    };
-  } catch (error) {
-    return { ok: false, inspector: DEFAULT_INSPECTOR, reason: `process inspection failed: ${error.message}` };
+  const inspected = inspectVerifiedProcessIdentity(pid, processVerificationOptions(opts));
+  if (inspected.status === "live" && inspected.identity) {
+    return legacyIdentity(inspected.identity);
   }
-}
-
-function inspectDarwinProcessIdentity(pid, opts = {}) {
-  const runCommand = resolveCommandRunner(opts);
-  try {
-    const lstart = runCommand("ps", ["-p", String(pid), "-o", "lstart="]).trim().replace(/\s+/gu, " ");
-    const command = runCommand("ps", ["-p", String(pid), "-o", "comm="]).trim().split(/\r?\n/u)[0] || "";
-    const cwd = darwinProcessCwd(pid, runCommand);
-    if (!lstart) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "missing process start marker" };
-    if (!command) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "missing process command" };
-    if (!cwd) return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "missing process cwd" };
-    return {
-      ok: true,
-      inspector: DEFAULT_INSPECTOR,
-      pid,
-      start_marker: `darwin-ps:${lstart}`,
-      command_name: normalizeCommandName(command),
-      cwd: resolve(cwd),
-    };
-  } catch (error) {
-    return { ok: false, inspector: DEFAULT_INSPECTOR, reason: `process inspection failed: ${error.message}` };
-  }
-}
-
-function darwinProcessCwd(pid, runCommand) {
-  const output = runCommand("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
-  const line = output.split(/\r?\n/u).find((item) => item.startsWith("n"));
-  return line ? line.slice(1) : null;
+  return {
+    ok: false,
+    inspector: DEFAULT_INSPECTOR,
+    reason: legacyInspectionReason(inspected, opts),
+  };
 }
 
 function compareProcessIdentity(evidence, inspected) {
   if (!inspected?.ok) return { ok: false, reason: inspected?.reason || "stale pid" };
-  if (positivePid(inspected.pid) && inspected.pid !== evidence.pid) return { ok: false, reason: "inspected pid mismatch" };
-  if (stringOrDefault(inspected.inspector, DEFAULT_INSPECTOR) !== evidence.identity.inspector) return { ok: false, reason: "unsupported inspector" };
+  if (!positivePid(inspected.pid) || inspected.pid !== evidence.pid) return { ok: false, reason: "inspected pid mismatch" };
+  if (!nonEmptyString(inspected.inspector) || inspected.inspector !== evidence.identity.inspector) return { ok: false, reason: "unsupported inspector" };
   if (String(inspected.start_marker || "") !== evidence.identity.start_marker) return { ok: false, reason: "process start marker mismatch" };
   if (normalizeCommandName(inspected.command_name || "") !== normalizeCommandName(evidence.identity.command_name)) return { ok: false, reason: "process command mismatch" };
   if (resolve(String(inspected.cwd || "")) !== resolve(evidence.cwd)) return { ok: false, reason: "process cwd mismatch" };
   return { ok: true };
 }
 
-function processIsProvenStale(inspected) {
-  if (!inspected || inspected.ok !== false) return false;
-  return /\b(?:ESRCH|no such process)\b/iu.test(String(inspected.reason || ""));
+function verifyEvidenceProcess(evidence, opts = {}) {
+  const injected = resolveLegacyInspector(opts);
+  if (!injected) {
+    const verified = verifyProcessIdentity(expectedProcessIdentity(evidence), processVerificationOptions(opts));
+    return { ...verified, reason: verificationReason(verified) };
+  }
+
+  const context = legacyVerificationContext(evidence, opts, injected);
+  const verified = verifyProcessIdentity(context.expected, context.options);
+  return {
+    ...verified,
+    status: context.state.comparison && !context.state.comparison.ok ? "mismatched" : verified.status,
+    reason: context.state.comparison && !context.state.comparison.ok
+      ? context.state.comparison.reason
+      : context.state.reason || verificationReason(verified),
+  };
+}
+
+async function signalEvidenceProcess(evidence, opts) {
+  const injected = resolveLegacyInspector(opts);
+  const context = injected
+    ? legacyVerificationContext(evidence, opts, injected)
+    : { expected: expectedProcessIdentity(evidence), options: processVerificationOptions(opts), state: null };
+  const signaled = await signalVerifiedProcess(context.expected, {
+    ...context.options,
+    signal: PROCESS_EVIDENCE_SIGNAL,
+    waitForExitMs: 0,
+  });
+  const verified = signaled.verification;
+  if (!verified) return signaled;
+  return {
+    ...signaled,
+    verification: {
+      ...verified,
+      status: context.state?.comparison && !context.state.comparison.ok ? "mismatched" : verified.status,
+      reason: context.state?.comparison && !context.state.comparison.ok
+        ? context.state.comparison.reason
+        : context.state?.reason || verificationReason(verified),
+    },
+  };
+}
+
+function inspectProcessForEvidence(pid, opts) {
+  const injected = resolveLegacyInspector(opts);
+  if (!injected) return inspectProcessIdentity(pid, opts);
+
+  const initial = callLegacyInspector(injected, pid);
+  if (legacyInspectionStatus(initial) !== "live") return legacyInspectionFailure(initial);
+  if (
+    !nonEmptyString(initial.start_marker)
+    || !nonEmptyString(initial.command_name)
+    || !nonEmptyString(initial.cwd)
+  ) return initial;
+  const expected = {
+    pid,
+    cwd: initial.cwd,
+    identity: {
+      inspector: stringOrDefault(initial.inspector, DEFAULT_INSPECTOR),
+      start_marker: initial.start_marker,
+      command_name: initial.command_name,
+    },
+  };
+  const context = legacyVerificationContext(expected, opts, injected);
+  const verified = verifyProcessIdentity(context.expected, context.options);
+  if (verified.status !== "live-and-matching" || (context.state.comparison && !context.state.comparison.ok)) {
+    return {
+      ok: false,
+      inspector: DEFAULT_INSPECTOR,
+      reason: context.state.comparison?.reason || context.state.reason || verificationReason(verified),
+    };
+  }
+  return context.state.inspected;
+}
+
+function legacyVerificationContext(evidence, opts, inspector) {
+  const state = { inspected: null, comparison: null, reason: null };
+  const options = {
+    ...processVerificationOptions(opts),
+    platform: "linux",
+    platformFn: () => "linux",
+    livenessProbe: (pid) => {
+      const inspected = callLegacyInspector(inspector, pid);
+      state.inspected = inspected;
+      const status = legacyInspectionStatus(inspected);
+      if (status !== "live") {
+        state.reason = inspected?.reason || (status === "absent" ? "stale pid (ESRCH: no such process)" : "process liveness unknown");
+        return { status };
+      }
+      state.comparison = compareProcessIdentity(evidence, inspected);
+      if (!state.comparison.ok) return { status: "indeterminate" };
+      return { status: "live" };
+    },
+    procReadFile: (path) => path.endsWith("/stat")
+      ? syntheticLinuxStat(evidence.pid)
+      : `${state.inspected?.command_name || ""}\n`,
+    procReadlink: () => state.inspected?.cwd || "",
+  };
+  return {
+    state,
+    options,
+    expected: {
+      pid: evidence.pid,
+      cwd: evidence.cwd,
+      identity: {
+        inspector: PROCESS_INSPECTOR,
+        start_marker: "linux-procfs:1",
+        command_name: evidence.identity.command_name,
+      },
+    },
+  };
+}
+
+function expectedProcessIdentity(evidence) {
+  return {
+    pid: evidence.pid,
+    cwd: evidence.cwd,
+    identity: {
+      inspector: evidence.identity.inspector,
+      start_marker: evidence.identity.start_marker,
+      command_name: evidence.identity.command_name,
+    },
+  };
+}
+
+function syntheticLinuxStat(pid) {
+  return `${pid} (compat) S ${Array(18).fill("0").join(" ")} 1\n`;
+}
+
+function legacyIdentity(identity) {
+  return {
+    ok: true,
+    inspector: identity.inspector,
+    pid: identity.pid,
+    start_marker: identity.start_marker,
+    command_name: identity.command_name,
+    cwd: identity.cwd,
+  };
+}
+
+function legacyInspectionFailure(inspected) {
+  return {
+    ok: false,
+    inspector: stringOrDefault(inspected?.inspector, DEFAULT_INSPECTOR),
+    reason: inspected?.reason || (legacyInspectionStatus(inspected) === "absent" ? "stale pid (ESRCH: no such process)" : "process liveness unknown"),
+  };
+}
+
+function legacyInspectionStatus(inspected) {
+  if (inspected?.status === "live" || inspected?.status === "absent" || inspected?.status === "indeterminate") return inspected.status;
+  if (inspected?.ok === true) return "live";
+  if (inspected?.ok === false && (inspected.code === "ESRCH" || /\bESRCH\b/u.test(String(inspected.reason || "")))) {
+    return "absent";
+  }
+  return "indeterminate";
+}
+
+function callLegacyInspector(inspector, pid) {
+  try {
+    return inspector(pid);
+  } catch {
+    return { ok: false, inspector: DEFAULT_INSPECTOR, reason: "process inspection failed" };
+  }
+}
+
+function verificationReason(verified) {
+  if (verified?.status === "absent") return "stale pid (ESRCH: no such process)";
+  const field = verified?.mismatched_fields?.[0];
+  if (field === "pid") return "inspected pid mismatch";
+  if (field === "inspector") return "unsupported inspector";
+  if (field === "start_marker") return "process start marker mismatch";
+  if (field === "command_name") return "process command mismatch";
+  if (field === "cwd") return "process cwd mismatch";
+  return verified?.reason || "process identity could not be verified";
+}
+
+function legacyInspectionReason(inspected, opts) {
+  if (inspected?.status === "absent") return "stale pid (ESRCH: no such process)";
+  if (inspected?.code === "LIVENESS_PERMISSION_DENIED") return "process liveness unknown: EPERM";
+  if (inspected?.code === "INVALID_PID") return "pid must be a positive integer";
+  if (inspected?.code === "PLATFORM_UNSUPPORTED") {
+    const platform = opts.platform || process.platform;
+    return `process inspector unsupported on platform ${platform}`;
+  }
+  return inspected?.reason || "process identity could not be verified";
 }
 
 function requireVerifiedProcessIdentity(inspected, expectedCwd) {
@@ -318,19 +484,36 @@ function requireVerifiedProcessIdentity(inspected, expectedCwd) {
   return { startMarker, commandName };
 }
 
-function resolveInspector(opts = {}) {
+function resolveLegacyInspector(opts = {}) {
   return typeof opts.inspectorFn === "function" ? opts.inspectorFn
     : typeof opts.processInspectorFn === "function" ? opts.processInspectorFn
-      : (pid) => inspectProcessIdentity(pid, opts);
+      : null;
 }
 
-function resolveSignalFn(opts = {}) {
-  if (typeof opts.signalFn === "function") return opts.signalFn;
-  if (typeof opts.processSignalFn === "function") return opts.processSignalFn;
-  return (pid, signal) => {
-    if (!positivePid(pid)) throw new Error("pid must be a positive integer");
-    if (signal !== PROCESS_EVIDENCE_SIGNAL) throw new Error("unsupported cancellation signal");
-    process.kill(pid, PROCESS_EVIDENCE_SIGNAL);
+function processVerificationOptions(opts = {}) {
+  const options = { ...opts };
+  if (
+    typeof opts.processAliveFn === "function"
+    && typeof opts.livenessProbe !== "function"
+    && typeof opts.livenessProbeFn !== "function"
+    && typeof opts.processLivenessProbe !== "function"
+  ) {
+    options.livenessProbe = (pid) => ({ status: opts.processAliveFn(pid) ? "live" : "absent" });
+  }
+  if (typeof opts.commandRunnerFn === "function" && typeof opts.commandRunner !== "function") {
+    options.commandRunner = legacyCommandRunner(opts.commandRunnerFn);
+  }
+  return options;
+}
+
+function legacyCommandRunner(runCommand) {
+  let cachedStart = null;
+  return (command, args, options) => {
+    const isStart = command === "ps" && args.at(-1) === "lstart=";
+    if (isStart && cachedStart !== null) return cachedStart;
+    const output = runCommand(command, args, options);
+    if (isStart) cachedStart = output;
+    return output;
   };
 }
 
@@ -383,33 +566,4 @@ function validTimestamp(value) {
 
 function invalid(reason) {
   return { ok: false, reason, evidence: null };
-}
-
-function inspectPidLiveness(pid, opts = {}) {
-  if (typeof opts.processAliveFn === "function") {
-    return opts.processAliveFn(pid) ? { alive: true, reason: null } : { alive: false, reason: "stale pid (no such process)" };
-  }
-  try {
-    process.kill(pid, 0);
-    return { alive: true, reason: null };
-  } catch (error) {
-    if (error?.code === "ESRCH") return { alive: false, reason: "stale pid (ESRCH: no such process)" };
-    return { alive: false, reason: `process liveness unknown: ${error?.code || error?.message || "unknown error"}` };
-  }
-}
-
-function resolveCommandRunner(opts = {}) {
-  if (typeof opts.commandRunnerFn === "function") return opts.commandRunnerFn;
-  return (command, args) => execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000, maxBuffer: 1024 * 1024 });
-}
-
-function writeJsonAtomic(file, value) {
-  mkdirSync(dirname(file), { recursive: true });
-  const temp = `${file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  try {
-    writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    renameSync(temp, file);
-  } finally {
-    if (existsSync(temp)) rmSync(temp, { force: true });
-  }
 }
