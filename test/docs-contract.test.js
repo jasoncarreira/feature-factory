@@ -337,6 +337,27 @@ describe("blocked-run continuation docs contract", () => {
     assert.match(SCHEMA, /refs paired with hashes|ref.*hash/i, "SCHEMA must require validated refs and hashes");
   });
 
+  it("gates planning reuse on durable acceptance, not file presence", () => {
+    // The brief is reused only when the parent DURABLY ACCEPTED it; presence of a
+    // technical-brief.md in a parent whose spec-writer step was rejected must NOT be
+    // adopted as approved. Pin the eligibility gate + amendment-only fallback.
+    for (const [name, text] of documentEntries({ SKILL, COMMAND })) {
+      assert.match(text, /continuation\.planning_reuse\.eligible/i, `${name} must gate reuse on continuation.planning_reuse.eligible`);
+      assert.match(text, /amendment input only/i, `${name} must treat an unaccepted parent brief as amendment input only`);
+    }
+    // The adopted spec acceptance is recorded against a CHILD-LOCAL review ref, never a
+    // parent-run review path (which does not resolve in the child).
+    assert.match(SKILL, /--review-ref reviews\/spec-writer\.json[\s\S]*never a parent-run review path/i, "SKILL must record adopted acceptance against the child-local seeded review ref");
+    assert.match(COMMAND, /child-local review ref \(never a parent-run review path\)/i, "COMMAND must forbid a parent-run review path for the adopted acceptance");
+    // Continuation decomposition is scoped to the blocking review's required_fixes, not a
+    // full-brief re-decomposition that recreates completed parent work.
+    assert.match(SKILL, /decompose \*\*only `continuation\.review\.required_fixes`\*\*[\s\S]*do not re-decompose the full brief/i, "SKILL must scope continuation remediation to continuation.review.required_fixes");
+    assert.match(COMMAND, /decompose only `continuation\.review\.required_fixes`/i, "COMMAND must scope continuation remediation to continuation.review.required_fixes");
+    // SCHEMA documents the acceptance-gated planning_reuse shape.
+    assert.match(SCHEMA, /planning_reuse[\s\S]*reusable by durable acceptance rather than file presence/i, "SCHEMA must describe planning_reuse acceptance gating");
+    assert.match(SCHEMA, /child_spec_review_ref/i, "SCHEMA must document the child-local carried spec review ref");
+  });
+
   it("documents configurable PR mode for factory continue", () => {
     for (const [name, text] of documentEntries({ README, SPEC })) {
       assert.match(text, /factory continue[\s\S]*prMode|Continuation[\s\S]*effective PR mode/i, `${name} must document continuation PR mode`);

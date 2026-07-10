@@ -5,7 +5,10 @@ const PREFIX = "ffpayload-v1:";
 const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews"]);
+const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse"]);
+const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "child_spec_review_ref"]);
+const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
+const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
 const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "summary", "required_fixes", "source", "verdict"]);
 const CONTINUATION_TARGET_KEYS = new Set(["run_id", "branch", "worktree", "base_ref", "base_commit"]);
@@ -169,6 +172,20 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
     if (!Array.isArray(items) || items.some((item) => !plainObject(item) || !hasOnlyKeys(item, CONTINUATION_REF_KEYS))) return { ok: false, reason: "invalid-continuation-refs" };
   }
 
+  const planningReuse = continuation.planning_reuse;
+  if (planningReuse !== undefined) {
+    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, CONTINUATION_PLANNING_REUSE_KEYS) || typeof planningReuse.eligible !== "boolean") {
+      return { ok: false, reason: "invalid-continuation-planning-reuse" };
+    }
+    if (planningReuse.eligible
+      && (!canonicalJsonRef(planningReuse.spec_review_ref, "reviews/")
+        || planningReuse.child_spec_review_ref !== CONTINUATION_CHILD_SPEC_REVIEW_REF
+        || planningReuse.spec_artifact_ref !== "artifacts/technical-brief.md"
+        || !SHA256_PATTERN.test(planningReuse.spec_review_hash || ""))) {
+      return { ok: false, reason: "invalid-continuation-planning-reuse" };
+    }
+  }
+
   try {
     validateRun({
       schema_version: 1,
@@ -237,7 +254,21 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       parent_artifacts: continuation.parent_artifacts.map(normalizedRefHash),
       parent_evidence: continuation.parent_evidence.map(normalizedRefHash),
       parent_reviews: continuation.parent_reviews.map(normalizedRefHash),
+      ...(planningReuse === undefined ? {} : { planning_reuse: normalizedPlanningReuse(planningReuse) }),
     },
+  };
+}
+
+function normalizedPlanningReuse(planningReuse) {
+  if (!planningReuse.eligible) {
+    return { eligible: false, ...(nonEmptyString(planningReuse.reason) ? { reason: planningReuse.reason } : {}) };
+  }
+  return {
+    eligible: true,
+    spec_review_ref: planningReuse.spec_review_ref,
+    spec_review_hash: planningReuse.spec_review_hash,
+    spec_artifact_ref: planningReuse.spec_artifact_ref,
+    child_spec_review_ref: planningReuse.child_spec_review_ref,
   };
 }
 

@@ -370,6 +370,21 @@ function validateContinuation(errors, run, path) {
   validateContinuationRefHashArray(errors, continuation.parent_evidence, `${path}.parent_evidence`);
   validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
   validateContinuationSelectedReview(errors, continuation, path);
+  validateContinuationPlanningReuse(errors, continuation.planning_reuse, `${path}.planning_reuse`);
+}
+
+function validateContinuationPlanningReuse(errors, reuse, path) {
+  if (reuse === undefined || reuse === null) return;
+  if (!isRecord(reuse)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  if (typeof reuse.eligible !== "boolean") errors.push({ path: `${path}.eligible`, message: "must be a boolean" });
+  if (reuse.eligible === true) {
+    requiredString(errors, reuse, "spec_review_ref", `${path}.spec_review_ref`);
+    requiredHash(errors, reuse, "spec_review_hash", `${path}.spec_review_hash`);
+    requiredString(errors, reuse, "spec_artifact_ref", `${path}.spec_artifact_ref`);
+  }
 }
 
 function validateSteering(errors, steering, path) {

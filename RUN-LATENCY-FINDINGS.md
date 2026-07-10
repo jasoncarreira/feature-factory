@@ -20,13 +20,25 @@ Two things make it churn instead of converge:
   output-inventory + env-snapshot + identity-API + lock-state-table + heartbeat-parsing;
   round 2 rejects on *mostly new* items (opaque constructors, `process.json` normalization,
   `heartbeatOnce` transitions, `doctor.js` sanitizer). It is the same "one more sink each
-  round" pattern the retrospective found in *build* remediation — PR #42 relocated it into
-  the *spec* phase. The consolidate-don't-drip-feed rule was added for build reviews but
-  not spec reviews.
+  round" pattern the retrospective found in *build* remediation, now visible in the *spec*
+  phase. This is an **enforcement/observability gap, not a missing rule**: PR #42 already
+  added the first-attempt consolidation rule to `assets/agent/work-reviewer.md` and Step 2
+  of `SKILL.md`, and it applies to spec reviews. The observed rounds show the reviewer did
+  not consolidate as instructed — it enumerated roughly one category per round instead of
+  every discoverable dimension at `attempt: 1`. The open question is *why* later reviews
+  produced new same-class demands: was the full research inventory available to round 1, and
+  did the reviewer actually inspect it? The lever is to strengthen the rule to require every
+  *dimension* of under-specification up front and to make first-pass completeness observable
+  (PR #45), not to add a rule that already exists.
 - **Each spec rewrite is expensive** (~50–110 min per draft; one ran 1h50m) while the review
-  itself is cheap (~6–15 min). The cost is the writer regenerating a giant brief every round,
-  and `resolved_models` is null — the hardest planning task runs on the default model with
-  no elevated reasoning effort.
+  itself is cheap (~6–15 min). The cost is the writer regenerating a giant brief every round.
+  Note: `resolved_models` is null in the run snapshots, but that is a **telemetry gap, not
+  proof the writer ran on a weak model or default reasoning effort**. The active operator
+  config maps `spec-writer` to GPT-5.6 Sol `xhigh` and `work-reviewer` to `high`; the
+  `factory env` snapshot collected model resolution without the operator's `opencode.jsonc`
+  profiles, so it recorded null. Treat null as unknown resolution — a diagnostic blind spot —
+  unless runtime evidence demonstrates an actual profile fallback. The snapshot observability
+  is fixed in PR #46 (honest `resolved_from` provenance).
 
 A/B proof it is new behavior: `steering-drain-boundaries` ran pre-class-wide (1 spec
 attempt, ~20 min); the post-#42 runs take 2–3 attempts and 1–2.5h, and the two `-completion`
@@ -63,18 +75,30 @@ their merits — bounded escalation working as designed. The levers below make t
 
 ## Levers (highest impact first)
 
-1. **Continuation reuses the parent's accepted brief instead of regenerating it.**
-   `factory continue` now seeds the parent's accepted planning artifacts (`story.md`,
-   `research-map.md`, `design-brief.md`, `technical-brief.md`) into the child `$RUN/artifacts/`
-   (hash-verified; outcome artifacts excluded), and the SKILL/command instruct the
-   orchestrator to reuse them and skip story/research/spec regeneration unless the blocking
-   review's `required_fixes` require spec/plan changes. **← addressed in this PR.**
-2. **Apply the consolidate-don't-drip-feed rule to the *spec* review**, not just build
-   reviews: the first spec review must enumerate all missing inventory in one pass, and a
-   spec may be accepted with a reviewed inventory without pre-deciding every micro-contract
-   (leave a bounded residual to build remediation). *(follow-up)*
-3. **Configure a stronger model / higher effort for `spec-writer` and the reviewers**
-   (`resolved_models` is null today). *(follow-up)*
+1. **Continuation reuses the parent's *durably accepted* brief instead of regenerating it.**
+   `factory continue` seeds the parent's planning artifacts (`story.md`, `research-map.md`,
+   `design-brief.md`, `technical-brief.md`) into the child `$RUN/artifacts/` **only when the
+   parent has an accepted, approved `spec-writer` step** (`continuation.planning_reuse.eligible`)
+   — hash-verified and transactional (fail-closed; no partial child dir) — and carries the
+   approving spec review into `$RUN/reviews/spec-writer.json` so the adopted acceptance
+   resolves in child state. The SKILL/command instruct the orchestrator to reuse them, record
+   the adopted acceptance against that child-local review, decompose only the blocking
+   review's `required_fixes`, and skip story/research/spec regeneration unless those fixes
+   require spec/plan changes. When the parent brief was not accepted, nothing is seeded and it
+   is amendment input only. **← addressed in this PR.**
+2. **Strengthen and enforce the consolidate-don't-drip-feed rule in the *spec* review.** The
+   rule already exists (PR #42) and applies to specs; the churn is under-enforcement, not
+   absence. Broaden it to require every *dimension* of under-specification at `attempt: 1`
+   (not just each same-class instance), add a finite acceptance bar so reviewers stop
+   extending the loop for achievable-but-absent depth, and bound deferrals/residuals so an
+   in-scope sink cannot be waived. **← PR #45.**
+3. **Fix the model-resolution telemetry and ship a recommended effort default.**
+   `resolved_models` is null in snapshots only because `factory env` collected without the
+   operator's `opencode.jsonc` profiles (which already map `spec-writer`→`xhigh`,
+   reviewers→`high`); it is not evidence of a weak model. Make the snapshot honest
+   (`resolved_from` provenance) and fill a recommended reasoning-effort variant per role when
+   an agent has a model but no explicit variant, so fresh installs get high planning/review
+   effort without pinning a provider model. **← PR #46.**
 4. **Cap decomposition depth** — a 13-slice DAG with a 5-deep chain strands 7 slices on one
    block; prefer shallower/wider waves so one hard slice does not freeze the rest.
    *(follow-up)*

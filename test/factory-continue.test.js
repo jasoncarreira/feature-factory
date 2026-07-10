@@ -67,6 +67,7 @@ describe("factory continue", () => {
         parent_artifacts: [{ kind: "story", ref: "artifacts/story.md", hash: hashFile(join(fixture.runDir, "artifacts", "story.md")) }],
         parent_evidence: [],
         parent_reviews: [{ kind: "review", ref: "reviews/reviewer.json", hash: beforeReviewHash }],
+        planning_reuse: { eligible: false, reason: "parent has no spec-writer step; brief is amendment input only" },
       });
       assert.equal(hashFile(join(fixture.runDir, "run.json")), beforeRunHash);
       assert.equal(hashFile(join(fixture.runDir, "reviews", "reviewer.json")), beforeReviewHash);
@@ -520,28 +521,38 @@ describe("factory continue", () => {
 });
 
 describe("continuation planning-artifact reuse", () => {
-  it("seeds the parent's accepted planning artifacts into the child, excluding outcome artifacts", () => {
-    const fixture = createFixture("reuse-seed");
+  function seedPlanningArtifacts(runDir) {
+    writeFileSync(join(runDir, "artifacts", "research-map.md"), "research\n", "utf8");
+    writeFileSync(join(runDir, "artifacts", "design-brief.md"), "design\n", "utf8");
+    writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
+  }
+
+  it("seeds the parent's accepted planning artifacts and carries the approving spec review into the child", () => {
+    const fixture = createFixture("reuse-seed", { spec: { status: "accepted", verdict: "APPROVE" } });
     try {
-      writeFileSync(join(fixture.runDir, "artifacts", "research-map.md"), "research\n", "utf8");
-      writeFileSync(join(fixture.runDir, "artifacts", "design-brief.md"), "design\n", "utf8");
-      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
+      seedPlanningArtifacts(fixture.runDir);
       writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "tests\n", "utf8");
       writeFileSync(join(fixture.runDir, "artifacts", "pr-body.md"), "pr\n", "utf8");
 
       const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-seed-next", dryRun: true });
-      const targetArtifacts = join(fixture.repo, ".opencode", "factory", "reuse-seed-next", "artifacts");
+      const childRunDir = join(fixture.repo, ".opencode", "factory", "reuse-seed-next");
+      const targetArtifacts = join(childRunDir, "artifacts");
 
-      // dry-run reports the plan but must not seed anything
+      assert.equal(payload.continuation.planning_reuse.eligible, true);
       assert.deepEqual([...payload.continuation.parent_artifacts.filter((a) => ["story", "research_map", "design_brief", "technical_brief"].includes(a.kind)).map((a) => a.ref)].sort(),
         ["artifacts/design-brief.md", "artifacts/research-map.md", "artifacts/story.md", "artifacts/technical-brief.md"]);
       assert.equal(existsSync(targetArtifacts), false, "dry-run must not seed");
 
       const seeded = seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation);
-      assert.deepEqual([...seeded].sort(), ["artifacts/design-brief.md", "artifacts/research-map.md", "artifacts/story.md", "artifacts/technical-brief.md"]);
+      assert.deepEqual([...seeded.artifacts].sort(), ["artifacts/design-brief.md", "artifacts/research-map.md", "artifacts/story.md", "artifacts/technical-brief.md"]);
+      assert.equal(seeded.spec_review_ref, "reviews/spec-writer.json");
       // planning artifacts copied with identical content
       assert.equal(readFileSync(join(targetArtifacts, "technical-brief.md"), "utf8"), "brief\n");
       assert.equal(readFileSync(join(targetArtifacts, "research-map.md"), "utf8"), "research\n");
+      // the approving spec review is carried into child state so the adopted step's ref resolves
+      const carriedReview = JSON.parse(readFileSync(join(childRunDir, "reviews", "spec-writer.json"), "utf8"));
+      assert.equal(carriedReview.subject, "spec-writer");
+      assert.equal(carriedReview.verdict, "APPROVE");
       // outcome artifacts NOT seeded
       assert.equal(existsSync(join(targetArtifacts, "test-report.md")), false);
       assert.equal(existsSync(join(targetArtifacts, "pr-body.md")), false);
@@ -550,24 +561,80 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
-  it("refuses to seed when a parent artifact changed since the payload was built", () => {
-    const fixture = createFixture("reuse-mismatch");
+  it("does NOT adopt a brief from a parent whose spec-writer step was rejected", () => {
+    const fixture = createFixture("reuse-rejected", { spec: { status: "rejected", verdict: "REJECT" } });
     try {
-      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
+      seedPlanningArtifacts(fixture.runDir); // the rejected brief IS present on disk
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-rejected-next", dryRun: true });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", "reuse-rejected-next");
+
+      assert.equal(payload.continuation.planning_reuse.eligible, false);
+      assert.match(payload.continuation.planning_reuse.reason, /rejected|not accepted|amendment input only/i);
+
+      const seeded = seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation);
+      assert.equal(seeded.eligible, false);
+      assert.deepEqual(seeded.artifacts, []);
+      // NOTHING adopted: no child artifacts and no carried review
+      assert.equal(existsSync(join(childRunDir, "artifacts")), false, "rejected brief must not be seeded");
+      assert.equal(existsSync(join(childRunDir, "reviews", "spec-writer.json")), false, "no approving review to carry");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("does NOT adopt when the spec-writer step is accepted but its review is not approving", () => {
+    const fixture = createFixture("reuse-unapproved", { spec: { status: "accepted", verdict: "REJECT" } });
+    try {
+      seedPlanningArtifacts(fixture.runDir);
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-unapproved-next", dryRun: true });
+      assert.equal(payload.continuation.planning_reuse.eligible, false);
+      assert.match(payload.continuation.planning_reuse.reason, /not approving/i);
+      const seeded = seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation);
+      assert.equal(seeded.eligible, false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "reuse-unapproved-next", "artifacts")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed with no partial child directory when a source disappears after the payload was built", () => {
+    const fixture = createFixture("reuse-missing", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      seedPlanningArtifacts(fixture.runDir);
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-missing-next", dryRun: true });
+      // a source vanishes between payload build and seed — must abort, not silently skip
+      rmSync(join(fixture.runDir, "artifacts", "research-map.md"), { force: true });
+      assert.throws(
+        () => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation),
+        /missing or not a regular file/u,
+      );
+      // fail closed: nothing published (not even the entries validated before the missing one)
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "reuse-missing-next", "artifacts")), false, "no partial child artifacts/ may survive");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed with no partial child directory when a later entry changed after the payload was built", () => {
+    const fixture = createFixture("reuse-mismatch", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      seedPlanningArtifacts(fixture.runDir);
       const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-mismatch-next", dryRun: true });
-      // tamper with the parent artifact after the payload (with its hash) was built
-      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "tampered\n", "utf8");
+      // tamper with a LATER planning artifact (story.md sorts after design-brief/research-map)
+      writeFileSync(join(fixture.runDir, "artifacts", "story.md"), "tampered\n", "utf8");
       assert.throws(
         () => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation),
         /changed since payload build/u,
       );
+      // the earlier, valid entries must NOT have been written before the mismatch aborted
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "reuse-mismatch-next", "artifacts")), false, "no partial child artifacts/ may survive a later-entry mismatch");
     } finally {
       cleanup(fixture.repo);
     }
   });
 });
 
-function createFixture(runId, { status = "blocked", createBranch = true, review } = {}) {
+function createFixture(runId, { status = "blocked", createBranch = true, review, spec } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "factory-continue-"));
   initGitRepo(repo);
   if (createBranch) runGit(repo, ["branch", runId]);
@@ -576,7 +643,7 @@ function createFixture(runId, { status = "blocked", createBranch = true, review 
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
   writeJson(join(runDir, "reviews", "reviewer.json"), review || { subject: runId, summary: "needs continuation" });
-  writeJson(join(runDir, "run.json"), {
+  const run = {
     schema_version: 1,
     run_id: runId,
     status,
@@ -585,7 +652,12 @@ function createFixture(runId, { status = "blocked", createBranch = true, review 
     validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
     gates: {},
     terminal_result: status === "blocked" ? { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} } : null,
-  });
+  };
+  if (spec) {
+    writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: spec.verdict, summary: "spec review" });
+    run.steps = [{ agent: "spec-writer", status: spec.status, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json" }];
+  }
+  writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId };
 }
 
