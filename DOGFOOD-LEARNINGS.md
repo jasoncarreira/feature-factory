@@ -7,11 +7,13 @@ A retrospective from analyzing the 15 self-hosted feature-factory runs under
 
 ## TL;DR
 
-- **The factory works.** 14 of 15 runs completed end-to-end and shipped a PR (6 ready, 8
-  draft). Robustness visibly improved over the week — the newest process logs have zero
-  failure signatures.
-- **Fragility was never the model.** No provider, model, rate-limit, or auth errors across
-  57 logs. What broke autonomous runs was the host environment and a few structural gaps.
+- **The factory works.** Of the 15 runs currently on disk, 14 completed end-to-end and
+  shipped a PR (6 ready, 8 draft); 1 is orphaned. The newest process logs have zero failure
+  signatures (with the survivorship caveat in §4a).
+- **What broke autonomous runs was the host environment, not the model.** None of the
+  sampled logs surfaced provider/model/rate-limit/auth error signatures (grep/tail search;
+  terms in the Appendix); the recurring failures were host-side and structural. This is a
+  "not found with these searches" result, not an exhaustive proof of absence.
 - **The review loop converges; remediation is what churns.** Reviewers stayed on the delta
   and the trust-model rubric correctly downgraded out-of-scope findings. Multi-round
   remediation was caused by builders shipping partial fixes to open-ended "sanitize every
@@ -35,9 +37,13 @@ A retrospective from analyzing the 15 self-hosted feature-factory runs under
 | Draft PR | 8 | #18, #21, #22, #23, #24, #25, #28, #29 |
 | Orphaned (running, dead process) | 1 | steering-drain-boundaries |
 
-Every slice in every terminal run reached `merged` — zero `blocked`/`review`/`running`
-slices anywhere. Every reached gate is `approved`; no terminal run is `blocked`/`partial`/
-`needs-human`.
+This inventory is the **15 run directories currently on disk** under `.opencode/factory/`.
+Within it, every slice in every terminal run reached `merged` — zero
+`blocked`/`review`/`running` slices — every reached gate is `approved`, and no terminal run
+is `blocked`/`partial`/`needs-human`. Earlier runs that hit terminal `blocked` do appear in
+the longer process-log history (§2, point 4); their run directories are no longer present,
+so they are not part of this inventory. The two accounts describe different populations —
+the current on-disk manifests vs. the full process-log timeline.
 
 ## 2. Runtime fragility was host-environment, not logic
 
@@ -61,16 +67,19 @@ filtering, the genuine recurring failures were:
    commit is X, expected Y` appears 11× across 8 of the older (pre-simplification) logs —
    the deliberate provenance halt firing on worktree HEAD drift. This is retroactive
    evidence that the provenance-simplification effort targeted a real, recurring condition.
-4. **`max_retries=3` exhaustion → blocked.** 3 runs terminated cleanly as `blocked` after
-   the retry ceiling and required a human — designed escalation, but a real fraction of
-   "autonomous" runs could not finish unattended.
+4. **`max_retries=3` exhaustion → blocked.** In the process-log history, 3 *earlier* runs
+   (Jul 6–7 logs, whose run directories are no longer on disk and so are outside the §1
+   inventory) terminated cleanly as `blocked` after the retry ceiling and required a human —
+   designed escalation, but evidence that a real fraction of "autonomous" runs could not
+   finish unattended. The current 15 on-disk runs show no terminal `blocked` (§1).
 5. **Benign transient hiccups (recovered):** wrong-cwd `not a git repository` probes (3
    logs), transient `gh` "Repository not found" (3×), stale-heartbeat detections up to
    ~30 min — the recovery machinery being exercised on real stalls.
 
-**Not observed:** no provider/model/rate-limit/auth errors, no uncaught exceptions, no
-merge conflicts (only test names), no `AI_APICallError`/overloaded. The fragility was the
-environment, not the LLM.
+**Not surfaced by the searches (Appendix terms):** no provider/model/rate-limit/auth error
+signatures, no uncaught exceptions, no real merge conflicts (only test names), no
+`AI_APICallError`/overloaded. This is a bounded-search negative, not proof of absence — but
+across the sampled logs the recurring failures were all host-side/structural, not the LLM.
 
 ## 3. The review loop: converges, but remediation churns
 
@@ -121,20 +130,32 @@ remediation incompleteness, which the delta rule does not address.
 Missing tests were never a standalone blocker (every remediation bundled regression tests);
 cross-slice integration was essentially never the blocker.
 
-> **These are the same classes flagged in the open-PR reviews** (#34 NEL escaping, #33
-> cancel liveness, #40 NEL again). They recur per-feature precisely because each feature
-> re-implements — and re-misses — the same guard.
+> **The same underlying classes surface in the open-PR reviews too**, though the specific
+> blockers differ: PR #34's requested change was inconsistent inherited W3C trace context
+> (not NEL); PR #33's was forgeable / not-fail-closed process-cancellation liveness (EPERM);
+> PR #40's CHANGES_REQUESTED blockers were payload-marker placement and under-validated
+> continuation/steering envelopes, with NEL escaping a secondary defense-in-depth note. The
+> recurring classes — output/context integrity, fail-closed liveness, input validation —
+> repeat because each feature re-implements (and re-misses) the same guard.
 
 ## 4. Operational gaps still present after hardening
 
 - **Orphans still occur.** `steering-drain-boundaries` is stuck `status: running` with a
-  dead pid, a held `factory.lock`, no `heartbeat.json`, `updated_at` frozen at
-  `created_at`, and all 5 steps at `blocked`/`attempts:0`. It is the original
-  "orphan claiming running" pattern, unchanged — and ironically the run meant to harden
-  steering. Clean `factory recover` target.
-- **Queued steering can be silently dropped.** `tui-active-session-refresh` shipped ready
-  PR #32 while carrying an undrained 592-char `steering.pending` directive (queued
-  16:02:57) that was never applied — an operator instruction vanished with no signal.
+  dead pid, no `heartbeat.json`, `updated_at` frozen at `created_at`, and all 5 steps at
+  `blocked`/`attempts:0` — the original "orphan claiming running" pattern, ironically in the
+  run meant to harden steering. A residual `$RUN/factory.lock` is left behind, but per
+  SCHEMA that is the diagnostic session-owner sidecar, **not** the `run-json.lock/` mutex or
+  a heartbeat credential — it carries no authority, so the orphan is diagnosed from the dead
+  process + missing heartbeat + frozen manifest + `running` status. Clean `factory recover`
+  target.
+- **Terminalization is allowed with an undrained directive (data is not lost).**
+  `tui-active-session-refresh` shipped ready PR #32 while `run.json.steering.pending` still
+  held a 592-char directive (queued 16:02:57). The directive was **not** dropped —
+  `transitionSteeringQueued` persists both `steering/pending-*.json` and the manifest
+  pointer, and status/list/TUI expose it — but the run terminalized without draining,
+  refusing, or warning. The gap is a missing pre-terminalization drain/refuse/warn, not
+  vanished data (which changes the fix: gate terminalization on pending steering, don't
+  "recover" lost input).
 - **No post-terminal cleanup.** The 14 completed runs stranded ~52 worktrees (**721 MB**),
   64 branches, and 15 MB of process logs. `factory cleanup` exists but nothing auto-invokes
   it, and the SKILL's "remove slice worktrees after merge" step did not run. Related: the
@@ -146,9 +167,12 @@ cross-slice integration was essentially never the blocker.
   `debug_snapshot` in `tui-active-session-refresh`; `pre_pr` artifact named
   `validation-report.md` in some runs and `pre-pr.md` in others; field ordering varies.
   Latent doc-contract / differential risk.
-- **Cost instrumentation is inert.** Where present it is always `status: "unavailable"`,
-  `entry_count: 0` — and the run literally named `cost-attribution` carries no
-  `cost_attribution` block at all. The feature shipped but never captured data in practice.
+- **No cost data was captured in any run.** Every `cost_attribution` block present is
+  `status: "unavailable"`, `entry_count: 0`, and the run named `cost-attribution` has no
+  block at all. This establishes only that cost was never *persisted* — not, by itself, a
+  wiring bug: per SCHEMA, `factory cost-record` is called *when provider/opencode metadata
+  exposes usage*, so an equally-consistent cause is that usable metadata was never surfaced
+  (or the run's skill version predated the recording path). §4a splits this by merge timing.
 
 ## 4a. Findings vs. merge timing — what was actually exercised
 
@@ -170,16 +194,17 @@ how several findings should be read.
 
 **Reframed findings:**
 
-- **Cost instrumentation "inert" is two different things.** The cost-attribution *recording*
-  code (#30) **was** present in 6 runs' bases — so the always-`unavailable`/empty blocks are
-  not "unmerged," they mean the `factory cost-record` step was never invoked with provider
-  usage during those runs (a wiring/trigger gap, not missing code). The cost *reporting/export*
-  layer (#38) is in **zero** runs' bases — it merged after every run finished, so it has
-  genuinely never executed. Net: the cost feature is effectively unexercised end-to-end.
-- **The silent steering drop is expected, not a regression.** `tui-active-session-refresh`
-  queued a directive but never drained it because the drain-at-safe-boundaries behavior is
-  the still-unbuilt `steering-drain-boundaries` work (TODO's "future work"). The queue shipped;
-  the consume-at-boundary did not.
+- **Cost absence splits by merge timing.** The cost-attribution *recording* code (#30)
+  **was** present in 6 runs' bases, so the empty blocks are not "unmerged." Whether the
+  `factory cost-record` step was never called, or was called but provider metadata never
+  exposed usage, the sampled logs do not disambiguate — the observation is "no cost
+  persisted," not a proven trigger bug. The cost *reporting/export* layer (#38) is in
+  **zero** runs' bases — it merged after every run finished, so it has genuinely never
+  executed. Net: the cost feature is effectively unexercised end-to-end.
+- **The undrained-directive gap is a missing guard, not lost data.** `tui-active-session-refresh`
+  terminalized with its still-visible pending directive because drain/refuse/warn-at-boundary
+  is the still-unbuilt `steering-drain-boundaries` work (TODO "future work"). The queue and
+  its visibility shipped; the pre-terminalization guard did not.
 - **The newest security-hardening features are essentially unvalidated by dogfooding.**
   interrupt-cancel #33 and honeycomb #34 have only 3 light subsequent runs; optional-telemetry
   #35, gate-answer-source #36, tui-current #37, and cost-reporting-export #38 have none. The
@@ -225,5 +250,11 @@ launching runs from `origin/main`.
 - `reviews/*.json` and `evidence/*.json` mined for verdict progression and finding text.
 - All 57 logs in `.opencode/factory/processes/` sampled via grep/tail (largest files read
   directly); raw counts filtered for the tool's own domain vocabulary and SHA artifacts.
+- The "not surfaced" negatives (§TL;DR, §2) are bounded by these case-insensitive searches,
+  not an exhaustive audit: `error|exception|throw|failed|ENOENT|EEXIST|timed out|cannot`,
+  `heartbeat|stale|lock`, `Promise resolution is still pending|cancelled`, `merge conflict`,
+  `rate.?limit|429|overloaded|AI_APICallError|401|403|auth`, `provider|model`, `SIGTERM|SIGKILL`.
+- Coverage correlation (§4a) computed with `git merge-base --is-ancestor <feature-merge-commit>
+  <run.base_commit>` for every feature PR against every run's recorded `base_commit`.
 - PR outcomes cross-checked with `gh pr list --state all`; branch merge status verified
-  against `origin/main`.
+  against `origin/main`. Open-PR blocker attributions (§3) taken from the PRs' review threads.
