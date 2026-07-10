@@ -369,8 +369,16 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
 // the continuation is built. Best-effort: only binds refs that currently resolve
 // (present, in-run, non-symlink). An accepted step whose artifact is absent stays
 // unbound, and any continuation reuse of it fails closed.
+//
+// Any transition that does not successfully bind the CURRENT accepted artifact/
+// review must not leave a prior binding behind — otherwise accepted(A) → rejected
+// → accepted(missing B) would keep A's binding while the step points at B, a stale
+// provenance claim. So clear first, then re-bind only when this transition's own
+// accepted refs resolve.
 function bindStepAcceptance(runDir, step) {
-  if (!step || step.status !== "accepted") return;
+  if (!step) return;
+  delete step.acceptance;
+  if (step.status !== "accepted") return;
   const artifactRef = typeof step.artifact_ref === "string" ? step.artifact_ref.trim() : "";
   if (!artifactRef) return;
   const artifactHash = tryHashDurableRef(() => resolveArtifactRef(runDir, artifactRef, { mustExist: true }));

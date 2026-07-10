@@ -682,6 +682,38 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
+  it("clears the acceptance binding on non-accepted and failed re-acceptance transitions (no stale provenance)", () => {
+    const fixture = createFixture("bind-clear");
+    try {
+      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
+      writeJson(join(fixture.runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", summary: "ok" });
+      updateRun(fixture, (run) => {
+        run.status = "running";
+        run.terminal_result = null;
+        run.steps = [{ agent: "spec-writer", status: "running", attempts: 0 }];
+      });
+      const readStep = () => JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8")).steps[0];
+
+      // accepted(A) → binds
+      assert.equal(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "accepted", "--artifact-ref", "artifacts/technical-brief.md", "--review-ref", "reviews/spec-writer.json", "--json"]).status, 0);
+      assert.ok(readStep().acceptance, "accept must bind the acceptance");
+
+      // rejected → the prior binding must be cleared (no stale provenance on a non-accepted step)
+      assert.equal(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "rejected", "--json"]).status, 0);
+      assert.equal(readStep().acceptance, undefined, "a non-accepted transition must clear the binding");
+
+      // accepted(missing B) → status flips to accepted but the transition cannot bind, so it must
+      // NOT re-attach the prior A binding (the manifest must not claim an acceptance never established)
+      assert.equal(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "accepted", "--artifact-ref", "artifacts/missing.md", "--json"]).status, 0);
+      const stale = readStep();
+      assert.equal(stale.status, "accepted");
+      assert.equal(stale.artifact_ref, "artifacts/missing.md");
+      assert.equal(stale.acceptance, undefined, "a failed re-acceptance must not carry the prior binding");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("adopts a continuation through the checked transition, recording inherited acceptance", async () => {
     const fixture = createFixture("adopt-ok", { spec: { status: "accepted", verdict: "APPROVE" } });
     try {
