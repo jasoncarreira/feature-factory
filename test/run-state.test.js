@@ -9,12 +9,14 @@ import {
   mutateRunJsonLocked,
   transitionCostUsage,
   transitionGateDecision,
+  transitionPrePrFenceEstablished,
   transitionLifecycleRun,
   transitionPrCreated,
   transitionRecoverOrphan,
   transitionRunJson,
   transitionRunSlice,
   transitionSteeringConsumed,
+  transitionSteeringBoundaryOpened,
   transitionSteeringQueued,
   transitionTerminalResult,
   transitionSliceMerged,
@@ -38,7 +40,7 @@ describe("simplified run-state transitions", () => {
       });
       writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
 
-      const result = await transitionGateDecision(fixture.runDir, "story", {
+      const result = await approveGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
@@ -65,7 +67,7 @@ describe("simplified run-state transitions", () => {
       writeFileSync(join(fixture.runDir, "gates", "story.question.md"), "changed?\n");
 
       await assert.rejects(
-        transitionGateDecision(fixture.runDir, "story", {
+        approveGateDecision(fixture.runDir, "story", {
           status: "approved",
           artifact: "artifacts/story.md",
           question_ref: "gates/story.question.md",
@@ -89,7 +91,7 @@ describe("simplified run-state transitions", () => {
         answer_ref: "gates/story.answer",
       });
       await assert.rejects(
-        transitionGateDecision(fixture.runDir, "story", {
+        approveGateDecision(fixture.runDir, "story", {
           status: "approved",
           artifact: "artifacts/story.md",
           question_ref: "gates/story.question.md",
@@ -199,7 +201,7 @@ describe("simplified run-state transitions", () => {
       });
       writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
 
-      let result = await transitionGateDecision(fixture.runDir, "story", {
+      let result = await approveGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
@@ -219,7 +221,7 @@ describe("simplified run-state transitions", () => {
       });
 
       await assert.rejects(
-        transitionGateDecision(fixture.runDir, "story", {
+        approveGateDecision(fixture.runDir, "story", {
           status: "approved",
           artifact: "artifacts/story.md",
           question_ref: "gates/story.question.md",
@@ -229,7 +231,7 @@ describe("simplified run-state transitions", () => {
       );
 
       writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
-      result = await transitionGateDecision(fixture.runDir, "story", {
+      result = await approveGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
@@ -360,7 +362,7 @@ describe("simplified run-state transitions", () => {
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", verdict: "GO" });
       writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", verdict: "PASS" });
 
-      const result = await transitionPrCreated(fixture.runDir, {
+      const result = await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/99",
         pr_number: 99,
         repository: "jasoncarreira/opencode-feature-factory",
@@ -390,7 +392,7 @@ describe("simplified run-state transitions", () => {
         continuation: continuationMetadata(fixture.runId),
       });
 
-      const result = await transitionPrCreated(fixture.runDir, {
+      const result = await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/103",
         pr_number: 103,
         repository: "jasoncarreira/opencode-feature-factory",
@@ -412,7 +414,7 @@ describe("simplified run-state transitions", () => {
         continuation: continuationMetadata(fixture.runId),
       });
 
-      const result = await transitionPrCreated(fixture.runDir, {
+      const result = await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
         pr_number: 104,
         repository: "jasoncarreira/opencode-feature-factory",
@@ -432,7 +434,7 @@ describe("simplified run-state transitions", () => {
       writeReadyPrRun(fixture);
 
       await assert.rejects(
-        transitionPrCreated(fixture.runDir, {
+        establishFenceAndExpectFailure(fixture.runDir, {
           pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
           pr_number: 104,
           repository: "other-owner/other-repo",
@@ -453,7 +455,7 @@ describe("simplified run-state transitions", () => {
       writeReadyPrRun(fixture, { slices: [{ id: "slice", status: "review", attempts: 1 }] });
 
       await assert.rejects(
-        transitionPrCreated(fixture.runDir, {
+        establishFenceAndExpectFailure(fixture.runDir, {
           pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/100",
           pr_number: 100,
           repository: "jasoncarreira/opencode-feature-factory",
@@ -471,7 +473,7 @@ describe("simplified run-state transitions", () => {
       writeReadyPrRun(fixture, { validator: { verdict: "GO", report: "artifacts/missing.md" } });
 
       await assert.rejects(
-        transitionPrCreated(fixture.runDir, {
+        establishFenceAndExpectFailure(fixture.runDir, {
           pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/101",
           pr_number: 101,
           repository: "jasoncarreira/opencode-feature-factory",
@@ -512,7 +514,7 @@ describe("simplified run-state transitions", () => {
         else writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), item.review);
 
         await assert.rejects(
-          transitionPrCreated(fixture.runDir, {
+          establishFenceAndExpectFailure(fixture.runDir, {
             pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/105",
             pr_number: 105,
             repository: "jasoncarreira/opencode-feature-factory",
@@ -523,7 +525,7 @@ describe("simplified run-state transitions", () => {
         assert.equal(run.status, "running");
         assert.equal(run.pr_url, undefined);
 
-        const blocked = await transitionTerminalResult(fixture.runDir, { status: "blocked", reason: "review gate did not pass", artifacts: {} });
+        const blocked = await terminalTransition(fixture.runDir, { status: "blocked", reason: "review gate did not pass", artifacts: {} });
         assert.equal(blocked.run.status, "blocked");
         assert.equal(blocked.run.pr_url, undefined);
         run = readJson(join(fixture.runDir, "run.json"));
@@ -586,7 +588,7 @@ describe("simplified run-state transitions", () => {
   it("does not mutate terminal runs when recording cost usage", async () => {
     const fixture = createFixture("cost-terminal");
     try {
-      await transitionTerminalResult(fixture.runDir, { status: "blocked", reason: "done", artifacts: {} }, { now: NOW });
+      await terminalTransition(fixture.runDir, { status: "blocked", reason: "done", artifacts: {} }, { now: NOW });
 
       await assert.rejects(
         transitionCostUsage(fixture.runDir, { agent: "backend-builder", input_tokens: 1 }, { now: NOW, id: "late-cost" }),
@@ -704,7 +706,7 @@ describe("simplified run-state transitions", () => {
       await approveGate(fixture, "pre_pr", "validation-report.md");
       assertConsistent(fixture);
 
-      await transitionPrCreated(fixture.runDir, {
+      await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/102",
         pr_number: 102,
         repository: "jasoncarreira/opencode-feature-factory",
@@ -870,12 +872,32 @@ async function approveGate(fixture, gate, artifactFile) {
     answer_ref: answerRef,
   });
   writeFileSync(join(fixture.runDir, answerRef), "approve\n");
-  await transitionGateDecision(fixture.runDir, gate, {
+  await approveGateDecision(fixture.runDir, gate, {
     status: "approved",
     artifact: artifactRef,
     question_ref: questionRef,
     answer_ref: answerRef,
   }, { now: NOW });
+}
+
+async function approveGateDecision(runDir, gate, decision, options = {}) {
+  const opened = await transitionSteeringBoundaryOpened(runDir, "gate", options);
+  return transitionGateDecision(runDir, gate, decision, { ...options, boundaryToken: opened.boundary.token });
+}
+
+async function createPrTransition(runDir, input, options = {}) {
+  const fenced = await transitionPrePrFenceEstablished(runDir, options);
+  return transitionPrCreated(runDir, input, { ...options, fenceToken: fenced.fence.token });
+}
+
+async function establishFenceAndExpectFailure(runDir, input, options = {}) {
+  const fenced = await transitionPrePrFenceEstablished(runDir, options);
+  return transitionPrCreated(runDir, input, { ...options, fenceToken: fenced.fence.token });
+}
+
+async function terminalTransition(runDir, terminalResult, options = {}) {
+  const opened = await transitionSteeringBoundaryOpened(runDir, "terminal", options);
+  return transitionTerminalResult(runDir, terminalResult, { ...options, boundaryToken: opened.boundary.token });
 }
 
 function assertConsistent(fixture) {

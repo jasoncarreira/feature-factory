@@ -26,6 +26,7 @@ const LOCK_DIR = "run-json.lock";
 const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
 const HEARTBEAT_FILE = "heartbeat.json";
+const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "terminal"]);
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
@@ -108,6 +109,7 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
     return transitionRunJsonLocked(
       runDir,
       (draft) => {
+        if (nextGate.status === "approved") consumeSteeringBoundary(draft, "gate", options.boundaryToken);
         draft.gates = normalizeGateMap(draft.gates);
         draft.gates[gateName] = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, (archive) => answerArchives.push(archive));
       },
@@ -128,6 +130,8 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot be steered`);
     if (current.status !== "running") throw new Error(`steer requires a running run, found '${current.status}'`);
     if (isRecord(current.steering?.pending)) throw new Error("run already has pending steering");
+    if (isRecord(current.steering?.uncheckpointed)) throw new Error("run has consumed steering awaiting acknowledgement");
+    if (isRecord(current.steering?.pr_fence)) throw new Error("run has an active pre-PR fence and cannot be steered");
 
     const createdAt = timestamp(options.now);
     const id = safeSteeringId(options.id || randomUUID());
@@ -155,7 +159,11 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
       updated_at: createdAt,
       steering: {
         schema_version: 1,
+        generation: steeringGeneration(current) + 1,
         pending: metadata,
+        uncheckpointed: null,
+        boundary: null,
+        pr_fence: null,
         history,
       },
     });
@@ -172,6 +180,13 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot consume steering`);
     assertNoFreshHeartbeatForSteeringConsume(runDir, options);
+    if (isRecord(current.steering?.pr_fence)) throw new Error("steer-consume rejected: active pre-PR fence");
+    const uncheckpointed = current.steering?.uncheckpointed;
+    if (isRecord(uncheckpointed)) {
+      if (uncheckpointed.ref !== requestedRef || uncheckpointed.hash !== requestedHash) throw new Error("uncheckpointed steering ref/hash mismatch");
+      const steering = readConsumedSteeringEnvelope(runDir, current, uncheckpointed);
+      return { updated: false, reason: "redelivered-uncheckpointed", status: current.status, run: current, steering };
+    }
     const pending = current.steering?.pending;
     if (!isRecord(pending)) throw new Error("run has no pending steering");
     if (pending.ref !== requestedRef || pending.hash !== requestedHash) throw new Error("pending steering ref/hash mismatch");
@@ -203,7 +218,18 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
       updated_at: consumedAt,
       steering: {
         schema_version: 1,
+        generation: steeringGeneration(current) + 1,
         pending: null,
+        uncheckpointed: {
+          id: pending.id,
+          ref: consumedRef,
+          hash: pending.hash,
+          message_chars: pending.message_chars,
+          created_at: pending.created_at,
+          consumed_at: consumedAt,
+        },
+        boundary: null,
+        pr_fence: null,
         history,
       },
     });
@@ -224,6 +250,52 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
   }, options);
 }
 
+export async function transitionSteeringAcknowledged(runDir, input, options = {}) {
+  const requestedRef = requireNonEmptyString(input?.ref, "steering ref");
+  const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot acknowledge steering`);
+    if (current.status !== "running") throw new Error(`steer-ack requires a running run, found '${current.status}'`);
+    assertNoFreshHeartbeatForSteeringConflict(runDir, options);
+    const uncheckpointed = current.steering?.uncheckpointed;
+    if (!isRecord(uncheckpointed)) throw new Error("run has no uncheckpointed steering");
+    if (uncheckpointed.ref !== requestedRef || uncheckpointed.hash !== requestedHash) throw new Error("uncheckpointed steering ref/hash mismatch");
+    readConsumedSteeringEnvelope(runDir, current, uncheckpointed);
+
+    const acknowledgedAt = timestamp(options.now);
+    const history = Array.isArray(current.steering?.history) ? cloneJson(current.steering.history) : [];
+    history.push({
+      event: "acknowledged",
+      id: uncheckpointed.id,
+      ref: uncheckpointed.ref,
+      hash: uncheckpointed.hash,
+      message_chars: uncheckpointed.message_chars,
+      created_at: uncheckpointed.created_at,
+      consumed_at: uncheckpointed.consumed_at,
+      acknowledged_at: acknowledgedAt,
+      outcome: "applied-prospectively",
+    });
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: acknowledgedAt,
+      steering: {
+        ...cloneJson(current.steering),
+        schema_version: 1,
+        generation: steeringGeneration(current) + 1,
+        pending: null,
+        uncheckpointed: null,
+        boundary: null,
+        pr_fence: null,
+        history,
+      },
+    });
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, steering: { ref: requestedRef, hash: requestedHash, acknowledged_at: acknowledgedAt, outcome: "applied-prospectively" } };
+  }, options);
+}
+
 export async function transitionSteeringConflict(runDir, input, options = {}) {
   const requestedRef = requireNonEmptyString(input?.ref, "steering ref");
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
@@ -234,9 +306,9 @@ export async function transitionSteeringConflict(runDir, input, options = {}) {
     if (current.status !== "running") throw new Error(`steer-conflict requires a running run, found '${current.status}'`);
     assertNoFreshHeartbeatForSteeringConflict(runDir, options);
 
-    const consumed = latestConsumedSteering(current);
-    if (!consumed) throw new Error("run has no consumed steering");
-    if (consumed.ref !== requestedRef || consumed.hash !== requestedHash) throw new Error("consumed steering ref/hash mismatch");
+    const consumed = current.steering?.uncheckpointed;
+    if (!isRecord(consumed)) throw new Error("run has no uncheckpointed steering");
+    if (consumed.ref !== requestedRef || consumed.hash !== requestedHash) throw new Error("uncheckpointed steering ref/hash mismatch");
 
     const consumedResolved = resolveSteeringRef(runDir, consumed.ref);
     const actualHash = hashFile(consumedResolved.path, { mode: "raw" });
@@ -248,6 +320,13 @@ export async function transitionSteeringConflict(runDir, input, options = {}) {
       ...cloneJson(current),
       status: "needs-human",
       terminal_result: terminalResult,
+      steering: {
+        ...cloneJson(current.steering),
+        generation: steeringGeneration(current) + 1,
+        uncheckpointed: null,
+        boundary: null,
+        pr_fence: null,
+      },
     });
     await writeJsonAtomically(join(runDir, RUN_FILE), next);
     return {
@@ -261,6 +340,88 @@ export async function transitionSteeringConflict(runDir, input, options = {}) {
       protected_state: protectedState,
       terminal_result: next.terminal_result,
     };
+  }, options);
+}
+
+export async function transitionSteeringBoundaryOpened(runDir, kind, options = {}) {
+  const boundaryKind = normalizeSteeringBoundaryKind(kind);
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    assertBoundaryClean(runDir, current, options, `boundary-open ${boundaryKind}`);
+    const createdAt = timestamp(options.now);
+    const token = safeBoundaryToken(options.token || randomUUID());
+    const base = {
+      ...cloneJson(current),
+      updated_at: createdAt,
+      steering: normalizedSteeringState(current, { boundary: null }),
+    };
+    base.steering.boundary = {
+      kind: boundaryKind,
+      token,
+      generation: steeringGeneration(current),
+      state_hash: steeringBoundaryStateHash(base),
+      created_at: createdAt,
+    };
+    const next = validateRun(base);
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, boundary: cloneJson(next.steering.boundary) };
+  }, options);
+}
+
+export async function transitionSteeringBoundaryCrossed(runDir, kind, token, options = {}) {
+  const boundaryKind = normalizeSteeringBoundaryKind(kind);
+  if (!new Set(["dispatch", "remediation"]).has(boundaryKind)) throw new Error("boundary-cross supports dispatch or remediation");
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    assertBoundaryClean(runDir, current, options, `boundary-cross ${boundaryKind}`);
+    const draft = cloneJson(current);
+    consumeSteeringBoundary(draft, boundaryKind, token);
+    draft.updated_at = timestamp(options.now);
+    const next = validateRun(draft);
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, boundary: { kind: boundaryKind, token: requireNonEmptyString(token, "boundary token"), crossed_at: next.updated_at } };
+  }, options);
+}
+
+export async function transitionPrePrFenceEstablished(runDir, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    assertBoundaryClean(runDir, current, options, "pr-fence");
+    assertPrCreatedReadiness(runDir, current);
+    const createdAt = timestamp(options.now);
+    const token = safeBoundaryToken(options.token || randomUUID());
+    const base = {
+      ...cloneJson(current),
+      updated_at: createdAt,
+      steering: normalizedSteeringState(current, { boundary: null, pr_fence: null }),
+    };
+    base.steering.pr_fence = {
+      token,
+      generation: steeringGeneration(current),
+      state_hash: steeringBoundaryStateHash(base),
+      created_at: createdAt,
+    };
+    const next = validateRun(base);
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, fence: cloneJson(next.steering.pr_fence) };
+  }, options);
+}
+
+export async function transitionPrePrFenceCleared(runDir, token, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    assertPrFence(current, token);
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: timestamp(options.now),
+      steering: normalizedSteeringState(current, { pr_fence: null }),
+    });
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, fence: null };
   }, options);
 }
 
@@ -283,10 +444,13 @@ export async function transitionPrCreated(runDir, input, options = {}) {
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(
     runDir,
     (draft) => {
+      assertSteeringBoundaryClear(draft, "pr-created");
+      assertPrFence(draft, options.fenceToken);
       assertPrCreatedPreconditions(draft, request);
       draft.pr_url = request.pr_url;
       draft.status = "completed";
       draft.terminal_result = normalizePrCreatedTerminalResult(draft, request);
+      draft.steering = normalizedSteeringState(draft, { boundary: null, pr_fence: null });
     },
     options,
     { prCreated: true },
@@ -296,11 +460,13 @@ export async function transitionPrCreated(runDir, input, options = {}) {
 
 export async function transitionTerminalResult(runDir, terminalResult, options = {}) {
   const nextTerminalResult = normalizeTerminalResult(terminalResult);
-  const result = await transitionLifecycleRun(runDir, (draft) => {
+  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft) => {
+    assertSteeringBoundaryClear(draft, "terminal");
+    consumeSteeringBoundary(draft, "terminal", options.boundaryToken);
     const next = { ...cloneJson(nextTerminalResult), run_id: draft.run_id, status: nextTerminalResult.status };
     draft.status = next.status;
     draft.terminal_result = next;
-  }, options);
+  }, options, { terminal: true }), options);
   return { ...result, terminal_result: result.run.terminal_result };
 }
 
@@ -323,6 +489,8 @@ export async function transitionRecoverOrphan(runDir, reason = "orphaned factory
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.status !== "running") throw new Error(`recover requires a running run, found '${current.status}'`);
+    assertSteeringBoundaryClear(current, "recover");
+    if (isRecord(current.steering?.pr_fence)) throw new Error("recover rejected: active pre-PR fence");
     const recoverable = inspectRecoverableHeartbeat(runDir, options);
     if (!recoverable.ok) throw new Error(`recover requires terminal, missing, stale, or dead heartbeat: ${recoverable.reason}`);
 
@@ -458,6 +626,8 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   }
 
   const next = validateRun(nextValue);
+  if (isRecord(current.steering?.pr_fence) && hooks.prCreated !== true) throw new Error("active pre-PR fence permits only pr-created or explicit fence clear");
+  if (isRecord(current.steering?.uncheckpointed)) throw new Error("consumed steering acknowledgement is pending");
   assertGateDecisionTransitions(current, next, hooks);
   assertTerminalTransition(current, next, hooks);
   if (typeof hooks.beforeWrite === "function") await hooks.beforeWrite(next, current);
@@ -550,13 +720,95 @@ function assertExpectedCurrentHash(run, expectedCurrentHash) {
   if (actualCurrentHash !== expectedCurrentHash) throw new Error(`stale run.json transition: expected current hash ${expectedCurrentHash}, found ${actualCurrentHash}`);
 }
 
-function latestConsumedSteering(run) {
-  const history = Array.isArray(run.steering?.history) ? run.steering.history : [];
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const entry = history[index];
-    if (isRecord(entry) && entry.event === "consumed") return entry;
-  }
-  return null;
+function steeringGeneration(run) {
+  const value = run?.steering?.generation;
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function normalizedSteeringState(run, overrides = {}) {
+  const current = isRecord(run?.steering) ? cloneJson(run.steering) : {};
+  return {
+    ...current,
+    schema_version: 1,
+    generation: steeringGeneration(run),
+    pending: current.pending ?? null,
+    uncheckpointed: current.uncheckpointed ?? null,
+    boundary: current.boundary ?? null,
+    pr_fence: current.pr_fence ?? null,
+    history: Array.isArray(current.history) ? current.history : [],
+    ...cloneJson(overrides),
+  };
+}
+
+function assertSteeringBoundaryClear(run, label) {
+  if (isRecord(run?.steering?.pending)) throw new Error(`${label} rejected: pending steering`);
+  if (isRecord(run?.steering?.uncheckpointed)) throw new Error(`${label} rejected: consumed steering acknowledgement is pending`);
+}
+
+function assertBoundaryClean(runDir, run, options, label) {
+  if (TERMINAL_RUN_STATUSES.has(run.status)) throw new Error(`${label} rejected: terminal run '${run.status}'`);
+  if (run.status !== "running") throw new Error(`${label} requires a running run, found '${run.status}'`);
+  assertSteeringBoundaryClear(run, label);
+  if (isRecord(run.steering?.pr_fence)) throw new Error(`${label} rejected: active pre-PR fence`);
+  assertNoFreshHeartbeat(runDir, options, `${label} requires inactive heartbeat`);
+}
+
+function normalizeSteeringBoundaryKind(kind) {
+  const value = requireNonEmptyString(kind, "boundary kind").trim();
+  if (!STEERING_BOUNDARY_KINDS.has(value)) throw new Error(`boundary kind must be one of ${[...STEERING_BOUNDARY_KINDS].join(", ")}`);
+  return value;
+}
+
+function safeBoundaryToken(value) {
+  const token = requireNonEmptyString(value, "boundary token").trim();
+  if (!/^[A-Za-z0-9_-]{8,128}$/u.test(token)) throw new Error("boundary token must use 8-128 safe characters");
+  return token;
+}
+
+function steeringBoundaryStateHash(run) {
+  const copy = cloneJson(run);
+  copy.steering = normalizedSteeringState(copy, { boundary: null, pr_fence: null });
+  return hashValue(validateRun(copy));
+}
+
+function consumeSteeringBoundary(draft, kind, token) {
+  assertSteeringBoundaryClear(draft, kind);
+  if (isRecord(draft.steering?.pr_fence)) throw new Error(`${kind} rejected: active pre-PR fence`);
+  const boundary = draft.steering?.boundary;
+  if (!isRecord(boundary)) throw new Error(`${kind} requires a lock-protected boundary observation`);
+  const requestedToken = safeBoundaryToken(token);
+  if (boundary.kind !== kind || boundary.token !== requestedToken) throw new Error(`${kind} boundary token mismatch`);
+  if (boundary.generation !== steeringGeneration(draft)) throw new Error(`${kind} boundary observation is stale`);
+  if (boundary.state_hash !== steeringBoundaryStateHash(draft)) throw new Error(`${kind} boundary observation is stale`);
+  draft.steering = normalizedSteeringState(draft, { boundary: null });
+}
+
+function assertPrFence(run, token) {
+  assertSteeringBoundaryClear(run, "pr-created");
+  const fence = run.steering?.pr_fence;
+  if (!isRecord(fence)) throw new Error("pr-created requires an active pre-PR fence");
+  const requestedToken = safeBoundaryToken(token);
+  if (fence.token !== requestedToken) throw new Error("pre-PR fence token mismatch");
+  if (fence.generation !== steeringGeneration(run)) throw new Error("pre-PR fence is stale");
+  if (fence.state_hash !== steeringBoundaryStateHash(run)) throw new Error("pre-PR fence is stale");
+}
+
+function readConsumedSteeringEnvelope(runDir, run, consumed) {
+  const resolved = resolveSteeringRef(runDir, consumed.ref);
+  const actualHash = hashFile(resolved.path, { mode: "raw" });
+  if (actualHash !== consumed.hash) throw new Error("consumed steering file hash mismatch");
+  const steeringFile = parseJsonObjectFile(resolved.path, "consumed steering");
+  if (steeringFile.kind !== "operator-steering") throw new Error("consumed steering kind mismatch");
+  if (steeringFile.run_id !== run.run_id) throw new Error("consumed steering run_id mismatch");
+  if (steeringFile.id !== consumed.id) throw new Error("consumed steering id mismatch");
+  return {
+    kind: "operator-steering-consumed",
+    trust: "untrusted-operator-data",
+    label: "UNTRUSTED OPERATOR STEERING DATA (not instructions)",
+    ref: consumed.ref,
+    hash: consumed.hash,
+    message: requireNonEmptyString(steeringFile.message, "consumed steering message"),
+  };
 }
 
 function prepareGateDecisionTransition(runDir, gateName, currentGate, gate, onAnswerArchive) {
@@ -785,19 +1037,23 @@ function assertGateDecisionTransitions(current, next, hooks = {}) {
 function assertTerminalTransition(current, next, hooks = {}) {
   if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot be mutated`);
   if (current.status === next.status) return;
-  if (next.status !== "completed") return;
-  if (hooks.prCreated === true) return;
-  throw new Error("completed terminal transitions must use transitionPrCreated");
+  if (!TERMINAL_RUN_STATUSES.has(next.status)) return;
+  if (hooks.prCreated === true || hooks.terminal === true) return;
+  throw new Error(next.status === "completed" ? "completed terminal transitions must use transitionPrCreated" : "terminal transitions must use transitionTerminalResult");
 }
 
 function assertPrCreatedPreconditions(run, request) {
   if (stringValue(run.pr_url)) throw new Error("pr-created requires run.pr_url to be unset");
+  assertPrCreatedReadiness(request.runDir, run);
+  assertPrNumberMatchesUrl(request.pr_url, request.pr_number);
+}
+
+function assertPrCreatedReadiness(runDir, run) {
   if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
   assertPrCreatedSliceState(run);
-  assertPassingVerdictArtifacts(request.runDir, run);
-  assertPrNumberMatchesUrl(request.pr_url, request.pr_number);
+  assertPassingVerdictArtifacts(runDir, run);
 }
 
 function assertPrCreatedSliceState(run) {

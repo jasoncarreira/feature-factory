@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
-import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionSteeringAcknowledged, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -457,6 +457,9 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
       runDir,
       reason: current.terminal_result?.reason || reason,
     });
+    if (current.steering?.pending) throw new Error("recovery terminalization rejected: pending steering");
+    if (current.steering?.uncheckpointed) throw new Error("recovery terminalization rejected: consumed steering acknowledgement is pending");
+    if (current.steering?.pr_fence) throw new Error("recovery terminalization rejected: active pre-PR fence");
     bestEffortStopHeartbeatForTerminal(runDir, opts);
     const next = validateRun({
       ...current,
@@ -545,6 +548,36 @@ export async function consumeSteering(runId, input, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const result = await transitionSteeringConsumed(runDir, input, opts);
   return { run_id: result.run.run_id, steering: result.steering };
+}
+
+export async function acknowledgeSteering(runId, input, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringAcknowledged(runDir, input, opts);
+  return { run_id: result.run.run_id, steering: result.steering };
+}
+
+export async function openSteeringBoundary(runId, kind, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringBoundaryOpened(runDir, kind, opts);
+  return { run_id: result.run.run_id, boundary: result.boundary };
+}
+
+export async function crossSteeringBoundary(runId, kind, token, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringBoundaryCrossed(runDir, kind, token, opts);
+  return { run_id: result.run.run_id, boundary: result.boundary };
+}
+
+export async function establishPrePrFence(runId, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionPrePrFenceEstablished(runDir, opts);
+  return { run_id: result.run.run_id, fence: result.fence };
+}
+
+export async function clearPrePrFence(runId, token, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionPrePrFenceCleared(runDir, token, opts);
+  return { run_id: result.run.run_id, fence: result.fence };
 }
 
 export async function recordSteeringConflict(runId, input, opts = {}) {
@@ -678,6 +711,9 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     if (run.status !== "running") {
       throw new Error(`run '${run.run_id}' must be running to start a heartbeat`);
     }
+    if (run.steering?.pending) throw new Error(`run '${run.run_id}' has pending steering; drain it before starting a heartbeat`);
+    if (run.steering?.uncheckpointed) throw new Error(`run '${run.run_id}' has consumed steering awaiting acknowledgement`);
+    if (run.steering?.pr_fence) throw new Error(`run '${run.run_id}' has an active pre-PR fence`);
     const protectedGate = pendingProtectedGate(run);
     if (protectedGate) {
       throw new Error(`run '${run.run_id}' is waiting at protected gate '${protectedGate}'`);
@@ -1828,15 +1864,19 @@ function buildResumePayload(run, opts) {
     kind: "operator-steering-pointer",
     run_id: run.run_id,
     pending: null,
+    uncheckpointed: null,
     consume: null,
     raw_message_included: false,
   };
   const pending = steeringPendingMetadata(run.steering?.pending);
-  if (pending) {
+  const uncheckpointed = steeringConsumedMetadata(run.steering?.uncheckpointed);
+  const pointer = pending || uncheckpointed;
+  if (pointer) {
     steering.pending = pending;
+    steering.uncheckpointed = uncheckpointed;
     steering.consume = {
       command: "feature-factory",
-      args: ["factory", "steer-consume", run.run_id, "--ref", pending.ref, "--hash", pending.hash, "--json"],
+      args: ["factory", "steer-consume", run.run_id, "--ref", pointer.ref, "--hash", pointer.hash, "--json"],
     };
   }
   return {
@@ -1868,6 +1908,7 @@ function resumeEligibility(runDir, run, opts = {}) {
   const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
   if (heartbeat.error) reasons.push("invalid-run-state");
   else if (heartbeat.value && heartbeatIsFresh(heartbeat.value, timestamp(opts.now), opts)) reasons.push("active-heartbeat");
+  if (run.steering?.pr_fence) reasons.push("pre-pr-fence-active");
   return { eligible: reasons.length === 0, reasons: [...new Set(reasons)], diagnostics, steering_checks: steeringChecks, heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null };
 }
 
@@ -1879,11 +1920,12 @@ function assertResumeMutationAllowed(runDir, run, opts = {}) {
 
 function steeringSummary(run) {
   const steering = run?.steering;
-  if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, consumed_count: 0, latest_consumed: null };
+  if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, uncheckpointed: null, consumed_count: 0, latest_consumed: null, boundary: null, pr_fence: null };
   const consumed = Array.isArray(steering.history) ? steering.history.filter((item) => item?.event === "consumed") : [];
   const latest = consumed[consumed.length - 1] || null;
   return {
     pending: steeringPendingMetadata(steering.pending),
+    uncheckpointed: steeringConsumedMetadata(steering.uncheckpointed),
     consumed_count: consumed.length,
     latest_consumed: latest ? {
       id: latest.id,
@@ -1893,6 +1935,8 @@ function steeringSummary(run) {
       created_at: latest.created_at,
       consumed_at: latest.consumed_at,
     } : null,
+    boundary: steeringBoundaryMetadata(steering.boundary),
+    pr_fence: steeringFenceMetadata(steering.pr_fence),
   };
 }
 
@@ -1905,6 +1949,22 @@ function steeringPendingMetadata(pending) {
     message_chars: pending.message_chars,
     created_at: pending.created_at,
   };
+}
+
+function steeringConsumedMetadata(consumed) {
+  const metadata = steeringPendingMetadata(consumed);
+  if (!metadata) return null;
+  return { ...metadata, consumed_at: consumed.consumed_at };
+}
+
+function steeringBoundaryMetadata(boundary) {
+  if (!boundary || typeof boundary !== "object" || Array.isArray(boundary)) return null;
+  return { kind: boundary.kind, token: boundary.token, generation: boundary.generation, state_hash: boundary.state_hash, created_at: boundary.created_at };
+}
+
+function steeringFenceMetadata(fence) {
+  if (!fence || typeof fence !== "object" || Array.isArray(fence)) return null;
+  return { token: fence.token, generation: fence.generation, state_hash: fence.state_hash, created_at: fence.created_at };
 }
 
 function featureCommandPayload(prompt, opts) {

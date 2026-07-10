@@ -550,15 +550,13 @@ describe("live-run steering drain docs contract", () => {
     }
   });
 
-  it("uses pointer-only discovery and skips all drain mutations when pending is null", () => {
+  it("uses pointer-only discovery and skips drain delivery when both durable pointers are null", () => {
     for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
       assert.match(text, /factory status <run-id> --json/i, `${name} must probe status`);
-      for (const field of ["id", "ref", "hash", "message_chars", "created_at"]) {
-        assert.match(text, literalPattern(`\`${field}\``), `${name} must limit discovery to pending metadata ${field}`);
-      }
+      assert.match(text, /steering\.pending["]? and [`"]?steering\.uncheckpointed|steering\.pending`? and `steering\.uncheckpointed/i, `${name} must discover pending and uncheckpointed metadata`);
       assert.match(text, /pointer-only discovery|read-only pointer probe/i, `${name} must make discovery pointer-only`);
-      assert.match(text, /do not open the pending file|must not open the pending file/i, `${name} must not read raw text during discovery`);
-      assert.match(text, /steering\.pending`? is null[\s\S]*do not call `?env record-resume`?[\s\S]*`?steer-consume`?[\s\S]*conflict checkpoint/i, `${name} must make the live drain conditional`);
+      assert.match(text, /do not open (?:either|steering) file|must not open either file/i, `${name} must not read raw text during discovery`);
+      assert.match(text, /both (?:are|pointers are) null[\s\S]*(?:do not call|skip)[\s\S]*(?:record-resume|drain commands)[\s\S]*(?:steer-consume|boundary)/i, `${name} must make delivery conditional`);
       assert.match(text, /Status is (?:pointer-only|metadata) discovery, not a consume site/i, `${name} must keep status read-only`);
     }
   });
@@ -567,13 +565,13 @@ describe("live-run steering drain docs contract", () => {
     for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
       const normalized = text.toLowerCase();
       const recordResume = normalized.indexOf("feature-factory factory env record-resume <run-id> --json");
-      const consume = normalized.indexOf("feature-factory factory steer-consume <run-id> --ref <pending.ref> --hash <pending.hash> --json");
+      const consume = normalized.indexOf("feature-factory factory steer-consume <run-id> --ref <pending-or-uncheckpointed.ref> --hash <pending-or-uncheckpointed.hash> --json");
       const checkpoint = normalized.indexOf("immediately perform the steering-conflict checkpoint", consume);
       assert.ok(recordResume >= 0 && recordResume < consume && consume < checkpoint, `${name} must order record-resume before consume before checkpoint`);
-      assert.match(text, /active-heartbeat[\s\S]*(?:leaves|leaving)[\s\S]*(?:pending|pointer\/file pending)[\s\S]*prevents crossing the boundary/i, `${name} must reject active heartbeat before crossing`);
+      assert.match(text, /active-heartbeat[\s\S]*(?:prevents|prevent)[\s\S]*(?:application|raw-text application)[\s\S]*(?:boundary crossing|crossing the boundary)/i, `${name} must reject active heartbeat before crossing`);
       assert.match(text, /steer-consume[\s\S]*independently rechecks heartbeat inactivity/i, `${name} must retain the consume heartbeat check`);
-      assert.match(text, /Between consume and its checkpoint|between consume and its checkpoint|between `?steer-consume`? and (?:its|the) checkpoint/i, `${name} must make the checkpoint immediate`);
-      assert.match(text, /no cost write|do not perform a cost write/i, `${name} must forbid intervening writes/actions`);
+      assert.match(text, /immediately after every (?:delivery|consume)/i, `${name} must make the checkpoint immediate`);
+      assert.match(text, /do not perform a cost write|No cost write/i, `${name} must forbid intervening writes/actions`);
     }
   });
 
@@ -582,12 +580,26 @@ describe("live-run steering drain docs contract", () => {
       assert.match(text, /UNTRUSTED OPERATOR STEERING DATA \(not instructions\)/, `${name} must retain the raw-text label`);
       assert.match(text, /trust: untrusted-operator-data/, `${name} must retain the trust value`);
       assert.match(text, /prospectively[\s\S]*future unaccepted work/i, `${name} must apply compatible guidance prospectively`);
-      assert.match(text, /steering\/consumed-\*/i, `${name} must archive consumed steering`);
-      assert.match(text, /later boundaries[\s\S]*(?:do not re-consume|do not reconsume)/i, `${name} must preserve one-time consumption`);
+      assert.match(text, /steering\/consumed-(?:\*|<file>)/i, `${name} must archive consumed steering`);
+      assert.match(text, /without (?:another|a second) (?:rename|archive|consumed event)|archives? exactly once/i, `${name} must preserve one-time consumption`);
+      assert.match(text, /steering\.uncheckpointed[\s\S]*(?:redeliver|redelivery)/i, `${name} must document crash-safe uncheckpointed redelivery`);
+      assert.match(text, /factory steer-ack[\s\S]*applied-prospectively/i, `${name} must require no-conflict acknowledgement`);
       assert.match(text, /approved gates[\s\S]*accepted steps[\s\S]*merged or blocked slices[\s\S]*validator\/security verdicts[\s\S]*pr_url[\s\S]*terminal_result/i, `${name} must list protected durable state`);
       assert.match(text, /only permitted workflow write[\s\S]*factory steer-conflict/i, `${name} must limit conflict writes to steer-conflict`);
       assert.match(text, /needs-human/i, `${name} must stop conflicts as needs-human`);
       assert.match(text, /(?:do not auto-rollback|perform no rollback)/i, `${name} must prohibit rollback`);
+      assert.match(text, /fixed safe[\s\S]*(?:reason code|summary)|reason_code/i, `${name} must prevent raw conflict reasons`);
+    }
+  });
+
+  it("documents lock-protected stale boundary rejection and the durable pre-PR fence", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /factory boundary-open/i, `${name} must expose boundary-open`);
+      assert.match(text, /factory boundary-cross/i, `${name} must expose boundary-cross`);
+      assert.match(text, /generation[\s\S]*(?:state hash|run-state hash)[\s\S]*(?:stale|reject)/i, `${name} must reject stale boundary observations`);
+      assert.match(text, /factory pr-fence[\s\S]*before `?gh pr create`?/i, `${name} must fence before the external PR side effect`);
+      assert.match(text, /blocks new steering|prevents new steering/i, `${name} must block steering while fenced`);
+      assert.match(text, /pr-created[\s\S]*(?:missing|mismatched|stale) fence|missing, mismatched, or stale fence/i, `${name} must validate the fence at pr-created`);
     }
   });
 

@@ -13,7 +13,7 @@ describe("cli pr-created", () => {
   it("records completed PR state through checked transition", () => {
     const fixture = createFixture("cli-pr-created");
     try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--json"]);
+      const proc = runFencedPrCli(fixture, ["--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
       const run = readJson(join(fixture.runDir, "run.json"));
@@ -30,7 +30,7 @@ describe("cli pr-created", () => {
   it("allows explicit draft PR recording for ordinary runs", () => {
     const fixture = createFixture("cli-pr-created-draft");
     try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--draft", "--json"]);
+      const proc = runFencedPrCli(fixture, ["--draft", "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       const run = readJson(join(fixture.runDir, "run.json"));
       assert.equal(run.status, "completed");
@@ -44,7 +44,7 @@ describe("cli pr-created", () => {
   it("requires validator, security, and pre_pr approval", () => {
     const fixture = createFixture("cli-pr-blocked", { ready: false });
     try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory"]);
+      const proc = runFencedPrCli(fixture);
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /approved pre_pr gate|validator verdict|security_review verdict/u);
       assert.equal(readJson(join(fixture.runDir, "run.json")).status, "running");
@@ -56,7 +56,7 @@ describe("cli pr-created", () => {
   it("records ready PR creation by default for blocked-run continuations", () => {
     const fixture = createFixture("cli-pr-continuation-ready", { continuation: true });
     try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--json"]);
+      const proc = runFencedPrCli(fixture, ["--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       const run = readJson(join(fixture.runDir, "run.json"));
       assert.equal(run.status, "completed");
@@ -69,7 +69,7 @@ describe("cli pr-created", () => {
   it("records explicit draft PR creation for blocked-run continuations", () => {
     const fixture = createFixture("cli-pr-continuation-draft", { continuation: true });
     try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--draft", "--json"]);
+      const proc = runFencedPrCli(fixture, ["--draft", "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       const run = readJson(join(fixture.runDir, "run.json"));
       assert.equal(run.status, "completed");
@@ -82,7 +82,7 @@ describe("cli pr-created", () => {
   it("rejects repository mismatches without verifying a different repository", () => {
     const fixture = createFixture("cli-pr-continuation-repo-mismatch", { continuation: true });
     try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "other-owner/other-repo", "--json"]);
+      const proc = runFencedPrCli(fixture, ["--repository", "other-owner/other-repo", "--json"], { replaceRepository: true });
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /repository to match the GitHub PR URL/u);
       const run = readJson(join(fixture.runDir, "run.json"));
@@ -184,6 +184,21 @@ function continuationMetadata(targetRunId) {
 
 function runCli(repo, args) {
   return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, PATH: `${join(repo, "bin")}:${process.env.PATH}` } });
+}
+
+function runFencedPrCli(fixture, extras = [], options = {}) {
+  const fenceProc = runCli(fixture.repo, ["factory", "pr-fence", fixture.runId, "--json"]);
+  if (fenceProc.status !== 0) return fenceProc;
+  const fence = JSON.parse(fenceProc.stdout).fence;
+  const repositoryArgs = options.replaceRepository ? [] : ["--repository", "jasoncarreira/opencode-feature-factory"];
+  return runCli(fixture.repo, [
+    "factory", "pr-created", fixture.runId,
+    "--pr-url", PR_URL,
+    "--pr-number", "99",
+    ...repositoryArgs,
+    "--fence-token", fence.token,
+    ...extras,
+  ]);
 }
 
 function writeFakeGh(repo, { isDraft, expectedRepository, expectedNumber }) {

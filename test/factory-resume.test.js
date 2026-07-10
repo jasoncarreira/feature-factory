@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { persistFactoryRunResumeEnv, resumeFactory, writeSteering } from "../src/factory.js";
+import { consumeSteering, persistFactoryRunResumeEnv, resumeFactory, writeSteering } from "../src/factory.js";
 
 describe("factory resume", () => {
   it("builds an exact dry-run resume payload with steering pointers and no raw text", async () => {
@@ -37,6 +37,23 @@ describe("factory resume", () => {
       assert.equal(result.status, "dry-run");
       assert.equal(result.payload.driver.ready, false);
       assert.equal(result.payload.driver.pr_mode, "draft");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("routes consumed-but-uncheckpointed steering to archived-text redelivery on resume", async () => {
+    const fixture = createFixture("resume-uncheckpointed");
+    try {
+      const queued = await writeSteering(fixture.runId, "redeliver only under the untrusted label", { cwd: fixture.repo, now: "2026-07-08T12:00:00.000Z" });
+      const consumed = await consumeSteering(fixture.runId, queued.steering, { cwd: fixture.repo, now: "2026-07-08T12:01:00.000Z" });
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, json: true, headless: true });
+
+      assert.equal(result.payload.steering.pending, null);
+      assert.equal(result.payload.steering.uncheckpointed.ref, consumed.steering.ref);
+      assert.deepEqual(result.payload.steering.consume.args, ["factory", "steer-consume", fixture.runId, "--ref", consumed.steering.ref, "--hash", consumed.steering.hash, "--json"]);
+      assert.equal(JSON.stringify(result.payload).includes("redeliver only"), false);
+      assert.equal(readdirSync(join(fixture.runDir, "steering")).filter((name) => name.startsWith("consumed-")).length, 1);
     } finally {
       cleanup(fixture.repo);
     }

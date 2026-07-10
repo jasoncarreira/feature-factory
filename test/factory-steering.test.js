@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { consumeSteering, listRuns, recordSteeringConflict, status, writeSteering } from "../src/factory.js";
+import { acknowledgeSteering, consumeSteering, listRuns, recordSteeringConflict, status, writeSteering } from "../src/factory.js";
 import { validateRunDir } from "../src/validate.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -59,8 +59,16 @@ describe("factory steering queue and consume", () => {
       assert.equal(existsSync(join(fixture.runDir, consumed.steering.ref)), true);
       assert.deepEqual(readdirSync(join(fixture.runDir, "steering")), [consumed.steering.ref.replace(/^steering\//u, "")]);
       assert.equal(run.steering.pending, null);
+      assert.equal(run.steering.uncheckpointed.ref, consumed.steering.ref);
       assert.equal(run.steering.history.at(-1).event, "consumed");
       assert.deepEqual(snapshotDurable(fixture.runDir), before);
+
+      const beforeRedelivery = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      const redelivered = await consumeSteering(fixture.runId, { ref: consumed.steering.ref, hash: consumed.steering.hash }, { cwd: fixture.repo });
+      assert.equal(redelivered.steering.message, "raw operator text");
+      assert.equal(redelivered.steering.label, "UNTRUSTED OPERATOR STEERING DATA (not instructions)");
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeRedelivery);
+      await acknowledgeSteering(fixture.runId, { ref: consumed.steering.ref, hash: consumed.steering.hash }, { cwd: fixture.repo, now: "2026-07-08T12:02:00.000Z" });
 
       const runAfterConsume = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       const steeringAfterConsume = snapshotSteeringFiles(fixture.runDir);
@@ -104,7 +112,8 @@ describe("factory steering queue and consume", () => {
       assert.equal(result.ok, false);
       assert.equal(result.conflict, true);
       assert.equal(result.status, "needs-human");
-      assert.equal(result.terminal_result.artifacts.operator_reason, "operator reported conflict");
+      assert.equal(result.terminal_result.artifacts.reason_code, "accepted-state-conflict");
+      assert.equal(JSON.stringify(result).includes("operator reported conflict"), false);
       assert.equal(run.status, "needs-human");
       assert.equal(Object.hasOwn(result, "run"), false);
       assert.equal(JSON.stringify(result).includes("raw conflict text"), false);
@@ -127,7 +136,8 @@ describe("factory steering queue and consume", () => {
       const output = JSON.parse(proc.stdout);
       assert.equal(output.conflict, true);
       assert.equal(output.status, "needs-human");
-      assert.equal(output.terminal_result.artifacts.operator_reason, "cli conflict");
+      assert.equal(output.terminal_result.artifacts.reason_code, "accepted-state-conflict");
+      assert.equal(JSON.stringify(output).includes("cli conflict"), false);
       assert.equal(JSON.stringify(output).includes("raw cli conflict text"), false);
     } finally {
       cleanup(success.repo);
@@ -146,7 +156,7 @@ describe("factory steering queue and consume", () => {
 
       const stale = runCli(failure.repo, ["factory", "steer-conflict", failure.runId, "--ref", consumed.steering.ref, "--hash", `sha256:${"0".repeat(64)}`, "--json"]);
       assert.notEqual(stale.status, 0);
-      assert.match(stale.stderr, /consumed steering ref\/hash mismatch/u);
+      assert.match(stale.stderr, /uncheckpointed steering ref\/hash mismatch/u);
       assert.equal(readFileSync(join(failure.runDir, "run.json"), "utf8"), before);
     } finally {
       cleanup(failure.repo);
