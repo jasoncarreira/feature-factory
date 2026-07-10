@@ -165,6 +165,40 @@ describe("bounded prototype-safe projection", () => {
     assert.doesNotMatch(JSON.stringify(byKeys), /not visited/u);
   });
 
+  it("ignores non-enumerables without spending or reserving the enumerable-key budget", () => {
+    const source = Object.create(null);
+    Object.defineProperty(source, REDACTED_KEY, { value: "ignored", enumerable: false });
+    Object.defineProperty(source, "hidden", { value: "ignored", enumerable: false });
+    Object.defineProperty(source, "api_token", { value: "not read", enumerable: true });
+    Object.defineProperty(source, "later", { value: "not visited", enumerable: true });
+
+    const result = scrubSensitiveData(source, { keyMode: "redact", maxKeys: 1 });
+    assert.deepEqual(Object.keys(result), [REDACTED_KEY, SCRUB_MARKERS.truncated]);
+    assert.equal(result[REDACTED_KEY], REDACTED_VALUE);
+    assert.equal(result[SCRUB_MARKERS.truncated], SCRUB_MARKERS.truncated);
+    assert.doesNotMatch(JSON.stringify(result), /ignored|not read|not visited/u);
+  });
+
+  it("stops descriptor inspection after the first over-budget enumerable key", () => {
+    const inspected = [];
+    const source = {};
+    Object.defineProperty(source, "hiddenOne", { value: 1, enumerable: false, configurable: true });
+    Object.defineProperty(source, "hiddenTwo", { value: 2, enumerable: false, configurable: true });
+    source.first = "safe";
+    source.second = "not visited";
+    source.later = "not inspected";
+    const proxy = new Proxy(source, {
+      getOwnPropertyDescriptor(target, key) {
+        inspected.push(key);
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+
+    const result = scrubSensitiveData(proxy, { maxKeys: 1 });
+    assert.deepEqual(inspected, ["hiddenOne", "hiddenTwo", "first", "second"]);
+    assert.deepEqual({ ...result }, { first: "safe", [SCRUB_MARKERS.truncated]: SCRUB_MARKERS.truncated });
+  });
+
   it("preserves array holes and named properties and caps without inspecting later indices", () => {
     const source = new Array(5);
     source[1] = "safe";
@@ -187,6 +221,13 @@ describe("bounded prototype-safe projection", () => {
     assert.equal(result.__proto__, "named");
     assert.equal(Object.hasOwn(result, "api_token"), false);
     assert.doesNotMatch(JSON.stringify(result), /late-index-secret|named-secret/u);
+  });
+
+  it("rejects a zero array-length bound because no truncation slot exists", () => {
+    assert.throws(
+      () => scrubSensitiveData(["not inspected"], { maxArrayLength: 0 }),
+      /invalid sensitive-data maxArrayLength/u,
+    );
   });
 
   it("distinguishes active cycles from completed shared references", () => {
@@ -246,6 +287,35 @@ describe("descriptor and proxy failures", () => {
     assert.equal(scrubSensitiveData(revoked.proxy), SCRUB_MARKERS.unavailable);
   });
 
+  it("marks a disappeared ownKeys entry unavailable without overwriting reserved names and continues", () => {
+    const source = {
+      [REDACTED_KEY]: "reserved",
+      api_token: "not read",
+      vanished: "removed",
+      after: "safe",
+    };
+    const proxy = new Proxy(source, {
+      ownKeys() {
+        return [REDACTED_KEY, "api_token", "vanished", "after"];
+      },
+      getOwnPropertyDescriptor(target, key) {
+        if (key === "vanished") {
+          delete target.vanished;
+          return undefined;
+        }
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+
+    const result = scrubSensitiveData(proxy, { keyMode: "redact" });
+    assert.deepEqual(Object.keys(result), [REDACTED_KEY, `${REDACTED_KEY}#2`, "vanished", "after"]);
+    assert.equal(result[REDACTED_KEY], "reserved");
+    assert.equal(result[`${REDACTED_KEY}#2`], REDACTED_VALUE);
+    assert.equal(result.vanished, SCRUB_MARKERS.unavailable);
+    assert.equal(result.after, "safe");
+    assert.doesNotMatch(JSON.stringify(result), /not read|removed/u);
+  });
+
   it("does not inspect omitted sensitive property values", () => {
     let descriptorCalls = 0;
     const source = new Proxy({ api_token: "source-secret-value", safe: "ok" }, {
@@ -258,7 +328,7 @@ describe("descriptor and proxy failures", () => {
     const result = scrubSensitiveData(source);
     assert.equal(result.safe, "ok");
     assert.equal(Object.hasOwn(result, "api_token"), false);
-    assert.equal(descriptorCalls, 1);
+    assert.equal(descriptorCalls, 2);
     assert.doesNotMatch(JSON.stringify(result), /source-secret-value|source get trap/u);
   });
 });

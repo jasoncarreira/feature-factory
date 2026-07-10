@@ -82,7 +82,7 @@ export function scrubSensitiveData(value, {
   assertBound("maxDepth", maxDepth);
   assertBound("maxNodes", maxNodes);
   assertBound("maxKeys", maxKeys);
-  assertBound("maxArrayLength", maxArrayLength, 2 ** 32 - 1);
+  assertBound("maxArrayLength", maxArrayLength, 2 ** 32 - 1, 1);
   assertBound("maxStringLength", maxStringLength);
 
   const state = {
@@ -152,8 +152,7 @@ function scrubObject(source, depth, state) {
   }
 
   const output = Object.create(null);
-  const reserved = reserveSafeNames(keys, state);
-  return projectKeys(source, output, keys, depth, state, reserved, () => true);
+  return projectKeys(source, output, keys, depth, state, () => true);
 }
 
 function scrubArray(source, depth, state) {
@@ -179,8 +178,7 @@ function scrubArray(source, depth, state) {
   const forcedTruncationIndex = overCap && outputLength > 0 ? outputLength - 1 : -1;
   if (forcedTruncationIndex >= 0) defineData(output, String(forcedTruncationIndex), SCRUB_MARKERS.truncated);
 
-  const reserved = reserveSafeNames(keys, state);
-  return projectKeys(source, output, keys, depth, state, reserved, (key) => {
+  return projectKeys(source, output, keys, depth, state, (key) => {
     if (key === "length") return false;
     const index = arrayIndex(key);
     if (index === null) return true;
@@ -189,29 +187,23 @@ function scrubArray(source, depth, state) {
   });
 }
 
-function projectKeys(source, output, keys, depth, state, reserved, include) {
-  const allocated = new Set(reserved);
-  for (const key of keys) {
-    if (typeof key !== "string" || !include(key)) continue;
-    const sensitive = key.length > state.maxStringLength || isSensitiveKey(key, { mode: state.mode });
-
+function projectKeys(source, output, keys, depth, state, include) {
+  const prepared = prepareKeys(source, keys, state, include);
+  const allocated = new Set(prepared.reserved);
+  for (const item of prepared.items) {
+    const { key, sensitive, descriptor } = item;
     if (state.keys >= state.maxKeys) {
       addTruncationProperty(output, allocated);
       return { value: output, stop: true };
     }
     state.keys += 1;
-    if (state.keyMode === "omit" && sensitive) continue;
 
-    let descriptor;
-    try {
-      descriptor = Reflect.getOwnPropertyDescriptor(source, key);
-    } catch {
+    if (item.unavailable) {
+      if (state.keyMode === "omit" && sensitive) continue;
       const outputKey = sensitive ? allocateName(REDACTED_KEY, allocated) : key;
       defineData(output, outputKey, SCRUB_MARKERS.unavailable);
       continue;
     }
-    if (!descriptor || descriptor.enumerable !== true) continue;
-
     if (sensitive) {
       if (state.keyMode === "redact") defineData(output, allocateName(REDACTED_KEY, allocated), REDACTED_VALUE);
       continue;
@@ -225,19 +217,33 @@ function projectKeys(source, output, keys, depth, state, reserved, include) {
     defineData(output, key, scrubbed.value);
     if (scrubbed.stop) return { value: output, stop: true };
   }
+  if (prepared.truncated) {
+    addTruncationProperty(output, allocated);
+    return { value: output, stop: true };
+  }
   return { value: output, stop: false };
 }
 
-function reserveSafeNames(keys, state) {
+function prepareKeys(source, keys, state, include) {
+  const items = [];
   const reserved = new Set();
+  const remaining = state.maxKeys - state.keys;
   for (const key of keys) {
-    if (typeof key === "string"
-      && key.length <= state.maxStringLength
-      && !isSensitiveKey(key, { mode: state.mode })) {
-      reserved.add(key);
+    if (typeof key !== "string" || !include(key)) continue;
+    const sensitive = key.length > state.maxStringLength || isSensitiveKey(key, { mode: state.mode });
+
+    let descriptor;
+    try {
+      descriptor = Reflect.getOwnPropertyDescriptor(source, key);
+    } catch {
+      descriptor = null;
     }
+    if (descriptor && descriptor.enumerable !== true) continue;
+    if (items.length >= remaining) return { items, reserved, truncated: true };
+    items.push({ key, sensitive, descriptor, unavailable: descriptor === null || descriptor === undefined });
+    if (!sensitive) reserved.add(key);
   }
-  return reserved;
+  return { items, reserved, truncated: false };
 }
 
 function addTruncationProperty(output, allocated) {
@@ -319,8 +325,8 @@ function assertMode(mode) {
   if (mode !== "baseline" && mode !== "endpoint") throw new TypeError("invalid sensitive-data mode");
 }
 
-function assertBound(name, value, maximum = Number.MAX_SAFE_INTEGER) {
-  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+function assertBound(name, value, maximum = Number.MAX_SAFE_INTEGER, minimum = 0) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new TypeError(`invalid sensitive-data ${name}`);
   }
 }
