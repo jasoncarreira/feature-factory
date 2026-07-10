@@ -84,9 +84,57 @@ describe("class-wide planning prompt contract", () => {
 
   it("gives the spec review an acceptance bar so it converges", () => {
     assert.match(WORK_REVIEWER_PROMPT, /Spec acceptance bar/i);
-    assert.match(WORK_REVIEWER_PROMPT, /assigned policy or an explicit reasoned deferral[\s\S]*maps to a test/i);
-    assert.match(WORK_REVIEWER_PROMPT, /Reject only for a genuinely missing sink, policy, deferral, or test — not for achievable-but-absent depth/i);
-    assert.match(SKILL, /Accept the brief once the inventory is finite[\s\S]*per-sink policy or explicit reasoned deferral[\s\S]*bounded residual detail to build-time remediation/i);
+    assert.match(WORK_REVIEWER_PROMPT, /every in-scope sink carries a decided policy[\s\S]*maps to a test/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Reject only for a genuinely missing sink, policy, compatibility decision, or test — not for achievable-but-absent depth/i);
+    assert.match(SKILL, /Accept the brief once the inventory is finite[\s\S]*decided per-sink policy[\s\S]*mechanical residual detail/i);
+  });
+
+  it("bounds deferral so an in-scope sink cannot be waived without story/scope authorization", () => {
+    // A deferral/exclusion is legitimate only when the approved story or scope authorizes it,
+    // and never for a sink under an all/every criterion — otherwise the bar passes the unsafe
+    // interpretation where a reviewer defers a required sink and calls the spec accepted.
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /deferral or exclusion is legitimate \*\*only when the approved story or scope authorizes it\*\*[\s\S]*never (?:waive, defer, or leave undecided )?an in-scope sink that falls under an `all`\/`every`\/`across`/i,
+      "work-reviewer must forbid deferring an in-scope all/every sink without story/scope authorization",
+    );
+    assert.match(
+      SKILL,
+      /deferring or excluding a sink only when the approved story or scope authorizes it \(never an in-scope sink under an `all`\/`every` criterion\)/i,
+      "SKILL must mirror the story/scope-authorized deferral boundary",
+    );
+  });
+
+  it("forbids leaving an unresolved behavioral/design decision as a bounded residual", () => {
+    // A residual must be mechanical detail whose behavior/compat/security/state policy is already
+    // decided; an undecided behavioral/design decision is not a residual and cannot be shipped to
+    // builders as an open choice — otherwise the bar passes the unsafe "approve an undecided row".
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /bounded residual\*\* may be left to build-time remediation only when it is mechanical implementation detail whose behavior, backward-compatibility, security, and state-transition policy are already decided[\s\S]*unresolved behavioral or design decision is not a residual and must be decided here/i,
+      "work-reviewer must exclude unresolved behavioral/design decisions from bounded residuals",
+    );
+    assert.match(
+      SKILL,
+      /only mechanical residual detail whose behavior, compatibility, security, and state-transition policy are already decided, never an unresolved behavioral or design decision/i,
+      "SKILL must mirror the mechanical-only residual boundary",
+    );
+  });
+
+  it("keeps a required late-discovered omission blocking despite the delta rule", () => {
+    // Precedence: a genuinely required sink/policy/compat/test omission is blocking regardless of
+    // attempt number; the delta rule's NONBLOCKING carve-out is only for unrelated new scope or
+    // optional depth — otherwise an attempt-2 discovery could be approved as nonblocking.
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /Precedence for late discoveries:[\s\S]*blocking regardless of attempt number[\s\S]*NONBLOCKING carve-out applies only to \*unrelated\* new scope or \*optional\* additional depth[\s\S]*never downgrades a required in-scope omission to optional/i,
+      "work-reviewer must state that required omissions stay blocking regardless of attempt",
+    );
+    assert.match(
+      SKILL,
+      /genuinely required sink, policy, compatibility decision, or test stays blocking regardless of attempt number, and only unrelated new scope or optional depth is nonblocking/i,
+      "SKILL must mirror the late-discovery precedence rule",
+    );
   });
 
   it("puts the closed-scope guard in workflow steps 1 and 2", () => {
