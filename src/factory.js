@@ -751,7 +751,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     });
     writeHeartbeatFile(heartbeatFile, heartbeat);
     writeJsonAtomic(join(runDir, "run.json"), validateRun({ ...run, heartbeat_at: startedAt }));
-  });
+  }, opts);
 
   const runtime = createHeartbeatRuntime(runDir, heartbeat, opts);
   activeHeartbeatLoops.set(runDir, runtime);
@@ -2058,24 +2058,33 @@ function createHeartbeatRuntime(runDir, heartbeat, opts) {
     lockTimeouts: 0,
     timer: null,
     ticking: false,
+    tickPromise: null,
     stopped: false,
   };
 }
 
-function runHeartbeatTick(runtime) {
-  if (runtime.stopped || runtime.ticking) return;
+function runHeartbeatTick(runtime, lockOptions = {}) {
+  if (runtime.stopped) return Promise.resolve({ continue: false, reason: "runtime-stopped" });
+  if (runtime.tickPromise) return runtime.tickPromise;
   runtime.ticking = true;
-  heartbeatTick(runtime)
-    .then((next) => {
+  const tickPromise = (async () => {
+    try {
+      const next = await heartbeatTick(runtime, lockOptions);
       if (!next.continue) stopActiveHeartbeatLoop(runtime.runDir, runtime);
-    })
-    .catch(() => stopActiveHeartbeatLoop(runtime.runDir, runtime))
-    .finally(() => {
+      return next;
+    } catch (error) {
+      stopActiveHeartbeatLoop(runtime.runDir, runtime);
+      return { continue: false, reason: error.message };
+    } finally {
       runtime.ticking = false;
-    });
+      if (runtime.tickPromise === tickPromise) runtime.tickPromise = null;
+    }
+  })();
+  runtime.tickPromise = tickPromise;
+  return tickPromise;
 }
 
-async function heartbeatTick(runtime) {
+async function heartbeatTick(runtime, lockOptions = {}) {
   const now = timestamp();
   try {
     return await withRunJsonLock(runtime.runDir, async () => {
@@ -2112,7 +2121,7 @@ async function heartbeatTick(runtime) {
       writeJsonAtomic(runPath, nextRun);
       runtime.lockTimeouts = 0;
       return { continue: true, reason: null };
-    }, { timeoutMs: runtime.tickTimeoutMs });
+    }, heartbeatTickLockOptions(runtime, lockOptions));
   } catch (error) {
     if (isRunJsonLockTimeout(error) && runtime.lockTimeouts < HEARTBEAT_TICK_LOCK_RETRIES) {
       runtime.lockTimeouts += 1;
@@ -2120,6 +2129,29 @@ async function heartbeatTick(runtime) {
     }
     return { continue: false, reason: error.message };
   }
+}
+
+function heartbeatTickLockOptions(runtime, lockOptions = {}) {
+  const allowed = ["lockHooks", "retryDelayMs", "staleLockMs", "missingOwnerStealMs", "processAliveFn"];
+  const options = { timeoutMs: lockOptions.timeoutMs ?? runtime.tickTimeoutMs };
+  for (const key of allowed) {
+    if (lockOptions[key] !== undefined) options[key] = lockOptions[key];
+  }
+  return options;
+}
+
+export async function runActiveHeartbeatTickForTest(runId, opts = {}) {
+  const runDir = resolveHeartbeatRunDir(runId, opts);
+  const runtime = activeHeartbeatLoops.get(runDir);
+  if (!runtime) throw new Error(`no active heartbeat runtime for run '${runId}'`);
+  const inFlight = runtime.tickPromise;
+  if (runtime.timer) clearInterval(runtime.timer);
+  runtime.timer = null;
+  if (inFlight) {
+    await inFlight;
+    throw new Error(`controlled heartbeat tick did not run for '${runId}': tick already in progress`);
+  }
+  return runHeartbeatTick(runtime, opts);
 }
 
 function isRunJsonLockTimeout(error) {
@@ -2130,6 +2162,7 @@ function stopActiveHeartbeatLoop(runDir, runtime = activeHeartbeatLoops.get(runD
   if (!runtime) return false;
   runtime.stopped = true;
   if (runtime.timer) clearInterval(runtime.timer);
+  runtime.timer = null;
   if (activeHeartbeatLoops.get(runDir) === runtime) activeHeartbeatLoops.delete(runDir);
   return true;
 }

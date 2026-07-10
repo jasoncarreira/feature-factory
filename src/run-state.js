@@ -31,6 +31,7 @@ const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation"]);
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
+  const lockHooks = validateRunJsonLockHooks(options.lockHooks);
   const timeoutMs = normalizePositiveInteger(options.timeoutMs, DEFAULT_LOCK_TIMEOUT_MS);
   const retryDelayMs = normalizePositiveInteger(options.retryDelayMs, DEFAULT_LOCK_RETRY_DELAY_MS);
   const staleLockMs = normalizePositiveInteger(options.staleLockMs, DEFAULT_STALE_LOCK_MS);
@@ -39,6 +40,7 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let stolenFrom = null;
   let stealAttempted = false;
+  let contentionReported = false;
 
   while (true) {
     try {
@@ -46,6 +48,10 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
+      if (!contentionReported && lockHooks.onContended) {
+        contentionReported = true;
+        await runContendedLockHook(lockHooks.onContended, { runDir, lockDir }, deadline, ownerPath);
+      }
       if (Date.now() >= deadline) {
         const owner = await readJsonIfExists(ownerPath);
         if (!stealAttempted && canStealRunJsonLock(owner, staleLockMs, lockDir, options)) {
@@ -68,6 +74,33 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
     return await fn({ lock_dir: lockDir, owner });
   } finally {
     await rm(lockDir, { recursive: true, force: true });
+  }
+}
+
+function validateRunJsonLockHooks(lockHooks) {
+  if (lockHooks === undefined) return {};
+  if (!isRecord(lockHooks)) throw new Error("lockHooks must be an object");
+  if (lockHooks.onContended !== undefined && typeof lockHooks.onContended !== "function") {
+    throw new Error("lockHooks.onContended must be a function");
+  }
+  return lockHooks;
+}
+
+async function runContendedLockHook(onContended, context, deadline, ownerPath) {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) throw new Error(formatLockTimeout(context.lockDir, await readJsonIfExists(ownerPath)));
+  let timer;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => onContended(context)),
+      new Promise((_, reject) => {
+        timer = setTimeout(async () => {
+          reject(new Error(formatLockTimeout(context.lockDir, await readJsonIfExists(ownerPath))));
+        }, remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -424,12 +457,12 @@ async function transitionSteeringActionResolved(runDir, kind, token, outcome, op
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    const claim = assertSteeringActionClaim(current, actionKind, token);
     if (outcome === "aborted") {
       const recoverable = inspectRecoverableHeartbeat(runDir, options);
       if (!recoverable.ok) throw new Error("action-abort requires inactive heartbeat: active-heartbeat");
       await stopHeartbeatForRecovery(runDir, recoverable.heartbeat, timestamp(options.now));
     }
-    const claim = assertSteeringActionClaim(current, actionKind, token);
     const resolvedAt = timestamp(options.now);
     const next = validateRun({
       ...cloneJson(current),
