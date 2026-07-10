@@ -806,7 +806,7 @@ describe("simplified run-state transitions", () => {
     try {
       const lockDir = join(fixture.runDir, "run-json.lock");
       mkdirSync(lockDir);
-      writeJson(join(lockDir, "owner.json"), { pid: 999999, hostname: "old-host", acquired_at: NOW });
+      writeJson(join(lockDir, "owner.json"), { pid: 999999, hostname: "old-host", acquired_at: NOW, nonce: "11111111-1111-4111-8111-111111111111" });
 
       let observedOwner = null;
       await withRunJsonLock(fixture.runDir, ({ owner }) => {
@@ -815,27 +815,125 @@ describe("simplified run-state transitions", () => {
 
       assert.equal(observedOwner.stolen_from.pid, 999999);
       assert.equal(observedOwner.stolen_from.hostname, "old-host");
+      assert.equal(observedOwner.stolen_from.nonce, undefined);
+      assert.match(observedOwner.nonce, /^[0-9a-f-]{36}$/u);
     } finally {
       cleanup(fixture.repo);
     }
   });
 
-  it("does not steal a run-json lock from a live owner", async () => {
+  it("does not steal an aged run-json lock from a live owner", async () => {
     const fixture = createFixture("live-lock");
     try {
       const lockDir = join(fixture.runDir, "run-json.lock");
       mkdirSync(lockDir);
-      writeJson(join(lockDir, "owner.json"), { pid: process.pid, hostname: "live-host", acquired_at: new Date().toISOString() });
+      writeJson(join(lockDir, "owner.json"), { pid: process.pid, hostname: "live-host", acquired_at: "2000-01-01T00:00:00.000Z", nonce: "22222222-2222-4222-8222-222222222222" });
 
       await assert.rejects(
-        withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 60000, processAliveFn: () => true }),
+        withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, processAliveFn: () => true }),
         /timed out waiting for run\.json lock/u,
       );
+      assert.equal(readJson(join(lockDir, "owner.json")).nonce, "22222222-2222-4222-8222-222222222222");
     } finally {
       cleanup(fixture.repo);
     }
   });
+
+  it("fails closed when a paused pre-publication acquirer resumes into a successor lock", async () => {
+    const fixture = createFixture("publication-gap");
+    const firstCreated = deferredPromise();
+    const releaseFirst = deferredPromise();
+    const successorEntered = deferredPromise();
+    const releaseSuccessor = deferredPromise();
+    try {
+      const first = withRunJsonLock(fixture.runDir, () => {}, {
+        timeoutMs: 5000,
+        lockHooks: { onLockCreated: async () => { firstCreated.resolve(); await releaseFirst.promise; } },
+      });
+      await firstCreated.promise;
+      rmSync(join(fixture.runDir, "run-json.lock"), { recursive: true, force: true });
+
+      const successor = withRunJsonLock(fixture.runDir, async ({ owner }) => {
+        successorEntered.resolve(owner.nonce);
+        await releaseSuccessor.promise;
+      }, { timeoutMs: 5000 });
+      const successorNonce = await successorEntered.promise;
+      releaseFirst.resolve();
+      await assert.rejects(first, /lock ownership changed before owner publication/u);
+      assert.equal(readJson(join(fixture.runDir, "run-json.lock", "owner.json")).nonce, successorNonce);
+
+      releaseSuccessor.resolve();
+      await successor;
+      assert.equal(existsSync(join(fixture.runDir, "run-json.lock")), false);
+    } finally {
+      releaseFirst.resolve();
+      releaseSuccessor.resolve();
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("cleans up only the lock carrying the callback owner's nonce", async () => {
+    const fixture = createFixture("nonce-cleanup");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    try {
+      const successorNonce = "33333333-3333-4333-8333-333333333333";
+      await withRunJsonLock(fixture.runDir, async ({ owner }) => {
+        assert.notEqual(owner.nonce, successorNonce);
+        writeJson(join(lockDir, "owner.json"), { ...owner, nonce: successorNonce });
+      });
+      assert.equal(readJson(join(lockDir, "owner.json")).nonce, successorNonce);
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed for ownerless and invalid lock publication", async () => {
+    for (const [name, owner] of [["ownerless", null], ["invalid", { pid: 999999, hostname: "dead", acquired_at: NOW }]]) {
+      const fixture = createFixture(`invalid-lock-${name}`);
+      try {
+        const lockDir = join(fixture.runDir, "run-json.lock");
+        mkdirSync(lockDir);
+        if (owner) writeJson(join(lockDir, "owner.json"), owner);
+        await assert.rejects(
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, missingOwnerStealMs: 1, processAliveFn: () => false }),
+          /timed out waiting for run\.json lock/u,
+        );
+        assert.equal(existsSync(lockDir), true);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("does not delete invalid successor evidence published while acquisition is paused", async () => {
+    const fixture = createFixture("invalid-publication-race");
+    const created = deferredPromise();
+    const release = deferredPromise();
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    try {
+      const acquiring = withRunJsonLock(fixture.runDir, () => {}, {
+        timeoutMs: 5000,
+        lockHooks: { onLockCreated: async () => { created.resolve(); await release.promise; } },
+      });
+      await created.promise;
+      writeJson(join(lockDir, "owner.json"), { invalid: true });
+      release.resolve();
+      await assert.rejects(acquiring, /EEXIST/u);
+      assert.deepEqual(readJson(join(lockDir, "owner.json")), { invalid: true });
+    } finally {
+      release.resolve();
+      rmSync(lockDir, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
 });
+
+function deferredPromise() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 function createFixture(runId) {
   const repo = mkdtempSync(join(tmpdir(), "run-state-simplified-"));

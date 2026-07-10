@@ -727,6 +727,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     }
     if (run.steering?.pending) throw new Error(`run '${run.run_id}' has pending steering; drain it before starting a heartbeat`);
     if (run.steering?.uncheckpointed) throw new Error(`run '${run.run_id}' has consumed steering awaiting acknowledgement`);
+    if (run.steering?.action_claim) throw new Error(`run '${run.run_id}' has an action awaiting start acknowledgement`);
     if (run.steering?.pr_fence) throw new Error(`run '${run.run_id}' has an active pre-PR fence`);
     const protectedGate = pendingProtectedGate(run);
     if (protectedGate) {

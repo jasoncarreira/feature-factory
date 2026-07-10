@@ -141,6 +141,32 @@ describe("lock-protected steering boundaries", () => {
     }
   });
 
+  it("keeps aged live ownership authoritative for gate, steering, and fence writers", async () => {
+    const gateFixture = await createPendingGateFixture("aged-live-gate");
+    const steeringFixture = createFixture("aged-live-steering");
+    const fenceFixture = createReadyPrFixture("aged-live-fence");
+    const cases = [
+      [gateFixture, () => transitionGateDecision(gateFixture.runDir, "story", gateFixture.approval, { boundaryToken: gateFixture.boundary.token, ...agedLiveLockOptions() })],
+      [steeringFixture, () => transitionSteeringQueued(steeringFixture.runDir, "must not overwrite", { id: "aged-live", ...agedLiveLockOptions() })],
+      [fenceFixture, () => transitionPrePrFenceEstablished(fenceFixture.runDir, { token: "aged-live-fence-token", ...agedLiveLockOptions() })],
+    ];
+    try {
+      for (const [fixture, invoke] of cases) {
+        const before = bytes(fixture.runPath);
+        seedAgedLiveLock(fixture);
+        await assert.rejects(invoke(), /timed out waiting for run\.json lock/u);
+        assertBytes(fixture.runPath, before);
+        assert.equal(readJson(join(fixture.lockPath, "owner.json")).nonce, "44444444-4444-4444-8444-444444444444");
+        rmSync(fixture.lockPath, { recursive: true, force: true });
+      }
+    } finally {
+      for (const fixture of [gateFixture, steeringFixture, fenceFixture]) {
+        rmSync(fixture.lockPath, { recursive: true, force: true });
+        cleanupFixture(fixture);
+      }
+    }
+  });
+
   it("orders steering ahead of gate approval and preserves answer and winner sidecars", async () => {
     const fixture = await createPendingGateFixture("gate-queue-race");
     const holder = await acquireHolder(fixture.runDir);
@@ -558,8 +584,66 @@ describe("lock-protected steering boundaries", () => {
       await assert.rejects(transitionPrCreated(fixture.runDir, prInput()), /active pre-PR fence/u);
       const established = await transitionPrePrFenceEstablished(fixture.runDir, { token: "pr-create-fence" });
       await assert.rejects(transitionPrCreated(fixture.runDir, prInput(), { fenceToken: "wrong-fence-token" }), /token mismatch/u);
+      const stale = readJson(fixture.runPath);
+      stale.steering.generation += 1;
+      writeJson(fixture.runPath, stale);
+      const staleBytes = bytes(fixture.runPath);
+      await assert.rejects(transitionPrCreated(fixture.runDir, prInput(), { fenceToken: established.fence.token }), /pre-PR fence is stale/u);
+      assertBytes(fixture.runPath, staleBytes);
+      stale.steering.generation -= 1;
+      writeJson(fixture.runPath, stale);
       const completed = await transitionPrCreated(fixture.runDir, prInput(), { fenceToken: established.fence.token });
       assert.equal(completed.run.status, "completed");
+    } finally {
+      cleanupFixture(fixture);
+    }
+  });
+
+  it("restores heartbeat claim guards and side-effect-free fresh abort rejection", async () => {
+    const consumedFixture = createFixture("heartbeat-uncheckpointed");
+    try {
+      const queued = await transitionSteeringQueued(consumedFixture.runDir, "consume before heartbeat", { id: "heartbeat-consumed", now: NOW });
+      await transitionSteeringConsumed(consumedFixture.runDir, queued.steering, { now: LATER });
+      const before = bytes(consumedFixture.runPath);
+      await assert.rejects(startHeartbeat(consumedFixture.runId, { phase: "builder-wave", intervalMs: 60000 }, { cwd: consumedFixture.repo, now: LATER }), /consumed steering awaiting acknowledgement/u);
+      assertBytes(consumedFixture.runPath, before);
+      assert.equal(existsSync(consumedFixture.heartbeatPath), false);
+    } finally {
+      cleanupFixture(consumedFixture);
+    }
+
+    for (const kind of ["dispatch", "remediation"]) {
+      const fixture = createFixture(`heartbeat-${kind}-claim`);
+      try {
+        const claim = await seedActionClaim(fixture, kind);
+        const runBeforeStart = bytes(fixture.runPath);
+        await assert.rejects(startHeartbeat(fixture.runId, { phase: "builder-wave", intervalMs: 60000 }, { cwd: fixture.repo, now: LATER }), /action awaiting start acknowledgement/u);
+        assertBytes(fixture.runPath, runBeforeStart);
+        assert.equal(readJson(fixture.runPath).steering.action_claim.token, claim.token);
+        assert.equal(existsSync(fixture.heartbeatPath), false);
+
+        seedInactiveHeartbeat(fixture, LATER, process.pid, 60000);
+        const runBeforeAbort = bytes(fixture.runPath);
+        const heartbeatBeforeAbort = bytes(fixture.heartbeatPath);
+        await assert.rejects(transitionSteeringActionAborted(fixture.runDir, kind, claim.token, { now: LATER, processAliveFn: () => true }), /inactive heartbeat: active-heartbeat/u);
+        assertBytes(fixture.runPath, runBeforeAbort);
+        assertBytes(fixture.heartbeatPath, heartbeatBeforeAbort);
+      } finally {
+        cleanupFixture(fixture);
+      }
+    }
+  });
+
+  it("clears a pre-PR fence through the executable exact-token CLI", () => {
+    const fixture = createReadyPrFixture("cli-exact-fence-clear");
+    try {
+      const established = runCli(fixture.repo, ["factory", "pr-fence", fixture.runId, "--json"]);
+      assert.equal(established.status, 0, established.stderr);
+      const token = JSON.parse(established.stdout).fence.token;
+      const cleared = runCli(fixture.repo, ["factory", "pr-fence", fixture.runId, "--clear", "--fence-token", token, "--json"]);
+      assert.equal(cleared.status, 0, cleared.stderr);
+      assert.equal(JSON.parse(cleared.stdout).fence, null);
+      assert.equal(readJson(fixture.runPath).steering.pr_fence, null);
     } finally {
       cleanupFixture(fixture);
     }
@@ -788,6 +872,20 @@ function seedInactiveHeartbeat(fixture, lastTickAt, pid = null, intervalMs = 300
     interval_ms: intervalMs,
     last_tick_at: lastTickAt,
   });
+}
+
+function seedAgedLiveLock(fixture) {
+  mkdirSync(fixture.lockPath);
+  writeJson(join(fixture.lockPath, "owner.json"), {
+    pid: process.pid,
+    hostname: "aged-live-owner",
+    acquired_at: "2000-01-01T00:00:00.000Z",
+    nonce: "44444444-4444-4444-8444-444444444444",
+  });
+}
+
+function agedLiveLockOptions() {
+  return { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, processAliveFn: () => true };
 }
 
 async function stopIfActive(fixture) {

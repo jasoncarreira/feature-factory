@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
+import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
+import { lstat, open, readFile, rename, rm, mkdir, stat, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
@@ -34,17 +34,22 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
   const lockHooks = validateRunJsonLockHooks(options.lockHooks);
   const timeoutMs = normalizePositiveInteger(options.timeoutMs, DEFAULT_LOCK_TIMEOUT_MS);
   const retryDelayMs = normalizePositiveInteger(options.retryDelayMs, DEFAULT_LOCK_RETRY_DELAY_MS);
-  const staleLockMs = normalizePositiveInteger(options.staleLockMs, DEFAULT_STALE_LOCK_MS);
+  normalizePositiveInteger(options.staleLockMs, DEFAULT_STALE_LOCK_MS);
+  normalizePositiveInteger(options.missingOwnerStealMs, DEFAULT_MISSING_OWNER_STEAL_MS);
   const lockDir = join(runDir, LOCK_DIR);
   const ownerPath = join(lockDir, LOCK_OWNER_FILE);
   const deadline = Date.now() + timeoutMs;
   let stolenFrom = null;
   let stealAttempted = false;
   let contentionReported = false;
+  let createdIdentity = null;
+  let owner = null;
+  let ownerPublished = false;
 
   while (true) {
     try {
       await mkdir(lockDir);
+      createdIdentity = await lockDirectoryIdentity(lockDir);
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
@@ -53,27 +58,46 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
         await runContendedLockHook(lockHooks.onContended, { runDir, lockDir }, deadline, ownerPath);
       }
       if (Date.now() >= deadline) {
-        const owner = await readJsonIfExists(ownerPath);
-        if (!stealAttempted && canStealRunJsonLock(owner, staleLockMs, lockDir, options)) {
+        const observedOwner = await readLockOwner(ownerPath);
+        if (!stealAttempted && canStealRunJsonLock(observedOwner, options)) {
+          const confirmedOwner = await readLockOwner(ownerPath);
+          if (!sameLockOwner(observedOwner, confirmedOwner) || !canStealRunJsonLock(confirmedOwner, options)) {
+            throw new Error(formatLockTimeout(lockDir, confirmedOwner));
+          }
           await rm(lockDir, { recursive: true, force: true });
-          stolenFrom = owner || { missing_owner: true };
+          stolenFrom = confirmedOwner;
           stealAttempted = true;
           continue;
         }
-        throw new Error(formatLockTimeout(lockDir, owner));
+        throw new Error(formatLockTimeout(lockDir, observedOwner));
       }
       await delay(Math.min(retryDelayMs, Math.max(1, deadline - Date.now())));
     }
   }
 
-  const owner = { pid: process.pid, hostname: hostname(), acquired_at: new Date().toISOString() };
+  owner = { pid: process.pid, hostname: hostname(), acquired_at: new Date().toISOString(), nonce: randomUUID() };
   if (stolenFrom) owner.stolen_from = sanitizeLockOwner(stolenFrom);
 
   try {
-    await writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+    if (lockHooks.onLockCreated) {
+      await runRunJsonLockHook(lockHooks.onLockCreated, { runDir, lockDir }, deadline, ownerPath);
+    }
+    if (!sameLockDirectoryIdentity(createdIdentity, await lockDirectoryIdentity(lockDir))) {
+      throw new Error(`run.json lock ownership changed before owner publication at ${lockDir}`);
+    }
+    await writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    const publishedOwner = await readLockOwner(ownerPath);
+    if (!sameLockOwner(owner, publishedOwner)) throw new Error(`run.json lock owner publication failed at ${lockDir}`);
+    ownerPublished = true;
     return await fn({ lock_dir: lockDir, owner });
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    if (ownerPublished && sameLockOwner(owner, await readLockOwner(ownerPath))) {
+      await rm(lockDir, { recursive: true, force: true });
+    } else if (!ownerPublished && !(await lockOwnerEntryExists(ownerPath))) {
+      if (sameLockDirectoryIdentity(createdIdentity, await lockDirectoryIdentity(lockDir))) {
+        await rm(lockDir, { recursive: true, force: true });
+      }
+    }
   }
 }
 
@@ -83,19 +107,26 @@ function validateRunJsonLockHooks(lockHooks) {
   if (lockHooks.onContended !== undefined && typeof lockHooks.onContended !== "function") {
     throw new Error("lockHooks.onContended must be a function");
   }
+  if (lockHooks.onLockCreated !== undefined && typeof lockHooks.onLockCreated !== "function") {
+    throw new Error("lockHooks.onLockCreated must be a function");
+  }
   return lockHooks;
 }
 
 async function runContendedLockHook(onContended, context, deadline, ownerPath) {
+  return runRunJsonLockHook(onContended, context, deadline, ownerPath);
+}
+
+async function runRunJsonLockHook(hook, context, deadline, ownerPath) {
   const remainingMs = deadline - Date.now();
-  if (remainingMs <= 0) throw new Error(formatLockTimeout(context.lockDir, await readJsonIfExists(ownerPath)));
+  if (remainingMs <= 0) throw new Error(formatLockTimeout(context.lockDir, await readLockOwner(ownerPath)));
   let timer;
   try {
     await Promise.race([
-      Promise.resolve().then(() => onContended(context)),
+      Promise.resolve().then(() => hook(context)),
       new Promise((_, reject) => {
         timer = setTimeout(async () => {
-          reject(new Error(formatLockTimeout(context.lockDir, await readJsonIfExists(ownerPath))));
+          reject(new Error(formatLockTimeout(context.lockDir, await readLockOwner(ownerPath))));
         }, remainingMs);
       }),
     ]);
@@ -104,25 +135,63 @@ async function runContendedLockHook(onContended, context, deadline, ownerPath) {
   }
 }
 
-function canStealRunJsonLock(owner, staleLockMs, lockDir, options = {}) {
-  if (!isRecord(owner)) return missingOwnerLockIsOldEnough(lockDir, options);
-  if (!isProcessAlive(owner.pid, options)) return true;
-  const acquiredMs = Date.parse(owner.acquired_at || "");
-  return Number.isFinite(acquiredMs) && Date.now() - acquiredMs > staleLockMs;
+function canStealRunJsonLock(owner, options = {}) {
+  return isDurableLockOwner(owner) && !isProcessAlive(owner.pid, options);
 }
 
-function missingOwnerLockIsOldEnough(lockDir, options = {}) {
-  const threshold = normalizePositiveInteger(options.missingOwnerStealMs, DEFAULT_MISSING_OWNER_STEAL_MS);
+async function readLockOwner(ownerPath) {
+  let handle;
   try {
-    return Date.now() - statSync(lockDir).mtimeMs > threshold;
+    handle = await open(ownerPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    const parsed = JSON.parse(await handle.readFile("utf8"));
+    return isDurableLockOwner(parsed) ? parsed : null;
   } catch {
-    return false;
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function lockOwnerEntryExists(ownerPath) {
+  try {
+    await lstat(ownerPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    return true;
   }
 }
 
 function sanitizeLockOwner(owner) {
   if (!isRecord(owner)) return owner;
-  return Object.fromEntries(Object.entries(owner).filter(([key]) => key !== "stolen_from"));
+  return Object.fromEntries(Object.entries(owner).filter(([key]) => key !== "stolen_from" && key !== "nonce"));
+}
+
+function isDurableLockOwner(owner) {
+  return isRecord(owner)
+    && Number.isInteger(owner.pid)
+    && owner.pid > 0
+    && stringValue(owner.hostname)
+    && Number.isFinite(Date.parse(owner.acquired_at || ""))
+    && typeof owner.nonce === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(owner.nonce);
+}
+
+function sameLockOwner(left, right) {
+  return isDurableLockOwner(left) && isDurableLockOwner(right) && left.nonce === right.nonce;
+}
+
+async function lockDirectoryIdentity(lockDir) {
+  try {
+    const value = await stat(lockDir);
+    return { dev: value.dev, ino: value.ino };
+  } catch {
+    return null;
+  }
+}
+
+function sameLockDirectoryIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
 }
 
 export function hashRunState(run) {
@@ -1368,15 +1437,6 @@ function seedRunSlice(sliceSelector) {
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
-}
-
-async function readJsonIfExists(path) {
-  if (!existsSync(path)) return null;
-  try {
-    return await readJson(path);
-  } catch {
-    return null;
-  }
 }
 
 async function writeJsonAtomically(path, value) {
