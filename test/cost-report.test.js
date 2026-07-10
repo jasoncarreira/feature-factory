@@ -301,6 +301,10 @@ describe("cost report domain", () => {
       () => buildCostReport("run-123", { entries: [availableEntry({ run_id: "other-run" })] }),
       /run\.cost_attribution\.entries\[0\]\.run_id: must match run\.run_id/u,
     );
+    assert.throws(
+      () => buildCostReport("run-123", { entries: [availableEntry({ missing: ["usage"] })] }),
+      /run\.cost_attribution\.entries\[0\]\.missing: must be empty when status is available/u,
+    );
   });
 });
 

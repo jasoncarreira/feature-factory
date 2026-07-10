@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -26,6 +26,8 @@ const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft"]);
 const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate"]);
+const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
+const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
 const COST_NUMERIC_FLAGS = new Map([
   ["--input-tokens", "inputTokens"],
   ["--output-tokens", "outputTokens"],
@@ -249,13 +251,14 @@ async function costRecord(args) {
 
 function costReport(args) {
   try {
+    assertCostReportOptions(args);
     const opts = options(args);
     const positional = positionals(args);
     if (positional.length !== 1) throw new Error("factory cost-report requires exactly one <run-id>");
 
     const requestedRunId = normalizeCostReportRunId(positional[0]);
     const runDir = resolveRunDir(requestedRunId, opts);
-    const run = readJsonFile(join(runDir, "run.json"), "run.json");
+    const run = readCostReportRunJson(runDir);
     if (!run || typeof run !== "object" || Array.isArray(run)) throw new Error("run.json must contain an object");
 
     const report = buildCostReport(basename(runDir), run.cost_attribution, { telemetry: opts.telemetry });
@@ -405,6 +408,21 @@ function assertKnownOptions(args) {
       continue;
     }
     throw new Error(`unknown option: ${arg}`);
+  }
+}
+
+function assertCostReportOptions(args) {
+  assertKnownOptions(args);
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith("--")) continue;
+    if (COST_REPORT_BOOLEAN_FLAGS.has(arg)) continue;
+    if (COST_REPORT_VALUE_FLAGS.has(arg)) {
+      if (index + 1 >= args.length || args[index + 1].startsWith("--")) throw new Error(`${arg} requires a value`);
+      index += 1;
+      continue;
+    }
+    throw new Error(`factory cost-report does not support ${arg}`);
   }
 }
 
@@ -709,6 +727,29 @@ function readJsonFile(file, label) {
     return JSON.parse(readFileSync(file, "utf8"));
   } catch (error) {
     throw new Error(`${label} must be valid JSON: ${error.message}`);
+  }
+}
+
+function readCostReportRunJson(runDir) {
+  const file = join(runDir, "run.json");
+  if (typeof FS_CONSTANTS.O_NOFOLLOW !== "number") throw new Error("run.json cannot be read safely on this platform");
+
+  let descriptor;
+  let text;
+  try {
+    descriptor = openSync(file, FS_CONSTANTS.O_RDONLY | FS_CONSTANTS.O_NOFOLLOW);
+    if (!fstatSync(descriptor).isFile()) throw new Error("not a regular file");
+    text = readFileSync(descriptor, "utf8");
+  } catch (error) {
+    throw new Error(`run.json must be a regular file inside the run directory: ${error.message}`);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`run.json must be valid JSON: ${error.message}`);
   }
 }
 

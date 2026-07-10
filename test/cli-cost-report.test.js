@@ -148,6 +148,19 @@ describe("factory cost-report CLI", () => {
     }
   });
 
+  it("rejects flags outside the cost-report command contract", () => {
+    const repo = tempRepo();
+    seedRun(repo, populatedRun());
+    try {
+      for (const args of [[RUN_ID, "--force"], [RUN_ID, "--model", "openai/gpt-5.6-sol"]]) {
+        const proc = runCostReport(repo, args);
+        assertFailure(proc, /factory cost-report does not support --(?:force|model)/u);
+      }
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("rejects escaped run directories, malformed files, and invalid attribution with no partial stdout", () => {
     const repo = tempRepo();
     const external = tempRepo();
@@ -171,6 +184,14 @@ describe("factory cost-report CLI", () => {
 
       writeJson(join(runDir, "run.json"), { cost_attribution: { entries: [availableEntry({ run_id: "other" })] } });
       assertFailure(runCostReport(repo, [RUN_ID, "--json"]), /run\.cost_attribution\.entries\[0\]\.run_id: must match run\.run_id/u);
+
+      const outsideFile = join(external, "outside.json");
+      writeJson(outsideFile, populatedRun());
+      rmSync(join(runDir, "run.json"));
+      symlinkSync(outsideFile, join(runDir, "run.json"));
+      assertFailure(runCostReport(repo, [RUN_ID, "--json"]), /run\.json must be a regular file inside the run directory/u);
+      rmSync(join(runDir, "run.json"));
+      writeJson(join(runDir, "run.json"), populatedRun());
 
       const outsideRun = join(external, RUN_ID);
       mkdirSync(outsideRun, { recursive: true });

@@ -711,6 +711,9 @@ function validateCostAttributionAvailability(errors, entry, path) {
   const missing = costAttributionAvailabilityMissing(entry);
   const hasUsage = hasUsageNumber(entry);
   const hasCost = hasCostNumber(entry);
+  if (entry.status === "available" && Array.isArray(entry.missing) && entry.missing.length > 0) {
+    errors.push({ path: `${path}.missing`, message: "must be empty when status is available" });
+  }
   if (entry.status === "available" && missing.length > 0) {
     errors.push({ path: `${path}.status`, message: "available requires provider, model, usage, cost_total, and cost_currency" });
   }
