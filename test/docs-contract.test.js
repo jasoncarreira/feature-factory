@@ -46,6 +46,7 @@ const STATE_WRITE_COMMANDS = Object.freeze([
 const PROCESS_SIDECAR_COMMANDS = Object.freeze([
   "factory cancel <run-id> --json",
 ]);
+const COST_REPORT_DOCS = Object.freeze({ SKILL, SCHEMA, COMMAND, README, SPEC });
 
 describe("heartbeat docs contract", () => {
   it("lists every required heartbeat phase in the skill and schema", () => {
@@ -561,6 +562,92 @@ describe("cost attribution docs contract", () => {
   });
 });
 
+describe("cost report docs contract", () => {
+  it("documents human, JSON, and opt-in telemetry invocations", () => {
+    for (const [name, text] of documentEntries(COST_REPORT_DOCS)) {
+      assert.match(text, /feature-factory factory cost-report <run-id>/i, `${name} must document human cost-report invocation`);
+      assert.match(text, /cost-report <run-id> --json/i, `${name} must document JSON cost-report invocation`);
+      assert.match(text, /cost-report <run-id> --telemetry \[--json\]/i, `${name} must document telemetry cost-report invocation`);
+      assert.match(text, /report-v1|schema_version(?:`|\s)*:?(?:`|\s)*1/i, `${name} must name report-v1/schema version 1`);
+    }
+  });
+
+  it("documents dimensions, counts, on-read recomputation, and missing steps", () => {
+    for (const [name, text] of documentEntries(COST_REPORT_DOCS)) {
+      for (const dimension of ["totals", "by_agent", "by_step", "by_slice"]) {
+        assert.match(text, literalPattern(dimension), `${name} must document ${dimension}`);
+      }
+      for (const count of ["entry_count", "request_count", "agent_count", "step_count", "slice_count", "unattributed_step_entry_count"]) {
+        assert.match(text, literalPattern(count), `${name} must document ${count}`);
+      }
+      assert.match(text, /recomput(?:e|es|ed)[\s\S]*(?:exclusively )?from[\s\S]*(?:cost_attribution\.)?entries[\s\S]*(?:read time|at read time)|(?:read time|at read time)[\s\S]*recomput/i, `${name} must recompute report views from entries at read time`);
+      assert.match(text, /persisted[\s\S]*(?:status[\s\S]*)?totals[\s\S]*by_agent[\s\S]*by_slice[\s\S]*(?:ignore|ignored)|ignore[\s\S]*persisted[\s\S]*totals/i, `${name} must ignore persisted rollup caches`);
+      assert.match(text, /missing[\s\S]*null[\s\S]*(?:empty|blank)[\s\S]*whitespace-only[\s\S]*(?:excluded|omitted)[\s\S]*by_step/i, `${name} must exclude missing/null/blank steps`);
+      assert.match(text, /no synthetic|never (?:placed in|assigned|represented by) a synthetic/i, `${name} must forbid a synthetic step group`);
+    }
+  });
+
+  it("preserves raw JSON identities and injective terminal-safe human labels", () => {
+    for (const [name, text] of documentEntries(COST_REPORT_DOCS)) {
+      assert.match(text, /exact[\s\S]*untrimmed[\s\S]*unsanitized|raw untrimmed\/unsanitized/i, `${name} must preserve exact raw grouping identities`);
+      assert.match(text, /raw JSON (?:map )?(?:key|keys|identit)|JSON identities/i, `${name} must preserve raw JSON keys`);
+      assert.match(text, /injective terminal-safe/i, `${name} must require injective terminal-safe human labels`);
+      assert.match(text, /uppercase `?\\uXXXX`?/i, `${name} must document reversible UTF-16 display escaping`);
+      assert.match(text, /(?:never|do not)[\s\S]*(?:merge|merges)[\s\S]*(?:identities|groups)|display[\s\S]*(?:never|does not)[\s\S]*merge/i, `${name} must forbid display collision merging`);
+    }
+  });
+
+  it("documents status, null-as-absence, data-less partial, and mixed currencies", () => {
+    for (const [name, text] of documentEntries(COST_REPORT_DOCS)) {
+      for (const status of ["available", "partial", "unavailable"]) assert.match(text, literalPattern(status), `${name} must document ${status}`);
+      assert.match(text, /data-less `?partial`?|partial[\s\S]*no usage or cost numeric fields/i, `${name} must preserve data-less partial status`);
+      assert.match(text, /(?:every|all|any)[\s\S]*(?:usage\/cost|usage or cost)[\s\S]*numeric[\s\S]*`?null`?[\s\S]*(?:absence|omitted)/i, `${name} must treat every numeric null as absence`);
+      assert.match(text, /explicit numeric `?0`?[\s\S]*(?:remain|preserv)/i, `${name} must preserve explicit zero`);
+      assert.match(text, /mixed.currenc[\s\S]*mixed_currency(?:`|\s)*:?(?:`|\s)*true[\s\S]*(?:omit|suppress)[\s\S]*cost_total[\s\S]*cost_currency/i, `${name} must suppress mixed-currency totals and currency`);
+      assert.match(text, /component[\s\S]*(?:remain|still|may)[\s\S]*(?:sum|summed)|separately summed component/i, `${name} must warn about compatibility component sums`);
+      assert.match(text, /(?:not normalized|must not[\s\S]*(?:reconstruct|combined total))/i, `${name} must forbid treating components as normalized totals`);
+    }
+  });
+
+  it("documents strict read-only, local, non-billing boundaries", () => {
+    for (const [name, text] of documentEntries(COST_REPORT_DOCS)) {
+      assert.match(text, /read-only|read only/i, `${name} must mark cost-report read-only`);
+      assert.match(text, /(?:does not|must not|never)[\s\S]*mutate/i, `${name} must forbid mutation`);
+      assert.match(text, /(?:does not|must not|never)[\s\S]*(?:acquire|wait for)[\s\S]*run-json(?: write)? lock|run-json\.lock[\s\S]*(?:does not|never)/i, `${name} must forbid lock acquisition/waiting`);
+      assert.match(text, /(?:does not|must not|never)[\s\S]*(?:require|accepted)[\s\S]*attestations?/i, `${name} must forbid attestation requirements`);
+      assert.match(text, /pricing tables|pricing-table/i, `${name} must forbid pricing tables`);
+      assert.match(text, /pricing APIs|pricing-table\/API|pricing tables\/APIs/i, `${name} must forbid pricing APIs`);
+      assert.match(text, /(?:price or estimate|pricing[\s\S]*estimation|estimate costs)/i, `${name} must forbid pricing/estimation`);
+      assert.match(text, /convert currencies|currency conversion/i, `${name} must forbid conversion`);
+      assert.match(text, /missing-to-zero|coerc(?:e|ion)[\s\S]*missing/i, `${name} must forbid missing-to-zero coercion`);
+      assert.match(text, /no network|make(?:s)? no network|does not[\s\S]*make network calls|never[\s\S]*make network calls/i, `${name} must forbid network calls`);
+      assert.match(text, /strictly local|local[\s\S]*diagnostic/i, `${name} must keep cost-report local diagnostics`);
+      assert.match(text, /non-billing|not billing authority/i, `${name} must deny billing authority`);
+    }
+  });
+
+  it("limits telemetry to opt-in report-invocation correlation, not entry/span proof", () => {
+    for (const [name, text] of documentEntries(COST_REPORT_DOCS)) {
+      assert.match(text, /--telemetry[\s\S]*(?:opt(?:s)? in|opt-in|opt in)[\s\S]*(?:report invocation|invocation)/i, `${name} must make report telemetry opt-in`);
+      assert.match(text, /telemetry\.trace_id|trace_id/i, `${name} must document telemetry trace_id`);
+      assert.match(text, /telemetry\.parent_span_id|parent_span_id/i, `${name} must document telemetry parent_span_id`);
+      assert.match(text, /correlat(?:e|es)[\s\S]*(?:report )?invocation only|(?:report-)?invocation(?:-| )correlation only/i, `${name} must scope telemetry to report invocation correlation`);
+      assert.match(text, /(?:does|do) not prove|not proof/i, `${name} must deny telemetry proof`);
+      assert.match(text, /entry[\s\S]*agent[\s\S]*step[\s\S]*slice[\s\S]*provider request[\s\S]*aggregate/i, `${name} must deny attribution-to-span proof for every report subject`);
+      assert.match(text, /(?:does not|creates no|must not)[\s\S]*(?:create )?spans?|no span/i, `${name} must not claim span creation`);
+      assert.match(text, /(?:does not|initializes no|must not)[\s\S]*exporter/i, `${name} must not enable an exporter`);
+    }
+  });
+
+  it("closes richer report/export TODO while retaining genuine follow-ups", () => {
+    assert.doesNotMatch(TODO, /richer reporting\/export views/i, "TODO must not leave cost reporting/export as future work");
+    assert.match(TODO, /provider-specific metadata normalization/i, "TODO must retain provider normalization follow-up");
+    assert.match(TODO, /span taxonomy\/correlation/i, "TODO must retain genuine telemetry span follow-up");
+    assert.match(TODO, /SDK\/export/i, "TODO must retain exporter validation follow-up");
+    assert.match(TODO, /not entry-to-span proof/i, "TODO must distinguish invocation correlation from entry/span proof");
+  });
+});
+
 describe("telemetry readiness docs contract", () => {
   it("documents doctor --telemetry readiness categories", () => {
     for (const [name, text] of documentEntries({ README, SPEC })) {
@@ -599,7 +686,8 @@ describe("telemetry readiness docs contract", () => {
       assert.match(text, /no durable trace state|not persisted in `run\.json`|must not be written into `run\.json`/i, `${name} must document no durable trace state`);
       assert.match(text, /not (?:workflow )?authority|non-authoritative/i, `${name} must document telemetry/trace non-authority`);
     }
-    assert.doesNotMatch(SCHEMA, /["'](?:traceparent|tracestate|parent_span_id|parentSpanId)["']\s*:/i, "SCHEMA must not add durable trace-context fields");
+    assert.doesNotMatch(SCHEMA, /["'](?:traceparent|tracestate|parentSpanId)["']\s*:/i, "SCHEMA must not add durable trace-context fields");
+    assert.match(SCHEMA, /report telemetry[\s\S]*(?:not persisted|not persisted[\s\S]*report telemetry)|telemetry[\s\S]*response[\s\S]*not persisted/i, "SCHEMA must keep cost-report parent_span_id response metadata non-durable");
   });
 
   it("documents trace-context launch flags and runtime env mapping", () => {

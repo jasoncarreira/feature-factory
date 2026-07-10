@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { cancelFactoryRun, cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
+import { buildCostReport, formatCostReport, serializeCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
@@ -25,6 +26,8 @@ const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft"]);
 const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate"]);
+const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
+const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
 const COST_NUMERIC_FLAGS = new Map([
   ["--input-tokens", "inputTokens"],
   ["--output-tokens", "outputTokens"],
@@ -38,6 +41,7 @@ const COST_NUMERIC_FLAGS = new Map([
   ["--cost-cache-creation", "costCacheCreation"],
   ["--cost-cache-read", "costCacheRead"],
 ]);
+const SAFE_COST_REPORT_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 
 function usage(write = console.log) {
   write(`feature-factory
@@ -53,6 +57,7 @@ Commands:
   factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> [--json]
   factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> [--reason TEXT] [--json]
   factory cost-record <run-id> --agent AGENT [--step STEP] [--slice-id ID] [--provider PROVIDER] [--model MODEL] [--source SOURCE] [--operation OP] [--request-id ID] [--input-tokens N] [--output-tokens N] [--total-tokens N] [--cache-creation-input-tokens N] [--cache-read-input-tokens N] [--reasoning-tokens N] [--cost-total N] [--cost-input N] [--cost-output N] [--cost-cache-creation N] [--cost-cache-read N] [--currency CODE] [--recorded-at ISO] [--entry-id ID] [--json]
+  factory cost-report <run-id> [--json] [--telemetry]
   factory resume <run-id> [--headless|--autonomous|--detached] [--dry-run] [--json] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory list                  List local factory runs
   factory status [run-id]       Read .opencode/factory state
@@ -136,6 +141,7 @@ async function doctor(args) {
 async function factory(args) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
+  if (sub === "cost-report") return costReport(rest);
   const opts = options(rest);
   const positional = positionals(rest);
   if (sub === "start") {
@@ -241,6 +247,25 @@ async function costRecord(args) {
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory cost-record requires exactly one <run-id>");
   return print(await recordCostUsage(runId, costRecordInput(opts), opts), opts);
+}
+
+function costReport(args) {
+  try {
+    assertCostReportOptions(args);
+    const opts = options(args);
+    const positional = positionals(args);
+    if (positional.length !== 1) throw new Error("factory cost-report requires exactly one <run-id>");
+
+    const requestedRunId = normalizeCostReportRunId(positional[0]);
+    const runDir = resolveRunDir(requestedRunId, opts);
+    const run = readCostReportRunJson(runDir);
+    if (!run || typeof run !== "object" || Array.isArray(run)) throw new Error("run.json must contain an object");
+
+    const report = buildCostReport(basename(runDir), run.cost_attribution, { telemetry: opts.telemetry });
+    console.log(opts.json ? serializeCostReport(report) : formatCostReport(report));
+  } catch (error) {
+    throw new Error(terminalSafeCostReportError(error?.message));
+  }
 }
 
 async function resume(args) {
@@ -383,6 +408,21 @@ function assertKnownOptions(args) {
       continue;
     }
     throw new Error(`unknown option: ${arg}`);
+  }
+}
+
+function assertCostReportOptions(args) {
+  assertKnownOptions(args);
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith("--")) continue;
+    if (COST_REPORT_BOOLEAN_FLAGS.has(arg)) continue;
+    if (COST_REPORT_VALUE_FLAGS.has(arg)) {
+      if (index + 1 >= args.length || args[index + 1].startsWith("--")) throw new Error(`${arg} requires a value`);
+      index += 1;
+      continue;
+    }
+    throw new Error(`factory cost-report does not support ${arg}`);
   }
 }
 
@@ -690,6 +730,29 @@ function readJsonFile(file, label) {
   }
 }
 
+function readCostReportRunJson(runDir) {
+  const file = join(runDir, "run.json");
+  if (typeof FS_CONSTANTS.O_NOFOLLOW !== "number") throw new Error("run.json cannot be read safely on this platform");
+
+  let descriptor;
+  let text;
+  try {
+    descriptor = openSync(file, FS_CONSTANTS.O_RDONLY | FS_CONSTANTS.O_NOFOLLOW);
+    if (!fstatSync(descriptor).isFile()) throw new Error("not a regular file");
+    text = readFileSync(descriptor, "utf8");
+  } catch (error) {
+    throw new Error(`run.json must be a regular file inside the run directory: ${error.message}`);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`run.json must be valid JSON: ${error.message}`);
+  }
+}
+
 function print(value, opts) {
   if (value === undefined) return;
   if (value === null || opts.json || typeof value !== "object") {
@@ -838,6 +901,29 @@ function normalizeHeartbeatRunId(runId) {
     throw new Error("factory heartbeat requires a bare <run-id>, not a filesystem path");
   }
   return value;
+}
+
+function normalizeCostReportRunId(runId) {
+  const value = String(runId);
+  if (isAbsolute(value) || value.includes("/") || value.includes("\\") || value === "." || value === "..") {
+    throw new Error("factory cost-report requires a bare <run-id>, not a filesystem path");
+  }
+  if (!SAFE_COST_REPORT_RUN_ID_PATTERN.test(value) || value.includes("..") || value.endsWith(".lock")) {
+    throw new Error('factory cost-report requires a safe <run-id> using letters, digits, ".", "_", or "-"');
+  }
+  return value;
+}
+
+function terminalSafeCostReportError(message) {
+  const value = String(message ?? "cost-report failed");
+  let safe = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    safe += code >= 0x20 && code <= 0x7E
+      ? value[index]
+      : `\\u${code.toString(16).toUpperCase().padStart(4, "0")}`;
+  }
+  return safe;
 }
 
 function insideDirectory(parent, child) {
