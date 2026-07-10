@@ -18,6 +18,11 @@ A retrospective from analyzing the 15 self-hosted feature-factory runs under
   sink" requirements.
 - **The same vulnerability classes recur per-feature** because there is no centralized
   hardened primitive for them. This is the single highest-leverage thing to fix.
+- **Coverage is biased toward early features.** A run only exercises what is in its
+  `base_commit`, and runs launch from a chronically-stale local `main` — so the last four
+  features merged (#35–#38, including the cost reporting/export layer) were exercised by
+  **zero** runs. Several "findings" are really "not run yet" (see §4a); read the
+  retrospective with that window in mind.
 
 ---
 
@@ -144,6 +149,53 @@ cross-slice integration was essentially never the blocker.
 - **Cost instrumentation is inert.** Where present it is always `status: "unavailable"`,
   `entry_count: 0` — and the run literally named `cost-attribution` carries no
   `cost_attribution` block at all. The feature shipped but never captured data in practice.
+
+## 4a. Findings vs. merge timing — what was actually exercised
+
+A run can only exercise features present in its `base_commit`. Because runs launch from the
+local `main` checkout (which lags `origin/main`), a feature merged at time *T* is only
+exercised by runs whose base contains *T*'s merge commit. Correlating each feature's merge
+commit against every run's recorded `base_commit` gives the real coverage — and it changes
+how several findings should be read.
+
+**Coverage tiers (runs whose base contained the merged feature):**
+
+| Feature (PR) | merged | runs that could exercise it |
+|---|---|---|
+| remediation-reuse #28, non-destructive #29, cost-attribution #30 | Jul 9 15:25–15:31 | 6 (honeycomb, tui-active, interrupt, cost-reporting-export, tui-current, steering-drain*) |
+| named-start #31, tui-active #32, interrupt-cancel #33, honeycomb-otel #34 | Jul 9 18:58–20:03 | 3 (cost-reporting-export, tui-current, steering-drain*) |
+| optional-telemetry #35, gate-answer-source #36, tui-current #37, cost-reporting-export #38 | Jul 9 21:14 – Jul 10 02:35 | **0 — no run's base contains them** |
+
+*steering-drain is the orphan that never progressed, so its "coverage" is nominal.
+
+**Reframed findings:**
+
+- **Cost instrumentation "inert" is two different things.** The cost-attribution *recording*
+  code (#30) **was** present in 6 runs' bases — so the always-`unavailable`/empty blocks are
+  not "unmerged," they mean the `factory cost-record` step was never invoked with provider
+  usage during those runs (a wiring/trigger gap, not missing code). The cost *reporting/export*
+  layer (#38) is in **zero** runs' bases — it merged after every run finished, so it has
+  genuinely never executed. Net: the cost feature is effectively unexercised end-to-end.
+- **The silent steering drop is expected, not a regression.** `tui-active-session-refresh`
+  queued a directive but never drained it because the drain-at-safe-boundaries behavior is
+  the still-unbuilt `steering-drain-boundaries` work (TODO's "future work"). The queue shipped;
+  the consume-at-boundary did not.
+- **The newest security-hardening features are essentially unvalidated by dogfooding.**
+  interrupt-cancel #33 and honeycomb #34 have only 3 light subsequent runs; optional-telemetry
+  #35, gate-answer-source #36, tui-current #37, and cost-reporting-export #38 have none. The
+  PR-review-only work (#39, #40) likewise has zero factory-run coverage.
+- **"Robustness improved over the week" carries a survivorship caveat.** The clean newest
+  logs partly reflect that later runs did *less* (tui/docs-scale features) and that the newest
+  code simply has not been re-run — not that it is proven more robust.
+- **The base-drift findings are mostly deliberate stacking, not defects.** `batch-001`/`002`
+  based off the in-flight `tui-active-session-refresh` branch (base `c9bfb797`, before #32
+  merged) was intentional stacking during parallel development; `interrupt`'s `origin/main`
+  base is a one-off. Worth normalizing, but not run failures.
+
+**Operational consequence:** because local `main` lags `origin/main`, the *next* dogfood run
+launched from the local checkout still would not exercise #37/#38 (they are only on
+`origin/main`). Validating the newest features requires either pulling `main` first or
+launching runs from `origin/main`.
 
 ## 5. Highest-leverage takeaways
 
