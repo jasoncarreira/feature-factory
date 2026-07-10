@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
-import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency } from "./cost-attribution.js";
+import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency, sanitizePublicCostText } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
 import { PROCESS_EVIDENCE_FILE, processEvidenceProcessesDir, validateProcessEvidence } from "./process-evidence.js";
 import { hashFile, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
@@ -44,9 +44,14 @@ const COST_ATTRIBUTION_NUMERIC_FIELDS = new Set([...USAGE_NUMERIC_FIELDS, ...COS
 
 export class ValidationError extends Error {
   constructor(errors) {
-    super(errors.map((item) => `${item.path}: ${item.message}`).join("; "));
+    const safeErrors = errors.map((item) => ({
+      ...item,
+      path: safeValidationText(item.path),
+      message: safeValidationText(item.message),
+    }));
+    super(safeErrors.map((item) => `${item.path}: ${item.message}`).join("; "));
     this.name = "ValidationError";
-    this.errors = errors;
+    this.errors = safeErrors;
   }
 }
 
@@ -547,7 +552,7 @@ function validateRunSlice(errors, slice, path, ids) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  requiredString(errors, slice, "id", `${path}.id`);
+  requiredTerminalSafeString(errors, slice, "id", `${path}.id`);
   optionalString(errors, slice, "stack", `${path}.stack`);
   validateStringArray(errors, slice.depends_on, `${path}.depends_on`, { required: false, values: ids });
   optionalEnum(errors, slice, "status", SLICE_STATUSES, `${path}.status`);
@@ -567,7 +572,7 @@ function validatePlannedSlices(errors, slices, path) {
       errors.push({ path: `${path}[${index}]`, message: "must be an object" });
       continue;
     }
-    requiredString(errors, slice, "id", `${path}[${index}].id`);
+    requiredTerminalSafeString(errors, slice, "id", `${path}[${index}].id`);
     requiredString(errors, slice, "stack", `${path}[${index}].stack`);
     validateStringArray(errors, slice.paths, `${path}[${index}].paths`, { required: true, nonEmpty: true });
     validateStringArray(errors, slice.depends_on, `${path}[${index}].depends_on`, { required: true, values: ids });
@@ -581,7 +586,7 @@ function validateSliceIDs(errors, slices, path) {
   const ids = new Set();
   for (const [index, slice] of slices.entries()) {
     if (!isRecord(slice) || typeof slice.id !== "string" || !slice.id.trim()) continue;
-    if (ids.has(slice.id)) errors.push({ path: `${path}[${index}].id`, message: `duplicate id '${slice.id}'` });
+    if (ids.has(slice.id)) errors.push({ path: `${path}[${index}].id`, message: `duplicate id '${safeValidationIdentifier(slice.id)}'` });
     ids.add(slice.id);
   }
   return ids;
@@ -617,7 +622,7 @@ function validateSteps(errors, steps, path) {
       errors.push({ path: `${path}[${index}]`, message: "must be an object" });
       continue;
     }
-    requiredString(errors, step, "agent", `${path}[${index}].agent`);
+    requiredTerminalSafeString(errors, step, "agent", `${path}[${index}].agent`);
     requiredEnum(errors, step, "status", STEP_STATUSES, `${path}[${index}].status`);
     optionalInteger(errors, step, "attempts", `${path}[${index}].attempts`);
     optionalString(errors, step, "artifact_ref", `${path}[${index}].artifact_ref`);
@@ -845,6 +850,11 @@ function requiredString(errors, obj, key, path) {
   if (!stringValue(obj[key])) errors.push({ path, message: "must be a non-empty string" });
 }
 
+function requiredTerminalSafeString(errors, obj, key, path) {
+  requiredString(errors, obj, key, path);
+  if (typeof obj[key] === "string" && hasTerminalControl(obj[key])) errors.push({ path, message: "must not contain control characters" });
+}
+
 function optionalString(errors, obj, key, path) {
   if (obj[key] === undefined || obj[key] === null) return;
   if (typeof obj[key] !== "string") errors.push({ path, message: "must be a string or null" });
@@ -904,6 +914,15 @@ function optionalHash(errors, obj, key, path) {
 
 function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function safeValidationIdentifier(value) {
+  return safeValidationText(value) || "<control characters removed>";
+}
+
+function safeValidationText(value) {
+  if (!hasTerminalControl(value)) return value;
+  return sanitizePublicCostText(value);
 }
 
 function fail(errors) {

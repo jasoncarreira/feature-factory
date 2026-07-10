@@ -6,13 +6,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
-import { ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir } from "../src/validate.js";
+import { ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSlicesPlan } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
   "USD\u001b]0;pwned\u0007",
   "USD\u001b[2J",
   "USD\u001b]52;c;U0VDUkVU\u0007",
+]);
+const TERMINAL_LABEL_PAYLOADS = Object.freeze([
+  "work\u001b[2J",
+  "work\u0007",
+  "work\u009b2J",
 ]);
 
 describe("run schema and consistency", () => {
@@ -181,6 +186,58 @@ describe("run schema and consistency", () => {
         () => validateCostAttributionEntries([{ ...entry, input_tokens: value }], "run"),
         (error) => error instanceof ValidationError && error.message.includes("run.cost_attribution.entries[0].input_tokens: must be a finite non-negative number"),
       );
+    }
+  });
+
+  it("rejects terminal controls in planned and durable work labels", () => {
+    for (const payload of TERMINAL_LABEL_PAYLOADS) {
+      assert.throws(
+        () => validateSlicesPlan({ slices: [{ id: payload, stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["safe"], test_plan: ["node --test"] }] }),
+        (error) => error instanceof ValidationError && error.message.includes("plan.slices[0].id: must not contain control characters"),
+      );
+      assert.throws(
+        () => validateRun({ ...runningRun(), slices: [{ id: payload, status: "running" }] }),
+        (error) => error instanceof ValidationError && error.message.includes("run.slices[0].id: must not contain control characters"),
+      );
+      assert.throws(
+        () => validateRun({ ...runningRun(), steps: [{ agent: payload, status: "running" }] }),
+        (error) => error instanceof ValidationError && error.message.includes("run.steps[0].agent: must not contain control characters"),
+      );
+    }
+  });
+
+  it("does not expose duplicate planned slice ids with terminal controls in validation errors", () => {
+    for (const payload of TERMINAL_LABEL_PAYLOADS) {
+      let error;
+      assert.throws(
+        () => validateSlicesPlan({ slices: [
+          { id: payload, stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["safe"], test_plan: ["node --test"] },
+          { id: payload, stack: "backend", paths: ["test/**"], depends_on: [], acceptance: ["safe"], test_plan: ["node --test"] },
+        ] }),
+        (caught) => {
+          error = caught;
+          return caught instanceof ValidationError;
+        },
+      );
+
+      assert.match(error.message, /plan\.slices\[1\]\.id: duplicate id/u);
+      assert.equal(validationErrorHasTerminalControl(error), false);
+    }
+  });
+
+  it("does not expose duplicate durable slice ids with terminal controls in validation errors", () => {
+    for (const payload of TERMINAL_LABEL_PAYLOADS) {
+      let error;
+      assert.throws(
+        () => validateRun({ ...runningRun(), slices: [{ id: payload, status: "running" }, { id: payload, status: "blocked" }] }),
+        (caught) => {
+          error = caught;
+          return caught instanceof ValidationError;
+        },
+      );
+
+      assert.match(error.message, /run\.slices\[1\]\.id: duplicate id/u);
+      assert.equal(validationErrorHasTerminalControl(error), false);
     }
   });
 
@@ -478,6 +535,15 @@ function createRunDir(repo, runId) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function validationErrorHasTerminalControl(error) {
+  return hasTerminalControl(error.message)
+    || error.errors.some((item) => hasTerminalControl(item.path) || hasTerminalControl(item.message));
+}
+
+function hasTerminalControl(value) {
+  return /[\u0000-\u001F\u007F-\u009F]/u.test(value);
 }
 
 function hashFile(file) {
