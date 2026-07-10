@@ -17,6 +17,8 @@ const SPEC = readDoc("../SPEC.md");
 const TODO = readDoc("../TODO.md");
 const CLI = readDoc("../src/cli.js");
 const TUI = readDoc("../src/tui.jsx");
+const CODEBASE_RESEARCHER_PROMPT = readDoc("../assets/agent/codebase-researcher.md");
+const SPEC_WRITER_PROMPT = readDoc("../assets/agent/spec-writer.md");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
@@ -47,6 +49,44 @@ const PROCESS_SIDECAR_COMMANDS = Object.freeze([
   "factory cancel <run-id> --json",
 ]);
 const COST_REPORT_DOCS = Object.freeze({ SKILL, SCHEMA, COMMAND, README, SPEC });
+
+describe("class-wide planning prompt contract", () => {
+  it("requires research to enumerate a finite source-to-sink surface", () => {
+    assert.match(CODEBASE_RESEARCHER_PROMPT, /class-wide requirements as closed-world inventory work/i);
+    for (const trigger of ["all", "every", "centralize", "across"]) {
+      assert.match(CODEBASE_RESEARCHER_PROMPT, literalPattern(`\`${trigger}\``), `research prompt missing class-wide trigger ${trigger}`);
+    }
+    for (const column of ["Source", "Sink / call site", "Existing guard", "Required policy", "Compatibility / exclusion", "Test"]) {
+      assert.match(CODEBASE_RESEARCHER_PROMPT, literalPattern(column), `research inventory missing ${column}`);
+    }
+    assert.match(CODEBASE_RESEARCHER_PROMPT, /deliberate exclusions with reasons/i);
+    assert.match(CODEBASE_RESEARCHER_PROMPT, /cannot establish a finite inventory[\s\S]*additional research required/i);
+  });
+
+  it("requires specs to close class-wide scope before builders run", () => {
+    assert.match(SPEC_WRITER_PROMPT, /research map must contain a finite surface inventory/i);
+    assert.match(SPEC_WRITER_PROMPT, /Class-wide implementation matrix \(required when applicable\)/i);
+    for (const column of ["Source", "Sink / call site", "Required primitive / policy", "Compatibility / exclusion", "Test"]) {
+      assert.match(SPEC_WRITER_PROMPT, literalPattern(column), `spec matrix missing ${column}`);
+    }
+    assert.match(SPEC_WRITER_PROMPT, /stop and request targeted research/i);
+    assert.match(SPEC_WRITER_PROMPT, /Do not use open-ended phrases such as "apply everywhere"/i);
+  });
+
+  it("requires first review to consolidate same-class findings", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule/i);
+    assert.match(WORK_REVIEWER_PROMPT, /On `attempt: 1`[\s\S]*all currently discoverable in-scope instances/i);
+    assert.match(WORK_REVIEWER_PROMPT, /do not cite one example while withholding equivalent findings for later rounds/i);
+    assert.match(WORK_REVIEWER_PROMPT, /class-wide spec that lacks a finite source\/sink inventory/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*attempt > 1/i);
+  });
+
+  it("puts the closed-scope guard in workflow steps 1 and 2", () => {
+    assert.match(SKILL, /Step 1 - Research And Design[\s\S]*finite in-scope surface inventory[\s\S]*Step 2 - Spec And Decomposition/i);
+    assert.match(SKILL, /Step 2 - Spec And Decomposition[\s\S]*closed implementation matrix[\s\S]*Do not dispatch builders with unresolved instructions/i);
+    assert.match(SKILL, /first spec review[\s\S]*every currently discoverable same-class issue[\s\S]*one `required_fixes` list/i);
+  });
+});
 
 describe("heartbeat docs contract", () => {
   it("lists every required heartbeat phase in the skill and schema", () => {
