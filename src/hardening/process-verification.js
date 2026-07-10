@@ -11,6 +11,9 @@ export const PROCESS_SIGNAL_RACE_LIMITATION =
 const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 const DEFAULT_COMMAND_MAX_BUFFER = 1024 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 200;
+const DARWIN_WEEKDAYS = Object.freeze(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
+const DARWIN_MONTHS = Object.freeze(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]);
+const DARWIN_START_PATTERN = /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([1-9]|[12]\d|3[01]) ([01]\d|2[0-3]):([0-5]\d):([0-5]\d) (\d{4})$/u;
 
 export const PROCESS_VERIFICATION_CODES = Object.freeze({
   INVALID_PID: "INVALID_PID",
@@ -274,7 +277,7 @@ function inspectDarwinIdentity(pid, options) {
 
   const firstMarker = normalizeDarwinStart(firstStart);
   const finalMarker = normalizeDarwinStart(finalStart);
-  const commandName = normalizeCommandName(firstLine(command));
+  const commandName = parseDarwinCommand(command);
   const cwd = parseDarwinCwd(lsof, pid);
   if (!firstMarker || !finalMarker || firstMarker !== finalMarker || !commandName || !cwd) {
     throw new InspectionFailure("METADATA_MALFORMED");
@@ -389,10 +392,10 @@ function parseLinuxStartMarker(value, pid) {
 }
 
 function parseDarwinCwd(value, pid) {
-  const lines = toText(value).split(/\r?\n/u);
-  if (!lines.includes(`p${pid}`) || !lines.includes("fcwd")) return null;
-  const name = lines.find((line) => line.startsWith("n"));
-  return name ? normalizeCwd(name.slice(1)) : null;
+  const lines = strictOutputLines(value);
+  if (!lines || lines.length !== 3) return null;
+  if (lines[0] !== `p${pid}` || lines[1] !== "fcwd" || !lines[2].startsWith("n")) return null;
+  return normalizeCwd(lines[2].slice(1));
 }
 
 function commandOutput(runCommand, command, args, commandOptions, maxBuffer) {
@@ -416,12 +419,41 @@ function normalizeCwd(value) {
 }
 
 function normalizeDarwinStart(value) {
-  const line = firstLine(value);
-  return line.trim().replace(/\s+/gu, " ");
+  const lines = strictOutputLines(value);
+  if (!lines || lines.length !== 1 || !/^[ -~]+$/u.test(lines[0])) return null;
+  const normalized = lines[0].trim().replace(/ +/gu, " ");
+  const match = normalized.match(DARWIN_START_PATTERN);
+  if (!match) return null;
+
+  const [, weekday, monthName, dayText, hourText, minuteText, secondText, yearText] = match;
+  const month = DARWIN_MONTHS.indexOf(monthName);
+  const day = Number(dayText);
+  const year = Number(yearText);
+  if (year < 1970 || month < 0) return null;
+  const date = new Date(Date.UTC(year, month, day, Number(hourText), Number(minuteText), Number(secondText)));
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month
+    || date.getUTCDate() !== day
+    || DARWIN_WEEKDAYS[date.getUTCDay()] !== weekday
+  ) return null;
+  return normalized;
 }
 
-function firstLine(value) {
-  return toText(value).split(/\r?\n/u)[0] || "";
+function parseDarwinCommand(value) {
+  const lines = strictOutputLines(value);
+  return lines && lines.length === 1 ? normalizeCommandName(lines[0]) : null;
+}
+
+function strictOutputLines(value) {
+  const text = toText(value);
+  if (!text || text.includes("\0") || /\r(?!\n)/u.test(text)) return null;
+  const body = text.endsWith("\r\n") ? text.slice(0, -2)
+    : text.endsWith("\n") ? text.slice(0, -1)
+      : text;
+  if (!body || /[\r\n]$/u.test(body)) return null;
+  const lines = body.split(/\r?\n/u);
+  return lines.some((line) => line.length === 0) ? null : lines;
 }
 
 function resolvePlatform(options) {

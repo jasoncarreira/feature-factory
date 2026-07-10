@@ -65,6 +65,21 @@ function expectedIdentity(overrides = {}) {
   };
 }
 
+function darwinExpectedIdentity(overrides = {}) {
+  const { identity: identityOverrides = {}, ...topLevelOverrides } = overrides;
+  return {
+    pid: PID,
+    cwd: CWD,
+    identity: {
+      inspector: PROCESS_INSPECTOR,
+      start_marker: "darwin-ps:Thu Jul 9 15:00:00 2026",
+      command_name: "opencode",
+      ...identityOverrides,
+    },
+    ...topLevelOverrides,
+  };
+}
+
 describe("structured process liveness", () => {
   it("accepts only positive pids and structured injected classifications", () => {
     assert.deepEqual(probeProcessLiveness(0), {
@@ -232,6 +247,82 @@ describe("platform process identity inspection", () => {
       });
       assert.equal(inspected.status, "indeterminate");
       assert.notEqual(inspected.status, "absent");
+    }
+  });
+
+  it("rejects nonempty malformed or multiline Darwin ps output without signaling", async () => {
+    const cases = [
+      {
+        name: "nonempty malformed lstart",
+        lstart: "not a process start timestamp\n",
+        command: "/opt/homebrew/bin/opencode\n",
+      },
+      {
+        name: "impossible lstart date",
+        lstart: "Mon Feb 31 15:00:00 2026\n",
+        command: "/opt/homebrew/bin/opencode\n",
+      },
+      {
+        name: "multiline lstart",
+        lstart: "Thu Jul  9 15:00:00 2026\nFri Jul 10 15:00:00 2026\n",
+        command: "/opt/homebrew/bin/opencode\n",
+      },
+      {
+        name: "multiline comm",
+        lstart: "Thu Jul  9 15:00:00 2026\n",
+        command: "/opt/homebrew/bin/opencode\n/usr/bin/replacement\n",
+      },
+    ];
+
+    for (const item of cases) {
+      const signals = [];
+      const result = await signalVerifiedProcess(darwinExpectedIdentity(), {
+        platform: "darwin",
+        hostname: "host",
+        livenessProbe: () => ({ status: "live" }),
+        commandRunner(command, args) {
+          if (command === "ps" && args.at(-1) === "lstart=") return item.lstart;
+          if (command === "ps" && args.at(-1) === "comm=") return item.command;
+          if (command === "lsof") return `p${PID}\nfcwd\nn${CWD}\n`;
+          throw new Error("unexpected command");
+        },
+        signalFn: (...args) => signals.push(args),
+      });
+      assert.equal(result.status, "not-signaled", item.name);
+      assert.equal(result.verification.status, "indeterminate", item.name);
+      assert.equal(result.verification.code, PROCESS_VERIFICATION_CODES.METADATA_MALFORMED, item.name);
+      assert.deepEqual(signals, [], item.name);
+    }
+  });
+
+  it("rejects malformed, misordered, ambiguous, or unassociated lsof records without signaling", async () => {
+    const records = [
+      ["misordered", `p${PID}\nn${CWD}\nfcwd\n`],
+      ["ambiguous duplicate name", `p${PID}\nfcwd\nn${CWD}\nn/tmp/other\n`],
+      ["unassociated pid", `p${PID + 1}\nfcwd\nn${CWD}\n`],
+      ["multiple process records", `p${PID + 1}\nfcwd\nn/tmp/other\np${PID}\nfcwd\nn${CWD}\n`],
+      ["extra blank record", `p${PID}\nfcwd\nn${CWD}\n\n`],
+      ["missing file descriptor record", `p${PID}\nn${CWD}\n`],
+    ];
+
+    for (const [name, lsof] of records) {
+      const signals = [];
+      const result = await signalVerifiedProcess(darwinExpectedIdentity(), {
+        platform: "darwin",
+        hostname: "host",
+        livenessProbe: () => ({ status: "live" }),
+        commandRunner(command, args) {
+          if (command === "ps" && args.at(-1) === "lstart=") return "Thu Jul  9 15:00:00 2026\n";
+          if (command === "ps" && args.at(-1) === "comm=") return "/opt/homebrew/bin/opencode\n";
+          if (command === "lsof") return lsof;
+          throw new Error("unexpected command");
+        },
+        signalFn: (...args) => signals.push(args),
+      });
+      assert.equal(result.status, "not-signaled", name);
+      assert.equal(result.verification.status, "indeterminate", name);
+      assert.equal(result.verification.code, PROCESS_VERIFICATION_CODES.METADATA_MALFORMED, name);
+      assert.deepEqual(signals, [], name);
     }
   });
 
