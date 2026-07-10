@@ -490,7 +490,9 @@ Rules:
       "hash": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       "subject": "app-123-short-slug",
       "verdict": "APPROVE",
-      "source": "run.validator.review_ref"
+      "source": "run.validator.review_ref",
+      "summary": "Remediate the blocked slice by hardening the recovery runtime.",
+      "required_fixes": ["Verify branch evidence via refs/heads before worktree add"]
     },
     "target": {
       "run_id": "app-123-continuation-1",
@@ -519,6 +521,11 @@ Rules:
       }
     ],
     "parent_reviews": [
+      {
+        "kind": "review",
+        "ref": "reviews/remediation-review.json",
+        "hash": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+      },
       {
         "kind": "review",
         "ref": "reviews/implementation-validator.json",

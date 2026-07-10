@@ -97,7 +97,7 @@ Actions by intent:
 
 - `new-feature`: proceed to Step 0.
 - `resume`: first verify/recover with `feature-factory factory resume-check <run-id> --json` (or rely on the CLI preflight in `factory start --headless|--autonomous "resume <run-id>"`), then load `run.json` and continue from the first incomplete point only when the envelope is `ok:true`.
-- `gate-answer`: write the answer to `gates/<pending-gate>.answer`, consume it through `transitionGateDecision`, then continue or stop according to the answer.
+- `gate-answer`: write the answer to `gates/<pending-gate>.answer`, consume it with `feature-factory factory gate-decision <run-id> <gate> <status> --answer-ref gates/<gate>.answer`, then continue or stop according to the answer.
 - `status`: read state and report. Do not dispatch agents, create worktrees, write gates, or change run status.
 - `scripted-start`: proceed like `new-feature`/`resume`, but in scripted mode stop after writing the next pending gate question if no answer file exists.
 - `autonomous-start`: proceed like `new-feature`/`resume`, set `run.json.mode = "autonomous"`, and use Autonomous Mode rules instead of waiting for external gate answers.
