@@ -1,13 +1,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   heartbeatOnce,
+  mutateRunJsonLocked,
   transitionCostUsage,
   transitionGateDecision,
+  transitionLifecycleRun,
   transitionPrCreated,
   transitionRecoverOrphan,
   transitionRunJson,
@@ -560,6 +562,27 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("does not consume pending steering when recording cost usage", async () => {
+    const fixture = createFixture("cost-pending-steering");
+    try {
+      await transitionSteeringQueued(fixture.runDir, "reconsider the next build wave", { now: NOW, id: "cost-pending" });
+      const steeringBefore = snapshotPendingSteering(fixture);
+
+      const result = await transitionCostUsage(fixture.runDir, {
+        agent: "backend-builder",
+        slice_id: "slice",
+        input_tokens: 20,
+        output_tokens: 5,
+      }, { now: "2026-07-08T12:01:00.000Z", id: "usage-with-pending" });
+
+      assert.equal(result.updated, true);
+      assert.equal(result.cost_attribution.entries.at(-1).id, "usage-with-pending");
+      assertPendingSteeringUnchanged(fixture, steeringBefore);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("does not mutate terminal runs when recording cost usage", async () => {
     const fixture = createFixture("cost-terminal");
     try {
@@ -713,6 +736,50 @@ describe("simplified run-state transitions", () => {
       assert.equal(consumed.steering.trust, "untrusted-operator-data");
       assert.equal(consumed.run.steering.pending, null);
       assert.equal(consumed.run.steering.history.at(-1).event, "consumed");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("does not consume pending steering in generic low-level transitions", async () => {
+    const transitions = [
+      ["transitionRunJson", transitionRunJson],
+      ["transitionLifecycleRun", transitionLifecycleRun],
+      ["mutateRunJsonLocked", mutateRunJsonLocked],
+    ];
+
+    for (const [name, transition] of transitions) {
+      const fixture = createFixture(`pending-${name}`);
+      try {
+        await transitionSteeringQueued(fixture.runDir, `keep steering pending through ${name}`, { now: NOW, id: `pending-${name}` });
+        const steeringBefore = snapshotPendingSteering(fixture);
+        const updatedAt = "2026-07-08T12:01:00.000Z";
+
+        const result = await transition(fixture.runDir, (run) => {
+          run.updated_at = updatedAt;
+        });
+
+        assert.equal(result.updated, true, `${name} should perform its requested state transition`);
+        assert.equal(result.run.updated_at, updatedAt);
+        assertPendingSteeringUnchanged(fixture, steeringBefore);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("does not consume pending steering on heartbeat ticks", async () => {
+    const fixture = createFixture("heartbeat-pending-steering");
+    try {
+      await transitionSteeringQueued(fixture.runDir, "adjust work after the current wait", { now: NOW, id: "heartbeat-pending" });
+      const steeringBefore = snapshotPendingSteering(fixture);
+      writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
+
+      const result = await heartbeatOnce(fixture.runDir, { now: Date.parse("2026-07-08T12:01:00.000Z") });
+
+      assert.equal(result.updated, true);
+      assert.equal(result.run.heartbeat_at, "2026-07-08T12:01:00.000Z");
+      assertPendingSteeringUnchanged(fixture, steeringBefore);
     } finally {
       cleanup(fixture.repo);
     }
@@ -913,6 +980,32 @@ function heartbeat(runId) {
 
 function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
+}
+
+function snapshotPendingSteering(fixture) {
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const steeringDir = join(fixture.runDir, "steering");
+  assert.ok(run.steering?.pending, "fixture must have pending steering metadata");
+  return {
+    pending: run.steering.pending,
+    history: run.steering.history,
+    file: readFileSync(join(fixture.runDir, run.steering.pending.ref), "utf8"),
+    files: readdirSync(steeringDir).sort(),
+  };
+}
+
+function assertPendingSteeringUnchanged(fixture, before) {
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const steeringDir = join(fixture.runDir, "steering");
+  const files = readdirSync(steeringDir).sort();
+
+  assert.deepEqual(run.steering.pending, before.pending);
+  assert.equal(run.steering.pending.ref, before.pending.ref);
+  assert.equal(run.steering.pending.hash, before.pending.hash);
+  assert.deepEqual(run.steering.history, before.history);
+  assert.equal(readFileSync(join(fixture.runDir, before.pending.ref), "utf8"), before.file);
+  assert.deepEqual(files, before.files);
+  assert.equal(files.some((file) => file.startsWith("consumed-")), false);
 }
 
 function writeJson(file, value) {
