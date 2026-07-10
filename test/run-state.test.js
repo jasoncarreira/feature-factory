@@ -822,6 +822,47 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("revalidates dead-owner liveness immediately before quarantine removal", async () => {
+    const fixture = createFixture("reclaim-liveness-change");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    let livenessChecks = 0;
+    let quarantine = null;
+    let callbackEntered = false;
+    try {
+      mkdirSync(lockDir);
+      writeJson(join(lockDir, "owner.json"), {
+        pid: 999999,
+        hostname: hostname(),
+        acquired_at: NOW,
+        nonce: "99999999-9999-4999-8999-999999999999",
+      });
+
+      await assert.rejects(
+        withRunJsonLock(fixture.runDir, () => { callbackEntered = true; }, {
+          timeoutMs: 5000,
+          retryDelayMs: 1,
+          processAliveFn: () => {
+            livenessChecks += 1;
+            return livenessChecks < 3 ? false : true;
+          },
+          lockHooks: {
+            onReclaimRenamed: ({ quarantine: path }) => { quarantine = path; },
+          },
+        }),
+        /owner is no longer definitively dead before removal/u,
+      );
+
+      assert.equal(livenessChecks, 3);
+      assert.equal(callbackEntered, false);
+      assert.equal(existsSync(lockDir), false);
+      assert.ok(quarantine);
+      assert.equal(existsSync(quarantine), true, "changed-owner quarantine must remain for manual recovery");
+      assert.equal(readJson(join(quarantine, "owner.json")).nonce, "99999999-9999-4999-8999-999999999999");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("does not steal an aged run-json lock from a live owner", async () => {
     const fixture = createFixture("live-lock");
     try {

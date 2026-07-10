@@ -204,6 +204,9 @@ async function reclaimRunJsonLock(runDir, lockDir, observedIdentity, observedEvi
     || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
     throw new Error(`run.json lock reclamation identity changed before removal at ${quarantine}`);
   }
+  if (!canStealRunJsonLock(observedEvidence.owner, options)) {
+    throw new Error(`run.json lock owner is no longer definitively dead before removal at ${quarantine}`);
+  }
   await rm(quarantine, { recursive: true, force: true });
   await removeOwnedReclaimClaim(claimPath, claim);
   if (lockHooks.onReclaimRemoved) await lockHooks.onReclaimRemoved({ runDir, lockDir });
