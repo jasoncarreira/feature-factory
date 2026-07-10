@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { cancelFactoryRun, cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { adoptContinuation, cancelFactoryRun, cleanupRun, consumeSteering, continueFactory, heartbeatStatus, listRuns, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport, serializeCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
@@ -160,6 +160,10 @@ async function factory(args) {
   if (sub === "continue") {
     if (positional.length !== 1) throw new Error("factory continue requires exactly one <blocked-run-id>");
     return print(continueFactory(positional[0], opts), opts);
+  }
+  if (sub === "adopt-continuation") {
+    if (positional.length !== 1) throw new Error("factory adopt-continuation requires exactly one <child-run-id>");
+    return print(await adoptContinuation(positional[0], opts), opts);
   }
   if (sub === "cancel") return cancel(rest);
   if (sub === "steer") return steer(rest);

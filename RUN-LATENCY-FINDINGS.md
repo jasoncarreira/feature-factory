@@ -40,9 +40,13 @@ Two things make it churn instead of converge:
   unless runtime evidence demonstrates an actual profile fallback. The snapshot observability
   is fixed in PR #46 (honest `resolved_from` provenance).
 
-A/B proof it is new behavior: `steering-drain-boundaries` ran pre-class-wide (1 spec
-attempt, ~20 min); the post-#42 runs take 2–3 attempts and 1–2.5h, and the two `-completion`
-continuations are currently ~100% stuck in the spec loop.
+Observational before/after association (not a controlled A/B — these are different runs and
+workloads with no controlled assignment and obvious confounders, so read it as a signal, not
+proof): the pre-class-wide run `steering-drain-boundaries` (sampled 2026-07-06) took 1 spec
+attempt, ~20 min; the post-#42 runs sampled 2026-07-07/08 took 2–3 attempts and 1–2.5h, and at
+the time of that analysis the two `-completion` continuations were stuck in the spec loop.
+Those specific run-status observations are historical — later runs and the fixes in PRs
+#44/#45/#46 have since changed the picture.
 
 ## Why the runs take so long (by wall-clock share)
 

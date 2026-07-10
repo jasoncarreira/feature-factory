@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
+import { adoptContinuation, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
@@ -521,10 +521,11 @@ describe("factory continue", () => {
 });
 
 describe("continuation planning-artifact reuse", () => {
+  // The brief + spec review are written by createFixture({ spec }) so the parent's
+  // acceptance binding can be computed against them; here we add the other inputs.
   function seedPlanningArtifacts(runDir) {
     writeFileSync(join(runDir, "artifacts", "research-map.md"), "research\n", "utf8");
     writeFileSync(join(runDir, "artifacts", "design-brief.md"), "design\n", "utf8");
-    writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
   }
 
   it("seeds the parent's accepted planning artifacts and carries the approving spec review into the child", () => {
@@ -632,6 +633,139 @@ describe("continuation planning-artifact reuse", () => {
       cleanup(fixture.repo);
     }
   });
+
+  it("fails closed for a legacy accepted step that carries no durable acceptance binding", () => {
+    const fixture = createFixture("reuse-unbound", { spec: { status: "accepted", verdict: "APPROVE", bind: false } });
+    try {
+      seedPlanningArtifacts(fixture.runDir);
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-unbound-next", dryRun: true });
+      assert.equal(payload.continuation.planning_reuse.eligible, false);
+      assert.match(payload.continuation.planning_reuse.reason, /acceptance binding|re-acceptance/i);
+      assert.equal(seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation).eligible, false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed when the brief changed after acceptance (does not match the binding)", () => {
+    const fixture = createFixture("reuse-stale", { spec: { status: "accepted", verdict: "APPROVE", staleArtifact: true } });
+    try {
+      seedPlanningArtifacts(fixture.runDir);
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "reuse-stale-next", dryRun: true });
+      assert.equal(payload.continuation.planning_reuse.eligible, false);
+      assert.match(payload.continuation.planning_reuse.reason, /changed since acceptance|re-acceptance/i);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("records an immutable acceptance binding when the parent step is accepted (via the real CLI transition)", () => {
+    const fixture = createFixture("bind-write");
+    try {
+      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
+      writeJson(join(fixture.runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", summary: "ok" });
+      // seed the step so the accept transition has a step to bind
+      updateRun(fixture, (run) => {
+        run.status = "running";
+        run.terminal_result = null;
+        run.steps = [{ agent: "spec-writer", status: "running", attempts: 0 }];
+      });
+
+      const proc = runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "accepted", "--artifact-ref", "artifacts/technical-brief.md", "--review-ref", "reviews/spec-writer.json", "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      const written = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8")).steps[0];
+      assert.equal(written.acceptance.artifact_ref, "artifacts/technical-brief.md");
+      assert.equal(written.acceptance.artifact_hash, hashFile(join(fixture.runDir, "artifacts", "technical-brief.md")));
+      assert.equal(written.acceptance.review_hash, hashFile(join(fixture.runDir, "reviews", "spec-writer.json")));
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("adopts a continuation through the checked transition, recording inherited acceptance", async () => {
+    const fixture = createFixture("adopt-ok", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      const child = seedChildForAdopt(fixture, "adopt-ok-next");
+      const result = await adoptContinuation("adopt-ok-next", { cwd: fixture.repo });
+      assert.equal(result.status, "adopted");
+      assert.equal(result.step.status, "accepted");
+      assert.equal(result.step.review_ref, "reviews/spec-writer.json");
+      assert.equal(result.step.acceptance.artifact_hash, child.continuation.planning_reuse.spec_artifact_hash);
+      assert.equal(result.step.inherited_acceptance.from_run_id, fixture.runId);
+      assert.equal(result.step.inherited_acceptance.review_hash, child.continuation.planning_reuse.spec_review_hash);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("refuses to adopt when the seeded review was altered (or spoofed) after seeding", async () => {
+    const fixture = createFixture("adopt-altered", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      const child = seedChildForAdopt(fixture, "adopt-altered-next");
+      writeFileSync(join(child.childRunDir, "reviews", "spec-writer.json"), JSON.stringify({ subject: "spec-writer", verdict: "APPROVE", summary: "TAMPERED" }), "utf8");
+      await assert.rejects(() => adoptContinuation("adopt-altered-next", { cwd: fixture.repo }), /does not match the parent acceptance binding/u);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("refuses to adopt when a seeded file is missing", async () => {
+    const fixture = createFixture("adopt-missing", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      const child = seedChildForAdopt(fixture, "adopt-missing-next");
+      rmSync(join(child.childRunDir, "artifacts", "technical-brief.md"), { force: true });
+      await assert.rejects(() => adoptContinuation("adopt-missing-next", { cwd: fixture.repo }), /requires seeded artifacts\/technical-brief\.md/u);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("exclusive publish: a concurrent destination winner is not clobbered and this seed rolls back", () => {
+    const fixture = createFixture("seed-race", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      seedPlanningArtifacts(fixture.runDir);
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "seed-race-next", dryRun: true });
+      const childArtifacts = join(fixture.repo, ".opencode", "factory", "seed-race-next", "artifacts");
+      // a concurrent seed already published technical-brief.md (sorts last of the artifacts)
+      mkdirSync(childArtifacts, { recursive: true });
+      writeFileSync(join(childArtifacts, "technical-brief.md"), "winner\n", "utf8");
+      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation), /EEXIST|exist/u);
+      // the winner's bytes are untouched; the earlier files this seed published are rolled back
+      assert.equal(readFileSync(join(childArtifacts, "technical-brief.md"), "utf8"), "winner\n");
+      assert.equal(existsSync(join(childArtifacts, "design-brief.md")), false);
+      assert.equal(existsSync(join(childArtifacts, "research-map.md")), false);
+      assert.equal(existsSync(join(childArtifacts, "story.md")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("mid-publication failure leaves no partial child artifacts", () => {
+    const fixture = createFixture("seed-midfail", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      seedPlanningArtifacts(fixture.runDir);
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "seed-midfail-next", dryRun: true });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", "seed-midfail-next");
+      // reviews/ is a FILE, so publishing the spec review (last in the plan, after all
+      // artifacts) fails with ENOTDIR mid-publication.
+      mkdirSync(childRunDir, { recursive: true });
+      writeFileSync(join(childRunDir, "reviews"), "not a dir\n", "utf8");
+      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation), /ENOTDIR|EEXIST|not a directory/u);
+      // every artifact published before the failure was rolled back
+      assert.equal(existsSync(join(childRunDir, "artifacts")), false, "no partial child artifacts/ may survive a mid-publish failure");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  function seedChildForAdopt(fixture, childRunId) {
+    const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, dryRun: true });
+    const seeded = seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation);
+    assert.equal(seeded.eligible, true);
+    const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+    writeJson(join(childRunDir, "run.json"), childRunFromPayload(payload.continuation));
+    return { childRunDir, continuation: payload.continuation };
+  }
 });
 
 function createFixture(runId, { status = "blocked", createBranch = true, review, spec } = {}) {
@@ -654,8 +788,20 @@ function createFixture(runId, { status = "blocked", createBranch = true, review,
     terminal_result: status === "blocked" ? { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} } : null,
   };
   if (spec) {
+    writeFileSync(join(runDir, "artifacts", "technical-brief.md"), spec.brief ?? "brief\n", "utf8");
     writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: spec.verdict, summary: "spec review" });
-    run.steps = [{ agent: "spec-writer", status: spec.status, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json" }];
+    const step = { agent: "spec-writer", status: spec.status, attempts: 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json" };
+    if (spec.status === "accepted" && spec.bind !== false) {
+      step.acceptance = {
+        artifact_ref: "artifacts/technical-brief.md",
+        // staleArtifact simulates the brief changing after acceptance: the bound
+        // hash no longer matches the current file, so reuse must fail closed.
+        artifact_hash: spec.staleArtifact ? `sha256:${"0".repeat(64)}` : hashFile(join(runDir, "artifacts", "technical-brief.md")),
+        review_ref: "reviews/spec-writer.json",
+        review_hash: hashFile(join(runDir, "reviews", "spec-writer.json")),
+      };
+    }
+    run.steps = [step];
   }
   writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId };

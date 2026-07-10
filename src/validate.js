@@ -384,6 +384,7 @@ function validateContinuationPlanningReuse(errors, reuse, path) {
     requiredString(errors, reuse, "spec_review_ref", `${path}.spec_review_ref`);
     requiredHash(errors, reuse, "spec_review_hash", `${path}.spec_review_hash`);
     requiredString(errors, reuse, "spec_artifact_ref", `${path}.spec_artifact_ref`);
+    requiredHash(errors, reuse, "spec_artifact_hash", `${path}.spec_artifact_hash`);
   }
 }
 
@@ -643,7 +644,33 @@ function validateSteps(errors, steps, path) {
     optionalString(errors, step, "artifact_ref", `${path}[${index}].artifact_ref`);
     optionalString(errors, step, "review_ref", `${path}[${index}].review_ref`);
     optionalString(errors, step, "evidence_ref", `${path}[${index}].evidence_ref`);
+    validateStepAcceptance(errors, step.acceptance, `${path}[${index}].acceptance`);
+    validateStepInheritedAcceptance(errors, step.inherited_acceptance, `${path}[${index}].inherited_acceptance`);
   }
+}
+
+function validateStepAcceptance(errors, acceptance, path) {
+  if (acceptance === undefined || acceptance === null) return;
+  if (!isRecord(acceptance)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredString(errors, acceptance, "artifact_ref", `${path}.artifact_ref`);
+  requiredHash(errors, acceptance, "artifact_hash", `${path}.artifact_hash`);
+  optionalString(errors, acceptance, "review_ref", `${path}.review_ref`);
+  if (acceptance.review_ref !== undefined && acceptance.review_ref !== null) requiredHash(errors, acceptance, "review_hash", `${path}.review_hash`);
+}
+
+function validateStepInheritedAcceptance(errors, inherited, path) {
+  if (inherited === undefined || inherited === null) return;
+  if (!isRecord(inherited)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredString(errors, inherited, "from_run_id", `${path}.from_run_id`);
+  requiredString(errors, inherited, "parent_spec_review_ref", `${path}.parent_spec_review_ref`);
+  requiredHash(errors, inherited, "artifact_hash", `${path}.artifact_hash`);
+  requiredHash(errors, inherited, "review_hash", `${path}.review_hash`);
 }
 
 function validateVerdict(errors, value, path, allowed) {

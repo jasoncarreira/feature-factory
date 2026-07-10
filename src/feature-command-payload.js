@@ -6,7 +6,7 @@ const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse"]);
-const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "child_spec_review_ref"]);
+const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
@@ -181,7 +181,8 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       && (!canonicalJsonRef(planningReuse.spec_review_ref, "reviews/")
         || planningReuse.child_spec_review_ref !== CONTINUATION_CHILD_SPEC_REVIEW_REF
         || planningReuse.spec_artifact_ref !== "artifacts/technical-brief.md"
-        || !SHA256_PATTERN.test(planningReuse.spec_review_hash || ""))) {
+        || !SHA256_PATTERN.test(planningReuse.spec_review_hash || "")
+        || !SHA256_PATTERN.test(planningReuse.spec_artifact_hash || ""))) {
       return { ok: false, reason: "invalid-continuation-planning-reuse" };
     }
   }
@@ -268,6 +269,7 @@ function normalizedPlanningReuse(planningReuse) {
     spec_review_ref: planningReuse.spec_review_ref,
     spec_review_hash: planningReuse.spec_review_hash,
     spec_artifact_ref: planningReuse.spec_artifact_ref,
+    spec_artifact_hash: planningReuse.spec_artifact_hash,
     child_spec_review_ref: planningReuse.child_spec_review_ref,
   };
 }

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
-import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionRunStep, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -1301,6 +1301,7 @@ function normalizeRequiredFixes(value) {
 // (or any non-approving verdict) is never treated as acceptance.
 const APPROVING_SPEC_VERDICTS = new Set(["APPROVE", "APPROVED", "ACCEPT", "ACCEPTED", "GO", "PASS"]);
 const CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
+const SHA256_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
 
 // Decide whether the parent's planning output is reusable by DURABLE ACCEPTANCE,
 // not mere file presence. A brief is reusable only when the parent has an accepted
@@ -1316,20 +1317,37 @@ function continuationPlanningReuse(parentRun, parentRunDir) {
   if (status !== "accepted") {
     return { eligible: false, reason: `parent spec-writer step is '${status || "unset"}', not accepted; brief is amendment input only` };
   }
-  if (String(step.artifact_ref || "").trim() !== "artifacts/technical-brief.md") {
-    return { eligible: false, reason: "accepted spec-writer step does not reference artifacts/technical-brief.md" };
+  // Require a durable acceptance binding recorded at the accept transition, not an
+  // inference from the parent's current (mutable) files. A legacy accepted step
+  // that predates the binding fails closed and needs explicit re-acceptance.
+  const acceptance = step.acceptance;
+  if (!acceptance || typeof acceptance !== "object") {
+    return { eligible: false, reason: "accepted spec-writer step has no durable acceptance binding (legacy/unbound); requires explicit re-acceptance" };
   }
-  if (!stringValue(step.review_ref)) {
-    return { eligible: false, reason: "accepted spec-writer step has no review_ref" };
+  if (String(acceptance.artifact_ref || "").trim() !== "artifacts/technical-brief.md") {
+    return { eligible: false, reason: "acceptance binding does not reference artifacts/technical-brief.md" };
+  }
+  if (!SHA256_HASH_PATTERN.test(String(acceptance.artifact_hash || "")) || !stringValue(acceptance.review_ref) || !SHA256_HASH_PATTERN.test(String(acceptance.review_hash || ""))) {
+    return { eligible: false, reason: "acceptance binding is missing artifact/review hashes; requires explicit re-acceptance" };
   }
   const parentRoot = resolve(parentRunDir);
-  const reviewRef = normalizeParentRef(step.review_ref, "reviews");
+  // The bound artifact bytes must still be present and unchanged since acceptance.
+  const artifactPath = resolve(parentRoot, "artifacts/technical-brief.md");
+  const artifactEntry = lstatOptionalNoSymlinks(parentRoot, artifactPath, "spec-writer artifact 'artifacts/technical-brief.md'", "spec-writer artifact must not contain symlinks");
+  if (!artifactEntry || !artifactEntry.isFile()) return { eligible: false, reason: "bound technical-brief.md is missing from the parent run" };
+  if (sha256File(artifactPath) !== acceptance.artifact_hash) {
+    return { eligible: false, reason: "technical-brief.md changed since acceptance (does not match acceptance binding); requires explicit re-acceptance" };
+  }
+  const reviewRef = normalizeParentRef(acceptance.review_ref, "reviews");
   const reviewPath = resolve(parentRoot, reviewRef);
   if (!isLogicalContainedPath(join(parentRoot, "reviews"), reviewPath, { allowEqual: false })) {
     return { eligible: false, reason: `spec-writer review_ref '${reviewRef}' escapes reviews/` };
   }
   const entry = lstatOptionalNoSymlinks(parentRoot, reviewPath, `spec-writer review '${reviewRef}'`, `spec-writer review '${reviewRef}' must not contain symlinks`);
   if (!entry || !entry.isFile()) return { eligible: false, reason: `spec-writer review_ref '${reviewRef}' does not resolve to a file` };
+  if (sha256File(reviewPath) !== acceptance.review_hash) {
+    return { eligible: false, reason: "spec-writer review changed since acceptance (does not match acceptance binding); requires explicit re-acceptance" };
+  }
   let review;
   try {
     review = readReviewJson(reviewPath);
@@ -1345,8 +1363,9 @@ function continuationPlanningReuse(parentRun, parentRunDir) {
   return {
     eligible: true,
     spec_review_ref: reviewRef,
-    spec_review_hash: sha256File(reviewPath),
+    spec_review_hash: acceptance.review_hash,
     spec_artifact_ref: "artifacts/technical-brief.md",
+    spec_artifact_hash: acceptance.artifact_hash,
     child_spec_review_ref: CHILD_SPEC_REVIEW_REF,
   };
 }
@@ -1409,31 +1428,35 @@ export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuati
     if (!isLogicalContainedPath(item.destRoot, dest, { allowEqual: false })) {
       throw new Error(`continuation seed dest escapes its root: ${item.destRef}`);
     }
-    if (existsSync(dest)) {
-      throw new Error(`continuation seed target already exists (seed aborted): ${item.destRef}`);
-    }
     staged.push({ dest, bytes, destRef: item.destRef, isArtifact: item.isArtifact });
   }
 
-  // Phase 2 — publish atomically-enough: on any write failure, remove everything
-  // we created so no partial child artifacts/ or reviews/ survives.
-  const written = [];
+  // Phase 2 — publish through a private staging tree, then commit each file with
+  // an exclusive hard link. `linkSync` is atomic and fails EEXIST if a concurrent
+  // seed already published that destination, so a partial write never lands at a
+  // real path and a race cannot clobber the winner. On any failure, roll back only
+  // what THIS call created (published files, then empty dirs it created) — never a
+  // whole run directory a concurrent seed may own.
+  const stagingRoot = join(targetRunDir, `.continuation-seed-${randomUUID()}`);
+  const published = [];
+  const createdDirs = [];
   try {
-    for (const item of staged) {
-      mkdirSync(dirname(item.dest), { recursive: true });
-      writeFileSync(item.dest, item.bytes);
-      written.push(item.dest);
+    mkdirRecordingCreated(stagingRoot, createdDirs);
+    const stagedFiles = staged.map((item, index) => {
+      const tmp = join(stagingRoot, `seed-${index}`);
+      writeFileSync(tmp, item.bytes);
+      return { tmp, dest: item.dest };
+    });
+    for (const { tmp, dest } of stagedFiles) {
+      mkdirRecordingCreated(dirname(dest), createdDirs);
+      linkSync(tmp, dest); // atomic + exclusive: EEXIST if a concurrent seed won
+      published.push(dest);
     }
   } catch (error) {
-    for (const path of written) {
-      try {
-        rmSync(path, { force: true });
-      } catch {
-        // Best-effort rollback; surface the original write failure.
-      }
-    }
+    rollbackContinuationSeed({ published, stagingRoot, createdDirs });
     throw error;
   }
+  bestEffortRemove(() => rmSync(stagingRoot, { recursive: true, force: true }));
   return {
     eligible: true,
     reason: null,
@@ -1445,6 +1468,96 @@ export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuati
 
 function sha256Buffer(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+// Create `dir` (recursively) and record only the directories this call actually
+// created, so a rollback removes them without touching pre-existing dirs.
+function mkdirRecordingCreated(dir, createdDirs) {
+  const missing = [];
+  let current = resolve(dir);
+  while (!existsSync(current)) {
+    missing.unshift(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  if (missing.length === 0) return;
+  mkdirSync(dir, { recursive: true });
+  for (const created of missing) createdDirs.push(created);
+}
+
+function rollbackContinuationSeed({ published, stagingRoot, createdDirs }) {
+  for (const dest of published) bestEffortRemove(() => rmSync(dest, { force: true }));
+  bestEffortRemove(() => rmSync(stagingRoot, { recursive: true, force: true }));
+  // Remove created dirs deepest-first, but only if now empty (a concurrent seed
+  // that won a race may have published its own files into a shared dir).
+  for (const dir of [...createdDirs].sort((a, b) => b.length - a.length)) {
+    bestEffortRemove(() => {
+      if (existsSync(dir) && readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true });
+    });
+  }
+}
+
+function bestEffortRemove(fn) {
+  try {
+    fn();
+  } catch {
+    // Rollback is best-effort; surface the original failure instead.
+  }
+}
+
+// Checked continuation-adoption transition. Instead of a model-driven generic
+// `factory step ... accepted`, this verifies the seeded child files against the
+// parent's durable acceptance binding (carried in `continuation.planning_reuse`)
+// and atomically records an inherited-acceptance provenance record on the child
+// spec-writer step. Fails closed if the seeded brief/review are missing, altered,
+// or the continuation is not reuse-eligible.
+export async function adoptContinuation(childRunId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const childRunDir = resolveRunDir(childRunId, { ...opts, cwd: repo });
+  const run = readRunFile(join(childRunDir, "run.json"));
+  const continuation = run?.continuation;
+  if (!continuation || continuation.kind !== "blocked-run-continuation") {
+    throw new Error(`run '${childRunId}' has no blocked-run-continuation metadata to adopt`);
+  }
+  const reuse = continuation.planning_reuse;
+  if (!reuse || reuse.eligible !== true) {
+    throw new Error(`continuation '${childRunId}' has no reuse-eligible parent acceptance to adopt${reuse?.reason ? ` (${reuse.reason})` : ""}`);
+  }
+  if (!SHA256_HASH_PATTERN.test(String(reuse.spec_artifact_hash || "")) || !SHA256_HASH_PATTERN.test(String(reuse.spec_review_hash || ""))) {
+    throw new Error(`continuation '${childRunId}' planning_reuse is missing artifact/review acceptance hashes`);
+  }
+  const childRoot = resolve(childRunDir);
+  verifySeededChildFile(childRoot, "artifacts", "artifacts/technical-brief.md", reuse.spec_artifact_hash);
+  verifySeededChildFile(childRoot, "reviews", CHILD_SPEC_REVIEW_REF, reuse.spec_review_hash);
+
+  const result = await transitionRunStep(childRunDir, "spec-writer", (step) => {
+    step.status = "accepted";
+    step.artifact_ref = "artifacts/technical-brief.md";
+    step.review_ref = CHILD_SPEC_REVIEW_REF;
+    if (!Number.isInteger(step.attempts)) step.attempts = 0;
+    step.inherited_acceptance = {
+      from_run_id: continuation.parent.run_id,
+      parent_spec_review_ref: reuse.spec_review_ref,
+      artifact_hash: reuse.spec_artifact_hash,
+      review_hash: reuse.spec_review_hash,
+    };
+  }, { ...opts, mustExist: false });
+  return { status: "adopted", run_id: childRunId, step: result.step };
+}
+
+function verifySeededChildFile(childRoot, root, ref, expectedHash) {
+  const path = resolve(childRoot, ref);
+  if (!isLogicalContainedPath(join(childRoot, root), path, { allowEqual: false })) {
+    throw new Error(`continuation adoption ref escapes ${root}/: ${ref}`);
+  }
+  const entry = lstatOptionalNoSymlinks(childRoot, path, `seeded ${ref}`, `seeded ${ref} must not contain symlinks`);
+  if (!entry || !entry.isFile()) {
+    throw new Error(`continuation adoption requires seeded ${ref}; it is missing (run 'factory continue' first)`);
+  }
+  if (sha256File(path) !== expectedHash) {
+    throw new Error(`continuation adoption: seeded ${ref} does not match the parent acceptance binding (altered or spoofed)`);
+  }
 }
 
 function collectContinuationParentArtifacts(parentRunDir) {
