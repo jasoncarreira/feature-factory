@@ -1,12 +1,49 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   REDACTED_ENV_VALUE,
+  collectEnv,
   collectRunDebugSnapshot,
   isSensitiveEnvKey,
   isSensitiveEnvValue,
+  readConfiguredPluginOptions,
   scrubSecretEnv,
 } from "../src/env-snapshot.js";
+
+describe("resolved model provenance", () => {
+  function withConfig(profilesJson) {
+    const dir = mkdtempSync(join(tmpdir(), "ff-env-cfg-"));
+    const configPath = join(dir, "opencode.jsonc");
+    writeFileSync(configPath, JSON.stringify({ plugin: [["file:///x/opencode-feature-factory", { profiles: profilesJson }]] }), "utf8");
+    return { dir, configPath };
+  }
+
+  it("recovers operator profiles from the opencode config and labels the source", async () => {
+    const { dir, configPath } = withConfig({ "spec-writer": { model: "openai/gpt-5.6-sol", variant: "xhigh" } });
+    try {
+      const env = await collectEnv({ pluginOptions: {}, configPath });
+      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_models["spec-writer"], "openai/gpt-5.6-sol");
+      assert.equal(env.resolved_variants["spec-writer"], "xhigh");
+      assert.deepEqual(readConfiguredPluginOptions(process.cwd(), { configPath }).profiles["spec-writer"], { model: "openai/gpt-5.6-sol", variant: "xhigh" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("labels explicitly passed options and package defaults distinctly", async () => {
+    const passed = await collectEnv({ pluginOptions: { profiles: { "spec-writer": { model: "m", variant: "high" } }, readConfiguredProfiles: false }, configPath: "/does/not/exist" });
+    assert.equal(passed.resolved_from, "plugin-options");
+    assert.equal(passed.resolved_models["spec-writer"], "m");
+
+    const none = await collectEnv({ pluginOptions: {}, configPath: "/does/not/exist" });
+    assert.equal(none.resolved_from, "package-default");
+    assert.equal(none.resolved_models["spec-writer"], null); // not visible to this process, not "unconfigured"
+  });
+});
 
 describe("environment snapshot redaction", () => {
   it("redacts token-shaped and high-entropy values", () => {

@@ -176,6 +176,23 @@ Seed repair is intentionally narrow. The CLI manages only `SKILL.md` and `SCHEMA
 
 Profile precedence is exact agent, then role, then `profiles.default`, then top-level `profile`, then opencode default. A profile may contain `model`, `variant`, or both.
 
+**Recommended profile.** The planning and review roles do the hardest reasoning in the factory (a decision-complete, class-wide technical brief; the pre-PR panel), so give them a strong model at high effort. A good starting point — swap the model for whatever your provider exposes:
+
+```jsonc
+"profiles": {
+  "planning":  { "model": "<your-strong-model>", "variant": "xhigh" },  // feature-factory, spec-writer, work-decomposer
+  "security":  { "model": "<your-strong-model>", "variant": "xhigh" },  // security-reviewer
+  "reviewer":  { "model": "<your-strong-model>", "variant": "high" },   // work-reviewer, implementation-validator
+  "builder":   { "model": "<your-strong-model>", "variant": "high" },
+  "research":  { "model": "<your-capable-model>", "variant": "high" },  // codebase-researcher, test-verifier
+  "test":      { "model": "<your-capable-model>", "variant": "high" },
+  "design":    { "model": "<your-strong-model>", "variant": "high" },
+  "story":     { "model": "<your-fast-model>",   "variant": "medium" }
+}
+```
+
+**Recommended effort default (model-agnostic).** When a profile sets a `model` for an agent but no `variant`, the plugin fills in the role's recommended reasoning-effort variant automatically — `planning`/`security` → `xhigh`, `reviewer`/`builder`/`research`/`test`/`design` → `high`, `story` → `medium`. It never pins a model and never overrides a `variant` you set, so setting only `profiles.default.model` already gives planning/review high effort. `feature-factory doctor` warns (`recommended profiles`) when a planning or review agent resolves to no model at all.
+
 ### Reviewer Read-Only Guard
 
 Reviewer-designated agents are `work-reviewer`, `implementation-validator`, and `security-reviewer`. They run with `edit: deny`, but that is not a runtime sandbox: they may still mutate through allowed `bash` or other tool paths.

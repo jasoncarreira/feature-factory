@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
+import { readJsoncConfig } from "./config.js";
 import { git } from "./git.js";
 import plugin from "./plugin.js";
 import { timestamp } from "./utils.js";
@@ -29,11 +31,19 @@ const SAFE_HIGH_ENTROPY_ENV_KEY_PATTERN = /^(?:OTEL_EXPORTER_OTLP(?:_(?:TRACES|M
 export const REDACTED_ENV_VALUE = "[redacted]";
 
 export async function collectEnv(options = {}) {
-  const resolvedConfig = await resolvePluginConfig(options.pluginOptions || {});
+  const { pluginOptions, resolvedFrom } = resolveEffectivePluginOptions(options);
+  const resolvedConfig = await resolvePluginConfig(pluginOptions);
   return {
     feature_factory_version: packageVersion(),
     opencode_version: commandOutput("opencode", ["--version"]),
     plugin_spec: options.pluginSpec || "opencode-feature-factory",
+    // How the model/variant map below was resolved: "plugin-options" (passed by
+    // a caller that has them, e.g. doctor), "opencode-config" (recovered from the
+    // operator's opencode.jsonc plugin entry), or "package-default" (no operator
+    // profiles visible). A null model under "package-default" means "not visible
+    // to this process", NOT "unconfigured" — opencode still applies operator
+    // profiles at runtime.
+    resolved_from: resolvedFrom,
     resolved_models: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.model || null])),
     resolved_variants: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.variant || null])),
     driver: {
@@ -43,6 +53,50 @@ export async function collectEnv(options = {}) {
     },
     capabilities: detectCapabilities(options.cwd || process.cwd()),
   };
+}
+
+function resolveEffectivePluginOptions(options = {}) {
+  if (hasProfileConfig(options.pluginOptions)) return { pluginOptions: options.pluginOptions, resolvedFrom: "plugin-options" };
+  // The `factory env` snapshot path collects without the operator's plugin
+  // options (they live in the opencode.jsonc plugin entry, which only opencode
+  // parses). Recover them from the config so resolved_models reflects what
+  // opencode actually applies rather than misleading nulls.
+  if (options.readConfiguredProfiles !== false) {
+    const recovered = readConfiguredPluginOptions(options.cwd, { configPath: options.configPath });
+    if (hasProfileConfig(recovered)) return { pluginOptions: recovered, resolvedFrom: "opencode-config" };
+  }
+  return { pluginOptions: isRecord(options.pluginOptions) ? options.pluginOptions : {}, resolvedFrom: "package-default" };
+}
+
+export function readConfiguredPluginOptions(cwd = process.cwd(), { configPath } = {}) {
+  void cwd;
+  const path = configPath || join(homedir(), ".config", "opencode", "opencode.jsonc");
+  let cfg;
+  try {
+    if (!existsSync(path)) return null;
+    cfg = readJsoncConfig(path, { label: "opencode.jsonc" });
+  } catch {
+    return null;
+  }
+  for (const entry of Array.isArray(cfg?.plugin) ? cfg.plugin : []) {
+    const spec = Array.isArray(entry) ? entry[0] : entry;
+    if (typeof spec !== "string") continue;
+    if (spec === "opencode-feature-factory" || spec.includes("opencode-feature-factory")) {
+      return Array.isArray(entry) && isRecord(entry[1]) ? entry[1] : {};
+    }
+  }
+  return null;
+}
+
+function hasProfileConfig(value) {
+  if (!isRecord(value)) return false;
+  return isRecord(value.profiles) && Object.keys(value.profiles).length > 0
+    ? true
+    : isRecord(value.profile) && (value.profile.model || value.profile.variant) ? true : false;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 export async function collectRunDebugSnapshot({ cwd, driverKind, pluginSpec, pluginOptions, event, now } = {}) {

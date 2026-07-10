@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { readJsoncConfig, readStrictJsonConfig } from "./config.js";
 import { REDACTED_ENV_VALUE, collectEnv, resolvePluginConfig, scrubSecretEnv } from "./env-snapshot.js";
 import { checkOpenTelemetryApiLoadability, evaluateContentCaptureRisk, sanitizeOtlpEnv } from "./telemetry.js";
+import { AGENT_ROLES, PROFILE_RECOMMENDED_ROLES } from "./plugin.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const SUBAGENTS = [
@@ -107,6 +108,15 @@ export async function runDoctor(options = {}) {
   if (!options.providerSmoke) {
     add(checks, "provider smoke", false, "run with --provider-smoke before long scripted runs", "warn");
   }
+
+  // The planning and review roles do the hardest work; a fresh install with no
+  // profile leaves them on opencode's default model/effort. doctor reads the
+  // operator config, so env.resolved_models is authoritative here.
+  const unprofiledRoleAgents = PROFILE_RECOMMENDED_ROLES.flatMap((role) =>
+    Object.keys(AGENT_ROLES).filter((agent) => AGENT_ROLES[agent] === role && !env.resolved_models[agent]));
+  add(checks, "recommended profiles", unprofiledRoleAgents.length === 0,
+    unprofiledRoleAgents.length === 0 ? "planning/review roles have a configured model" : `no model for ${unprofiledRoleAgents.join(", ")} — see README "Configure Profiles"`,
+    unprofiledRoleAgents.length === 0 ? "ok" : "warn");
 
   if (options.json) {
     console.log(JSON.stringify(telemetry ? { checks, env, telemetry } : { checks, env }, null, 2));

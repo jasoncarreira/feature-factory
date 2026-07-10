@@ -30,6 +30,28 @@ describe("plugin profiles", () => {
 
     assert.equal(cfg.agent["security-reviewer"].variant, "xhigh");
   });
+
+  it("fills in the recommended effort variant when a model has no variant", async () => {
+    const cfg = await pluginConfig({ profiles: { default: { model: "openai/gpt-5.5" } } });
+    assert.equal(cfg.agent["spec-writer"].model, "openai/gpt-5.5");
+    assert.equal(cfg.agent["spec-writer"].variant, "xhigh"); // planning role
+    assert.equal(cfg.agent["feature-factory"].variant, "xhigh"); // planning role
+    assert.equal(cfg.agent["security-reviewer"].variant, "xhigh"); // security role
+    assert.equal(cfg.agent["work-reviewer"].variant, "high"); // reviewer role
+    assert.equal(cfg.agent["backend-builder"].variant, "high"); // builder role
+    assert.equal(cfg.agent["story-reader"].variant, "medium"); // story role
+  });
+
+  it("never overrides an explicit variant", async () => {
+    const cfg = await pluginConfig({ profiles: { "spec-writer": { model: "openai/gpt-5.5", variant: "low" } } });
+    assert.equal(cfg.agent["spec-writer"].variant, "low");
+  });
+
+  it("does not attach a variant to a model-less agent", async () => {
+    const cfg = await pluginConfig({});
+    assert.equal(cfg.agent["spec-writer"].model ?? null, null);
+    assert.equal(cfg.agent["spec-writer"].variant ?? null, null);
+  });
 });
 
 describe("plugin agent edit permissions", () => {
