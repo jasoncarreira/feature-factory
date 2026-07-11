@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readJsoncConfig } from "./config.js";
@@ -69,8 +69,46 @@ function resolveEffectivePluginOptions(options = {}) {
 }
 
 export function readConfiguredPluginOptions(cwd = process.cwd(), { configPath } = {}) {
-  void cwd;
-  const path = configPath || join(homedir(), ".config", "opencode", "opencode.jsonc");
+  // Resolve the effective config the same way the launched opencode CLI would,
+  // so `resolved_from`/`resolved_models` stay honest under supported overrides
+  // (OPENCODE_CONFIG, XDG_CONFIG_HOME) and project-level config layers — not only
+  // the default ~/.config location. Prefer whichever layer actually carries the
+  // feature-factory profiles; otherwise report the first plugin entry seen.
+  const candidates = stringValue(configPath) ? [configPath] : opencodeConfigCandidates(cwd);
+  let firstEntry = null;
+  for (const path of candidates) {
+    const entry = readPluginEntryFromConfig(path);
+    if (!entry) continue;
+    if (hasProfileConfig(entry)) return entry;
+    if (!firstEntry) firstEntry = entry;
+  }
+  return firstEntry;
+}
+
+// Candidate config files in opencode's precedence order. Opencode layers project
+// config over the global config, so project-level `opencode.json[c]` (walked up
+// from cwd, nearest first) is preferred; then the global config, which is the
+// OPENCODE_CONFIG override when set, otherwise the XDG (or ~/.config) location.
+function opencodeConfigCandidates(cwd = process.cwd()) {
+  const candidates = [];
+  let dir = resolve(stringValue(cwd) ? cwd : process.cwd());
+  for (;;) {
+    for (const name of ["opencode.jsonc", "opencode.json"]) candidates.push(join(dir, name));
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const override = process.env.OPENCODE_CONFIG;
+  if (stringValue(override)) {
+    candidates.push(override.trim());
+  } else {
+    const configHome = stringValue(process.env.XDG_CONFIG_HOME) ? process.env.XDG_CONFIG_HOME.trim() : join(homedir(), ".config");
+    for (const name of ["opencode.jsonc", "opencode.json"]) candidates.push(join(configHome, "opencode", name));
+  }
+  return [...new Set(candidates)];
+}
+
+function readPluginEntryFromConfig(path) {
   let cfg;
   try {
     if (!existsSync(path)) return null;

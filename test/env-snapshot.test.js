@@ -34,6 +34,42 @@ describe("resolved model provenance", () => {
     }
   });
 
+  it("honors the OPENCODE_CONFIG override when recovering profiles (not just ~/.config)", async () => {
+    const { dir, configPath } = withConfig({ "work-decomposer": { model: "openai/gpt-5.6-sol", variant: "xhigh" } });
+    const emptyCwd = mkdtempSync(join(tmpdir(), "ff-env-cwd-"));
+    const prev = process.env.OPENCODE_CONFIG;
+    process.env.OPENCODE_CONFIG = configPath;
+    try {
+      // No configPath option passed: discovery must follow opencode's override
+      // semantics and find the profile via OPENCODE_CONFIG. cwd is an empty dir so
+      // no project-level config interferes.
+      const env = await collectEnv({ pluginOptions: {}, cwd: emptyCwd });
+      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_models["work-decomposer"], "openai/gpt-5.6-sol");
+      assert.equal(env.resolved_variants["work-decomposer"], "xhigh");
+    } finally {
+      if (prev === undefined) delete process.env.OPENCODE_CONFIG;
+      else process.env.OPENCODE_CONFIG = prev;
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(emptyCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers profiles from a project-level opencode.jsonc walked up from cwd", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ff-env-proj-"));
+    writeFileSync(join(dir, "opencode.jsonc"), JSON.stringify({ plugin: [["opencode-feature-factory", { profiles: { "security-reviewer": { model: "openai/gpt-5.6-sol", variant: "xhigh" } } }]] }), "utf8");
+    const prev = process.env.OPENCODE_CONFIG;
+    delete process.env.OPENCODE_CONFIG;
+    try {
+      const env = await collectEnv({ pluginOptions: {}, cwd: dir });
+      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_models["security-reviewer"], "openai/gpt-5.6-sol");
+    } finally {
+      if (prev !== undefined) process.env.OPENCODE_CONFIG = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("labels explicitly passed options and package defaults distinctly", async () => {
     const passed = await collectEnv({ pluginOptions: { profiles: { "spec-writer": { model: "m", variant: "high" } }, readConfiguredProfiles: false }, configPath: "/does/not/exist" });
     assert.equal(passed.resolved_from, "plugin-options");
