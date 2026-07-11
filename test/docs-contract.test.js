@@ -159,6 +159,47 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SKILL, /Step 2 - Spec And Decomposition[\s\S]*closed implementation matrix[\s\S]*Do not dispatch builders with unresolved instructions/i);
     assert.match(SKILL, /first spec review[\s\S]*every currently discoverable same-class issue[\s\S]*one `required_fixes` list/i);
   });
+
+  it("rejects specifications whose required behavior conflicts with every allowed implementation mechanism", () => {
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /Feasibility rule:[\s\S]*cannot be implemented within its allowed mechanisms, dependencies, compatibility constraints, or explicit non-goals/i,
+    );
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /grammar-complete[\s\S]*prohibiting every parser, tokenizer, scanner, dependency/i,
+    );
+    assert.match(
+      SKILL,
+      /reject mutually incompatible constraints[\s\S]*feasible within the brief's allowed mechanisms, dependencies, compatibility rules, and non-goals/i,
+    );
+  });
+});
+
+describe("review trust and remediation escalation contract", () => {
+  it("requires concrete authority gain inside the declared trust model", () => {
+    for (const [name, text] of documentEntries({ IMPLEMENTATION_VALIDATOR_PROMPT, SECURITY_REVIEWER_PROMPT })) {
+      assert.match(text, /untrusted ingress[\s\S]*privileged sink[\s\S]*capability gained[\s\S]*already possess/i, `${name} must require concrete authority gain`);
+      assert.match(text, /arbitrary code already executing in the same (?:Node\.js )?process[\s\S]*unless the (?:approved )?story[\s\S]*untrusted/i, `${name} must keep same-process mutation outside the default trust model`);
+      assert.match(text, /secret-exposure[\s\S]*sensitive source[\s\S]*unauthorized disclosure sink or observer[\s\S]*does not require attacker-controlled ingress/i, `${name} must preserve secret disclosure as independently blocking`);
+      assert.match(text, /Supply-chain compromise and security regressions[\s\S]*(?:independently|remain)[\s\S]*blocking/i, `${name} must preserve supply-chain and regression blockers`);
+    }
+  });
+
+  it("classifies rerun findings and consolidates discoverable authority surfaces", () => {
+    for (const [name, text] of documentEntries({ IMPLEMENTATION_VALIDATOR_PROMPT, SECURITY_REVIEWER_PROMPT })) {
+      for (const classification of ["unresolved-prior", "remediation-regression", "remediation-exposed", "unrelated-new-scope"]) {
+        assert.match(text, literalPattern(classification), `${name} must classify ${classification} findings`);
+      }
+    }
+    assert.match(SECURITY_REVIEWER_PROMPT, /first review[\s\S]*complete authority and mutation surface[\s\S]*Do not reveal one[\s\S]*per remediation round/i);
+  });
+
+  it("stops retry churn when remediation requires a design decision", () => {
+    assert.match(SKILL, /Before spending a remediation attempt[\s\S]*design-level root cause/i);
+    assert.match(SKILL, /violate an accepted story or brief constraint[\s\S]*repeated findings arise from the same unresolved design choice/i);
+    assert.match(SKILL, /do not burn another implementation retry[\s\S]*terminalize the run as blocked[\s\S]*reviewed continuation to amend the specification/i);
+  });
 });
 
 describe("bounded agent depth contract", () => {
