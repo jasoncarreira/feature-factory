@@ -24,6 +24,11 @@ function isTerminated(record) {
   return record.exit || record.close || record.exitCode !== null || record.signalCode !== null;
 }
 
+function hasOriginalAuthority(record) {
+  const descriptor = Object.getOwnPropertyDescriptor(record.child, "_handle");
+  return record.authorityHandle !== null && descriptor?.value === record.authorityHandle;
+}
+
 function stateOf(record) {
   if (record.close) return "closed";
   if (record.exit || record.exitCode !== null || record.signalCode !== null) return "exited";
@@ -51,17 +56,22 @@ export function createTrackedProcessCleanup({ timeoutMs = 1500, diagnostic = con
 
     spawning = true;
     try {
-      if (options?.detached === true) throw new Error("Tracked process cleanup does not support detached children");
+      const spawnOptions = Object.freeze(options == null ? {} : { ...options });
+      if (cleanupPromise) throw new Error("Cannot spawn after process cleanup has started");
+      if (spawnOptions.detached === true) {
+        throw new Error("Tracked process cleanup does not support detached children");
+      }
 
       const label = boundedText(metadata?.label, MAX_METADATA_LENGTH);
       const boundedCommand = command.slice(0, MAX_METADATA_LENGTH);
       if (cleanupPromise) throw new Error("Cannot spawn after process cleanup has started");
 
-      const child = spawnChild(command, args, options);
+      const child = spawnChild(command, args, spawnOptions);
       const signal = typeof child.kill === "function" ? child.kill.bind(child) : null;
       const record = {
         child,
         signal,
+        authorityHandle: child._handle ?? null,
         label,
         command: boundedCommand,
         pid: positivePid(child),
@@ -124,6 +134,10 @@ export function createTrackedProcessCleanup({ timeoutMs = 1500, diagnostic = con
 
         record.signalAttempted = true;
         attempted.push(record);
+        if (!hasOriginalAuthority(record)) {
+          record.signalOutcome = "signaling-authority-changed";
+          continue;
+        }
         try {
           const signaled = record.signal("SIGTERM");
           record.signalOutcome = signaled ? "signal-sent" : "signal-returned-false";
