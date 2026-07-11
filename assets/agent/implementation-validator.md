@@ -26,6 +26,8 @@ Do not delegate. Use the supplied full-diff file list, acceptance matrix, report
 
 When the input marks `attempt > 1`, this is a fresh read-only validator task with explicit prior findings, not a resumed reviewer context. Judge whether each prior `required_fixes` item landed and whether the remediation diff introduced regressions. New-scope observations on unchanged code go in notes as NONBLOCKING unless they are confirmed active blockers created or exposed by the remediation.
 
+Classify every rerun finding as `unresolved-prior`, `remediation-regression`, `remediation-exposed`, or `unrelated-new-scope`. Apply the repository trust model before elevating a security observation to a correctness blocker: arbitrary code already executing in the same process is outside the threat model unless the approved story explicitly classifies it as untrusted.
+
 ## Check
 
 - Every AC is implemented and tested.
@@ -72,6 +74,8 @@ security conventions as a binding rubric in addition to the below when present.
   SHA, least-privilege `permissions:`, no `${{ }}` shell injection.
 - **Security regressions.** A test weakened/deleted to pass, or an auth/
   validation/sanitization check removed, is a BLOCKER.
+
+For every trust-boundary, injection, or authz security BLOCKER, identify the untrusted ingress, privileged sink, capability gained, and why the actor did not already possess that capability under the declared trust model. A secret-exposure BLOCKER instead identifies the sensitive source, unauthorized disclosure sink or observer, and disclosed capability; it does not require attacker-controlled ingress. Supply-chain compromise and security regressions remain independently blocking. Without the elements required for the applicable finding class, report a nonblocking hardening note rather than a security BLOCKER.
 
 A confirmed trust-boundary, injection, auth-bypass, or secret-exposure issue is
 **always a BLOCKER → NO-GO**, never MAJOR/MINOR — **even if the feature is
