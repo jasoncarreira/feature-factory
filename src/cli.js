@@ -172,6 +172,7 @@ async function factory(args) {
   const opts = options(rest);
   const positional = positionals(rest);
   if (sub === "start") {
+    if (opts.dryRun) throw new Error("factory start --dry-run is unsupported");
     const result = await startFactory(positional, opts);
     print(result, opts);
     if (result && typeof result === "object" && result.ok === false) process.exitCode = 1;
