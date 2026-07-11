@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "./helpers/git-fixture.js";
 import {
   lstatSync,
   mkdirSync,
