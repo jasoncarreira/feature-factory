@@ -606,7 +606,15 @@ Absent context adds no field. The IDs do not prove that an attribution entry, ag
         "ref": "reviews/implementation-validator.json",
         "hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
       }
-    ]
+    ],
+    "planning_reuse": {
+      "eligible": true,
+      "spec_review_ref": "reviews/spec-writer.json",
+      "spec_review_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "spec_artifact_ref": "artifacts/technical-brief.md",
+      "spec_artifact_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "child_spec_review_ref": "reviews/spec-writer.json"
+    }
   },
   "created_at": "2026-07-04T11:45:00Z",
   "updated_at": "2026-07-04T12:00:00Z",
@@ -662,7 +670,13 @@ Absent context adds no field. The IDs do not prove that an attribution entry, ag
       "attempts": 1,
       "artifact_ref": "artifacts/technical-brief.md",
       "review_ref": "reviews/spec-writer.json",
-      "evidence_ref": null
+      "evidence_ref": null,
+      "acceptance": {
+        "artifact_ref": "artifacts/technical-brief.md",
+        "artifact_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "review_ref": "reviews/spec-writer.json",
+        "review_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+      }
     }
   ],
   "slices": [
@@ -701,7 +715,9 @@ Top-level `run.json.review_tier` is an optional opaque display string. It may co
 
 Top-level `run.json.pr_mode` is an optional durable PR creation mode with value `draft` or `ready`. Persist the effective start-time mode there after applying `driver.pr_mode`, legacy `driver.ready`, or the plugin configured default; resume payloads carry this value as `driver.pr_mode` so a run created with a per-run override does not fall back to a later plugin default. It does not change `schema_version`; it remains `1`.
 
-Top-level `run.json.continuation` is present only for child runs created by `factory continue`. Accepted continuation metadata has `schema_version: 1`, `kind: "blocked-run-continuation"`, `created_at`, `operator_summary`, nested `parent`, `review`, and `target` objects, and refs paired with hashes for the parent manifest, approved review evidence, target base commit, and every read-only parent context file. `parent.status` must be exactly `blocked`; `parent.worktree`, branch, and commit identify the source worktree. `review.ref` resolves under the parent run's `reviews/` directory, is paired with `review.hash`, must be referenced by parent run state, and must have a subject consistent with that source. `target.run_id`, `target.branch`, `target.worktree`, `target.base_ref`, and `target.base_commit` describe the fresh child run. `parent_artifacts` is an array of `{kind, ref, hash}` entries for source artifacts such as story and technical brief, and `parent_evidence` / `parent_reviews` arrays carry `{kind, ref, hash}` entries for additional source context; `parent_reviews` includes the selected review with the same hash as `review.hash`. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits/hashes; it must not rely on a special blocking verdict enum as the authorization mechanism.
+Top-level `run.json.continuation` is present only for child runs created by `factory continue`. Accepted continuation metadata has `schema_version: 1`, `kind: "blocked-run-continuation"`, `created_at`, `operator_summary`, nested `parent`, `review`, and `target` objects, and refs paired with hashes for the parent manifest, approved review evidence, target base commit, and every read-only parent context file. `parent.status` must be exactly `blocked`; `parent.worktree`, branch, and commit identify the source worktree. `review.ref` resolves under the parent run's `reviews/` directory, is paired with `review.hash`, must be referenced by parent run state, and must have a subject consistent with that source. `target.run_id`, `target.branch`, `target.worktree`, `target.base_ref`, and `target.base_commit` describe the fresh child run. `parent_artifacts` is an array of `{kind, ref, hash}` entries for source artifacts such as story and technical brief, and `parent_evidence` / `parent_reviews` arrays carry `{kind, ref, hash}` entries for additional source context; `parent_reviews` includes the selected review with the same hash as `review.hash`. Optional `planning_reuse` records whether the parent's planning output is reusable by durable acceptance rather than file presence: `eligible` is true only when the parent has an accepted `spec-writer` step carrying an **acceptance binding** (see below) whose bound bytes still match the current `artifacts/technical-brief.md` and its approving `spec-writer` review. `spec_review_ref`/`spec_review_hash` and `spec_artifact_ref`/`spec_artifact_hash` echo the bound review and brief hashes; `child_spec_review_ref` (`reviews/spec-writer.json`) is where `factory continue` carries the approving review into child state so the adopted step's review ref resolves. When `eligible` is false, no planning artifacts are seeded and the parent brief is amendment input only, never adopted as approved. The child records the adoption only through the checked `factory adopt-continuation <child-run-id>` transition, which re-verifies the seeded brief and review against `spec_artifact_hash`/`spec_review_hash` before writing an inherited-acceptance record — a generic `factory step ... accepted` does not perform this verification. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits/hashes; it must not rely on a special blocking verdict enum as the authorization mechanism.
+
+Each `run.json.steps[]` entry may carry an optional `acceptance` binding, written by the accept transition (`factory step <run-id> <agent> accepted`) when the step references an artifact that exists: `{ artifact_ref, artifact_hash, review_ref?, review_hash? }` capture the exact bytes accepted. This binding is what a blocked-run continuation matches against — reuse is gated on the current files still hashing to the bound values, so bytes changed after acceptance are not silently treated as accepted, and a legacy accepted step with no binding fails closed. A child step written by `factory adopt-continuation` additionally carries `inherited_acceptance` `{ from_run_id, parent_spec_review_ref, artifact_hash, review_hash }` recording the parent run and bound hashes the adoption verified.
 
 Continuation child runs use the normal run status enum and normal gate/evidence/review schemas. They must run the standard story, brief, build, acceptance-test, implementation-validator, security-reviewer, and pre-PR gates before PR creation. Continuation PRs use the same effective configured PR mode as normal runs: `draft` creates and records draft PRs, while `ready` creates and records ready-for-review PRs. If remediation is exhausted or the child remains invalid after bounded attempts, write terminal `status: "blocked"` with `terminal_result.pr_url: null` and leave top-level `pr_url` unset.
 
