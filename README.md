@@ -31,6 +31,18 @@ Limits:
 - Local-only, not cryptographic or tamper-proof.
 - A coherent rewrite of local files and Git history is outside the model.
 
+## Install
+
+Install the published package and register both the server plugin and TUI sidebar with opencode:
+
+```sh
+npm install -g opencode-feature-factory
+feature-factory install
+feature-factory doctor
+```
+
+Restart opencode after installation. Config and TUI plugins are loaded at startup.
+
 ## Install Locally
 
 From this package directory:

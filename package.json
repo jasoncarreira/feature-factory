@@ -1,9 +1,17 @@
 {
   "name": "opencode-feature-factory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hybrid opencode plugin and scriptable feature factory workflow.",
   "type": "module",
   "main": "src/plugin.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasoncarreira/opencode-feature-factory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jasoncarreira/opencode-feature-factory/issues"
+  },
+  "homepage": "https://github.com/jasoncarreira/opencode-feature-factory#readme",
   "exports": {
     ".": "./src/plugin.js",
     "./server": "./src/plugin.js",
@@ -45,6 +53,12 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "license": "MIT"
 }
