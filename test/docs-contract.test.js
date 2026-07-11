@@ -246,6 +246,63 @@ describe("consolidated reviewer decision procedure contract", () => {
     }
   });
 
+  it("preserves work-review evidence authority and every subject-specific rejection disposition", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /Producer reports are claims; orchestrator-observed evidence is truth[\s\S]*Reject if a claim and the observed evidence disagree/i);
+    assert.match(WORK_REVIEWER_PROMPT, /supplied evidence is insufficient[\s\S]*REJECT with the exact missing ref, path, or command[\s\S]*Do not compensate with open-ended scanning/i);
+
+    for (const failClosedCase of [
+      "`review_ready=false`",
+      "empty or unobserved required diff",
+      "missing, failed, fake, or unobserved tests without an explicit acceptable skip reason",
+    ]) {
+      assert.match(WORK_REVIEWER_PROMPT, new RegExp(`REJECT[^\\n]*${escapeRegExp(failClosedCase)}`, "i"), `work reviewer must reject ${failClosedCase}`);
+    }
+
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT[\s\S]*out-of-lane edits outside slice `paths`[\s\S]*acceptance criterion that is unimplemented or untested/i);
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT serious correctness, repository-convention, migration, generated-code, or compatibility risk/i);
+    for (const decompositionFailure of ["orphan acceptance criteria", "cyclic dependencies", "same-wave path overlap", "un-serialized hotspots", "dependency path deeper than three waves"]) {
+      assert.match(WORK_REVIEWER_PROMPT, new RegExp(`For decomposition, REJECT[^\\n]*${escapeRegExp(decompositionFailure)}`, "i"), `work reviewer must reject ${decompositionFailure}`);
+    }
+
+    assert.match(WORK_REVIEWER_PROMPT, /mandatory touched-path security review[\s\S]*Enumerate \*\*every\*\* path the observed diff touches[\s\S]*including sibling entry points/i);
+    assert.match(WORK_REVIEWER_PROMPT, /outside the factory trust model[\s\S]*NONBLOCKING notes, never REJECT reasons/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Give actionable justification for every rejection and specific fixes owned by the appropriate agent/i);
+    assert.match(WORK_REVIEWER_PROMPT, /\*\*Required fixes \(if REJECT\):\*\*[\s\S]*<specific fix>/i);
+  });
+
+  it("preserves validator holistic checks, ingress completeness, authority qualification, and routing", () => {
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /priority order[^\n]*security → correctness → architecture → performance → tests → style/i);
+    for (const check of [
+      /every acceptance criterion is implemented and meaningfully tested/i,
+      /follows the brief or has explicitly defensible deviations/i,
+      /cross-slice integration and shared hotspots are coherent/i,
+      /scope is clean/i,
+      /no serious correctness, migration, generated-code, performance, or compatibility issue remains/i,
+      /Tests must contain real assertions that would fail on regression/i,
+    ]) {
+      assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, check, `validator missing holistic check ${check}`);
+    }
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /mandatory security review[\s\S]*Enumerate \*\*every\*\* relevant ingress and path[\s\S]*including sibling handlers/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Carry every unresolved prior fix forward[\s\S]*unresolved prior blockers[\s\S]*produce `NO-GO`/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /same process is outside the threat model unless the approved story explicitly classifies it as untrusted[\s\S]*same-process object mutation alone adds no signaling authority/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /`reviews\/implementation-validator\.json` with `subject` equal to the integrated feature branch name/i);
+  });
+
+  it("preserves security-review attack completeness, strict dispositions, routing, and distinct schema", () => {
+    assert.match(SECURITY_REVIEWER_PROMPT, /Deny the untrusted path \*\*before\*\* any trusted-allowance carve-out/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /Construct bypasses across every touched ingress[\s\S]*Enumerate \*\*every\*\* ingress the diff touches[\s\S]*including sibling endpoints/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /Carry unresolved prior fixes forward[\s\S]*Applicable unresolved-prior[\s\S]*remain `BLOCK`/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /same Node\.js process unless the approved story explicitly classifies it as untrusted[\s\S]*does not gain a new signaling capability by mutating another in-process object/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /`reviews\/security-reviewer\.json` with `subject` equal to the integrated feature branch name/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /Record every bypass attempt as blocked with why, or exploitable with how/i);
+
+    const securityOutput = firstFencedBlockAfter(SECURITY_REVIEWER_PROMPT, /## Output/i);
+    for (const validatorOnlyField of ["Acceptance criteria", "Brief deviations", "Scope check", "If NO-GO", "fix_owner", "[MAJOR]", "[MINOR]"]) {
+      assert.doesNotMatch(securityOutput, literalPattern(validatorOnlyField), `security output must not gain validator field ${validatorOnlyField}`);
+    }
+    assert.doesNotMatch(SECURITY_REVIEWER_PROMPT, /artifacts\/validation-report\.md|run\.json\.validator\./i, "security routing must remain distinct from validator routing");
+  });
+
   it("preserves security classes and each role's repository-rubric boundary", () => {
     for (const [name, text] of documentEntries(reviewerPrompts)) {
       for (const findingClass of ["Trust boundaries", "Injection", "Forgeable identity / authz", "Secrets", "Security regression"]) {
