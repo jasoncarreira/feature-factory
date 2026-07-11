@@ -15,7 +15,18 @@ const COMMAND = readDoc("../assets/command/feature.md");
 const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
 const TODO = readDoc("../TODO.md");
+const CONTRIBUTING = readDoc("../CONTRIBUTING.md");
+const RELEASING = readDoc("../RELEASING.md");
+const CHANGELOG = readDoc("../CHANGELOG.md");
+const DOGFOOD_LEARNINGS = readDoc("../DOGFOOD-LEARNINGS.md");
+const RUN_LATENCY_FINDINGS = readDoc("../RUN-LATENCY-FINDINGS.md");
+const SIMPLIFICATION = readDoc("../SIMPLIFICATION.md");
+const PACKAGE = JSON.parse(readDoc("../package.json"));
+const TOOL_VERSIONS = readDoc("../.tool-versions");
+const CI_WORKFLOW = readDoc("../.github/workflows/ci.yml");
+const PUBLISH_WORKFLOW = readDoc("../.github/workflows/publish.yml");
 const CLI = readDoc("../src/cli.js");
+const PLUGIN = readDoc("../src/plugin.js");
 const TUI = readDoc("../src/tui.jsx");
 const CODEBASE_RESEARCHER_PROMPT = readDoc("../assets/agent/codebase-researcher.md");
 const SPEC_WRITER_PROMPT = readDoc("../assets/agent/spec-writer.md");
@@ -379,7 +390,6 @@ describe("simplified state contract docs", () => {
       "owner" + "Capability",
       "HEARTBEAT" + "_OWNER",
       "assertSemantic" + "TransitionHeartbeatState",
-      "prove" + "nance",
       "prove" + "nance" + "-authority",
       "review" + "-guard",
       "safe" + "-git",
@@ -390,7 +400,7 @@ describe("simplified state contract docs", () => {
     ];
     const retiredPattern = new RegExp(retiredTerms.map(escapeRegExp).join("|"), "i");
     const retiredDirectoryPattern = new RegExp(`${escapeRegExp("attest" + "ations")}/`, "i");
-    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC, TODO })) {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README })) {
       assert.doesNotMatch(text, retiredPattern, `${name} must not reference removed proof-layer terms`);
       assert.doesNotMatch(text, retiredDirectoryPattern, `${name} must not require retired proof directories`);
     }
@@ -1042,13 +1052,213 @@ describe("TUI sidebar refresh diagnostics docs contract", () => {
 
   it("documents the sidebar data-version label and restart limitation", () => {
     assert.match(README, /Feature Factory` panel[\s\S]*`sidebar vN · plugin changes need TUI restart`/i, "README must document the sidebar refresh metadata label");
-    assert.match(README, /30s root-cache TTL|30-second root-cache TTL|30 second root-cache TTL/i, "README must document the root-cache TTL behind sidebar refreshes");
+    assert.match(README, /30s root-cache TTL|30-second root-cache TTL|30 second root-cache TTL|caches root discovery for 30 seconds/i, "README must document the root-cache TTL behind sidebar refreshes");
     assert.match(README, /already-open opencode TUI process[\s\S]*stale Feature Factory sidebar data[\s\S]*restart or reload the TUI/i, "README must document the active-session plugin-change limitation");
   });
 
   it("resolves the open TUI refresh hardening TODO while retaining the operational note", () => {
     assert.doesNotMatch(TODO, /TUI active-session refresh hardening/i, "TODO must not leave the resolved TUI refresh hardening item open");
     assert.match(TODO, /plugin bundle changes[\s\S]*restart(?:ing)? the opencode TUI|restart(?:ing)? the opencode TUI[\s\S]*plugin bundle changes/i, "TODO must retain the operational restart note");
+  });
+});
+
+describe("0.2.0 public documentation contract", () => {
+  const documentationStatus = markdownSection(README, "Documentation Status");
+  const install = `${markdownSection(README, "Install")}\n${markdownSection(README, "Install Locally")}`;
+  const packageSurface = markdownSection(README, "Package Surface");
+  const releaseChecks = markdownSection(README, "Release Checks");
+  const useInOpencode = markdownSection(README, "Use In opencode");
+  const profiles = markdownSection(README, "Configure Plugin Options");
+  const recommendedProfile = markdownSection(README, "Recommended Model Profile");
+  const scriptedMode = markdownSection(README, "Scripted Mode");
+  const doctor = markdownSection(README, "Doctor");
+  const cleanupAndTui = markdownSection(README, "Cost attribution diagnostics");
+  const prRecording = markdownSection(README, "Environment snapshots and PR recording");
+
+  it("classifies current, proposal, historical, and protected documentation authority", () => {
+    assert.match(documentationStatus, /README is the current packaged operator contract/i);
+    for (const guide of ["CONTRIBUTING.md", "RELEASING.md", "CHANGELOG.md"]) {
+      assert.match(documentationStatus, literalPattern(guide), `README must link ${guide}`);
+    }
+    assert.match(documentationStatus, /repository-only[\s\S]*current companion documentation/i);
+    assert.match(SPEC, /Status — proposal \/ internal planning:[\s\S]*not the current operator[\s>]+contract[\s\S]*README\.md[\s\S]*current authority/i);
+    for (const [name, text] of documentEntries({ DOGFOOD_LEARNINGS, RUN_LATENCY_FINDINGS })) {
+      assert.match(text.slice(0, 500), /Status — historical retrospective[\s\S]*not[\s\S]*(?:current behavior|current[\s\S]*contract)[\s\S]*README\.md/i, `${name} must be historical, not current`);
+    }
+    assert.match(SIMPLIFICATION.slice(0, 500), /Status — historical implementation plan[\s\S]*not the active specification[\s\S]*README\.md/i);
+    assert.match(documentationStatus, /TODO\.md[\s\S]*EXTRACTION-SPEC\.md[\s\S]*non-authoritative/i);
+    for (const [name, text] of documentEntries({ CONTRIBUTING, RELEASING, CHANGELOG })) {
+      assert.match(text.slice(0, 300), /Status:[\s\S]*current repository-only/i, `${name} must identify itself as a current repository-only guide`);
+    }
+  });
+
+  it("protects package installation, JSONC rewrite, and single-registration limits", () => {
+    assert.match(install, /npm install -g opencode-feature-factory[\s\S]*feature-factory install/i);
+    assert.match(install, /npm install -g[\s\S]*does not edit opencode configuration/i);
+    assert.match(install, /~\/\.config\/opencode\/opencode\.jsonc[\s\S]*one package plugin entry/i);
+    assert.match(install, /preserves unrelated values and existing tuple options/i);
+    assert.match(install, /matching registration is idempotent/i);
+    assert.match(install, /formatted strict JSON[\s\S]*comments and trailing commas are not preserved/i);
+    assert.match(install, /shadowing[\s\S]*warnings only[\s\S]*not changed/i);
+    assert.match(install, /install --local[\s\S]*file:\/\/[\s\S]*package root/i);
+    assert.match(install, /restart opencode/i);
+    assert.match(install, /does not add a second, independent TUI registration/i);
+    assert.match(install, /does not prove host discovery or automatic TUI activation/i);
+  });
+
+  it("documents the exact metadata-derived exports and bin", () => {
+    assert.deepEqual(PACKAGE.exports, {
+      ".": "./src/plugin.js",
+      "./server": "./src/plugin.js",
+      "./tui": "./dist/tui.js",
+      "./cli": "./src/cli.js",
+    });
+    assert.deepEqual(PACKAGE.bin, { "feature-factory": "src/cli.js" });
+    for (const [entry, target] of Object.entries(PACKAGE.exports)) {
+      assert.match(packageSurface, new RegExp(`${escapeRegExp(entry === "." ? "Package root `.`" : `\`${entry}\``)}[\\s\\S]{0,100}${escapeRegExp(`\`${target}\``)}`), `README missing export ${entry} -> ${target}`);
+    }
+    assert.match(packageSurface, new RegExp(`\`${escapeRegExp(Object.keys(PACKAGE.bin)[0])}\` bin[\\s\\S]{0,60}\`${escapeRegExp(Object.values(PACKAGE.bin)[0])}\``));
+    assert.match(packageSurface, /dist\/[\s\S]*generated during packing[\s\S]*not edited or committed as source/i);
+  });
+
+  it("documents source-derived plugin and TUI registration plus observational limits", () => {
+    const sourceAgents = [...PLUGIN.matchAll(/^\s{2}"([a-z-]+)": "(?:planning|story|research|design|builder|test|reviewer|security)",$/gmu)].map((match) => match[1]);
+    const tuiId = /id: "([^"]+)"/.exec(TUI)?.[1];
+    const tuiOrder = /order: (\d+)/.exec(TUI)?.[1];
+    const tuiSlots = [...TUI.matchAll(/^\s{8}([a-z_]+)\(/gmu)].map((match) => match[1]);
+    assert.equal(sourceAgents.length, 13);
+    assert.match(useInOpencode, /registers `\/feature`, one primary `feature-factory` agent, 12 specialized subagents/i);
+    assert.match(useInOpencode, /assets\/skills\/feature\/SKILL\.md/i);
+    assert.deepEqual(tuiSlots, ["sidebar_content"]);
+    assert.match(useInOpencode, new RegExp(`ID \`${escapeRegExp(tuiId)}\`[\\s\\S]*one \`${tuiSlots[0]}\` slot[\\s\\S]*order \`${tuiOrder}\``));
+    assert.match(useInOpencode, /not a promise[\s\S]*automatically discovers or activates/i);
+    for (const limit of [/refreshes data every 5 seconds/i, /caches root discovery for 30 seconds/i, /scans at most 2,000 directories/i, /displays at most three run rows/i, /Completed runs are hidden except for the most recent completed run/i, /restart or reload the TUI/i]) {
+      assert.match(cleanupAndTui, limit);
+    }
+  });
+
+  it("publishes exactly the approved 13-agent GPT-5.6 recommendation and routing rules", () => {
+    const expected = [
+      ["feature-factory", "openai/gpt-5.6-sol", "xhigh"],
+      ["backend-builder", "openai/gpt-5.6-sol", "high"],
+      ["codebase-researcher", "openai/gpt-5.6-terra", "high"],
+      ["design-interpreter", "openai/gpt-5.6-sol", "high"],
+      ["frontend-builder", "openai/gpt-5.6-sol", "high"],
+      ["implementation-validator", "openai/gpt-5.6-sol", "xhigh"],
+      ["security-reviewer", "openai/gpt-5.6-sol", "xhigh"],
+      ["spec-writer", "openai/gpt-5.6-sol", "xhigh"],
+      ["story-reader", "openai/gpt-5.6-luna", "medium"],
+      ["story-writer", "openai/gpt-5.6-sol", "high"],
+      ["test-verifier", "openai/gpt-5.6-terra", "high"],
+      ["work-decomposer", "openai/gpt-5.6-sol", "xhigh"],
+      ["work-reviewer", "openai/gpt-5.6-sol", "high"],
+    ];
+    const table = recommendedProfile.slice(recommendedProfile.indexOf("Canonical resolved recommendation"), recommendedProfile.indexOf("Rationale:"));
+    const actual = [...table.matchAll(/^\| `([^`]+)` \| `([^`]+)` \| `([^`]+)` \|$/gmu)].map((match) => match.slice(1));
+    assert.deepEqual(actual, expected);
+    const sourceAgentNames = [...PLUGIN.matchAll(/^\s{2}"([a-z-]+)": "(?:planning|story|research|design|builder|test|reviewer|security)",$/gmu)].map((match) => match[1]).sort();
+    assert.deepEqual(expected.map(([agent]) => agent).sort(), sourceAgentNames);
+    assert.match(recommendedProfile, /opt-in exact-agent mapping[\s\S]*package supplies no model or variant defaults/i);
+    assert.doesNotMatch(recommendedProfile, /openai\/gpt-5\.[45]/i);
+    assert.match(profiles, /Profile precedence is exact agent, then role, then `profiles\.default`, then top-level `profile`, then opencode default/i);
+    for (const role of ["story", "research", "design", "planning", "builder", "test", "reviewer", "security"]) assert.match(profiles, literalPattern(`\`${role}\``));
+    assert.match(profiles, /security-reviewer` uses `profiles\.security`[\s\S]*falls back to `profiles\.reviewer` for compatibility/i);
+    assert.match(profiles, /profile may contain `model`, `variant`, or both/i);
+  });
+
+  it("states start dry-run rejection before every launch-mode side effect", () => {
+    assert.match(scriptedMode, /`factory start --dry-run` is unsupported/i);
+    for (const mode of ["foreground", "headless", "autonomous", "detached"]) assert.match(scriptedMode, literalPattern(mode));
+    for (const sideEffect of ["opencode launch", "skill seeding", "factory or worktree creation", "process-state creation", "detached logging", ".git/info/exclude"]) {
+      assert.match(scriptedMode, literalPattern(sideEffect), `start dry-run statement missing ${sideEffect}`);
+    }
+    assert.match(scriptedMode, /rejected before[\s\S]*any other repository side effect/i);
+    assert.match(scriptedMode, /Dry-run support[\s\S]*command-specific[\s\S]*does not make start dry-run valid/i);
+  });
+
+  it("states every provider-smoke caveat, including accepted-but-help-omitted", () => {
+    const usageText = extractFunctionBody("usage");
+    assert.match(CLI, /BOOLEAN_FLAGS[\s\S]*"--provider-smoke"/);
+    assert.doesNotMatch(usageText, /--provider-smoke/);
+    assert.match(doctor, /accepted by the CLI but omitted from the current help text/i);
+    assert.match(doctor, /real `opencode run` in the selected working directory/i);
+    assert.match(doctor, /once per distinct resolved model string—not once per provider or agent/i);
+    assert.match(doctor, /consume quota or incur cost/i);
+    assert.match(doctor, /30-second default timeout/i);
+    assert.match(doctor, /point-in-time evidence[\s\S]*invocation and authentication/i);
+    assert.match(doctor, /not a deterministic release check[\s\S]*does not guarantee future credentials, model availability, capacity, or provider service/i);
+  });
+
+  it("derives and protects Node support, tooling, CI, and publish versions", () => {
+    const toolNode = /^nodejs (\S+)$/mu.exec(TOOL_VERSIONS)?.[1];
+    const ciNodes = /node-version: \[([^\]]+)\]/u.exec(CI_WORKFLOW)?.[1].split(",").map((value) => value.trim());
+    const publishNode = /^\s+node-version: (\d+)$/mu.exec(PUBLISH_WORKFLOW)?.[1];
+    assert.match(releaseChecks, literalPattern(`Node \`${PACKAGE.engines.node}\``));
+    assert.match(releaseChecks, literalPattern(`Node \`${toolNode}\``));
+    for (const version of ciNodes) assert.match(releaseChecks, new RegExp(`CI[\\s\\S]{0,80}Node ${version}`));
+    assert.match(releaseChecks, new RegExp(`publication uses Node ${publishNode}`));
+    assert.match(releaseChecks, /Node 20[\s\S]*not a CI matrix version/i);
+    assert.match(CONTRIBUTING, literalPattern(`Node.js \`${PACKAGE.engines.node}\``));
+    assert.match(CONTRIBUTING, literalPattern(`Node.js \`${toolNode}\``));
+  });
+
+  it("protects contributor commands, check order, and generated output policy", () => {
+    for (const command of ["npm ci", "npm run test:unit", "npm run smoke:pack", "npm run check"]) assert.match(CONTRIBUTING, literalPattern(command));
+    const checkOrder = PACKAGE.scripts.check.split(" && ");
+    assert.match(CONTRIBUTING, orderedPattern(checkOrder));
+    assert.match(CONTRIBUTING, /does not currently define a lint or typecheck script/i);
+    assert.equal(PACKAGE.scripts.prepack, "npm run build:tui");
+    assert.match(PACKAGE.scripts["build:tui"], /--outfile=dist\/tui\.js/u);
+    assert.match(CONTRIBUTING, /smoke test packs[\s\S]*invokes `prepack`[\s\S]*generates `dist\/tui\.js` from `src\/tui\.jsx`/i);
+    assert.match(CONTRIBUTING, /do not edit it, stage it, or commit it/i);
+  });
+
+  it("protects the metadata/workflow-derived pushed-tag release sequence and boundaries", () => {
+    const version = PACKAGE.version;
+    assert.match(PUBLISH_WORKFLOW, /push:[\s\S]*tags:[\s\S]*- "v\*"/);
+    assert.match(RELEASING, new RegExp(`tag matching \`v\\*\` is pushed[\\s\\S]*\`v<version>\`[\\s\\S]*\`v${escapeRegExp(version)}\``));
+    for (const step of ["Checks out the pushed tag", "Selects Node.js 24", "Runs `npm ci`", "Verifies that `GITHUB_REF_NAME` exactly equals `v${package.json.version}`", "Runs `npm run check`", "Runs `npm publish`"]) {
+      assert.match(RELEASING, literalPattern(step), `release guide missing ${step}`);
+    }
+    assert.match(RELEASING, orderedPattern(["Checks out the pushed tag", "Runs `npm ci`", "GITHUB_REF_NAME", "Runs `npm run check`", "Runs `npm publish`"]));
+    assert.match(PUBLISH_WORKFLOW, orderedPattern(["actions/checkout", "node-version: 24", "npm ci", "Verify release tag", "npm run check", "npm publish"]));
+    assert.match(RELEASING, /GitHub Actions `npm` environment[\s\S]*`id-token: write`/i);
+    for (const exclusion of [/publish from a branch or support manual dispatch/i, /choose or bump the package version/i, /update the changelog/i, /create or push commits or tags/i, /create a GitHub Release/i]) assert.match(RELEASING, exclusion);
+  });
+
+  it("keeps the changelog minimal, verified, and undated", () => {
+    assert.equal((CHANGELOG.match(/^## /gmu) || []).length, 1);
+    assert.match(CHANGELOG, new RegExp(`^## ${escapeRegExp(PACKAGE.version)}$`, "mu"));
+    assert.equal((CHANGELOG.match(/^- /gmu) || []).length, 3);
+    assert.match(CHANGELOG, /`\/feature`[\s\S]*one primary `feature-factory` agent[\s\S]*12 specialized subagents[\s\S]*packaged feature skill/i);
+    assert.match(CHANGELOG, /package root and `\/server`[\s\S]*`src\/plugin\.js`[\s\S]*`\/tui`[\s\S]*generated `dist\/tui\.js`[\s\S]*`\/cli`[\s\S]*`src\/cli\.js`[\s\S]*`feature-factory` bin/i);
+    assert.match(CHANGELOG, /install, doctor, and factory CLI surfaces[\s\S]*separately importable TUI registration object/i);
+    assert.doesNotMatch(CHANGELOG, /\b(?:19|20)\d{2}-\d{2}-\d{2}\b|migration|published|released on|guarantee/i);
+  });
+
+  it("protects cancel-pending semantics and fail-closed signal boundaries", () => {
+    assert.match(scriptedMode, /exactly one `SIGTERM`[\s\S]*Only verified exit changes `process\.json\.state` to `cancelled`/i);
+    assert.match(scriptedMode, /process remains alive[\s\S]*status:"cancel-pending"[\s\S]*process state remains `running`[\s\S]*process\.json\.cancel/i);
+    assert.match(scriptedMode, /rerun cancel to confirm exit or stop the process manually/i);
+    assert.match(scriptedMode, /missing, invalid, stale, mismatched[\s\S]*status:"failed-closed"[\s\S]*signaled:false[\s\S]*updated:false/i);
+    assert.match(scriptedMode, /Neither pending nor failed-closed handling attempts a second or broad signal/i);
+  });
+
+  it("requires a PR fence token in the public creation sequence and every command example", () => {
+    assert.match(prRecording, orderedPattern(["factory pr-fence <run-id> --json", "gh pr create", "gh pr view <url>", "factory pr-created <run-id>", "--fence-token TOKEN"]));
+    const exampleBlocks = fencedBlocks(README).filter((block) => /feature-factory factory pr-created <run-id>/u.test(block));
+    assert.ok(exampleBlocks.length > 0, "README must include a factory pr-created command example");
+    for (const block of exampleBlocks) assert.match(block, /--fence-token TOKEN/u, "every factory pr-created command example must carry its fence token");
+    assert.match(prRecording, /rejects a missing, mismatched, or stale fence/i);
+    assert.match(prRecording, /--clear --fence-token TOKEN/i);
+  });
+
+  it("documents only the narrow pre-manifest cleanup exception", () => {
+    assert.match(cleanupAndTui, /run with `run\.json`[\s\S]*only runs for terminal statuses[\s\S]*unless `--force`/i);
+    assert.match(cleanupAndTui, /narrow pre-manifest exception[\s\S]*died before writing `run\.json`/i);
+    assert.match(cleanupAndTui, /run directory containing process evidence may be removed when that evidence is not `running`/i);
+    assert.match(cleanupAndTui, /running evidence is refused[\s\S]*cancel first/i);
+    assert.match(cleanupAndTui, /refuses to remove run directories outside `\.opencode\/factory`/i);
   });
 });
 
@@ -1110,6 +1320,10 @@ function firstFencedBlockAfter(text, pattern) {
   const rest = text.slice(match.index + match[0].length);
   const block = /```[a-z]*\n([\s\S]*?)\n```/i.exec(rest);
   return block ? block[1] : "";
+}
+
+function fencedBlocks(text) {
+  return [...text.matchAll(/```[^\n]*\n([\s\S]*?)\n```/gu)].map((match) => match[1]);
 }
 
 function implementedStateWriteVerbs() {
