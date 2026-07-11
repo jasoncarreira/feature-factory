@@ -139,8 +139,8 @@ function registerAgents(cfg) {
   cfg.agent["feature-factory"] = {
     description: "Primary orchestrator for the durable feature-factory workflow. Scoped non-interactive permissions prevent headless factory runs from blocking on approval prompts.",
     mode: "primary",
-    permission: nonInteractivePermission("allow"),
-    prompt: "You are the feature-factory orchestrator. Follow the loaded feature skill exactly: classify intent, persist durable state, use file-based gates, delegate to specialized subagents, observe evidence yourself, stop at gates in headless/scripted mode instead of waiting for interactive approval, and in explicit autonomous mode use the factory's own reviewed evidence/panel verdicts to record bounded autonomous gate decisions and terminal_result without auto-merging.",
+    permission: nonInteractivePermission("allow", { task: "allow" }),
+    prompt: "You are the feature-factory orchestrator. Follow the loaded feature skill exactly: classify intent, persist durable state, use file-based gates, delegate only from this primary agent to specialized subagents, observe evidence yourself, stop at gates in headless/scripted mode instead of waiting for interactive approval, and in explicit autonomous mode use the factory's own reviewed evidence/panel verdicts to record bounded autonomous gate decisions and terminal_result without auto-merging.",
   };
   const agentDir = join(assets, "agent");
   for (const file of readdirSync(agentDir).filter((name) => name.endsWith(".md"))) {
@@ -153,12 +153,16 @@ function registerAgents(cfg) {
   }
 }
 
-function mergeFactoryPermission(existing = {}) {
+// Force-deny Task delegation for every loaded subagent so only the primary
+// feature-factory orchestrator can dispatch, keeping the orchestration tree one
+// level deep. The forced `task: "deny"` is spread last, so agent frontmatter cannot
+// re-enable delegation.
+export function mergeFactoryPermission(existing = {}) {
   const edit = typeof existing === "object" && existing.edit ? existing.edit : "deny";
-  return { ...(typeof existing === "object" ? existing : {}), ...nonInteractivePermission(edit) };
+  return { ...(typeof existing === "object" ? existing : {}), ...nonInteractivePermission(edit, { task: "deny" }) };
 }
 
-function nonInteractivePermission(edit) {
+function nonInteractivePermission(edit, { task = "deny" } = {}) {
   return {
     read: "allow",
     glob: "allow",
@@ -167,7 +171,7 @@ function nonInteractivePermission(edit) {
     bash: "allow",
     edit,
     webfetch: "allow",
-    task: "allow",
+    task,
     todowrite: "allow",
     external_directory: "deny",
   };

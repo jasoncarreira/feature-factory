@@ -45,6 +45,28 @@ describe("feature-factory install", () => {
       cleanup(home);
     }
   });
+
+  it("warns when stale global agent definitions may shadow plugin agents", () => {
+    const home = tempHome();
+    const researcher = join(home, ".config", "opencode", "agent", "codebase-researcher.md");
+    const reviewer = join(home, ".config", "opencode", "agents", "work-reviewer.md");
+
+    try {
+      writeFile(researcher, "---\nmode: subagent\n---\n\n# Old Researcher\n");
+      writeFile(reviewer, "---\nmode: subagent\n---\n\n# Old Reviewer\n");
+
+      const proc = runInstall(home);
+
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.match(proc.stderr, /WARNING: existing global feature-factory agent definitions detected/);
+      assert.match(proc.stderr, /can shadow the plugin's current prompts/);
+      assert.match(proc.stderr, new RegExp(escapeRegExp(researcher)));
+      assert.match(proc.stderr, new RegExp(escapeRegExp(reviewer)));
+      assert.match(proc.stderr, /replace them with delegators that defer to the plugin-owned agents/);
+    } finally {
+      cleanup(home);
+    }
+  });
 });
 
 function runInstall(home) {
