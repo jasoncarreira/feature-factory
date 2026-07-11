@@ -19,7 +19,7 @@
     "./cli": "./src/cli.js"
   },
   "bin": {
-    "feature-factory": "./src/cli.js"
+    "feature-factory": "src/cli.js"
   },
   "files": [
     "assets",
