@@ -875,13 +875,10 @@ describe("live-run steering drain docs contract", () => {
     }
   });
 
-  it("preserves explicit resume semantics and marks live drain implemented", () => {
+  it("preserves explicit resume semantics without completed TODO residue", () => {
     assert.match(markdownSection(SCHEMA, "`/feature resume` Contract"), /Preserve existing resume semantics[\s\S]*calls `record-resume` before any other mutating resume work whether or not steering is pending/i, "SCHEMA must preserve explicit resume semantics");
-    assert.match(TODO, /Live-run draining is implemented/i, "TODO must mark live-run draining implemented");
     assert.doesNotMatch(TODO, /Future work: drain and consume pending steering/i, "TODO must not leave live-run drain as future work");
-    for (const summary of ["after heartbeat-bracketed waits", "before autonomous gate approval", "before dispatching the next agent or build wave", "before remediation", "before terminalization or PR creation"]) {
-      assert.match(TODO, new RegExp(escapeRegExp(summary), "i"), `TODO must summarize ${summary}`);
-    }
+    assert.doesNotMatch(TODO, /Live-run draining is implemented|Interrupt, steer, resume, and cancellation rollback \(implemented\)/i, "TODO must not retain completed steering/drain status");
   });
 });
 
@@ -1086,20 +1083,20 @@ describe("telemetry readiness docs contract", () => {
   });
 });
 
-describe("TUI sidebar refresh diagnostics docs contract", () => {
-  it("renders the refresh signal directly under the Feature Factory header with muted styling", () => {
-    assert.match(TUI, /<b>Feature Factory<\/b>[\s\S]*<text fg=\{theme\(\)\.textMuted\} wrapMode="none">\{refreshMetadata\(\)\.label\}<\/text>/, "TUI must render the muted refresh label directly under the Feature Factory header");
+describe("TUI sidebar live refresh docs contract", () => {
+  it("keeps an empty sidebar mounted without rendering internal refresh metadata", () => {
+    assert.match(TUI, /<b>Feature Factory<\/b>[\s\S]*fallback=\{<text fg=\{theme\(\)\.textMuted\}>No factory runs yet<\/text>\}/, "TUI must keep a visible empty state mounted under the Feature Factory header");
+    assert.doesNotMatch(TUI, /sidebar v|plugin changes need TUI restart|refreshMetadata/, "TUI must not render internal refresh metadata");
   });
 
-  it("documents the sidebar data-version label and restart limitation", () => {
-    assert.match(README, /Feature Factory` panel[\s\S]*`sidebar vN · plugin changes need TUI restart`/i, "README must document the sidebar refresh metadata label");
+  it("documents empty-start polling and the root discovery cache", () => {
+    assert.match(README, /No factory runs yet[\s\S]*keeps the panel mounted[\s\S]*runs start/i, "README must document live refresh after an empty startup");
     assert.match(README, /30s root-cache TTL|30-second root-cache TTL|30 second root-cache TTL|caches root discovery for 30 seconds/i, "README must document the root-cache TTL behind sidebar refreshes");
-    assert.match(README, /already-open opencode TUI process[\s\S]*stale Feature Factory sidebar data[\s\S]*restart or reload the TUI/i, "README must document the active-session plugin-change limitation");
   });
 
-  it("resolves the open TUI refresh hardening TODO while retaining the operational note", () => {
+  it("does not retain completed TUI refresh work in TODO", () => {
     assert.doesNotMatch(TODO, /TUI active-session refresh hardening/i, "TODO must not leave the resolved TUI refresh hardening item open");
-    assert.match(TODO, /plugin bundle changes[\s\S]*restart(?:ing)? the opencode TUI|restart(?:ing)? the opencode TUI[\s\S]*plugin bundle changes/i, "TODO must retain the operational restart note");
+    assert.doesNotMatch(TODO, /sidebar v\d|plugin changes need TUI restart/i, "TODO must not retain removed sidebar metadata");
   });
 });
 

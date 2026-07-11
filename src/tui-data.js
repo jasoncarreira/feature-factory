@@ -7,33 +7,15 @@ const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache",
 const MAX_SCAN_DIRS = 2000;
 const MAX_DIAGNOSTIC_SUMMARY = 180;
 const ROOT_CACHE_TTL_MS = 30000;
-const TUI_SIDEBAR_REFRESH_LIMITATION = "An already-open opencode TUI process can keep rendering stale Feature Factory sidebar data after the plugin bundle changes; restart or reload the TUI to pick up plugin changes.";
 const FAIL_CLOSED_CONDITIONS = new Set(["invalid-run-state"]);
 const rootCache = new Map();
-
-export function tuiSidebarRefreshMetadata({ version } = {}) {
-  const dataVersion = sanitizedDataVersion(version);
-  return {
-    schema_version: 1,
-    data_version: dataVersion,
-    root_cache_ttl_ms: ROOT_CACHE_TTL_MS,
-    limitation: TUI_SIDEBAR_REFRESH_LIMITATION,
-    label: `sidebar v${dataVersion} · plugin changes need TUI restart`,
-  };
-}
-
-function sanitizedDataVersion(value) {
-  const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < 0) return 0;
-  return number;
-}
 
 export function factoryRoots(api, options = {}) {
   const starts = tuiStartPaths(api);
   const cacheKey = starts.map((start) => resolve(start)).join("\0");
   const now = Date.now();
   const cached = rootCache.get(cacheKey);
-  if (!options.noCache && !options.notes && cached && cached.expiresAt > now) return cached.roots;
+  if (!options.noCache && !options.notes && cached && cached.expiresAt > now && cached.roots.some((root) => existsSync(root))) return cached.roots;
 
   const roots = new Set();
   for (const start of starts) {
