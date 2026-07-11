@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   lstatSync,
   mkdirSync,
@@ -16,6 +16,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createTrackedProcessCleanup } from "./process-cleanup-helper.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const RUN_ID = "cli-cost-report";
@@ -268,6 +269,7 @@ describe("factory cost-report CLI", () => {
 
   it("makes zero connections to advertised OTLP endpoints", async () => {
     const repo = tempRepo();
+    const owner = createTrackedProcessCleanup();
     seedRun(repo, { cost_attribution: { entries: [] } });
     const server = createServer();
     let connections = 0;
@@ -282,7 +284,7 @@ describe("factory cost-report CLI", () => {
     const endpoint = `http://127.0.0.1:${server.address().port}`;
 
     try {
-      const proc = await runCostReportAsync(repo, [RUN_ID, "--json", "--telemetry"], {
+      const proc = await runCostReportAsync(owner, repo, [RUN_ID, "--json", "--telemetry"], {
         FEATURE_FACTORY_TRACEPARENT: TRACEPARENT,
         OTEL_EXPORTER_OTLP_ENDPOINT: endpoint,
         OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${endpoint}/v1/traces`,
@@ -291,6 +293,7 @@ describe("factory cost-report CLI", () => {
       assert.equal(JSON.parse(proc.stdout).telemetry.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
       assert.equal(connections, 0);
     } finally {
+      await owner.cleanup().catch(() => undefined);
       await new Promise((resolve) => server.close(resolve));
       cleanup(repo);
     }
@@ -399,19 +402,30 @@ function runCostReport(repo, args, extraEnv = {}) {
   return proc;
 }
 
-function runCostReportAsync(repo, args, extraEnv = {}) {
+function runCostReportAsync(owner, repo, args, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI, "factory", "cost-report", ...args, "--repo", repo], {
+    const child = owner.spawn(process.execPath, [CLI, "factory", "cost-report", ...args, "--repo", repo], {
       cwd: repo,
       env: cleanEnv(extraEnv),
       stdio: ["ignore", "pipe", "pipe"],
-    });
+    }, { label: "factory cost-report" });
     let stdout = "";
     let stderr = "";
+    const timeout = setTimeout(() => {
+      const error = new Error("factory cost-report result collection timed out after 5000ms");
+      error.code = "CLI_RESULT_TIMEOUT";
+      reject(error);
+    }, 5000);
     child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
-    child.once("error", reject);
-    child.once("close", (status) => resolve({ status, stdout, stderr }));
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (status) => {
+      clearTimeout(timeout);
+      resolve({ status, stdout, stderr });
+    });
   });
 }
 
