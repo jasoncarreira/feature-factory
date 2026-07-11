@@ -44,8 +44,9 @@ export function buildSteeringConflictTerminalResult(run, steering, protectedStat
     steering_ref: ref,
     steering_hash: hash,
     protected_state: normalizedProtectedState.join(","),
+    reason_code: "accepted-state-conflict",
   };
-  if (stringValue(input.reason)) artifacts.operator_reason = String(input.reason).trim();
+  void input;
 
   return {
     status: "needs-human",
