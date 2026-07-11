@@ -19,6 +19,7 @@ const CLI = readDoc("../src/cli.js");
 const TUI = readDoc("../src/tui.jsx");
 const CODEBASE_RESEARCHER_PROMPT = readDoc("../assets/agent/codebase-researcher.md");
 const SPEC_WRITER_PROMPT = readDoc("../assets/agent/spec-writer.md");
+const WORK_DECOMPOSER_PROMPT = readDoc("../assets/agent/work-decomposer.md");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
@@ -49,6 +50,16 @@ const PROCESS_SIDECAR_COMMANDS = Object.freeze([
   "factory cancel <run-id> --json",
 ]);
 const COST_REPORT_DOCS = Object.freeze({ SKILL, SCHEMA, COMMAND, README, SPEC });
+const LIVE_DRAIN_SKILL = markdownSection(SKILL, "Live-Run Steering Drain Protocol");
+const LIVE_DRAIN_SCHEMA = markdownSection(SCHEMA, "Live-Run Steering Drain Protocol");
+const LIVE_DRAIN_DOCS = Object.freeze({ LIVE_DRAIN_SKILL, LIVE_DRAIN_SCHEMA });
+const LIVE_DRAIN_BOUNDARIES = Object.freeze([
+  "After a heartbeat-bracketed wait",
+  "Before an autonomous gate approval decision",
+  "Before dispatching the next agent or next build wave",
+  "Before remediation",
+  "Before terminalization or PR creation",
+]);
 
 describe("class-wide planning prompt contract", () => {
   it("requires research to enumerate a finite source-to-sink surface", () => {
@@ -73,18 +84,119 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SPEC_WRITER_PROMPT, /Do not use open-ended phrases such as "apply everywhere"/i);
   });
 
-  it("requires first review to consolidate same-class findings", () => {
+  it("requires first review to consolidate same-class findings across every dimension", () => {
     assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule/i);
-    assert.match(WORK_REVIEWER_PROMPT, /On `attempt: 1`[\s\S]*all currently discoverable in-scope instances/i);
-    assert.match(WORK_REVIEWER_PROMPT, /do not cite one example while withholding equivalent findings for later rounds/i);
+    assert.match(WORK_REVIEWER_PROMPT, /On `attempt: 1`[\s\S]*every dimension of under-specification/i);
+    assert.match(WORK_REVIEWER_PROMPT, /do not surface one example, or one category, while withholding equivalent findings for later rounds/i);
+    assert.match(WORK_REVIEWER_PROMPT, /new category that was discoverable at `attempt: 1`[\s\S]*first-pass miss/i);
     assert.match(WORK_REVIEWER_PROMPT, /class-wide spec that lacks a finite source\/sink inventory/i);
     assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*attempt > 1/i);
+  });
+
+  it("gives the spec review an acceptance bar so it converges", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /Spec acceptance bar/i);
+    assert.match(WORK_REVIEWER_PROMPT, /every in-scope sink carries a decided policy[\s\S]*maps to a test/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Reject only for a genuinely missing sink, policy, compatibility decision, or test — not for achievable-but-absent depth/i);
+    assert.match(SKILL, /Accept the brief once the inventory is finite[\s\S]*decided per-sink policy[\s\S]*mechanical residual detail/i);
+  });
+
+  it("bounds deferral so an in-scope sink cannot be waived without story/scope authorization", () => {
+    // A deferral/exclusion is legitimate only when the approved story or scope authorizes it,
+    // and never for a sink under an all/every criterion — otherwise the bar passes the unsafe
+    // interpretation where a reviewer defers a required sink and calls the spec accepted.
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /deferral or exclusion is legitimate \*\*only when the approved story or scope authorizes it\*\*[\s\S]*never (?:waive, defer, or leave undecided )?an in-scope sink that falls under an `all`\/`every`\/`across`/i,
+      "work-reviewer must forbid deferring an in-scope all/every sink without story/scope authorization",
+    );
+    assert.match(
+      SKILL,
+      /deferring or excluding a sink only when the approved story or scope authorizes it \(never an in-scope sink under an `all`\/`every` criterion\)/i,
+      "SKILL must mirror the story/scope-authorized deferral boundary",
+    );
+  });
+
+  it("forbids leaving an unresolved behavioral/design decision as a bounded residual", () => {
+    // A residual must be mechanical detail whose behavior/compat/security/state policy is already
+    // decided; an undecided behavioral/design decision is not a residual and cannot be shipped to
+    // builders as an open choice — otherwise the bar passes the unsafe "approve an undecided row".
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /bounded residual\*\* may be left to build-time remediation only when it is mechanical implementation detail whose behavior, backward-compatibility, security, and state-transition policy are already decided[\s\S]*unresolved behavioral or design decision is not a residual and must be decided here/i,
+      "work-reviewer must exclude unresolved behavioral/design decisions from bounded residuals",
+    );
+    assert.match(
+      SKILL,
+      /only mechanical residual detail whose behavior, compatibility, security, and state-transition policy are already decided, never an unresolved behavioral or design decision/i,
+      "SKILL must mirror the mechanical-only residual boundary",
+    );
+  });
+
+  it("keeps a required late-discovered omission blocking until fixed despite the delta rule", () => {
+    // Precedence: a genuinely required sink/policy/compat/test omission is blocking regardless of
+    // attempt number; the delta rule's NONBLOCKING carve-out is only for unrelated new scope or
+    // optional depth — otherwise an attempt-2 discovery could be approved as nonblocking.
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /Precedence for late discoveries:[\s\S]*blocking regardless of attempt number[\s\S]*NONBLOCKING carve-out applies only to \*unrelated\* new scope or \*optional\* additional depth[\s\S]*never downgrades a required in-scope omission to optional/i,
+      "work-reviewer must state that required omissions stay blocking regardless of attempt",
+    );
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /Record it once in `required_fixes`, carry it into every later review, and REJECT until observed evidence proves it landed/i,
+      "work-reviewer must carry a required omission forward and reject until it lands",
+    );
+    assert.match(
+      SKILL,
+      /recorded once and carried in prior `required_fixes` until observed fixed[\s\S]*each review must REJECT until it lands/i,
+      "SKILL must carry a required omission forward and reject until it lands",
+    );
+    assert.doesNotMatch(WORK_REVIEWER_PROMPT, /blocking-once|do not reopen it/i);
   });
 
   it("puts the closed-scope guard in workflow steps 1 and 2", () => {
     assert.match(SKILL, /Step 1 - Research And Design[\s\S]*finite in-scope surface inventory[\s\S]*Step 2 - Spec And Decomposition/i);
     assert.match(SKILL, /Step 2 - Spec And Decomposition[\s\S]*closed implementation matrix[\s\S]*Do not dispatch builders with unresolved instructions/i);
     assert.match(SKILL, /first spec review[\s\S]*every currently discoverable same-class issue[\s\S]*one `required_fixes` list/i);
+  });
+});
+
+describe("decomposition depth contract", () => {
+  it("requires the decomposer and reviewer to enforce a three-wave maximum", () => {
+    assert.match(WORK_DECOMPOSER_PROMPT, /longest dependency path may span at most three waves; a root slice is wave 1/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /combine tightly serialized work into one coherent slice instead of creating a fourth wave/i);
+    assert.match(WORK_REVIEWER_PROMPT, /dependency path deeper than three waves \(root is wave 1\)/i);
+  });
+
+  it("documents derived depth separately from concurrency", () => {
+    for (const [name, text] of Object.entries({ SKILL, SCHEMA, README })) {
+      assert.match(text, /root(?: slice)? is wave 1/i, `${name} must define root depth`);
+      assert.match(text, /(?:at most|capped at) three waves/i, `${name} must document the depth cap`);
+      assert.match(text, /max_parallel_slices[\s\S]{0,120}(?:concurrency|concurrently)[\s\S]{0,120}(?:does not|not)[\s\S]{0,80}(?:depth cap|cap)/i, `${name} must distinguish concurrency from depth`);
+    }
+  });
+
+  it("seeds (validates) before recording work-decomposer acceptance, atomically", () => {
+    // slices-seed is the enforcing validation; it must run BEFORE the accepted step so an
+    // over-depth/invalid plan cannot leave a durable accepted decomposition + unseeded plan.
+    assert.match(
+      SKILL,
+      /seed durable slices first[\s\S]*slices-seed[\s\S]*enforcing validation[\s\S]*Only after it succeeds[\s\S]*work-decomposer accepted/i,
+      "SKILL Step 4 must seed (validate) before recording work-decomposer acceptance",
+    );
+  });
+
+  it("states that a grandfathered already-seeded deeper graph remains runnable", () => {
+    assert.match(
+      SKILL,
+      /resumed run whose durable `run\.slices` already matches a deeper seeded plan[\s\S]*stays runnable/i,
+      "SKILL must state a grandfathered seeded graph stays runnable",
+    );
+    assert.match(
+      SCHEMA,
+      /Existing durable runs with older, deeper seeded plans remain readable and resumable/i,
+      "SCHEMA must state grandfathered seeded plans remain runnable",
+    );
   });
 });
 
@@ -337,6 +449,30 @@ describe("blocked-run continuation docs contract", () => {
     assert.match(SCHEMA, /refs paired with hashes|ref.*hash/i, "SCHEMA must require validated refs and hashes");
   });
 
+  it("gates planning reuse on durable acceptance, not file presence", () => {
+    // The brief is reused only when the parent DURABLY ACCEPTED it; presence of a
+    // technical-brief.md in a parent whose spec-writer step was rejected must NOT be
+    // adopted as approved. Pin the eligibility gate + amendment-only fallback.
+    for (const [name, text] of documentEntries({ SKILL, COMMAND })) {
+      assert.match(text, /continuation\.planning_reuse\.eligible/i, `${name} must gate reuse on continuation.planning_reuse.eligible`);
+      assert.match(text, /amendment input only/i, `${name} must treat an unaccepted parent brief as amendment input only`);
+    }
+    // The adopted spec acceptance is recorded through the CHECKED adopt-continuation
+    // transition (which verifies the parent acceptance binding), not a hand-rolled
+    // generic `factory step accepted`.
+    assert.match(SKILL, /factory adopt-continuation <run-id>[\s\S]*Do not hand-roll a generic `factory step spec-writer accepted`/i, "SKILL must record adoption through the checked adopt-continuation transition");
+    assert.match(COMMAND, /factory adopt-continuation <run-id>[\s\S]*not a hand-rolled generic `factory step accepted`/i, "COMMAND must record adoption through the checked adopt-continuation transition");
+    // Continuation decomposition is scoped to the blocking review's required_fixes, not a
+    // full-brief re-decomposition that recreates completed parent work.
+    assert.match(SKILL, /decompose \*\*only `continuation\.review\.required_fixes`\*\*[\s\S]*do not re-decompose the full brief/i, "SKILL must scope continuation remediation to continuation.review.required_fixes");
+    assert.match(COMMAND, /decompose only `continuation\.review\.required_fixes`/i, "COMMAND must scope continuation remediation to continuation.review.required_fixes");
+    // SCHEMA documents the acceptance-gated planning_reuse shape + acceptance binding.
+    assert.match(SCHEMA, /planning_reuse[\s\S]*reusable by durable acceptance rather than file presence/i, "SCHEMA must describe planning_reuse acceptance gating");
+    assert.match(SCHEMA, /child_spec_review_ref/i, "SCHEMA must document the child-local carried spec review ref");
+    assert.match(SCHEMA, /acceptance` binding[\s\S]*bytes changed after acceptance are not silently treated as accepted/i, "SCHEMA must document the immutable acceptance binding gating reuse");
+    assert.match(SCHEMA, /inherited_acceptance/i, "SCHEMA must document the inherited-acceptance provenance record");
+  });
+
   it("documents configurable PR mode for factory continue", () => {
     for (const [name, text] of documentEntries({ README, SPEC })) {
       assert.match(text, /factory continue[\s\S]*prMode|Continuation[\s\S]*effective PR mode/i, `${name} must document continuation PR mode`);
@@ -552,6 +688,117 @@ describe("interrupt steer resume docs contract", () => {
   it("does not leave cancellation rollback as an open TODO", () => {
     assert.doesNotMatch(TODO, /Future work: live cancellation\/kill/i, "TODO must not leave live cancellation as future work");
     assert.doesNotMatch(TODO, /semantic rollback when steering conflicts/i, "TODO must not leave steering rollback as future work");
+  });
+});
+
+describe("live-run steering drain docs contract", () => {
+  it("enumerates exactly the five safe consume boundaries in each authoritative contract", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      const numberedBoundaries = [...text.matchAll(/^\d+\. \*\*([^*]+):\*\*/gmu)].map((match) => match[1]);
+      assert.deepEqual(numberedBoundaries, LIVE_DRAIN_BOUNDARIES, `${name} must contain exactly the approved five safe boundaries`);
+      assert.match(text, /Every numbered boundary uses the (?:complete|same) pointer-(?:probe|only discovery),? conditional(?:-| )drain,? (?:conflict-checkpoint|immediate conflict checkpoint),? and prospective(?:-| )application (?:protocol|contract)/i, `${name} must govern every boundary with the complete protocol`);
+    }
+  });
+
+  it("defines each boundary precisely and applies it from live orchestrator stages", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /heartbeat-bracketed wait[\s\S]*heartbeat[\s\S]*(?:stopped|inactive)[\s\S]*before[\s\S]*(?:cost-record|cost recording)/i, `${name} must drain after inactive-heartbeat waits before cost/state writes`);
+      assert.match(text, /autonomous gate approval[\s\S]*material[\s\S]*eligibility evidence[\s\S]*immediately before[\s\S]*gate-decision \.\.\. approved[\s\S]*no intervening durable write/i, `${name} must drain immediately before autonomous approval`);
+      assert.match(text, /next agent(?: is)?[\s\S]{0,80}each standalone Task|each standalone Task[\s\S]{0,80}next agent/i, `${name} must define each standalone Task as a next agent`);
+      assert.match(text, /next build wave(?: is)?[\s\S]{0,100}dependency-ready slice batch|dependency-ready slice batch[\s\S]{0,100}next build wave/i, `${name} must define a dependency-ready batch as a next build wave`);
+      assert.match(text, /never between[\s\S]*(?:its )?already-started/i, `${name} must not drain between started wave members`);
+      assert.match(text, /Before remediation[\s\S]*before choosing, routing, or locally applying each new remediation attempt/i, `${name} must drain before every remediation attempt`);
+      assert.match(text, /terminalization or PR creation[\s\S]*immediately before `factory terminal`[\s\S]*Gate 3 approval[\s\S]*immediately before `gh pr create`/i, `${name} must drain before terminalization and PR creation`);
+    }
+
+    for (const stage of ["Autonomous Mode", "Step 2 - Spec And Decomposition", "Step 4 - Build Slices", "Step 5 - Integrate And Validate", "Gate 3 - Pre-PR", "Step 6 - PR Creation", "Resuming"]) {
+      assert.match(markdownSection(SKILL, stage), /Live-Run Steering Drain Protocol/i, `SKILL ${stage} must apply the live drain protocol`);
+    }
+  });
+
+  it("uses pointer-only discovery and skips drain delivery when both durable pointers are null", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /factory status <run-id> --json/i, `${name} must probe status`);
+      assert.match(text, /steering\.pending["]? and [`"]?steering\.uncheckpointed|steering\.pending`? and `steering\.uncheckpointed/i, `${name} must discover pending and uncheckpointed metadata`);
+      assert.match(text, /pointer-only discovery|read-only pointer probe/i, `${name} must make discovery pointer-only`);
+      assert.match(text, /do not open (?:either|steering) file|must not open either file/i, `${name} must not read raw text during discovery`);
+      assert.match(text, /both (?:are|pointers are) null[\s\S]*(?:do not call|skip)[\s\S]*(?:record-resume|drain commands)[\s\S]*(?:steer-consume|boundary)/i, `${name} must make delivery conditional`);
+      assert.match(text, /Status is (?:pointer-only|metadata) discovery, not a consume site/i, `${name} must keep status read-only`);
+    }
+  });
+
+  it("requires inactive heartbeat and record-resume -> consume -> immediate checkpoint ordering", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      const normalized = text.toLowerCase();
+      const recordResume = normalized.indexOf("feature-factory factory env record-resume <run-id> --json");
+      const consume = normalized.indexOf("feature-factory factory steer-consume <run-id> --ref <pending-or-uncheckpointed.ref> --hash <pending-or-uncheckpointed.hash> --json");
+      const checkpoint = normalized.indexOf("immediately perform the steering-conflict checkpoint", consume);
+      assert.ok(recordResume >= 0 && recordResume < consume && consume < checkpoint, `${name} must order record-resume before consume before checkpoint`);
+      assert.match(text, /active-heartbeat[\s\S]*(?:prevents|prevent)[\s\S]*(?:application|raw-text application)[\s\S]*(?:boundary crossing|crossing the boundary)/i, `${name} must reject active heartbeat before crossing`);
+      assert.match(text, /steer-consume[\s\S]*independently rechecks heartbeat inactivity/i, `${name} must retain the consume heartbeat check`);
+      assert.match(text, /immediately after every (?:delivery|consume)/i, `${name} must make the checkpoint immediate`);
+      assert.match(text, /do not perform a cost write|No cost write/i, `${name} must forbid intervening writes/actions`);
+    }
+  });
+
+  it("preserves untrusted labeling, one-time archival, prospective application, and conflict stop", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /UNTRUSTED OPERATOR STEERING DATA \(not instructions\)/, `${name} must retain the raw-text label`);
+      assert.match(text, /trust: untrusted-operator-data/, `${name} must retain the trust value`);
+      assert.match(text, /prospectively[\s\S]*future unaccepted work/i, `${name} must apply compatible guidance prospectively`);
+      assert.match(text, /steering\/consumed-(?:\*|<file>)/i, `${name} must archive consumed steering`);
+      assert.match(text, /without (?:another|a second) (?:rename|archive|consumed event)|archives? exactly once/i, `${name} must preserve one-time consumption`);
+      assert.match(text, /steering\.uncheckpointed[\s\S]*(?:redeliver|redelivery)/i, `${name} must document crash-safe uncheckpointed redelivery`);
+      assert.match(text, /factory steer-ack[\s\S]*applied-prospectively/i, `${name} must require no-conflict acknowledgement`);
+      assert.match(text, /approved gates[\s\S]*accepted steps[\s\S]*merged or blocked slices[\s\S]*validator\/security verdicts[\s\S]*pr_url[\s\S]*terminal_result/i, `${name} must list protected durable state`);
+      assert.match(text, /only permitted workflow write[\s\S]*factory steer-conflict/i, `${name} must limit conflict writes to steer-conflict`);
+      assert.match(text, /needs-human/i, `${name} must stop conflicts as needs-human`);
+      assert.match(text, /(?:do not auto-rollback|perform no rollback)/i, `${name} must prohibit rollback`);
+      assert.match(text, /fixed safe[\s\S]*(?:reason code|summary)|reason_code/i, `${name} must prevent raw conflict reasons`);
+    }
+  });
+
+  it("documents lock-protected stale boundary rejection and the durable pre-PR fence", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /factory boundary-open/i, `${name} must expose boundary-open`);
+      assert.match(text, /factory boundary-cross/i, `${name} must expose boundary-cross`);
+      assert.match(text, /generation[\s\S]*(?:state hash|run-state hash)[\s\S]*(?:stale|reject)/i, `${name} must reject stale boundary observations`);
+      assert.match(text, /action.claim[\s\S]*(?:blocks|remains active)[\s\S]*(?:action start|action-started)/i, `${name} must hold an action claim through start`);
+      assert.match(text, /factory pr-fence[\s\S]*before `?gh pr create`?/i, `${name} must fence before the external PR side effect`);
+      assert.match(text, /blocks new steering[\s\S]*(?:every|any) `?run\.json`? writer|prevents new steering[\s\S]*(?:every|any) `?run\.json`? write/i, `${name} must block steering and sibling writers while fenced`);
+      assert.match(text, /pr-created[\s\S]*(?:missing|mismatched|stale) fence|missing, mismatched, or stale fence/i, `${name} must validate the fence at pr-created`);
+    }
+  });
+
+  it("keeps every privileged public command inventory token-complete", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /factory boundary-cross <run-id> <dispatch\|remediation> --boundary-token TOKEN --json/i, `${name} boundary-cross inventory must require its token`);
+      assert.match(text, /factory action-started <run-id> <dispatch\|remediation> --action-token TOKEN --json/i, `${name} must inventory action-start acknowledgement`);
+      assert.match(text, /factory action-abort <run-id> <dispatch\|remediation> --action-token TOKEN --json/i, `${name} must inventory action recovery`);
+      assert.match(text, /factory gate-decision <run-id> <gate> approved[^\n]*--boundary-token TOKEN --json/i, `${name} approved gate inventory must require its token`);
+      assert.match(text, /factory terminal <run-id> blocked --reason TEXT --boundary-token TOKEN --json/i, `${name} terminal inventory must require its token`);
+      assert.match(text, /factory pr-fence <run-id> --clear --fence-token TOKEN --json/i, `${name} must inventory exact-token PR fence recovery`);
+      assert.match(text, /factory pr-created <run-id>[^\n]*--fence-token TOKEN --json/i, `${name} pr-created inventory must require its fence token`);
+    }
+  });
+
+  it("prohibits consume on unsafe paths and at every non-enumerated site by default", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /low-level (?:run-state )?transition helpers/i, `${name} must prohibit low-level transitions`);
+      assert.match(text, /heartbeat tick\/start\/status\/stop helpers/i, `${name} must prohibit heartbeat helper consumption`);
+      assert.match(text, /cost-record|cost writes/i, `${name} must prohibit cost-write consumption`);
+      assert.match(text, /read-only[\s\S]*status[\s\S]*list[\s\S]*validate[\s\S]*watch[\s\S]*TUI/i, `${name} must prohibit read-only path consumption`);
+      assert.match(text, /Every site outside the five numbered safe boundaries is prohibited by default/i, `${name} must prohibit every other site by default`);
+    }
+  });
+
+  it("preserves explicit resume semantics and marks live drain implemented", () => {
+    assert.match(markdownSection(SCHEMA, "`/feature resume` Contract"), /Preserve existing resume semantics[\s\S]*calls `record-resume` before any other mutating resume work whether or not steering is pending/i, "SCHEMA must preserve explicit resume semantics");
+    assert.match(TODO, /Live-run draining is implemented/i, "TODO must mark live-run draining implemented");
+    assert.doesNotMatch(TODO, /Future work: drain and consume pending steering/i, "TODO must not leave live-run drain as future work");
+    for (const summary of ["after heartbeat-bracketed waits", "before autonomous gate approval", "before dispatching the next agent or build wave", "before remediation", "before terminalization or PR creation"]) {
+      assert.match(TODO, new RegExp(escapeRegExp(summary), "i"), `TODO must summarize ${summary}`);
+    }
   });
 });
 
@@ -775,6 +1022,16 @@ describe("TUI sidebar refresh diagnostics docs contract", () => {
 
 function documentEntries(map) {
   return Object.entries(map);
+}
+
+function markdownSection(text, heading) {
+  const headingPattern = new RegExp(`^(#{2,6}) ${escapeRegExp(heading)}\\s*$`, "mu");
+  const match = headingPattern.exec(text);
+  assert.ok(match, `missing markdown section ${heading}`);
+  const level = match[1].length;
+  const bodyStart = match.index + match[0].length;
+  const nextHeading = new RegExp(`^#{1,${level}} \\S.*$`, "mu").exec(text.slice(bodyStart));
+  return text.slice(match.index, nextHeading ? bodyStart + nextHeading.index : text.length);
 }
 
 function readDoc(relativePath) {

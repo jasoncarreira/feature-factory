@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashFile } from "../src/refs.js";
-import { transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
+import { transitionSteeringAcknowledged, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
 import { collectProtectedSteeringState } from "../src/steering-conflicts.js";
 import { validateRunDir } from "../src/validate.js";
 
@@ -63,10 +63,15 @@ describe("factory steering conflict transition", () => {
         steering_ref: consumed.steering.ref,
         steering_hash: consumed.steering.hash,
         protected_state: "gate:story,gate:pre_pr,step:spec-writer,step:test-verifier,slice:be-api,slice:be-docs,validator:GO-WITH-NITS,security_review:PASS,pr_url",
-        operator_reason: "operator requested rollback",
+        reason_code: "accepted-state-conflict",
       });
 
-      assert.deepEqual(afterRun, { ...beforeRun, status: "needs-human", terminal_result: afterRun.terminal_result });
+      assert.deepEqual(afterRun, {
+        ...beforeRun,
+        status: "needs-human",
+        steering: { ...beforeRun.steering, generation: beforeRun.steering.generation + 1, uncheckpointed: null },
+        terminal_result: afterRun.terminal_result,
+      });
       assert.deepEqual(snapshotDurableFiles(fixture.runDir), durableFilesBefore);
       assert.equal(validateRunDir(fixture.runDir).ok, true);
     } finally {
@@ -125,16 +130,17 @@ describe("factory steering conflict transition", () => {
     const fixture = createFixture("steering-conflict-ref-hash");
     try {
       const first = await queueAndConsume(fixture.runDir, "first steering", "first");
+      await transitionSteeringAcknowledged(fixture.runDir, first);
       const second = await queueAndConsume(fixture.runDir, "second steering", "second");
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
 
       await assert.rejects(
         transitionSteeringConflict(fixture.runDir, { ref: first.ref, hash: first.hash }),
-        /consumed steering ref\/hash mismatch/u,
+        /uncheckpointed steering ref\/hash mismatch/u,
       );
       await assert.rejects(
         transitionSteeringConflict(fixture.runDir, { ref: second.ref, hash: `sha256:${"0".repeat(64)}` }),
-        /consumed steering ref\/hash mismatch/u,
+        /uncheckpointed steering ref\/hash mismatch/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
 
@@ -155,7 +161,7 @@ describe("factory steering conflict transition", () => {
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       await assert.rejects(
         transitionSteeringConflict(fixture.runDir, { ref: "steering/consumed-missing.json", hash: `sha256:${"1".repeat(64)}` }),
-        /no consumed steering/u,
+        /no uncheckpointed steering/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
     } finally {

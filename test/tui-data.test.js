@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { factoryRoots, findFactoryRoots, readRuns, tuiSidebarRefreshMetadata } from "../src/tui-data.js";
@@ -137,23 +138,29 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
-  it("projects steering metadata without raw message text", () => {
+  it("scans real pending steering as read-only metadata without raw text", () => {
     const repo = tempDir();
-    writeRun(repo, "steered-run", {
-      status: "running",
-      updated_at: "2026-07-05T00:00:00Z",
-      gates: {},
-      steering: {
-        schema_version: 1,
-        pending: { id: "s1", ref: "steering/pending.json", hash: `sha256:${"a".repeat(64)}`, message_chars: 11, created_at: "2026-07-05T00:00:00Z" },
-        history: [{ event: "queued", id: "s1", ref: "steering/pending.json", hash: `sha256:${"a".repeat(64)}`, message_chars: 11, created_at: "2026-07-05T00:00:00Z" }],
-      },
-    });
+    const rawSteering = "raw operator steering must never reach a TUI row";
+    const fixture = writePendingSteeringRun(repo, "steered-run", rawSteering);
+    const before = snapshotPendingSteering(fixture);
 
-    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
-    assert.equal(run.steering.pending.ref, "steering/pending.json");
-    assert.equal(JSON.stringify(run).includes("raw operator message"), false);
-    cleanup(repo);
+    try {
+      const directRoots = findFactoryRoots(repo);
+      const sidebarRoots = factoryRoots({ state: { path: { worktree: repo, directory: repo } } }, { noCache: true });
+      const [diagnosticRun] = readRuns(directRoots);
+      const [sidebarRun] = readRuns(sidebarRoots, { diagnostics: false });
+
+      for (const run of [diagnosticRun, sidebarRun]) {
+        assert.deepEqual(run.steering.pending, fixture.pending);
+        assert.deepEqual(Object.keys(run.steering.pending).sort(), ["created_at", "hash", "id", "message_chars", "ref"]);
+        assert.equal(run.steering.consumed_count, 0);
+        assert.equal(run.steering.latest_consumed, null);
+        assert.equal(JSON.stringify(run).includes(rawSteering), false);
+      }
+      assertPendingSteeringUnchanged(fixture, before);
+    } finally {
+      cleanup(repo);
+    }
   });
 
   it("projects the current slice or step beside gate state", () => {
@@ -517,6 +524,61 @@ function writeRun(repo, id, input) {
     join(dir, "run.json"),
     `${JSON.stringify(run, null, 2)}\n`,
   );
+}
+
+function writePendingSteeringRun(repo, id, message) {
+  const runDir = join(repo, ".opencode", "factory", id);
+  const steeringDir = join(runDir, "steering");
+  const createdAt = "2026-07-05T00:00:00.000Z";
+  const ref = "steering/pending-20260705T000000000Z-tui-read-only.json";
+  const pendingFile = join(runDir, ref);
+  const steeringFile = {
+    schema_version: 1,
+    kind: "operator-steering",
+    run_id: id,
+    id: "tui-read-only",
+    message,
+    message_chars: message.length,
+    created_at: createdAt,
+    source: "factory steer",
+  };
+  mkdirSync(steeringDir, { recursive: true });
+  writeFileSync(pendingFile, `${JSON.stringify(steeringFile, null, 2)}\n`, "utf8");
+  const pending = {
+    id: steeringFile.id,
+    ref,
+    hash: `sha256:${createHash("sha256").update(readFileSync(pendingFile)).digest("hex")}`,
+    message_chars: message.length,
+    created_at: createdAt,
+  };
+  const history = [{ event: "queued", ...pending }];
+  writeRun(repo, id, {
+    status: "running",
+    updated_at: createdAt,
+    gates: {},
+    steering: { schema_version: 1, pending, history },
+  });
+  return { repo, runDir, runFile: join(runDir, "run.json"), pendingFile, pending, history };
+}
+
+function snapshotPendingSteering(fixture) {
+  return {
+    runText: readFileSync(fixture.runFile, "utf8"),
+    pendingText: readFileSync(fixture.pendingFile, "utf8"),
+    files: readdirSync(join(fixture.runDir, "steering")).sort(),
+  };
+}
+
+function assertPendingSteeringUnchanged(fixture, before) {
+  const run = JSON.parse(readFileSync(fixture.runFile, "utf8"));
+  const files = readdirSync(join(fixture.runDir, "steering")).sort();
+
+  assert.equal(readFileSync(fixture.runFile, "utf8"), before.runText);
+  assert.deepEqual(run.steering.pending, fixture.pending);
+  assert.deepEqual(run.steering.history, fixture.history);
+  assert.equal(readFileSync(fixture.pendingFile, "utf8"), before.pendingText);
+  assert.deepEqual(files, before.files);
+  assert.equal(files.some((file) => file.startsWith("consumed-")), false);
 }
 
 function costAttributionFixture(runID) {

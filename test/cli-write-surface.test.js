@@ -75,6 +75,7 @@ describe("cli write surface", () => {
       assert.equal(steered.steering.message_chars, 17);
       const consumed = JSON.parse(runFactory(repo, ["steer-consume", RUN_ID, "--ref", steered.steering.ref, "--hash", steered.steering.hash, "--json"]).stdout);
       assert.equal(consumed.steering.trust, "untrusted-operator-data");
+      runFactory(repo, ["steer-ack", RUN_ID, "--ref", consumed.steering.ref, "--hash", consumed.steering.hash, "--json"]);
       validateFactory(repo);
 
       runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
@@ -113,10 +114,12 @@ describe("cli write surface", () => {
       runFactory(repo, ["gate-decision", RUN_ID, "pre_pr", "pending", "--artifact", "artifacts/validation-report.md", "--question-ref", "gates/pre_pr.question.md", "--answer-ref", "gates/pre_pr.answer", "--json"]);
       validateFactory(repo);
       runFactory(repo, ["answer", "--json", RUN_ID, "pre_pr", "approve"]);
-      runFactory(repo, ["gate-decision", RUN_ID, "pre_pr", "approved", "--artifact", "artifacts/validation-report.md", "--question-ref", "gates/pre_pr.question.md", "--answer-ref", "gates/pre_pr.answer", "--approval-source", "external-driver", "--json"]);
+      const gateBoundary = openBoundary(repo, "gate");
+      runFactory(repo, ["gate-decision", RUN_ID, "pre_pr", "approved", "--artifact", "artifacts/validation-report.md", "--question-ref", "gates/pre_pr.question.md", "--answer-ref", "gates/pre_pr.answer", "--approval-source", "external-driver", "--boundary-token", gateBoundary.token, "--json"]);
       validateFactory(repo);
 
-      const completed = JSON.parse(runFactory(repo, ["pr-created", RUN_ID, "--pr-url", "https://github.com/jasoncarreira/opencode-feature-factory/pull/123", "--pr-number", "123", "--repository", "jasoncarreira/opencode-feature-factory", "--json"]).stdout);
+      const fence = JSON.parse(runFactory(repo, ["pr-fence", RUN_ID, "--json"]).stdout).fence;
+      const completed = JSON.parse(runFactory(repo, ["pr-created", RUN_ID, "--pr-url", "https://github.com/jasoncarreira/opencode-feature-factory/pull/123", "--pr-number", "123", "--repository", "jasoncarreira/opencode-feature-factory", "--fence-token", fence.token, "--json"]).stdout);
       const validation = JSON.parse(runFactory(repo, ["validate", RUN_ID]).stdout);
 
       assert.equal(completed.status, "completed");
@@ -173,11 +176,13 @@ describe("cli write surface", () => {
       writeFileSync(join(runDir, "gates", "story.question.md"), "approve story?\n", "utf8");
       runFactory(repo, ["gate-decision", RUN_ID, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--json"]);
       runFactory(repo, ["answer", "--json", RUN_ID, "story", "approve"]);
-      runFactory(repo, ["gate-decision", RUN_ID, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--approval-source", "external-driver", "--json"]);
+      const firstBoundary = openBoundary(repo, "gate");
+      runFactory(repo, ["gate-decision", RUN_ID, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--approval-source", "external-driver", "--boundary-token", firstBoundary.token, "--json"]);
 
       writeFileSync(join(runDir, "gates", "story.question.md"), "approve updated story?\n", "utf8");
       runFactory(repo, ["gate-decision", RUN_ID, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--json"]);
-      assert.match(runFactoryFail(repo, ["gate-decision", RUN_ID, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--approval-source", "external-driver", "--json"]).stderr, /missing gates ref/u);
+      const secondBoundary = openBoundary(repo, "gate");
+      assert.match(runFactoryFail(repo, ["gate-decision", RUN_ID, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--approval-source", "external-driver", "--boundary-token", secondBoundary.token, "--json"]).stderr, /missing gates ref/u);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -189,7 +194,8 @@ describe("cli write surface", () => {
     try {
       initGitRepo(repo);
       seedRun(runDir);
-      runFactory(repo, ["terminal", RUN_ID, "blocked", "--reason", "needs operator", "--json"]);
+      const terminalBoundary = openBoundary(repo, "terminal");
+      runFactory(repo, ["terminal", RUN_ID, "blocked", "--reason", "needs operator", "--boundary-token", terminalBoundary.token, "--json"]);
       const run = readJson(join(runDir, "run.json"));
       assert.equal(run.status, "blocked");
       assert.equal(run.terminal_result.reason, "needs operator");
@@ -199,6 +205,31 @@ describe("cli write surface", () => {
       assert.equal(validation.runs[0].diagnostics.items[0].condition, "terminal-run");
       assert.match(runFactoryFail(repo, ["step", RUN_ID, "spec-writer", "running", "--attempts", "2", "--json"]).stderr, /terminal run 'blocked' cannot be mutated/u);
       assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]).stderr, /terminal run 'blocked' cannot be mutated/u);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an over-depth slice plan without mutating run state", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-slice-depth-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      seedRun(runDir);
+      writeJson(join(runDir, "plan", "slices.json"), {
+        slices: [
+          plannedSlice("root"),
+          plannedSlice("second", ["root"]),
+          plannedSlice("third", ["second"]),
+          plannedSlice("fourth", ["third"]),
+        ],
+      });
+      const runBefore = readFileSync(join(runDir, "run.json"), "utf8");
+
+      const result = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+
+      assert.match(result.stderr, /dependency depth 4 exceeds maximum 3 waves: root -> second -> third -> fourth/u);
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), runBefore);
+      assert.deepEqual(readJson(join(runDir, "run.json")).slices, []);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -243,9 +274,17 @@ function seedRun(runDir) {
   });
 }
 
+function plannedSlice(id, dependsOn = []) {
+  return { id, stack: "backend", paths: [`src/${id}.js`], depends_on: dependsOn, acceptance: [id], test_plan: ["unit"] };
+}
+
 function validateFactory(repo) {
   const validation = JSON.parse(runFactory(repo, ["validate", RUN_ID]).stdout);
   assert.equal(validation.ok, true, JSON.stringify(validation, null, 2));
+}
+
+function openBoundary(repo, kind) {
+  return JSON.parse(runFactory(repo, ["boundary-open", RUN_ID, kind, "--json"]).stdout).boundary;
 }
 
 function runFactoryFail(repo, args) {

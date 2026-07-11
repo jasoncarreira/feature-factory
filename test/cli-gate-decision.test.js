@@ -14,8 +14,9 @@ describe("cli gate-decision", () => {
       let proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
+      const boundary = openBoundary(fixture, "gate");
 
-      proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--approval-source", "external-driver", "--json"]);
+      proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--approval-source", "external-driver", "--boundary-token", boundary.token, "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
       const run = readJson(join(fixture.runDir, "run.json"));
@@ -31,9 +32,39 @@ describe("cli gate-decision", () => {
     const fixture = createFixture("cli-human-gate");
     try {
       assert.equal(runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--json"]).status, 0);
-      const proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer", "approve", "--json"]);
+      const boundary = openBoundary(fixture, "gate");
+      const proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer", "approve", "--boundary-token", boundary.token, "--json"]);
       assert.equal(proc.status, 0, proc.stderr);
       assert.equal(readJson(join(fixture.runDir, "run.json")).gates.story.approval_source, "human");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects missing and stale approval boundary tokens and recovers with a fresh token", () => {
+    const fixture = createFixture("cli-gate-boundary-guards");
+    try {
+      let proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+
+      const approvalArgs = ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer", "approve", "--json"];
+      proc = runCli(fixture.repo, approvalArgs);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /lock-protected boundary observation/u);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).gates.story.status, "pending");
+
+      const stale = openBoundary(fixture, "gate");
+      proc = runCli(fixture.repo, ["factory", "env", "record-created", fixture.runId, "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      proc = runCli(fixture.repo, [...approvalArgs.slice(0, -1), "--boundary-token", stale.token, "--json"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /boundary observation is stale/u);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).gates.story.status, "pending");
+
+      const fresh = openBoundary(fixture, "gate");
+      proc = runCli(fixture.repo, [...approvalArgs.slice(0, -1), "--boundary-token", fresh.token, "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).gates.story.status, "approved");
     } finally {
       cleanup(fixture.repo);
     }
@@ -114,6 +145,12 @@ function createFixture(runId) {
 
 function runCli(repo, args) {
   return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8" });
+}
+
+function openBoundary(fixture, kind) {
+  const proc = runCli(fixture.repo, ["factory", "boundary-open", fixture.runId, kind, "--json"]);
+  assert.equal(proc.status, 0, proc.stderr);
+  return JSON.parse(proc.stdout).boundary;
 }
 
 function readJson(file) {

@@ -5,13 +5,17 @@ const PREFIX = "ffpayload-v1:";
 const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews"]);
+const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse"]);
+const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
+const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
 const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "summary", "required_fixes", "source", "verdict"]);
 const CONTINUATION_TARGET_KEYS = new Set(["run_id", "branch", "worktree", "base_ref", "base_commit"]);
 const CONTINUATION_REF_KEYS = new Set(["kind", "ref", "hash"]);
-const STEERING_KEYS = new Set(["schema_version", "kind", "run_id", "pending", "consume", "raw_message_included"]);
+const STEERING_KEYS = new Set(["schema_version", "kind", "run_id", "pending", "uncheckpointed", "consume", "raw_message_included"]);
 const STEERING_PENDING_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at"]);
+const STEERING_UNCHECKPOINTED_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at", "consumed_at"]);
 const STEERING_CONSUME_KEYS = new Set(["command", "args"]);
 const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice"]);
 const CONTINUATION_ARTIFACT_KINDS = new Map([
@@ -122,24 +126,28 @@ function normalizeSteering(steering, runId) {
   if (runId !== steering.run_id.trim()) return { ok: false, reason: "run-id-mismatch" };
 
   const pending = steering.pending ?? null;
+  const uncheckpointed = steering.uncheckpointed ?? null;
   const consume = steering.consume ?? null;
-  if (pending === null || consume === null) {
-    if (pending !== null || consume !== null) return { ok: false, reason: "incomplete-steering-pointer" };
-    return { ok: true, value: { schema_version: 1, kind: "operator-steering-pointer", run_id: runId, pending: null, consume: null, raw_message_included: false } };
+  if (pending !== null && uncheckpointed !== null) return { ok: false, reason: "ambiguous-steering-pointer" };
+  const pointer = pending || uncheckpointed;
+  if (pointer === null || consume === null) {
+    if (pointer !== null || consume !== null) return { ok: false, reason: "incomplete-steering-pointer" };
+    return { ok: true, value: { schema_version: 1, kind: "operator-steering-pointer", run_id: runId, pending: null, uncheckpointed: null, consume: null, raw_message_included: false } };
   }
-  if (!plainObject(pending) || !hasOnlyKeys(pending, STEERING_PENDING_KEYS) || !plainObject(consume) || !hasOnlyKeys(consume, STEERING_CONSUME_KEYS)) {
+  const pointerKeys = pending ? STEERING_PENDING_KEYS : STEERING_UNCHECKPOINTED_KEYS;
+  if (!plainObject(pointer) || !hasOnlyKeys(pointer, pointerKeys) || !plainObject(consume) || !hasOnlyKeys(consume, STEERING_CONSUME_KEYS)) {
     return { ok: false, reason: "invalid-steering-pointer" };
   }
 
   try {
-    validateRun({ schema_version: 1, run_id: runId, status: "running", gates: {}, steering: { schema_version: 1, pending, history: [] } });
+    validateRun({ schema_version: 1, run_id: runId, status: "running", gates: {}, steering: { schema_version: 1, pending, uncheckpointed, history: [] } });
   } catch {
     return { ok: false, reason: "invalid-steering-pending" };
   }
-  if (!safePendingRef(pending.ref) || consume.command !== "feature-factory" || !Array.isArray(consume.args)) {
+  if (!(pending ? safePendingRef(pointer.ref) : safeConsumedRef(pointer.ref)) || consume.command !== "feature-factory" || !Array.isArray(consume.args)) {
     return { ok: false, reason: "invalid-steering-consume" };
   }
-  const expectedArgs = ["factory", "steer-consume", runId, "--ref", pending.ref, "--hash", pending.hash, "--json"];
+  const expectedArgs = ["factory", "steer-consume", runId, "--ref", pointer.ref, "--hash", pointer.hash, "--json"];
   if (consume.args.length !== expectedArgs.length || consume.args.some((item, index) => item !== expectedArgs[index])) {
     return { ok: false, reason: "invalid-steering-consume" };
   }
@@ -150,7 +158,8 @@ function normalizeSteering(steering, runId) {
       schema_version: 1,
       kind: "operator-steering-pointer",
       run_id: runId,
-      pending: { id: pending.id, ref: pending.ref, hash: pending.hash, message_chars: pending.message_chars, created_at: pending.created_at },
+      pending: pending ? { id: pending.id, ref: pending.ref, hash: pending.hash, message_chars: pending.message_chars, created_at: pending.created_at } : null,
+      uncheckpointed: uncheckpointed ? { id: uncheckpointed.id, ref: uncheckpointed.ref, hash: uncheckpointed.hash, message_chars: uncheckpointed.message_chars, created_at: uncheckpointed.created_at, consumed_at: uncheckpointed.consumed_at } : null,
       consume: { command: "feature-factory", args: expectedArgs },
       raw_message_included: false,
     },
@@ -167,6 +176,21 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
   }
   for (const items of [continuation.parent_artifacts, continuation.parent_evidence, continuation.parent_reviews]) {
     if (!Array.isArray(items) || items.some((item) => !plainObject(item) || !hasOnlyKeys(item, CONTINUATION_REF_KEYS))) return { ok: false, reason: "invalid-continuation-refs" };
+  }
+
+  const planningReuse = continuation.planning_reuse;
+  if (planningReuse !== undefined) {
+    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, CONTINUATION_PLANNING_REUSE_KEYS) || typeof planningReuse.eligible !== "boolean") {
+      return { ok: false, reason: "invalid-continuation-planning-reuse" };
+    }
+    if (planningReuse.eligible
+      && (!canonicalJsonRef(planningReuse.spec_review_ref, "reviews/")
+        || planningReuse.child_spec_review_ref !== CONTINUATION_CHILD_SPEC_REVIEW_REF
+        || planningReuse.spec_artifact_ref !== "artifacts/technical-brief.md"
+        || !SHA256_PATTERN.test(planningReuse.spec_review_hash || "")
+        || !SHA256_PATTERN.test(planningReuse.spec_artifact_hash || ""))) {
+      return { ok: false, reason: "invalid-continuation-planning-reuse" };
+    }
   }
 
   try {
@@ -237,7 +261,22 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       parent_artifacts: continuation.parent_artifacts.map(normalizedRefHash),
       parent_evidence: continuation.parent_evidence.map(normalizedRefHash),
       parent_reviews: continuation.parent_reviews.map(normalizedRefHash),
+      ...(planningReuse === undefined ? {} : { planning_reuse: normalizedPlanningReuse(planningReuse) }),
     },
+  };
+}
+
+function normalizedPlanningReuse(planningReuse) {
+  if (!planningReuse.eligible) {
+    return { eligible: false, ...(nonEmptyString(planningReuse.reason) ? { reason: planningReuse.reason } : {}) };
+  }
+  return {
+    eligible: true,
+    spec_review_ref: planningReuse.spec_review_ref,
+    spec_review_hash: planningReuse.spec_review_hash,
+    spec_artifact_ref: planningReuse.spec_artifact_ref,
+    spec_artifact_hash: planningReuse.spec_artifact_hash,
+    child_spec_review_ref: planningReuse.child_spec_review_ref,
   };
 }
 
@@ -274,6 +313,10 @@ function normalizedRefHash(item) {
 
 function safePendingRef(value) {
   return safeRelativeRef(value, "steering/") && /^steering\/pending-[^/]+\.json$/u.test(value);
+}
+
+function safeConsumedRef(value) {
+  return safeRelativeRef(value, "steering/") && /^steering\/consumed-[^/]+\.json$/u.test(value);
 }
 
 function validContinuationReviewSource(kind, source) {
