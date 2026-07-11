@@ -73,6 +73,32 @@ const LIVE_DRAIN_BOUNDARIES = Object.freeze([
 ]);
 
 describe("class-wide planning prompt contract", () => {
+  it("gives the spec writer the same acceptance bar the reviewer applies", () => {
+    // Alignment, not accretion: every recent run paid a guaranteed one-round spec
+    // rejection because the reviewer's acceptance rubric was richer than the
+    // writer's output contract. The writer must carry the reviewer's bar as a
+    // pre-return self-check, and the two prompts must not drift apart: each bar
+    // concept below must appear in BOTH prompts.
+    assert.match(SPEC_WRITER_PROMPT, /## Self-review before returning \(the reviewer's bar\)/i);
+    assert.match(SPEC_WRITER_PROMPT, /Apply the same checklist to your own draft first/i);
+    const barConcepts = [
+      ["decided per-sink policy", /decided policy/i, /decided policy/i],
+      ["mandatory test mapping", /every AC maps to a mandatory, named test or command/i, /every row maps to a test/i],
+      ["no unresolved behavioral/design decision", /No behavioral or design choice is left to builders/i, /unresolved behavioral or design decision is not a residual/i],
+      ["mechanical-only residual", /mechanical residual is acceptable only when its behavior, compatibility, security, and state policy are already decided/i, /mechanical implementation detail whose behavior, backward-compatibility, security, and state-transition policy are already decided/i],
+      ["state-transition dimension", /state-transition table/i, /state-transition table/i],
+      ["story-authorized deferral", /only when the approved story or scope authorizes it/i, /only when the approved story or scope authorizes it/i],
+      ["feasible envelope", /implementable within the brief's allowed mechanisms, dependencies, compatibility constraints, and non-goals/i, /cannot be implemented within its allowed mechanisms, dependencies, compatibility constraints, or explicit non-goals/i],
+    ];
+    for (const [name, writerPattern, reviewerPattern] of barConcepts) {
+      assert.match(SPEC_WRITER_PROMPT, writerPattern, `spec-writer must self-check: ${name}`);
+      assert.match(WORK_REVIEWER_PROMPT, reviewerPattern, `work-reviewer must still enforce: ${name}`);
+    }
+    // Internal-consistency and ownership checks come from observed first-attempt rejections.
+    assert.match(SPEC_WRITER_PROMPT, /hunting for contradictions/i);
+    assert.match(SPEC_WRITER_PROMPT, /call out shared or contested paths explicitly/i);
+  });
+
   it("requires research to enumerate a finite source-to-sink surface", () => {
     assert.match(CODEBASE_RESEARCHER_PROMPT, /class-wide requirements as closed-world inventory work/i);
     for (const trigger of ["all", "every", "centralize", "across"]) {
