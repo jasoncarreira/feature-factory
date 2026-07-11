@@ -25,7 +25,8 @@ describe("resolved model provenance", () => {
     const { dir, configPath } = withConfig({ "spec-writer": { model: "openai/gpt-5.6-sol", variant: "xhigh" } });
     try {
       const env = await collectEnv({ pluginOptions: {}, configPath });
-      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_from, "visible-config-plugin-entry");
+      assert.deepEqual(env.profile_observation, { scope: "feature-factory-plugin-profiles", authoritative: false });
       assert.equal(env.resolved_models["spec-writer"], "openai/gpt-5.6-sol");
       assert.equal(env.resolved_variants["spec-writer"], "xhigh");
       assert.deepEqual(readConfiguredPluginOptions(process.cwd(), { configPath }).profiles["spec-writer"], { model: "openai/gpt-5.6-sol", variant: "xhigh" });
@@ -44,7 +45,7 @@ describe("resolved model provenance", () => {
       // semantics and find the profile via OPENCODE_CONFIG. cwd is an empty dir so
       // no project-level config interferes.
       const env = await collectEnv({ pluginOptions: {}, cwd: emptyCwd });
-      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_from, "visible-config-plugin-entry");
       assert.equal(env.resolved_models["work-decomposer"], "openai/gpt-5.6-sol");
       assert.equal(env.resolved_variants["work-decomposer"], "xhigh");
     } finally {
@@ -69,7 +70,7 @@ describe("resolved model provenance", () => {
     delete process.env.OPENCODE_CONFIG;
     try {
       const env = await collectEnv({ pluginOptions: {}, cwd: project });
-      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_from, "visible-config-plugin-entry");
       assert.equal(env.resolved_models["work-decomposer"], "openai/dir-profile", "OPENCODE_CONFIG_DIR must outrank project config");
     } finally {
       if (prevDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
@@ -96,7 +97,7 @@ describe("resolved model provenance", () => {
     delete process.env.OPENCODE_CONFIG;
     try {
       const env = await collectEnv({ pluginOptions: {}, cwd: emptyCwd });
-      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_from, "visible-config-plugin-entry");
       assert.equal(env.resolved_models["work-decomposer"], "openai/global-profile");
     } finally {
       if (prevDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
@@ -118,7 +119,7 @@ describe("resolved model provenance", () => {
     delete process.env.OPENCODE_CONFIG;
     try {
       const env = await collectEnv({ pluginOptions: {}, cwd: dir });
-      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_from, "visible-config-plugin-entry");
       assert.equal(env.resolved_models["security-reviewer"], "openai/gpt-5.6-sol");
     } finally {
       if (prev !== undefined) process.env.OPENCODE_CONFIG = prev;
@@ -132,8 +133,29 @@ describe("resolved model provenance", () => {
     assert.equal(passed.resolved_models["spec-writer"], "m");
 
     const none = await collectEnv({ pluginOptions: {}, configPath: "/does/not/exist" });
-    assert.equal(none.resolved_from, "package-default");
+    assert.equal(none.resolved_from, "not-observed");
     assert.equal(none.resolved_models["spec-writer"], null); // not visible to this process, not "unconfigured"
+  });
+
+  it("preserves unknown provenance for malformed and ambiguous config observations", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ff-env-bad-cfg-"));
+    const malformedPath = join(dir, "malformed.jsonc");
+    const duplicatePath = join(dir, "duplicate.jsonc");
+    writeFileSync(malformedPath, "{ invalid", "utf8");
+    writeFileSync(duplicatePath, JSON.stringify({ plugin: [
+      ["opencode-feature-factory", { profiles: { planning: { model: "one" } } }],
+      ["file:///x/opencode-feature-factory", { profiles: { planning: { model: "two" } } }],
+    ] }), "utf8");
+    try {
+      for (const configPath of [malformedPath, duplicatePath]) {
+        const env = await collectEnv({ pluginOptions: {}, configPath });
+        assert.equal(env.resolved_from, "config-observation-error");
+        assert.equal(env.resolved_models["spec-writer"], null);
+        assert.equal(env.profile_observation.authoritative, false);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

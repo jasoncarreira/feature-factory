@@ -31,15 +31,10 @@ describe("plugin profiles", () => {
     assert.equal(cfg.agent["security-reviewer"].variant, "xhigh");
   });
 
-  it("fills in the recommended effort variant when a model has no variant", async () => {
+  it("leaves provider-specific variants explicit when a model has no variant", async () => {
     const cfg = await pluginConfig({ profiles: { default: { model: "openai/gpt-5.5" } } });
     assert.equal(cfg.agent["spec-writer"].model, "openai/gpt-5.5");
-    assert.equal(cfg.agent["spec-writer"].variant, "xhigh"); // planning role
-    assert.equal(cfg.agent["feature-factory"].variant, "xhigh"); // planning role
-    assert.equal(cfg.agent["security-reviewer"].variant, "xhigh"); // security role
-    assert.equal(cfg.agent["work-reviewer"].variant, "high"); // reviewer role
-    assert.equal(cfg.agent["backend-builder"].variant, "high"); // builder role
-    assert.equal(cfg.agent["story-reader"].variant, "medium"); // story role
+    for (const agent of Object.values(cfg.agent)) assert.equal(agent.variant ?? null, null);
   });
 
   it("never overrides an explicit variant", async () => {

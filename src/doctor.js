@@ -109,13 +109,14 @@ export async function runDoctor(options = {}) {
     add(checks, "provider smoke", false, "run with --provider-smoke before long scripted runs", "warn");
   }
 
-  // The planning and review roles do the hardest work; a fresh install with no
-  // profile leaves them on opencode's default model/effort. doctor reads the
-  // operator config, so env.resolved_models is authoritative here.
+  // This reports only models visible in feature-factory plugin profiles. OpenCode
+  // defaults, inherited agent config, and managed/inline config remain unknown.
   const unprofiledRoleAgents = PROFILE_RECOMMENDED_ROLES.flatMap((role) =>
     Object.keys(AGENT_ROLES).filter((agent) => AGENT_ROLES[agent] === role && !env.resolved_models[agent]));
-  add(checks, "recommended profiles", unprofiledRoleAgents.length === 0,
-    unprofiledRoleAgents.length === 0 ? "planning/review roles have a configured model" : `no model for ${unprofiledRoleAgents.join(", ")} — see README "Configure Profiles"`,
+  add(checks, "visible recommended profiles", unprofiledRoleAgents.length === 0,
+    unprofiledRoleAgents.length === 0
+      ? "visible feature-factory plugin profiles configure planning/review models"
+      : `no model in visible feature-factory plugin profiles for ${unprofiledRoleAgents.join(", ")} — OpenCode defaults and inheritance are not inspected`,
     unprofiledRoleAgents.length === 0 ? "ok" : "warn");
 
   if (options.json) {

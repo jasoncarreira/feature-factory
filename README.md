@@ -191,7 +191,7 @@ Profile precedence is exact agent, then role, then `profiles.default`, then top-
 }
 ```
 
-**Recommended effort default (model-agnostic).** When a profile sets a `model` for an agent but no `variant`, the plugin fills in the role's recommended reasoning-effort variant automatically — `planning`/`security` → `xhigh`, `reviewer`/`builder`/`research`/`test`/`design` → `high`, `story` → `medium`. It never pins a model and never overrides a `variant` you set, so setting only `profiles.default.model` already gives planning/review high effort. `feature-factory doctor` warns (`recommended profiles`) when a planning or review agent resolves to no model at all.
+Variants are explicit and provider/model-specific. The plugin never invents a variant when a profile specifies only a model; configure a variant only when that model exposes the named capability. `feature-factory doctor` reports whether planning/review models appear in visible feature-factory plugin profiles, but it does not inspect OpenCode defaults, inherited agent configuration, or managed/inline sources.
 
 ### Reviewer Read-Only Guard
 

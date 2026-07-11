@@ -189,20 +189,6 @@ const AGENT_ROLES = {
   "security-reviewer": "security",
 };
 
-// Recommended reasoning-effort variant per role. Model-agnostic: applied only as
-// a default when an agent already resolves to a model but the operator set no
-// explicit variant, so planning/security/review get high effort out of the box
-// without pinning any provider model. Never overrides an explicit variant.
-export const RECOMMENDED_PROFILE_VARIANTS = Object.freeze({
-  planning: "xhigh",
-  security: "xhigh",
-  reviewer: "high",
-  builder: "high",
-  test: "high",
-  research: "high",
-  design: "high",
-  story: "medium",
-});
 const PROFILE_RECOMMENDED_ROLES = Object.freeze(["planning", "reviewer", "security"]);
 export { PROFILE_RECOMMENDED_ROLES, AGENT_ROLES };
 
@@ -219,13 +205,6 @@ function applyProfileOptions(cfg, options = {}) {
     if (selected) {
       if (selected.model) agent.model = selected.model;
       if (selected.variant) agent.variant = selected.variant;
-    }
-    // Recommended effort default: once an agent resolves to a model but has no
-    // explicit variant, apply the role's recommended reasoning-effort variant.
-    // Elevates planning/security/review effort out of the box without pinning a
-    // provider model; never overrides an explicit variant or a model-less agent.
-    if (agent.model && !agent.variant && RECOMMENDED_PROFILE_VARIANTS[role]) {
-      agent.variant = RECOMMENDED_PROFILE_VARIANTS[role];
     }
   }
 }

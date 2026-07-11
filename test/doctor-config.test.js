@@ -83,6 +83,40 @@ describe("doctor opencode config parsing", () => {
       cleanup(dir);
     }
   });
+
+  it("scopes missing-profile warnings to visible feature-factory plugin profiles", () => {
+    const dir = tempDir();
+    try {
+      const home = join(dir, "home");
+      const configDir = join(home, ".config", "opencode");
+      mkdirSync(configDir, { recursive: true });
+      const configPath = join(configDir, "opencode.jsonc");
+      writeFileSync(configPath, JSON.stringify({ plugin: [[LOCAL_PLUGIN_SPEC, {}]] }), "utf8");
+      const proc = spawnSync(process.execPath, [CLI, "doctor", "--local", "--json"], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: home,
+          XDG_CONFIG_HOME: join(home, ".config"),
+          OPENCODE_CONFIG: "",
+          OPENCODE_CONFIG_DIR: "",
+        },
+      });
+      const output = JSON.parse(proc.stdout);
+      const check = output.checks.find((item) => item.label === "visible recommended profiles");
+      assert.ok(check);
+      assert.equal(check.level, "warn");
+      assert.match(check.detail, /no model in visible feature-factory plugin profiles/u);
+      assert.match(check.detail, /OpenCode defaults and inheritance are not inspected/u);
+      assert.deepEqual(output.env.profile_observation, {
+        scope: "feature-factory-plugin-profiles",
+        authoritative: false,
+      });
+    } finally {
+      cleanup(dir);
+    }
+  });
 });
 
 describe("doctor telemetry readiness helpers", () => {

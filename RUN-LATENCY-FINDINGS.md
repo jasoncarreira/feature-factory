@@ -37,8 +37,8 @@ Two things make it churn instead of converge:
   config maps `spec-writer` to GPT-5.6 Sol `xhigh` and `work-reviewer` to `high`; the
   `factory env` snapshot collected model resolution without the operator's `opencode.jsonc`
   profiles, so it recorded null. Treat null as unknown resolution — a diagnostic blind spot —
-  unless runtime evidence demonstrates an actual profile fallback. The snapshot observability
-  is fixed in PR #46 (honest `resolved_from` provenance).
+  unless runtime evidence demonstrates an actual profile fallback. PR #46 narrows the snapshot
+  to explicitly non-authoritative visible plugin-profile provenance.
 
 Observational before/after association (not a controlled A/B — these are different runs and
 workloads with no controlled assignment and obvious confounders, so read it as a signal, not
@@ -96,13 +96,12 @@ their merits — bounded escalation working as designed. The levers below make t
    (not just each same-class instance), add a finite acceptance bar so reviewers stop
    extending the loop for achievable-but-absent depth, and bound deferrals/residuals so an
    in-scope sink cannot be waived. **← PR #45.**
-3. **Fix the model-resolution telemetry and ship a recommended effort default.**
-   `resolved_models` is null in snapshots only because `factory env` collected without the
-   operator's `opencode.jsonc` profiles (which already map `spec-writer`→`xhigh`,
-   reviewers→`high`); it is not evidence of a weak model. Make the snapshot honest
-   (`resolved_from` provenance) and fill a recommended reasoning-effort variant per role when
-   an agent has a model but no explicit variant, so fresh installs get high planning/review
-   effort without pinning a provider model. **← PR #46.**
+3. **Make visible plugin-profile telemetry honest.**
+   A null `resolved_models` entry is not evidence of a weak or absent runtime model: the
+   snapshot can observe feature-factory plugin profiles in supported files, but not OpenCode's
+   full merged agent configuration, inheritance, or managed/inline sources. Record that
+   observation scope and preserve unknown/error provenance. Keep provider/model-specific
+   variants explicit rather than inventing unsupported reasoning-effort names. **← PR #46.**
 4. **Cap decomposition depth** — a 13-slice DAG with a 5-deep chain strands 7 slices on one
    block; prefer shallower/wider waves so one hard slice does not freeze the rest.
    *(follow-up)*

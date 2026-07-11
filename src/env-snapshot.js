@@ -37,13 +37,13 @@ export async function collectEnv(options = {}) {
     feature_factory_version: packageVersion(),
     opencode_version: commandOutput("opencode", ["--version"]),
     plugin_spec: options.pluginSpec || "opencode-feature-factory",
-    // How the model/variant map below was resolved: "plugin-options" (passed by
-    // a caller that has them, e.g. doctor), "opencode-config" (recovered from the
-    // operator's opencode.jsonc plugin entry), or "package-default" (no operator
-    // profiles visible). A null model under "package-default" means "not visible
-    // to this process", NOT "unconfigured" — opencode still applies operator
-    // profiles at runtime.
+    // This is a partial observation of feature-factory plugin profiles, not
+    // OpenCode's fully merged runtime agent configuration.
     resolved_from: resolvedFrom,
+    profile_observation: {
+      scope: "feature-factory-plugin-profiles",
+      authoritative: false,
+    },
     resolved_models: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.model || null])),
     resolved_variants: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, agent]) => [name, agent.variant || null])),
     driver: {
@@ -59,30 +59,33 @@ function resolveEffectivePluginOptions(options = {}) {
   if (hasProfileConfig(options.pluginOptions)) return { pluginOptions: options.pluginOptions, resolvedFrom: "plugin-options" };
   // The `factory env` snapshot path collects without the operator's plugin
   // options (they live in the opencode.jsonc plugin entry, which only opencode
-  // parses). Recover them from the config so resolved_models reflects what
-  // opencode actually applies rather than misleading nulls.
+  // parses). Recover profiles visible in supported config files without claiming
+  // to reproduce OpenCode's complete config merge.
   if (options.readConfiguredProfiles !== false) {
-    const recovered = readConfiguredPluginOptions(options.cwd, { configPath: options.configPath });
-    if (hasProfileConfig(recovered)) return { pluginOptions: recovered, resolvedFrom: "opencode-config" };
+    const observation = observeConfiguredPluginOptions(options.cwd, { configPath: options.configPath });
+    if (hasProfileConfig(observation.options)) return { pluginOptions: observation.options, resolvedFrom: "visible-config-plugin-entry" };
+    if (observation.status === "error") return { pluginOptions: {}, resolvedFrom: "config-observation-error" };
   }
-  return { pluginOptions: isRecord(options.pluginOptions) ? options.pluginOptions : {}, resolvedFrom: "package-default" };
+  return { pluginOptions: isRecord(options.pluginOptions) ? options.pluginOptions : {}, resolvedFrom: "not-observed" };
 }
 
 export function readConfiguredPluginOptions(cwd = process.cwd(), { configPath } = {}) {
-  // Resolve the effective config the same way the launched opencode CLI would,
-  // so `resolved_from`/`resolved_models` stay honest under supported overrides
-  // (OPENCODE_CONFIG_DIR, OPENCODE_CONFIG, XDG_CONFIG_HOME) and project-level config
-  // layers — not only the default ~/.config location. Prefer whichever layer actually
-  // carries the feature-factory profiles; otherwise report the first plugin entry seen.
+  return observeConfiguredPluginOptions(cwd, { configPath }).options;
+}
+
+function observeConfiguredPluginOptions(cwd = process.cwd(), { configPath } = {}) {
+  // Inspect supported file locations in precedence order. Managed/inline sources,
+  // full layer merging, and agent inheritance remain outside this observation.
   const candidates = stringValue(configPath) ? [configPath] : opencodeConfigCandidates(cwd);
   let firstEntry = null;
   for (const path of candidates) {
-    const entry = readPluginEntryFromConfig(path);
-    if (!entry) continue;
-    if (hasProfileConfig(entry)) return entry;
-    if (!firstEntry) firstEntry = entry;
+    const observation = observePluginEntryFromConfig(path);
+    if (observation.status === "error") return { options: null, status: "error" };
+    if (observation.status !== "entry") continue;
+    if (hasProfileConfig(observation.options)) return { options: observation.options, status: "observed" };
+    if (!firstEntry) firstEntry = observation.options;
   }
-  return firstEntry;
+  return { options: firstEntry, status: firstEntry ? "observed" : "not-observed" };
 }
 
 // Candidate config files in opencode's effective precedence order (opencode 1.1.36):
@@ -93,8 +96,8 @@ export function readConfiguredPluginOptions(cwd = process.cwd(), { configPath } 
 //   3. the global config file: the OPENCODE_CONFIG override when set, otherwise the
 //      XDG (or ~/.config) default. OPENCODE_CONFIG_DIR layers over this file rather
 //      than replacing it.
-// First layer that actually carries feature-factory profiles wins, so `resolved_*`
-// mirrors what the launched CLI applies rather than a lower-precedence layer.
+// The first layer carrying visible feature-factory profiles is reported. This is
+// intentionally not described as OpenCode's effective merged configuration.
 function opencodeConfigCandidates(cwd = process.cwd()) {
   const candidates = [];
   const dirOverride = process.env.OPENCODE_CONFIG_DIR;
@@ -118,22 +121,24 @@ function opencodeConfigCandidates(cwd = process.cwd()) {
   return [...new Set(candidates)];
 }
 
-function readPluginEntryFromConfig(path) {
+function observePluginEntryFromConfig(path) {
   let cfg;
   try {
-    if (!existsSync(path)) return null;
+    if (!existsSync(path)) return { status: "absent" };
     cfg = readJsoncConfig(path, { label: "opencode.jsonc" });
   } catch {
-    return null;
+    return { status: "error" };
   }
+  const matches = [];
   for (const entry of Array.isArray(cfg?.plugin) ? cfg.plugin : []) {
     const spec = Array.isArray(entry) ? entry[0] : entry;
     if (typeof spec !== "string") continue;
     if (spec === "opencode-feature-factory" || spec.includes("opencode-feature-factory")) {
-      return Array.isArray(entry) && isRecord(entry[1]) ? entry[1] : {};
+      matches.push(Array.isArray(entry) && isRecord(entry[1]) ? entry[1] : {});
     }
   }
-  return null;
+  if (matches.length > 1) return { status: "error" };
+  return matches.length === 1 ? { status: "entry", options: matches[0] } : { status: "no-entry" };
 }
 
 function hasProfileConfig(value) {
