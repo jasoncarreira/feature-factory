@@ -116,6 +116,39 @@ export function validateSlicesPlan(plan, { enforceDependencyDepth = true } = {})
   return plan;
 }
 
+// The dependency-depth cap is grandfathered ONLY for a plan whose durable form is
+// the current `run.slices` — i.e. run.slices is the seeded projection of this exact
+// plan. A merely nonempty run.slices must not exempt the plan: a stale, partial, or
+// unrelated durable slice list would otherwise let the plan be swapped for an
+// over-depth graph unchecked. Match on the closed set of slice ids AND each slice's
+// dependency set (order-insensitive); any divergence re-enables enforcement.
+export function runSlicesMatchPlan(run, plan) {
+  const runGraph = normalizeSliceGraph(run?.slices);
+  const planGraph = normalizeSliceGraph(plan?.slices);
+  if (!runGraph || !planGraph) return false;
+  if (runGraph.size === 0 || runGraph.size !== planGraph.size) return false;
+  for (const [id, deps] of runGraph) {
+    const planDeps = planGraph.get(id);
+    if (!planDeps || planDeps.length !== deps.length || planDeps.some((dep, index) => dep !== deps[index])) return false;
+  }
+  return true;
+}
+
+function normalizeSliceGraph(slices) {
+  if (!Array.isArray(slices)) return null;
+  const graph = new Map();
+  for (const slice of slices) {
+    if (!isRecord(slice) || !stringValue(slice.id)) return null;
+    const id = String(slice.id).trim();
+    if (graph.has(id)) return null;
+    const deps = Array.isArray(slice.depends_on)
+      ? [...new Set(slice.depends_on.filter(stringValue).map((dep) => String(dep).trim()))].sort()
+      : [];
+    graph.set(id, deps);
+  }
+  return graph;
+}
+
 export function validateHeartbeatState(heartbeat) {
   const errors = [];
   if (!isRecord(heartbeat)) return fail([{ path: "heartbeat", message: "must be an object" }]);
@@ -165,7 +198,7 @@ export function validateRunDir(runDir) {
   const processPath = join(runDir, PROCESS_EVIDENCE_FILE);
   if (existsSync(processPath)) checks.push(validateFile(processPath, (value) => validateProcessSidecar(value, { runDir, runId: run?.run_id })));
   const slicesPath = join(runDir, "plan", "slices.json");
-  if (existsSync(slicesPath)) checks.push(validateFile(slicesPath, (value) => validateSlicesPlan(value, { enforceDependencyDepth: !run?.slices?.length })));
+  if (existsSync(slicesPath)) checks.push(validateFile(slicesPath, (value) => validateSlicesPlan(value, { enforceDependencyDepth: !runSlicesMatchPlan(run, value) })));
   if (checks.every((item) => item.ok)) checks.push(...checkRunConsistency(runDir, run).checks);
   return { ok: checks.every((item) => item.ok), checks };
 }

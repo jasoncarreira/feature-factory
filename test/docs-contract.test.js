@@ -103,6 +103,29 @@ describe("decomposition depth contract", () => {
       assert.match(text, /max_parallel_slices[\s\S]{0,120}(?:concurrency|concurrently)[\s\S]{0,120}(?:does not|not)[\s\S]{0,80}(?:depth cap|cap)/i, `${name} must distinguish concurrency from depth`);
     }
   });
+
+  it("seeds (validates) before recording work-decomposer acceptance, atomically", () => {
+    // slices-seed is the enforcing validation; it must run BEFORE the accepted step so an
+    // over-depth/invalid plan cannot leave a durable accepted decomposition + unseeded plan.
+    assert.match(
+      SKILL,
+      /seed durable slices first[\s\S]*slices-seed[\s\S]*enforcing validation[\s\S]*Only after it succeeds[\s\S]*work-decomposer accepted/i,
+      "SKILL Step 4 must seed (validate) before recording work-decomposer acceptance",
+    );
+  });
+
+  it("states that a grandfathered already-seeded deeper graph remains runnable", () => {
+    assert.match(
+      SKILL,
+      /resumed run whose durable `run\.slices` already matches a deeper seeded plan[\s\S]*stays runnable/i,
+      "SKILL must state a grandfathered seeded graph stays runnable",
+    );
+    assert.match(
+      SCHEMA,
+      /Existing durable runs with older, deeper seeded plans remain readable and resumable/i,
+      "SCHEMA must state grandfathered seeded plans remain runnable",
+    );
+  });
 });
 
 describe("heartbeat docs contract", () => {
