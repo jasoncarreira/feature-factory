@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { factoryRoots, findFactoryRoots, readRuns, selectVisibleRuns, tuiSidebarRefreshMetadata } from "../src/tui-data.js";
+import { factoryRoots, findFactoryRoots, readRuns, selectVisibleRuns } from "../src/tui-data.js";
 
 describe("sidebar run visibility", () => {
   const run = (run_id, status, diagnostic_status = "ok") => ({ run_id, status, diagnostic_status });
@@ -32,28 +32,6 @@ describe("sidebar run visibility", () => {
 });
 
 describe("TUI factory scanner", () => {
-  it("describes sidebar refresh metadata and active-session limitations", () => {
-    const metadata = tuiSidebarRefreshMetadata({ version: 7 });
-
-    assert.deepEqual(metadata, {
-      schema_version: 1,
-      data_version: 7,
-      root_cache_ttl_ms: 30000,
-      limitation: "An already-open opencode TUI process can keep rendering stale Feature Factory sidebar data after the plugin bundle changes; restart or reload the TUI to pick up plugin changes.",
-      label: "sidebar v7 · plugin changes need TUI restart",
-    });
-  });
-
-  it("sanitizes sidebar refresh data versions for display", () => {
-    for (const version of [undefined, -1, 1.5, "7\u001b[2J", Number.NaN]) {
-      const metadata = tuiSidebarRefreshMetadata({ version });
-
-      assert.equal(metadata.data_version, 0);
-      assert.equal(metadata.label, "sidebar v0 · plugin changes need TUI restart");
-      assert.equal(hasTerminalControl(metadata.label), false);
-    }
-  });
-
   it("finds runs in the current repo factory", () => {
     const repo = tempDir();
     writeRun(repo, "direct", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
@@ -89,6 +67,22 @@ describe("TUI factory scanner", () => {
 
     assert.equal(roots.length, 1);
     cleanup(repo);
+  });
+
+  it("discovers a factory root created after an empty startup scan", () => {
+    const workspace = tempDir();
+    const api = { state: { path: { worktree: workspace, directory: workspace } } };
+    const syntheticRoot = join(workspace, ".opencode", "factory");
+
+    assert.deepEqual(factoryRoots(api), [syntheticRoot]);
+
+    const nested = join(workspace, "new-repo");
+    writeRun(nested, "started-later", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
+    const roots = factoryRoots(api);
+
+    assert.ok(roots.includes(join(nested, ".opencode", "factory")));
+    assert.equal(readRuns(roots)[0].run_id, "started-later");
+    cleanup(workspace);
   });
 
   it("tolerates missing TUI startup path state", () => {
