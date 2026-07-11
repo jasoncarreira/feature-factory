@@ -228,18 +228,96 @@ describe("consolidated reviewer decision procedure contract", () => {
     assert.match(SECURITY_REVIEWER_PROMPT, orderedPattern(["trust model and bounded diff surface", "attempt mode", "every touched ingress", "Qualify each candidate", "trust and authority qualification", "security-specific threshold", "structured security review"]));
   });
 
-  it("preserves exact structured verdicts, actionable fields, and durable routes", () => {
-    for (const field of ["## Review: <subject>", "**Verdict:** APPROVE | REJECT", "**Checked against:**", "**Claim vs observed:**", "**Findings:**", "fix_owner: <agent>", "**Required fixes (if REJECT):**"]) {
-      assert.match(WORK_REVIEWER_PROMPT, literalPattern(field), `work reviewer missing ${field}`);
+  it("keeps procedural policy inside the one ordered procedure", () => {
+    const procedureMarkers = {
+      WORK_REVIEWER_PROMPT: [
+        /Producer reports are claims; orchestrator-observed evidence is truth/i,
+        /First-attempt completeness rule/i,
+        /Feasibility rule/i,
+        /mandatory touched-path security review/i,
+        /Apply the declared trust model/i,
+        /Precedence for late discoveries/i,
+        /Emit the structured review/i,
+      ],
+      IMPLEMENTATION_VALIDATOR_PROMPT: [
+        /Establish the bounded integrated surface/i,
+        /Delta Review Rule/i,
+        /Review holistically in priority order/i,
+        /Perform the mandatory security review/i,
+        /Qualify security candidates against the declared trust model before elevation/i,
+        /Apply the validator threshold and determine severity\/verdict/i,
+        /Emit and route the structured validation report/i,
+      ],
+      SECURITY_REVIEWER_PROMPT: [
+        /Establish the trust model and bounded diff surface/i,
+        /Delta rule/i,
+        /Construct bypasses across every touched ingress/i,
+        /Qualify each candidate before blocking/i,
+        /Apply trust and authority qualification/i,
+        /Apply the security-specific threshold and determine verdict/i,
+        /Emit and route the structured security review/i,
+      ],
+    };
+
+    for (const [name, text] of documentEntries(reviewerPrompts)) {
+      const procedure = markdownSection(text, "Ordered decision procedure");
+      const outsideProcedure = text.replace(procedure, "");
+      for (const marker of procedureMarkers[name]) {
+        assert.match(procedure, marker, `${name} must retain its ${marker} policy in the procedure`);
+        assert.doesNotMatch(outsideProcedure, marker, `${name} must not duplicate ${marker} in a legacy rule block`);
+      }
     }
-    for (const field of ["**Verdict:** GO | GO-WITH-NITS | NO-GO", "**Acceptance criteria:**", "**Brief deviations:**", "**Scope check:**", "**If NO-GO:** <single most important fix and owner>"]) {
-      assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, literalPattern(field), `validator missing ${field}`);
+  });
+
+  it("preserves exact role-specific structured verdict schemas, actionable fields, and durable routes", () => {
+    const workOutput = firstFencedBlockAfter(WORK_REVIEWER_PROMPT, /## Output/i);
+    for (const field of [
+      "## Review: <subject>",
+      "**Verdict:** APPROVE | REJECT",
+      "**Checked against:** output-contract, technical-brief, observed-evidence, repo-guidelines",
+      "**Claim vs observed:** consistent | MISMATCH - <details>",
+      "**Findings:**",
+      "- [BLOCKER] <what> - `path:line` - <why it fails> - fix_owner: <agent>",
+      "- [MAJOR] <...>",
+      "- [MINOR] <...>",
+      "**Required fixes (if REJECT):**",
+      "1. <specific fix>",
+    ]) {
+      assert.match(workOutput, literalPattern(field), `work reviewer output missing ${field}`);
+    }
+
+    const validatorOutput = firstFencedBlockAfter(IMPLEMENTATION_VALIDATOR_PROMPT, /## Output/i);
+    for (const field of [
+      "## Validation report",
+      "**Verdict:** GO | GO-WITH-NITS | NO-GO",
+      "**Acceptance criteria:**",
+      "| AC | Implemented | Tested | Notes |",
+      "| AC1 | yes/no/partial | yes/no | `path:line` |",
+      "**Findings:**",
+      "- [BLOCKER] <what> - `path:line` - <why it fails> - fix_owner: <agent>",
+      "- [MAJOR] <...>",
+      "- [MINOR] <...>",
+      "**Brief deviations:** <list, each defensible/not | none>",
+      "**Scope check:** <clean | issue at path>",
+      "**If NO-GO:** <single most important fix and owner>",
+    ]) {
+      assert.match(validatorOutput, literalPattern(field), `validator output missing ${field}`);
     }
     for (const route of ["reviews/implementation-validator.json", "artifacts/validation-report.md", "run.json.validator.report", "run.json.validator.review_ref"]) {
       assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, literalPattern(`\`${route}\``), `validator missing route ${route}`);
     }
-    for (const field of ["**Verdict:** PASS | BLOCK", "**Ingresses reviewed:**", "[BLOCK]", "fix: <specific change>", "[NONBLOCKING]", "**Bypass attempts:**"]) {
-      assert.match(SECURITY_REVIEWER_PROMPT, literalPattern(field), `security reviewer missing ${field}`);
+
+    const securityOutput = firstFencedBlockAfter(SECURITY_REVIEWER_PROMPT, /## Output/i);
+    for (const field of [
+      "## Security review",
+      "**Verdict:** PASS | BLOCK",
+      "**Ingresses reviewed:** <every untrusted-input entry path you traced>",
+      "**Findings:**",
+      "- [BLOCK] <what> - `path:line` - <the concrete bypass / why it fails> - fix: <specific change>",
+      "- [NONBLOCKING] <...>",
+      "**Bypass attempts:** <what you tried; for each: blocked (why) or exploitable (how)>",
+    ]) {
+      assert.match(securityOutput, literalPattern(field), `security reviewer output missing ${field}`);
     }
     for (const route of ["reviews/security-reviewer.json", "run.json.security_review.review_ref"]) {
       assert.match(SECURITY_REVIEWER_PROMPT, literalPattern(`\`${route}\``), `security reviewer missing route ${route}`);
@@ -265,7 +343,12 @@ describe("consolidated reviewer decision procedure contract", () => {
     }
 
     assert.match(WORK_REVIEWER_PROMPT, /mandatory touched-path security review[\s\S]*Enumerate \*\*every\*\* path the observed diff touches[\s\S]*including sibling entry points/i);
-    assert.match(WORK_REVIEWER_PROMPT, /outside the factory trust model[\s\S]*NONBLOCKING notes, never REJECT reasons/i);
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /outside the factory trust model[\s\S]*NONBLOCKING notes, never REJECT reasons[\s\S]*malicious local operator[\s\S]*manipulating `PATH`[\s\S]*rewriting Git history[\s\S]*hand-editing run state[\s\S]*tampering across runs[\s\S]*arbitrary code already executing in the same process[\s\S]*story does not classify it as untrusted[\s\S]*Same-process object mutation alone adds no signaling authority[\s\S]*Cite the README trust statement/i,
+      "work reviewer must preserve the complete outside-model and same-process authority carve-out",
+    );
+    assert.match(WORK_REVIEWER_PROMPT, /confirmed applicable trust-boundary, injection, auth-bypass, or secret-exposure issue is a BLOCKER -> REJECT, even if default-off/i);
     assert.match(WORK_REVIEWER_PROMPT, /Give actionable justification for every rejection and specific fixes owned by the appropriate agent/i);
     assert.match(WORK_REVIEWER_PROMPT, /\*\*Required fixes \(if REJECT\):\*\*[\s\S]*<specific fix>/i);
   });
