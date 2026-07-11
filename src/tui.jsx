@@ -1,6 +1,6 @@
 /* @jsxImportSource @opentui/solid */
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { factoryRoots, readRuns, runHasNonOkDiagnostic as hasNonOkDiagnostic, selectVisibleRuns, tuiSidebarRefreshMetadata } from "./tui-data.js";
+import { factoryRoots, readRuns, runHasNonOkDiagnostic as hasNonOkDiagnostic, selectVisibleRuns } from "./tui-data.js";
 
 const REFRESH_INTERVAL_MS = 5000;
 const MAX_VISIBLE_RUNS = 3;
@@ -125,17 +125,15 @@ function View(props) {
   const version = store.version;
   const theme = () => currentTheme(props.api);
   const visible = createMemo(() => runs().length > 0);
-  const refreshMetadata = createMemo(() => tuiSidebarRefreshMetadata({ version: version() }));
   const shown = createMemo(() => selectVisibleRuns(runs()));
   const visibleRuns = createMemo(() => shown().slice(0, MAX_VISIBLE_RUNS));
   const hiddenCount = createMemo(() => Math.max(0, runs().length - visibleRuns().length));
   return (
-    <Show when={visible()}>
-      <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
-        <text fg={theme().text}>
-          <b>Feature Factory</b>
-        </text>
-        <text fg={theme().textMuted} wrapMode="none">{refreshMetadata().label}</text>
+    <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
+      <text fg={theme().text}>
+        <b>Feature Factory</b>
+      </text>
+      <Show when={visible()} fallback={<text fg={theme().textMuted}>No factory runs yet</text>}>
         <Show keyed when={version()}>
           {() => (
             <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
@@ -198,8 +196,8 @@ function View(props) {
             </box>
           )}
         </Show>
-      </box>
-    </Show>
+      </Show>
+    </box>
   );
 }
 
