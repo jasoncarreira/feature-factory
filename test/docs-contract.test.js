@@ -1237,11 +1237,12 @@ describe("0.2.0 public documentation contract", () => {
   });
 
   it("protects cancel-pending semantics and fail-closed signal boundaries", () => {
-    assert.match(scriptedMode, /exactly one `SIGTERM`[\s\S]*Only verified exit changes `process\.json\.state` to `cancelled`/i);
+    assert.match(scriptedMode, /each invocation sends at most one `SIGTERM`[\s\S]*Only verified exit changes `process\.json\.state` to `cancelled`/i);
     assert.match(scriptedMode, /process remains alive[\s\S]*status:"cancel-pending"[\s\S]*process state remains `running`[\s\S]*process\.json\.cancel/i);
-    assert.match(scriptedMode, /rerun cancel to confirm exit or stop the process manually/i);
+    assert.match(scriptedMode, /rerun performs fresh fail-closed identity checks[\s\S]*exact recorded process remains live and matches the evidence[\s\S]*new invocation may send one more targeted `SIGTERM`[\s\S]*if it has exited[\s\S]*confirms cancellation without signaling/i);
     assert.match(scriptedMode, /missing, invalid, stale, mismatched[\s\S]*status:"failed-closed"[\s\S]*signaled:false[\s\S]*updated:false/i);
-    assert.match(scriptedMode, /Neither pending nor failed-closed handling attempts a second or broad signal/i);
+    assert.match(scriptedMode, /each invocation sends at most one `SIGTERM`[\s\S]*never retries automatically/i);
+    assert.match(scriptedMode, /Failed-closed handling sends no signal[\s\S]*no broad signal, process-group signal, `pkill`, or `killall` fallback/i);
   });
 
   it("requires a PR fence token in the public creation sequence and every command example", () => {
