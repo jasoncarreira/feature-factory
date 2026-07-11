@@ -298,7 +298,7 @@ function currentSummary(run) {
 
 function steeringSummary(run) {
   const steering = run?.steering;
-  if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, consumed_count: 0, latest_consumed: null };
+  if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, uncheckpointed: null, consumed_count: 0, latest_consumed: null, boundary: null, action_claim: null, last_action: null, pr_fence: null };
   const pending = steering.pending && typeof steering.pending === "object" && !Array.isArray(steering.pending)
     ? {
       id: stringOrNull(steering.pending.id),
@@ -310,13 +310,49 @@ function steeringSummary(run) {
     : null;
   const consumed = Array.isArray(steering.history) ? steering.history.filter((item) => item?.event === "consumed") : [];
   const latest = consumed[consumed.length - 1];
+  const uncheckpointed = steering.uncheckpointed && typeof steering.uncheckpointed === "object" && !Array.isArray(steering.uncheckpointed)
+    ? {
+      id: stringOrNull(steering.uncheckpointed.id),
+      ref: stringOrNull(steering.uncheckpointed.ref),
+      hash: stringOrNull(steering.uncheckpointed.hash),
+      message_chars: Number.isInteger(steering.uncheckpointed.message_chars) ? steering.uncheckpointed.message_chars : null,
+      created_at: stringOrNull(steering.uncheckpointed.created_at),
+      consumed_at: stringOrNull(steering.uncheckpointed.consumed_at),
+    }
+    : null;
   return {
     pending,
+    uncheckpointed,
     consumed_count: consumed.length,
     latest_consumed: latest ? {
       ref: stringOrNull(latest.ref),
       consumed_at: stringOrNull(latest.consumed_at),
     } : null,
+    boundary: steering.boundary && typeof steering.boundary === "object" ? {
+      kind: stringOrNull(steering.boundary.kind),
+      token: stringOrNull(steering.boundary.token),
+      generation: Number.isInteger(steering.boundary.generation) ? steering.boundary.generation : null,
+      created_at: stringOrNull(steering.boundary.created_at),
+    } : null,
+    action_claim: steeringActionSummary(steering.action_claim),
+    last_action: steeringActionSummary(steering.last_action),
+    pr_fence: steering.pr_fence && typeof steering.pr_fence === "object" ? {
+      token: stringOrNull(steering.pr_fence.token),
+      generation: Number.isInteger(steering.pr_fence.generation) ? steering.pr_fence.generation : null,
+      created_at: stringOrNull(steering.pr_fence.created_at),
+    } : null,
+  };
+}
+
+function steeringActionSummary(action) {
+  if (!action || typeof action !== "object" || Array.isArray(action)) return null;
+  return {
+    kind: stringOrNull(action.kind),
+    token: stringOrNull(action.token),
+    generation: Number.isInteger(action.generation) ? action.generation : null,
+    claimed_at: stringOrNull(action.claimed_at),
+    outcome: stringOrNull(action.outcome),
+    resolved_at: stringOrNull(action.resolved_at),
   };
 }
 

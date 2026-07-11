@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
-import { hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionRunStep, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertRunJsonWriterAllowed, hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -187,6 +187,7 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   if (run.worktree !== worktree.path) {
     nextRun = await withRunJsonLock(target.runDir, async () => {
       const currentRun = readRunFile(target.runFile);
+      assertRunJsonWriterAllowed(currentRun, "recovery worktree update");
       const next = validateRun({ ...currentRun, worktree: worktree.path });
       writeJsonAtomic(target.runFile, next);
       return next;
@@ -462,6 +463,10 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
       runDir,
       reason: current.terminal_result?.reason || reason,
     });
+    if (current.steering?.pending) throw new Error("recovery terminalization rejected: pending steering");
+    if (current.steering?.uncheckpointed) throw new Error("recovery terminalization rejected: consumed steering acknowledgement is pending");
+    if (current.steering?.action_claim) throw new Error("recovery terminalization rejected: action start acknowledgement is pending");
+    if (current.steering?.pr_fence) throw new Error("recovery terminalization rejected: active pre-PR fence");
     bestEffortStopHeartbeatForTerminal(runDir, opts);
     const next = validateRun({
       ...current,
@@ -555,6 +560,48 @@ export async function consumeSteering(runId, input, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const result = await transitionSteeringConsumed(runDir, input, opts);
   return { run_id: result.run.run_id, steering: result.steering };
+}
+
+export async function acknowledgeSteering(runId, input, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringAcknowledged(runDir, input, opts);
+  return { run_id: result.run.run_id, steering: result.steering };
+}
+
+export async function openSteeringBoundary(runId, kind, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringBoundaryOpened(runDir, kind, opts);
+  return { run_id: result.run.run_id, boundary: result.boundary };
+}
+
+export async function crossSteeringBoundary(runId, kind, token, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringBoundaryCrossed(runDir, kind, token, opts);
+  return { run_id: result.run.run_id, action_claim: result.action_claim };
+}
+
+export async function acknowledgeSteeringActionStart(runId, kind, token, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringActionStarted(runDir, kind, token, opts);
+  return { run_id: result.run.run_id, action: result.action };
+}
+
+export async function abortSteeringAction(runId, kind, token, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionSteeringActionAborted(runDir, kind, token, opts);
+  return { run_id: result.run.run_id, action: result.action };
+}
+
+export async function establishPrePrFence(runId, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionPrePrFenceEstablished(runDir, opts);
+  return { run_id: result.run.run_id, fence: result.fence };
+}
+
+export async function clearPrePrFence(runId, token, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const result = await transitionPrePrFenceCleared(runDir, token, opts);
+  return { run_id: result.run.run_id, fence: result.fence };
 }
 
 export async function recordSteeringConflict(runId, input, opts = {}) {
@@ -688,6 +735,10 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     if (run.status !== "running") {
       throw new Error(`run '${run.run_id}' must be running to start a heartbeat`);
     }
+    if (run.steering?.pending) throw new Error(`run '${run.run_id}' has pending steering; drain it before starting a heartbeat`);
+    if (run.steering?.uncheckpointed) throw new Error(`run '${run.run_id}' has consumed steering awaiting acknowledgement`);
+    if (run.steering?.action_claim) throw new Error(`run '${run.run_id}' has an action awaiting start acknowledgement`);
+    if (run.steering?.pr_fence) throw new Error(`run '${run.run_id}' has an active pre-PR fence`);
     const protectedGate = pendingProtectedGate(run);
     if (protectedGate) {
       throw new Error(`run '${run.run_id}' is waiting at protected gate '${protectedGate}'`);
@@ -711,7 +762,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     });
     writeHeartbeatFile(heartbeatFile, heartbeat);
     writeJsonAtomic(join(runDir, "run.json"), validateRun({ ...run, heartbeat_at: startedAt }));
-  });
+  }, opts);
 
   const runtime = createHeartbeatRuntime(runDir, heartbeat, opts);
   activeHeartbeatLoops.set(runDir, runtime);
@@ -2066,15 +2117,19 @@ function buildResumePayload(run, opts) {
     kind: "operator-steering-pointer",
     run_id: run.run_id,
     pending: null,
+    uncheckpointed: null,
     consume: null,
     raw_message_included: false,
   };
   const pending = steeringPendingMetadata(run.steering?.pending);
-  if (pending) {
+  const uncheckpointed = steeringConsumedMetadata(run.steering?.uncheckpointed);
+  const pointer = pending || uncheckpointed;
+  if (pointer) {
     steering.pending = pending;
+    steering.uncheckpointed = uncheckpointed;
     steering.consume = {
       command: "feature-factory",
-      args: ["factory", "steer-consume", run.run_id, "--ref", pending.ref, "--hash", pending.hash, "--json"],
+      args: ["factory", "steer-consume", run.run_id, "--ref", pointer.ref, "--hash", pointer.hash, "--json"],
     };
   }
   return {
@@ -2106,6 +2161,8 @@ function resumeEligibility(runDir, run, opts = {}) {
   const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
   if (heartbeat.error) reasons.push("invalid-run-state");
   else if (heartbeat.value && heartbeatIsFresh(heartbeat.value, timestamp(opts.now), opts)) reasons.push("active-heartbeat");
+  if (run.steering?.action_claim) reasons.push("action-start-pending");
+  if (run.steering?.pr_fence) reasons.push("pre-pr-fence-active");
   return { eligible: reasons.length === 0, reasons: [...new Set(reasons)], diagnostics, steering_checks: steeringChecks, heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null };
 }
 
@@ -2117,11 +2174,12 @@ function assertResumeMutationAllowed(runDir, run, opts = {}) {
 
 function steeringSummary(run) {
   const steering = run?.steering;
-  if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, consumed_count: 0, latest_consumed: null };
+  if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, uncheckpointed: null, consumed_count: 0, latest_consumed: null, boundary: null, action_claim: null, last_action: null, pr_fence: null };
   const consumed = Array.isArray(steering.history) ? steering.history.filter((item) => item?.event === "consumed") : [];
   const latest = consumed[consumed.length - 1] || null;
   return {
     pending: steeringPendingMetadata(steering.pending),
+    uncheckpointed: steeringConsumedMetadata(steering.uncheckpointed),
     consumed_count: consumed.length,
     latest_consumed: latest ? {
       id: latest.id,
@@ -2131,6 +2189,10 @@ function steeringSummary(run) {
       created_at: latest.created_at,
       consumed_at: latest.consumed_at,
     } : null,
+    boundary: steeringBoundaryMetadata(steering.boundary),
+    action_claim: steeringActionMetadata(steering.action_claim),
+    last_action: steeringActionMetadata(steering.last_action),
+    pr_fence: steeringFenceMetadata(steering.pr_fence),
   };
 }
 
@@ -2142,6 +2204,34 @@ function steeringPendingMetadata(pending) {
     hash: pending.hash,
     message_chars: pending.message_chars,
     created_at: pending.created_at,
+  };
+}
+
+function steeringConsumedMetadata(consumed) {
+  const metadata = steeringPendingMetadata(consumed);
+  if (!metadata) return null;
+  return { ...metadata, consumed_at: consumed.consumed_at };
+}
+
+function steeringBoundaryMetadata(boundary) {
+  if (!boundary || typeof boundary !== "object" || Array.isArray(boundary)) return null;
+  return { kind: boundary.kind, token: boundary.token, generation: boundary.generation, state_hash: boundary.state_hash, created_at: boundary.created_at };
+}
+
+function steeringFenceMetadata(fence) {
+  if (!fence || typeof fence !== "object" || Array.isArray(fence)) return null;
+  return { token: fence.token, generation: fence.generation, state_hash: fence.state_hash, created_at: fence.created_at };
+}
+
+function steeringActionMetadata(action) {
+  if (!action || typeof action !== "object" || Array.isArray(action)) return null;
+  return {
+    kind: action.kind,
+    token: action.token,
+    generation: action.generation,
+    claimed_at: action.claimed_at,
+    outcome: action.outcome || null,
+    resolved_at: action.resolved_at || null,
   };
 }
 
@@ -2207,24 +2297,33 @@ function createHeartbeatRuntime(runDir, heartbeat, opts) {
     lockTimeouts: 0,
     timer: null,
     ticking: false,
+    tickPromise: null,
     stopped: false,
   };
 }
 
-function runHeartbeatTick(runtime) {
-  if (runtime.stopped || runtime.ticking) return;
+function runHeartbeatTick(runtime, lockOptions = {}) {
+  if (runtime.stopped) return Promise.resolve({ continue: false, reason: "runtime-stopped" });
+  if (runtime.tickPromise) return runtime.tickPromise;
   runtime.ticking = true;
-  heartbeatTick(runtime)
-    .then((next) => {
+  const tickPromise = (async () => {
+    try {
+      const next = await heartbeatTick(runtime, lockOptions);
       if (!next.continue) stopActiveHeartbeatLoop(runtime.runDir, runtime);
-    })
-    .catch(() => stopActiveHeartbeatLoop(runtime.runDir, runtime))
-    .finally(() => {
+      return next;
+    } catch (error) {
+      stopActiveHeartbeatLoop(runtime.runDir, runtime);
+      return { continue: false, reason: error.message };
+    } finally {
       runtime.ticking = false;
-    });
+      if (runtime.tickPromise === tickPromise) runtime.tickPromise = null;
+    }
+  })();
+  runtime.tickPromise = tickPromise;
+  return tickPromise;
 }
 
-async function heartbeatTick(runtime) {
+async function heartbeatTick(runtime, lockOptions = {}) {
   const now = timestamp();
   try {
     return await withRunJsonLock(runtime.runDir, async () => {
@@ -2240,6 +2339,7 @@ async function heartbeatTick(runtime) {
       }
 
       const run = runResult.value;
+      if (run.steering?.pr_fence) return { continue: false, reason: "pre-pr-fence-active" };
       if (TERMINAL_STATUSES.has(run.status)) {
         writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
         return { continue: false, reason: "terminal-status" };
@@ -2260,7 +2360,7 @@ async function heartbeatTick(runtime) {
       writeJsonAtomic(runPath, nextRun);
       runtime.lockTimeouts = 0;
       return { continue: true, reason: null };
-    }, { timeoutMs: runtime.tickTimeoutMs });
+    }, heartbeatTickLockOptions(runtime, lockOptions));
   } catch (error) {
     if (isRunJsonLockTimeout(error) && runtime.lockTimeouts < HEARTBEAT_TICK_LOCK_RETRIES) {
       runtime.lockTimeouts += 1;
@@ -2268,6 +2368,29 @@ async function heartbeatTick(runtime) {
     }
     return { continue: false, reason: error.message };
   }
+}
+
+function heartbeatTickLockOptions(runtime, lockOptions = {}) {
+  const allowed = ["lockHooks", "retryDelayMs", "staleLockMs", "missingOwnerStealMs", "processAliveFn"];
+  const options = { timeoutMs: lockOptions.timeoutMs ?? runtime.tickTimeoutMs };
+  for (const key of allowed) {
+    if (lockOptions[key] !== undefined) options[key] = lockOptions[key];
+  }
+  return options;
+}
+
+export async function runActiveHeartbeatTickForTest(runId, opts = {}) {
+  const runDir = resolveHeartbeatRunDir(runId, opts);
+  const runtime = activeHeartbeatLoops.get(runDir);
+  if (!runtime) throw new Error(`no active heartbeat runtime for run '${runId}'`);
+  const inFlight = runtime.tickPromise;
+  if (runtime.timer) clearInterval(runtime.timer);
+  runtime.timer = null;
+  if (inFlight) {
+    await inFlight;
+    throw new Error(`controlled heartbeat tick did not run for '${runId}': tick already in progress`);
+  }
+  return runHeartbeatTick(runtime, opts);
 }
 
 function isRunJsonLockTimeout(error) {
@@ -2278,6 +2401,7 @@ function stopActiveHeartbeatLoop(runDir, runtime = activeHeartbeatLoops.get(runD
   if (!runtime) return false;
   runtime.stopped = true;
   if (runtime.timer) clearInterval(runtime.timer);
+  runtime.timer = null;
   if (activeHeartbeatLoops.get(runDir) === runtime) activeHeartbeatLoops.delete(runDir);
   return true;
 }
@@ -2352,6 +2476,7 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
   return withRunJsonLock(runDir, async () => {
     const runPath = join(runDir, "run.json");
     const current = readRunFile(runPath);
+    assertRunJsonWriterAllowed(current, `env ${eventKind}`, { allowUncheckpointed: eventKind === "resume" });
     if (eventKind === "resume") assertResumeMutationAllowed(runDir, current, opts);
     const next = validateRun({
       ...current,
