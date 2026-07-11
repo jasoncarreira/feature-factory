@@ -11,6 +11,10 @@ const helperPath = resolve(repositoryRoot, "test/helpers/git-fixture.js");
 const scannedExtensions = new Set([".js", ".mjs", ".jsx", ".cjs"]);
 const childProcessSpecifiers = new Set(["child_" + "process", "node:" + "child_process"]);
 
+// This is hygiene against accidental direct imports by trusted contributors, not a
+// security boundary against deliberate repository-code evasion. Computed or aliased
+// loads stay out of scope unless a real accidental bypass demonstrates a need.
+
 describe("ESM import extraction", () => {
   const childProcess = "node:" + "child_process";
 
@@ -135,7 +139,7 @@ describe("import boundary policy", () => {
     for (const source of sources) assert.deepEqual(findViolations(importer, source, "production"), [], source);
   });
 
-  it("fails explicitly when CommonJS enters the guarded source tree", () => {
+  it("rejects CommonJS in the guarded source tree", () => {
     const cjsFile = resolve(repositoryRoot, "test/support/fixture.cjs");
 
     assert.deepEqual(findViolations(cjsFile, "module.exports = {};", "test"), [{
@@ -143,7 +147,7 @@ describe("import boundary policy", () => {
       line: 1,
       syntax: "CommonJS",
       specifier: ".cjs",
-      reason: "guarded source uses unsupported CommonJS; decide and add an explicit boundary policy",
+      reason: "guarded source must use ESM; CommonJS .cjs files are not permitted",
     }]);
   });
 
@@ -238,7 +242,7 @@ function findViolations(file, source, role) {
       line: 1,
       syntax: "CommonJS",
       specifier: ".cjs",
-      reason: "guarded source uses unsupported CommonJS; decide and add an explicit boundary policy",
+      reason: "guarded source must use ESM; CommonJS .cjs files are not permitted",
     }];
   }
 
