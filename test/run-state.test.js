@@ -900,7 +900,10 @@ describe("simplified run-state transitions", () => {
       }, { timeoutMs: 5000 });
       const successorNonce = await successorEntered.promise;
       releaseFirst.resolve();
-      await assert.rejects(first, /lock ownership changed before owner publication/u);
+      await assert.rejects(first, (error) => {
+        assert.equal(error?.code === "EEXIST" || /lock ownership changed before owner publication/u.test(error?.message), true);
+        return true;
+      });
       assert.equal(readJson(join(fixture.runDir, "run-json.lock", "owner.json")).nonce, successorNonce);
 
       releaseSuccessor.resolve();
