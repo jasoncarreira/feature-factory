@@ -90,6 +90,14 @@ npm run doctor:local
 /feature APP-123 add the missing approval workflow
 ```
 
+### Workflow Depth
+
+The primary `feature-factory` agent is the only agent allowed to dispatch tasks. Specialized subagents cannot recursively delegate, which keeps the orchestration tree one level deep.
+
+Research, planning, and review agents work inside the evidence they are handed: the researcher makes one scoped discovery pass with a bounded search/read budget and no repeated scans, and planning and review agents do not re-run broad repository discovery — they scope to the supplied research map, brief, diff, and observed evidence, and inspect only the remediation delta on reruns. This keeps depth and cost bounded and avoids re-scanning the whole repo every review round.
+
+`feature-factory install` warns when global files under `~/.config/opencode/agent/` or `agents/` duplicate plugin-owned agent names. Remove stale copies or replace them with delegators; otherwise an old global prompt may shadow the package prompt until opencode restarts.
+
 ## Configure Plugin Options
 
 By default, successful factory runs create ready-for-review PRs. Set plugin `prMode` to `"draft"` if this repo should keep successful PRs as drafts, or `"ready"` to make the default explicit. Per-run CLI flags such as `factory start --draft` or `factory start --ready` / `--no-draft` can override the plugin default for that run.

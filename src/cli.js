@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -110,6 +110,27 @@ function install(args) {
   console.log(`updated: ${configPath}`);
   console.log("restart opencode for plugin changes to take effect");
   warnGlobalFeatureSkillConflicts(findGlobalFeatureSkillConflicts(home));
+  warnGlobalAgentConflicts(findGlobalAgentConflicts(home));
+}
+
+function findGlobalAgentConflicts(home) {
+  const names = readdirSync(join(root, "assets", "agent")).filter((name) => name.endsWith(".md"));
+  return names.flatMap((name) => [
+    join(home, ".config", "opencode", "agent", name),
+    join(home, ".config", "opencode", "agents", name),
+  ]).filter((path) => existsSync(path));
+}
+
+function warnGlobalAgentConflicts(paths) {
+  if (!paths.length) return;
+  console.warn([
+    "",
+    "WARNING: existing global feature-factory agent definitions detected.",
+    "These files are not managed by opencode-feature-factory and can shadow the plugin's current prompts:",
+    ...paths.map((path) => `- ${path}`),
+    "Remove stale files, or replace them with delegators that defer to the plugin-owned agents.",
+    "Restart opencode after changing agent files.",
+  ].join("\n"));
 }
 
 function findGlobalFeatureSkillConflicts(home) {

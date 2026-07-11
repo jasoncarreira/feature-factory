@@ -19,6 +19,7 @@ const CLI = readDoc("../src/cli.js");
 const TUI = readDoc("../src/tui.jsx");
 const CODEBASE_RESEARCHER_PROMPT = readDoc("../assets/agent/codebase-researcher.md");
 const SPEC_WRITER_PROMPT = readDoc("../assets/agent/spec-writer.md");
+const WORK_DECOMPOSER_PROMPT = readDoc("../assets/agent/work-decomposer.md");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
@@ -85,6 +86,38 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SKILL, /Step 1 - Research And Design[\s\S]*finite in-scope surface inventory[\s\S]*Step 2 - Spec And Decomposition/i);
     assert.match(SKILL, /Step 2 - Spec And Decomposition[\s\S]*closed implementation matrix[\s\S]*Do not dispatch builders with unresolved instructions/i);
     assert.match(SKILL, /first spec review[\s\S]*every currently discoverable same-class issue[\s\S]*one `required_fixes` list/i);
+  });
+});
+
+describe("bounded agent depth contract", () => {
+  it("denies recursive delegation to every subagent in the schema", () => {
+    assert.match(SCHEMA, /Only the primary `feature-factory` agent may use the Task tool/i);
+    assert.match(SCHEMA, /Every registered subagent has `permission\.task: "deny"`/i);
+  });
+
+  it("gives research one scoped pass with a bounded budget and no repeated scans", () => {
+    assert.match(CODEBASE_RESEARCHER_PROMPT, /Do not delegate to another agent/i);
+    assert.match(CODEBASE_RESEARCHER_PROMPT, /Perform one discovery pass/i);
+    assert.match(CODEBASE_RESEARCHER_PROMPT, /do not repeat an equivalent Glob\/Grep query or reread an unchanged file/i);
+    assert.match(CODEBASE_RESEARCHER_PROMPT, /Budget roughly 8 searches and 16 file reads[\s\S]*class-wide[\s\S]*12 searches and 24 reads/i);
+    assert.match(CODEBASE_RESEARCHER_PROMPT, /stop and report the exact missing evidence instead of continuing open-ended discovery/i);
+  });
+
+  it("keeps planning and review inside supplied evidence boundaries", () => {
+    assert.match(SPEC_WRITER_PROMPT, /Do not delegate and do not run broad Glob\/Grep searches/i);
+    assert.match(SPEC_WRITER_PROMPT, /Never repeat research already present in the map/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /Do not delegate or rediscover the codebase/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Do not delegate\. Keep verification subject-specific/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Do not independently rediscover the repository or repeat the researcher's inventory searches/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Do not reread unchanged files or rerun first-attempt discovery/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Do not run broad repository rediscovery unless a concrete changed import, call site, or generated output escapes that inventory/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /Expand beyond it only when a concrete changed ingress, sink, import, or shared guard leads to an unlisted path/i);
+  });
+
+  it("documents bounded workflow depth in the README", () => {
+    assert.match(README, /### Workflow Depth/i);
+    assert.match(README, /only agent allowed to dispatch tasks/i);
+    assert.match(README, /duplicate plugin-owned agent names/i);
   });
 });
 

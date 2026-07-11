@@ -58,6 +58,8 @@ The orchestrator may use a `task_id` only to resume an eligible implementer reme
 
 Reviewer tasks are always fresh. `task_id` must never be passed to or stored for `work-reviewer`, `implementation-validator`, or `security-reviewer`; their continuity comes only from explicit prompt inputs such as current observed evidence, `attempt`, and prior `required_fixes`.
 
+Only the primary `feature-factory` agent may use the Task tool. Every registered subagent has `permission.task: "deny"`, so researchers, spec writers, decomposers, builders, test verifiers, and reviewers cannot recursively delegate or create hidden agent chains.
+
 ## Runtime-Only Trace Context
 
 Telemetry is off by default. The schema has no default exporter, no network side effects, and no durable trace state.
