@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,6 +61,41 @@ describe("cli write surface", () => {
       assert.equal(existsSync(capture), false);
     } finally {
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects start dry runs before any launch or repository side effect", () => {
+    const modes = [
+      ["default foreground", []],
+      ["headless", ["--headless"]],
+      ["autonomous", ["--autonomous"]],
+      ["detached", ["--detached"]],
+    ];
+
+    for (const [mode, modeArgs] of modes) {
+      const repo = mkdtempSync(join(tmpdir(), `feature-factory-cli-start-dry-run-${mode.replaceAll(" ", "-")}-`));
+      try {
+        initGitRepo(repo);
+        const capture = join(repo, "opencode-capture.json");
+        const bin = writeFakeOpencode(repo, capture);
+        const filesystemBefore = snapshotFixtureTree(repo);
+        const gitBefore = snapshotGitBaseline(repo);
+
+        const proc = spawnFactoryStart(repo, ["--dry-run", ...modeArgs, "implement without writes"], bin, capture);
+
+        assert.equal(proc.status, 1, `${mode}: ${proc.stderr || proc.stdout}`);
+        assert.equal(proc.stdout, "", mode);
+        assert.equal(proc.stderr, "error: factory start --dry-run is unsupported\n", mode);
+        assert.equal(existsSync(capture), false, `${mode}: fake OpenCode must not run`);
+        assert.equal(existsSync(join(repo, ".opencode", "skills", "feature")), false, `${mode}: repo seed must be absent`);
+        assert.equal(existsSync(join(repo, ".opencode", "factory")), false, `${mode}: factory state must be absent`);
+        assert.equal(existsSync(join(repo, ".opencode", "worktrees")), false, `${mode}: worktrees must be absent`);
+        assert.equal(existsSync(join(repo, ".opencode", "factory", "processes")), false, `${mode}: detached logs must be absent`);
+        assert.deepEqual(snapshotFixtureTree(repo), filesystemBefore, `${mode}: filesystem baseline changed`);
+        assert.deepEqual(snapshotGitBaseline(repo), gitBefore, `${mode}: git baseline changed`);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
     }
   });
 
@@ -370,4 +405,39 @@ function writeJson(file, value) {
 
 function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
+}
+
+function snapshotFixtureTree(root) {
+  const snapshot = {};
+  snapshotFixtureDirectory(root, "", snapshot);
+  return snapshot;
+}
+
+function snapshotFixtureDirectory(root, relative, snapshot) {
+  const directory = relative ? join(root, relative) : root;
+  for (const name of readdirSync(directory).sort()) {
+    if (!relative && name === ".git") continue;
+    const childRelative = relative ? join(relative, name) : name;
+    const child = join(root, childRelative);
+    if (statSync(child).isDirectory()) {
+      snapshot[`${childRelative}/`] = "directory";
+      snapshotFixtureDirectory(root, childRelative, snapshot);
+      continue;
+    }
+    snapshot[childRelative] = readFileSync(child).toString("base64");
+  }
+}
+
+function snapshotGitBaseline(repo) {
+  return {
+    status: gitOutput(repo, ["status", "--porcelain=v1", "--untracked-files=all"]),
+    branches: gitOutput(repo, ["branch", "--format=%(refname:short) %(objectname)"]),
+    worktrees: gitOutput(repo, ["worktree", "list", "--porcelain"]),
+  };
+}
+
+function gitOutput(repo, args) {
+  const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+  return proc.stdout;
 }
