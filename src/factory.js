@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
@@ -1390,7 +1390,7 @@ function continuationSeedPlan(continuation) {
 // every source is validated (containment, no symlinks, is-file, hash) and read into
 // memory BEFORE anything is written, so a missing source or a later hash mismatch
 // aborts the whole seed with no partial child run directory left behind.
-export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuation) {
+export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuation, options = {}) {
   const reuse = continuation?.planning_reuse;
   if (!reuse || reuse.eligible !== true) {
     return { eligible: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
@@ -1431,32 +1431,31 @@ export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuati
     staged.push({ dest, bytes, destRef: item.destRef, isArtifact: item.isArtifact });
   }
 
-  // Phase 2 — publish through a private staging tree, then commit each file with
-  // an exclusive hard link. `linkSync` is atomic and fails EEXIST if a concurrent
-  // seed already published that destination, so a partial write never lands at a
-  // real path and a race cannot clobber the winner. On any failure, roll back only
-  // what THIS call created (published files, then empty dirs it created) — never a
-  // whole run directory a concurrent seed may own.
-  const stagingRoot = join(targetRunDir, `.continuation-seed-${randomUUID()}`);
-  const published = [];
-  const createdDirs = [];
+  // Phase 2 — build the complete child seed as a sibling of the target, then make
+  // it visible with one atomic directory rename. A crash before rename leaves no
+  // partial child run; a crash after rename leaves the complete seed set. A
+  // concurrent/non-empty target makes rename fail without clobbering its state.
+  const stagingRoot = join(dirname(factoryRoot(repo)), `.continuation-seed-${continuation.target.run_id}-${randomUUID()}`);
   try {
-    mkdirRecordingCreated(stagingRoot, createdDirs);
-    const stagedFiles = staged.map((item, index) => {
-      const tmp = join(stagingRoot, `seed-${index}`);
-      writeFileSync(tmp, item.bytes);
-      return { tmp, dest: item.dest };
-    });
-    for (const { tmp, dest } of stagedFiles) {
-      mkdirRecordingCreated(dirname(dest), createdDirs);
-      linkSync(tmp, dest); // atomic + exclusive: EEXIST if a concurrent seed won
-      published.push(dest);
+    mkdirSync(stagingRoot, { recursive: false });
+    for (const item of staged) {
+      const stagedDest = resolve(stagingRoot, item.destRef);
+      if (!isLogicalContainedPath(stagingRoot, stagedDest, { allowEqual: false })) {
+        throw new Error(`continuation staged destination escapes staging root: ${item.destRef}`);
+      }
+      mkdirSync(dirname(stagedDest), { recursive: true });
+      writeFileSync(stagedDest, item.bytes, { flag: "wx" });
     }
+    if (options.beforePublish) options.beforePublish({ stagingRoot, targetRunDir });
+    renameSync(stagingRoot, targetRunDir);
   } catch (error) {
-    rollbackContinuationSeed({ published, stagingRoot, createdDirs });
+    try {
+      rmSync(stagingRoot, { recursive: true, force: true });
+    } catch {
+      // Preserve the publication failure; an orphan staging tree is never child state.
+    }
     throw error;
   }
-  bestEffortRemove(() => rmSync(stagingRoot, { recursive: true, force: true }));
   return {
     eligible: true,
     reason: null,
@@ -1468,42 +1467,6 @@ export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuati
 
 function sha256Buffer(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-}
-
-// Create `dir` (recursively) and record only the directories this call actually
-// created, so a rollback removes them without touching pre-existing dirs.
-function mkdirRecordingCreated(dir, createdDirs) {
-  const missing = [];
-  let current = resolve(dir);
-  while (!existsSync(current)) {
-    missing.unshift(current);
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  if (missing.length === 0) return;
-  mkdirSync(dir, { recursive: true });
-  for (const created of missing) createdDirs.push(created);
-}
-
-function rollbackContinuationSeed({ published, stagingRoot, createdDirs }) {
-  for (const dest of published) bestEffortRemove(() => rmSync(dest, { force: true }));
-  bestEffortRemove(() => rmSync(stagingRoot, { recursive: true, force: true }));
-  // Remove created dirs deepest-first, but only if now empty (a concurrent seed
-  // that won a race may have published its own files into a shared dir).
-  for (const dir of [...createdDirs].sort((a, b) => b.length - a.length)) {
-    bestEffortRemove(() => {
-      if (existsSync(dir) && readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true });
-    });
-  }
-}
-
-function bestEffortRemove(fn) {
-  try {
-    fn();
-  } catch {
-    // Rollback is best-effort; surface the original failure instead.
-  }
 }
 
 // Checked continuation-adoption transition. Instead of a model-driven generic

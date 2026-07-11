@@ -761,7 +761,7 @@ describe("continuation planning-artifact reuse", () => {
       // a concurrent seed already published technical-brief.md (sorts last of the artifacts)
       mkdirSync(childArtifacts, { recursive: true });
       writeFileSync(join(childArtifacts, "technical-brief.md"), "winner\n", "utf8");
-      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation), /EEXIST|exist/u);
+      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation), /EEXIST|ENOTEMPTY|exist|not empty/u);
       // the winner's bytes are untouched; the earlier files this seed published are rolled back
       assert.equal(readFileSync(join(childArtifacts, "technical-brief.md"), "utf8"), "winner\n");
       assert.equal(existsSync(join(childArtifacts, "design-brief.md")), false);
@@ -782,9 +782,35 @@ describe("continuation planning-artifact reuse", () => {
       // artifacts) fails with ENOTDIR mid-publication.
       mkdirSync(childRunDir, { recursive: true });
       writeFileSync(join(childRunDir, "reviews"), "not a dir\n", "utf8");
-      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation), /ENOTDIR|EEXIST|not a directory/u);
+      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation), /ENOTDIR|EEXIST|ENOTEMPTY|not a directory|not empty/u);
       // every artifact published before the failure was rolled back
       assert.equal(existsSync(join(childRunDir, "artifacts")), false, "no partial child artifacts/ may survive a mid-publish failure");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("keeps the child run invisible until the complete seed is atomically published", () => {
+    const fixture = createFixture("seed-crash-window", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      seedPlanningArtifacts(fixture.runDir);
+      const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "seed-crash-window-next", dryRun: true });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", "seed-crash-window-next");
+      let stagedRoot;
+
+      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation, {
+        beforePublish: ({ stagingRoot, targetRunDir }) => {
+          stagedRoot = stagingRoot;
+          assert.equal(targetRunDir, childRunDir);
+          assert.equal(existsSync(targetRunDir), false, "the child must not exist before the atomic commit");
+          assert.equal(existsSync(join(stagingRoot, "artifacts", "technical-brief.md")), true, "the private staging tree must already be complete");
+          assert.equal(existsSync(join(stagingRoot, "reviews", "spec-writer.json")), true, "the approving review must be staged before commit");
+          throw new Error("simulated crash before atomic publish");
+        },
+      }), /simulated crash before atomic publish/u);
+
+      assert.equal(existsSync(childRunDir), false, "a pre-commit crash must leave no partial child run");
+      assert.equal(existsSync(stagedRoot), false, "a handled failure cleans its private staging tree");
     } finally {
       cleanup(fixture.repo);
     }
