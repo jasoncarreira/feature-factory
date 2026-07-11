@@ -214,8 +214,12 @@ describe("diagnostic projection", () => {
     const source = { batches: [{
       entry: { ref: identity, note: sibling, child: { value: descendant } },
       partial,
-      api_token: { ref: associated },
     }] };
+    let sensitiveValueReads = 0;
+    Object.defineProperty(source.batches[0], "api_token", {
+      enumerable: true,
+      get() { sensitiveValueReads += 1; return { ref: associated }; },
+    });
     const options = { validatedIdentityPaths: [["batches", "*", "*", "ref"]] };
     const projected = projectDiagnosticData(source, options);
     const serialized = serializeTerminalJson(projected);
@@ -227,6 +231,7 @@ describe("diagnostic projection", () => {
     assert.equal(projected.batches[0].partial, "[redacted]");
     assert.equal(Object.hasOwn(projected.batches[0], "api_token"), false);
     assert.equal(Object.hasOwn(parsed.batches[0], "api_token"), false);
+    assert.equal(sensitiveValueReads, 0);
     assert.doesNotMatch(serialized, /api_token|protected-associated-sensitive-key-value/u);
     assertPolicyFailure(() => projectDiagnosticData({
       batches: [{ entry: { ref: { value: identity } } }],
@@ -239,8 +244,12 @@ describe("diagnostic projection", () => {
     const associated = "protected-associated-oversized-key-value";
     const source = { batches: [{
       entry: { ref: identity, note: SECRET },
-      [oversizedKey]: { ref: associated },
     }] };
+    let oversizedValueReads = 0;
+    Object.defineProperty(source.batches[0], oversizedKey, {
+      enumerable: true,
+      get() { oversizedValueReads += 1; return { ref: associated }; },
+    });
     const projected = projectDiagnosticData(source, {
       validatedIdentityPaths: [["batches", "*", "*", "ref"]],
       maxStringLength: 8,
@@ -253,6 +262,7 @@ describe("diagnostic projection", () => {
     assert.equal(parsed.batches[0].entry.note, "[redacted]");
     assert.equal(Object.hasOwn(projected.batches[0], oversizedKey), false);
     assert.equal(Object.hasOwn(parsed.batches[0], oversizedKey), false);
+    assert.equal(oversizedValueReads, 0);
     assert.equal(serialized.includes(oversizedKey), false);
     assert.equal(serialized.includes(associated), false);
   });
