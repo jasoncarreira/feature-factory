@@ -1,18 +1,22 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   heartbeatOnce,
+  mutateRunJsonLocked,
   transitionCostUsage,
   transitionGateDecision,
+  transitionPrePrFenceEstablished,
+  transitionLifecycleRun,
   transitionPrCreated,
   transitionRecoverOrphan,
   transitionRunJson,
   transitionRunSlice,
   transitionSteeringConsumed,
+  transitionSteeringBoundaryOpened,
   transitionSteeringQueued,
   transitionTerminalResult,
   transitionSliceMerged,
@@ -36,7 +40,7 @@ describe("simplified run-state transitions", () => {
       });
       writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
 
-      const result = await transitionGateDecision(fixture.runDir, "story", {
+      const result = await approveGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
@@ -63,7 +67,7 @@ describe("simplified run-state transitions", () => {
       writeFileSync(join(fixture.runDir, "gates", "story.question.md"), "changed?\n");
 
       await assert.rejects(
-        transitionGateDecision(fixture.runDir, "story", {
+        approveGateDecision(fixture.runDir, "story", {
           status: "approved",
           artifact: "artifacts/story.md",
           question_ref: "gates/story.question.md",
@@ -87,7 +91,7 @@ describe("simplified run-state transitions", () => {
         answer_ref: "gates/story.answer",
       });
       await assert.rejects(
-        transitionGateDecision(fixture.runDir, "story", {
+        approveGateDecision(fixture.runDir, "story", {
           status: "approved",
           artifact: "artifacts/story.md",
           question_ref: "gates/story.question.md",
@@ -197,7 +201,7 @@ describe("simplified run-state transitions", () => {
       });
       writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
 
-      let result = await transitionGateDecision(fixture.runDir, "story", {
+      let result = await approveGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
@@ -217,7 +221,7 @@ describe("simplified run-state transitions", () => {
       });
 
       await assert.rejects(
-        transitionGateDecision(fixture.runDir, "story", {
+        approveGateDecision(fixture.runDir, "story", {
           status: "approved",
           artifact: "artifacts/story.md",
           question_ref: "gates/story.question.md",
@@ -227,7 +231,7 @@ describe("simplified run-state transitions", () => {
       );
 
       writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
-      result = await transitionGateDecision(fixture.runDir, "story", {
+      result = await approveGateDecision(fixture.runDir, "story", {
         status: "approved",
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
@@ -358,7 +362,7 @@ describe("simplified run-state transitions", () => {
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", verdict: "GO" });
       writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", verdict: "PASS" });
 
-      const result = await transitionPrCreated(fixture.runDir, {
+      const result = await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/99",
         pr_number: 99,
         repository: "jasoncarreira/opencode-feature-factory",
@@ -388,7 +392,7 @@ describe("simplified run-state transitions", () => {
         continuation: continuationMetadata(fixture.runId),
       });
 
-      const result = await transitionPrCreated(fixture.runDir, {
+      const result = await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/103",
         pr_number: 103,
         repository: "jasoncarreira/opencode-feature-factory",
@@ -410,7 +414,7 @@ describe("simplified run-state transitions", () => {
         continuation: continuationMetadata(fixture.runId),
       });
 
-      const result = await transitionPrCreated(fixture.runDir, {
+      const result = await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
         pr_number: 104,
         repository: "jasoncarreira/opencode-feature-factory",
@@ -430,7 +434,7 @@ describe("simplified run-state transitions", () => {
       writeReadyPrRun(fixture);
 
       await assert.rejects(
-        transitionPrCreated(fixture.runDir, {
+        establishFenceAndExpectFailure(fixture.runDir, {
           pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/104",
           pr_number: 104,
           repository: "other-owner/other-repo",
@@ -451,7 +455,7 @@ describe("simplified run-state transitions", () => {
       writeReadyPrRun(fixture, { slices: [{ id: "slice", status: "review", attempts: 1 }] });
 
       await assert.rejects(
-        transitionPrCreated(fixture.runDir, {
+        establishFenceAndExpectFailure(fixture.runDir, {
           pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/100",
           pr_number: 100,
           repository: "jasoncarreira/opencode-feature-factory",
@@ -469,7 +473,7 @@ describe("simplified run-state transitions", () => {
       writeReadyPrRun(fixture, { validator: { verdict: "GO", report: "artifacts/missing.md" } });
 
       await assert.rejects(
-        transitionPrCreated(fixture.runDir, {
+        establishFenceAndExpectFailure(fixture.runDir, {
           pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/101",
           pr_number: 101,
           repository: "jasoncarreira/opencode-feature-factory",
@@ -510,7 +514,7 @@ describe("simplified run-state transitions", () => {
         else writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), item.review);
 
         await assert.rejects(
-          transitionPrCreated(fixture.runDir, {
+          establishFenceAndExpectFailure(fixture.runDir, {
             pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/105",
             pr_number: 105,
             repository: "jasoncarreira/opencode-feature-factory",
@@ -521,7 +525,7 @@ describe("simplified run-state transitions", () => {
         assert.equal(run.status, "running");
         assert.equal(run.pr_url, undefined);
 
-        const blocked = await transitionTerminalResult(fixture.runDir, { status: "blocked", reason: "review gate did not pass", artifacts: {} });
+        const blocked = await terminalTransition(fixture.runDir, { status: "blocked", reason: "review gate did not pass", artifacts: {} });
         assert.equal(blocked.run.status, "blocked");
         assert.equal(blocked.run.pr_url, undefined);
         run = readJson(join(fixture.runDir, "run.json"));
@@ -560,10 +564,31 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("does not consume pending steering when recording cost usage", async () => {
+    const fixture = createFixture("cost-pending-steering");
+    try {
+      await transitionSteeringQueued(fixture.runDir, "reconsider the next build wave", { now: NOW, id: "cost-pending" });
+      const steeringBefore = snapshotPendingSteering(fixture);
+
+      const result = await transitionCostUsage(fixture.runDir, {
+        agent: "backend-builder",
+        slice_id: "slice",
+        input_tokens: 20,
+        output_tokens: 5,
+      }, { now: "2026-07-08T12:01:00.000Z", id: "usage-with-pending" });
+
+      assert.equal(result.updated, true);
+      assert.equal(result.cost_attribution.entries.at(-1).id, "usage-with-pending");
+      assertPendingSteeringUnchanged(fixture, steeringBefore);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("does not mutate terminal runs when recording cost usage", async () => {
     const fixture = createFixture("cost-terminal");
     try {
-      await transitionTerminalResult(fixture.runDir, { status: "blocked", reason: "done", artifacts: {} }, { now: NOW });
+      await terminalTransition(fixture.runDir, { status: "blocked", reason: "done", artifacts: {} }, { now: NOW });
 
       await assert.rejects(
         transitionCostUsage(fixture.runDir, { agent: "backend-builder", input_tokens: 1 }, { now: NOW, id: "late-cost" }),
@@ -681,7 +706,7 @@ describe("simplified run-state transitions", () => {
       await approveGate(fixture, "pre_pr", "validation-report.md");
       assertConsistent(fixture);
 
-      await transitionPrCreated(fixture.runDir, {
+      await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/102",
         pr_number: 102,
         repository: "jasoncarreira/opencode-feature-factory",
@@ -718,6 +743,50 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("does not consume pending steering in generic low-level transitions", async () => {
+    const transitions = [
+      ["transitionRunJson", transitionRunJson],
+      ["transitionLifecycleRun", transitionLifecycleRun],
+      ["mutateRunJsonLocked", mutateRunJsonLocked],
+    ];
+
+    for (const [name, transition] of transitions) {
+      const fixture = createFixture(`pending-${name}`);
+      try {
+        await transitionSteeringQueued(fixture.runDir, `keep steering pending through ${name}`, { now: NOW, id: `pending-${name}` });
+        const steeringBefore = snapshotPendingSteering(fixture);
+        const updatedAt = "2026-07-08T12:01:00.000Z";
+
+        const result = await transition(fixture.runDir, (run) => {
+          run.updated_at = updatedAt;
+        });
+
+        assert.equal(result.updated, true, `${name} should perform its requested state transition`);
+        assert.equal(result.run.updated_at, updatedAt);
+        assertPendingSteeringUnchanged(fixture, steeringBefore);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("does not consume pending steering on heartbeat ticks", async () => {
+    const fixture = createFixture("heartbeat-pending-steering");
+    try {
+      await transitionSteeringQueued(fixture.runDir, "adjust work after the current wait", { now: NOW, id: "heartbeat-pending" });
+      const steeringBefore = snapshotPendingSteering(fixture);
+      writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
+
+      const result = await heartbeatOnce(fixture.runDir, { now: Date.parse("2026-07-08T12:01:00.000Z") });
+
+      assert.equal(result.updated, true);
+      assert.equal(result.run.heartbeat_at, "2026-07-08T12:01:00.000Z");
+      assertPendingSteeringUnchanged(fixture, steeringBefore);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("heartbeat ticks only liveness state", async () => {
     const fixture = createFixture("heartbeat");
     try {
@@ -737,7 +806,7 @@ describe("simplified run-state transitions", () => {
     try {
       const lockDir = join(fixture.runDir, "run-json.lock");
       mkdirSync(lockDir);
-      writeJson(join(lockDir, "owner.json"), { pid: 999999, hostname: "old-host", acquired_at: NOW });
+      writeJson(join(lockDir, "owner.json"), { pid: 999999, hostname: hostname(), acquired_at: NOW, nonce: "11111111-1111-4111-8111-111111111111" });
 
       let observedOwner = null;
       await withRunJsonLock(fixture.runDir, ({ owner }) => {
@@ -745,28 +814,361 @@ describe("simplified run-state transitions", () => {
       }, { timeoutMs: 5, retryDelayMs: 1, processAliveFn: () => false });
 
       assert.equal(observedOwner.stolen_from.pid, 999999);
-      assert.equal(observedOwner.stolen_from.hostname, "old-host");
+      assert.equal(observedOwner.stolen_from.hostname, hostname());
+      assert.equal(observedOwner.stolen_from.nonce, undefined);
+      assert.match(observedOwner.nonce, /^[0-9a-f-]{36}$/u);
     } finally {
       cleanup(fixture.repo);
     }
   });
 
-  it("does not steal a run-json lock from a live owner", async () => {
+  it("revalidates dead-owner liveness immediately before quarantine removal", async () => {
+    const fixture = createFixture("reclaim-liveness-change");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    let livenessChecks = 0;
+    let quarantine = null;
+    let callbackEntered = false;
+    try {
+      mkdirSync(lockDir);
+      writeJson(join(lockDir, "owner.json"), {
+        pid: 999999,
+        hostname: hostname(),
+        acquired_at: NOW,
+        nonce: "99999999-9999-4999-8999-999999999999",
+      });
+
+      await assert.rejects(
+        withRunJsonLock(fixture.runDir, () => { callbackEntered = true; }, {
+          timeoutMs: 5000,
+          retryDelayMs: 1,
+          processAliveFn: () => {
+            livenessChecks += 1;
+            return livenessChecks < 3 ? false : true;
+          },
+          lockHooks: {
+            onReclaimRenamed: ({ quarantine: path }) => { quarantine = path; },
+          },
+        }),
+        /owner is no longer definitively dead before removal/u,
+      );
+
+      assert.equal(livenessChecks, 3);
+      assert.equal(callbackEntered, false);
+      assert.equal(existsSync(lockDir), false);
+      assert.ok(quarantine);
+      assert.equal(existsSync(quarantine), true, "changed-owner quarantine must remain for manual recovery");
+      assert.equal(readJson(join(quarantine, "owner.json")).nonce, "99999999-9999-4999-8999-999999999999");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("does not steal an aged run-json lock from a live owner", async () => {
     const fixture = createFixture("live-lock");
     try {
       const lockDir = join(fixture.runDir, "run-json.lock");
       mkdirSync(lockDir);
-      writeJson(join(lockDir, "owner.json"), { pid: process.pid, hostname: "live-host", acquired_at: new Date().toISOString() });
+      writeJson(join(lockDir, "owner.json"), { pid: process.pid, hostname: hostname(), acquired_at: "2000-01-01T00:00:00.000Z", nonce: "22222222-2222-4222-8222-222222222222" });
 
       await assert.rejects(
-        withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 60000, processAliveFn: () => true }),
+        withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, staleLockMs: 1, processAliveFn: () => true }),
         /timed out waiting for run\.json lock/u,
       );
+      assert.equal(readJson(join(lockDir, "owner.json")).nonce, "22222222-2222-4222-8222-222222222222");
     } finally {
       cleanup(fixture.repo);
     }
   });
+
+  it("fails closed when a paused pre-publication acquirer resumes into a successor lock", async () => {
+    const fixture = createFixture("publication-gap");
+    const firstCreated = deferredPromise();
+    const releaseFirst = deferredPromise();
+    const successorEntered = deferredPromise();
+    const releaseSuccessor = deferredPromise();
+    try {
+      const first = withRunJsonLock(fixture.runDir, () => {}, {
+        timeoutMs: 5000,
+        lockHooks: { onLockCreated: async () => { firstCreated.resolve(); await releaseFirst.promise; } },
+      });
+      await firstCreated.promise;
+      rmSync(join(fixture.runDir, "run-json.lock"), { recursive: true, force: true });
+
+      const successor = withRunJsonLock(fixture.runDir, async ({ owner }) => {
+        successorEntered.resolve(owner.nonce);
+        await releaseSuccessor.promise;
+      }, { timeoutMs: 5000 });
+      const successorNonce = await successorEntered.promise;
+      releaseFirst.resolve();
+      await assert.rejects(first, /lock ownership changed before owner publication/u);
+      assert.equal(readJson(join(fixture.runDir, "run-json.lock", "owner.json")).nonce, successorNonce);
+
+      releaseSuccessor.resolve();
+      await successor;
+      assert.equal(existsSync(join(fixture.runDir, "run-json.lock")), false);
+    } finally {
+      releaseFirst.resolve();
+      releaseSuccessor.resolve();
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("cleans up only the lock carrying the callback owner's nonce", async () => {
+    const fixture = createFixture("nonce-cleanup");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    try {
+      const successorNonce = "33333333-3333-4333-8333-333333333333";
+      await withRunJsonLock(fixture.runDir, async ({ owner }) => {
+        assert.notEqual(owner.nonce, successorNonce);
+        writeJson(join(lockDir, "owner.json"), { ...owner, nonce: successorNonce });
+      });
+      assert.equal(readJson(join(lockDir, "owner.json")).nonce, successorNonce);
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("reclaims an old ownerless lock left by a crash", async () => {
+    const fixture = createFixture("ownerless-lock");
+    let callbackEntered = false;
+    try {
+      const lockDir = join(fixture.runDir, "run-json.lock");
+      mkdirSync(lockDir);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      await withRunJsonLock(fixture.runDir, () => { callbackEntered = true; }, {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        missingOwnerStealMs: 1,
+      });
+
+      assert.equal(callbackEntered, true);
+      assert.equal(existsSync(lockDir), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed for a fresh ownerless lock and invalid owner publication", async () => {
+    for (const [name, owner, missingOwnerStealMs] of [
+      ["fresh-ownerless", null, 60000],
+      ["invalid", { pid: 999999, hostname: "dead", acquired_at: NOW }, 1],
+    ]) {
+      const fixture = createFixture(`invalid-lock-${name}`);
+      try {
+        const lockDir = join(fixture.runDir, "run-json.lock");
+        mkdirSync(lockDir);
+        if (owner) writeJson(join(lockDir, "owner.json"), owner);
+        await assert.rejects(
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, missingOwnerStealMs, processAliveFn: () => false }),
+          /timed out waiting for run\.json lock/u,
+        );
+        assert.equal(existsSync(lockDir), true);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("does not delete invalid successor evidence published while acquisition is paused", async () => {
+    const fixture = createFixture("invalid-publication-race");
+    const created = deferredPromise();
+    const release = deferredPromise();
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    try {
+      const acquiring = withRunJsonLock(fixture.runDir, () => {}, {
+        timeoutMs: 5000,
+        lockHooks: { onLockCreated: async () => { created.resolve(); await release.promise; } },
+      });
+      await created.promise;
+      writeJson(join(lockDir, "owner.json"), { invalid: true });
+      release.resolve();
+      await assert.rejects(acquiring, /EEXIST/u);
+      assert.deepEqual(readJson(join(lockDir, "owner.json")), { invalid: true });
+    } finally {
+      release.resolve();
+      rmSync(lockDir, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("allows only one exact-lock reclaimer and never removes its successor", async () => {
+    const fixture = createFixture("two-reclaimers");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    const firstClaimed = deferredPromise();
+    const releaseFirstClaim = deferredPromise();
+    const firstRenamed = deferredPromise();
+    const releaseFirstRename = deferredPromise();
+    const secondContended = deferredPromise();
+    const secondCreated = deferredPromise();
+    const releaseSecondPublication = deferredPromise();
+    const secondEntered = deferredPromise();
+    const releaseSecondCallback = deferredPromise();
+    const secondCleaning = deferredPromise();
+    const releaseSecondCleanup = deferredPromise();
+    const firstEntered = deferredPromise();
+    let activeCallbacks = 0;
+    let maxActiveCallbacks = 0;
+    try {
+      mkdirSync(lockDir);
+      writeJson(join(lockDir, "owner.json"), {
+        pid: 999999,
+        hostname: hostname(),
+        acquired_at: NOW,
+        nonce: "55555555-5555-4555-8555-555555555555",
+      });
+      const callback = async (entered, release = null) => {
+        activeCallbacks += 1;
+        maxActiveCallbacks = Math.max(maxActiveCallbacks, activeCallbacks);
+        entered.resolve();
+        if (release) await release.promise;
+        activeCallbacks -= 1;
+      };
+      const first = withRunJsonLock(fixture.runDir, () => callback(firstEntered), {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        processAliveFn: () => false,
+        lockHooks: {
+          onReclaimClaimed: async () => { firstClaimed.resolve(); await releaseFirstClaim.promise; },
+          onReclaimRenamed: async () => { firstRenamed.resolve(); await releaseFirstRename.promise; },
+        },
+      });
+      await firstClaimed.promise;
+      const second = withRunJsonLock(fixture.runDir, () => callback(secondEntered, releaseSecondCallback), {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        processAliveFn: () => false,
+        lockHooks: {
+          onContended: () => secondContended.resolve(),
+          onLockCreated: async () => { secondCreated.resolve(); await releaseSecondPublication.promise; },
+          onBeforeCleanup: async () => { secondCleaning.resolve(); await releaseSecondCleanup.promise; },
+        },
+      });
+      await secondContended.promise;
+      releaseFirstClaim.resolve();
+      await firstRenamed.promise;
+      await secondCreated.promise;
+      releaseSecondPublication.resolve();
+      await secondEntered.promise;
+      releaseFirstRename.resolve();
+      releaseSecondCallback.resolve();
+      await secondCleaning.promise;
+      assert.equal(activeCallbacks, 0);
+      assert.equal(existsSync(lockDir), true, "successor lock must remain during its cleanup barrier");
+      releaseSecondCleanup.resolve();
+      await second;
+      await firstEntered.promise;
+      await first;
+      assert.equal(maxActiveCallbacks, 1);
+      assert.equal(existsSync(lockDir), false);
+    } finally {
+      for (const barrier of [releaseFirstClaim, releaseFirstRename, releaseSecondPublication, releaseSecondCallback, releaseSecondCleanup]) barrier.resolve();
+      rmSync(lockDir, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("binds a delayed reclaim claim outside the replaceable lock pathname", async () => {
+    const fixture = createFixture("observation-claim-race");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    const delayedObserved = deferredPromise();
+    const releaseDelayedClaim = deferredPromise();
+    const winnerRemoved = deferredPromise();
+    const releaseWinnerRemoved = deferredPromise();
+    const delayedAbandoned = deferredPromise();
+    const successorEntered = deferredPromise();
+    const releaseSuccessor = deferredPromise();
+    let delayedCallbackEntered = false;
+    let winnerCallbackEntered = false;
+    try {
+      mkdirSync(lockDir);
+      writeJson(join(lockDir, "owner.json"), {
+        pid: 999999,
+        hostname: hostname(),
+        acquired_at: NOW,
+        nonce: "88888888-8888-4888-8888-888888888888",
+      });
+      const delayed = withRunJsonLock(fixture.runDir, () => { delayedCallbackEntered = true; }, {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        processAliveFn: () => false,
+        lockHooks: {
+          onBeforeReclaimClaim: async () => { delayedObserved.resolve(); await releaseDelayedClaim.promise; },
+          onReclaimAbandoned: () => delayedAbandoned.resolve(),
+        },
+      });
+      await delayedObserved.promise;
+      const winner = withRunJsonLock(fixture.runDir, () => { winnerCallbackEntered = true; }, {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        processAliveFn: () => false,
+        lockHooks: { onReclaimRemoved: async () => { winnerRemoved.resolve(); await releaseWinnerRemoved.promise; } },
+      });
+      await winnerRemoved.promise;
+      const successor = withRunJsonLock(fixture.runDir, async () => {
+        successorEntered.resolve();
+        await releaseSuccessor.promise;
+      }, { timeoutMs: 5000 });
+      await successorEntered.promise;
+      const successorOwner = readFileSync(join(lockDir, "owner.json"));
+      releaseDelayedClaim.resolve();
+      await delayedAbandoned.promise;
+      assert.deepEqual(readFileSync(join(lockDir, "owner.json")), successorOwner);
+      assert.deepEqual(readdirSync(lockDir), ["owner.json"]);
+      assert.equal(delayedCallbackEntered, false);
+      assert.equal(winnerCallbackEntered, false);
+
+      releaseWinnerRemoved.resolve();
+      releaseSuccessor.resolve();
+      await successor;
+      await Promise.all([winner, delayed]);
+      assert.equal(winnerCallbackEntered, true);
+      assert.equal(delayedCallbackEntered, true);
+      assert.equal(existsSync(lockDir), false);
+    } finally {
+      for (const barrier of [releaseDelayedClaim, releaseWinnerRemoved, releaseSuccessor]) barrier.resolve();
+      rmSync(lockDir, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed for remote and indeterminate owner liveness", async () => {
+    const cases = [
+      ["remote", "remote-host.invalid", () => false],
+      ["undefined", hostname(), () => undefined],
+      ["unknown-status", hostname(), () => ({ status: "unknown" })],
+      ["eperm", hostname(), () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); }],
+      ["probe-error", hostname(), () => { throw new Error("probe failed"); }],
+    ];
+    for (const [name, ownerHostname, processAliveFn] of cases) {
+      const fixture = createFixture(`indeterminate-${name}`);
+      const lockDir = join(fixture.runDir, "run-json.lock");
+      try {
+        mkdirSync(lockDir);
+        writeJson(join(lockDir, "owner.json"), {
+          pid: 999999,
+          hostname: ownerHostname,
+          acquired_at: NOW,
+          nonce: "66666666-6666-4666-8666-666666666666",
+        });
+        await assert.rejects(
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, processAliveFn }),
+          /timed out waiting for run\.json lock/u,
+        );
+        assert.equal(readJson(join(lockDir, "owner.json")).nonce, "66666666-6666-4666-8666-666666666666");
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
 });
+
+function deferredPromise() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 function createFixture(runId) {
   const repo = mkdtempSync(join(tmpdir(), "run-state-simplified-"));
@@ -803,12 +1205,32 @@ async function approveGate(fixture, gate, artifactFile) {
     answer_ref: answerRef,
   });
   writeFileSync(join(fixture.runDir, answerRef), "approve\n");
-  await transitionGateDecision(fixture.runDir, gate, {
+  await approveGateDecision(fixture.runDir, gate, {
     status: "approved",
     artifact: artifactRef,
     question_ref: questionRef,
     answer_ref: answerRef,
   }, { now: NOW });
+}
+
+async function approveGateDecision(runDir, gate, decision, options = {}) {
+  const opened = await transitionSteeringBoundaryOpened(runDir, "gate", options);
+  return transitionGateDecision(runDir, gate, decision, { ...options, boundaryToken: opened.boundary.token });
+}
+
+async function createPrTransition(runDir, input, options = {}) {
+  const fenced = await transitionPrePrFenceEstablished(runDir, options);
+  return transitionPrCreated(runDir, input, { ...options, fenceToken: fenced.fence.token });
+}
+
+async function establishFenceAndExpectFailure(runDir, input, options = {}) {
+  const fenced = await transitionPrePrFenceEstablished(runDir, options);
+  return transitionPrCreated(runDir, input, { ...options, fenceToken: fenced.fence.token });
+}
+
+async function terminalTransition(runDir, terminalResult, options = {}) {
+  const opened = await transitionSteeringBoundaryOpened(runDir, "terminal", options);
+  return transitionTerminalResult(runDir, terminalResult, { ...options, boundaryToken: opened.boundary.token });
 }
 
 function assertConsistent(fixture) {
@@ -913,6 +1335,32 @@ function heartbeat(runId) {
 
 function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
+}
+
+function snapshotPendingSteering(fixture) {
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const steeringDir = join(fixture.runDir, "steering");
+  assert.ok(run.steering?.pending, "fixture must have pending steering metadata");
+  return {
+    pending: run.steering.pending,
+    history: run.steering.history,
+    file: readFileSync(join(fixture.runDir, run.steering.pending.ref), "utf8"),
+    files: readdirSync(steeringDir).sort(),
+  };
+}
+
+function assertPendingSteeringUnchanged(fixture, before) {
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const steeringDir = join(fixture.runDir, "steering");
+  const files = readdirSync(steeringDir).sort();
+
+  assert.deepEqual(run.steering.pending, before.pending);
+  assert.equal(run.steering.pending.ref, before.pending.ref);
+  assert.equal(run.steering.pending.hash, before.pending.hash);
+  assert.deepEqual(run.steering.history, before.history);
+  assert.equal(readFileSync(join(fixture.runDir, before.pending.ref), "utf8"), before.file);
+  assert.deepEqual(files, before.files);
+  assert.equal(files.some((file) => file.startsWith("consumed-")), false);
 }
 
 function writeJson(file, value) {

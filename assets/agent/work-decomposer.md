@@ -29,6 +29,8 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 - Shared hotspots must be serialized into different waves.
 - Generated files have one owning slice.
 - Prefer fewer coherent slices over many tiny slices.
+- The longest dependency path may span at most three waves; a root slice is wave 1.
+- Combine tightly serialized work into one coherent slice instead of creating a fourth wave. `max_parallel_slices` limits concurrency within a wave and does not relax the depth cap.
 - If the feature is indivisible, emit one slice and explain why.
 
 ## Hotspot Examples

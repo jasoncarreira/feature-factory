@@ -19,6 +19,7 @@ export const HEARTBEAT_PHASES = Object.freeze([
   "remediation",
 ]);
 export const HEARTBEAT_PROTECTED_GATES = Object.freeze(["story", "brief", "pre_pr"]);
+export const MAX_SLICE_DEPENDENCY_WAVES = 3;
 
 const RUN_STATUSES = new Set(["running", ...TERMINAL_RUN_STATUSES]);
 const TERMINAL_STATUSES = new Set(TERMINAL_RUN_STATUSES);
@@ -106,13 +107,46 @@ export function validateCostAttributionEntries(entries, runId) {
   return entries;
 }
 
-export function validateSlicesPlan(plan) {
+export function validateSlicesPlan(plan, { enforceDependencyDepth = true } = {}) {
   const errors = [];
   if (!isRecord(plan)) return fail([{ path: "plan", message: "must be an object" }]);
   if (!Array.isArray(plan.slices)) errors.push({ path: "plan.slices", message: "must be an array" });
-  else validatePlannedSlices(errors, plan.slices, "plan.slices");
+  else validatePlannedSlices(errors, plan.slices, "plan.slices", { enforceDependencyDepth });
   if (errors.length) fail(errors);
   return plan;
+}
+
+// The dependency-depth cap is grandfathered ONLY for a plan whose durable form is
+// the current `run.slices` — i.e. run.slices is the seeded projection of this exact
+// plan. A merely nonempty run.slices must not exempt the plan: a stale, partial, or
+// unrelated durable slice list would otherwise let the plan be swapped for an
+// over-depth graph unchecked. Match on the closed set of slice ids AND each slice's
+// dependency set (order-insensitive); any divergence re-enables enforcement.
+export function runSlicesMatchPlan(run, plan) {
+  const runGraph = normalizeSliceGraph(run?.slices);
+  const planGraph = normalizeSliceGraph(plan?.slices);
+  if (!runGraph || !planGraph) return false;
+  if (runGraph.size === 0 || runGraph.size !== planGraph.size) return false;
+  for (const [id, deps] of runGraph) {
+    const planDeps = planGraph.get(id);
+    if (!planDeps || planDeps.length !== deps.length || planDeps.some((dep, index) => dep !== deps[index])) return false;
+  }
+  return true;
+}
+
+function normalizeSliceGraph(slices) {
+  if (!Array.isArray(slices)) return null;
+  const graph = new Map();
+  for (const slice of slices) {
+    if (!isRecord(slice) || !stringValue(slice.id)) return null;
+    const id = String(slice.id).trim();
+    if (graph.has(id)) return null;
+    const deps = Array.isArray(slice.depends_on)
+      ? [...new Set(slice.depends_on.filter(stringValue).map((dep) => String(dep).trim()))].sort()
+      : [];
+    graph.set(id, deps);
+  }
+  return graph;
 }
 
 export function validateHeartbeatState(heartbeat) {
@@ -164,7 +198,7 @@ export function validateRunDir(runDir) {
   const processPath = join(runDir, PROCESS_EVIDENCE_FILE);
   if (existsSync(processPath)) checks.push(validateFile(processPath, (value) => validateProcessSidecar(value, { runDir, runId: run?.run_id })));
   const slicesPath = join(runDir, "plan", "slices.json");
-  if (existsSync(slicesPath)) checks.push(validateFile(slicesPath, validateSlicesPlan));
+  if (existsSync(slicesPath)) checks.push(validateFile(slicesPath, (value) => validateSlicesPlan(value, { enforceDependencyDepth: !runSlicesMatchPlan(run, value) })));
   if (checks.every((item) => item.ok)) checks.push(...checkRunConsistency(runDir, run).checks);
   return { ok: checks.every((item) => item.ok), checks };
 }
@@ -245,9 +279,18 @@ export function steeringConsistencyChecks(runDir, run) {
       return { ref: resolved.ref, path: resolved.path, hash: actualHash };
     }));
   }
+  const uncheckpointed = isRecord(steering.uncheckpointed) ? steering.uncheckpointed : null;
+  if (uncheckpointed) {
+    checks.push(refCheck("run.steering.uncheckpointed.ref", () => {
+      const resolved = resolveSteeringRef(runDir, uncheckpointed.ref);
+      const actualHash = hashFile(resolved.path, { mode: "raw" });
+      if (actualHash !== uncheckpointed.hash) fail([{ path: "run.steering.uncheckpointed.hash", message: "must match consumed steering file" }]);
+      return { ref: resolved.ref, path: resolved.path, hash: actualHash };
+    }));
+  }
   for (const [index, entry] of (Array.isArray(steering.history) ? steering.history : []).entries()) {
     if (!isRecord(entry) || !stringValue(entry.ref)) continue;
-    const mustExist = entry.event === "consumed";
+    const mustExist = entry.event === "consumed" || entry.event === "acknowledged";
     checks.push(refCheck(`run.steering.history[${index}].ref`, () => {
       const resolved = resolveSteeringRef(runDir, entry.ref, { mustExist });
       if (mustExist && stringValue(entry.hash)) {
@@ -380,8 +423,28 @@ function validateSteering(errors, steering, path) {
   }
   requiredInteger(errors, steering, "schema_version", `${path}.schema_version`);
   if (Number.isInteger(steering.schema_version) && steering.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  optionalInteger(errors, steering, "generation", `${path}.generation`);
+  if (Number.isInteger(steering.generation) && steering.generation < 0) errors.push({ path: `${path}.generation`, message: "must be non-negative" });
   if (steering.pending !== undefined && steering.pending !== null) validateSteeringEntry(errors, steering.pending, `${path}.pending`, { pending: true });
   if (steering.pending !== undefined && steering.pending !== null && !isRecord(steering.pending)) errors.push({ path: `${path}.pending`, message: "must be an object or null" });
+  if (steering.uncheckpointed !== undefined && steering.uncheckpointed !== null) validateSteeringEntry(errors, steering.uncheckpointed, `${path}.uncheckpointed`, { consumed: true });
+  if (steering.uncheckpointed !== undefined && steering.uncheckpointed !== null && !isRecord(steering.uncheckpointed)) errors.push({ path: `${path}.uncheckpointed`, message: "must be an object or null" });
+  validateSteeringBoundary(errors, steering.boundary, `${path}.boundary`, { fence: false });
+  validateSteeringAction(errors, steering.action_claim, `${path}.action_claim`, { claim: true });
+  validateSteeringAction(errors, steering.last_action, `${path}.last_action`, { resolved: true });
+  validateSteeringBoundary(errors, steering.pr_fence, `${path}.pr_fence`, { fence: true });
+  if (steering.pending !== undefined && steering.pending !== null && steering.uncheckpointed !== undefined && steering.uncheckpointed !== null) {
+    errors.push({ path, message: "cannot have both pending and uncheckpointed steering" });
+  }
+  if (steering.boundary !== undefined && steering.boundary !== null && (steering.pending !== undefined && steering.pending !== null || steering.uncheckpointed !== undefined && steering.uncheckpointed !== null)) {
+    errors.push({ path, message: "boundary cannot coexist with pending or uncheckpointed steering" });
+  }
+  if (steering.action_claim !== undefined && steering.action_claim !== null && (steering.pending !== undefined && steering.pending !== null || steering.uncheckpointed !== undefined && steering.uncheckpointed !== null || steering.boundary !== undefined && steering.boundary !== null)) {
+    errors.push({ path, message: "action claim cannot coexist with pending, uncheckpointed, or boundary steering state" });
+  }
+  if (steering.pr_fence !== undefined && steering.pr_fence !== null && (steering.pending !== undefined && steering.pending !== null || steering.uncheckpointed !== undefined && steering.uncheckpointed !== null || steering.boundary !== undefined && steering.boundary !== null || steering.action_claim !== undefined && steering.action_claim !== null)) {
+    errors.push({ path, message: "pre-PR fence cannot coexist with pending, uncheckpointed, boundary, or action claim steering state" });
+  }
   if (steering.history === undefined || steering.history === null) return;
   if (!Array.isArray(steering.history)) {
     errors.push({ path: `${path}.history`, message: "must be an array" });
@@ -395,15 +458,54 @@ function validateSteeringEntry(errors, entry, path, options = {}) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  if (options.history) requiredEnum(errors, entry, "event", new Set(["queued", "consumed"]), `${path}.event`);
+  if (options.history) requiredEnum(errors, entry, "event", new Set(["queued", "consumed", "acknowledged"]), `${path}.event`);
   requiredString(errors, entry, "id", `${path}.id`);
   requiredString(errors, entry, "ref", `${path}.ref`);
+  if (stringValue(entry.ref) && (options.consumed || entry.event === "consumed" || entry.event === "acknowledged") && !/^steering\/consumed-[^/]+\.json$/u.test(entry.ref)) errors.push({ path: `${path}.ref`, message: "must name a consumed steering file" });
   requiredHash(errors, entry, "hash", `${path}.hash`);
   requiredInteger(errors, entry, "message_chars", `${path}.message_chars`);
   requiredString(errors, entry, "created_at", `${path}.created_at`);
   if (entry.event === "consumed") {
     requiredString(errors, entry, "source_ref", `${path}.source_ref`);
     requiredString(errors, entry, "consumed_at", `${path}.consumed_at`);
+  }
+  if (options.consumed || entry.event === "acknowledged") requiredString(errors, entry, "consumed_at", `${path}.consumed_at`);
+  if (entry.event === "acknowledged") {
+    requiredString(errors, entry, "acknowledged_at", `${path}.acknowledged_at`);
+    requiredEnum(errors, entry, "outcome", new Set(["applied-prospectively"]), `${path}.outcome`);
+  }
+}
+
+function validateSteeringBoundary(errors, boundary, path, options = {}) {
+  if (boundary === undefined || boundary === null) return;
+  if (!isRecord(boundary)) {
+    errors.push({ path, message: "must be an object or null" });
+    return;
+  }
+  if (!options.fence) requiredEnum(errors, boundary, "kind", new Set(["gate", "dispatch", "remediation", "terminal"]), `${path}.kind`);
+  requiredString(errors, boundary, "token", `${path}.token`);
+  if (stringValue(boundary.token) && !/^[A-Za-z0-9_-]{8,128}$/u.test(boundary.token)) errors.push({ path: `${path}.token`, message: "must use 8-128 safe characters" });
+  requiredInteger(errors, boundary, "generation", `${path}.generation`);
+  if (Number.isInteger(boundary.generation) && boundary.generation < 0) errors.push({ path: `${path}.generation`, message: "must be non-negative" });
+  requiredHash(errors, boundary, "state_hash", `${path}.state_hash`);
+  requiredString(errors, boundary, "created_at", `${path}.created_at`);
+}
+
+function validateSteeringAction(errors, action, path, options = {}) {
+  if (action === undefined || action === null) return;
+  if (!isRecord(action)) {
+    errors.push({ path, message: "must be an object or null" });
+    return;
+  }
+  requiredEnum(errors, action, "kind", new Set(["dispatch", "remediation"]), `${path}.kind`);
+  requiredString(errors, action, "token", `${path}.token`);
+  if (stringValue(action.token) && !/^[A-Za-z0-9_-]{8,128}$/u.test(action.token)) errors.push({ path: `${path}.token`, message: "must use 8-128 safe characters" });
+  requiredInteger(errors, action, "generation", `${path}.generation`);
+  if (Number.isInteger(action.generation) && action.generation < 0) errors.push({ path: `${path}.generation`, message: "must be non-negative" });
+  requiredString(errors, action, "claimed_at", `${path}.claimed_at`);
+  if (options.resolved) {
+    requiredEnum(errors, action, "outcome", new Set(["started", "aborted"]), `${path}.outcome`);
+    requiredString(errors, action, "resolved_at", `${path}.resolved_at`);
   }
 }
 
@@ -565,7 +667,7 @@ function validateRunSlice(errors, slice, path, ids) {
   optionalString(errors, slice, "blocked_reason", `${path}.blocked_reason`);
 }
 
-function validatePlannedSlices(errors, slices, path) {
+function validatePlannedSlices(errors, slices, path, { enforceDependencyDepth }) {
   const ids = validateSliceIDs(errors, slices, path);
   for (const [index, slice] of slices.entries()) {
     if (!isRecord(slice)) {
@@ -579,7 +681,8 @@ function validatePlannedSlices(errors, slices, path) {
     validateStringArray(errors, slice.acceptance, `${path}[${index}].acceptance`, { required: true, nonEmpty: true });
     validateStringArray(errors, slice.test_plan, `${path}[${index}].test_plan`, { required: true, nonEmpty: true });
   }
-  validateAcyclic(errors, slices, ids, path);
+  const acyclic = validateAcyclic(errors, slices, ids, path);
+  if (enforceDependencyDepth && errors.length === 0 && acyclic) validateDependencyDepth(errors, slices, path);
 }
 
 function validateSliceIDs(errors, slices, path) {
@@ -597,10 +700,12 @@ function validateAcyclic(errors, slices, ids, path) {
   for (const slice of slices) if (isRecord(slice) && typeof slice.id === "string" && ids.has(slice.id)) graph.set(slice.id, Array.isArray(slice.depends_on) ? slice.depends_on.filter((id) => ids.has(id)) : []);
   const visiting = new Set();
   const visited = new Set();
+  let acyclic = true;
   const visit = (id, chain) => {
     if (visited.has(id)) return;
     if (visiting.has(id)) {
       errors.push({ path, message: `dependency cycle: ${[...chain, id].join(" -> ")}` });
+      acyclic = false;
       return;
     }
     visiting.add(id);
@@ -609,6 +714,33 @@ function validateAcyclic(errors, slices, ids, path) {
     visited.add(id);
   };
   for (const id of graph.keys()) visit(id, []);
+  return acyclic;
+}
+
+function validateDependencyDepth(errors, slices, path) {
+  const byId = new Map(slices.map((slice, index) => [slice.id, { slice, index }]));
+  const memo = new Map();
+  const longestPath = (id) => {
+    if (memo.has(id)) return memo.get(id);
+    const dependencies = byId.get(id).slice.depends_on;
+    let result = { depth: 1, ids: [id] };
+    for (const dependency of dependencies) {
+      const parent = longestPath(dependency);
+      if (parent.depth + 1 > result.depth) result = { depth: parent.depth + 1, ids: [...parent.ids, id] };
+    }
+    memo.set(id, result);
+    return result;
+  };
+
+  for (const [id, { index }] of byId) {
+    const result = longestPath(id);
+    if (result.depth > MAX_SLICE_DEPENDENCY_WAVES) {
+      errors.push({
+        path: `${path}[${index}].depends_on`,
+        message: `dependency depth ${result.depth} exceeds maximum ${MAX_SLICE_DEPENDENCY_WAVES} waves: ${result.ids.join(" -> ")}`,
+      });
+    }
+  }
 }
 
 function validateSteps(errors, steps, path) {
