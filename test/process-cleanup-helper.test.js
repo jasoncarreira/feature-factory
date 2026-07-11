@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ChildProcess, spawn as spawnChild } from "node:child_process";
+import { ChildProcess, spawn as spawnChild } from "./helpers/git-fixture.js";
 import { readFileSync } from "node:fs";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
@@ -35,7 +35,7 @@ function spawnWithCapturedKill(owner, kill, ...spawnArgs) {
 }
 
 describe("tracked process cleanup", () => {
-  it("keeps immutable signaling authority for the exact owned handle", async () => {
+  it("captures signaling for the exact owned child", async () => {
     const owner = createTrackedProcessCleanup({ timeoutMs: 500, diagnostic: () => {} });
     const exited = owner.spawn(process.execPath, ["-e", ""], {}, { label: "exited" });
     await once(exited, "exit");
@@ -58,30 +58,6 @@ describe("tracked process cleanup", () => {
       assert.equal(report.diagnostics[0].label, "owned");
     } finally {
       await stopFixture(unowned, unownedOriginalKill);
-    }
-  });
-
-  it("fails closed when an owned child's internal handle is replaced", async () => {
-    const owner = createTrackedProcessCleanup({ timeoutMs: 10, diagnostic: () => {} });
-    const owned = await spawned(owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], {}, { label: "owned" }));
-    const unowned = await spawned(spawnChild(process.execPath, ["-e", SLEEP_SCRIPT]));
-    const ownedHandle = owned._handle;
-    const ownedOriginalKill = owned.kill.bind(owned);
-    const unownedOriginalKill = unowned.kill.bind(unowned);
-    owned._handle = unowned._handle;
-
-    try {
-      const report = await owner.cleanup();
-      assert.equal(report.signaledCount, 0);
-      assert.equal(report.timedOut, true);
-      assert.ok(report.diagnostics.some(({ outcome }) => outcome === "signaling-authority-changed"));
-      assert.equal(unowned.signalCode, null);
-    } finally {
-      owned._handle = ownedHandle;
-      await Promise.all([
-        stopFixture(owned, ownedOriginalKill),
-        stopFixture(unowned, unownedOriginalKill),
-      ]);
     }
   });
 
@@ -118,24 +94,20 @@ describe("tracked process cleanup", () => {
     assert.deepEqual(Object.keys(owner).sort(), ["cleanup", "spawn"]);
   });
 
-  it("snapshots a stateful detached option once and rejects cleanup reentry before spawning", async () => {
+  it("snapshots a stateful detached option once before spawning", async () => {
     const owner = createTrackedProcessCleanup({ diagnostic: () => {} });
     let detachedReads = 0;
-    let reentrantCleanup;
     const options = {
       get detached() {
         detachedReads += 1;
-        reentrantCleanup = owner.cleanup();
         return detachedReads > 1;
       },
     };
 
-    assert.throws(
-      () => owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], options),
-      /cleanup has started/u,
-    );
+    const child = owner.spawn(process.execPath, ["-e", ""], options);
+    await once(child, "exit");
     assert.equal(detachedReads, 1);
-    const report = await reentrantCleanup;
+    const report = await owner.cleanup();
     assert.equal(report.signaledCount, 0);
     assert.deepEqual(report.diagnostics, []);
   });

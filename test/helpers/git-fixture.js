@@ -1,9 +1,9 @@
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export { execFileSync, spawn, spawnSync };
+export { ChildProcess, execFileSync, spawn, spawnSync };
 
 export function runFixtureGit(cwd, args, { baseEnv = {} } = {}) {
   const fixtureConfigDirectory = mkdtempSync(join(tmpdir(), "feature-factory-git-fixture-"));

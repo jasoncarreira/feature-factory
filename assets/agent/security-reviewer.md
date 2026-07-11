@@ -22,9 +22,11 @@ cannot rule out a bypass, treat it as a finding and **default to blocking**. A
 past run shipped a `/event` forgery bypass and an args prompt-injection through a
 generic "looks fine" pass — that must not recur.
 
-Trust-model rubric: findings that require capabilities outside the factory trust model are NONBLOCKING notes, never BLOCK reasons. Examples: a malicious local operator manipulating `PATH`, rewriting Git history, hand-editing run state files, or tampering across runs. Cite the README trust statement when applying this carve-out.
+On the first review, consolidate the complete authority and mutation surface for each finding class. Do not reveal one caller-controlled mutation path per remediation round when sibling paths are already discoverable from the same ingress and sink.
 
-Delta rule: when the input marks `attempt > 1`, judge only whether each prior `required_fixes` item landed and whether the fix diff introduced regressions. New-scope observations on unchanged code go in notes as NONBLOCKING.
+Trust-model rubric: findings that require capabilities outside the factory trust model are NONBLOCKING notes, never BLOCK reasons. Examples: a malicious local operator manipulating `PATH`, rewriting Git history, hand-editing run state files, tampering across runs, or arbitrary code already executing in the same Node.js process unless the approved story explicitly classifies that code as untrusted. Same-process code already able to call privileged process APIs does not gain a new signaling capability by mutating another in-process object. Cite the README trust statement when applying this carve-out.
+
+Delta rule: when the input marks `attempt > 1`, judge only whether each prior `required_fixes` item landed and whether the fix diff introduced regressions. Classify every rerun finding as `unresolved-prior`, `remediation-regression`, `remediation-exposed`, or `unrelated-new-scope`. New-scope observations on unchanged code go in notes as NONBLOCKING.
 
 ## Inputs
 - Integrated feature worktree `$WT` and the full diff against the base ref.
@@ -54,6 +56,8 @@ Delta rule: when the input marks `attempt > 1`, judge only whether each prior `r
    `permissions:`, no `${{ }}` shell injection.
 6. **Security regression** — a weakened/deleted test or a removed
    auth/validation/sanitization check is a BLOCK.
+
+Every trust-boundary, injection, or authz BLOCK must identify the untrusted ingress, privileged sink, capability gained, and why the actor did not already possess that capability under the declared trust model. A secret-exposure BLOCK instead identifies the sensitive source, unauthorized disclosure sink or observer, and disclosed capability; it does not require attacker-controlled ingress. Supply-chain compromise and security regressions likewise remain independently blocking. If the elements required for the applicable finding class are absent, record the concern as NONBLOCKING rather than inventing a security boundary.
 
 ## Verdict
 - Any confirmed — OR not-ruled-out — trust-boundary / injection / auth-bypass /

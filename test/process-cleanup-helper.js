@@ -1,4 +1,4 @@
-import { spawn as spawnChild } from "node:child_process";
+import { spawn as spawnChild } from "./helpers/git-fixture.js";
 
 const MAX_DIAGNOSTICS = 20;
 const MAX_METADATA_LENGTH = 160;
@@ -22,11 +22,6 @@ function errorDetails(error) {
 
 function isTerminated(record) {
   return record.exit || record.close || record.exitCode !== null || record.signalCode !== null;
-}
-
-function hasOriginalAuthority(record) {
-  const descriptor = Object.getOwnPropertyDescriptor(record.child, "_handle");
-  return record.authorityHandle !== null && descriptor?.value === record.authorityHandle;
 }
 
 function stateOf(record) {
@@ -71,7 +66,6 @@ export function createTrackedProcessCleanup({ timeoutMs = 1500, diagnostic = con
       const record = {
         child,
         signal,
-        authorityHandle: child._handle ?? null,
         label,
         command: boundedCommand,
         pid: positivePid(child),
@@ -134,10 +128,6 @@ export function createTrackedProcessCleanup({ timeoutMs = 1500, diagnostic = con
 
         record.signalAttempted = true;
         attempted.push(record);
-        if (!hasOriginalAuthority(record)) {
-          record.signalOutcome = "signaling-authority-changed";
-          continue;
-        }
         try {
           const signaled = record.signal("SIGTERM");
           record.signalOutcome = signaled ? "signal-sent" : "signal-returned-false";

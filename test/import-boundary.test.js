@@ -3,69 +3,32 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, extname, isAbsolute, normalize, relative, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { init, parse } from "es-module-lexer";
+
+await init;
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const helperPath = resolve(repositoryRoot, "test/helpers/git-fixture.js");
-const JavaScriptExtensions = new Set([".js", ".mjs", ".cjs"]);
+const scannedExtensions = new Set([".js", ".mjs", ".cjs"]);
 const childProcessSpecifiers = new Set(["child_" + "process", "node:" + "child_process"]);
-const comment = String.raw`(?:\/\*(?:[^*]|\*(?!\/))*\*\/|\/\/[^\r\n]*(?:\r\n?|\n|$))`;
-const trivia = String.raw`(?:\s|${comment})*`;
-const quotedSpecifier = String.raw`(?<quote>["'])(?<specifier>(?:(?!\k<quote>)[^\\\r\n])*)\k<quote>`;
-const declarationString = String.raw`(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*')`;
-const declarationAtom = String.raw`(?:${comment}|${declarationString}|\s|[^\s/"';])`;
-const namedExportAtom = String.raw`(?:${comment}|${declarationString}|\s|[^\s/"';}])`;
 
-const loadPatterns = [
-  {
-    syntax: "static import",
-    expression: new RegExp(
-      String.raw`(?<![\w$.])\bimport${trivia}(?:(?:${declarationAtom})*?\bfrom${trivia})?${quotedSpecifier}`,
-      "g",
-    ),
-  },
-  {
-    syntax: "export-from",
-    expression: new RegExp(
-      String.raw`(?<![\w$.])\bexport${trivia}(?:\*${trivia}(?:as${trivia}[A-Za-z_$][\w$]*${trivia})?|\{(?:${namedExportAtom})*\}${trivia})\bfrom${trivia}${quotedSpecifier}`,
-      "g",
-    ),
-  },
-  {
-    syntax: "require",
-    expression: new RegExp(
-      String.raw`(?<![\w$.])\brequire${trivia}\(${trivia}${quotedSpecifier}${trivia}(?:\)|,)`,
-      "g",
-    ),
-  },
-  {
-    syntax: "dynamic import",
-    expression: new RegExp(
-      String.raw`(?<![\w$.])\bimport${trivia}\(${trivia}${quotedSpecifier}${trivia}(?:\)|,)`,
-      "g",
-    ),
-  },
-];
-
-describe("bounded import extraction", () => {
+describe("ESM import extraction", () => {
   const childProcess = "node:" + "child_process";
-  const quote = (specifier, mark = '"') => `${mark}${specifier}${mark}`;
 
-  const prohibitedForms = [
-    ["static import", `import { spawnSync } from ${quote(childProcess)}`],
-    ["static import", `import processApi from ${quote(childProcess, "'")}`],
-    ["static import", `import * as processApi from\n  ${quote(childProcess)}`],
-    ["static import", `import ${quote(childProcess)}`],
-    ["export-from", `export { spawnSync } from ${quote(childProcess)}`],
-    ["export-from", `export * from ${quote(childProcess, "'")}`],
-    ["export-from", `export * as processApi from ${quote(childProcess)}`],
-    ["require", `require ( ${quote(childProcess)} )`],
-    ["require", `require(${quote(childProcess)}, { fixture: true })`],
-    ["dynamic import", `import( ${quote(childProcess, "'")} )`],
-    ["dynamic import", `import(${quote(childProcess)}, { with: { type: "json" } })`],
-  ];
+  it("recognizes static imports, export-from, and literal dynamic imports", () => {
+    const forms = [
+      ["static import", `import { spawnSync } from "${childProcess}"`],
+      ["static import", `import processApi from '${childProcess}'`],
+      ["static import", `import * as processApi from\n  "${childProcess}"`],
+      ["static import", `import "${childProcess}"`],
+      ["export-from", `export { spawnSync } from "${childProcess}"`],
+      ["export-from", `export * from '${childProcess}'`],
+      ["export-from", `export * as processApi from "${childProcess}"`],
+      ["dynamic import", `import("${childProcess}")`],
+      ["dynamic import", `import("${childProcess}", { with: { type: "json" } })`],
+    ];
 
-  it("recognizes the supported canonical quoted forms", () => {
-    for (const [syntax, source] of prohibitedForms) {
+    for (const [syntax, source] of forms) {
       assert.deepEqual(
         extractLiteralLoads(source).map((load) => [load.syntax, load.specifier]),
         [[syntax, childProcess]],
@@ -74,154 +37,64 @@ describe("bounded import extraction", () => {
     }
   });
 
-  it("rejects supported loads with legal comments between syntax tokens", () => {
-    const syntheticTest = resolve(repositoryRoot, "test/support/comment-gaps.js");
-    const target = quote(childProcess);
-    const forms = [
-      ["static import", `import/* declaration */{/* binding */spawnSync/* binding */}\nfrom// target\n${target}`],
-      ["export-from", `export/* declaration */*/* exported */as/* alias */processApi/* source */from/* target */${target}`],
-      ["require", `require/* callee */(/* target */${target}/* close */)`],
-      ["dynamic import", `import/* callee */(/* target */${target}/* close */)`],
-    ];
-
-    for (const [syntax, source] of forms) {
-      const violations = findViolations(syntheticTest, source, "test");
-      assert.deepEqual(
-        violations.map((violation) => violation.syntax),
-        [syntax],
-        source,
-      );
-    }
-  });
-
-  it("recognizes canonical static clauses despite comment delimiters and string-named bindings", () => {
-    const syntheticTest = resolve(repositoryRoot, "test/support/static-clause-delimiters.js");
-    const target = quote(childProcess);
-    const forms = [
-      [
-        "static import",
-        `import/* ' } \" */ { /* \" } ' */ "remote}name" as local /* { ' \" */ } from ${target}`,
-      ],
-      [
-        "export-from",
-        `export { /* } ' \" */ local as "remote}name" /* { \" ' */ } from ${target}`,
-      ],
-    ];
-
-    for (const [syntax, source] of forms) {
-      assert.deepEqual(
-        findViolations(syntheticTest, source, "test").map((violation) => violation.syntax),
-        [syntax],
-        source,
-      );
-    }
-  });
-
-  it("deterministically treats direct-looking comments and strings as loads", () => {
-    const direct = `import ${quote(childProcess)}`;
-    const specimens = [`// ${direct}`, `/* ${direct} */`, `const fixtureProgram = '${direct}'`];
-
-    for (const source of specimens) {
-      assert.equal(extractLiteralLoads(source).some((load) => load.specifier === childProcess), true, source);
-    }
-  });
-
-  it("excludes encoded, template, computed, indirect, member, alias, and unrelated forms", () => {
-    const syntheticTest = resolve(repositoryRoot, "test/support/synthetic.js");
+  it("uses JavaScript syntax rather than matching comments, strings, calls, or CommonJS", () => {
     const sources = [
-      "import(`node:child_process`)",
-      'import("node:%63hild_process")',
-      'import("node:" + "child_process")',
-      "import(moduleName)",
-      'object.require("node:child_process")',
-      'object.import("node:child_process")',
-      'requireAlias("node:child_process")',
-      'launch("node:child_process")',
-      'import("node:\\x63hild_process")',
+      `// import "${childProcess}"`,
+      `/* import "${childProcess}" */`,
+      `const fixtureProgram = 'import "${childProcess}"'`,
+      `object.import("${childProcess}")`,
+      `require("${childProcess}")`,
+      `import(moduleName)`,
+      `import("node:" + "child_process")`,
     ];
 
-    for (const source of sources) assert.deepEqual(findViolations(syntheticTest, source, "test"), [], source);
+    for (const source of sources) assert.deepEqual(extractLiteralLoads(source), [], source);
+  });
+
+  it("handles comments and long whitespace without a repository-owned grammar", () => {
+    const source = `import/* declaration */{ spawnSync }${"\n".repeat(20_000)}from/* target */"${childProcess}"`;
+
+    assert.deepEqual(extractLiteralLoads(source).map((load) => load.specifier), [childProcess]);
   });
 
   it("reports syntax and line metadata", () => {
-    const source = `const first = true;\n${prohibitedForms[0][1]}`;
+    const source = `const first = true;\nexport * from "${childProcess}"`;
+
     assert.deepEqual(extractLiteralLoads(source)[0], {
-      syntax: "static import",
+      syntax: "export-from",
       specifier: childProcess,
       line: 2,
     });
-  });
-
-  it("starts require metadata at the require token on a multiline load", () => {
-    const source = `const first = true;\n// spacer\n  require/* callee */(\n    ${quote(childProcess)}\n  )`;
-
-    assert.deepEqual(extractLiteralLoads(source)[0], {
-      syntax: "require",
-      specifier: childProcess,
-      line: 3,
-    });
-  });
-
-  it("detects canonical test and production loads beyond the former declaration cap", () => {
-    const longGap = "\n".repeat(20_000);
-    const testFile = resolve(repositoryRoot, "test/support/large-imports.js");
-    const productionFile = resolve(repositoryRoot, "src/nested/large-imports.js");
-    const helperSpecifier = "../../test/helpers/git-fixture.js";
-    const testSources = [
-      `import { spawnSync }${longGap}from ${quote(childProcess)}`,
-      `export { spawnSync }${longGap}from ${quote(childProcess)}`,
-      `require(${longGap}${quote(childProcess)}, { fixture: true })`,
-      `import(${longGap}${quote(childProcess)}, { with: { type: "json" } })`,
-    ];
-    const productionSources = [
-      `import { fixture }${longGap}from ${quote(helperSpecifier)}`,
-      `export { fixture }${longGap}from ${quote(helperSpecifier)}`,
-      `require(${longGap}${quote(helperSpecifier)}, { fixture: true })`,
-      `import(${longGap}${quote(helperSpecifier)}, { with: { type: "json" } })`,
-    ];
-
-    for (const source of testSources) assert.equal(findViolations(testFile, source, "test").length, 1, source);
-    for (const source of productionSources) assert.equal(findViolations(productionFile, source, "production").length, 1, source);
-  });
-
-  it("continues past long comment-heavy incomplete declarations to later canonical loads", () => {
-    const incompleteDeclaration = `import/*${"\n".repeat(24_000)}*/`;
-    const source = `${incompleteDeclaration}\nimport ${quote(childProcess)}`;
-
-    assert.deepEqual(extractLiteralLoads(source).map((load) => [load.syntax, load.specifier]), [["static import", childProcess]]);
   });
 });
 
 describe("import boundary policy", () => {
   const childProcess = "child_" + "process";
-  const directChildProcessImport = `import ${JSON.stringify(childProcess)}`;
 
-  it("allows the exact helper and production child-process loads only", () => {
-    assert.deepEqual(findViolations(helperPath, directChildProcessImport, "test"), []);
-    assert.deepEqual(findViolations(resolve(repositoryRoot, "src/git.js"), directChildProcessImport, "production"), []);
+  it("allows native child-process loads only from the exact test helper", () => {
+    const source = `import { spawnSync } from ${JSON.stringify(childProcess)}`;
 
-    const sibling = resolve(repositoryRoot, "test/helpers/git-fixture-copy.js");
-    const nested = resolve(repositoryRoot, "test/helpers/nested/git-fixture.js");
-    assert.equal(findViolations(sibling, directChildProcessImport, "test").length, 1);
-    assert.equal(findViolations(nested, directChildProcessImport, "test").length, 1);
+    assert.deepEqual(findViolations(helperPath, source, "test"), []);
+    assert.equal(findViolations(resolve(repositoryRoot, "test/helpers/git-fixture-copy.js"), source, "test").length, 1);
+    assert.equal(findViolations(resolve(repositoryRoot, "test/helpers/nested/git-fixture.js"), source, "test").length, 1);
+    assert.deepEqual(findViolations(resolve(repositoryRoot, "src/git.js"), source, "production"), []);
   });
 
-  it("rejects both child-process spellings in recursively covered test modules", () => {
-    const nestedTest = resolve(repositoryRoot, "test/support/nested/fixture.cjs");
+  it("rejects both child-process spellings through supported ESM forms", () => {
+    const testFile = resolve(repositoryRoot, "test/support/nested/fixture.js");
 
-    for (const specifier of [childProcess, "node:" + childProcess]) {
+    for (const specifier of [childProcess, `node:${childProcess}`]) {
       for (const source of [
         `import { spawn } from ${JSON.stringify(specifier)}`,
         `export * from ${JSON.stringify(specifier)}`,
-        `require(${JSON.stringify(specifier)})`,
         `import(${JSON.stringify(specifier)})`,
       ]) {
-        assert.equal(findViolations(nestedTest, source, "test").length, 1, source);
+        assert.equal(findViolations(testFile, source, "test").length, 1, source);
       }
     }
   });
 
-  it("rejects production loads resolving exactly to the helper", () => {
+  it("rejects production ESM loads resolving exactly to the helper", () => {
     const importer = resolve(repositoryRoot, "src/nested/module.js");
     const helperWithoutExtension = helperPath.slice(0, -3);
     const canonicalFileUrl = pathToFileURL(helperPath).href;
@@ -231,18 +104,16 @@ describe("import boundary policy", () => {
       "../../test/helpers/git-fixture.js?fixture=1",
       "../../test/helpers/git-fixture.js#fixture",
       "../../test/helpers/git-fixture.js?fixture=%2f#%23",
+      "../../test/helpers/git%2dfixture.js",
       helperPath,
       helperWithoutExtension,
-      `${helperPath}?fixture=%2f#%23`,
       `${canonicalFileUrl}?fixture=1#fixture`,
-      `${canonicalFileUrl}?fixture=%2f#%23`,
     ];
 
     for (const specifier of specifiers) {
       for (const source of [
         `import fixture from ${JSON.stringify(specifier)}`,
         `export { fixture } from ${JSON.stringify(specifier)}`,
-        `require(${JSON.stringify(specifier)})`,
         `import(${JSON.stringify(specifier)})`,
       ]) {
         assert.equal(findViolations(importer, source, "production").length, 1, source);
@@ -250,19 +121,30 @@ describe("import boundary policy", () => {
     }
   });
 
-  it("allows near-name, encoded, bare, non-file URL, and computed helper loads", () => {
+  it("allows unrelated, near-name, bare, non-file, and computed loads", () => {
     const importer = resolve(repositoryRoot, "src/module.js");
     const sources = [
       'import "../test/helpers/git-fixtures.js"',
       'import "test/helpers/git-fixture.js"',
       'import "https://example.test/test/helpers/git-fixture.js"',
-      'import "../test/helpers/git%2dfixture.js"',
-      'import helperPath',
+      'import "../test/helpers/git%2dfixtures.js"',
+      "import(helperPath)",
       'import("../test/helpers/" + "git-fixture.js")',
-      'require(`../test/helpers/git-fixture.js`)',
     ];
 
     for (const source of sources) assert.deepEqual(findViolations(importer, source, "production"), [], source);
+  });
+
+  it("fails explicitly when CommonJS enters the guarded source tree", () => {
+    const cjsFile = resolve(repositoryRoot, "test/support/fixture.cjs");
+
+    assert.deepEqual(findViolations(cjsFile, "module.exports = {};", "test"), [{
+      file: normalize(cjsFile),
+      line: 1,
+      syntax: "CommonJS",
+      specifier: ".cjs",
+      reason: "guarded source uses unsupported CommonJS; decide and add an explicit boundary policy",
+    }]);
   });
 
   it("finds no violations in the recursive repository corpora", () => {
@@ -276,26 +158,29 @@ describe("import boundary policy", () => {
 });
 
 function extractLiteralLoads(source) {
-  const loads = [];
+  const [imports] = parse(source);
+  let cursor = 0;
+  let line = 1;
 
-  for (const { syntax, expression } of loadPatterns) {
-    expression.lastIndex = 0;
-    for (const match of source.matchAll(expression)) {
-      loads.push({
-        syntax,
-        specifier: match.groups.specifier,
-        line: 1 + countLines(source, match.index),
-      });
+  return imports.flatMap((entry) => {
+    for (let newline = source.indexOf("\n", cursor); newline !== -1 && newline < entry.ss; newline = source.indexOf("\n", cursor)) {
+      line += 1;
+      cursor = newline + 1;
     }
-  }
+    if (entry.n === undefined || entry.n === null || entry.d === -2) return [];
+    const statement = source.slice(entry.ss, entry.se);
+    const syntax = entry.d >= 0
+      ? "dynamic import"
+      : /^\s*export\b/u.test(statement)
+        ? "export-from"
+        : "static import";
 
-  return loads.sort((left, right) => left.line - right.line || left.syntax.localeCompare(right.syntax));
-}
-
-function countLines(source, end) {
-  let count = 0;
-  for (let index = 0; index < end; index += 1) if (source[index] === "\n") count += 1;
-  return count;
+    return [{
+      syntax,
+      specifier: entry.n,
+      line,
+    }];
+  });
 }
 
 function scanDirectory(directory, role) {
@@ -308,7 +193,7 @@ function listJavaScriptFiles(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) files.push(...listJavaScriptFiles(path));
-    else if (entry.isFile() && JavaScriptExtensions.has(extname(entry.name))) files.push(path);
+    else if (entry.isFile() && scannedExtensions.has(extname(entry.name))) files.push(path);
   }
 
   return files;
@@ -316,8 +201,17 @@ function listJavaScriptFiles(directory) {
 
 function findViolations(file, source, role) {
   const normalizedFile = normalize(file);
-  const isExactHelper = normalizedFile === normalize(helperPath);
+  if (extname(normalizedFile) === ".cjs") {
+    return [{
+      file: normalizedFile,
+      line: 1,
+      syntax: "CommonJS",
+      specifier: ".cjs",
+      reason: "guarded source uses unsupported CommonJS; decide and add an explicit boundary policy",
+    }];
+  }
 
+  const isExactHelper = normalizedFile === normalize(helperPath);
   return extractLiteralLoads(source).flatMap((load) => {
     if (role === "test" && !isExactHelper && childProcessSpecifiers.has(load.specifier)) {
       return [{ file: normalizedFile, ...load, reason: "test module directly loads child process" }];
@@ -330,15 +224,14 @@ function findViolations(file, source, role) {
 }
 
 function resolvesToHelper(specifier, importer) {
-  const withoutSuffix = specifier.replace(/[?#].*$/, "");
-  if (withoutSuffix.includes("%")) return false;
+  const withoutSuffix = specifier.replace(/[?#].*$/u, "");
   let candidate;
 
   try {
-    if (withoutSuffix.startsWith("file:")) candidate = fileURLToPath(withoutSuffix);
-    else if (isAbsolute(withoutSuffix)) candidate = withoutSuffix;
-    else if (withoutSuffix.startsWith("./") || withoutSuffix.startsWith("../")) {
-      candidate = resolve(dirname(importer), withoutSuffix);
+    if (withoutSuffix.startsWith("file:")) candidate = fileURLToPath(new URL(withoutSuffix));
+    else if (isAbsolute(withoutSuffix) || withoutSuffix.startsWith("./") || withoutSuffix.startsWith("../")) {
+      const importerDirectory = pathToFileURL(`${dirname(importer)}/`);
+      candidate = fileURLToPath(new URL(withoutSuffix, importerDirectory));
     } else return false;
   } catch {
     return false;

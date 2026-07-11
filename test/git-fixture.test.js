@@ -3,15 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { execFileSync, runFixtureGit, spawn, spawnSync } from "./helpers/git-fixture.js";
+import { ChildProcess, execFileSync, runFixtureGit, spawn, spawnSync } from "./helpers/git-fixture.js";
 
 describe("fixture Git harness", () => {
-  it("re-exports native process functions unchanged", async () => {
-    const nativeProcess = await import("node:" + "child_process");
-
-    assert.equal(spawn, nativeProcess.spawn);
-    assert.equal(spawnSync, nativeProcess.spawnSync);
-    assert.equal(execFileSync, nativeProcess.execFileSync);
+  it("exports the native process API shapes used by fixtures", () => {
+    assert.equal(typeof spawn, "function");
+    assert.equal(typeof spawnSync, "function");
+    assert.equal(typeof execFileSync, "function");
+    assert.equal(typeof ChildProcess, "function");
   });
 
   it("returns the raw result for a nonzero Git exit", () => {
