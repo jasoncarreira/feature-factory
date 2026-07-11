@@ -37,7 +37,7 @@ Reject on:
 - Any security issue from the mandatory security review below (trust-boundary,
   injection, auth-bypass, secret exposure) — always a BLOCKER.
 - Serious repo convention, migration, generated-code, or correctness risk.
-- Decomposition that has orphan ACs, cyclic dependencies, same-wave path overlap, or un-serialized hotspots.
+- Decomposition that has orphan ACs, cyclic dependencies, same-wave path overlap, un-serialized hotspots, or a dependency path deeper than three waves (root is wave 1).
 - A class-wide spec that lacks a finite source/sink inventory, per-call-site policy, explicit compatibility/exclusion decisions, or mapped tests.
 
 ## Security review (build slices — mandatory, cite `path:line`)

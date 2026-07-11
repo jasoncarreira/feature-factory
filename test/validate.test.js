@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
-import { ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSlicesPlan } from "../src/validate.js";
+import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSlicesPlan } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
@@ -225,6 +225,61 @@ describe("run schema and consistency", () => {
     }
   });
 
+  it("caps planned slice dependency paths at three waves", () => {
+    assert.equal(MAX_SLICE_DEPENDENCY_WAVES, 3);
+    const threeWaves = slicesPlan([
+      plannedSlice("root"),
+      plannedSlice("middle", ["root"]),
+      plannedSlice("leaf", ["middle"]),
+    ]);
+    assert.equal(validateSlicesPlan(threeWaves), threeWaves);
+
+    const diamond = slicesPlan([
+      plannedSlice("root"),
+      plannedSlice("left", ["root"]),
+      plannedSlice("right", ["root"]),
+      plannedSlice("leaf", ["left", "right"]),
+    ]);
+    assert.equal(validateSlicesPlan(diamond), diamond);
+
+    assert.throws(
+      () => validateSlicesPlan(slicesPlan([
+        plannedSlice("root"),
+        plannedSlice("second", ["root"]),
+        plannedSlice("third", ["second"]),
+        plannedSlice("fourth", ["third"]),
+      ])),
+      (error) => error instanceof ValidationError
+        && error.message.includes("plan.slices[3].depends_on: dependency depth 4 exceeds maximum 3 waves: root -> second -> third -> fourth"),
+    );
+
+    const legacyPlan = slicesPlan([
+      plannedSlice("root"),
+      plannedSlice("second", ["root"]),
+      plannedSlice("third", ["second"]),
+      plannedSlice("fourth", ["third"]),
+    ]);
+    assert.equal(validateSlicesPlan(legacyPlan, { enforceDependencyDepth: false }), legacyPlan);
+  });
+
+  it("reports invalid dependency graphs before calculating depth", () => {
+    assert.throws(
+      () => validateSlicesPlan(slicesPlan([plannedSlice("leaf", ["missing"])])),
+      (error) => error instanceof ValidationError
+        && error.message.includes("unknown dependency 'missing'")
+        && !error.message.includes("dependency depth"),
+    );
+    assert.throws(
+      () => validateSlicesPlan(slicesPlan([
+        plannedSlice("one", ["two"]),
+        plannedSlice("two", ["one"]),
+      ])),
+      (error) => error instanceof ValidationError
+        && error.message.includes("dependency cycle")
+        && !error.message.includes("dependency depth"),
+    );
+  });
+
   it("does not expose duplicate durable slice ids with terminal controls in validation errors", () => {
     for (const payload of TERMINAL_LABEL_PAYLOADS) {
       let error;
@@ -389,6 +444,71 @@ describe("run schema and consistency", () => {
     }
   });
 
+  it("enforces depth before seeding while preserving deeper seeded runs", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo, "legacy-depth");
+    const plan = slicesPlan([
+      plannedSlice("root"),
+      plannedSlice("second", ["root"]),
+      plannedSlice("third", ["second"]),
+      plannedSlice("fourth", ["third"]),
+    ]);
+    mkdirSync(join(runDir, "plan"), { recursive: true });
+    writeJson(join(runDir, "plan", "slices.json"), plan);
+    writeJson(join(runDir, "run.json"), runningRun("legacy-depth"));
+
+    try {
+      assert.equal(validateRunDir(runDir).ok, false, "new unseeded plans enforce the depth cap");
+
+      writeJson(join(runDir, "run.json"), {
+        ...runningRun("legacy-depth"),
+        slices: plan.slices.map(({ id, stack, depends_on }) => ({ id, stack, depends_on, status: "pending", attempts: 0 })),
+      });
+      assert.equal(validateRunDir(runDir).ok, true, "existing seeded plans remain readable");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("does not grandfather the depth cap when run.slices is not the durable form of the current plan", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo, "stale-depth");
+    const plan = slicesPlan([
+      plannedSlice("root"),
+      plannedSlice("second", ["root"]),
+      plannedSlice("third", ["second"]),
+      plannedSlice("fourth", ["third"]),
+    ]);
+    mkdirSync(join(runDir, "plan"), { recursive: true });
+    writeJson(join(runDir, "plan", "slices.json"), plan);
+
+    const withSlices = (slices) => ({ ...runningRun("stale-depth"), slices });
+    try {
+      // partial durable slice list must not exempt the over-depth plan
+      writeJson(join(runDir, "run.json"), withSlices([{ id: "root", stack: "backend", depends_on: [], status: "pending", attempts: 0 }]));
+      assert.equal(validateRunDir(runDir).ok, false, "a partial run.slices must not grandfather the plan");
+
+      // unrelated ids likewise do not exempt
+      writeJson(join(runDir, "run.json"), withSlices([
+        { id: "x-a", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
+        { id: "x-b", stack: "backend", depends_on: ["x-a"], status: "pending", attempts: 0 },
+        { id: "x-c", stack: "backend", depends_on: ["x-b"], status: "pending", attempts: 0 },
+        { id: "x-d", stack: "backend", depends_on: ["x-c"], status: "pending", attempts: 0 },
+      ]));
+      assert.equal(validateRunDir(runDir).ok, false, "an unrelated run.slices must not grandfather the plan");
+
+      // same ids but a different dependency graph is still a mismatch
+      writeJson(join(runDir, "run.json"), withSlices(plan.slices.map(({ id, stack }) => ({ id, stack, depends_on: [], status: "pending", attempts: 0 }))));
+      assert.equal(validateRunDir(runDir).ok, false, "same ids with a different dependency graph must not grandfather the plan");
+
+      // the exact durable form of this plan does grandfather it
+      writeJson(join(runDir, "run.json"), withSlices(plan.slices.map(({ id, stack, depends_on }) => ({ id, stack, depends_on, status: "pending", attempts: 0 }))));
+      assert.equal(validateRunDir(runDir).ok, true, "the exact durable form of the plan remains grandfathered");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("validates optional process evidence sidecars when present", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo, "process-valid");
@@ -521,6 +641,14 @@ function processEvidence(runId = "run", overrides = {}) {
     evidence.identity = { ...identity, ...overrides.identity };
   }
   return evidence;
+}
+
+function plannedSlice(id, dependsOn = []) {
+  return { id, stack: "backend", paths: [`src/${id}.js`], depends_on: dependsOn, acceptance: [id], test_plan: ["node --test"] };
+}
+
+function slicesPlan(slices) {
+  return { slices };
 }
 
 function tempRepo() {

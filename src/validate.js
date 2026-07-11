@@ -19,6 +19,7 @@ export const HEARTBEAT_PHASES = Object.freeze([
   "remediation",
 ]);
 export const HEARTBEAT_PROTECTED_GATES = Object.freeze(["story", "brief", "pre_pr"]);
+export const MAX_SLICE_DEPENDENCY_WAVES = 3;
 
 const RUN_STATUSES = new Set(["running", ...TERMINAL_RUN_STATUSES]);
 const TERMINAL_STATUSES = new Set(TERMINAL_RUN_STATUSES);
@@ -106,13 +107,46 @@ export function validateCostAttributionEntries(entries, runId) {
   return entries;
 }
 
-export function validateSlicesPlan(plan) {
+export function validateSlicesPlan(plan, { enforceDependencyDepth = true } = {}) {
   const errors = [];
   if (!isRecord(plan)) return fail([{ path: "plan", message: "must be an object" }]);
   if (!Array.isArray(plan.slices)) errors.push({ path: "plan.slices", message: "must be an array" });
-  else validatePlannedSlices(errors, plan.slices, "plan.slices");
+  else validatePlannedSlices(errors, plan.slices, "plan.slices", { enforceDependencyDepth });
   if (errors.length) fail(errors);
   return plan;
+}
+
+// The dependency-depth cap is grandfathered ONLY for a plan whose durable form is
+// the current `run.slices` — i.e. run.slices is the seeded projection of this exact
+// plan. A merely nonempty run.slices must not exempt the plan: a stale, partial, or
+// unrelated durable slice list would otherwise let the plan be swapped for an
+// over-depth graph unchecked. Match on the closed set of slice ids AND each slice's
+// dependency set (order-insensitive); any divergence re-enables enforcement.
+export function runSlicesMatchPlan(run, plan) {
+  const runGraph = normalizeSliceGraph(run?.slices);
+  const planGraph = normalizeSliceGraph(plan?.slices);
+  if (!runGraph || !planGraph) return false;
+  if (runGraph.size === 0 || runGraph.size !== planGraph.size) return false;
+  for (const [id, deps] of runGraph) {
+    const planDeps = planGraph.get(id);
+    if (!planDeps || planDeps.length !== deps.length || planDeps.some((dep, index) => dep !== deps[index])) return false;
+  }
+  return true;
+}
+
+function normalizeSliceGraph(slices) {
+  if (!Array.isArray(slices)) return null;
+  const graph = new Map();
+  for (const slice of slices) {
+    if (!isRecord(slice) || !stringValue(slice.id)) return null;
+    const id = String(slice.id).trim();
+    if (graph.has(id)) return null;
+    const deps = Array.isArray(slice.depends_on)
+      ? [...new Set(slice.depends_on.filter(stringValue).map((dep) => String(dep).trim()))].sort()
+      : [];
+    graph.set(id, deps);
+  }
+  return graph;
 }
 
 export function validateHeartbeatState(heartbeat) {
@@ -164,7 +198,7 @@ export function validateRunDir(runDir) {
   const processPath = join(runDir, PROCESS_EVIDENCE_FILE);
   if (existsSync(processPath)) checks.push(validateFile(processPath, (value) => validateProcessSidecar(value, { runDir, runId: run?.run_id })));
   const slicesPath = join(runDir, "plan", "slices.json");
-  if (existsSync(slicesPath)) checks.push(validateFile(slicesPath, validateSlicesPlan));
+  if (existsSync(slicesPath)) checks.push(validateFile(slicesPath, (value) => validateSlicesPlan(value, { enforceDependencyDepth: !runSlicesMatchPlan(run, value) })));
   if (checks.every((item) => item.ok)) checks.push(...checkRunConsistency(runDir, run).checks);
   return { ok: checks.every((item) => item.ok), checks };
 }
@@ -633,7 +667,7 @@ function validateRunSlice(errors, slice, path, ids) {
   optionalString(errors, slice, "blocked_reason", `${path}.blocked_reason`);
 }
 
-function validatePlannedSlices(errors, slices, path) {
+function validatePlannedSlices(errors, slices, path, { enforceDependencyDepth }) {
   const ids = validateSliceIDs(errors, slices, path);
   for (const [index, slice] of slices.entries()) {
     if (!isRecord(slice)) {
@@ -647,7 +681,8 @@ function validatePlannedSlices(errors, slices, path) {
     validateStringArray(errors, slice.acceptance, `${path}[${index}].acceptance`, { required: true, nonEmpty: true });
     validateStringArray(errors, slice.test_plan, `${path}[${index}].test_plan`, { required: true, nonEmpty: true });
   }
-  validateAcyclic(errors, slices, ids, path);
+  const acyclic = validateAcyclic(errors, slices, ids, path);
+  if (enforceDependencyDepth && errors.length === 0 && acyclic) validateDependencyDepth(errors, slices, path);
 }
 
 function validateSliceIDs(errors, slices, path) {
@@ -665,10 +700,12 @@ function validateAcyclic(errors, slices, ids, path) {
   for (const slice of slices) if (isRecord(slice) && typeof slice.id === "string" && ids.has(slice.id)) graph.set(slice.id, Array.isArray(slice.depends_on) ? slice.depends_on.filter((id) => ids.has(id)) : []);
   const visiting = new Set();
   const visited = new Set();
+  let acyclic = true;
   const visit = (id, chain) => {
     if (visited.has(id)) return;
     if (visiting.has(id)) {
       errors.push({ path, message: `dependency cycle: ${[...chain, id].join(" -> ")}` });
+      acyclic = false;
       return;
     }
     visiting.add(id);
@@ -677,6 +714,33 @@ function validateAcyclic(errors, slices, ids, path) {
     visited.add(id);
   };
   for (const id of graph.keys()) visit(id, []);
+  return acyclic;
+}
+
+function validateDependencyDepth(errors, slices, path) {
+  const byId = new Map(slices.map((slice, index) => [slice.id, { slice, index }]));
+  const memo = new Map();
+  const longestPath = (id) => {
+    if (memo.has(id)) return memo.get(id);
+    const dependencies = byId.get(id).slice.depends_on;
+    let result = { depth: 1, ids: [id] };
+    for (const dependency of dependencies) {
+      const parent = longestPath(dependency);
+      if (parent.depth + 1 > result.depth) result = { depth: parent.depth + 1, ids: [...parent.ids, id] };
+    }
+    memo.set(id, result);
+    return result;
+  };
+
+  for (const [id, { index }] of byId) {
+    const result = longestPath(id);
+    if (result.depth > MAX_SLICE_DEPENDENCY_WAVES) {
+      errors.push({
+        path: `${path}[${index}].depends_on`,
+        message: `dependency depth ${result.depth} exceeds maximum ${MAX_SLICE_DEPENDENCY_WAVES} waves: ${result.ids.join(" -> ")}`,
+      });
+    }
+  }
 }
 
 function validateSteps(errors, steps, path) {

@@ -846,6 +846,9 @@ Rules:
 - Dependencies are real consumption dependencies.
 - Generated files have one owning slice.
 - Shared hotspots are serialized by `depends_on`.
+- Waves are derived from `depends_on`: a root slice is wave 1, and the longest dependency path may span at most three waves.
+- `max_parallel_slices` limits concurrency within a wave; it does not override the three-wave depth cap.
+- `factory slices-seed` and pre-seed validation enforce the cap for new plans. Existing durable runs with older, deeper seeded plans remain readable and resumable; the cap does not rewrite persisted plan state.
 
 ## Steering And Resume
 
