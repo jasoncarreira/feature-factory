@@ -26,6 +26,7 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 - Every acceptance criterion maps to at least one slice.
 - Same-wave slices must be file-disjoint.
 - Dependencies must be real consumption dependencies, not blanket backend-before-frontend ordering.
+- For each test command, identify the changed slice outputs it validates. Add dependencies on every sibling slice whose changed output must exist before that command runs. Broad regression commands do not imply dependencies on unaffected code.
 - Shared hotspots must be serialized into different waves.
 - Generated files have one owning slice.
 - Prefer fewer coherent slices over many tiny slices.

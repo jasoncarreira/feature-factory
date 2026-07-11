@@ -73,30 +73,43 @@ const LIVE_DRAIN_BOUNDARIES = Object.freeze([
 ]);
 
 describe("class-wide planning prompt contract", () => {
-  it("gives the spec writer the same acceptance bar the reviewer applies", () => {
+  it("aligns the spec writer with the reviewer's shared bar and separates producer self-checks", () => {
     // Alignment, not accretion: every recent run paid a guaranteed one-round spec
     // rejection because the reviewer's acceptance rubric was richer than the
-    // writer's output contract. The writer must carry the reviewer's bar as a
-    // pre-return self-check, and the two prompts must not drift apart: each bar
-    // concept below must appear in BOTH prompts.
-    assert.match(SPEC_WRITER_PROMPT, /## Self-review before returning \(the reviewer's bar\)/i);
-    assert.match(SPEC_WRITER_PROMPT, /Apply the same checklist to your own draft first/i);
-    const barConcepts = [
+    // writer's output contract. The writer carries the reviewer's bar as a
+    // pre-return self-check. Shared invariants must appear in BOTH prompts so the
+    // producer checklist and reviewer rubric cannot silently drift apart;
+    // producer-only self-checks are deliberately NOT asserted against the
+    // reviewer — they are observed rejection causes, not reviewer contract text.
+    assert.match(SPEC_WRITER_PROMPT, /## Self-review before returning/i);
+    assert.match(SPEC_WRITER_PROMPT, /The reviewer's bar \(shared invariants/i);
+    assert.match(SPEC_WRITER_PROMPT, /Producer self-checks \(not reviewer contract text/i);
+    const sharedBar = [
       ["decided per-sink policy", /decided policy/i, /decided policy/i],
       ["mandatory test mapping", /every AC maps to a mandatory, named test or command/i, /every row maps to a test/i],
       ["no unresolved behavioral/design decision", /No behavioral or design choice is left to builders/i, /unresolved behavioral or design decision is not a residual/i],
       ["mechanical-only residual", /mechanical residual is acceptable only when its behavior, compatibility, security, and state policy are already decided/i, /mechanical implementation detail whose behavior, backward-compatibility, security, and state-transition policy are already decided/i],
-      ["state-transition dimension", /state-transition table/i, /state-transition table/i],
+      ["every under-specification dimension", /every unresolved contract, policy, state-transition table[\s\S]{0,80}compatibility decision, and test seam/i, /every dimension of under-specification/i],
       ["story-authorized deferral", /only when the approved story or scope authorizes it/i, /only when the approved story or scope authorizes it/i],
       ["feasible envelope", /implementable within the brief's allowed mechanisms, dependencies, compatibility constraints, and non-goals/i, /cannot be implemented within its allowed mechanisms, dependencies, compatibility constraints, or explicit non-goals/i],
     ];
-    for (const [name, writerPattern, reviewerPattern] of barConcepts) {
-      assert.match(SPEC_WRITER_PROMPT, writerPattern, `spec-writer must self-check: ${name}`);
-      assert.match(WORK_REVIEWER_PROMPT, reviewerPattern, `work-reviewer must still enforce: ${name}`);
+    for (const [name, writerPattern, reviewerPattern] of sharedBar) {
+      assert.match(SPEC_WRITER_PROMPT, writerPattern, `spec-writer must self-check shared invariant: ${name}`);
+      assert.match(WORK_REVIEWER_PROMPT, reviewerPattern, `work-reviewer must enforce shared invariant: ${name}`);
     }
-    // Internal-consistency and ownership checks come from observed first-attempt rejections.
+    // Producer-only self-checks (observed first-review rejection causes).
     assert.match(SPEC_WRITER_PROMPT, /hunting for contradictions/i);
     assert.match(SPEC_WRITER_PROMPT, /call out shared or contested paths explicitly/i);
+  });
+
+  it("requires the decomposer to derive dependencies from each test command's validated outputs", () => {
+    // Producer invariant from the observed remediation-exposed rejection: adding
+    // focused test commands to a slice without depending on the sibling whose
+    // changed output those commands validate. Narrow by design: broad regression
+    // commands must not imply dependencies on unaffected code.
+    assert.match(WORK_DECOMPOSER_PROMPT, /identify the changed slice outputs it validates/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /every sibling slice whose changed output must exist before that command runs/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /Broad regression commands do not imply dependencies on unaffected code/i);
   });
 
   it("requires research to enumerate a finite source-to-sink surface", () => {
