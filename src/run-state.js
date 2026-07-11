@@ -890,8 +890,49 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
     stepIndex = update.index;
     if (!update.changed) return;
     if (!hadSteps) draft.steps = steps;
+    if (stepIndex >= 0) bindStepAcceptance(runDir, steps[stepIndex]);
   }, options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
+}
+
+// Bind the exact accepted bytes to the step at the acceptance transition, so a
+// later blocked-run continuation can prove the artifact/review it reuses are the
+// ones that were accepted — not whatever the mutable files happen to contain when
+// the continuation is built. Best-effort: only binds refs that currently resolve
+// (present, in-run, non-symlink). An accepted step whose artifact is absent stays
+// unbound, and any continuation reuse of it fails closed.
+//
+// Any transition that does not successfully bind the CURRENT accepted artifact/
+// review must not leave a prior binding behind — otherwise accepted(A) → rejected
+// → accepted(missing B) would keep A's binding while the step points at B, a stale
+// provenance claim. So clear first, then re-bind only when this transition's own
+// accepted refs resolve.
+function bindStepAcceptance(runDir, step) {
+  if (!step) return;
+  delete step.acceptance;
+  if (step.status !== "accepted") return;
+  const artifactRef = typeof step.artifact_ref === "string" ? step.artifact_ref.trim() : "";
+  if (!artifactRef) return;
+  const artifactHash = tryHashDurableRef(() => resolveArtifactRef(runDir, artifactRef, { mustExist: true }));
+  if (!artifactHash) return;
+  const acceptance = { artifact_ref: artifactRef, artifact_hash: artifactHash };
+  const reviewRef = typeof step.review_ref === "string" ? step.review_ref.trim() : "";
+  if (reviewRef) {
+    const reviewHash = tryHashDurableRef(() => resolveReviewRef(runDir, reviewRef, { mustExist: true }));
+    if (reviewHash) {
+      acceptance.review_ref = reviewRef;
+      acceptance.review_hash = reviewHash;
+    }
+  }
+  step.acceptance = acceptance;
+}
+
+function tryHashDurableRef(resolveFn) {
+  try {
+    return hashFile(resolveFn().path);
+  } catch {
+    return null;
+  }
 }
 
 export async function transitionRunSlice(runDir, sliceId, updater, options = {}) {

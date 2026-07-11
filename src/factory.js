@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
-import { assertRunJsonWriterAllowed, hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertRunJsonWriterAllowed, hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -37,6 +37,11 @@ const CONTINUATION_PARENT_ARTIFACT_REFS = [
   { kind: "validation_report", ref: "artifacts/validation-report.md" },
   { kind: "pr_body", ref: "artifacts/pr-body.md" },
 ];
+// Planning artifacts the parent already had accepted. A blocked-run continuation
+// reuses these verbatim instead of regenerating story/research/spec from scratch.
+// Outcome artifacts (test-report, validation-report, pr-body) are intentionally
+// NOT seeded — the child must produce its own.
+const CONTINUATION_SEED_ARTIFACT_KINDS = new Set(["story", "research_map", "design_brief", "technical_brief"]);
 const REPO_SEEDED_SKILL_FILES = ["SKILL.md", "SCHEMA.md"];
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const PACKAGED_SEED_HASHES = {
@@ -500,13 +505,18 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 export function continueFactory(parentRunId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
+  const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
 
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
   const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
   const launchEnv = factoryLaunchEnv(opts);
-  if (opts.dryRun) return { status: "dry-run", payload };
+  if (opts.dryRun) return { status: "dry-run", payload, seed_plan: continuationSeedPlan(continuation) };
 
   seedRepoSkill(repo);
+  // Seed the accepted parent planning artifacts into the child run up front so the
+  // orchestrator reuses the approved brief/research/story instead of regenerating
+  // them (the dominant wall-clock cost of a continuation).
+  seedContinuationPlanningArtifacts(repo, parentRunDir, continuation);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(encodeFeatureCommandPayload(payload));
@@ -1192,6 +1202,7 @@ function buildContinuation(parentRunId, opts = {}) {
     parent_artifacts: collectContinuationParentArtifacts(parentRunDir),
     parent_evidence: collectContinuationParentEvidence(parentRunDir, parentRun),
     parent_reviews: collectContinuationParentReviews(parentRunDir, parentRun),
+    planning_reuse: continuationPlanningReuse(parentRun, parentRunDir),
   };
 }
 
@@ -1334,6 +1345,233 @@ function continuationReviewSources(parentRun) {
 function normalizeRequiredFixes(value) {
   if (!Array.isArray(value)) return [];
   return value.filter(stringValue).map((item) => String(item).trim());
+}
+
+// work-reviewer emits `APPROVE | REJECT`; accept the common approving synonyms so
+// the gate is not brittle to a slightly different recorded verdict, but a REJECT
+// (or any non-approving verdict) is never treated as acceptance.
+const APPROVING_SPEC_VERDICTS = new Set(["APPROVE", "APPROVED", "ACCEPT", "ACCEPTED", "GO", "PASS"]);
+const CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
+const SHA256_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
+
+// Decide whether the parent's planning output is reusable by DURABLE ACCEPTANCE,
+// not mere file presence. A brief is reusable only when the parent has an accepted
+// `spec-writer` step that references `artifacts/technical-brief.md` and whose
+// review_ref resolves to an approving `spec-writer` review. A brief from a parent
+// whose spec-writer step is rejected/blocked/absent — or whose review is not
+// approving — is amendment input only and is never adopted as approved.
+function continuationPlanningReuse(parentRun, parentRunDir) {
+  const steps = Array.isArray(parentRun.steps) ? parentRun.steps : [];
+  const step = steps.find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
+  if (!step) return { eligible: false, reason: "parent has no spec-writer step; brief is amendment input only" };
+  const status = String(step.status || "").trim();
+  if (status !== "accepted") {
+    return { eligible: false, reason: `parent spec-writer step is '${status || "unset"}', not accepted; brief is amendment input only` };
+  }
+  // Require a durable acceptance binding recorded at the accept transition, not an
+  // inference from the parent's current (mutable) files. A legacy accepted step
+  // that predates the binding fails closed and needs explicit re-acceptance.
+  const acceptance = step.acceptance;
+  if (!acceptance || typeof acceptance !== "object") {
+    return { eligible: false, reason: "accepted spec-writer step has no durable acceptance binding (legacy/unbound); requires explicit re-acceptance" };
+  }
+  if (String(acceptance.artifact_ref || "").trim() !== "artifacts/technical-brief.md") {
+    return { eligible: false, reason: "acceptance binding does not reference artifacts/technical-brief.md" };
+  }
+  if (!SHA256_HASH_PATTERN.test(String(acceptance.artifact_hash || "")) || !stringValue(acceptance.review_ref) || !SHA256_HASH_PATTERN.test(String(acceptance.review_hash || ""))) {
+    return { eligible: false, reason: "acceptance binding is missing artifact/review hashes; requires explicit re-acceptance" };
+  }
+  const parentRoot = resolve(parentRunDir);
+  // The bound artifact bytes must still be present and unchanged since acceptance.
+  const artifactPath = resolve(parentRoot, "artifacts/technical-brief.md");
+  const artifactEntry = lstatOptionalNoSymlinks(parentRoot, artifactPath, "spec-writer artifact 'artifacts/technical-brief.md'", "spec-writer artifact must not contain symlinks");
+  if (!artifactEntry || !artifactEntry.isFile()) return { eligible: false, reason: "bound technical-brief.md is missing from the parent run" };
+  if (sha256File(artifactPath) !== acceptance.artifact_hash) {
+    return { eligible: false, reason: "technical-brief.md changed since acceptance (does not match acceptance binding); requires explicit re-acceptance" };
+  }
+  const reviewRef = normalizeParentRef(acceptance.review_ref, "reviews");
+  const reviewPath = resolve(parentRoot, reviewRef);
+  if (!isLogicalContainedPath(join(parentRoot, "reviews"), reviewPath, { allowEqual: false })) {
+    return { eligible: false, reason: `spec-writer review_ref '${reviewRef}' escapes reviews/` };
+  }
+  const entry = lstatOptionalNoSymlinks(parentRoot, reviewPath, `spec-writer review '${reviewRef}'`, `spec-writer review '${reviewRef}' must not contain symlinks`);
+  if (!entry || !entry.isFile()) return { eligible: false, reason: `spec-writer review_ref '${reviewRef}' does not resolve to a file` };
+  if (sha256File(reviewPath) !== acceptance.review_hash) {
+    return { eligible: false, reason: "spec-writer review changed since acceptance (does not match acceptance binding); requires explicit re-acceptance" };
+  }
+  let review;
+  try {
+    review = readReviewJson(reviewPath);
+  } catch {
+    return { eligible: false, reason: `spec-writer review '${reviewRef}' is not a valid JSON object` };
+  }
+  const subject = String(review?.subject || "").trim();
+  if (subject !== "spec-writer") return { eligible: false, reason: `spec-writer review subject '${subject || "(none)"}' is not spec-writer` };
+  const verdict = String(review?.verdict || "").trim().toUpperCase();
+  if (!APPROVING_SPEC_VERDICTS.has(verdict)) {
+    return { eligible: false, reason: `spec-writer review verdict '${verdict || "(none)"}' is not approving; brief is amendment input only` };
+  }
+  return {
+    eligible: true,
+    spec_review_ref: reviewRef,
+    spec_review_hash: acceptance.review_hash,
+    spec_artifact_ref: "artifacts/technical-brief.md",
+    spec_artifact_hash: acceptance.artifact_hash,
+    child_spec_review_ref: CHILD_SPEC_REVIEW_REF,
+  };
+}
+
+function continuationSeedPlan(continuation) {
+  const reuse = continuation?.planning_reuse;
+  if (!reuse || reuse.eligible !== true) {
+    return { eligible: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
+  }
+  const artifacts = (Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : [])
+    .filter((entry) => CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind))
+    .map((entry) => entry.ref)
+    .sort((a, b) => a.localeCompare(b));
+  return { eligible: true, reason: null, artifacts, spec_review_ref: reuse.child_spec_review_ref || CHILD_SPEC_REVIEW_REF };
+}
+
+// Adopt the parent's DURABLY ACCEPTED planning output into the child run so a
+// continuation reuses the approved story/research/design/brief instead of
+// regenerating them, and carries the approving spec review into child state as
+// resolvable acceptance provenance. Seeding is gated by `continuationPlanningReuse`
+// (never adopts a rejected/unapproved brief) and is transactional/fail-closed:
+// every source is validated (containment, no symlinks, is-file, hash) and read into
+// memory BEFORE anything is written, so a missing source or a later hash mismatch
+// aborts the whole seed with no partial child run directory left behind.
+export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuation, options = {}) {
+  const reuse = continuation?.planning_reuse;
+  if (!reuse || reuse.eligible !== true) {
+    return { eligible: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
+  }
+  const parentRoot = resolve(parentRunDir);
+  const parentArtifactsDir = join(parentRoot, "artifacts");
+  const parentReviewsDir = join(parentRoot, "reviews");
+  const targetRunDir = join(factoryRoot(repo), continuation.target.run_id);
+  const targetArtifactsDir = join(targetRunDir, "artifacts");
+  const targetReviewsDir = join(targetRunDir, "reviews");
+
+  const plan = (Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : [])
+    .filter((entry) => CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind))
+    .map((entry) => ({ label: `parent artifact '${entry.ref}'`, srcRef: entry.ref, srcRoot: parentArtifactsDir, hash: entry.hash, destRef: entry.ref, destRoot: targetArtifactsDir, isArtifact: true }));
+  // Carry the approving spec review into the child under a canonical ref so the
+  // adopted spec-writer step's review_ref resolves in child state.
+  plan.push({ label: `spec review '${reuse.spec_review_ref}'`, srcRef: reuse.spec_review_ref, srcRoot: parentReviewsDir, hash: reuse.spec_review_hash, destRef: CHILD_SPEC_REVIEW_REF, destRoot: targetReviewsDir, isArtifact: false });
+
+  // Phase 1 — validate and stage every entry before writing anything.
+  const staged = [];
+  for (const item of plan) {
+    const src = resolve(parentRoot, item.srcRef);
+    if (!isLogicalContainedPath(item.srcRoot, src, { allowEqual: false })) {
+      throw new Error(`continuation seed source escapes its root: ${item.srcRef}`);
+    }
+    const entry = lstatOptionalNoSymlinks(parentRoot, src, item.label, `${item.label} must not contain symlinks`);
+    if (!entry || !entry.isFile()) {
+      throw new Error(`continuation ${item.label} is missing or not a regular file (seed aborted; nothing written)`);
+    }
+    const bytes = readFileSync(src);
+    if (sha256Buffer(bytes) !== item.hash) {
+      throw new Error(`continuation ${item.label} changed since payload build (hash mismatch)`);
+    }
+    const dest = resolve(targetRunDir, item.destRef);
+    if (!isLogicalContainedPath(item.destRoot, dest, { allowEqual: false })) {
+      throw new Error(`continuation seed dest escapes its root: ${item.destRef}`);
+    }
+    staged.push({ dest, bytes, destRef: item.destRef, isArtifact: item.isArtifact });
+  }
+
+  // Phase 2 — build the complete child seed as a sibling of the target, then make
+  // it visible with one atomic directory rename. A crash before rename leaves no
+  // partial child run; a crash after rename leaves the complete seed set. A
+  // concurrent/non-empty target makes rename fail without clobbering its state.
+  const stagingRoot = join(dirname(factoryRoot(repo)), `.continuation-seed-${continuation.target.run_id}-${randomUUID()}`);
+  try {
+    mkdirSync(stagingRoot, { recursive: false });
+    for (const item of staged) {
+      const stagedDest = resolve(stagingRoot, item.destRef);
+      if (!isLogicalContainedPath(stagingRoot, stagedDest, { allowEqual: false })) {
+        throw new Error(`continuation staged destination escapes staging root: ${item.destRef}`);
+      }
+      mkdirSync(dirname(stagedDest), { recursive: true });
+      writeFileSync(stagedDest, item.bytes, { flag: "wx" });
+    }
+    if (options.beforePublish) options.beforePublish({ stagingRoot, targetRunDir });
+    renameSync(stagingRoot, targetRunDir);
+  } catch (error) {
+    try {
+      rmSync(stagingRoot, { recursive: true, force: true });
+    } catch {
+      // Preserve the publication failure; an orphan staging tree is never child state.
+    }
+    throw error;
+  }
+  return {
+    eligible: true,
+    reason: null,
+    artifacts: staged.filter((item) => item.isArtifact).map((item) => item.destRef).sort((a, b) => a.localeCompare(b)),
+    spec_review_ref: CHILD_SPEC_REVIEW_REF,
+    spec_artifact_ref: reuse.spec_artifact_ref || "artifacts/technical-brief.md",
+  };
+}
+
+function sha256Buffer(bytes) {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+// Checked continuation-adoption transition. Instead of a model-driven generic
+// `factory step ... accepted`, this verifies the seeded child files against the
+// parent's durable acceptance binding (carried in `continuation.planning_reuse`)
+// and atomically records an inherited-acceptance provenance record on the child
+// spec-writer step. Fails closed if the seeded brief/review are missing, altered,
+// or the continuation is not reuse-eligible.
+export async function adoptContinuation(childRunId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const childRunDir = resolveRunDir(childRunId, { ...opts, cwd: repo });
+  const run = readRunFile(join(childRunDir, "run.json"));
+  const continuation = run?.continuation;
+  if (!continuation || continuation.kind !== "blocked-run-continuation") {
+    throw new Error(`run '${childRunId}' has no blocked-run-continuation metadata to adopt`);
+  }
+  const reuse = continuation.planning_reuse;
+  if (!reuse || reuse.eligible !== true) {
+    throw new Error(`continuation '${childRunId}' has no reuse-eligible parent acceptance to adopt${reuse?.reason ? ` (${reuse.reason})` : ""}`);
+  }
+  if (!SHA256_HASH_PATTERN.test(String(reuse.spec_artifact_hash || "")) || !SHA256_HASH_PATTERN.test(String(reuse.spec_review_hash || ""))) {
+    throw new Error(`continuation '${childRunId}' planning_reuse is missing artifact/review acceptance hashes`);
+  }
+  const childRoot = resolve(childRunDir);
+  verifySeededChildFile(childRoot, "artifacts", "artifacts/technical-brief.md", reuse.spec_artifact_hash);
+  verifySeededChildFile(childRoot, "reviews", CHILD_SPEC_REVIEW_REF, reuse.spec_review_hash);
+
+  const result = await transitionRunStep(childRunDir, "spec-writer", (step) => {
+    step.status = "accepted";
+    step.artifact_ref = "artifacts/technical-brief.md";
+    step.review_ref = CHILD_SPEC_REVIEW_REF;
+    if (!Number.isInteger(step.attempts)) step.attempts = 0;
+    step.inherited_acceptance = {
+      from_run_id: continuation.parent.run_id,
+      parent_spec_review_ref: reuse.spec_review_ref,
+      artifact_hash: reuse.spec_artifact_hash,
+      review_hash: reuse.spec_review_hash,
+    };
+  }, { ...opts, mustExist: false });
+  return { status: "adopted", run_id: childRunId, step: result.step };
+}
+
+function verifySeededChildFile(childRoot, root, ref, expectedHash) {
+  const path = resolve(childRoot, ref);
+  if (!isLogicalContainedPath(join(childRoot, root), path, { allowEqual: false })) {
+    throw new Error(`continuation adoption ref escapes ${root}/: ${ref}`);
+  }
+  const entry = lstatOptionalNoSymlinks(childRoot, path, `seeded ${ref}`, `seeded ${ref} must not contain symlinks`);
+  if (!entry || !entry.isFile()) {
+    throw new Error(`continuation adoption requires seeded ${ref}; it is missing (run 'factory continue' first)`);
+  }
+  if (sha256File(path) !== expectedHash) {
+    throw new Error(`continuation adoption: seeded ${ref} does not match the parent acceptance binding (altered or spoofed)`);
+  }
 }
 
 function collectContinuationParentArtifacts(parentRunDir) {
