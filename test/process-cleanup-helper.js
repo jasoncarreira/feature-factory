@@ -42,77 +42,90 @@ export function createTrackedProcessCleanup({ timeoutMs = 1500, diagnostic = con
   const terminationWaiters = new Map();
   const cleanupTimeoutMs = normalizeTimeout(timeoutMs);
   let cleanupPromise = null;
+  let spawning = false;
 
   function spawn(command, args = [], options = {}, metadata = {}) {
     if (cleanupPromise) throw new Error("Cannot spawn after process cleanup has started");
-    if (options?.detached === true) throw new Error("Tracked process cleanup does not support detached children");
+    if (spawning) throw new Error("Tracked process spawn is not reentrant");
+    if (typeof command !== "string") throw new TypeError("Tracked process command must be a string");
 
-    const label = boundedText(metadata?.label, MAX_METADATA_LENGTH);
-    const boundedCommand = boundedText(command, MAX_METADATA_LENGTH);
-    const child = spawnChild(command, args, options);
-    const record = {
-      child,
-      label,
-      command: boundedCommand,
-      pid: positivePid(child),
-      spawn: false,
-      error: false,
-      exit: false,
-      close: false,
-      exitCode: child.exitCode ?? null,
-      signalCode: child.signalCode ?? null,
-      signalAttempted: false,
-      signalOutcome: null,
-      signalError: null,
-      spawnError: null,
-    };
+    spawning = true;
+    try {
+      if (options?.detached === true) throw new Error("Tracked process cleanup does not support detached children");
 
-    const terminationPromise = new Promise((resolve) => {
-      terminationWaiters.set(child, { promise: null, resolve });
-    });
-    terminationWaiters.get(child).promise = terminationPromise;
-    records.set(child, record);
+      const label = boundedText(metadata?.label, MAX_METADATA_LENGTH);
+      const boundedCommand = command.slice(0, MAX_METADATA_LENGTH);
+      if (cleanupPromise) throw new Error("Cannot spawn after process cleanup has started");
 
-    child.once("spawn", () => {
-      record.spawn = true;
-      record.pid = positivePid(child);
-    });
-    child.once("error", (error) => {
-      record.error = true;
-      record.spawnError = errorDetails(error);
-    });
-    child.once("exit", (exitCode, signalCode) => {
-      record.exit = true;
-      record.exitCode = exitCode;
-      record.signalCode = signalCode;
-      terminationWaiters.get(child)?.resolve();
-    });
-    child.once("close", (exitCode, signalCode) => {
-      record.close = true;
-      record.exitCode = exitCode;
-      record.signalCode = signalCode;
-      terminationWaiters.get(child)?.resolve();
-    });
+      const child = spawnChild(command, args, options);
+      const signal = typeof child.kill === "function" ? child.kill.bind(child) : null;
+      const record = {
+        child,
+        signal,
+        label,
+        command: boundedCommand,
+        pid: positivePid(child),
+        spawn: false,
+        error: false,
+        exit: false,
+        close: false,
+        exitCode: child.exitCode ?? null,
+        signalCode: child.signalCode ?? null,
+        signalAttempted: false,
+        signalOutcome: null,
+        signalError: null,
+        spawnError: null,
+      };
 
-    return child;
+      const terminationPromise = new Promise((resolve) => {
+        terminationWaiters.set(child, { promise: null, resolve });
+      });
+      terminationWaiters.get(child).promise = terminationPromise;
+      records.set(child, record);
+
+      child.once("spawn", () => {
+        record.spawn = true;
+        record.pid = positivePid(child);
+      });
+      child.once("error", (error) => {
+        record.error = true;
+        record.spawnError = errorDetails(error);
+      });
+      child.once("exit", (exitCode, signalCode) => {
+        record.exit = true;
+        record.exitCode = exitCode;
+        record.signalCode = signalCode;
+        terminationWaiters.get(child)?.resolve();
+      });
+      child.once("close", (exitCode, signalCode) => {
+        record.close = true;
+        record.exitCode = exitCode;
+        record.signalCode = signalCode;
+        terminationWaiters.get(child)?.resolve();
+      });
+
+      return child;
+    } finally {
+      spawning = false;
+    }
   }
 
   function cleanup() {
     if (cleanupPromise) return cleanupPromise;
 
-    cleanupPromise = (async () => {
+    cleanupPromise = Promise.resolve().then(async () => {
       const deadline = Date.now() + cleanupTimeoutMs;
       const attempted = [];
 
       for (const record of records.values()) {
         record.exitCode = record.child.exitCode ?? record.exitCode;
         record.signalCode = record.child.signalCode ?? record.signalCode;
-        if (isTerminated(record) || typeof record.child.kill !== "function") continue;
+        if (isTerminated(record) || record.signal === null) continue;
 
         record.signalAttempted = true;
         attempted.push(record);
         try {
-          const signaled = record.child.kill("SIGTERM");
+          const signaled = record.signal("SIGTERM");
           record.signalOutcome = signaled ? "signal-sent" : "signal-returned-false";
         } catch (error) {
           record.signalOutcome = "signal-threw";
@@ -167,7 +180,7 @@ export function createTrackedProcessCleanup({ timeoutMs = 1500, diagnostic = con
         diagnostics: Object.freeze(diagnostics),
         omittedDiagnosticCount,
       });
-    })().catch((error) => {
+    }).catch((error) => {
       const entry = {
         label: null,
         command: null,
