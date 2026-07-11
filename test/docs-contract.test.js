@@ -1096,6 +1096,7 @@ describe("0.2.0 public documentation contract", () => {
     assert.match(install, /npm install -g opencode-feature-factory[\s\S]*feature-factory install/i);
     assert.match(install, /npm install -g[\s\S]*does not edit opencode configuration/i);
     assert.match(install, /~\/\.config\/opencode\/opencode\.jsonc[\s\S]*one package plugin entry/i);
+    assert.match(install, /rewrites the first matching registration[\s\S]*preferring a tuple entry so its options survive[\s\S]*removes any other duplicate string or tuple registrations/i);
     assert.match(install, /preserves unrelated values and existing tuple options/i);
     assert.match(install, /matching registration is idempotent/i);
     assert.match(install, /formatted strict JSON[\s\S]*comments and trailing commas are not preserved/i);
@@ -1132,7 +1133,7 @@ describe("0.2.0 public documentation contract", () => {
     assert.deepEqual(tuiSlots, ["sidebar_content"]);
     assert.match(useInOpencode, new RegExp(`ID \`${escapeRegExp(tuiId)}\`[\\s\\S]*one \`${tuiSlots[0]}\` slot[\\s\\S]*order \`${tuiOrder}\``));
     assert.match(useInOpencode, /not a promise[\s\S]*automatically discovers or activates/i);
-    for (const limit of [/refreshes data every 5 seconds/i, /caches root discovery for 30 seconds/i, /scans at most 2,000 directories/i, /displays at most three run rows/i, /Completed runs are hidden except for the most recent completed run/i, /restart or reload the TUI/i]) {
+    for (const limit of [/refreshes data every 5 seconds/i, /caches root discovery for 30 seconds/i, /scans at most 2,000 directories/i, /displays at most three run rows/i, /Completed runs are hidden once healthy[\s\S]*most recent completed run stays listed[\s\S]*non-ok diagnostic remains listed until its diagnostics clear/i, /more than one completed run can appear/i, /restart or reload the TUI/i]) {
       assert.match(cleanupAndTui, limit);
     }
   });
@@ -1256,10 +1257,33 @@ describe("0.2.0 public documentation contract", () => {
 
   it("documents only the narrow pre-manifest cleanup exception", () => {
     assert.match(cleanupAndTui, /run with `run\.json`[\s\S]*only runs for terminal statuses[\s\S]*unless `--force`/i);
-    assert.match(cleanupAndTui, /narrow pre-manifest exception[\s\S]*died before writing `run\.json`/i);
-    assert.match(cleanupAndTui, /run directory containing process evidence may be removed when that evidence is not `running`/i);
+    assert.match(cleanupAndTui, /narrow pre-manifest exception[\s\S]*known dead before writing `run\.json`/i);
+    assert.match(cleanupAndTui, /may be removed only when that evidence validates and records a non-`running` state/i);
     assert.match(cleanupAndTui, /running evidence is refused[\s\S]*cancel first/i);
+    assert.match(cleanupAndTui, /malformed, unreadable, or mismatched evidence fails closed[\s\S]*requires verifying the process is dead and rerunning with `--force`/i);
     assert.match(cleanupAndTui, /refuses to remove run directories outside `\.opencode\/factory`/i);
+  });
+
+  it("keeps every relative README link resolvable inside the published package", () => {
+    // The packaged README must not delegate to repository-only files: any relative
+    // link target has to be covered by package.json#files (npm always packs
+    // README/LICENSE/package.json). Repository-only guides use absolute URLs.
+    const packagedDirs = PACKAGE.files.filter((entry) => !entry.includes("*") && !entry.includes(".")).map((entry) => `${entry}/`);
+    const packagedFiles = new Set([...PACKAGE.files.filter((entry) => !entry.includes("*") && entry.includes(".")), "README.md", "LICENSE", "package.json"]);
+    const packagedGlobs = PACKAGE.files.filter((entry) => entry.includes("*"));
+    const matchesGlob = (target) => packagedGlobs.some((glob) => {
+      const [prefix, suffix] = glob.split("**/*");
+      return suffix !== undefined ? target.startsWith(prefix) && target.endsWith(suffix) : false;
+    });
+    const links = [...README.matchAll(/\]\(([^)\s]+)\)/g)].map((match) => match[1]);
+    for (const rawTarget of links) {
+      if (/^[a-z][a-z0-9+.-]*:/i.test(rawTarget) || rawTarget.startsWith("#")) continue;
+      const target = rawTarget.replace(/^\.\//, "").split("#")[0];
+      assert.ok(
+        packagedFiles.has(target) || packagedDirs.some((dir) => target.startsWith(dir)) || matchesGlob(target),
+        `README relative link '${rawTarget}' must resolve inside the published package (package.json#files)`,
+      );
+    }
   });
 });
 

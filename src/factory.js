@@ -922,6 +922,14 @@ function cleanupPreManifestRunDir(runId, opts = {}) {
     if (evidence.ok && evidence.evidence.state === "running") {
       throw new Error(`pre-manifest run '${runId}' has running process evidence; run 'factory cancel ${runId}' first`);
     }
+    // The pre-manifest exception is for a launch KNOWN dead: valid evidence in a
+    // non-running state. Malformed, unreadable, or mismatched evidence does not
+    // establish liveness either way, so fail closed instead of deleting a
+    // directory whose process may still be alive; --force is the explicit
+    // operator override.
+    if (!evidence.ok && !opts.force) {
+      throw new Error(`pre-manifest run '${runId}' has invalid process evidence (${evidence.reason}); liveness cannot be established — verify the process is dead, then rerun with --force`);
+    }
     if (!opts.dryRun) rmSync(candidate, { recursive: true, force: true });
     return {
       run_id: String(runId),

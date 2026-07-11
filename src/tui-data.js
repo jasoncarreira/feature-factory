@@ -64,6 +64,23 @@ export function readRuns(roots, options = {}) {
     .sort(compareRunRows);
 }
 
+export function runHasNonOkDiagnostic(run) {
+  return Boolean(run?.diagnostic_status && run.diagnostic_status !== "ok");
+}
+
+// Sidebar visibility rule, extracted so the documented contract is testable:
+// non-completed runs are always listed; a completed run stays listed while it
+// carries a non-ok diagnostic; and the most recent completed run is appended
+// even when healthy. Multiple completed runs can therefore appear at once when
+// older completed runs still have diagnostics that need attention.
+export function selectVisibleRuns(runs) {
+  const rows = Array.isArray(runs) ? runs : [];
+  const list = rows.filter((run) => run?.status !== "completed" || runHasNonOkDiagnostic(run));
+  const latestCompleted = rows.find((run) => run?.status === "completed");
+  if (latestCompleted && !list.some((run) => run.run_id === latestCompleted.run_id)) return [...list, latestCompleted];
+  return list;
+}
+
 export function findFactoryRoots(start, options = {}) {
   if (!isUsablePath(start)) return [];
   const dir = resolve(start);

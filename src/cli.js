@@ -107,10 +107,16 @@ function install(args) {
   cfg.$schema ??= "https://opencode.ai/config.json";
   cfg.plugin ??= [];
   const oldSpec = local ? oldLocalPluginSpec() : null;
-  const hit = cfg.plugin.findIndex((entry) => pluginEntrySpec(entry) === pluginSpec || (oldSpec && pluginEntrySpec(entry) === oldSpec));
+  const matchesSpec = (entry) => pluginEntrySpec(entry) === pluginSpec || (oldSpec && pluginEntrySpec(entry) === oldSpec);
+  // Single-entry contract: keep exactly one registration. Prefer the first tuple
+  // match so existing options survive, rewrite its spec, and drop every other
+  // matching string/tuple duplicate (including stale legacy-local specs).
+  const matchIndexes = cfg.plugin.map((entry, index) => (matchesSpec(entry) ? index : -1)).filter((index) => index >= 0);
+  const hit = matchIndexes.find((index) => Array.isArray(cfg.plugin[index])) ?? matchIndexes[0] ?? -1;
   if (hit === -1) cfg.plugin.push(pluginSpec);
   if (hit !== -1 && Array.isArray(cfg.plugin[hit])) cfg.plugin[hit][0] = pluginSpec;
   if (hit !== -1 && !Array.isArray(cfg.plugin[hit])) cfg.plugin[hit] = pluginSpec;
+  if (hit !== -1) cfg.plugin = cfg.plugin.filter((entry, index) => index === hit || !matchesSpec(entry));
   writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n");
   console.log(`configured opencode plugin: ${pluginSpec}`);
   console.log(`updated: ${configPath}`);
