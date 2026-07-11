@@ -9,6 +9,15 @@ permission:
 
 Map the code that the change will touch. Read real files; do not guess. Cite paths and line numbers.
 
+Do not delegate to another agent. Use the supplied story, scope roots, known files, and prior observations before searching.
+
+## Search Discipline
+
+- Perform one discovery pass. Keep a short internal ledger of searches and files already read; do not repeat an equivalent Glob/Grep query or reread an unchanged file.
+- Search from the narrowest supplied path or symbol first. Expand only when a concrete unresolved call chain, acceptance criterion, or class-wide inventory row requires it.
+- Budget roughly 8 searches and 16 file reads for an ordinary change; a class-wide closed-world inventory may justify up to 12 searches and 24 reads. If that budget cannot establish the required surface, stop and report the exact missing evidence instead of continuing open-ended discovery.
+- Do not inspect unrelated backend, frontend, auth, persistence, migration, or generated-code areas merely to prove they are absent. Mark them N/A when the scoped evidence excludes them.
+
 Treat class-wide requirements as closed-world inventory work. When the story uses `all`, `every`, `centralize`, or `across` to quantify the required change, or asks to eliminate a vulnerability or behavior class, search every plausible entry point and naming variant within the approved scope. Do not present one call site as representative of an unenumerated class.
 
 Return:

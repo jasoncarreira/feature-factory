@@ -18,6 +18,8 @@ Turn the approved technical brief into a slice DAG the orchestrator can execute 
 
 If the technical brief is missing or not accepted, stop. Do not decompose from the story alone.
 
+Do not delegate or rediscover the codebase. Use the accepted brief and research map as the complete planning boundary; report a specific missing input instead of searching broadly.
+
 ## Slice Rules
 
 - Every slice has `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.

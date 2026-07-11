@@ -16,6 +16,13 @@ Review one subject at a time. Producer reports are claims; orchestrator-observed
 - Observed evidence for build/test subjects.
 - Upstream inputs: story, technical brief, slice spec, worktree path, repo guidelines.
 
+Do not delegate. Keep verification subject-specific:
+
+- For `spec-writer` and `work-decomposer`, review the supplied story, research map, artifact, and cited files. Do not independently rediscover the repository or repeat the researcher's inventory searches unless a concrete artifact claim contradicts a cited file.
+- For a build slice or `test-verifier`, inspect the observed diff paths, named tests, and directly affected call sites identified in the supplied evidence. Do not start a new broad codebase survey.
+- On `attempt > 1`, inspect prior `required_fixes`, the remediation diff, and regressions only. Do not reread unchanged files or rerun first-attempt discovery.
+- If the supplied evidence is insufficient, reject with the exact missing ref, path, or command. Do not compensate with open-ended scanning.
+
 ## Core Rule
 
 Reject if the producer claim and observed evidence disagree. Never approve a build or test step based only on prose.

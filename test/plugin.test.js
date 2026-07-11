@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import plugin, { parseFrontmatter } from "../src/plugin.js";
+import plugin, { mergeFactoryPermission, parseFrontmatter } from "../src/plugin.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadValue } from "../src/feature-command-payload.js";
 
 const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
@@ -60,6 +60,24 @@ describe("plugin agent edit permissions", () => {
     for (const agent of ["work-reviewer", "implementation-validator", "security-reviewer"]) {
       assert.equal(cfg.agent[agent].permission.edit, "deny", `${agent} must remain read-only`);
     }
+  });
+
+  it("allows Task delegation only from the primary orchestrator", async () => {
+    const cfg = await pluginConfig();
+
+    assert.equal(cfg.agent["feature-factory"].permission.task, "allow", "primary orchestrator may delegate");
+    for (const [name, agent] of Object.entries(cfg.agent)) {
+      if (name === "feature-factory") continue;
+      assert.equal(agent.permission.task, "deny", `${name} must not recursively delegate tasks`);
+    }
+    assert.match(cfg.agent["feature-factory"].prompt, /delegate only from this primary agent to specialized subagents/u);
+  });
+
+  it("forces task:deny even when agent frontmatter tries to re-enable delegation", () => {
+    // mergeFactoryPermission spreads the forced deny last, so frontmatter cannot override it.
+    assert.equal(mergeFactoryPermission({ task: "allow", edit: "allow" }).task, "deny");
+    assert.equal(mergeFactoryPermission({ task: "allow", edit: "allow" }).edit, "allow", "frontmatter edit intent is preserved");
+    assert.equal(mergeFactoryPermission({}).task, "deny");
   });
 });
 
