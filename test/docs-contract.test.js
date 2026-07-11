@@ -96,12 +96,11 @@ describe("class-wide planning prompt contract", () => {
   });
 
   it("requires first review to consolidate same-class findings across every dimension", () => {
-    assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule/i);
-    assert.match(WORK_REVIEWER_PROMPT, /On `attempt: 1`[\s\S]*every dimension of under-specification/i);
+    assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule:[\s\S]*`attempt: 1`[\s\S]*every dimension of under-specification/i);
     assert.match(WORK_REVIEWER_PROMPT, /do not surface one example, or one category, while withholding equivalent findings for later rounds/i);
     assert.match(WORK_REVIEWER_PROMPT, /new category that was discoverable at `attempt: 1`[\s\S]*first-pass miss/i);
-    assert.match(WORK_REVIEWER_PROMPT, /class-wide spec that lacks a finite source\/sink inventory/i);
-    assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*attempt > 1/i);
+    assert.match(WORK_REVIEWER_PROMPT, /class-wide requirements[\s\S]*finite source-to-sink implementation matrix/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`/i);
   });
 
   it("gives the spec review an acceptance bar so it converges", () => {
@@ -117,7 +116,7 @@ describe("class-wide planning prompt contract", () => {
     // interpretation where a reviewer defers a required sink and calls the spec accepted.
     assert.match(
       WORK_REVIEWER_PROMPT,
-      /deferral or exclusion is legitimate \*\*only when the approved story or scope authorizes it\*\*[\s\S]*never (?:waive, defer, or leave undecided )?an in-scope sink that falls under an `all`\/`every`\/`across`/i,
+      /deferral or exclusion is legitimate \*\*only when the approved story or scope authorizes it\*\*[\s\S]*never (?:waive, defer, or leave undecided )?an in-scope sink (?:that falls )?under an `all`\/`every`\/`across`/i,
       "work-reviewer must forbid deferring an in-scope all/every sink without story/scope authorization",
     );
     assert.match(
@@ -203,13 +202,90 @@ describe("review trust and remediation escalation contract", () => {
         assert.match(text, literalPattern(classification), `${name} must classify ${classification} findings`);
       }
     }
-    assert.match(SECURITY_REVIEWER_PROMPT, /first review[\s\S]*complete authority and mutation surface[\s\S]*Do not reveal one[\s\S]*per remediation round/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /first review[\s\S]*complete discoverable authority and mutation surface[\s\S]*Do not reveal one[\s\S]*per remediation round/i);
   });
 
   it("stops retry churn when remediation requires a design decision", () => {
     assert.match(SKILL, /Before spending a remediation attempt[\s\S]*design-level root cause/i);
     assert.match(SKILL, /violate an accepted story or brief constraint[\s\S]*repeated findings arise from the same unresolved design choice/i);
     assert.match(SKILL, /do not burn another implementation retry[\s\S]*terminalize the run as blocked[\s\S]*reviewed continuation to amend the specification/i);
+  });
+});
+
+describe("consolidated reviewer decision procedure contract", () => {
+  const reviewerPrompts = {
+    WORK_REVIEWER_PROMPT,
+    IMPLEMENTATION_VALIDATOR_PROMPT,
+    SECURITY_REVIEWER_PROMPT,
+  };
+
+  it("defines exactly one ordered, role-specific procedure per reviewer", () => {
+    for (const [name, text] of documentEntries(reviewerPrompts)) {
+      assert.equal(text.match(/^## Ordered decision procedure$/gmu)?.length, 1, `${name} must have exactly one decision procedure`);
+    }
+    assert.match(WORK_REVIEWER_PROMPT, orderedPattern(["evidence truth", "evidence boundary", "attempt mode", "subject checks", "touched-path security", "declared trust model", "required-omission precedence", "structured review"]));
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, orderedPattern(["bounded integrated surface", "attempt mode", "priority order", "mandatory security review", "declared trust model", "validator threshold", "structured validation report"]));
+    assert.match(SECURITY_REVIEWER_PROMPT, orderedPattern(["trust model and bounded diff surface", "attempt mode", "every touched ingress", "Qualify each candidate", "trust and authority qualification", "security-specific threshold", "structured security review"]));
+  });
+
+  it("preserves exact structured verdicts, actionable fields, and durable routes", () => {
+    for (const field of ["## Review: <subject>", "**Verdict:** APPROVE | REJECT", "**Checked against:**", "**Claim vs observed:**", "**Findings:**", "fix_owner: <agent>", "**Required fixes (if REJECT):**"]) {
+      assert.match(WORK_REVIEWER_PROMPT, literalPattern(field), `work reviewer missing ${field}`);
+    }
+    for (const field of ["**Verdict:** GO | GO-WITH-NITS | NO-GO", "**Acceptance criteria:**", "**Brief deviations:**", "**Scope check:**", "**If NO-GO:** <single most important fix and owner>"]) {
+      assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, literalPattern(field), `validator missing ${field}`);
+    }
+    for (const route of ["reviews/implementation-validator.json", "artifacts/validation-report.md", "run.json.validator.report", "run.json.validator.review_ref"]) {
+      assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, literalPattern(`\`${route}\``), `validator missing route ${route}`);
+    }
+    for (const field of ["**Verdict:** PASS | BLOCK", "**Ingresses reviewed:**", "[BLOCK]", "fix: <specific change>", "[NONBLOCKING]", "**Bypass attempts:**"]) {
+      assert.match(SECURITY_REVIEWER_PROMPT, literalPattern(field), `security reviewer missing ${field}`);
+    }
+    for (const route of ["reviews/security-reviewer.json", "run.json.security_review.review_ref"]) {
+      assert.match(SECURITY_REVIEWER_PROMPT, literalPattern(`\`${route}\``), `security reviewer missing route ${route}`);
+    }
+  });
+
+  it("preserves security classes and each role's repository-rubric boundary", () => {
+    for (const [name, text] of documentEntries(reviewerPrompts)) {
+      for (const findingClass of ["Trust boundaries", "Injection", "Forgeable identity / authz", "Secrets", "Security regression"]) {
+        assert.match(text, literalPattern(findingClass), `${name} missing security class ${findingClass}`);
+      }
+    }
+    for (const text of [IMPLEMENTATION_VALIDATOR_PROMPT, SECURITY_REVIEWER_PROMPT]) assert.match(text, /Supply chain[\s\S]*(?:when|if).*touch/i);
+    for (const text of [WORK_REVIEWER_PROMPT, IMPLEMENTATION_VALIDATOR_PROMPT]) assert.match(text, /`REVIEW\.md`[\s\S]*binding rubric when present/i);
+    assert.doesNotMatch(SECURITY_REVIEWER_PROMPT, /REVIEW\.md/i, "security reviewer must not gain a repository-rubric policy");
+  });
+
+  it("keeps severity mappings and role-specific fail-closed thresholds distinct", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /confirmed applicable[\s\S]*BLOCKER -> REJECT[\s\S]*default-off/i);
+    assert.match(WORK_REVIEWER_PROMPT, orderedPattern(["`BLOCKER` -> REJECT", "`MAJOR` -> APPROVE", "`MINOR` -> note only"]));
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /confirmed applicable[\s\S]*`BLOCKER` -> `NO-GO`[\s\S]*default-off/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Do not apply the security reviewer's broader “not ruled out” threshold/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /MAJOR-only -> `GO-WITH-NITS`[\s\S]*clean or minor-only -> `GO` or `GO-WITH-NITS`/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /applicable under the declared trust model[\s\S]*confirmed \*\*or not-ruled-out\*[\s\S]*produces `BLOCK`[\s\S]*default-off/i);
+    assert.doesNotMatch(WORK_REVIEWER_PROMPT, /not-ruled-out/i);
+  });
+
+  it("preserves rerun classifications, carry-forward, and remediation dispositions without homogenizing work review", () => {
+    for (const [name, text] of documentEntries({ IMPLEMENTATION_VALIDATOR_PROMPT, SECURITY_REVIEWER_PROMPT })) {
+      assert.match(text, /fresh read-only|prior `required_fixes`/i, `${name} must receive fresh/prior-fix context`);
+      for (const classification of ["unresolved-prior", "remediation-regression", "remediation-exposed", "unrelated-new-scope"]) {
+        assert.match(text, literalPattern(`\`${classification}\``), `${name} missing ${classification}`);
+      }
+      assert.match(text, /Carry (?:every )?unresolved prior fix(?:es)? forward/i, `${name} must carry unresolved fixes`);
+      assert.match(text, /remediation-regression[\s\S]*remediation-exposed[\s\S]*(?:blocking|NO-GO|BLOCK)/i, `${name} must disposition created/exposed issues`);
+      assert.match(text, /unrelated-new-scope[\s\S]*NONBLOCKING/i, `${name} must keep unrelated unchanged scope nonblocking`);
+    }
+    assert.match(WORK_REVIEWER_PROMPT, /required-omission rule overrides the delta rule/i);
+    assert.doesNotMatch(WORK_REVIEWER_PROMPT, /`unresolved-prior`|`remediation-regression`|`remediation-exposed`/i);
+  });
+
+  it("keeps all three searches bounded by supplied evidence and concrete expansion triggers", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /concrete artifact claim contradicts a cited file/i);
+    assert.match(WORK_REVIEWER_PROMPT, /supplied evidence[\s\S]*Do not start a new broad codebase survey/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /supplied full-diff file inventory[\s\S]*Do not run broad repository rediscovery[\s\S]*concrete changed import, call site, or generated-output edge/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /supplied full-diff path inventory[\s\S]*Do not broadly rescan[\s\S]*concrete changed ingress, sink, import, or shared guard/i);
   });
 });
 
@@ -231,11 +307,12 @@ describe("bounded agent depth contract", () => {
     assert.match(SPEC_WRITER_PROMPT, /Do not delegate and do not run broad Glob\/Grep searches/i);
     assert.match(SPEC_WRITER_PROMPT, /Never repeat research already present in the map/i);
     assert.match(WORK_DECOMPOSER_PROMPT, /Do not delegate or rediscover the codebase/i);
-    assert.match(WORK_REVIEWER_PROMPT, /Do not delegate\. Keep verification subject-specific/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Never edit, commit, fix, or delegate/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Bind the evidence boundary[\s\S]*verification subject-specific/i);
     assert.match(WORK_REVIEWER_PROMPT, /Do not independently rediscover the repository or repeat the researcher's inventory searches/i);
     assert.match(WORK_REVIEWER_PROMPT, /Do not reread unchanged files or rerun first-attempt discovery/i);
-    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Do not run broad repository rediscovery unless a concrete changed import, call site, or generated output escapes that inventory/i);
-    assert.match(SECURITY_REVIEWER_PROMPT, /Expand beyond it only when a concrete changed ingress, sink, import, or shared guard leads to an unlisted path/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Do not run broad repository rediscovery[\s\S]*concrete changed import, call site, or generated-output edge/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /Expand only when a concrete changed ingress, sink, import, or shared guard leads to an unlisted path/i);
   });
 
   it("documents bounded workflow depth in the README", () => {
@@ -684,8 +761,8 @@ describe("remediation context reuse docs contract", () => {
     assert.match(SKILL, /test-verifier re-review[\s\S]*fresh `work-reviewer` task[\s\S]*`attempt: <n>`[\s\S]*prior review's `required_fixes` list/i, "SKILL must preserve test-verifier attempt and required_fixes on re-review");
     assert.match(SKILL, /panel re-run[\s\S]*fresh `implementation-validator` and `security-reviewer` tasks[\s\S]*never pass `task_id`[\s\S]*`attempt: <n>` plus the prior validator\/security `required_fixes` list/i, "SKILL must preserve implementation-validator/security reviewer attempt and required_fixes on panel reruns");
     assert.match(SPEC, /current `attempt` and the prior applicable `required_fixes` list[\s\S]*review checks whether required fixes landed/i, "SPEC must preserve attempt and required_fixes delta-review behavior");
-    assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*introduced regressions/i, "work-reviewer prompt must preserve delta rule");
-    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Delta Review Rule[\s\S]*fresh read-only validator task[\s\S]*prior findings[\s\S]*required_fixes[\s\S]*introduced regressions/i, "implementation-validator prompt must preserve fresh delta rule");
+    assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*regressions/i, "work-reviewer prompt must preserve delta rule");
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Delta Review Rule:[\s\S]*fresh read-only validator task[\s\S]*prior findings[\s\S]*`required_fixes`[\s\S]*introduced regressions/i, "implementation-validator prompt must preserve fresh delta rule");
     assert.match(SECURITY_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*introduced regressions/i, "security-reviewer prompt must preserve delta rule");
   });
 
