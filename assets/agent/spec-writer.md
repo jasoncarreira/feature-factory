@@ -74,3 +74,19 @@ Return exactly this structure:
 
 Keep it tight, concrete, and decision-complete.
 Do not use open-ended phrases such as "apply everywhere" in place of finite matrix rows.
+
+## Self-review before returning
+
+`work-reviewer` judges this brief on its first review, enumerating every failure in one pass. Apply this list to your own draft first — a brief that fails any item will be rejected, and that rejection round is pure waste.
+
+The reviewer's bar (shared invariants `work-reviewer` enforces):
+
+- **No unresolved decision.** No behavioral or design choice is left to builders, and no verification is conditional — every AC maps to a mandatory, named test or command, never "add tests if needed." A mechanical residual is acceptable only when its behavior, compatibility, security, and state policy are already decided here.
+- **Class-wide means closed.** The implementation matrix covers every inventoried sink/call site with a decided policy, an explicit compatibility or exclusion decision, and a mapped test. Defer or exclude a sink only when the approved story or scope authorizes it.
+- **Every dimension specified.** The reviewer checks not just sinks but every unresolved contract, policy, state-transition table (wherever the change touches stateful behavior), compatibility decision, and test seam. Enumerate them yourself before the reviewer does.
+- **Feasible envelope.** The required behavior is implementable within the brief's allowed mechanisms, dependencies, compatibility constraints, and non-goals. If constraints conflict, surface the smallest dependency, scope, or design decision in **Risks** instead of writing an impossible or self-contradictory requirement.
+
+Producer self-checks (not reviewer contract text — these are the observed causes of first-review rejections; catch them yourself):
+
+- **Internally consistent.** No exception, carve-out, or legacy allowance elsewhere in the brief contradicts an acceptance criterion or another section. Reread the draft specifically hunting for contradictions.
+- **Unambiguous ownership.** Every file and test the plan touches appears in the implementation plan with clear ownership; call out shared or contested paths explicitly so decomposition can assign each to exactly one slice.
