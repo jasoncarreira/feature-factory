@@ -61,6 +61,30 @@ describe("tracked process cleanup", () => {
     }
   });
 
+  it("fails closed when an owned child's internal handle is replaced", async () => {
+    const owner = createTrackedProcessCleanup({ timeoutMs: 10, diagnostic: () => {} });
+    const owned = await spawned(owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], {}, { label: "owned" }));
+    const unowned = await spawned(spawnChild(process.execPath, ["-e", SLEEP_SCRIPT]));
+    const ownedHandle = owned._handle;
+    const ownedOriginalKill = owned.kill.bind(owned);
+    const unownedOriginalKill = unowned.kill.bind(unowned);
+    owned._handle = unowned._handle;
+
+    try {
+      const report = await owner.cleanup();
+      assert.equal(report.signaledCount, 0);
+      assert.equal(report.timedOut, true);
+      assert.ok(report.diagnostics.some(({ outcome }) => outcome === "signaling-authority-changed"));
+      assert.equal(unowned.signalCode, null);
+    } finally {
+      owned._handle = ownedHandle;
+      await Promise.all([
+        stopFixture(owned, ownedOriginalKill),
+        stopFixture(unowned, unownedOriginalKill),
+      ]);
+    }
+  });
+
   it("does not let metadata label coercion reenter cleanup and create a child afterward", async () => {
     const owner = createTrackedProcessCleanup({ diagnostic: () => {} });
     let coercionCalls = 0;
@@ -92,6 +116,28 @@ describe("tracked process cleanup", () => {
       /does not support detached/u,
     );
     assert.deepEqual(Object.keys(owner).sort(), ["cleanup", "spawn"]);
+  });
+
+  it("snapshots a stateful detached option once and rejects cleanup reentry before spawning", async () => {
+    const owner = createTrackedProcessCleanup({ diagnostic: () => {} });
+    let detachedReads = 0;
+    let reentrantCleanup;
+    const options = {
+      get detached() {
+        detachedReads += 1;
+        reentrantCleanup = owner.cleanup();
+        return detachedReads > 1;
+      },
+    };
+
+    assert.throws(
+      () => owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], options),
+      /cleanup has started/u,
+    );
+    assert.equal(detachedReads, 1);
+    const report = await reentrantCleanup;
+    assert.equal(report.signaledCount, 0);
+    assert.deepEqual(report.diagnostics, []);
   });
 
   it("contains no discovery, broad, process-level, or negative-pid signaling", () => {
