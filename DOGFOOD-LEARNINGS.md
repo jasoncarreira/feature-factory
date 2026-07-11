@@ -1,5 +1,9 @@
 # Dogfood Learnings — what building the factory on itself taught us
 
+> **Status — historical retrospective:** This is a snapshot of past dogfood runs, not a
+> description or guarantee of current behavior. See [`README.md`](README.md) for the current
+> operator contract.
+
 A retrospective from analyzing the 15 self-hosted feature-factory runs under
 `.opencode/factory/` (the tool built almost entirely by running itself), their
 `reviews/`/`evidence/`, and all 57 process logs in `.opencode/factory/processes/`
