@@ -55,6 +55,31 @@ describe("resolved model provenance", () => {
     }
   });
 
+  it("honors OPENCODE_CONFIG_DIR above project/global (matches opencode CLI precedence)", async () => {
+    // Mirror the CLI probe: global + project + OPENCODE_CONFIG_DIR all define a profile;
+    // opencode resolves the OPENCODE_CONFIG_DIR one, so our snapshot must too.
+    const dirOverride = mkdtempSync(join(tmpdir(), "ff-env-dir-"));
+    const project = mkdtempSync(join(tmpdir(), "ff-env-proj-"));
+    const writeEntry = (dir, model) => writeFileSync(join(dir, "opencode.jsonc"), JSON.stringify({ plugin: [["opencode-feature-factory", { profiles: { "work-decomposer": { model, variant: "xhigh" } } }]] }), "utf8");
+    writeEntry(dirOverride, "openai/dir-profile");
+    writeEntry(project, "openai/project-profile");
+    const prevDir = process.env.OPENCODE_CONFIG_DIR;
+    const prevFile = process.env.OPENCODE_CONFIG;
+    process.env.OPENCODE_CONFIG_DIR = dirOverride;
+    delete process.env.OPENCODE_CONFIG;
+    try {
+      const env = await collectEnv({ pluginOptions: {}, cwd: project });
+      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_models["work-decomposer"], "openai/dir-profile", "OPENCODE_CONFIG_DIR must outrank project config");
+    } finally {
+      if (prevDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+      else process.env.OPENCODE_CONFIG_DIR = prevDir;
+      if (prevFile !== undefined) process.env.OPENCODE_CONFIG = prevFile;
+      rmSync(dirOverride, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it("recovers profiles from a project-level opencode.jsonc walked up from cwd", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ff-env-proj-"));
     writeFileSync(join(dir, "opencode.jsonc"), JSON.stringify({ plugin: [["opencode-feature-factory", { profiles: { "security-reviewer": { model: "openai/gpt-5.6-sol", variant: "xhigh" } } }]] }), "utf8");

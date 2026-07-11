@@ -71,9 +71,9 @@ function resolveEffectivePluginOptions(options = {}) {
 export function readConfiguredPluginOptions(cwd = process.cwd(), { configPath } = {}) {
   // Resolve the effective config the same way the launched opencode CLI would,
   // so `resolved_from`/`resolved_models` stay honest under supported overrides
-  // (OPENCODE_CONFIG, XDG_CONFIG_HOME) and project-level config layers — not only
-  // the default ~/.config location. Prefer whichever layer actually carries the
-  // feature-factory profiles; otherwise report the first plugin entry seen.
+  // (OPENCODE_CONFIG_DIR, OPENCODE_CONFIG, XDG_CONFIG_HOME) and project-level config
+  // layers — not only the default ~/.config location. Prefer whichever layer actually
+  // carries the feature-factory profiles; otherwise report the first plugin entry seen.
   const candidates = stringValue(configPath) ? [configPath] : opencodeConfigCandidates(cwd);
   let firstEntry = null;
   for (const path of candidates) {
@@ -85,12 +85,22 @@ export function readConfiguredPluginOptions(cwd = process.cwd(), { configPath } 
   return firstEntry;
 }
 
-// Candidate config files in opencode's precedence order. Opencode layers project
-// config over the global config, so project-level `opencode.json[c]` (walked up
-// from cwd, nearest first) is preferred; then the global config, which is the
-// OPENCODE_CONFIG override when set, otherwise the XDG (or ~/.config) location.
+// Candidate config files in opencode's effective precedence order (opencode 1.1.36):
+//   1. OPENCODE_CONFIG_DIR/opencode.json[c] — an explicit config-dir override that
+//      opencode ranks ABOVE project and default-global config.
+//   2. project `opencode.json[c]` walked up from cwd (nearest first), which opencode
+//      layers over the default global config.
+//   3. the global config file: the OPENCODE_CONFIG override when set, otherwise the
+//      XDG (or ~/.config) default — skipped when OPENCODE_CONFIG_DIR already supplied
+//      the config directory.
+// First layer that actually carries feature-factory profiles wins, so `resolved_*`
+// mirrors what the launched CLI applies rather than a lower-precedence layer.
 function opencodeConfigCandidates(cwd = process.cwd()) {
   const candidates = [];
+  const dirOverride = process.env.OPENCODE_CONFIG_DIR;
+  if (stringValue(dirOverride)) {
+    for (const name of ["opencode.jsonc", "opencode.json"]) candidates.push(join(dirOverride.trim(), name));
+  }
   let dir = resolve(stringValue(cwd) ? cwd : process.cwd());
   for (;;) {
     for (const name of ["opencode.jsonc", "opencode.json"]) candidates.push(join(dir, name));
@@ -98,10 +108,10 @@ function opencodeConfigCandidates(cwd = process.cwd()) {
     if (parent === dir) break;
     dir = parent;
   }
-  const override = process.env.OPENCODE_CONFIG;
-  if (stringValue(override)) {
-    candidates.push(override.trim());
-  } else {
+  const fileOverride = process.env.OPENCODE_CONFIG;
+  if (stringValue(fileOverride)) {
+    candidates.push(fileOverride.trim());
+  } else if (!stringValue(dirOverride)) {
     const configHome = stringValue(process.env.XDG_CONFIG_HOME) ? process.env.XDG_CONFIG_HOME.trim() : join(homedir(), ".config");
     for (const name of ["opencode.jsonc", "opencode.json"]) candidates.push(join(configHome, "opencode", name));
   }
