@@ -222,12 +222,13 @@ describe("protected atomic writes", () => {
   for (const hookName of ["afterTargetCheck", "afterTempOpen", "afterTempWrite", "afterTempClose", "beforeCommit"]) {
     it(`detects a target identity swap after ${hookName}`, () => withRoot((root) => {
       const target = join(root, "target");
+      const displaced = join(root, `displaced-target-${hookName}`);
       writeFileSync(target, "old");
       assert.throws(() => writeProtectedFileAtomicSync(root, "target", "new", {
         randomName: `.known-temp-${hookName}`,
         hooks: {
           [hookName]() {
-            rmSync(target, { force: true });
+            renameSync(target, displaced);
             writeFileSync(target, "swapped");
           },
         },
@@ -240,11 +241,12 @@ describe("protected atomic writes", () => {
   for (const hookName of ["afterTempOpen", "afterTempWrite", "afterTempClose", "beforeCommit"]) {
     it(`detects a temporary pathname swap after ${hookName} and leaves the replacement untouched`, () => withRoot((root) => {
       const temp = `.known-temp-swap-${hookName}`;
+      const displaced = join(root, `${temp}-displaced`);
       assert.throws(() => writeProtectedFileAtomicSync(root, "target", "new", {
         randomName: temp,
         hooks: {
           [hookName]() {
-            rmSync(join(root, temp), { force: true });
+            renameSync(join(root, temp), displaced);
             writeFileSync(join(root, temp), "attacker");
           },
         },
@@ -324,12 +326,13 @@ describe("protected atomic writes", () => {
 
   it("never unlinks a different entry observed at cleanup", () => withRoot((root) => {
     const temp = ".known-temp-cleanup-swap";
+    const displaced = join(root, `${temp}-displaced`);
     assert.throws(() => writeProtectedFileAtomicSync(root, "target", "new", {
       randomName: temp,
       fsOps: { writeSync() { throw Object.assign(new Error("fail"), { code: "EIO" }); } },
       hooks: {
         beforeCleanup() {
-          rmSync(join(root, temp), { force: true });
+          renameSync(join(root, temp), displaced);
           writeFileSync(join(root, temp), "different-entry");
         },
       },
