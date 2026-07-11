@@ -27,6 +27,30 @@ describe("feature-factory install", () => {
     }
   });
 
+  it("collapses duplicate string/tuple registrations to one entry, preserving tuple options", () => {
+    const home = tempHome();
+    const configPath = join(home, ".config", "opencode", "opencode.jsonc");
+    const spec = pathToFileURL(repo).href;
+    const legacySpec = pathToFileURL(join(repo, "src", "plugin.js")).href;
+
+    try {
+      // Pre-existing duplicates: plain string first, tuple with options second,
+      // stale legacy-local spec third, plus an unrelated plugin that must survive.
+      writeFile(configPath, JSON.stringify({
+        plugin: [spec, [spec, { prMode: "draft" }], legacySpec, "unrelated-plugin"],
+      }));
+
+      const proc = runInstall(home);
+
+      assert.equal(proc.status, 0, proc.stderr);
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      // Exactly one registration remains; the tuple wins so its options survive.
+      assert.deepEqual(config.plugin, [[spec, { prMode: "draft" }], "unrelated-plugin"]);
+    } finally {
+      cleanup(home);
+    }
+  });
+
   it("warns loudly when a global feature skill may shadow the plugin skill", () => {
     const home = tempHome();
     const skillPath = join(home, ".config", "opencode", "skills", "feature", "SKILL.md");

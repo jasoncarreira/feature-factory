@@ -1,5 +1,9 @@
 # Simplification Spec: Remove the Provenance/Proof Layer
 
+> **Status — historical implementation plan:** This document may describe superseded
+> architecture and commands. It is not the active specification; see
+> [`README.md`](README.md) for the current operator contract.
+
 ## Motivation
 
 Seven dogfood runs in this repo's `.opencode/factory/` produced one completed PR. The rest

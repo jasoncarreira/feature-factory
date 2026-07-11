@@ -1,8 +1,7 @@
 /* @jsxImportSource @opentui/solid */
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { factoryRoots, readRuns, tuiSidebarRefreshMetadata } from "./tui-data.js";
+import { factoryRoots, readRuns, runHasNonOkDiagnostic as hasNonOkDiagnostic, selectVisibleRuns, tuiSidebarRefreshMetadata } from "./tui-data.js";
 
-const HIDDEN_STATUSES = new Set(["completed"]);
 const REFRESH_INTERVAL_MS = 5000;
 const MAX_VISIBLE_RUNS = 3;
 const DEFAULT_THEME = {
@@ -32,10 +31,6 @@ function diagnosticColor(theme, status) {
   if (status === "error") return theme.error;
   if (status === "warning") return theme.warning;
   return theme.textMuted;
-}
-
-function hasNonOkDiagnostic(run) {
-  return Boolean(run?.diagnostic_status && run.diagnostic_status !== "ok");
 }
 
 function diagnosticLine(run) {
@@ -131,14 +126,7 @@ function View(props) {
   const theme = () => currentTheme(props.api);
   const visible = createMemo(() => runs().length > 0);
   const refreshMetadata = createMemo(() => tuiSidebarRefreshMetadata({ version: version() }));
-  const active = createMemo(() => runs().filter((run) => !HIDDEN_STATUSES.has(run.status) || hasNonOkDiagnostic(run)));
-  const latestCompleted = createMemo(() => runs().find((run) => run.status === "completed"));
-  const shown = createMemo(() => {
-    const list = active();
-    const completed = latestCompleted();
-    if (completed && !list.some((run) => run.run_id === completed.run_id)) return [...list, completed];
-    return list;
-  });
+  const shown = createMemo(() => selectVisibleRuns(runs()));
   const visibleRuns = createMemo(() => shown().slice(0, MAX_VISIBLE_RUNS));
   const hiddenCount = createMemo(() => Math.max(0, runs().length - visibleRuns().length));
   return (

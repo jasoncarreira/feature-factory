@@ -4,7 +4,32 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { factoryRoots, findFactoryRoots, readRuns, tuiSidebarRefreshMetadata } from "../src/tui-data.js";
+import { factoryRoots, findFactoryRoots, readRuns, selectVisibleRuns, tuiSidebarRefreshMetadata } from "../src/tui-data.js";
+
+describe("sidebar run visibility", () => {
+  const run = (run_id, status, diagnostic_status = "ok") => ({ run_id, status, diagnostic_status });
+
+  it("hides healthy completed runs except the most recent completed run", () => {
+    const rows = [run("active-1", "running"), run("done-new", "completed"), run("done-old", "completed")];
+    assert.deepEqual(selectVisibleRuns(rows).map((r) => r.run_id), ["active-1", "done-new"]);
+  });
+
+  it("keeps every completed run that still carries a non-ok diagnostic", () => {
+    // Documented exception: more than one completed run can appear at once.
+    const rows = [run("done-new", "completed"), run("done-warn", "completed", "warning"), run("done-old", "completed")];
+    assert.deepEqual(selectVisibleRuns(rows).map((r) => r.run_id), ["done-warn", "done-new"]);
+  });
+
+  it("does not duplicate the most recent completed run when it has diagnostics", () => {
+    const rows = [run("done-warn", "completed", "error"), run("blocked-1", "blocked")];
+    assert.deepEqual(selectVisibleRuns(rows).map((r) => r.run_id), ["done-warn", "blocked-1"]);
+  });
+
+  it("always lists non-completed runs regardless of diagnostics", () => {
+    const rows = [run("blocked-1", "blocked"), run("needs-human-1", "needs-human", "warning"), run("running-1", "running")];
+    assert.deepEqual(selectVisibleRuns(rows).map((r) => r.run_id), ["blocked-1", "needs-human-1", "running-1"]);
+  });
+});
 
 describe("TUI factory scanner", () => {
   it("describes sidebar refresh metadata and active-session limitations", () => {

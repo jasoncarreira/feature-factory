@@ -233,6 +233,57 @@ describe("pre-manifest detached launch recovery", () => {
       rmSync(repo, { recursive: true, force: true });
     }
   });
+
+  it("fails closed on malformed pre-manifest process evidence unless --force is supplied", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "review-pre-manifest-invalid-"));
+    const runId = "pre-manifest-invalid";
+    const runDir = join(repo, ".opencode", "factory", runId);
+    try {
+      mkdirSync(runDir, { recursive: true });
+      // Unparseable evidence: liveness cannot be established, so cleanup must not delete.
+      writeFileSync(join(runDir, "process.json"), "{ not json", "utf8");
+
+      await assert.rejects(cleanupRun(runId, { cwd: repo }), /invalid process evidence[\s\S]*--force/u);
+      assert.equal(existsSync(runDir), true, "invalid evidence must not permit deletion");
+
+      const forced = await cleanupRun(runId, { cwd: repo, force: true });
+      assert.equal(forced.status, "pre-manifest");
+      assert.equal(forced.removed_run_dir, true);
+      assert.equal(existsSync(runDir), false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on mismatched pre-manifest process evidence", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "review-pre-manifest-mismatch-"));
+    const runId = "pre-manifest-mismatch";
+    const runDir = join(repo, ".opencode", "factory", runId);
+    try {
+      mkdirSync(join(runDir, "processes"), { recursive: true });
+      writeFileSync(join(runDir, "processes", "opencode.log"), "started\n", "utf8");
+      // Evidence naming a DIFFERENT run does not establish that THIS launch died.
+      writeJson(join(runDir, "process.json"), {
+        schema_version: 1,
+        kind: "opencode-process",
+        run_id: "some-other-run",
+        execution_id: "exec-1",
+        pid: 4242,
+        started_at: NOW,
+        updated_at: NOW,
+        state: "exited",
+        cwd: repo,
+        identity: { inspector: "test-inspector", start_marker: "start-1", command_name: "opencode" },
+        log_ref: "processes/opencode.log",
+        cancel: null,
+      });
+
+      await assert.rejects(cleanupRun(runId, { cwd: repo }), /invalid process evidence/u);
+      assert.equal(existsSync(runDir), true, "mismatched evidence must not permit deletion");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("continuation and named-start git preflight", () => {

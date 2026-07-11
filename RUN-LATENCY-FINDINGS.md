@@ -1,5 +1,9 @@
 # Run latency & spec-churn findings
 
+> **Status — historical retrospective / snapshot:** These run-specific findings do not
+> describe or guarantee current behavior. See [`README.md`](README.md) for the current
+> operator contract.
+
 Diagnosis of why the current/blocked feature-factory runs (the ones building the dogfood
 takeaways: `centralized-hardening-*`, `git-fixture-*`, `steering-*`) take hours and why the
 spec-writer keeps getting rejected. All figures from run.json step/slice timestamps,

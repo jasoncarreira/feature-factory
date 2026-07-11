@@ -1,5 +1,9 @@
 # Feature Factory Improvement Spec
 
+> **Status — proposal / internal planning:** This document may mix observations of
+> implemented behavior with unimplemented proposals. It is not the current operator
+> contract; [`README.md`](README.md) is the current authority.
+
 Ideas to implement after reviewing `oh-my-openagent`, adapted for this package's tracker-agnostic feature factory.
 
 ## Goals
@@ -72,7 +76,11 @@ Future optional shape:
 }
 ```
 
-Recommended production profile:
+Historical production profile (not recommended):
+
+> **Historical model guidance — not recommended:** The GPT-5.4/GPT-5.5 table below is
+> retained for planning history only. Use the current recommendation in
+> [`README.md`](README.md) instead.
 
 | Agents | Model | Variant |
 |---|---|---|
