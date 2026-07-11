@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ChildProcess, spawn as spawnChild } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
@@ -23,37 +24,65 @@ async function stopFixture(child, originalKill = child.kill.bind(child)) {
   clearTimeout(timer);
 }
 
+function spawnWithCapturedKill(owner, kill, ...spawnArgs) {
+  const originalKill = ChildProcess.prototype.kill;
+  ChildProcess.prototype.kill = kill;
+  try {
+    return owner.spawn(...spawnArgs);
+  } finally {
+    ChildProcess.prototype.kill = originalKill;
+  }
+}
+
 describe("tracked process cleanup", () => {
-  it("returns and signals the exact owned handle while skipping exited and unowned children", async () => {
+  it("keeps immutable signaling authority for the exact owned handle", async () => {
     const owner = createTrackedProcessCleanup({ timeoutMs: 500, diagnostic: () => {} });
     const exited = owner.spawn(process.execPath, ["-e", ""], {}, { label: "exited" });
     await once(exited, "exit");
     const surviving = await spawned(owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], {}, { label: "owned" }));
-    const unowned = await spawned((await import("node:child_process")).spawn(process.execPath, ["-e", SLEEP_SCRIPT]));
-    const ownedOriginalKill = surviving.kill.bind(surviving);
+    const unowned = await spawned(spawnChild(process.execPath, ["-e", SLEEP_SCRIPT]));
     const unownedOriginalKill = unowned.kill.bind(unowned);
-    let ownedCalls = 0;
-    let unownedCalls = 0;
+    let redirectedCalls = 0;
     surviving.kill = (signal) => {
-      ownedCalls += 1;
-      assert.equal(signal, "SIGTERM");
-      return ownedOriginalKill(signal);
-    };
-    unowned.kill = (signal) => {
-      unownedCalls += 1;
+      redirectedCalls += 1;
       return unownedOriginalKill(signal);
     };
 
     try {
       const report = await owner.cleanup();
-      assert.equal(ownedCalls, 1);
-      assert.equal(unownedCalls, 0);
+      assert.equal(redirectedCalls, 0);
+      assert.notEqual(surviving.signalCode, null);
+      assert.equal(unowned.signalCode, null);
       assert.equal(report.signaledCount, 1);
       assert.equal(report.timedOut, false);
       assert.equal(report.diagnostics[0].label, "owned");
     } finally {
       await stopFixture(unowned, unownedOriginalKill);
     }
+  });
+
+  it("does not let metadata label coercion reenter cleanup and create a child afterward", async () => {
+    const owner = createTrackedProcessCleanup({ diagnostic: () => {} });
+    let coercionCalls = 0;
+    let reentrantCleanup;
+    const metadata = {
+      label: {
+        toString() {
+          coercionCalls += 1;
+          reentrantCleanup = owner.cleanup();
+          return "reentrant";
+        },
+      },
+    };
+
+    assert.throws(
+      () => owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], {}, metadata),
+      /cleanup has started/u,
+    );
+    assert.equal(coercionCalls, 1);
+    const report = await reentrantCleanup;
+    assert.equal(report.signaledCount, 0);
+    assert.deepEqual(report.diagnostics, []);
   });
 
   it("rejects detached creation before spawn and exposes no group signaling API", () => {
@@ -79,24 +108,42 @@ describe("tracked process cleanup", () => {
     failed.on("error", () => {});
     await new Promise((resolve) => failed.once("close", resolve));
 
-    const falseChild = await spawned(owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], {}, { label: "false" }));
+    const falseChild = await spawned(spawnWithCapturedKill(
+      owner,
+      () => false,
+      process.execPath,
+      ["-e", SLEEP_SCRIPT],
+      {},
+      { label: "false" },
+    ));
     const falseOriginalKill = falseChild.kill.bind(falseChild);
-    falseChild.kill = () => false;
 
-    const thrownChild = await spawned(owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], {}, { label: "throw" }));
+    const thrownChild = await spawned(spawnWithCapturedKill(
+      owner,
+      () => {
+        const error = new Error("x".repeat(500));
+        error.code = "UNSUPPORTED";
+        throw error;
+      },
+      process.execPath,
+      ["-e", SLEEP_SCRIPT],
+      {},
+      { label: "throw" },
+    ));
     const thrownOriginalKill = thrownChild.kill.bind(thrownChild);
-    thrownChild.kill = () => {
-      const error = new Error("x".repeat(500));
-      error.code = "UNSUPPORTED";
-      throw error;
-    };
 
-    const racedChild = await spawned(owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT], {}, { label: "race" }));
+    const racedChild = await spawned(spawnWithCapturedKill(
+      owner,
+      function raceSignal() {
+        this.emit("exit", 0, null);
+        return false;
+      },
+      process.execPath,
+      ["-e", SLEEP_SCRIPT],
+      {},
+      { label: "race" },
+    ));
     const racedOriginalKill = racedChild.kill.bind(racedChild);
-    racedChild.kill = () => {
-      racedChild.emit("exit", 0, null);
-      return false;
-    };
 
     try {
       const report = await owner.cleanup();
@@ -117,9 +164,8 @@ describe("tracked process cleanup", () => {
 
   it("uses one short deadline and supports concurrent, repeated cleanup", async () => {
     const owner = createTrackedProcessCleanup({ timeoutMs: 15, diagnostic: () => {} });
-    const child = await spawned(owner.spawn(process.execPath, ["-e", SLEEP_SCRIPT]));
+    const child = await spawned(spawnWithCapturedKill(owner, () => false, process.execPath, ["-e", SLEEP_SCRIPT]));
     const originalKill = child.kill.bind(child);
-    child.kill = () => false;
     const started = Date.now();
 
     try {
@@ -145,14 +191,15 @@ describe("tracked process cleanup", () => {
 
     try {
       for (let index = 0; index < 11; index += 1) {
-        const child = await spawned(owner.spawn(
+        const child = await spawned(spawnWithCapturedKill(
+          owner,
+          () => false,
           process.execPath,
           ["-e", SLEEP_SCRIPT, secretArg],
           { env: { ...process.env, PROCESS_CLEANUP_SECRET: secretEnv } },
           { label: `${index}-${"l".repeat(300)}` },
         ));
         const originalKill = child.kill.bind(child);
-        child.kill = () => false;
         fixtures.push([child, originalKill]);
       }
 
