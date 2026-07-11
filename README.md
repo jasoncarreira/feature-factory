@@ -1,14 +1,18 @@
 # opencode-feature-factory
 
-Hybrid opencode plugin plus CLI for a durable, scriptable feature workflow.
+Hybrid opencode server plugin, separately importable TUI registration object, and CLI for a durable, scriptable feature workflow.
 
 It ships:
 
 - `/feature` command registration for opencode.
-- A TUI sidebar panel that monitors active local factory runs.
+- A separately importable TUI sidebar registration object that can monitor local factory runs when loaded by a compatible host.
 - Feature-factory skill docs and control-plane schema.
-- Specialized subagents for story, research, spec, decomposition, build, tests, review, and validation.
+- Twelve specialized subagents for story, research, spec, decomposition, build, tests, review, and validation, coordinated by one primary `feature-factory` agent.
 - A `feature-factory` CLI with install/doctor commands and local factory state helpers.
+
+## Documentation Status
+
+This README is the current packaged operator contract. The repository-only [contributor](CONTRIBUTING.md), [release](RELEASING.md), and [change](CHANGELOG.md) guides are current companion documentation but are not included in the published package. `SPEC.md` is proposed/internal planning, not implemented operator guidance. `DOGFOOD-LEARNINGS.md`, `RUN-LATENCY-FINDINGS.md`, and `SIMPLIFICATION.md` are historical or retrospective records, not the current contract. Protected backlog and extraction notes such as `TODO.md` and `EXTRACTION-SPEC.md` are also non-authoritative for current behavior.
 
 ## Trust Model
 
@@ -20,7 +24,7 @@ Active guarantees:
 - Semantic manifest writes go through locked transition helpers so stale writers fail instead of overwriting newer state. `transitionGateDecision` owns approved gate writes, and `transitionPrCreated` owns completed PR state writes.
 - Pending gates include `pending_snapshot` entries for `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer material. Gate answer consumption fails closed if current refs are missing, escaped, stale, or hash-mismatched.
 - Detached opencode processes are cancellable only when they have run-scoped evidence from a known explicit run id: `$RUN/process.json` points at one verified process identity and `$RUN/processes/<timestamp>.log` records stdout/stderr. Run-owned detached launches fail before writing `process.json` if live process identity cannot be verified. `factory cancel` sends a single targeted `SIGTERM` only when that evidence validates; missing, invalid, stale, mismatched, or non-running evidence returns a fail-closed response and sends no signal. There is no broad process kill, process-group kill, `pkill`, or `killall` fallback.
-- PR URLs are written only through `feature-factory factory pr-created ...`, which checks `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and a canonical GitHub PR URL before updating `run.pr_url` and `terminal_result.pr_url`.
+- PR URLs are written only through the fenced `feature-factory factory pr-created ... --fence-token TOKEN` transition, which checks `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, a canonical GitHub PR URL, and the current fence before updating `run.pr_url` and `terminal_result.pr_url`.
 - Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and configured PR checks.
 - `run.json.debug_snapshot` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
 - `run.json.cost_attribution` is diagnostic-only local current-run usage/cost attribution. It is not billing authority, invoice data, quota enforcement, or cross-run chargeback state. It records provider-supplied usage and cost metadata only; the factory does not maintain pricing tables, call pricing APIs, estimate missing costs, or coerce missing usage/cost to zero.
@@ -33,7 +37,7 @@ Limits:
 
 ## Install
 
-Install the published package and register both the server plugin and TUI sidebar with opencode:
+Install the published package and its `feature-factory` bin globally, then add the package plugin spec to the user config:
 
 ```sh
 npm install -g opencode-feature-factory
@@ -41,7 +45,9 @@ feature-factory install
 feature-factory doctor
 ```
 
-Restart opencode after installation. Config and TUI plugins are loaded at startup.
+`npm install -g` installs the package; it does not edit opencode configuration. `feature-factory install` updates `~/.config/opencode/opencode.jsonc` with one package plugin entry. It preserves unrelated values and existing tuple options, and an already matching registration is idempotent. JSONC input is serialized as formatted strict JSON, so comments and trailing commas are not preserved. Shadowing files under `~/.config/opencode/agent/`, `~/.config/opencode/agents/`, `~/.config/opencode/skill/`, or `~/.config/opencode/skills/` produce warnings only and are not changed.
+
+The installer does not add a second, independent TUI registration. The package has a separately importable TUI object, but this repository does not prove host discovery or automatic TUI activation. Restart opencode after installation or after resolving a shadowing warning; config and plugin code are loaded at startup.
 
 ## Install Locally
 
@@ -53,18 +59,20 @@ feature-factory install --local
 feature-factory doctor --local
 ```
 
+`install --local` writes a `file://` URL for the package root and can upgrade the legacy local `src/plugin.js` registration. It has the same preservation, strict-JSON rewrite, idempotence, warning, single-entry, and restart behavior as the global configuration command.
+
 Then restart opencode. Config is loaded at startup.
 
-Local installs configure the package root, not `src/plugin.js`, so opencode can discover both the server plugin and the TUI sidebar export.
+Local installs configure the package root, not `src/plugin.js`, so the package entry points remain available. The verified contract is still one config entry plus a separately importable TUI export, not automatic TUI activation.
 
 ## Package Surface
 
 The published package exposes only the release-supported entry points declared in `package.json`:
 
-- `import "opencode-feature-factory"` and `import "opencode-feature-factory/server"` load the server plugin registration.
-- `import "opencode-feature-factory/tui"` loads the generated TUI sidebar module from `dist/tui.js`.
-- The `feature-factory` bin runs the CLI.
-- `import "opencode-feature-factory/cli"` remains available as the existing CLI subpath.
+- Package root `.` and `./server` resolve to `./src/plugin.js`, the server plugin registration (`import "opencode-feature-factory"` or `import "opencode-feature-factory/server"`).
+- `./tui` resolves to the generated `./dist/tui.js` module (`import "opencode-feature-factory/tui"`).
+- `./cli` resolves to `./src/cli.js` (`import "opencode-feature-factory/cli"`).
+- The `feature-factory` bin resolves to `src/cli.js`.
 
 `dist/` is generated during packing and included in the published files; it is not edited or committed as source.
 
@@ -84,6 +92,16 @@ npm run check
 
 Package smoke intentionally avoids launching interactive opencode. It checks deterministic package and registration surfaces only, so failures point to publish/install/export regressions rather than interactive terminal state.
 
+### Node and CI support
+
+The published package supports Node `>=20`. Repository tooling selects Node `24.11.1`; CI runs `npm ci` and `npm run check` on Node 22 and 24, while publication uses Node 24. Node 20 is supported by the package but is not a CI matrix version. See [CONTRIBUTING.md](CONTRIBUTING.md) for repository setup and check details.
+
+### Release workflow
+
+Publication is tag-driven only. Pushing `v<package.json version>` (for package version `0.2.0`, `v0.2.0`) triggers the workflow, which checks out that pushed tag, selects Node 24, runs `npm ci`, enforces exact equality between the tag and `v${package.json.version}`, runs `npm run check`, and then runs `npm publish`. The publish job uses the `npm` environment and `id-token: write` for trusted publication.
+
+The workflow does not publish from a branch or manual dispatch, and it does not bump the version, create or push the tag, generate a changelog, push commits, or create a GitHub Release. Operators own those preparatory actions. See [RELEASING.md](RELEASING.md) for the repository release guide and [CHANGELOG.md](CHANGELOG.md) for the verified 0.2.0 surface record.
+
 ## Local Diagnostics
 
 Use doctor checks when diagnosing a developer machine or local opencode install; keep them separate from release gates because they depend on local tools, config, credentials, and repository state:
@@ -101,6 +119,8 @@ npm run doctor:local
 ```text
 /feature APP-123 add the missing approval workflow
 ```
+
+The server plugin registers `/feature`, one primary `feature-factory` agent, 12 specialized subagents, and the packaged feature skill at `assets/skills/feature/SKILL.md`. The separately importable TUI module default-exports an object with ID `opencode-feature-factory` and one `sidebar_content` slot at order `450`; importing or installing that export is not a promise that an opencode host automatically discovers or activates it.
 
 ### Workflow Depth
 
@@ -208,7 +228,7 @@ Limitations: this catches only git-visible changes in the reviewed worktree afte
 
 For serious feature-factory runs, use the strongest model/effort where architectural mistakes are most expensive: planning, decomposition, review, and final validation. Builders should still run strong, but story normalization and acceptance-test writing can usually run lower.
 
-Recommended exact-agent mapping. These model IDs are registered by the OpenAI provider; if your provider exposes different IDs, keep the same agent/variant shape and adjust only the model strings.
+Recommended opt-in exact-agent mapping. The package supplies no model or variant defaults, and external model availability is not guaranteed. If your provider exposes different IDs, keep the same agent/variant shape and adjust only the model strings.
 
 ```jsonc
 {
@@ -237,30 +257,35 @@ Recommended exact-agent mapping. These model IDs are registered by the OpenAI pr
 }
 ```
 
-Resolved agent profile:
+Canonical resolved recommendation (the package does not apply these as defaults):
 
-| Agents | Model | Variant |
+| Agent | Model | Variant |
 |---|---|---|
-| `story-reader`, `story-writer` | `gpt-5.4` | `medium` |
-| `codebase-researcher` | `gpt-5.5` | `high` |
-| `design-interpreter` | `gpt-5.5` | `high` |
-| `feature-factory`, `spec-writer`, `work-decomposer` | `gpt-5.5` | `xhigh` |
-| `backend-builder`, `frontend-builder` | `gpt-5.4` | `xhigh` |
-| `test-verifier` | `gpt-5.4` | `medium` |
-| `work-reviewer`, `implementation-validator` | `gpt-5.5` | `xhigh` |
-| `security-reviewer` | `gpt-5.5` | `high` |
+| `feature-factory` | `openai/gpt-5.6-sol` | `xhigh` |
+| `backend-builder` | `openai/gpt-5.6-sol` | `high` |
+| `codebase-researcher` | `openai/gpt-5.6-terra` | `high` |
+| `design-interpreter` | `openai/gpt-5.6-sol` | `high` |
+| `frontend-builder` | `openai/gpt-5.6-sol` | `high` |
+| `implementation-validator` | `openai/gpt-5.6-sol` | `xhigh` |
+| `security-reviewer` | `openai/gpt-5.6-sol` | `xhigh` |
+| `spec-writer` | `openai/gpt-5.6-sol` | `xhigh` |
+| `story-reader` | `openai/gpt-5.6-luna` | `medium` |
+| `story-writer` | `openai/gpt-5.6-sol` | `high` |
+| `test-verifier` | `openai/gpt-5.6-terra` | `high` |
+| `work-decomposer` | `openai/gpt-5.6-sol` | `xhigh` |
+| `work-reviewer` | `openai/gpt-5.6-sol` | `high` |
 
 Rationale:
 
 - Planning/decomposition needs the highest reasoning budget because it determines architecture, slice boundaries, dependencies, and merge safety.
 - Review/validation also needs the highest budget because it catches cross-slice correctness gaps before PR creation.
-- Security review is isolated as its own profile so teams can tune adversarial review cost separately. Use `high` by default and raise to `xhigh` for high-risk auth, permission, prompt-injection, shell, SQL, or dependency changes.
+- Security review is isolated as its own profile so teams can tune adversarial review cost separately; the canonical recommendation uses `xhigh`.
 - Builders benefit from high effort but can usually use a slightly cheaper model because the brief and slice spec constrain the work.
-- Story reading/writing and acceptance-test authoring are important but narrower, so medium effort is usually sufficient.
+- Story reading is narrower and uses Luna/medium; story writing uses Sol/high, while test verification uses Terra/high. Exact overrides are required because a role-only `story` profile cannot reproduce the two story-agent recommendations.
 
 ### Anthropic Profile
 
-This profile uses Sonnet for implementation/research/test work and Opus for high-judgment planning, decomposition, design interpretation, review, and validation. Because `story-reader` and `story-writer` use different strengths in this setup, it uses exact agent overrides instead of only role keys.
+This operator-authored example uses Sonnet for implementation/research/test work and Opus for high-judgment planning, decomposition, design interpretation, review, and validation. It is not discovered provider output or an availability guarantee. Because `story-reader` and `story-writer` use different strengths in this setup, it uses exact agent overrides instead of only role keys.
 
 Adjust model IDs to the Anthropic models available in your opencode installation.
 
@@ -337,6 +362,8 @@ Run autonomously through the factory's own reviewed gates and open a PR when saf
 feature-factory factory start --repo /path/to/repo --autonomous "APP-123 add the missing approval workflow"
 ```
 
+`factory start --dry-run` is unsupported. It is rejected before opencode launch, skill seeding, factory or worktree creation, process-state creation, detached logging, `.git/info/exclude` changes, or any other repository side effect in foreground, headless, autonomous, and detached modes. Dry-run support on commands such as `factory resume` and `factory cleanup` is command-specific and does not make start dry-run valid.
+
 Check or recover a disrupted resume before launching opencode:
 
 ```sh
@@ -371,7 +398,9 @@ Cancel a detached run before queueing interrupt steering:
 feature-factory factory cancel <run-id> --json
 ```
 
-`factory cancel` is evidence-bound and fail-closed. On valid running `process.json` identity it sends exactly one `SIGTERM` to the recorded PID, marks `process.json.state` as `cancelled`, and returns `ok:true`, `status:"cancelled"`, `signal:"SIGTERM"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. If `process.json` is missing, invalid, stale, mismatched, already non-running, or the signal fails, it returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, a `reason`, and no broad process kill, process-group signal, `pkill`, or `killall` fallback is attempted.
+`factory cancel` is evidence-bound and fail-closed. On valid running `process.json` identity it sends exactly one `SIGTERM` to the recorded PID and waits briefly to verify exit. Only verified exit changes `process.json.state` to `cancelled` and returns `ok:true`, `status:"cancelled"`, `signal:"SIGTERM"`, `process_ref:"process.json"`, `signaled:true`, and `updated:true`. If the process remains alive, the response is `ok:false`, `status:"cancel-pending"`, `signaled:true`, and `updated:true`; process state remains `running`, pending request metadata is recorded under `process.json.cancel`, and the operator should rerun cancel to confirm exit or stop the process manually. This never fails open into a concurrent relaunch.
+
+If `process.json` is missing, invalid, stale, mismatched, already non-running without a confirmable cancellation, or the signal fails, cancel returns `ok:false`, `status:"failed-closed"`, `signaled:false`, `updated:false`, and a `reason`. Neither pending nor failed-closed handling attempts a second or broad signal, process-group signal, `pkill`, or `killall` fallback.
 
 `factory cancel` updates only the process sidecar (`$RUN/process.json`). It is not a semantic `run.json` state transition and does not approve gates, change slices, write verdicts, or terminalize the run.
 
@@ -402,14 +431,18 @@ feature-factory factory watch <run-id>
 feature-factory factory watch --all
 feature-factory factory validate <run-id>
 feature-factory factory env
+feature-factory factory provenance
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
 feature-factory factory cancel <run-id> --json
 feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json
 feature-factory factory cost-record <run-id> --agent AGENT --step STEP --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
 feature-factory factory cost-report <run-id> [--json] [--telemetry]
-feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --json
+feature-factory factory pr-fence <run-id> --json
+feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN --json
 ```
+
+`factory provenance` is the help-advertised compatibility alias for the diagnostic `factory env` command; neither is workflow authority.
 
 `factory status`, `factory answer`, and `factory validate` apply code-level schema validation to `run.json`; `factory validate` also validates `plan/slices.json` when present. Invalid runs appear as `invalid` in `factory list` instead of crashing the whole list.
 
@@ -470,9 +503,9 @@ feature-factory factory cleanup <run-id> --dry-run
 feature-factory factory cleanup <run-id>
 ```
 
-Cleanup removes `.opencode/factory/<run-id>`, recorded worktrees under `.opencode/worktrees/`, and recorded local branches. It only runs for terminal statuses (`completed`, `blocked`, `partial`, or `needs-human`) unless `--force` is supplied. Cleanup refuses to remove run directories outside `.opencode/factory`. Unmerged branches are preserved unless `--force` is supplied. Use `--dry-run` first when you want to preview what would be removed.
+Cleanup removes `.opencode/factory/<run-id>`, recorded worktrees under `.opencode/worktrees/`, and recorded local branches. For a run with `run.json`, it only runs for terminal statuses (`completed`, `blocked`, `partial`, or `needs-human`) unless `--force` is supplied. One narrow pre-manifest exception handles a detached launch that died before writing `run.json`: a run directory containing process evidence may be removed when that evidence is not `running`; running evidence is refused with an instruction to cancel first. Cleanup refuses to remove run directories outside `.opencode/factory`. Unmerged branches are preserved unless `--force` is supplied. Use `--dry-run` first when you want to preview what would be removed.
 
-When opencode is running in the TUI on a session route, the sidebar also shows a `Feature Factory` panel for runs found under `.opencode/factory/*/run.json` in the current session directory or any nested repo below it. It lists active runs across those repos, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden except for the most recent completed run. Directly under the panel header, the muted refresh diagnostic label `sidebar vN · plugin changes need TUI restart` shows the current sidebar data version; run discovery still uses the existing 30s root-cache TTL. An already-open opencode TUI process can keep rendering stale Feature Factory sidebar data after the plugin bundle changes, so restart or reload the TUI to pick up plugin changes.
+When a compatible opencode host loads the separate TUI export on a session route, its observational `Feature Factory` panel reads runs under `.opencode/factory/*/run.json` in the current session directory or nested repos below it. It refreshes data every 5 seconds, caches root discovery for 30 seconds, scans at most 2,000 directories, and displays at most three run rows. It lists active runs across those repos, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden except for the most recent completed run. Directly under the panel header, the muted refresh diagnostic label `sidebar vN · plugin changes need TUI restart` shows the current sidebar data version. An already-open opencode TUI process can keep rendering stale Feature Factory sidebar data after the plugin bundle changes, so restart or reload the TUI to pick up plugin changes. Package installation alone does not prove that a host discovers or automatically activates this export.
 
 For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url` only through the `pr-created` transition.
 
@@ -487,17 +520,28 @@ feature-factory factory env record-resume <run-id> --json
 
 These commands update `run.json.debug_snapshot.created_with`, `last_resumed_with`, and `resume_count` using redacted diagnostic-only snapshots. They must not persist raw token-shaped or high-entropy credentials such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, or `xoxb_*`.
 
-After Gate 3 and successful PR creation, the normal flow is to record the PR through the checked transition instead of editing the manifest directly:
+After the final steering drain/checkpoint, Gate 3 approval, final push, and PR metadata preparation, establish the checked fence before creating the external PR:
+
+```sh
+feature-factory factory pr-fence <run-id> --json
+gh pr create ...
+gh pr view <url>
+```
+
+The fence response supplies `fence.token`. Fence creation rechecks canonical PR readiness under the run lock and blocks new steering and every other `run.json` writer so the checked state cannot churn between external creation and recording. After creating the PR, verify it with `gh pr view <url>`, then record it instead of editing the manifest directly:
 
 ```sh
 feature-factory factory pr-created <run-id> \
   --pr-url URL \
   --pr-number N \
   --repository OWNER/REPO \
+  --fence-token TOKEN \
   --json
 ```
 
-Verify the created PR first with `gh pr view <url>`. The command checks the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, and a canonical GitHub PR URL. Only then does it write `run.pr_url`, `status: completed`, and `terminal_result.pr_url`.
+`factory pr-created` rejects a missing, mismatched, or stale fence. It checks the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, canonical GitHub PR URL, and unchanged fenced state. Only then does it atomically clear the fence and write `run.pr_url`, `status: completed`, and `terminal_result.pr_url`.
+
+Before an external PR exists, or after `gh pr create` definitively fails without creating one, clear the exact fence with `feature-factory factory pr-fence <run-id> --clear --fence-token TOKEN --json`. After an external PR exists, never clear the fence: keep the token and recover by recording that PR with `factory pr-created`. Treat fenced creation and immediate recording as one logical operation; do not insert another steering drain after the PR exists.
 
 `factory pr-created` records ready-for-review PRs by default. Pass `--draft` only when the effective PR mode intentionally created a draft PR.
 
@@ -655,7 +699,7 @@ feature-factory doctor --telemetry
 
 It checks opencode run support, plugin registration, command/agent/skill registration, provider auth visibility, `HOME`, `git`, `gh`, base branch detection, and whether `.opencode/factory/` / `.opencode/worktrees/` are gitignored.
 
-`--provider-smoke` runs a lightweight opencode call for each configured model provider. Use it when you want stronger credential validation and accept that it may consume model quota.
+`--provider-smoke` is accepted by the CLI but omitted from the current help text. It runs a real `opencode run` in the selected working directory, with a 30-second default timeout, once per distinct resolved model string—not once per provider or agent. These calls can consume quota or incur cost. A success is point-in-time evidence that invocation and authentication worked for that model; it is not a deterministic release check and does not guarantee future credentials, model availability, capacity, or provider service.
 
 ### Telemetry readiness and trace propagation
 
