@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -77,6 +77,37 @@ describe("resolved model provenance", () => {
       if (prevFile !== undefined) process.env.OPENCODE_CONFIG = prevFile;
       rmSync(dirOverride, { recursive: true, force: true });
       rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the global profile when OPENCODE_CONFIG_DIR contributes unrelated settings", async () => {
+    const dirOverride = mkdtempSync(join(tmpdir(), "ff-env-dir-"));
+    const configHome = mkdtempSync(join(tmpdir(), "ff-env-global-"));
+    const emptyCwd = mkdtempSync(join(tmpdir(), "ff-env-cwd-"));
+    const globalDir = join(configHome, "opencode");
+    mkdirSync(globalDir);
+    writeFileSync(join(dirOverride, "opencode.jsonc"), JSON.stringify({ theme: "system" }), "utf8");
+    writeFileSync(join(globalDir, "opencode.jsonc"), JSON.stringify({ plugin: [["opencode-feature-factory", { profiles: { "work-decomposer": { model: "openai/global-profile", variant: "xhigh" } } }]] }), "utf8");
+    const prevDir = process.env.OPENCODE_CONFIG_DIR;
+    const prevFile = process.env.OPENCODE_CONFIG;
+    const prevXdg = process.env.XDG_CONFIG_HOME;
+    process.env.OPENCODE_CONFIG_DIR = dirOverride;
+    process.env.XDG_CONFIG_HOME = configHome;
+    delete process.env.OPENCODE_CONFIG;
+    try {
+      const env = await collectEnv({ pluginOptions: {}, cwd: emptyCwd });
+      assert.equal(env.resolved_from, "opencode-config");
+      assert.equal(env.resolved_models["work-decomposer"], "openai/global-profile");
+    } finally {
+      if (prevDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+      else process.env.OPENCODE_CONFIG_DIR = prevDir;
+      if (prevFile === undefined) delete process.env.OPENCODE_CONFIG;
+      else process.env.OPENCODE_CONFIG = prevFile;
+      if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdg;
+      rmSync(dirOverride, { recursive: true, force: true });
+      rmSync(configHome, { recursive: true, force: true });
+      rmSync(emptyCwd, { recursive: true, force: true });
     }
   });
 

@@ -91,8 +91,8 @@ export function readConfiguredPluginOptions(cwd = process.cwd(), { configPath } 
 //   2. project `opencode.json[c]` walked up from cwd (nearest first), which opencode
 //      layers over the default global config.
 //   3. the global config file: the OPENCODE_CONFIG override when set, otherwise the
-//      XDG (or ~/.config) default — skipped when OPENCODE_CONFIG_DIR already supplied
-//      the config directory.
+//      XDG (or ~/.config) default. OPENCODE_CONFIG_DIR layers over this file rather
+//      than replacing it.
 // First layer that actually carries feature-factory profiles wins, so `resolved_*`
 // mirrors what the launched CLI applies rather than a lower-precedence layer.
 function opencodeConfigCandidates(cwd = process.cwd()) {
@@ -111,7 +111,7 @@ function opencodeConfigCandidates(cwd = process.cwd()) {
   const fileOverride = process.env.OPENCODE_CONFIG;
   if (stringValue(fileOverride)) {
     candidates.push(fileOverride.trim());
-  } else if (!stringValue(dirOverride)) {
+  } else {
     const configHome = stringValue(process.env.XDG_CONFIG_HOME) ? process.env.XDG_CONFIG_HOME.trim() : join(homedir(), ".config");
     for (const name of ["opencode.jsonc", "opencode.json"]) candidates.push(join(configHome, "opencode", name));
   }
