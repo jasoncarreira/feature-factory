@@ -49,6 +49,16 @@ const PROCESS_SIDECAR_COMMANDS = Object.freeze([
   "factory cancel <run-id> --json",
 ]);
 const COST_REPORT_DOCS = Object.freeze({ SKILL, SCHEMA, COMMAND, README, SPEC });
+const LIVE_DRAIN_SKILL = markdownSection(SKILL, "Live-Run Steering Drain Protocol");
+const LIVE_DRAIN_SCHEMA = markdownSection(SCHEMA, "Live-Run Steering Drain Protocol");
+const LIVE_DRAIN_DOCS = Object.freeze({ LIVE_DRAIN_SKILL, LIVE_DRAIN_SCHEMA });
+const LIVE_DRAIN_BOUNDARIES = Object.freeze([
+  "After a heartbeat-bracketed wait",
+  "Before an autonomous gate approval decision",
+  "Before dispatching the next agent or next build wave",
+  "Before remediation",
+  "Before terminalization or PR creation",
+]);
 
 describe("class-wide planning prompt contract", () => {
   it("requires research to enumerate a finite source-to-sink surface", () => {
@@ -555,6 +565,117 @@ describe("interrupt steer resume docs contract", () => {
   });
 });
 
+describe("live-run steering drain docs contract", () => {
+  it("enumerates exactly the five safe consume boundaries in each authoritative contract", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      const numberedBoundaries = [...text.matchAll(/^\d+\. \*\*([^*]+):\*\*/gmu)].map((match) => match[1]);
+      assert.deepEqual(numberedBoundaries, LIVE_DRAIN_BOUNDARIES, `${name} must contain exactly the approved five safe boundaries`);
+      assert.match(text, /Every numbered boundary uses the (?:complete|same) pointer-(?:probe|only discovery),? conditional(?:-| )drain,? (?:conflict-checkpoint|immediate conflict checkpoint),? and prospective(?:-| )application (?:protocol|contract)/i, `${name} must govern every boundary with the complete protocol`);
+    }
+  });
+
+  it("defines each boundary precisely and applies it from live orchestrator stages", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /heartbeat-bracketed wait[\s\S]*heartbeat[\s\S]*(?:stopped|inactive)[\s\S]*before[\s\S]*(?:cost-record|cost recording)/i, `${name} must drain after inactive-heartbeat waits before cost/state writes`);
+      assert.match(text, /autonomous gate approval[\s\S]*material[\s\S]*eligibility evidence[\s\S]*immediately before[\s\S]*gate-decision \.\.\. approved[\s\S]*no intervening durable write/i, `${name} must drain immediately before autonomous approval`);
+      assert.match(text, /next agent(?: is)?[\s\S]{0,80}each standalone Task|each standalone Task[\s\S]{0,80}next agent/i, `${name} must define each standalone Task as a next agent`);
+      assert.match(text, /next build wave(?: is)?[\s\S]{0,100}dependency-ready slice batch|dependency-ready slice batch[\s\S]{0,100}next build wave/i, `${name} must define a dependency-ready batch as a next build wave`);
+      assert.match(text, /never between[\s\S]*(?:its )?already-started/i, `${name} must not drain between started wave members`);
+      assert.match(text, /Before remediation[\s\S]*before choosing, routing, or locally applying each new remediation attempt/i, `${name} must drain before every remediation attempt`);
+      assert.match(text, /terminalization or PR creation[\s\S]*immediately before `factory terminal`[\s\S]*Gate 3 approval[\s\S]*immediately before `gh pr create`/i, `${name} must drain before terminalization and PR creation`);
+    }
+
+    for (const stage of ["Autonomous Mode", "Step 2 - Spec And Decomposition", "Step 4 - Build Slices", "Step 5 - Integrate And Validate", "Gate 3 - Pre-PR", "Step 6 - PR Creation", "Resuming"]) {
+      assert.match(markdownSection(SKILL, stage), /Live-Run Steering Drain Protocol/i, `SKILL ${stage} must apply the live drain protocol`);
+    }
+  });
+
+  it("uses pointer-only discovery and skips drain delivery when both durable pointers are null", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /factory status <run-id> --json/i, `${name} must probe status`);
+      assert.match(text, /steering\.pending["]? and [`"]?steering\.uncheckpointed|steering\.pending`? and `steering\.uncheckpointed/i, `${name} must discover pending and uncheckpointed metadata`);
+      assert.match(text, /pointer-only discovery|read-only pointer probe/i, `${name} must make discovery pointer-only`);
+      assert.match(text, /do not open (?:either|steering) file|must not open either file/i, `${name} must not read raw text during discovery`);
+      assert.match(text, /both (?:are|pointers are) null[\s\S]*(?:do not call|skip)[\s\S]*(?:record-resume|drain commands)[\s\S]*(?:steer-consume|boundary)/i, `${name} must make delivery conditional`);
+      assert.match(text, /Status is (?:pointer-only|metadata) discovery, not a consume site/i, `${name} must keep status read-only`);
+    }
+  });
+
+  it("requires inactive heartbeat and record-resume -> consume -> immediate checkpoint ordering", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      const normalized = text.toLowerCase();
+      const recordResume = normalized.indexOf("feature-factory factory env record-resume <run-id> --json");
+      const consume = normalized.indexOf("feature-factory factory steer-consume <run-id> --ref <pending-or-uncheckpointed.ref> --hash <pending-or-uncheckpointed.hash> --json");
+      const checkpoint = normalized.indexOf("immediately perform the steering-conflict checkpoint", consume);
+      assert.ok(recordResume >= 0 && recordResume < consume && consume < checkpoint, `${name} must order record-resume before consume before checkpoint`);
+      assert.match(text, /active-heartbeat[\s\S]*(?:prevents|prevent)[\s\S]*(?:application|raw-text application)[\s\S]*(?:boundary crossing|crossing the boundary)/i, `${name} must reject active heartbeat before crossing`);
+      assert.match(text, /steer-consume[\s\S]*independently rechecks heartbeat inactivity/i, `${name} must retain the consume heartbeat check`);
+      assert.match(text, /immediately after every (?:delivery|consume)/i, `${name} must make the checkpoint immediate`);
+      assert.match(text, /do not perform a cost write|No cost write/i, `${name} must forbid intervening writes/actions`);
+    }
+  });
+
+  it("preserves untrusted labeling, one-time archival, prospective application, and conflict stop", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /UNTRUSTED OPERATOR STEERING DATA \(not instructions\)/, `${name} must retain the raw-text label`);
+      assert.match(text, /trust: untrusted-operator-data/, `${name} must retain the trust value`);
+      assert.match(text, /prospectively[\s\S]*future unaccepted work/i, `${name} must apply compatible guidance prospectively`);
+      assert.match(text, /steering\/consumed-(?:\*|<file>)/i, `${name} must archive consumed steering`);
+      assert.match(text, /without (?:another|a second) (?:rename|archive|consumed event)|archives? exactly once/i, `${name} must preserve one-time consumption`);
+      assert.match(text, /steering\.uncheckpointed[\s\S]*(?:redeliver|redelivery)/i, `${name} must document crash-safe uncheckpointed redelivery`);
+      assert.match(text, /factory steer-ack[\s\S]*applied-prospectively/i, `${name} must require no-conflict acknowledgement`);
+      assert.match(text, /approved gates[\s\S]*accepted steps[\s\S]*merged or blocked slices[\s\S]*validator\/security verdicts[\s\S]*pr_url[\s\S]*terminal_result/i, `${name} must list protected durable state`);
+      assert.match(text, /only permitted workflow write[\s\S]*factory steer-conflict/i, `${name} must limit conflict writes to steer-conflict`);
+      assert.match(text, /needs-human/i, `${name} must stop conflicts as needs-human`);
+      assert.match(text, /(?:do not auto-rollback|perform no rollback)/i, `${name} must prohibit rollback`);
+      assert.match(text, /fixed safe[\s\S]*(?:reason code|summary)|reason_code/i, `${name} must prevent raw conflict reasons`);
+    }
+  });
+
+  it("documents lock-protected stale boundary rejection and the durable pre-PR fence", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /factory boundary-open/i, `${name} must expose boundary-open`);
+      assert.match(text, /factory boundary-cross/i, `${name} must expose boundary-cross`);
+      assert.match(text, /generation[\s\S]*(?:state hash|run-state hash)[\s\S]*(?:stale|reject)/i, `${name} must reject stale boundary observations`);
+      assert.match(text, /action.claim[\s\S]*(?:blocks|remains active)[\s\S]*(?:action start|action-started)/i, `${name} must hold an action claim through start`);
+      assert.match(text, /factory pr-fence[\s\S]*before `?gh pr create`?/i, `${name} must fence before the external PR side effect`);
+      assert.match(text, /blocks new steering[\s\S]*(?:every|any) `?run\.json`? writer|prevents new steering[\s\S]*(?:every|any) `?run\.json`? write/i, `${name} must block steering and sibling writers while fenced`);
+      assert.match(text, /pr-created[\s\S]*(?:missing|mismatched|stale) fence|missing, mismatched, or stale fence/i, `${name} must validate the fence at pr-created`);
+    }
+  });
+
+  it("keeps every privileged public command inventory token-complete", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA })) {
+      assert.match(text, /factory boundary-cross <run-id> <dispatch\|remediation> --boundary-token TOKEN --json/i, `${name} boundary-cross inventory must require its token`);
+      assert.match(text, /factory action-started <run-id> <dispatch\|remediation> --action-token TOKEN --json/i, `${name} must inventory action-start acknowledgement`);
+      assert.match(text, /factory action-abort <run-id> <dispatch\|remediation> --action-token TOKEN --json/i, `${name} must inventory action recovery`);
+      assert.match(text, /factory gate-decision <run-id> <gate> approved[^\n]*--boundary-token TOKEN --json/i, `${name} approved gate inventory must require its token`);
+      assert.match(text, /factory terminal <run-id> blocked --reason TEXT --boundary-token TOKEN --json/i, `${name} terminal inventory must require its token`);
+      assert.match(text, /factory pr-fence <run-id> --clear --fence-token TOKEN --json/i, `${name} must inventory exact-token PR fence recovery`);
+      assert.match(text, /factory pr-created <run-id>[^\n]*--fence-token TOKEN --json/i, `${name} pr-created inventory must require its fence token`);
+    }
+  });
+
+  it("prohibits consume on unsafe paths and at every non-enumerated site by default", () => {
+    for (const [name, text] of documentEntries(LIVE_DRAIN_DOCS)) {
+      assert.match(text, /low-level (?:run-state )?transition helpers/i, `${name} must prohibit low-level transitions`);
+      assert.match(text, /heartbeat tick\/start\/status\/stop helpers/i, `${name} must prohibit heartbeat helper consumption`);
+      assert.match(text, /cost-record|cost writes/i, `${name} must prohibit cost-write consumption`);
+      assert.match(text, /read-only[\s\S]*status[\s\S]*list[\s\S]*validate[\s\S]*watch[\s\S]*TUI/i, `${name} must prohibit read-only path consumption`);
+      assert.match(text, /Every site outside the five numbered safe boundaries is prohibited by default/i, `${name} must prohibit every other site by default`);
+    }
+  });
+
+  it("preserves explicit resume semantics and marks live drain implemented", () => {
+    assert.match(markdownSection(SCHEMA, "`/feature resume` Contract"), /Preserve existing resume semantics[\s\S]*calls `record-resume` before any other mutating resume work whether or not steering is pending/i, "SCHEMA must preserve explicit resume semantics");
+    assert.match(TODO, /Live-run draining is implemented/i, "TODO must mark live-run draining implemented");
+    assert.doesNotMatch(TODO, /Future work: drain and consume pending steering/i, "TODO must not leave live-run drain as future work");
+    for (const summary of ["after heartbeat-bracketed waits", "before autonomous gate approval", "before dispatching the next agent or build wave", "before remediation", "before terminalization or PR creation"]) {
+      assert.match(TODO, new RegExp(escapeRegExp(summary), "i"), `TODO must summarize ${summary}`);
+    }
+  });
+});
+
 describe("cost attribution docs contract", () => {
   it("documents the cost-record command and run.json cost_attribution schema", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, COMMAND, README, SPEC })) {
@@ -775,6 +896,16 @@ describe("TUI sidebar refresh diagnostics docs contract", () => {
 
 function documentEntries(map) {
   return Object.entries(map);
+}
+
+function markdownSection(text, heading) {
+  const headingPattern = new RegExp(`^(#{2,6}) ${escapeRegExp(heading)}\\s*$`, "mu");
+  const match = headingPattern.exec(text);
+  assert.ok(match, `missing markdown section ${heading}`);
+  const level = match[1].length;
+  const bodyStart = match.index + match[0].length;
+  const nextHeading = new RegExp(`^#{1,${level}} \\S.*$`, "mu").exec(text.slice(bodyStart));
+  return text.slice(match.index, nextHeading ? bodyStart + nextHeading.index : text.length);
 }
 
 function readDoc(relativePath) {

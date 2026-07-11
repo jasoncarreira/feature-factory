@@ -10,8 +10,9 @@ const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_ha
 const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "summary", "required_fixes", "source", "verdict"]);
 const CONTINUATION_TARGET_KEYS = new Set(["run_id", "branch", "worktree", "base_ref", "base_commit"]);
 const CONTINUATION_REF_KEYS = new Set(["kind", "ref", "hash"]);
-const STEERING_KEYS = new Set(["schema_version", "kind", "run_id", "pending", "consume", "raw_message_included"]);
+const STEERING_KEYS = new Set(["schema_version", "kind", "run_id", "pending", "uncheckpointed", "consume", "raw_message_included"]);
 const STEERING_PENDING_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at"]);
+const STEERING_UNCHECKPOINTED_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at", "consumed_at"]);
 const STEERING_CONSUME_KEYS = new Set(["command", "args"]);
 const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice"]);
 const CONTINUATION_ARTIFACT_KINDS = new Map([
@@ -122,24 +123,28 @@ function normalizeSteering(steering, runId) {
   if (runId !== steering.run_id.trim()) return { ok: false, reason: "run-id-mismatch" };
 
   const pending = steering.pending ?? null;
+  const uncheckpointed = steering.uncheckpointed ?? null;
   const consume = steering.consume ?? null;
-  if (pending === null || consume === null) {
-    if (pending !== null || consume !== null) return { ok: false, reason: "incomplete-steering-pointer" };
-    return { ok: true, value: { schema_version: 1, kind: "operator-steering-pointer", run_id: runId, pending: null, consume: null, raw_message_included: false } };
+  if (pending !== null && uncheckpointed !== null) return { ok: false, reason: "ambiguous-steering-pointer" };
+  const pointer = pending || uncheckpointed;
+  if (pointer === null || consume === null) {
+    if (pointer !== null || consume !== null) return { ok: false, reason: "incomplete-steering-pointer" };
+    return { ok: true, value: { schema_version: 1, kind: "operator-steering-pointer", run_id: runId, pending: null, uncheckpointed: null, consume: null, raw_message_included: false } };
   }
-  if (!plainObject(pending) || !hasOnlyKeys(pending, STEERING_PENDING_KEYS) || !plainObject(consume) || !hasOnlyKeys(consume, STEERING_CONSUME_KEYS)) {
+  const pointerKeys = pending ? STEERING_PENDING_KEYS : STEERING_UNCHECKPOINTED_KEYS;
+  if (!plainObject(pointer) || !hasOnlyKeys(pointer, pointerKeys) || !plainObject(consume) || !hasOnlyKeys(consume, STEERING_CONSUME_KEYS)) {
     return { ok: false, reason: "invalid-steering-pointer" };
   }
 
   try {
-    validateRun({ schema_version: 1, run_id: runId, status: "running", gates: {}, steering: { schema_version: 1, pending, history: [] } });
+    validateRun({ schema_version: 1, run_id: runId, status: "running", gates: {}, steering: { schema_version: 1, pending, uncheckpointed, history: [] } });
   } catch {
     return { ok: false, reason: "invalid-steering-pending" };
   }
-  if (!safePendingRef(pending.ref) || consume.command !== "feature-factory" || !Array.isArray(consume.args)) {
+  if (!(pending ? safePendingRef(pointer.ref) : safeConsumedRef(pointer.ref)) || consume.command !== "feature-factory" || !Array.isArray(consume.args)) {
     return { ok: false, reason: "invalid-steering-consume" };
   }
-  const expectedArgs = ["factory", "steer-consume", runId, "--ref", pending.ref, "--hash", pending.hash, "--json"];
+  const expectedArgs = ["factory", "steer-consume", runId, "--ref", pointer.ref, "--hash", pointer.hash, "--json"];
   if (consume.args.length !== expectedArgs.length || consume.args.some((item, index) => item !== expectedArgs[index])) {
     return { ok: false, reason: "invalid-steering-consume" };
   }
@@ -150,7 +155,8 @@ function normalizeSteering(steering, runId) {
       schema_version: 1,
       kind: "operator-steering-pointer",
       run_id: runId,
-      pending: { id: pending.id, ref: pending.ref, hash: pending.hash, message_chars: pending.message_chars, created_at: pending.created_at },
+      pending: pending ? { id: pending.id, ref: pending.ref, hash: pending.hash, message_chars: pending.message_chars, created_at: pending.created_at } : null,
+      uncheckpointed: uncheckpointed ? { id: uncheckpointed.id, ref: uncheckpointed.ref, hash: uncheckpointed.hash, message_chars: uncheckpointed.message_chars, created_at: uncheckpointed.created_at, consumed_at: uncheckpointed.consumed_at } : null,
       consume: { command: "feature-factory", args: expectedArgs },
       raw_message_included: false,
     },
@@ -274,6 +280,10 @@ function normalizedRefHash(item) {
 
 function safePendingRef(value) {
   return safeRelativeRef(value, "steering/") && /^steering\/pending-[^/]+\.json$/u.test(value);
+}
+
+function safeConsumedRef(value) {
+  return safeRelativeRef(value, "steering/") && /^steering\/consumed-[^/]+\.json$/u.test(value);
 }
 
 function validContinuationReviewSource(kind, source) {
