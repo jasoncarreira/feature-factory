@@ -8,27 +8,37 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const helperPath = resolve(repositoryRoot, "test/helpers/git-fixture.js");
 const JavaScriptExtensions = new Set([".js", ".mjs", ".cjs"]);
 const childProcessSpecifiers = new Set(["child_" + "process", "node:" + "child_process"]);
+const commentGap = String.raw`(?:\s|\/\*(?:[^*]|\*(?!\/))*\*\/|\/\/[^\r\n]*(?:\r\n?|\n|$))*`;
+const quotedSpecifier = String.raw`(?<quote>["'])(?<specifier>(?:(?!\k<quote>)[^\\\r\n])*)\k<quote>`;
 
 const loadPatterns = [
   {
     syntax: "static import",
-    expression:
-      /\bimport\s+(?:(?:[^"'`;]|\n)*?\s+from\s*)?(?<quote>["'])(?<specifier>(?:(?!\k<quote>)[^\\\r\n])*)\k<quote>/g,
+    expression: new RegExp(
+      String.raw`\bimport${commentGap}(?:(?:[^"'\`;]|\n)*?${commentGap}\bfrom${commentGap})?${quotedSpecifier}`,
+      "g",
+    ),
   },
   {
     syntax: "export-from",
-    expression:
-      /\bexport\s+(?:\*\s*(?:as\s+[A-Za-z_$][\w$]*\s*)?|\{[^}]*\}\s*)from\s*(?<quote>["'])(?<specifier>(?:(?!\k<quote>)[^\\\r\n])*)\k<quote>/g,
+    expression: new RegExp(
+      String.raw`\bexport${commentGap}(?:\*${commentGap}(?:as${commentGap}[A-Za-z_$][\w$]*${commentGap})?|\{[^}]*\}${commentGap})\bfrom${commentGap}${quotedSpecifier}`,
+      "g",
+    ),
   },
   {
     syntax: "require",
-    expression:
-      /(?:^|[^\w$.])require\s*\(\s*(?<quote>["'])(?<specifier>(?:(?!\k<quote>)[^\\\r\n])*)\k<quote>\s*\)/g,
+    expression: new RegExp(
+      String.raw`(?<![\w$.])\brequire${commentGap}\(${commentGap}${quotedSpecifier}${commentGap}\)`,
+      "g",
+    ),
   },
   {
     syntax: "dynamic import",
-    expression:
-      /\bimport\s*\(\s*(?<quote>["'])(?<specifier>(?:(?!\k<quote>)[^\\\r\n])*)\k<quote>\s*\)/g,
+    expression: new RegExp(
+      String.raw`\bimport${commentGap}\(${commentGap}${quotedSpecifier}${commentGap}\)`,
+      "g",
+    ),
   },
 ];
 
@@ -53,6 +63,26 @@ describe("bounded import extraction", () => {
       assert.deepEqual(
         extractLiteralLoads(source).map((load) => [load.syntax, load.specifier]),
         [[syntax, childProcess]],
+        source,
+      );
+    }
+  });
+
+  it("rejects supported loads with legal comments between syntax tokens", () => {
+    const syntheticTest = resolve(repositoryRoot, "test/support/comment-gaps.js");
+    const target = quote(childProcess);
+    const forms = [
+      ["static import", `import/* declaration */{/* binding */spawnSync/* binding */}\nfrom// target\n${target}`],
+      ["export-from", `export/* declaration */*/* exported */as/* alias */processApi/* source */from/* target */${target}`],
+      ["require", `require/* callee */(/* target */${target}/* close */)`],
+      ["dynamic import", `import/* callee */(/* target */${target}/* close */)`],
+    ];
+
+    for (const [syntax, source] of forms) {
+      const violations = findViolations(syntheticTest, source, "test");
+      assert.deepEqual(
+        violations.map((violation) => violation.syntax),
+        [syntax],
         source,
       );
     }
@@ -89,6 +119,16 @@ describe("bounded import extraction", () => {
       syntax: "static import",
       specifier: childProcess,
       line: 2,
+    });
+  });
+
+  it("starts require metadata at the require token on a multiline load", () => {
+    const source = `const first = true;\n// spacer\n  require/* callee */(\n    ${quote(childProcess)}\n  )`;
+
+    assert.deepEqual(extractLiteralLoads(source)[0], {
+      syntax: "require",
+      specifier: childProcess,
+      line: 3,
     });
   });
 });
