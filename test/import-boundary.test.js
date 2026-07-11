@@ -66,6 +66,20 @@ describe("ESM import extraction", () => {
       line: 2,
     });
   });
+
+  it("scans newline-free import offsets only once", () => {
+    const source = "x".repeat(10_000);
+    const offsets = Array.from({ length: 10_000 }, (_, index) => index);
+    let searches = 0;
+
+    const lines = lineNumbersForOffsets(source, offsets, (from) => {
+      searches += 1;
+      return source.indexOf("\n", from);
+    });
+
+    assert.equal(searches, 1);
+    assert.deepEqual(new Set(lines), new Set([1]));
+  });
 });
 
 describe("import boundary policy", () => {
@@ -159,15 +173,10 @@ describe("import boundary policy", () => {
 
 function extractLiteralLoads(source) {
   const [imports] = parse(source);
-  let cursor = 0;
-  let line = 1;
+  const literalImports = imports.filter((entry) => entry.n !== undefined && entry.n !== null && entry.d !== -2);
+  const lines = lineNumbersForOffsets(source, literalImports.map((entry) => entry.ss));
 
-  return imports.flatMap((entry) => {
-    for (let newline = source.indexOf("\n", cursor); newline !== -1 && newline < entry.ss; newline = source.indexOf("\n", cursor)) {
-      line += 1;
-      cursor = newline + 1;
-    }
-    if (entry.n === undefined || entry.n === null || entry.d === -2) return [];
+  return literalImports.map((entry, index) => {
     const statement = source.slice(entry.ss, entry.se);
     const syntax = entry.d >= 0
       ? "dynamic import"
@@ -175,12 +184,30 @@ function extractLiteralLoads(source) {
         ? "export-from"
         : "static import";
 
-    return [{
+    return {
       syntax,
       specifier: entry.n,
-      line,
-    }];
+      line: lines[index],
+    };
   });
+}
+
+function lineNumbersForOffsets(source, offsets, findNextNewline = (from) => source.indexOf("\n", from)) {
+  const lines = [];
+  let cursor = 0;
+  let line = 1;
+  let nextNewline = findNextNewline(cursor);
+
+  for (const offset of offsets) {
+    while (nextNewline !== -1 && nextNewline < offset) {
+      line += 1;
+      cursor = nextNewline + 1;
+      nextNewline = findNextNewline(cursor);
+    }
+    lines.push(line);
+  }
+
+  return lines;
 }
 
 function scanDirectory(directory, role) {
