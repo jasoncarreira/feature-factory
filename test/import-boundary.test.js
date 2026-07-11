@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, extname, isAbsolute, normalize, relative, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { init, parse } from "es-module-lexer";
-
-await init;
+import { parse } from "@babel/parser";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const helperPath = resolve(repositoryRoot, "test/helpers/git-fixture.js");
-const scannedExtensions = new Set([".js", ".mjs", ".cjs"]);
+const scannedExtensions = new Set([".js", ".mjs", ".jsx", ".cjs"]);
 const childProcessSpecifiers = new Set(["child_" + "process", "node:" + "child_process"]);
 
 describe("ESM import extraction", () => {
@@ -67,19 +66,6 @@ describe("ESM import extraction", () => {
     });
   });
 
-  it("scans newline-free import offsets only once", () => {
-    const source = "x".repeat(10_000);
-    const offsets = Array.from({ length: 10_000 }, (_, index) => index);
-    let searches = 0;
-
-    const lines = lineNumbersForOffsets(source, offsets, (from) => {
-      searches += 1;
-      return source.indexOf("\n", from);
-    });
-
-    assert.equal(searches, 1);
-    assert.deepEqual(new Set(lines), new Set([1]));
-  });
 });
 
 describe("import boundary policy", () => {
@@ -161,6 +147,26 @@ describe("import boundary policy", () => {
     }]);
   });
 
+  it("recursively guards JSX production entries used by the package build", () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "feature-factory-import-boundary-"));
+    const nested = resolve(directory, "nested");
+    const file = resolve(nested, "entry.jsx");
+
+    try {
+      mkdirSync(nested);
+      writeFileSync(file, `export { spawnSync } from ${JSON.stringify(pathToFileURL(helperPath).href)};`, {
+        encoding: "utf8",
+      });
+      const findings = scanDirectory(directory, "production");
+
+      assert.equal(findings.length, 1);
+      assert.equal(findings[0].file, normalize(file));
+      assert.equal(findings[0].reason, "production module loads the test Git fixture helper");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("finds no violations in the recursive repository corpora", () => {
     const findings = [
       ...scanDirectory(resolve(repositoryRoot, "test"), "test"),
@@ -172,42 +178,40 @@ describe("import boundary policy", () => {
 });
 
 function extractLiteralLoads(source) {
-  const [imports] = parse(source);
-  const literalImports = imports.filter((entry) => entry.n !== undefined && entry.n !== null && entry.d !== -2);
-  const lines = lineNumbersForOffsets(source, literalImports.map((entry) => entry.ss));
-
-  return literalImports.map((entry, index) => {
-    const statement = source.slice(entry.ss, entry.se);
-    const syntax = entry.d >= 0
-      ? "dynamic import"
-      : /^\s*export\b/u.test(statement)
-        ? "export-from"
-        : "static import";
-
-    return {
-      syntax,
-      specifier: entry.n,
-      line: lines[index],
-    };
+  const ast = parse(source, {
+    sourceType: "unambiguous",
+    plugins: ["jsx"],
+    createImportExpressions: true,
   });
+  const loads = [];
+  visit(ast.program);
+  return loads.sort((left, right) => left.line - right.line || left.syntax.localeCompare(right.syntax));
+
+  function visit(value) {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+
+    if (value.type === "ImportDeclaration" && value.source?.type === "StringLiteral") {
+      loads.push(makeLoad("static import", value.source.value, value));
+    } else if ((value.type === "ExportNamedDeclaration" || value.type === "ExportAllDeclaration") && value.source?.type === "StringLiteral") {
+      loads.push(makeLoad("export-from", value.source.value, value));
+    } else if (value.type === "ImportExpression" && value.source?.type === "StringLiteral") {
+      loads.push(makeLoad("dynamic import", value.source.value, value));
+    }
+
+    for (const child of Object.values(value)) visit(child);
+  }
 }
 
-function lineNumbersForOffsets(source, offsets, findNextNewline = (from) => source.indexOf("\n", from)) {
-  const lines = [];
-  let cursor = 0;
-  let line = 1;
-  let nextNewline = findNextNewline(cursor);
-
-  for (const offset of offsets) {
-    while (nextNewline !== -1 && nextNewline < offset) {
-      line += 1;
-      cursor = nextNewline + 1;
-      nextNewline = findNextNewline(cursor);
-    }
-    lines.push(line);
-  }
-
-  return lines;
+function makeLoad(syntax, specifier, node) {
+  return {
+    syntax,
+    specifier,
+    line: node.loc?.start.line ?? 1,
+  };
 }
 
 function scanDirectory(directory, role) {
