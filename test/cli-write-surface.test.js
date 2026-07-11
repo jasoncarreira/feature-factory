@@ -78,6 +78,8 @@ describe("cli write surface", () => {
         initGitRepo(repo);
         const capture = join(repo, "opencode-capture.json");
         const bin = writeFakeOpencode(repo, capture);
+        const gitExclude = join(repo, ".git", "info", "exclude");
+        const gitExcludeBefore = readFileSync(gitExclude, "utf8");
         const filesystemBefore = snapshotFixtureTree(repo);
         const gitBefore = snapshotGitBaseline(repo);
 
@@ -92,6 +94,7 @@ describe("cli write surface", () => {
         assert.equal(existsSync(join(repo, ".opencode", "worktrees")), false, `${mode}: worktrees must be absent`);
         assert.equal(existsSync(join(repo, ".opencode", "factory", "processes")), false, `${mode}: detached logs must be absent`);
         assert.deepEqual(snapshotFixtureTree(repo), filesystemBefore, `${mode}: filesystem baseline changed`);
+        assert.equal(readFileSync(gitExclude, "utf8"), gitExcludeBefore, `${mode}: .git/info/exclude changed`);
         assert.deepEqual(snapshotGitBaseline(repo), gitBefore, `${mode}: git baseline changed`);
       } finally {
         rmSync(repo, { recursive: true, force: true });
