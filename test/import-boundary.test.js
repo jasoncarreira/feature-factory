@@ -8,39 +8,7 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const helperPath = resolve(repositoryRoot, "test/helpers/git-fixture.js");
 const JavaScriptExtensions = new Set([".js", ".mjs", ".cjs"]);
 const childProcessSpecifiers = new Set(["child_" + "process", "node:" + "child_process"]);
-const commentGap = String.raw`(?:\s|\/\*(?:[^*]|\*(?!\/))*\*\/|\/\/[^\r\n]*(?:\r\n?|\n|$))*`;
-const quotedSpecifier = String.raw`(?<quote>["'])(?<specifier>(?:(?!\k<quote>)[^\\\r\n])*)\k<quote>`;
-
-const loadPatterns = [
-  {
-    syntax: "static import",
-    expression: new RegExp(
-      String.raw`\bimport${commentGap}(?:(?:[^"'\`;]|\n)*?${commentGap}\bfrom${commentGap})?${quotedSpecifier}`,
-      "g",
-    ),
-  },
-  {
-    syntax: "export-from",
-    expression: new RegExp(
-      String.raw`\bexport${commentGap}(?:\*${commentGap}(?:as${commentGap}[A-Za-z_$][\w$]*${commentGap})?|\{[^}]*\}${commentGap})\bfrom${commentGap}${quotedSpecifier}`,
-      "g",
-    ),
-  },
-  {
-    syntax: "require",
-    expression: new RegExp(
-      String.raw`(?<![\w$.])\brequire${commentGap}\(${commentGap}${quotedSpecifier}${commentGap}\)`,
-      "g",
-    ),
-  },
-  {
-    syntax: "dynamic import",
-    expression: new RegExp(
-      String.raw`\bimport${commentGap}\(${commentGap}${quotedSpecifier}${commentGap}\)`,
-      "g",
-    ),
-  },
-];
+const MAX_STATIC_DECLARATION_CHARS = 16_384;
 
 describe("bounded import extraction", () => {
   const childProcess = "node:" + "child_process";
@@ -55,7 +23,9 @@ describe("bounded import extraction", () => {
     ["export-from", `export * from ${quote(childProcess, "'")}`],
     ["export-from", `export * as processApi from ${quote(childProcess)}`],
     ["require", `require ( ${quote(childProcess)} )`],
+    ["require", `require(${quote(childProcess)}, { fixture: true })`],
     ["dynamic import", `import( ${quote(childProcess, "'")} )`],
+    ["dynamic import", `import(${quote(childProcess)}, { with: { type: "json" } })`],
   ];
 
   it("recognizes the supported canonical quoted forms", () => {
@@ -88,6 +58,29 @@ describe("bounded import extraction", () => {
     }
   });
 
+  it("recognizes canonical static clauses despite comment delimiters and string-named bindings", () => {
+    const syntheticTest = resolve(repositoryRoot, "test/support/static-clause-delimiters.js");
+    const target = quote(childProcess);
+    const forms = [
+      [
+        "static import",
+        `import/* ' } \" */ { /* \" } ' */ "remote}name" as local /* { ' \" */ } from ${target}`,
+      ],
+      [
+        "export-from",
+        `export { /* } ' \" */ local as "remote}name" /* { \" ' */ } from ${target}`,
+      ],
+    ];
+
+    for (const [syntax, source] of forms) {
+      assert.deepEqual(
+        findViolations(syntheticTest, source, "test").map((violation) => violation.syntax),
+        [syntax],
+        source,
+      );
+    }
+  });
+
   it("deterministically treats direct-looking comments and strings as loads", () => {
     const direct = `import ${quote(childProcess)}`;
     const specimens = [`// ${direct}`, `/* ${direct} */`, `const fixtureProgram = '${direct}'`];
@@ -105,6 +98,7 @@ describe("bounded import extraction", () => {
       'import("node:" + "child_process")',
       "import(moduleName)",
       'object.require("node:child_process")',
+      'object.import("node:child_process")',
       'requireAlias("node:child_process")',
       'launch("node:child_process")',
       'import("node:\\x63hild_process")',
@@ -130,6 +124,15 @@ describe("bounded import extraction", () => {
       specifier: childProcess,
       line: 3,
     });
+  });
+
+  it("caps each malformed static declaration scan before continuing through long comment input", () => {
+    const tooLongComment = `import/*${"\n".repeat(MAX_STATIC_DECLARATION_CHARS + 1)}*/`;
+    const source = `${tooLongComment}\nimport ${quote(childProcess)}`;
+
+    assert.deepEqual(extractLiteralLoads(source).map((load) => [load.syntax, load.specifier]), [
+      ["static import", childProcess],
+    ]);
   });
 });
 
@@ -171,9 +174,12 @@ describe("import boundary policy", () => {
       "../../test/helpers/../helpers/git-fixture",
       "../../test/helpers/git-fixture.js?fixture=1",
       "../../test/helpers/git-fixture.js#fixture",
+      "../../test/helpers/git-fixture.js?fixture=%2f#%23",
       helperPath,
       helperWithoutExtension,
+      `${helperPath}?fixture=%2f#%23`,
       `${canonicalFileUrl}?fixture=1#fixture`,
+      `${canonicalFileUrl}?fixture=%2f#%23`,
     ];
 
     for (const specifier of specifiers) {
@@ -216,18 +222,160 @@ describe("import boundary policy", () => {
 function extractLiteralLoads(source) {
   const loads = [];
 
-  for (const { syntax, expression } of loadPatterns) {
-    expression.lastIndex = 0;
-    for (const match of source.matchAll(expression)) {
-      loads.push({
-        syntax,
-        specifier: match.groups.specifier,
-        line: 1 + countLines(source, match.index),
-      });
-    }
-  }
+  scanKeyword(source, "import", (index) => {
+    addLoad(loads, source, "static import", index, scanStaticImport(source, index));
+    addLoad(loads, source, "dynamic import", index, scanDirectCall(source, index + "import".length));
+  });
+  scanKeyword(source, "export", (index) => {
+    addLoad(loads, source, "export-from", index, scanExportFrom(source, index));
+  });
+  scanKeyword(source, "require", (index) => {
+    addLoad(loads, source, "require", index, scanDirectCall(source, index + "require".length));
+  });
 
   return loads.sort((left, right) => left.line - right.line || left.syntax.localeCompare(right.syntax));
+}
+
+function addLoad(loads, source, syntax, index, specifier) {
+  if (specifier !== null) loads.push({ syntax, specifier, line: 1 + countLines(source, index) });
+}
+
+function scanKeyword(source, keyword, callback) {
+  let start = 0;
+
+  while (start < source.length) {
+    const index = source.indexOf(keyword, start);
+    if (index === -1) return;
+    if (isDirectKeyword(source, index, keyword)) callback(index);
+    start = index + keyword.length;
+  }
+}
+
+function isDirectKeyword(source, index, keyword) {
+  const before = source[index - 1];
+  const after = source[index + keyword.length];
+  return before !== "." && !isIdentifierPart(before) && !isIdentifierPart(after);
+}
+
+function isIdentifierPart(character) {
+  return character !== undefined && /[A-Za-z0-9_$]/.test(character);
+}
+
+function scanStaticImport(source, importIndex) {
+  const end = Math.min(source.length, importIndex + "import".length + MAX_STATIC_DECLARATION_CHARS);
+  const declarationStart = skipTrivia(source, importIndex + "import".length, end);
+  if (declarationStart === null || source[declarationStart] === "(") return null;
+
+  const directSpecifier = readQuotedSpecifier(source, declarationStart, end);
+  if (directSpecifier !== null) return directSpecifier.specifier;
+  return scanFromClause(source, declarationStart, end);
+}
+
+function scanExportFrom(source, exportIndex) {
+  const end = Math.min(source.length, exportIndex + "export".length + MAX_STATIC_DECLARATION_CHARS);
+  const declarationStart = skipTrivia(source, exportIndex + "export".length, end);
+  if (declarationStart === null || !["*", "{"].includes(source[declarationStart])) return null;
+  return scanFromClause(source, declarationStart + 1, end);
+}
+
+function scanFromClause(source, start, end) {
+  let index = start;
+
+  while (index < end) {
+    const triviaEnd = skipTrivia(source, index, end);
+    if (triviaEnd === null) return null;
+    index = triviaEnd;
+    if (index >= end || source[index] === ";") return null;
+
+    if (source.startsWith("from", index) && isIdentifierBoundary(source[index - 1]) && isIdentifierBoundary(source[index + 4])) {
+      const specifierStart = skipTrivia(source, index + 4, end);
+      const specifier = specifierStart === null ? null : readQuotedSpecifier(source, specifierStart, end);
+      if (specifier !== null) return specifier.specifier;
+      index += 4;
+      continue;
+    }
+
+    if (source[index] === '"' || source[index] === "'") {
+      const stringEnd = skipDeclarationString(source, index, end);
+      if (stringEnd === null) return null;
+      index = stringEnd;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return null;
+}
+
+function scanDirectCall(source, start) {
+  const end = Math.min(source.length, start + MAX_STATIC_DECLARATION_CHARS);
+  const openParenthesis = skipTrivia(source, start, end);
+  if (openParenthesis === null || source[openParenthesis] !== "(") return null;
+
+  const specifierStart = skipTrivia(source, openParenthesis + 1, end);
+  const specifier = specifierStart === null ? null : readQuotedSpecifier(source, specifierStart, end);
+  if (specifier === null) return null;
+
+  const next = skipTrivia(source, specifier.end, end);
+  return next !== null && [")", ","].includes(source[next]) ? specifier.specifier : null;
+}
+
+function skipTrivia(source, start, end) {
+  let index = start;
+
+  while (index < end) {
+    if (/\s/.test(source[index])) {
+      index += 1;
+      continue;
+    }
+    if (source[index] !== "/" || (source[index + 1] !== "/" && source[index + 1] !== "*")) return index;
+
+    const lineComment = source[index + 1] === "/";
+    index += 2;
+    while (index < end) {
+      if (lineComment ? source[index] === "\n" || source[index] === "\r" : source[index] === "*" && source[index + 1] === "/") {
+        index += lineComment ? 1 : 2;
+        break;
+      }
+      index += 1;
+    }
+    if (index >= end && (!lineComment || source[index - 1] !== "\n")) return null;
+  }
+
+  return index;
+}
+
+function readQuotedSpecifier(source, start, end) {
+  const quote = source[start];
+  if (quote !== '"' && quote !== "'") return null;
+
+  for (let index = start + 1; index < end; index += 1) {
+    const character = source[index];
+    if (character === quote) return { specifier: source.slice(start + 1, index), end: index + 1 };
+    if (character === "\\" || character === "\n" || character === "\r") return null;
+  }
+
+  return null;
+}
+
+function skipDeclarationString(source, start, end) {
+  const quote = source[start];
+
+  for (let index = start + 1; index < end; index += 1) {
+    if (source[index] === "\n" || source[index] === "\r") return null;
+    if (source[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (source[index] === quote) return index + 1;
+  }
+
+  return null;
+}
+
+function isIdentifierBoundary(character) {
+  return !isIdentifierPart(character);
 }
 
 function countLines(source, end) {
@@ -268,8 +416,8 @@ function findViolations(file, source, role) {
 }
 
 function resolvesToHelper(specifier, importer) {
-  if (specifier.includes("%")) return false;
   const withoutSuffix = specifier.replace(/[?#].*$/, "");
+  if (withoutSuffix.includes("%")) return false;
   let candidate;
 
   try {
