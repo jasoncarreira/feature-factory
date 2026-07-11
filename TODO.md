@@ -19,20 +19,22 @@ the remaining future work.
 
 ## Runnable Dogfood Epics
 
-These epics replace the over-broad `lifecycle-cleanup-recovery` and `git-test-harness-hardening` runs while preserving their material review constraints below. Keep each run bounded to its named outcome, and consume shared primitives from `centralized-hardening-primitives` when available instead of reimplementing them.
+Re-scoped 2026-07-11. The earlier epic pipelines here were distilled from failed runs and ratcheted acceptance criteria toward closed-world exactness (exact tuples, "no unspecified behavior remains"), which builders could not converge within bounded remediation — the `git-fixture-boundary-contract` and `owned-test-process-supervisor` runs blocked exactly this way. Those blocked runs are superseded by the re-scoped items below, not continued as-is. Keep each run bounded to its named outcome, consume shared primitives from `centralized-hardening-primitives` instead of reimplementing them, and do not write open-ended completeness acceptance criteria.
 
-### Lifecycle Cleanup And Recovery
+### Centralized Hardening Completion
 
-- [ ] **Safe cleanup lock claims** (`cleanup-lock-claim-recovery`) - Define and implement an ownership-stable, crash-recoverable cleanup mutation-claim protocol with deterministic concurrency and orphaned-claim recovery coverage. An orphaned claim must be recoverable through verified dead-local ownership without deleting a live or replacement claim.
-- [ ] **Orphan lifecycle assessment** (`orphan-lifecycle-assessment`) - Centralize read-only process/heartbeat/run-state classification and checked orphan recovery so missing, dead, live, stale, contradictory, and uncertain evidence remain fail-closed and actionable.
-- [ ] **Cleanup inventory and execution engine** (`cleanup-inventory-execution`) - Build conservative per-run and repository-wide inventory, planning, revalidation, execution, and partial-failure behavior for recorded and legacy factory resources. Depends on the lock-claim and orphan-assessment epics.
-- [ ] **Cleanup operator surface** (`cleanup-operator-surface`) - Integrate the engine into per-run and sweep CLI workflows, package-log retention, stable human/JSON output, compatibility behavior, and operational documentation. Depends on the cleanup engine.
+- Merge the reviewed `output-policy` handoff first (PR #50, from `centralized-hardening-primitives-continuation-2`).
+- [ ] **Consumer migration** (`centralized-hardening-consumer-migration`) - One bounded epic replacing the previous three serialized migration epics. Migrate the remaining diagnostic/report/state-lock/TUI/CLI consumers to the accepted sensitive-data, terminal-output, protected-write, and process-verification primitives, prioritizing sinks that can carry secrets. Preserve compatibility and focused tests; do not re-litigate the accepted foundation contracts; keep generated `dist/tui.js` unowned.
+
+### Lifecycle Cleanup
+
+- [ ] **Conservative cleanup sweep** (`cleanup-conservative-sweep`) - One epic replacing the previous four-epic cleanup pipeline (lock-claim protocol, orphan assessment, inventory/execution engine, operator surface). Extend `factory cleanup` with a repository-wide sweep that removes terminal-run state, worktrees, and branches only when nothing live references them (no live `factory.lock`, fresh heartbeat, or valid process evidence), and skips-and-reports anything uncertain. Fail closed instead of building a claim-recovery protocol for contested deletions.
 
 ### Git And Test Harness Hardening
 
-- [ ] **Hermetic Git fixture isolation** (`git-fixture-isolation`) - Centralize repository-owned fixture Git execution, ignore host global/system configuration, disable signing for fixture commits, migrate duplicate helpers, and enforce the boundary structurally without changing production Git behavior.
-- [ ] **Owned test process supervision** (`owned-test-process-supervisor`) - Provide a bounded, identity-verified process ownership and termination protocol with complete cross-module message/result contracts, parent-held descendant identity after supervisor exit, coherent escalation, and no-survivor outcomes across supported platforms.
-- [ ] **Leak attribution and bounded test runner** (`test-leak-attribution-runner`) - Attribute unresolved tests and completed-handle leaks through file/worker lifecycle correlation that remains correct under normal concurrency, apply measured phase/check deadlines, and integrate non-destructive package smoke plus actionable diagnostics. Depends on owned process supervision.
+- The five accepted fixture-isolation slices are preserved on `git-fixture-isolation` at `4dc146a`; do not rebuild them. The four-epic hand-rolled detector pipeline (boundary contract, capability grammar, lexical scope analysis, integration) is retired: it required builders to implement a bespoke JavaScript lexical analyzer and blocked on scope-analysis edge cases. The rejected detector work remains on `git-fixture-isolation--fixture-boundary` at `13d12ea` for reference only; do not merge it wholesale.
+- [ ] **Parser-based fixture boundary rule** (`git-fixture-boundary-lint`) - Enforce the same outcome with standard tooling instead of a hand-written analyzer: an ESLint rule (`no-restricted-imports`/`no-restricted-syntax`) or a small acorn-based check that flags child-process imports and calls in test files outside the sanctioned harness allowlist, plus protection for production harness imports. Preserve F-01 through F-14 and P-01 behavior and the package exception counts. Accept parser-grade scope handling; do not specify tokenizer, JSX, or lexical-scope semantics as acceptance criteria.
+- [ ] **Test process cleanup helper** (`test-process-cleanup-helper`) - Replaces the supervisor-protocol and leak-attribution-runner epics. Add a small shared test helper that records every test-spawned process/process group and terminates survivors on teardown, and scope slice-level test runs to the slice's named tests while the full suite stays at the pre-PR gate. This targets the observed `cli-cost-report`/`cli-heartbeat` parallel-load flakes directly; no cross-module message contracts, replay fingerprints, or platform escalation matrices.
 
 ## Observability And Cost
 
