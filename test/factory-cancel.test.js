@@ -302,7 +302,7 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
     }
   });
 
-  it("inspects Darwin process identity with targeted PID commands", () => {
+  it("inspects Darwin process identity with targeted PID commands and a final start recheck", () => {
     const fixture = createFixture("darwin-inspect");
     const commands = [];
     try {
@@ -327,6 +327,8 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
         ["ps", "-p", "4242", "-o", "lstart="],
         ["ps", "-p", "4242", "-o", "comm="],
         ["lsof", "-a", "-p", "4242", "-d", "cwd", "-Fn"],
+        // Recheck after metadata reads so PID reuse cannot produce a mixed identity.
+        ["ps", "-p", "4242", "-o", "lstart="],
       ]);
     } finally {
       cleanup(fixture.repo);
