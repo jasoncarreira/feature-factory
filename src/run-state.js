@@ -68,6 +68,9 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
             stolenFrom = reclaimed;
             continue;
           }
+        } else if (!observedEvidence && await canReclaimOwnerlessRunJsonLock(observedIdentity, ownerPath, options)) {
+          stealAttempted = true;
+          if (await reclaimOwnerlessRunJsonLock(runDir, lockDir, observedIdentity, options, lockHooks, deadline)) continue;
         }
       }
       if (Date.now() >= deadline) {
@@ -213,6 +216,51 @@ async function reclaimRunJsonLock(runDir, lockDir, observedIdentity, observedEvi
   return observedEvidence.owner;
 }
 
+async function canReclaimOwnerlessRunJsonLock(identity, ownerPath, options = {}) {
+  if (!identity || await lockOwnerEntryExists(ownerPath)) return false;
+  const ageMs = Date.now() - identity.mtimeMs;
+  return Number.isFinite(ageMs) && ageMs >= normalizePositiveInteger(options.missingOwnerStealMs, DEFAULT_MISSING_OWNER_STEAL_MS);
+}
+
+async function reclaimOwnerlessRunJsonLock(runDir, lockDir, observedIdentity, options, lockHooks, deadline) {
+  if (!observedIdentity) return false;
+  const claimPath = reclaimClaimPath(runDir, observedIdentity, "ownerless");
+  const claim = { owner_nonce: "ownerless", reclaim_nonce: randomUUID() };
+  if (lockHooks.onBeforeReclaimClaim) {
+    await runRunJsonLockHook(lockHooks.onBeforeReclaimClaim, { runDir, lockDir }, deadline, join(lockDir, LOCK_OWNER_FILE));
+  }
+  try {
+    await writeFile(claimPath, `${JSON.stringify(claim)}\n`, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if (error?.code === "EEXIST" || error?.code === "ENOENT") return false;
+    throw error;
+  }
+  if (lockHooks.onReclaimClaimed) {
+    await runRunJsonLockHook(lockHooks.onReclaimClaimed, { runDir, lockDir }, deadline, join(lockDir, LOCK_OWNER_FILE));
+  }
+  const ownerPath = join(lockDir, LOCK_OWNER_FILE);
+  if (!sameLockDirectoryIdentity(observedIdentity, await lockDirectoryIdentity(lockDir))
+    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))
+    || !await canReclaimOwnerlessRunJsonLock(observedIdentity, ownerPath, options)) {
+    await removeOwnedReclaimClaim(claimPath, claim);
+    if (lockHooks.onReclaimAbandoned) await lockHooks.onReclaimAbandoned({ runDir, lockDir });
+    return false;
+  }
+
+  const quarantine = await renameOwnedLockToQuarantine(runDir, lockDir, observedIdentity);
+  const movedOwnerPath = join(quarantine, LOCK_OWNER_FILE);
+  if (lockHooks.onReclaimRenamed) await lockHooks.onReclaimRenamed({ runDir, lockDir, quarantine });
+  if (!sameLockDirectoryIdentity(observedIdentity, await lockDirectoryIdentity(quarantine))
+    || await lockOwnerEntryExists(movedOwnerPath)
+    || !sameReclaimClaim(claim, await readJsonNoFollow(claimPath))) {
+    throw new Error(`ownerless run.json lock reclamation identity changed at ${quarantine}`);
+  }
+  await rm(quarantine, { recursive: true, force: true });
+  await removeOwnedReclaimClaim(claimPath, claim);
+  if (lockHooks.onReclaimRemoved) await lockHooks.onReclaimRemoved({ runDir, lockDir });
+  return true;
+}
+
 function reclaimClaimPath(runDir, identity, ownerNonce) {
   const key = createHash("sha256").update(`${identity.dev}:${identity.ino}:${ownerNonce}`).digest("hex");
   return join(runDir, `.run-json.lock-reclaim-${key}.json`);
@@ -332,7 +380,7 @@ async function lockDirectoryIdentity(lockDir) {
   try {
     const value = await lstat(lockDir);
     if (!value.isDirectory() || value.isSymbolicLink()) return null;
-    return { dev: value.dev, ino: value.ino };
+    return { dev: value.dev, ino: value.ino, mtimeMs: value.mtimeMs };
   } catch {
     return null;
   }

@@ -929,15 +929,39 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("fails closed for ownerless and invalid lock publication", async () => {
-    for (const [name, owner] of [["ownerless", null], ["invalid", { pid: 999999, hostname: "dead", acquired_at: NOW }]]) {
+  it("reclaims an old ownerless lock left by a crash", async () => {
+    const fixture = createFixture("ownerless-lock");
+    let callbackEntered = false;
+    try {
+      const lockDir = join(fixture.runDir, "run-json.lock");
+      mkdirSync(lockDir);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      await withRunJsonLock(fixture.runDir, () => { callbackEntered = true; }, {
+        timeoutMs: 5000,
+        retryDelayMs: 1,
+        missingOwnerStealMs: 1,
+      });
+
+      assert.equal(callbackEntered, true);
+      assert.equal(existsSync(lockDir), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails closed for a fresh ownerless lock and invalid owner publication", async () => {
+    for (const [name, owner, missingOwnerStealMs] of [
+      ["fresh-ownerless", null, 60000],
+      ["invalid", { pid: 999999, hostname: "dead", acquired_at: NOW }, 1],
+    ]) {
       const fixture = createFixture(`invalid-lock-${name}`);
       try {
         const lockDir = join(fixture.runDir, "run-json.lock");
         mkdirSync(lockDir);
         if (owner) writeJson(join(lockDir, "owner.json"), owner);
         await assert.rejects(
-          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, missingOwnerStealMs: 1, processAliveFn: () => false }),
+          withRunJsonLock(fixture.runDir, () => {}, { timeoutMs: 5, retryDelayMs: 1, missingOwnerStealMs, processAliveFn: () => false }),
           /timed out waiting for run\.json lock/u,
         );
         assert.equal(existsSync(lockDir), true);

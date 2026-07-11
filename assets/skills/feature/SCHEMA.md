@@ -151,7 +151,7 @@ External drivers write only `gates/<gate>.answer`; they may use `feature-factory
 
 Write `run.json` atomically: write a temp file, then rename. The current writer does not fsync the temp file or containing directory before rename; this is a conscious portability/speed tradeoff, so sudden power loss can still lose the most recent write even though readers never observe a partial JSON file.
 
-`$RUN/run-json.lock/` is the ephemeral lock directory used by both foreground manifest writes and heartbeat ticks. `owner.json` records the current lock holder for diagnostics.
+`$RUN/run-json.lock/` is the ephemeral lock directory used by both foreground manifest writes and heartbeat ticks. `owner.json` records the current lock holder for diagnostics. A lock directory that remains ownerless beyond `missingOwnerStealMs` may be reclaimed only through an exclusive claim bound to the same directory identity; fresh ownerless locks and malformed owner evidence remain fail-closed.
 
 `$RUN/factory.lock` records the local factory session owner for diagnostics. It is not a heartbeat credential and it does not authorize `run.json` writes.
 
