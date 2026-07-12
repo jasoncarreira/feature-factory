@@ -1,5 +1,7 @@
 const BASELINE_SENSITIVE_KEY_PATTERN = /(?:secret|token|password|passwd|pwd|api[_-]?key|private[_-]?key|credential|authorization|auth[_-]?header|access[_-]?key|bearer|cookie)/iu;
 const BASELINE_SENSITIVE_VALUE_PATTERN = /(?:secret|token|password|passwd|api[_-]?key|private[_-]?key)/iu;
+const FLATTENED_BASIC_HEADER_PATTERN = /(^|[\r\n]|[^A-Za-z0-9_-])(Authorization[ \t]*[:=][ \t]*Basic[ \t]+)([A-Za-z0-9._~+/-]+={0,})(?![A-Za-z0-9._~+/=-])/iu;
+const FLATTENED_BASIC_HEADER_GLOBAL_PATTERN = /(^|[\r\n]|[^A-Za-z0-9_-])(Authorization[ \t]*[:=][ \t]*Basic[ \t]+)([A-Za-z0-9._~+/-]+={0,})(?![A-Za-z0-9._~+/=-])/giu;
 const TOKEN_SHAPED_VALUE_PATTERNS = Object.freeze([
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/iu,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/iu,
@@ -55,7 +57,8 @@ export function isSensitiveValue(value, { mode = "baseline" } = {}) {
   if (typeof value !== "string") return false;
   const trimmed = value.trim();
   if (!trimmed) return false;
-  return BASELINE_SENSITIVE_VALUE_PATTERN.test(trimmed)
+  return FLATTENED_BASIC_HEADER_PATTERN.test(value)
+    || BASELINE_SENSITIVE_VALUE_PATTERN.test(trimmed)
     || tokenShapedValue(trimmed)
     || credentialBearingUrl(trimmed)
     || highEntropySingleToken(trimmed)
@@ -65,7 +68,13 @@ export function isSensitiveValue(value, { mode = "baseline" } = {}) {
 export function scrubSensitiveString(value, { mode = "baseline" } = {}) {
   assertMode(mode);
   if (typeof value !== "string") return SCRUB_MARKERS.unsupported;
-  return isSensitiveValue(value, { mode }) ? REDACTED_VALUE : value;
+  const flattenedCredentialsRedacted = value.replace(
+    FLATTENED_BASIC_HEADER_GLOBAL_PATTERN,
+    `$1$2${REDACTED_VALUE}`,
+  );
+  return isSensitiveValue(flattenedCredentialsRedacted, { mode })
+    ? REDACTED_VALUE
+    : flattenedCredentialsRedacted;
 }
 
 export function scrubSensitiveData(value, {

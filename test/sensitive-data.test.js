@@ -12,6 +12,49 @@ import {
 } from "../src/hardening/sensitive-data.js";
 
 describe("sensitive-data policy", () => {
+  it("redacts only flattened Basic credential values across supported variants", () => {
+    const cases = [
+      ["Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [redacted]"],
+      ["authorization\t=\tBASIC\tdXNlcjpwYXNz==", "authorization\t=\tBASIC\t[redacted]"],
+      ["prefix (Authorization : Basic abc+/~._-) suffix", "prefix (Authorization : Basic [redacted]) suffix"],
+      [
+        "before\nAuthorization: Basic first==\r\nafter Authorization=Basic\tsecond/+=\rend",
+        "before\nAuthorization: Basic [redacted]\r\nafter Authorization=Basic\t[redacted]\rend",
+      ],
+      [
+        "Authorization: Basic first, Authorization: Basic second==",
+        "Authorization: Basic [redacted], Authorization: Basic [redacted]",
+      ],
+    ];
+
+    for (const [source, expected] of cases) {
+      assert.equal(isSensitiveValue(source), true, source);
+      const scrubbed = scrubSensitiveString(source);
+      assert.equal(scrubbed, expected);
+      assert.equal(scrubSensitiveString(scrubbed), expected);
+      for (const credential of source.match(/(?:first|second|dXNlcjpwYXNz|abc\+\/~\._-)+/gu) || []) {
+        assert.equal(scrubbed.includes(credential), false, credential);
+      }
+    }
+  });
+
+  it("rejects Basic-header lookalikes and malformed token68 continuations", () => {
+    for (const value of [
+      "XAuthorization: Basic abc",
+      "X-Authorization: Basic abc",
+      "Proxy-Authorization: Basic abc",
+      "Authorization Basic abc",
+      "Authorization: Basic",
+      "Authorization: Basic ",
+      "Authorization:Basic\nabc",
+      "Authorization: Basic abc=def",
+      "Authorization: Basic abc==def",
+    ]) {
+      assert.equal(isSensitiveValue(value), false, value);
+      assert.equal(scrubSensitiveString(value), value, value);
+    }
+  });
+
   it("recognizes baseline key fragments, providers, credentials, hex, and entropy case-insensitively", () => {
     const cases = [
       "GITHUB_PAT_123456789012345678901234567890",
