@@ -489,7 +489,7 @@ function installFakeOpencode(repo) {
   const bin = join(repo, "bin");
   mkdirSync(bin, { recursive: true });
   const script = join(bin, "opencode");
-  writeFileSync(script, "#!/usr/bin/env node\nprocess.once(\"SIGTERM\", () => process.exit(0));\n", "utf8");
+  writeFileSync(script, "#!/usr/bin/env node\nconst keepAlive = setInterval(() => {}, 1000);\nprocess.once(\"SIGTERM\", () => { clearInterval(keepAlive); process.exit(0); });\n", "utf8");
   chmodSync(script, 0o755);
   return bin;
 }
