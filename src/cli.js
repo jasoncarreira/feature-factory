@@ -19,6 +19,9 @@ import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js
 import { printCliResult, projectCostReport, renderCliPath } from "./cli-output.js";
 import { freeformSegment, identitySegment, renderErrorForTerminal, renderTerminalSegments, StructuredOutputError, TRUSTED_SEGMENTS } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
+import { CleanupSweepCommandError, renderCleanupSweepCommandError, runCleanupSweepCommand } from "./cleanup-sweep-command.js";
+import { renderCleanupSweepReport } from "./cleanup-sweep-output.js";
+import { executeCleanupSweep, previewCleanupSweep } from "./cleanup-sweep.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
@@ -75,7 +78,9 @@ Commands:
   factory heartbeat <run-id> --status [--json]
   factory validate [run-id]     Validate run.json and plan/slices.json
   factory recover <run-id> [--reason TEXT]  Mark orphaned/stale running run as needs-human
-  factory cleanup <run-id>      Remove terminal run state, worktrees, and branches
+  factory cleanup <run-id> [--dry-run] [--force] [--repo PATH] [--json]
+  factory cleanup --all --dry-run [--repo PATH] [--json]
+  factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> [--repo PATH] [--json]
   factory answer [--repo PATH] [--json] <run> <gate> <approve|stop|changes: ...>
   factory gate-decision <run> <gate> <pending|approved|changes_requested|stopped> [--artifact REF] [--question-ref REF] [--answer-ref REF|--answer TEXT] [--approval-source SOURCE] [--boundary-token TOKEN]
   factory slices-seed <run-id> --from plan/slices.json
@@ -178,6 +183,7 @@ async function factory(args) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
   if (sub === "cost-report") return costReport(rest);
+  if (sub === "cleanup" && rest.some((argument) => argument === "--all" || argument === "--digest" || argument.startsWith("--all=") || argument.startsWith("--digest="))) return cleanupSweep(rest);
   const opts = options(rest);
   const positional = positionals(rest);
   if (sub === "start") {
@@ -245,6 +251,21 @@ async function factory(args) {
   ]).trim());
   usage(console.error);
   process.exitCode = 1;
+}
+
+async function cleanupSweep(args) {
+  try {
+    const result = await runCleanupSweepCommand(args, {
+      preview: previewCleanupSweep,
+      execute: executeCleanupSweep,
+    });
+    console.log(renderCleanupSweepReport(result.report, { json: args.includes("--json") }));
+    process.exitCode = result.exitCode;
+  } catch (error) {
+    if (!(error instanceof CleanupSweepCommandError)) throw error;
+    console.error(renderCleanupSweepCommandError());
+    process.exitCode = 1;
+  }
 }
 
 function answer(args) {
