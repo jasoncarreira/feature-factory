@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeFeatureCommandPayload, safePayloadValue } from "./feature-command-payload.js";
+import { normalizePostPrCiConfig } from "./config.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const assets = join(root, "assets");
@@ -70,9 +71,11 @@ function registerCommand(cfg, options = {}) {
 
 function commandTemplate(body, options = {}) {
   const prMode = normalizePrMode(options.prMode ?? options.pr_mode ?? options.pullRequests?.mode);
+  const postPrCi = normalizePostPrCiConfig(options.postPrCi);
   const config = [
     "Plugin configuration defaults:",
     `- PR mode: \`${prMode}\`. Use this as the default for successful PR creation when the driver payload has no \`pr_mode\` override.`,
+    `- Post-PR CI policy: ${JSON.stringify(postPrCi)}. Use this default-off policy only when the driver payload has no per-field \`post_pr_ci\` override; persist the complete effective policy once and never recalculate it on resume.`,
   ].join("\n");
   const markerIndex = operatorPayloadMarkerIndex(body);
   if (markerIndex < 0) return `${body.trim()}\n\n${config}`;
@@ -103,6 +106,7 @@ function parsedPayloadBlock(parsed) {
     `driver.reviewer: ${safePayloadValue(payload.driver.reviewer)}`,
     `driver.github_account: ${safePayloadValue(payload.driver.github_account)}`,
     `driver.run_id: ${safePayloadValue(payload.driver.run_id)}`,
+    `driver.post_pr_ci: ${safePayloadValue(payload.driver.post_pr_ci)}`,
     `resume: ${safePayloadValue(payload.resume)}`,
     `steering: ${safePayloadValue(payload.steering)}`,
     `continuation: ${safePayloadValue(payload.continuation)}`,

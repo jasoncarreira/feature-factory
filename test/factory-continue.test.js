@@ -238,6 +238,24 @@ describe("factory continue", () => {
     }
   });
 
+  it("enforces exact --new-pr admission before continuation side effects", () => {
+    const ordinary = createFixture("ordinary-new-pr");
+    try {
+      assert.throws(() => continueFactory(ordinary.runId, { cwd: ordinary.repo, review: "reviewer.json", runId: "ordinary-new-pr-next", newPr: true, dryRun: true }), /only for a blocked parent with pr_url/u);
+      assert.equal(existsSync(join(ordinary.repo, ".opencode", "factory", "ordinary-new-pr-next")), false);
+    } finally { cleanup(ordinary.repo); }
+
+    const postPr = createFixture("post-pr-needs-new-pr");
+    try {
+      updateRun(postPr, (run) => { run.pr_url = "https://github.com/acme/widgets/pull/7"; });
+      const before = readFileSync(join(postPr.runDir, "run.json"), "utf8");
+      assert.throws(() => continueFactory(postPr.runId, { cwd: postPr.repo, review: "reviewer.json", runId: "post-pr-needs-new-pr-next", dryRun: true }), /requires --new-pr/u);
+      assert.equal(readFileSync(join(postPr.runDir, "run.json"), "utf8"), before);
+      assert.equal(existsSync(join(postPr.repo, ".opencode", "factory", "post-pr-needs-new-pr-next")), false);
+      assert.equal(gitStdout(postPr.repo, ["rev-parse", "--verify", `refs/heads/${postPr.runId}^{commit}`]), gitStdout(postPr.repo, ["rev-parse", "--verify", "main^{commit}"]));
+    } finally { cleanup(postPr.repo); }
+  });
+
   it("rejects invalid JSON, non-object reviews, and empty required_fixes entries without summary", () => {
     const invalidJson = createFixture("invalid-json-review");
     try {
@@ -514,6 +532,12 @@ describe("factory continue", () => {
 
       const draft = JSON.parse(runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "draft-next", "--draft", "--dry-run", "--json"]).stdout);
       assert.equal(draft.payload.driver.pr_mode, "draft");
+
+      const postPr = JSON.parse(runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "post-pr-next", "--post-pr-ci", "--post-pr-wait-minutes", "90", "--post-pr-poll-seconds", "45", "--dry-run", "--json"]).stdout);
+      assert.deepEqual(postPr.payload.driver.post_pr_ci, { enabled: true, wait_ms: 5400000, initial_poll_ms: 45000 });
+      const invalidTiming = runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "invalid-post-pr-next", "--post-pr-wait-minutes", "90", "--dry-run", "--json"]);
+      assert.notEqual(invalidTiming.status, 0);
+      assert.match(invalidTiming.stderr, /timing flags require --post-pr-ci/u);
     } finally {
       cleanup(fixture.repo);
     }
