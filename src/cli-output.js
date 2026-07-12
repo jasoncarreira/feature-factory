@@ -5,7 +5,7 @@ import {
   renderTerminalSegments,
   TRUSTED_SEGMENTS,
 } from "./hardening/output-policy.js";
-import { REDACTED_VALUE, scrubSensitiveString } from "./hardening/sensitive-data.js";
+import { REDACTED_VALUE, isSensitiveValue, scrubSensitiveString } from "./hardening/sensitive-data.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
 const VALIDATED_STATUS_VALUES = new Set([
@@ -17,10 +17,7 @@ const VALIDATED_STATUS_VALUES = new Set([
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{8,128}$/u;
 const SAFE_HASH_PATTERN = /^(?:sha256:)?[A-Fa-f0-9]{32,128}$/u;
-const SAFE_REF_PATTERN = /^(?![/\\])(?!.*(?:^|[/\\])\.\.(?:[/\\]|$))[A-Za-z0-9._/-]+$/u;
-const SAFE_BRANCH_PATTERN = /^(?![./])(?!.*(?:\.\.|@\{|[~^:?*[\\\s]))[A-Za-z0-9._/-]+$/u;
-const SAFE_PATH_PATTERN = /^(?!.*[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]).+$/u;
-const BASIC_CREDENTIAL_PATTERN = /Authorization[ \t]*[:=][ \t]*Basic[ \t]+[A-Za-z0-9._~+/-]+={0,}/iu;
+const SAFE_REF_CHARACTERS = /^[A-Za-z0-9._/-]+$/u;
 const SAFE_COST_COLUMN_PATTERN = /^cost (?:available|partial|unavailable) · [0-9]+ (?:entry|entries)(?: · (?:[0-9?]+(?:\/[0-9?]+)? tokens|mixed currency|[0-9]+(?:\.[0-9]{1,6})? [A-Z]{3,12}|missing [A-Za-z0-9_, -]+))*$/u;
 
 export function printCliResult(value, options = {}, helpers = {}) {
@@ -44,7 +41,10 @@ export function projectCliData(value) {
 }
 
 function projectCliValue(value, key) {
-  if (typeof value === "string") return validatedIdentity(key, value) ? value : projectFreeformData(value);
+  if (typeof value === "string") {
+    if (validatedIdentity(key, value)) return value;
+    return contractualIdentityKey(key) ? REDACTED_VALUE : projectFreeformData(value);
+  }
   if (value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map((entry) => projectCliValue(entry, null));
   const projected = Object.create(null);
@@ -134,22 +134,85 @@ function projectedTableSegment(key, value) {
 }
 
 function projectedValueSegment(key, value) {
-  return validatedIdentity(key, value) ? identitySegment(value) : freeformSegment(value);
+  if (validatedIdentity(key, value)) return identitySegment(value);
+  return freeformSegment(contractualIdentityKey(key) ? REDACTED_VALUE : value);
 }
 
 function validatedIdentity(key, value) {
   if (typeof value !== "string") return false;
   if (key === "status" || key === "level") return VALIDATED_STATUS_VALUES.has(value);
-  if (key === "run_id") return SAFE_RUN_ID_PATTERN.test(value);
+  if (key === "run_id") return !isSensitiveValue(value, { mode: "baseline" }) && SAFE_RUN_ID_PATTERN.test(value);
   if (key === "token" || key === "boundary_token" || key === "action_token" || key === "fence_token") {
     return SAFE_TOKEN_PATTERN.test(value);
   }
   if (key === "hash" || key === "trace_id" || key?.endsWith("_hash")) return SAFE_HASH_PATTERN.test(value);
-  if (key === "ref" || key?.endsWith("_ref")) return SAFE_REF_PATTERN.test(value);
-  if (key === "branch") return SAFE_BRANCH_PATTERN.test(value);
+  if (key === "ref" || key?.endsWith("_ref")) return safeContractRef(value, { allowRunRoot: key === "run_ref" });
+  if (key === "branch") return safeContractRef(value);
   if (key === "commit" || key?.endsWith("_commit")) return /^[A-Fa-f0-9]{7,64}$/u.test(value);
   if (key === "worktree" || key === "path" || key?.endsWith("_path")) {
-    return SAFE_PATH_PATTERN.test(value) && !BASIC_CREDENTIAL_PATTERN.test(value);
+    return safeContractPath(value);
+  }
+  return false;
+}
+
+function contractualIdentityKey(key) {
+  return key === "run_id"
+    || key === "token"
+    || key === "boundary_token"
+    || key === "action_token"
+    || key === "fence_token"
+    || key === "hash"
+    || key === "trace_id"
+    || key?.endsWith("_hash")
+    || key === "ref"
+    || key?.endsWith("_ref")
+    || key === "branch"
+    || key === "commit"
+    || key?.endsWith("_commit")
+    || key === "worktree"
+    || key === "path"
+    || key?.endsWith("_path");
+}
+
+function safeContractRef(value, { allowRunRoot = false } = {}) {
+  if (!value) return false;
+  const segments = value.split("/");
+  if (segments.some(centrallySensitiveStructuredSegment) || !SAFE_REF_CHARACTERS.test(value)) return false;
+  if (value.startsWith("-") || value.startsWith("/") || value.endsWith("/") || value.endsWith(".")) return false;
+  if (value === "@" || value.includes("//") || value.includes("..") || value.includes("@{")) return false;
+  return segments.every((segment, index) => {
+    if (!segment || segment.endsWith(".") || segment.toLowerCase().endsWith(".lock")) return false;
+    if (!segment.startsWith(".")) return true;
+    return allowRunRoot && index === 0 && segment === ".opencode";
+  });
+}
+
+function safeContractPath(value) {
+  if (!value || hasUnsafeTerminalCodePoint(value)) return false;
+  return value.split(/[\\/]/u).every((segment) => !centrallySensitiveStructuredSegment(segment));
+}
+
+function centrallySensitiveStructuredSegment(segment) {
+  if (!segment || !isSensitiveValue(segment, { mode: "baseline" })) return false;
+  const scrubbed = scrubSensitiveString(segment, { mode: "baseline" });
+  if (scrubbed !== REDACTED_VALUE) return true;
+  if (segment.split(/[-_.]+/u).some((part) => part && isSensitiveValue(part, { mode: "baseline" }))) return true;
+  // Central token/PAT recognizers match in windows shorter than the generic
+  // high-entropy threshold. This preserves benign generated worktree directory
+  // names while still rejecting a credential embedded anywhere in a segment.
+  for (let start = 0; start < segment.length; start += 1) {
+    if (isSensitiveValue(segment.slice(start, start + 31), { mode: "baseline" })) return true;
+  }
+  return false;
+}
+
+function hasUnsafeTerminalCodePoint(value) {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint <= 0x1f
+      || (codePoint >= 0x7f && codePoint <= 0x9f)
+      || (codePoint >= 0x202a && codePoint <= 0x202e)
+      || (codePoint >= 0x2066 && codePoint <= 0x2069)) return true;
   }
   return false;
 }
