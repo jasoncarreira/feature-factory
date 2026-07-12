@@ -37,6 +37,7 @@ export const PASSING_SECURITY_VERDICTS = new Set(["PASS"]);
 const CONTINUATION_KINDS = new Set(["blocked-run-continuation"]);
 const BLOCKED_CONTINUATION_PARENT_STATUSES = new Set(["blocked"]);
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
+const HANDOFF_RECEIPT_KIND = "interactive-approval-handoff";
 const DEBUG_SNAPSHOT_KEYS = new Set(["created_with", "last_resumed_with", "resume_count"]);
 const DEBUG_SNAPSHOT_EVENT_KEYS = new Set(["collected_at", "event", "diagnostic_only", "env"]);
 const COST_ATTRIBUTION_STATUS_SET = new Set(COST_ATTRIBUTION_STATUSES);
@@ -360,7 +361,7 @@ function validateGateMap(errors, gates, path) {
   }
   for (const [name, gate] of Object.entries(gates)) {
     validateGateName(errors, name, `${path}.${name}`);
-    validateGate(errors, gate, `${path}.${name}`);
+    validateGate(errors, gate, `${path}.${name}`, name);
   }
 }
 
@@ -620,7 +621,7 @@ function validateRedactedEnv(errors, value, path) {
   }
 }
 
-function validateGate(errors, gate, path) {
+function validateGate(errors, gate, path, gateName) {
   if (!isRecord(gate)) {
     errors.push({ path, message: "must be an object" });
     return;
@@ -634,6 +635,27 @@ function validateGate(errors, gate, path) {
   optionalString(errors, gate, "decision_note", `${path}.decision_note`);
   optionalEnum(errors, gate, "approval_source", APPROVAL_SOURCES, `${path}.approval_source`);
   validatePendingSnapshot(errors, gate.pending_snapshot, `${path}.pending_snapshot`);
+  validateGateHandoffReceipt(errors, gate.handoff_receipt, `${path}.handoff_receipt`, gateName);
+}
+
+function validateGateHandoffReceipt(errors, receipt, path, gateName) {
+  if (receipt === undefined || receipt === null) return;
+  if (!isRecord(receipt)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredInteger(errors, receipt, "schema_version", `${path}.schema_version`);
+  if (Number.isInteger(receipt.schema_version) && receipt.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredString(errors, receipt, "kind", `${path}.kind`);
+  if (stringValue(receipt.kind) && receipt.kind !== HANDOFF_RECEIPT_KIND) errors.push({ path: `${path}.kind`, message: `must equal ${HANDOFF_RECEIPT_KIND}` });
+  requiredString(errors, receipt, "gate", `${path}.gate`);
+  if (stringValue(receipt.gate) && receipt.gate !== gateName) errors.push({ path: `${path}.gate`, message: "must match its gate key" });
+  requiredHash(errors, receipt, "approval_fingerprint", `${path}.approval_fingerprint`);
+  requiredHash(errors, receipt, "pending_snapshot_hash", `${path}.pending_snapshot_hash`);
+  requiredHash(errors, receipt, "answer_hash", `${path}.answer_hash`);
+  requiredInteger(errors, receipt, "steering_generation", `${path}.steering_generation`);
+  if (Number.isInteger(receipt.steering_generation) && receipt.steering_generation < 0) errors.push({ path: `${path}.steering_generation`, message: "must be non-negative" });
+  requiredString(errors, receipt, "accepted_at", `${path}.accepted_at`);
 }
 
 function validatePendingSnapshot(errors, pendingSnapshot, path) {

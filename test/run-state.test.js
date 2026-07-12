@@ -6,6 +6,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   heartbeatOnce,
+  inspectApprovalHandoffReceipt,
   mutateRunJsonLocked,
   transitionCostUsage,
   transitionGateDecision,
@@ -49,6 +50,93 @@ describe("simplified run-state transitions", () => {
 
       assert.equal(result.run.gates.story.status, "approved");
       assert.equal(result.run.gates.story.approval_source, "external-driver");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("persists an interactive receipt and exactly redelivers approval without a second boundary", async () => {
+    const fixture = createFixture("interactive-redelivery");
+    try {
+      writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), mode: "interactive" });
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer_ref: "gates/story.answer",
+      });
+      writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
+      const decision = {
+        status: "approved",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer_ref: "gates/story.answer",
+      };
+      const accepted = await approveGateDecision(fixture.runDir, "story", decision, { now: NOW });
+      assert.equal(inspectApprovalHandoffReceipt(fixture.runDir, accepted.run, "story").ok, true);
+
+      const redelivered = await transitionGateDecision(fixture.runDir, "story", decision, { now: "2026-07-08T12:01:00.000Z" });
+      assert.equal(redelivered.updated, false);
+      assert.equal(redelivered.reason, "redelivered-approved");
+      assert.equal(redelivered.run.gates.story.handoff_receipt.kind, "interactive-approval-handoff");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects redelivery changes to source, note, explicit time, or exact inline answer bytes", async () => {
+    const fixture = createFixture("interactive-redelivery-conflicts");
+    try {
+      writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), mode: "interactive" });
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+      });
+      const acceptedDecision = {
+        status: "approved",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer: "approve",
+        approval_source: "human",
+        decision_note: "accepted exactly",
+        answered_at: NOW,
+      };
+      await approveGateDecision(fixture.runDir, "story", acceptedDecision, { now: NOW });
+      for (const changed of [
+        { ...acceptedDecision, approval_source: "override" },
+        { ...acceptedDecision, decision_note: "changed" },
+        { ...acceptedDecision, answered_at: "2026-07-08T12:00:01.000Z" },
+        { ...acceptedDecision, answer: " approve" },
+      ]) {
+        await assert.rejects(
+          transitionGateDecision(fixture.runDir, "story", changed),
+          (error) => error?.handoffCode === "approval-snapshot-mismatch",
+        );
+      }
+      assert.equal(readJson(join(fixture.runDir, "run.json")).gates.story.decision_note, "accepted exactly");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects redelivery after archived answer bytes or steering generation change", async () => {
+    const fixture = createFixture("interactive-redelivery-durable-conflicts");
+    try {
+      writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), mode: "interactive" });
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer_ref: "gates/story.answer",
+      });
+      writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
+      const decision = { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer_ref: "gates/story.answer" };
+      const accepted = await approveGateDecision(fixture.runDir, "story", decision, { now: NOW });
+      writeFileSync(join(fixture.runDir, accepted.run.gates.story.answer_ref), "approve changed\n");
+      await assert.rejects(transitionGateDecision(fixture.runDir, "story", decision), (error) => error?.handoffCode === "approval-snapshot-mismatch");
+      writeFileSync(join(fixture.runDir, accepted.run.gates.story.answer_ref), "approve\n");
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.steering = { ...run.steering, generation: (run.steering?.generation || 0) + 1 };
+      writeJson(join(fixture.runDir, "run.json"), run);
+      await assert.rejects(transitionGateDecision(fixture.runDir, "story", decision), (error) => error?.handoffCode === "steering-generation-mismatch");
     } finally {
       cleanup(fixture.repo);
     }
