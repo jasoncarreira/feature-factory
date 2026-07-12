@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, status, writeSteering } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
+import { hashValue } from "../src/refs.js";
 
 const SHA = "a".repeat(40);
 
@@ -197,6 +198,83 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
+  it("durably records account-switch push failure and does not blindly retry", async () => {
+    const fixture = createRevalidationFixture("post-pr-push-account-failure");
+    const refs = writePassingRevalidationArtifacts(fixture);
+    let switches = 0;
+    try {
+      const result = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, ...refs,
+        executeGithub: async () => { switches += 1; return { exitCode: 1, stdout: "", stderr: "authentication failed" }; } });
+      assert.equal(result.action, "push-needs-human");
+      const run = readRun(fixture);
+      assert.equal(run.post_pr.phase, "push-pending");
+      assert.equal(run.post_pr.remediation.push.consecutive_transient_errors, run.post_pr.policy.max_transient_errors);
+      assert.equal(run.post_pr.remediation.push.next_retry_at, null);
+      const replay = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:11:00.000Z" });
+      assert.equal(replay.action, "push-needs-human");
+      assert.equal(switches, 1);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("persists transient push backoff and performs no operation before retry time", async () => {
+    const fixture = createRevalidationFixture("post-pr-push-transient");
+    const refs = writePassingRevalidationArtifacts(fixture); let operations = 0;
+    try {
+      const result = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, ...refs,
+        executeGithub: async () => ({ exitCode: 0, stdout: "", stderr: "" }), executeGitOperation: async () => { operations += 1; return { exitCode: 1, stdout: "", stderr: "HTTP 503" }; } });
+      assert.equal(result.action, "push-retry");
+      assert.equal(result.next_retry_at, "2026-07-12T12:11:00.000Z");
+      const replay = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:10:30.000Z" });
+      assert.equal(replay.action, "push-not-due");
+      assert.equal(operations, 1);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("reconciles crash-after-push from remote candidate without pushing twice", async () => {
+    const fixture = createRevalidationFixture("post-pr-crash-after-push");
+    const refs = writePassingRevalidationArtifacts(fixture); let remote = fixture.baseline; let pushes = 0;
+    const common = { cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", executeGithub: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      executeGitOperation: async ({ operation }) => { if (operation === "remote-head") return { exitCode: 0, stdout: `${remote}\trefs/heads/main\n`, stderr: "" }; pushes += 1; remote = fixture.candidate; return { exitCode: 0, stdout: "", stderr: "" }; } };
+    try {
+      await assert.rejects(postPrRemediation(fixture.runId, 1, "complete", { ...common, headSha: fixture.candidate, ...refs, afterExternalPush: async () => { throw new Error("simulated crash after push"); } }), /simulated crash/u);
+      assert.equal(readRun(fixture).post_pr.phase, "push-pending");
+      const result = await postPrRemediation(fixture.runId, 1, "complete", common);
+      assert.equal(result.action, "observing");
+      assert.equal(pushes, 1);
+      assert.equal(readRun(fixture).post_pr.observation.epoch, 2);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("terminalizes a remote head that is neither baseline nor candidate without force push", async () => {
+    const fixture = createRevalidationFixture("post-pr-remote-diverged");
+    const refs = writePassingRevalidationArtifacts(fixture); let pushes = 0;
+    try {
+      const result = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, ...refs,
+        executeGithub: async () => ({ exitCode: 0, stdout: "", stderr: "" }), executeGitOperation: async ({ operation }) => { if (operation === "fast-forward-push") pushes += 1; return { exitCode: 0, stdout: `${"f".repeat(40)}\trefs/heads/main\n`, stderr: "" }; } });
+      assert.equal(result.status, "needs-human");
+      assert.equal(result.reason, "post-pr-remote-head-diverged");
+      assert.equal(pushes, 0);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("reconciles validated, push-pending, and remote-confirmed crash rows exactly once", async () => {
+    for (const [name, hook, expectedPhase] of [["validated", "afterValidated", "validated"], ["push-pending", "afterPushPending", "push-pending"], ["remote-confirmed", "afterRemoteConfirmed", "remote-confirmed"]]) {
+      const fixture = createRevalidationFixture(`post-pr-crash-${name}`); const refs = writePassingRevalidationArtifacts(fixture); let remote = fixture.baseline; let pushes = 0;
+      const operations = { cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", executeGithub: async () => ({ exitCode: 0, stdout: "", stderr: "" }), executeGitOperation: async ({ operation }) => {
+        if (operation === "remote-head") return { exitCode: 0, stdout: `${remote}\trefs/heads/main\n`, stderr: "" };
+        pushes += 1; remote = fixture.candidate; return { exitCode: 0, stdout: "", stderr: "" };
+      } };
+      try {
+        await assert.rejects(postPrRemediation(fixture.runId, 1, "complete", { ...operations, headSha: fixture.candidate, ...refs, [hook]: async () => { throw new Error(`crash-${name}`); } }), new RegExp(`crash-${name}`));
+        assert.equal(readRun(fixture).post_pr.phase, expectedPhase);
+        const result = await postPrRemediation(fixture.runId, 1, "complete", operations);
+        assert.equal(result.action, "observing");
+        assert.equal(readRun(fixture).post_pr.observation.epoch, 2);
+        assert.ok(pushes <= 1);
+      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+    }
+  });
+
   it("adopts a clean descendant commit after a crashed started dispatch", async () => {
     const fixture = createRevalidationFixture("post-pr-adopt-descendant");
     try {
@@ -213,6 +291,24 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
+  it("adopts a lane-contained dirty diff after a crashed started dispatch", async () => {
+    const fixture = createRevalidationFixture("post-pr-adopt-dirty");
+    try {
+      runGit(fixture.repo, ["reset", "--hard", fixture.baseline]);
+      writeFileSync(join(fixture.repo, "src", "api.js"), "export const value = 3;\n");
+      updateRunFile(fixture, (run) => {
+        run.post_pr.phase = "remediation-running";
+        Object.assign(run.post_pr.remediation, { stage: "running", candidate_head_sha: null, remediation_evidence_ref: null, remediation_evidence_hash: null, changes: { paths: [], tree_hash: null } });
+        Object.assign(run.post_pr.remediation.dispatch, { status: "running", returned_at: null });
+      });
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
+      assert.equal(result.status, "dry-run");
+      const run = readRun(fixture);
+      assert.equal(run.post_pr.phase, "changes-observed");
+      assert.deepEqual(run.post_pr.remediation.changes.paths, ["src/api.js"]);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
   it("adopts bound failure evidence after a failure-recording crash", async () => {
     const fixture = createFixture("post-pr-failure-recording");
     try {
@@ -221,6 +317,34 @@ describe("post-PR workflow orchestration", () => {
       const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
       assert.equal(result.status, "dry-run");
       assert.equal(readRun(fixture).post_pr.phase, "remediation-planned");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("deterministically regenerates missing failure-recording evidence instead of blocking", async () => {
+    const fixture = createFixture("post-pr-regenerate-evidence");
+    try {
+      await observeApiRed(fixture);
+      const before = readRun(fixture); const binding = before.post_pr.evidence_refs[0];
+      updateRunFile(fixture, (run) => { run.post_pr.phase = "failure-recording"; });
+      rmSync(join(fixture.runDir, binding.ref));
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
+      assert.equal(result.status, "dry-run");
+      assert.equal(fileHash(join(fixture.runDir, binding.ref)), binding.hash);
+      assert.equal(readRun(fixture).post_pr.phase, "remediation-planned");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("adopts matching deterministic failure evidence left unbound by a crash", async () => {
+    const fixture = createFixture("post-pr-adopt-unbound");
+    try {
+      await observeApiRed(fixture);
+      updateRunFile(fixture, (run) => { run.post_pr.phase = "observing"; run.post_pr.attempt = 0; run.post_pr.remediation = null; run.post_pr.evidence_refs = []; });
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
+      assert.equal(result.status, "dry-run");
+      const run = readRun(fixture);
+      assert.equal(run.post_pr.phase, "remediation-planned");
+      assert.equal(run.post_pr.attempt, 1);
+      assert.equal(run.post_pr.remediation.failure_evidence_ref, "evidence/post-pr-ci.attempt-1.json");
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
@@ -238,6 +362,23 @@ describe("post-PR workflow orchestration", () => {
       assert.equal(run.terminal_result.artifacts.latest_failure_hash, fileHash(join(fixture.runDir, "evidence", "post-pr-local-failure.attempt-2.json")));
       assert.equal(run.terminal_result.artifacts.continuation_review_hash, run.post_pr.continuation_review.hash);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("re-attributes structured test-only panel failure to test-verifier and fails closed for unowned security block", async () => {
+    const fixture = createRevalidationFixture("post-pr-panel-reattribution");
+    try {
+      writeJson(join(fixture.runDir, "evidence", "panel-failure-2.json"), { run_id: fixture.runId, attempt: 2, source: "local-red", verdict: "red", failed_head_sha: fixture.candidate, failure_fingerprint: `sha256:${"7".repeat(64)}`, affected_paths: ["test/api.test.js"], panel: "validator" });
+      const result = await postPrRemediation(fixture.runId, 1, "failed", { cwd: fixture.repo, failureEvidenceRef: "evidence/panel-failure-2.json", now: "2026-07-12T12:10:00.000Z" });
+      assert.equal(result.route, "test-verifier");
+      assert.equal(readRun(fixture).post_pr.remediation.owner.kind, "integration");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+
+    const security = createRevalidationFixture("post-pr-security-reattribution");
+    try {
+      writeJson(join(security.runDir, "evidence", "security-failure-2.json"), { run_id: security.runId, attempt: 2, source: "local-red", verdict: "red", failed_head_sha: security.candidate, failure_fingerprint: `sha256:${"6".repeat(64)}`, affected_paths: ["test/api.test.js"], panel: "security" });
+      await assert.rejects(postPrRemediation(security.runId, 1, "failed", { cwd: security.repo, failureEvidenceRef: "evidence/security-failure-2.json", now: "2026-07-12T12:10:00.000Z" }), /human ownership reconciliation/u);
+      assert.equal(readRun(security).post_pr.phase, "revalidating");
+    } finally { rmSync(security.repo, { recursive: true, force: true }); }
   });
 
   it("builds a hash-bound new-PR continuation without mutating the parent and rejects tampering", async () => {
@@ -292,14 +433,18 @@ function createRevalidationFixture(runId) {
   const runDir = join(repo, ".opencode", "factory", runId); mkdirSync(join(runDir, "plan"), { recursive: true }); mkdirSync(join(runDir, "evidence")); mkdirSync(join(runDir, "reviews")); mkdirSync(join(runDir, "artifacts"));
   writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify({ slices: [{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }] })}\n`);
   writeFileSync(join(runDir, "evidence", "post-pr-ci.attempt-1.json"), "{}\n");
-  const remediationEvidence = { kind: "post-pr-remediation", run_id: runId, attempt: 1, dispatch_id: "dispatch-1", baseline_head_sha: baseline, candidate_head_sha: candidate, route: "backend-builder", review_ready: true, commands: [{ program: "node", args: ["--test"] }], commit: candidate, changed_paths: ["src/api.js"] };
+  const owner = { kind: "slice", slice_id: "api", stack: "backend", path_b64url: null, method: "check-slice-id" };
+  const failureEvidenceRef = "evidence/post-pr-ci.attempt-1.json"; const failureHash = fileHash(join(runDir, failureEvidenceRef));
+  const dispatch = { schema_version: 1, kind: "post-pr-remediation-dispatch", run_id: runId, attempt: 1, dispatch_id: "dispatch-1", role: "backend-builder", subject: "api", lane: "slice", owner, failed_head_sha: baseline, baseline_head_sha: baseline, failure_evidence: { ref: failureEvidenceRef, hash: failureHash } };
+  const changes = [{ status: "modified", path: "src/api.js", previous_path: null }];
+  const remediationEvidence = { kind: "post-pr-remediation", run_id: runId, attempt: 1, dispatch_id: "dispatch-1", dispatch_hash: hashValue(dispatch), baseline_head_sha: baseline, candidate_head_sha: candidate, route: "backend-builder", lane: "slice", owner, failure_evidence_ref: failureEvidenceRef, failure_evidence_hash: failureHash, review_ready: true, commands: [{ program: "node", args: ["--test"], exit_code: 0, head_sha: candidate }], commit: candidate, changed_paths: ["src/api.js"], changes, diff_hash: hashValue(changes) };
   writeJson(join(runDir, "evidence", "post-pr-remediation.attempt-1.json"), remediationEvidence);
-  const failureHash = fileHash(join(runDir, "evidence", "post-pr-ci.attempt-1.json")); const remediationHash = fileHash(join(runDir, "evidence", "post-pr-remediation.attempt-1.json"));
+  const remediationHash = fileHash(join(runDir, "evidence", "post-pr-remediation.attempt-1.json"));
   writeJson(join(runDir, "run.json"), {
     schema_version: 1, run_id: runId, status: "running", max_retries: 3, github_account: "octocat", branch: "main", worktree: repo, pr_url: "https://github.com/acme/widgets/pull/7", pr_mode: "ready", gates: {},
     post_pr: { schema_version: 1, policy: { enabled: true, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } }, phase: "revalidating", attempt: 1,
       observation: { epoch: 1, expected_head_sha: baseline, started_at: "2026-07-12T12:00:00.000Z", deadline_at: "2026-07-12T13:00:00.000Z", next_poll_at: "2026-07-12T12:01:00.000Z", poll_count: 1, unchanged_count: 0, current_interval_ms: 30000, consecutive_transient_errors: 0, last_observed_at: "2026-07-12T12:00:30.000Z", last_fingerprint: `sha256:${"1".repeat(64)}`, last_check_verdict: "red", last_review_verdict: "not_required", last_verdict: "red", last_error: null, review_request: null, snapshot: null },
-      remediation: { schema_version: 1, attempt: 1, reason_code: "check-red", failure_fingerprint: `sha256:${"2".repeat(64)}`, failed_head_sha: baseline, failure_evidence_ref: "evidence/post-pr-ci.attempt-1.json", failure_evidence_hash: failureHash, owner: { kind: "slice", slice_id: "api", stack: "backend", path_b64url: null, method: "check-slice-id" }, route: "backend-builder", lane: "slice", stage: "revalidating", baseline_head_sha: baseline, dispatch: { id: "dispatch-1", status: "returned", role: "backend-builder", subject: "api", started_at: "2026-07-12T12:01:00.000Z", returned_at: "2026-07-12T12:02:00.000Z" }, changes: { paths: ["src/api.js"], tree_hash: `sha256:${"3".repeat(64)}` }, candidate_head_sha: candidate, remediation_evidence_ref: "evidence/post-pr-remediation.attempt-1.json", remediation_evidence_hash: remediationHash, revalidation: { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null, validator_review_ref: null, validator_review_hash: null, validator_verdict: null, security_review_ref: null, security_review_hash: null, security_verdict: null }, push: { status: "not-ready", remote_before_sha: null, local_head_sha: null, remote_after_sha: null, consecutive_transient_errors: 0, next_retry_at: null, pushed_at: null } },
+      remediation: { schema_version: 1, attempt: 1, reason_code: "check-red", failure_fingerprint: `sha256:${"2".repeat(64)}`, failed_head_sha: baseline, failure_evidence_ref: failureEvidenceRef, failure_evidence_hash: failureHash, owner, route: "backend-builder", lane: "slice", stage: "revalidating", baseline_head_sha: baseline, dispatch: { id: "dispatch-1", status: "returned", role: "backend-builder", subject: "api", started_at: "2026-07-12T12:01:00.000Z", returned_at: "2026-07-12T12:02:00.000Z" }, changes: { paths: ["src/api.js"], tree_hash: `sha256:${"3".repeat(64)}` }, candidate_head_sha: candidate, remediation_evidence_ref: "evidence/post-pr-remediation.attempt-1.json", remediation_evidence_hash: remediationHash, revalidation: { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null, validator_review_ref: null, validator_review_hash: null, validator_verdict: null, security_review_ref: null, security_review_hash: null, security_verdict: null }, push: { status: "not-ready", remote_before_sha: null, local_head_sha: null, remote_after_sha: null, consecutive_transient_errors: 0, next_retry_at: null, pushed_at: null } },
       evidence_refs: [{ ref: "evidence/post-pr-ci.attempt-1.json", hash: failureHash }], continuation_review: null, terminal_fact: null },
   });
   return { repo, runDir, runId, baseline, candidate };
