@@ -70,6 +70,39 @@ test("R03-R06 cover symlinked entries and every deterministic invalid manifest f
   } finally { fixture.cleanup(); }
 });
 
+test("R03-R05 use the no-follow filesystem seam for inaccessible and special entries", () => {
+  const fixture = createCleanupSweepFixture("entry-inspection-seam");
+  try {
+    fixture.addRun("inaccessible-entry");
+    fixture.addRun("inaccessible-manifest");
+    fixture.addRun("special-entry");
+    const manifestDir = join(fixture.factoryRoot, "manifest-directory");
+    mkdirSync(join(manifestDir, "run.json"), { recursive: true });
+    const inaccessibleEntry = join(fixture.factoryRoot, "inaccessible-entry");
+    const inaccessibleManifest = join(fixture.factoryRoot, "inaccessible-manifest", "run.json");
+    const specialEntry = join(fixture.factoryRoot, "special-entry");
+    const operations = [];
+    const result = inspect(fixture, {
+      fsInspector: (path, context) => {
+        operations.push([path, context.operation]);
+        if (path === inaccessibleEntry && context.operation === "lstat") throw accessError();
+        if (path === inaccessibleManifest && context.operation === "read-json-no-follow") return inaccessibleJson();
+        if (path === specialEntry && context.operation === "lstat") return specialStat();
+        return context.inspectDefault();
+      },
+    });
+    const byName = candidatesByName(result);
+    assert.deepEqual(byName["inaccessible-entry"].reason_codes, ["SKIPPED_UNSAFE_ENTRY"]);
+    assert.equal(byName["inaccessible-entry"].evidence.entry.kind, "inaccessible");
+    assert.deepEqual(byName["inaccessible-manifest"].reason_codes, ["SKIPPED_INVALID_RUN_STATE"]);
+    assert.equal(byName["inaccessible-manifest"].evidence.run.state, "inaccessible");
+    assert.deepEqual(byName["special-entry"].reason_codes, ["SKIPPED_UNSAFE_ENTRY"]);
+    assert.equal(byName["special-entry"].evidence.entry.kind, "other");
+    assert.deepEqual(byName["manifest-directory"].reason_codes, ["SKIPPED_INVALID_RUN_STATE"]);
+    assert.equal(operations.some(([, operation]) => operation === "read-json-no-follow"), true);
+  } finally { fixture.cleanup(); }
+});
+
 test("R07-R10 protect every recoverable status and skip running without external lookup", () => {
   const fixture = createCleanupSweepFixture("statuses");
   try {
@@ -177,14 +210,44 @@ test("R14-R19 retain active-owner, heartbeat, and live-process reasons together"
   } finally { fixture.cleanup(); }
 });
 
+test("R13-R22 classify inaccessible sidecars and run locks through the filesystem seam", async (t) => {
+  const cases = [
+    ["factory lock", "factory.lock", "read-json-no-follow", "SKIPPED_FACTORY_LOCK_INVALID", "factory_lock", "inaccessible", {}],
+    ["heartbeat", "heartbeat.json", "read-json-no-follow", "SKIPPED_HEARTBEAT_UNCERTAIN", "heartbeat", "indeterminate", {}],
+    ["process", "process.json", "read-json-no-follow", "SKIPPED_PROCESS_UNCERTAIN", "process", "indeterminate", { inspectProcess: () => ({ state: "indeterminate" }) }],
+    ["run lock", "run-json.lock", "lstat", "SKIPPED_RUN_LOCK_INVALID", "run_lock", "invalid", {}],
+  ];
+  for (const [name, file, operation, reason, section, state, candidateOptions] of cases) await t.test(name, () => {
+    const fixture = createCleanupSweepFixture(`inaccessible-${name.replaceAll(" ", "-")}`);
+    try {
+      const { runDir } = fixture.addRun("run");
+      const target = join(runDir, file);
+      const candidate = inspect(fixture, {
+        ...candidateOptions,
+        fsInspector: (path, context) => {
+          if (path !== target || context.operation !== operation) return context.inspectDefault();
+          if (operation === "read-json-no-follow") return inaccessibleJson();
+          throw accessError();
+        },
+      }).candidates[0];
+      assert.deepEqual(candidate.reason_codes, [reason]);
+      const actualState = section === "run_lock" ? candidate.evidence[section].observed_before_acquire : candidate.evidence[section].state;
+      assert.equal(actualState, state);
+    } finally { fixture.cleanup(); }
+  });
+});
+
 test("R24-R28 require exact closed PR metadata and a freshly fetched exact base", async (t) => {
   const cases = [
     ["metadata mismatch", ({ fixture }) => { const run = fixture.readRun("run"); run.pr_url = null; fixture.writeRun("run", run); }, "SKIPPED_PR_METADATA_MISMATCH", {}],
     ["terminal tuple mismatch", ({ fixture }) => { const run = fixture.readRun("run"); run.terminal_result.pr_number = 8; fixture.writeRun("run", run); }, "SKIPPED_PR_METADATA_MISMATCH", {}],
     ["lookup unavailable", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { githubRunner: () => ({ ok: false, status: 1, stdout: "" }) }],
+    ["lookup exception", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { githubRunner: () => { throw new Error("injected"); } }],
     ["malformed response", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { githubRunner: () => ({ ok: true, status: 0, stdout: "{" }) }],
     ["response tuple mismatch", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { github: { number: 8 } }],
+    ["contradictory response state", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { github: { state: "open", merged: true } }],
     ["open", () => {}, "SKIPPED_PR_OPEN", { github: { state: "open", merged: false } }],
+    ["missing response field", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { github: { base: { repo: null } } }],
     ["invalid base ref", () => {}, "SKIPPED_BASE_UNPROVABLE", { github: { base: { ref: "bad ref" } } }],
     ["base fetch failure", () => {}, "SKIPPED_BASE_UNPROVABLE", { gitRunner: (_cwd, args) => args[0] === "fetch" ? { ok: false, status: 1, stdout: "" } : null }],
     ["base oid mismatch", () => {}, "SKIPPED_BASE_UNPROVABLE", { gitRunner: (_cwd, args) => args[0] === "rev-parse" && String(args[2]).startsWith("refs/feature-factory/") ? { ok: true, status: 0, stdout: `${"f".repeat(40)}\n` } : null }],
@@ -199,6 +262,16 @@ test("R24-R28 require exact closed PR metadata and a freshly fetched exact base"
       assert.equal(candidate.reason_codes.includes(reason), true);
     } finally { fixture.cleanup(); }
   });
+});
+
+test("R27 exact closed-unmerged pull requests continue through base verification", () => {
+  const fixture = createCleanupSweepFixture("closed-unmerged-pr");
+  try {
+    fixture.addRun("run");
+    const candidate = inspect(fixture, { githubRunner: githubVariant(fixture, { state: "closed", merged: false }) }).candidates[0];
+    assert.equal(candidate.classification, "eligible");
+    assert.equal(candidate.evidence.pr.state, "closed");
+  } finally { fixture.cleanup(); }
 });
 
 test("R29-R35 classify branch safety, presence, checkout, ancestry, and exact ancestors", async (t) => {
@@ -231,6 +304,43 @@ test("R32 rejects a branch checked out in an unrecorded worktree", () => {
     const candidate = inspect(fixture).candidates[0];
     assert.deepEqual(candidate.reason_codes, ["SKIPPED_BRANCH_CHECKED_OUT"]);
     assert.equal(candidate.evidence.branches[0].state, "checked-out-unrecorded");
+  } finally { fixture.cleanup(); }
+});
+
+test("R31 rejects malformed branch-head evidence", () => {
+  const fixture = createCleanupSweepFixture("branch-malformed-head");
+  try {
+    fixture.addRun("run");
+    const runner = fallbackRunner((_cwd, args) => args[0] === "rev-parse" && args[2] === "refs/heads/run^{commit}"
+      ? { ok: true, status: 0, stdout: "not-an-object-id\n" }
+      : null, fixture.gitRunner);
+    const candidate = inspect(fixture, { gitRunner: runner }).candidates[0];
+    assert.deepEqual(candidate.reason_codes, ["SKIPPED_BRANCH_MISSING"]);
+    assert.equal(candidate.evidence.branches[0].state, "missing");
+  } finally { fixture.cleanup(); }
+});
+
+test("R32 examines every registration when recorded checkout appears before unrecorded checkout", () => {
+  const fixture = createCleanupSweepFixture("branch-recorded-first");
+  try {
+    fixture.addRun("run");
+    const recorded = fixture.addRecordedWorktree("run");
+    const runner = porcelainRunner(fixture, (stdout) => `${stdout.trimEnd()}\n\nworktree ${join(fixture.root, "unrecorded")}\nHEAD ${fixture.baseSha}\nbranch refs/heads/run\n\n`);
+    const candidate = inspect(fixture, { gitRunner: runner }).candidates[0];
+    assert.deepEqual(candidate.reason_codes, ["SKIPPED_BRANCH_CHECKED_OUT"]);
+    assert.equal(candidate.evidence.branches[0].state, "checked-out-unrecorded");
+    assert.equal(candidate.evidence.claims.worktrees.includes(recorded), true);
+  } finally { fixture.cleanup(); }
+});
+
+test("R34 fails closed when git worktree list cannot be established", () => {
+  const fixture = createCleanupSweepFixture("worktree-list-failure");
+  try {
+    fixture.addRun("run");
+    const runner = fallbackRunner((_cwd, args) => args[0] === "worktree"
+      ? { ok: false, status: 2, stdout: "" }
+      : null, fixture.gitRunner);
+    assert.deepEqual(inspect(fixture, { gitRunner: runner }).candidates[0].reason_codes, ["SKIPPED_BRANCH_UNPROVABLE"]);
   } finally { fixture.cleanup(); }
 });
 
@@ -312,6 +422,60 @@ test("R36-R41 verify recorded worktree containment, registration, branch/head id
       assert.equal(candidate.evidence.worktrees.every((item) => item.state === "branch-mismatch"), true);
     } finally { fixture.cleanup(); }
   });
+  await t.test("classifies inaccessible lstat and realpath worktree evidence", () => {
+    for (const operation of ["lstat", "realpath"]) {
+      const fixture = createCleanupSweepFixture(`worktree-inaccessible-${operation}`);
+      try {
+        fixture.addRun("run");
+        const worktree = fixture.addRecordedWorktree("run");
+        const candidate = inspect(fixture, {
+          fsInspector: (path, context) => {
+            if (path === worktree && context.operation === operation) throw accessError();
+            return context.inspectDefault();
+          },
+        }).candidates[0];
+        assert.deepEqual(candidate.reason_codes, [operation === "lstat" ? "SKIPPED_WORKTREE_MISSING" : "SKIPPED_WORKTREE_UNSAFE"]);
+      } finally { fixture.cleanup(); }
+    }
+  });
+  await t.test("rejects duplicate registrations of one recorded branch and path", () => {
+    const fixture = createCleanupSweepFixture("worktree-duplicate-registration");
+    try {
+      fixture.addRun("run");
+      const worktree = fixture.addRecordedWorktree("run");
+      const runner = porcelainRunner(fixture, (stdout) => `${stdout.trimEnd()}\n\nworktree ${worktree}\nHEAD ${fixture.baseSha}\nbranch refs/heads/run\n\n`);
+      const candidate = inspect(fixture, { gitRunner: runner }).candidates[0];
+      assert.deepEqual(candidate.reason_codes, ["SKIPPED_BRANCH_CHECKED_OUT"]);
+    } finally { fixture.cleanup(); }
+  });
+  await t.test("rejects contradictory branch registrations for one recorded path", () => {
+    const fixture = createCleanupSweepFixture("worktree-contradictory-registration");
+    try {
+      fixture.addRun("run");
+      const worktree = fixture.addRecordedWorktree("run");
+      const runner = porcelainRunner(fixture, (stdout) => `${stdout.trimEnd()}\n\nworktree ${worktree}\nHEAD ${fixture.baseSha}\nbranch refs/heads/main\n\n`);
+      const candidate = inspect(fixture, { gitRunner: runner }).candidates[0];
+      assert.deepEqual(candidate.reason_codes, ["SKIPPED_WORKTREE_IDENTITY"]);
+    } finally { fixture.cleanup(); }
+  });
+  await t.test("rejects missing and malformed porcelain identity fields for a recorded path", () => {
+    const fixture = createCleanupSweepFixture("worktree-malformed-porcelain");
+    try {
+      fixture.addRun("run");
+      const worktree = fixture.addRecordedWorktree("run");
+      const runner = porcelainRunner(fixture, (stdout) => stdout.replace(
+        new RegExp(`worktree ${escapeRegExp(worktree)}\\nHEAD [0-9a-f]+\\nbranch refs/heads/run`, "u"),
+        `worktree ${worktree}\nbranch refs/heads/run`,
+      ));
+      const candidate = inspect(fixture, { gitRunner: runner }).candidates[0];
+      assert.deepEqual(candidate.reason_codes, ["SKIPPED_WORKTREE_IDENTITY"]);
+      const branchlessRunner = porcelainRunner(fixture, (stdout) => stdout.replace(
+        new RegExp(`(worktree ${escapeRegExp(worktree)}\\nHEAD [0-9a-f]+)\\nbranch refs/heads/run`, "u"),
+        "$1",
+      ));
+      assert.deepEqual(inspect(fixture, { gitRunner: branchlessRunner }).candidates[0].reason_codes, ["SKIPPED_WORKTREE_IDENTITY"]);
+    } finally { fixture.cleanup(); }
+  });
 });
 
 test("R52 turns an unexpected per-entry inspection exception into FAILED_INSPECTION", () => {
@@ -370,6 +534,19 @@ function expectedTemporaryRef(runId) {
   return `refs/feature-factory/cleanup-sweep/v1/00000000-0000-4000-8000-000000000001/${createHash("sha256").update(runId).digest("hex")}`;
 }
 function fallbackRunner(primary, fallback) { return (cwd, args, options) => primary(cwd, args, options) ?? fallback(cwd, args, options); }
+function porcelainRunner(fixture, transform) {
+  return fallbackRunner((_cwd, args) => {
+    if (args[0] !== "worktree") return null;
+    const result = fixture.gitRunner(fixture.repo, args);
+    return { ...result, stdout: transform(result.stdout) };
+  }, fixture.gitRunner);
+}
+function inaccessibleJson() { return { state: "inaccessible", value: null, hash: null }; }
+function accessError() { return Object.assign(new Error("injected inaccessible path"), { code: "EACCES" }); }
+function specialStat() {
+  return { dev: 1, ino: 2, isSymbolicLink: () => false, isDirectory: () => false, isFile: () => false };
+}
+function escapeRegExp(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"); }
 function githubVariant(fixture, changes) {
   return (...args) => {
     const result = fixture.githubRunner(...args);

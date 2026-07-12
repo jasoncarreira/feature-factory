@@ -24,21 +24,21 @@ const utf8 = (left, right) => Buffer.from(left, "utf8").compare(Buffer.from(righ
  * Callers own deletion of every ref returned in temporary_refs.
  */
 export function discoverCleanupSweepCandidates(repo, options = {}) {
-  const repositoryRoot = realpathSync(resolve(repo));
+  const repositoryRoot = inspectFilesystem(resolve(repo), "realpath", options);
   const factoryRoot = join(repositoryRoot, ".opencode", "factory");
   let root;
   try {
-    root = lstatSync(factoryRoot);
+    root = inspectFilesystem(factoryRoot, "lstat", options);
   } catch (error) {
     if (error?.code === "ENOENT") return { factory_root: factoryRoot, candidates: [], temporary_refs: [] };
     throw error;
   }
-  if (root.isSymbolicLink() || !root.isDirectory() || realpathSync(factoryRoot) !== factoryRoot) {
+  if (root.isSymbolicLink() || !root.isDirectory() || inspectFilesystem(factoryRoot, "realpath", options) !== factoryRoot) {
     throw new Error("factory root is not a safe physical directory");
   }
 
-  const entries = readdirSync(factoryRoot).sort(utf8).map((entryName) => inspectEntry(factoryRoot, entryName));
-  const collisions = buildClaimInventory(entries, repositoryRoot);
+  const entries = inspectFilesystem(factoryRoot, "readdir", options).sort(utf8).map((entryName) => inspectEntry(factoryRoot, entryName, options));
+  const collisions = buildClaimInventory(entries, repositoryRoot, options);
   const temporaryRefs = [];
   const candidates = entries.map((entry) => {
     try {
@@ -55,29 +55,29 @@ export function discoverCleanupSweepCandidates(repo, options = {}) {
 }
 
 export function classifyCleanupSweepCandidate(repo, entryName, options = {}) {
-  const repositoryRoot = realpathSync(resolve(repo));
+  const repositoryRoot = inspectFilesystem(resolve(repo), "realpath", options);
   const factoryRoot = join(repositoryRoot, ".opencode", "factory");
-  const entries = readdirSync(factoryRoot).sort(utf8).map((name) => inspectEntry(factoryRoot, name));
+  const entries = inspectFilesystem(factoryRoot, "readdir", options).sort(utf8).map((name) => inspectEntry(factoryRoot, name, options));
   const entry = entries.find((item) => item.entryName === entryName);
   if (!entry) throw new Error("cleanup sweep entry does not exist");
-  const collisions = buildClaimInventory(entries, repositoryRoot);
+  const collisions = buildClaimInventory(entries, repositoryRoot, options);
   return classifyEntry(repositoryRoot, entry, collisions.get(entryName) ?? false, options);
 }
 
-function inspectEntry(factoryRoot, entryName) {
+function inspectEntry(factoryRoot, entryName, options) {
   const logicalPath = join(factoryRoot, entryName);
   const entry = { entryName, logicalPath, kind: "inaccessible", stat: null, physicalPath: null, rawRun: null };
   try {
-    const value = lstatSync(logicalPath);
+    const value = inspectFilesystem(logicalPath, "lstat", options);
     entry.stat = value;
     entry.kind = value.isSymbolicLink() ? "symlink" : value.isDirectory() ? "directory" : value.isFile() ? "file" : "other";
-    if (entry.kind === "directory") entry.physicalPath = realpathSync(logicalPath);
+    if (entry.kind === "directory") entry.physicalPath = inspectFilesystem(logicalPath, "realpath", options);
   } catch {
     return entry;
   }
   if (entry.kind !== "directory") return entry;
   try {
-    const read = readJsonNoFollow(join(logicalPath, FILES.run));
+    const read = inspectFilesystem(join(logicalPath, FILES.run), "read-json-no-follow", options);
     if (read.state === "valid") {
       entry.rawRun = read.value;
     }
@@ -87,11 +87,11 @@ function inspectEntry(factoryRoot, entryName) {
   return entry;
 }
 
-function buildClaimInventory(entries, repo) {
+function buildClaimInventory(entries, repo, options) {
   const owners = new Map();
   const claimsByEntry = new Map();
   for (const entry of entries) {
-    const claims = rawClaims(entry, repo);
+    const claims = rawClaims(entry, repo, options);
     claimsByEntry.set(entry.entryName, claims);
     for (const key of [...claims.branchKeys, ...claims.worktreeKeys]) {
       const claimants = owners.get(key) ?? new Set();
@@ -106,7 +106,7 @@ function buildClaimInventory(entries, repo) {
   return result;
 }
 
-function rawClaims(entry, repo) {
+function rawClaims(entry, repo, options) {
   const branchValues = [entry.entryName];
   const worktreeValues = [join(repo, ".opencode", "worktrees", entry.entryName)];
   const run = entry.rawRun;
@@ -124,13 +124,13 @@ function rawClaims(entry, repo) {
     branches,
     worktrees,
     branchKeys: branches.map((value) => `branch:${value}`),
-    worktreeKeys: worktrees.flatMap((value) => worktreeClaimKeys(value)),
+    worktreeKeys: worktrees.flatMap((value) => worktreeClaimKeys(value, options)),
   };
 }
 
-function worktreeClaimKeys(logical) {
+function worktreeClaimKeys(logical, options) {
   const keys = [`worktree-logical:${logical}`];
-  try { keys.push(`worktree-physical:${realpathSync(logical)}`); } catch { /* logical key remains collision-safe */ }
+  try { keys.push(`worktree-physical:${inspectFilesystem(logical, "realpath", options)}`); } catch { /* logical key remains collision-safe */ }
   return keys;
 }
 
@@ -143,7 +143,7 @@ function classifyEntry(repo, entry, sharedClaim, options) {
     device: entry.stat ? String(entry.stat.dev) : null,
     inode: entry.stat ? String(entry.stat.ino) : null,
   };
-  const claims = rawClaims(entry, repo);
+  const claims = rawClaims(entry, repo, options);
   evidence.claims = { branches: claims.branches, worktrees: claims.worktrees };
   const finish = (classification, reasonCodes, runId = evidence.run.run_id, temporaryRef = null) => ({
     candidate: createCandidate({ entry_name: entry.entryName, run_id: runId, classification, reason_codes: sharedClaim ? [...reasonCodes, "SHARED_TARGET_CLAIM"] : reasonCodes, evidence }),
@@ -151,7 +151,7 @@ function classifyEntry(repo, entry, sharedClaim, options) {
   });
 
   if (entry.kind !== "directory" || entry.physicalPath !== entry.logicalPath || !SAFE_ENTRY.test(entry.entryName)) return finish("skipped", ["SKIPPED_UNSAFE_ENTRY"], null);
-  const runRead = readJsonNoFollow(join(entry.logicalPath, FILES.run));
+  const runRead = inspectFilesystem(join(entry.logicalPath, FILES.run), "read-json-no-follow", options);
   if (runRead.state === "missing") return finish("skipped", ["SKIPPED_PRE_MANIFEST"], null);
   if (runRead.state !== "valid") {
     evidence.run.state = runRead.state === "inaccessible" ? "inaccessible" : "invalid";
@@ -188,7 +188,7 @@ function classifyEntry(repo, entry, sharedClaim, options) {
   const temporaryRef = temporaryRefFor(entry.entryName, options.invocationId ?? randomUUID());
   options.registerTemporaryRef?.(temporaryRef);
   if (!verifyFetchedBase(repo, pr, temporaryRef, options.gitRunner ?? git)) return finish("skipped", ["SKIPPED_BASE_UNPROVABLE"], run.run_id, temporaryRef);
-  const targetResult = inspectTargets(repo, run, temporaryRef, pr.base_sha, evidence, options.gitRunner ?? git);
+  const targetResult = inspectTargets(repo, run, temporaryRef, pr.base_sha, evidence, options.gitRunner ?? git, options);
   if (targetResult.reason) return finish("skipped", [targetResult.reason], run.run_id, temporaryRef);
   return finish("eligible", ["ELIGIBLE"], run.run_id, temporaryRef);
 }
@@ -196,7 +196,7 @@ function classifyEntry(repo, entry, sharedClaim, options) {
 function inspectSidecars(runDir, run, evidence, options) {
   const protectedReasons = [];
   const skipped = [];
-  const factoryLock = inspectValidatedFile(join(runDir, FILES.factoryLock), validateFactoryLock, run.run_id);
+  const factoryLock = inspectValidatedFile(join(runDir, FILES.factoryLock), validateFactoryLock, run.run_id, options);
   evidence.factory_lock = { state: factoryLock.state, hash: factoryLock.hash, active_owner: null };
   if (!["missing", "valid-matching"].includes(factoryLock.state)) skipped.push("SKIPPED_FACTORY_LOCK_INVALID");
 
@@ -208,7 +208,7 @@ function inspectSidecars(runDir, run, evidence, options) {
   const processInspector = options.inspectProcess ?? inspectProcessEvidenceForCleanup;
   let processResult;
   try { processResult = processInspector(runDir, { ...options.processOptions, runId: run.run_id }); } catch { processResult = { state: "indeterminate" }; }
-  const processHash = safeFileHash(join(runDir, FILES.process));
+  const processHash = safeFileHash(join(runDir, FILES.process), options);
   evidence.process = { state: normalizeProcessState(processResult?.state), hash: processHash };
   if (evidence.process.state === "live-matching") protectedReasons.push("PROTECTED_LIVE_PROCESS");
   else if (!["missing", "absent"].includes(evidence.process.state)) skipped.push("SKIPPED_PROCESS_UNCERTAIN");
@@ -218,7 +218,7 @@ function inspectSidecars(runDir, run, evidence, options) {
     protectedReasons.unshift("PROTECTED_ACTIVE_FACTORY_OWNER");
   } else if (factoryLock.state === "valid-matching") evidence.factory_lock.active_owner = false;
 
-  const lockState = inspectRunLock(join(runDir, FILES.runLock), options.heldRunId === run.run_id);
+  const lockState = inspectRunLock(join(runDir, FILES.runLock), options.heldRunId === run.run_id, options);
   evidence.run_lock = { observed_before_acquire: lockState, held_by_sweep: options.heldRunId === run.run_id };
   if (lockState === "invalid") skipped.push("SKIPPED_RUN_LOCK_INVALID");
   else if (lockState === "present" && options.heldRunId !== run.run_id) {
@@ -228,7 +228,7 @@ function inspectSidecars(runDir, run, evidence, options) {
 }
 
 function inspectHeartbeat(runDir, runId, options) {
-  const read = readJsonNoFollow(join(runDir, FILES.heartbeat));
+  const read = inspectFilesystem(join(runDir, FILES.heartbeat), "read-json-no-follow", options);
   if (read.state === "missing") return { evidence: { state: "missing", hash: null, fresh: null } };
   if (read.state !== "valid") return { evidence: { state: read.state === "inaccessible" ? "indeterminate" : "invalid", hash: read.hash, fresh: null } };
   let heartbeat;
@@ -242,7 +242,7 @@ function inspectHeartbeat(runDir, runId, options) {
   return { evidence: { state: fresh ? "valid-fresh" : "valid-stale", hash: read.hash, fresh } };
 }
 
-function inspectTargets(repo, run, temporaryRef, baseOid, evidence, gitRunner) {
+function inspectTargets(repo, run, temporaryRef, baseOid, evidence, gitRunner, options) {
   const targets = collectCleanupTargets(run);
   const worktreeTargets = recordedWorktreeAssociations(run);
   let registered = [];
@@ -251,10 +251,12 @@ function inspectTargets(repo, run, temporaryRef, baseOid, evidence, gitRunner) {
     if (!listed?.ok) return { reason: "SKIPPED_BRANCH_UNPROVABLE" };
     registered = parseWorktreeListPorcelain(listed.stdout);
   }
-  const worktreeRoot = join(repo, ".opencode", "worktrees");
-  const recordedPaths = new Set(worktreeTargets
-    .map((item) => resolve(repo, item.worktree))
-    .filter((path) => contained(worktreeRoot, path)));
+  const associationConflict = conflictingWorktreeAssociation(repo, worktreeTargets, options);
+  if (associationConflict) {
+    appendConflictingWorktreeEvidence(evidence, repo, associationConflict, options);
+    return { reason: "SKIPPED_WORKTREE_IDENTITY" };
+  }
+  const registration = inspectRegisteredWorktreeClaims(repo, registered, worktreeTargets, targets.branches, options);
   for (const branch of [...targets.branches].sort(utf8)) {
     const record = { name: branch, expected_head: null, state: "unprovable", base_oid: baseOid };
     evidence.branches.push(record);
@@ -262,9 +264,9 @@ function inspectTargets(repo, run, temporaryRef, baseOid, evidence, gitRunner) {
     const head = gitRunner(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
     if (!head?.ok || !oid(head.stdout.trim())) { record.state = "missing"; return { reason: "SKIPPED_BRANCH_MISSING" }; }
     record.expected_head = head.stdout.trim();
-    const checkout = registered.find((item) => item.branch === branch);
-    if (checkout && !recordedPaths.has(resolve(checkout.path))) {
-      record.state = resolve(checkout.path) === repo ? "current" : "checked-out-unrecorded";
+    const checkout = registration.unrecordedByBranch.get(branch);
+    if (checkout) {
+      record.state = checkout.current ? "current" : "checked-out-unrecorded";
       return { reason: "SKIPPED_BRANCH_CHECKED_OUT" };
     }
     const ancestry = gitRunner(repo, ["merge-base", "--is-ancestor", `refs/heads/${branch}`, temporaryRef]);
@@ -272,21 +274,12 @@ function inspectTargets(repo, run, temporaryRef, baseOid, evidence, gitRunner) {
     if (!ancestry?.ok) { record.state = "unprovable"; return { reason: "SKIPPED_BRANCH_UNPROVABLE" }; }
     record.state = "verified-ancestor";
   }
-  const associationConflict = conflictingWorktreeAssociation(repo, worktreeTargets);
-  if (associationConflict) {
-    for (const target of associationConflict) {
-      evidence.worktrees.push({
-        recorded_path: String(target.worktree),
-        physical_path: physicalPathOrNull(resolve(repo, target.worktree)),
-        branch: target.branch ?? null,
-        head: null,
-        state: "branch-mismatch",
-      });
-    }
+  if (registration.identityConflict) {
+    appendConflictingWorktreeEvidence(evidence, repo, registration.identityConflict, options);
     return { reason: "SKIPPED_WORKTREE_IDENTITY" };
   }
   for (const target of dedupeWorktreeAssociations(worktreeTargets)) {
-    const result = inspectWorktree(repo, target, registered, evidence.branches);
+    const result = inspectWorktree(repo, target, registered, evidence.branches, options);
     evidence.worktrees.push(result.record);
     if (result.reason) return { reason: result.reason };
   }
@@ -302,12 +295,12 @@ function recordedWorktreeAssociations(run) {
   return entries.sort((left, right) => utf8(String(left.worktree), String(right.worktree)) || utf8(String(left.branch ?? ""), String(right.branch ?? "")));
 }
 
-function conflictingWorktreeAssociation(repo, targets) {
+function conflictingWorktreeAssociation(repo, targets, options) {
   const associations = new Map();
   for (const target of targets) {
     const logical = resolve(repo, target.worktree);
     const keys = new Set([logical]);
-    const physical = physicalPathOrNull(logical);
+    const physical = physicalPathOrNull(logical, options);
     if (physical) keys.add(physical);
     for (const key of keys) {
       const byBranch = associations.get(key) ?? new Map();
@@ -324,6 +317,83 @@ function conflictingWorktreeAssociation(repo, targets) {
   return null;
 }
 
+function inspectRegisteredWorktreeClaims(repo, registered, targets, branches, options) {
+  const recordedBranches = new Set(branches);
+  const associationsByBranch = new Map(branches.map((branch) => [branch, new Set()]));
+  const associationsByPath = new Map();
+  for (const target of targets) {
+    const keys = pathIdentityKeys(repo, target.worktree, options);
+    const branch = target.branch ?? null;
+    if (recordedBranches.has(branch)) for (const key of keys) associationsByBranch.get(branch).add(key);
+    for (const key of keys) {
+      const expected = associationsByPath.get(key) ?? new Set();
+      expected.add(branch);
+      associationsByPath.set(key, expected);
+    }
+  }
+
+  const relevant = [];
+  for (const item of registered) {
+    const keys = pathIdentityKeys(repo, item.path, options);
+    const expectedBranches = new Set([...keys].flatMap((key) => [...(associationsByPath.get(key) ?? [])]));
+    if (recordedBranches.has(item.branch) || expectedBranches.size > 0) relevant.push({ item, keys, expectedBranches });
+  }
+
+  const unrecordedByBranch = new Map();
+  for (const branch of recordedBranches) {
+    const checkouts = relevant.filter(({ item }) => item.branch === branch);
+    const allowed = associationsByBranch.get(branch);
+    const outside = checkouts.find(({ keys }) => ![...keys].some((key) => allowed.has(key)));
+    if (outside) {
+      unrecordedByBranch.set(branch, { current: outside.keys.has(repo) });
+    } else if (checkouts.length > 1) {
+      unrecordedByBranch.set(branch, { current: checkouts.some(({ keys }) => keys.has(repo)) });
+    }
+  }
+
+  for (let left = 0; left < relevant.length; left += 1) {
+    for (let right = left + 1; right < relevant.length; right += 1) {
+      if ([...relevant[left].keys].some((key) => relevant[right].keys.has(key))) {
+        return { unrecordedByBranch, identityConflict: targetsForRegistrationConflict([relevant[left], relevant[right]], targets, repo, options) };
+      }
+    }
+  }
+  for (const record of relevant) {
+    if (record.expectedBranches.size > 0
+      && (!record.expectedBranches.has(record.item.branch) || !oid(record.item.head))) {
+      return { unrecordedByBranch, identityConflict: targetsForRegistrationConflict([record], targets, repo, options) };
+    }
+  }
+  return { unrecordedByBranch, identityConflict: null };
+}
+
+function targetsForRegistrationConflict(records, targets, repo, options) {
+  const keys = new Set(records.flatMap((record) => [...record.keys]));
+  const matching = targets.filter((target) => [...pathIdentityKeys(repo, target.worktree, options)].some((key) => keys.has(key)));
+  return matching.length > 0 ? matching : targets;
+}
+
+function appendConflictingWorktreeEvidence(evidence, repo, targets, options) {
+  for (const target of targets) {
+    evidence.worktrees.push({
+      recorded_path: String(target.worktree),
+      physical_path: physicalPathOrNull(resolve(repo, target.worktree), options),
+      branch: target.branch ?? null,
+      head: null,
+      state: "branch-mismatch",
+    });
+  }
+}
+
+function pathIdentityKeys(repo, path, options) {
+  if (!nonEmpty(path)) return new Set();
+  const logical = resolve(repo, path);
+  const keys = new Set([logical]);
+  const physical = physicalPathOrNull(logical, options);
+  if (physical) keys.add(physical);
+  return keys;
+}
+
 function dedupeWorktreeAssociations(targets) {
   const seen = new Set();
   return targets.filter((target) => {
@@ -334,23 +404,25 @@ function dedupeWorktreeAssociations(targets) {
   });
 }
 
-function physicalPathOrNull(path) {
-  try { return realpathSync(path); } catch { return null; }
+function physicalPathOrNull(path, options) {
+  try { return inspectFilesystem(path, "realpath", options); } catch { return null; }
 }
 
-function inspectWorktree(repo, target, registered, branches) {
+function inspectWorktree(repo, target, registered, branches, options) {
   const recordedPath = String(target.worktree);
   const logical = resolve(repo, recordedPath);
   const record = { recorded_path: recordedPath, physical_path: null, branch: target.branch ?? null, head: null, state: "unprovable" };
   const root = join(repo, ".opencode", "worktrees");
   if (!contained(root, logical)) { record.state = "outside-root"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
   let value;
-  try { value = lstatSync(logical); } catch { record.state = "missing"; return { record, reason: "SKIPPED_WORKTREE_MISSING" }; }
+  try { value = inspectFilesystem(logical, "lstat", options); } catch { record.state = "missing"; return { record, reason: "SKIPPED_WORKTREE_MISSING" }; }
   if (value.isSymbolicLink()) { record.state = "symlink"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
   if (!value.isDirectory()) { record.state = "missing"; return { record, reason: "SKIPPED_WORKTREE_MISSING" }; }
-  try { record.physical_path = realpathSync(logical); } catch { record.state = "unprovable"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
-  if (!contained(realpathExistingRoot(root), record.physical_path)) { record.state = "outside-root"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
-  const registeredEntry = registered.find((item) => { try { return realpathSync(item.path) === record.physical_path; } catch { return false; } });
+  try { record.physical_path = inspectFilesystem(logical, "realpath", options); } catch { record.state = "unprovable"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
+  if (!contained(realpathExistingRoot(root, options), record.physical_path)) { record.state = "outside-root"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
+  const registeredEntries = registered.filter((item) => pathIdentityKeys(repo, item.path, options).has(record.physical_path));
+  if (registeredEntries.length > 1) { record.state = "branch-mismatch"; return { record, reason: "SKIPPED_WORKTREE_IDENTITY" }; }
+  const registeredEntry = registeredEntries[0];
   if (!registeredEntry) { record.state = "unregistered"; return { record, reason: "SKIPPED_WORKTREE_UNREGISTERED" }; }
   record.branch = registeredEntry.branch;
   record.head = registeredEntry.head;
@@ -375,8 +447,8 @@ function validBranch(repo, branch, gitRunner) {
   return gitRunner(repo, ["check-ref-format", "--branch", branch])?.ok === true;
 }
 
-function inspectValidatedFile(path, validator, runId) {
-  const read = readJsonNoFollow(path);
+function inspectValidatedFile(path, validator, runId, options) {
+  const read = inspectFilesystem(path, "read-json-no-follow", options);
   if (read.state === "missing") return { state: "missing", hash: null };
   if (read.state !== "valid") return { state: read.state === "inaccessible" ? "inaccessible" : "invalid", hash: read.hash };
   try {
@@ -385,9 +457,9 @@ function inspectValidatedFile(path, validator, runId) {
   } catch { return { state: "invalid", hash: read.hash }; }
 }
 
-function inspectRunLock(path, held) {
+function inspectRunLock(path, held, options) {
   try {
-    const value = lstatSync(path);
+    const value = inspectFilesystem(path, "lstat", options);
     if (value.isSymbolicLink() || !value.isDirectory()) return "invalid";
     return held ? "missing" : "present";
   } catch (error) { return error?.code === "ENOENT" ? "missing" : "invalid"; }
@@ -423,11 +495,28 @@ function temporaryRefFor(runId, invocationId) {
   const hash = createHash("sha256").update(runId).digest("hex");
   return `refs/feature-factory/cleanup-sweep/v1/${safeInvocation}/${hash}`;
 }
-function safeFileHash(path) { const read = readJsonNoFollow(path); return read.hash; }
+function inspectFilesystem(path, operation, options = {}) {
+  const inspectDefault = () => defaultFilesystemInspection(path, operation);
+  const injected = options?.fsInspector;
+  if (typeof injected === "function") {
+    const result = injected(path, { operation, inspectDefault });
+    return result === undefined ? inspectDefault() : result;
+  }
+  if (injected && typeof injected[operation] === "function") return injected[operation](path, { inspectDefault });
+  return inspectDefault();
+}
+function defaultFilesystemInspection(path, operation) {
+  if (operation === "lstat") return lstatSync(path);
+  if (operation === "realpath") return realpathSync(path);
+  if (operation === "readdir") return readdirSync(path);
+  if (operation === "read-json-no-follow") return readJsonNoFollow(path);
+  throw new TypeError(`unsupported filesystem inspection operation: ${operation}`);
+}
+function safeFileHash(path, options) { const read = inspectFilesystem(path, "read-json-no-follow", options); return read.hash; }
 function normalizeProcessState(value) { return ["missing", "live-matching", "absent", "mismatched", "invalid", "indeterminate"].includes(value) ? value : "indeterminate"; }
 function clockMs(clock) { try { const value = typeof clock === "function" ? clock() : Date.now(); return value instanceof Date ? value.getTime() : Number(value); } catch { return Number.NaN; } }
 function oid(value) { return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(String(value)); }
 function nonEmpty(value) { return typeof value === "string" && value.trim() !== ""; }
 function dedupe(values) { return [...new Set(values)]; }
 function contained(root, target) { const rel = relative(resolve(root), resolve(target)); return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel); }
-function realpathExistingRoot(root) { try { return realpathSync(root); } catch { return root; } }
+function realpathExistingRoot(root, options) { try { return inspectFilesystem(root, "realpath", options); } catch { return root; } }
