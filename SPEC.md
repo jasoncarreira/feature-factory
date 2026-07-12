@@ -260,7 +260,7 @@ Long-wait heartbeat guard:
 - Do not perform the next semantic `run.json` / factory CLI state write while the long-wait heartbeat remains active; stop heartbeat or verify inactive first.
 - Protected gates `story`, `brief`, and `pre_pr` remain heartbeat-free. The phase is opaque/non-enforced by validation beyond being non-empty, and heartbeat remains liveness-only, not authority.
 
-Use these phase labels by convention: `spec-review` for the spec-writer Task wait and spec review, `decomposition-review` for the work-decomposer Task wait and plan review, `builder-wave` for builder wave waits, `slice-review` for slice reviewer waits, `test-verifier` for test-verifier waits, `test-rerun` for long acceptance-suite reruns, `test-review` for test evidence review, `implementation-validator` and `security-reviewer` for the pre-PR panel, and `remediation` for routed fix waits.
+Use these phase labels by convention: `spec-review` for the spec-writer Task wait and spec review, `decomposition-review` for the work-decomposer Task wait and plan review, `builder-wave` for builder wave waits, `slice-review` for slice reviewer waits, `test-verifier` for test-verifier waits, `test-rerun` for long acceptance-suite reruns, `test-review` for test evidence review, `implementation-validator` and `security-reviewer` for the pre-PR panel, `remediation` for routed fix waits, `post-pr-observation` for long GitHub checks/review observation waits, `post-pr-remediation` for post-PR builder or test-verifier remediation waits, and `post-pr-revalidation` for post-PR panel and local revalidation waits.
 
 External monitoring semantics:
 
