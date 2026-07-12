@@ -30,8 +30,18 @@ const HEARTBEAT_FILE = "heartbeat.json";
 const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "terminal"]);
 const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation"]);
 
+export class RunJsonLockContendedError extends Error {
+  constructor(lockDir) {
+    super(`run.json lock is contended at ${lockDir}`);
+    this.name = "RunJsonLockContendedError";
+    this.code = "RUN_JSON_LOCK_CONTENDED";
+    this.lockDir = lockDir;
+  }
+}
+
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
+  const reclaimMode = normalizeReclaimMode(options.reclaimMode);
   const lockHooks = validateRunJsonLockHooks(options.lockHooks);
   const timeoutMs = normalizePositiveInteger(options.timeoutMs, DEFAULT_LOCK_TIMEOUT_MS);
   const retryDelayMs = normalizePositiveInteger(options.retryDelayMs, DEFAULT_LOCK_RETRY_DELAY_MS);
@@ -55,6 +65,7 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
+      if (reclaimMode === "never") throw new RunJsonLockContendedError(lockDir);
       if (!contentionReported && lockHooks.onContended) {
         contentionReported = true;
         await runContendedLockHook(lockHooks.onContended, { runDir, lockDir }, deadline, ownerPath);
@@ -105,6 +116,12 @@ export async function withRunJsonLock(runDir, fn, options = {}) {
       await quarantineAndRemoveOwnedLock(runDir, lockDir, createdIdentity);
     }
   }
+}
+
+function normalizeReclaimMode(value) {
+  if (value === undefined || value === "dead-owner") return "dead-owner";
+  if (value === "never") return value;
+  throw new Error("reclaimMode must be dead-owner or never");
 }
 
 function validateRunJsonLockHooks(lockHooks) {

@@ -541,6 +541,31 @@ When a compatible opencode host loads the separate TUI export on a session route
 
 For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url` only through the `pr-created` transition.
 
+### Repository-wide conservative cleanup
+
+Preview eligible completed runs in the selected repository without modifying cleanup targets:
+
+```sh
+feature-factory factory cleanup --all --dry-run --repo /path/to/repo
+feature-factory factory cleanup --all --dry-run --repo /path/to/repo --json
+```
+
+The preview reports every immediate entry under that repository's physical `.opencode/factory/` root as `eligible`, `protected`, `skipped`, or `failed`, with stable reason codes and aggregate eligible, protected, skipped, deleted, and failed counts. It emits a repository-and-candidate-set digest and an exact confirmation command. Execute only by supplying that digest:
+
+```sh
+feature-factory factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> --repo /path/to/repo
+```
+
+Sweep flags may appear in any order, but `--all` must appear exactly once and must select exactly one mode: `--dry-run` once for preview or `--digest VALUE` once for execution. `--repo PATH` and `--json` are each optional once. Sweep cleanup accepts no run ID, `--force`, repeated flag, unrelated option, short option, `--flag=value`, or `--` separator. A digest has exactly two 64-character lowercase hexadecimal components. Grammar errors produce one terminal-safe `error:` line on stderr, no report on stdout, and perform no repository inspection.
+
+Sweep cleanup is deliberately stricter than single-run cleanup. A run is eligible only when its status is exactly `completed`, its canonical recorded GitHub PR is currently merged or closed, every recorded branch is proven contained in a freshly fetched PR base, every worktree and branch passes containment and identity checks, and no active ownership, fresh heartbeat, live identity-matching process, run lock, shared target, or contradictory evidence remains. Missing, malformed, inaccessible, stale, foreign, or otherwise unprovable evidence skips deletion; `--force` is not supported with `--all`.
+
+Execution first resolves `--repo` to its physical identity and recomputes the complete digest. The exact physical root, device/inode identity, Git common-directory identity, and object format bind authorization; display text never does. A digest from another repository is refused as `DIGEST_FOREIGN`; changed candidate evidence is refused as `DIGEST_STALE`. Both refusals preserve the recomputed unattempted candidates and counts, provide no confirmation action, and require a fresh preview. After a matching digest, each eligible candidate is locked without lock takeover and fully revalidated immediately before mutation. Changed or contested candidates are skipped. Deletion delegates to the existing identity-checked single-run target semantics, uses no branch force deletion, retains the run directory after a partial target failure, and continues processing independent candidates.
+
+Human diagnostics apply sensitive-value projection and terminal-safe encoding, so a displayed repository or candidate value may be `[redacted]` and is never authorization input. Preview `confirmation.argv` nevertheless retains the exact authorized physical root. When that root is sensitive-looking or terminal-hostile, the human `shell_command` uses a deterministic ASCII-only POSIX `/bin/sh` octal variable with a sentinel so even trailing newlines round-trip without exposing the path literally. JSON is the exact normalized machine report with transport escaping only: repository identity, evidence, authorization, and confirmation values are not semantically redacted. Execute, refused, and failed reports always have null confirmation.
+
+Human and JSON execution reports distinguish deleted, protected, skipped, inspection-failed, and attempted-cleanup-failed outcomes. Preview, completed execution, refusal, attempted cleanup failure, and report-level failure each emit one complete selected report on stdout with empty stderr; grammar rejection is the only sweep outcome written to stderr instead. Ordinary protected and fail-closed skipped outcomes do not make execution fail. Any attempted-cleanup failure makes the final command exit nonzero after independent candidates finish. Report-level failures expose no usable digest or confirmation but preserve completed candidate outcomes when discovery or mutation had already begun. Runs in `blocked`, `partial`, or `needs-human` are protected recoverable work and are never automatically deleted: inspect their report reasons, recover or preserve any needed artifacts manually, then use the existing single-run cleanup command only when an operator intentionally decides how to handle that work.
+
 ### Environment snapshots and PR recording
 
 The factory records diagnostic environment snapshots explicitly:

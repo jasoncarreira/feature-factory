@@ -1640,6 +1640,31 @@ describe("0.2.0 public documentation contract", () => {
     assert.match(cleanupAndTui, /refuses to remove run directories outside `\.opencode\/factory`/i);
   });
 
+  it("documents conservative repository cleanup preview, confirmation, and reporting", () => {
+    const sweep = markdownSection(README, "Repository-wide conservative cleanup");
+    assert.match(sweep, /cleanup --all --dry-run --repo \/path\/to\/repo/i);
+    assert.match(sweep, /cleanup --all --digest ff-cleanup-v1\.<repository-sha256>\.<envelope-sha256>/i);
+    assert.match(sweep, /repository-and-candidate-set digest[\s\S]*exact confirmation command/i);
+    for (const classification of ["eligible", "protected", "skipped", "failed", "deleted"]) {
+      assert.match(sweep, literalPattern(classification), `cleanup sweep docs missing ${classification}`);
+    }
+    assert.match(sweep, /status is exactly `completed`[\s\S]*GitHub PR is currently merged or closed[\s\S]*freshly fetched PR base/i);
+    assert.match(sweep, /recomputes[\s\S]*`DIGEST_FOREIGN`[\s\S]*`DIGEST_STALE`/i);
+    assert.match(sweep, /physical root, device\/inode identity, Git common-directory identity, and object format bind authorization/i);
+    assert.match(sweep, /Both refusals preserve the recomputed unattempted candidates and counts[\s\S]*no confirmation action[\s\S]*fresh preview/i);
+    assert.match(sweep, /fully revalidated immediately before mutation/i);
+    assert.match(sweep, /retains the run directory after a partial target failure[\s\S]*continues processing independent candidates/i);
+    assert.match(sweep, /attempted-cleanup failure[\s\S]*exit nonzero/i);
+    assert.match(sweep, /Human diagnostics apply sensitive-value projection and terminal-safe encoding[\s\S]*displayed repository[\s\S]*never authorization input/i);
+    assert.match(sweep, /confirmation\.argv[\s\S]*exact authorized physical root[\s\S]*POSIX `\/bin\/sh` octal variable[\s\S]*trailing newlines/i);
+    assert.match(sweep, /JSON is the exact normalized machine report[\s\S]*not semantically redacted/i);
+    assert.match(sweep, /Execute, refused, and failed reports always have null confirmation/i);
+    assert.match(sweep, /flags may appear in any order[\s\S]*exactly one mode[\s\S]*no repository inspection/i);
+    assert.match(sweep, /one complete selected report on stdout with empty stderr[\s\S]*grammar rejection[\s\S]*stderr/i);
+    assert.match(sweep, /`blocked`, `partial`, or `needs-human`[\s\S]*protected recoverable work[\s\S]*never automatically deleted/i);
+    assert.match(sweep, /handle that work/i);
+  });
+
   it("keeps every relative README link resolvable inside the published package", () => {
     // The packaged README must not delegate to repository-only files: any relative
     // link target has to be covered by package.json#files (npm always packs
