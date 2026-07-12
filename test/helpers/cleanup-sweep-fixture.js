@@ -51,12 +51,21 @@ export function createCleanupSweepFixture(name = "eligibility") {
   function readRun(runId) { return JSON.parse(readFileSync(join(factoryRoot, runId, "run.json"), "utf8")); }
   function addRecordedWorktree(runId, branch = runId) {
     const worktree = join(worktreeRoot, runId);
-    mustGit(repo, ["worktree", "add", worktree, branch]);
+    addRegisteredWorktree(runId, branch);
     const run = readRun(runId);
     run.branch = branch;
     run.worktree = worktree;
     writeRun(runId, run);
     return worktree;
+  }
+  function addRegisteredWorktree(name, branch = name, root = worktreeRoot) {
+    const worktree = join(root, name);
+    mustGit(repo, ["worktree", "add", worktree, branch]);
+    return worktree;
+  }
+  function createBranch(branch, start = baseSha) {
+    if (!branchExists(repo, branch)) mustGit(repo, ["branch", branch, start]);
+    return branch;
   }
 
   function gitRunner(cwd, args) {
@@ -86,7 +95,7 @@ export function createCleanupSweepFixture(name = "eligibility") {
 
   return {
     root, repo, factoryRoot, worktreeRoot, baseSha,
-    addRun, writeRun, readRun, addRecordedWorktree, gitRunner, githubRunner,
+    addRun, writeRun, readRun, addRecordedWorktree, addRegisteredWorktree, createBranch, gitRunner, githubRunner,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }

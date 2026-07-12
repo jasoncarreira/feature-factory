@@ -42,8 +42,10 @@ export function discoverCleanupSweepCandidates(repo, options = {}) {
   const temporaryRefs = [];
   const candidates = entries.map((entry) => {
     try {
-      const result = classifyEntry(repositoryRoot, entry, collisions.get(entry.entryName) ?? false, options);
-      if (result.temporary_ref) temporaryRefs.push(result.temporary_ref);
+      const result = classifyEntry(repositoryRoot, entry, collisions.get(entry.entryName) ?? false, {
+        ...options,
+        registerTemporaryRef: (temporaryRef) => temporaryRefs.push(temporaryRef),
+      });
       return result.candidate;
     } catch {
       return failedCandidate(entry);
@@ -166,12 +168,12 @@ function classifyEntry(repo, entry, sharedClaim, options) {
   }
   evidence.run.state = "valid";
   if (run.run_id !== entry.entryName) return finish("skipped", ["SKIPPED_RUN_ID_MISMATCH"]);
-  if (PROTECTED_STATUS[run.status]) return finish("protected", [PROTECTED_STATUS[run.status]]);
-  if (run.status !== "completed") return finish("skipped", ["SKIPPED_NON_TERMINAL_STATUS"]);
-  if (sharedClaim) return finish("skipped", []);
-
   const sidecars = inspectSidecars(entry.logicalPath, run, evidence, options);
-  if (sidecars.protected.length) return finish("protected", sidecars.protected);
+  const protectedStatus = PROTECTED_STATUS[run.status];
+  if (protectedStatus) return finish("protected", [protectedStatus, ...sidecars.protected, ...sidecars.skipped]);
+  if (run.status !== "completed") return finish("skipped", ["SKIPPED_NON_TERMINAL_STATUS", ...sidecars.protected, ...sidecars.skipped]);
+  if (sharedClaim) return finish("skipped", [...sidecars.protected, ...sidecars.skipped]);
+  if (sidecars.protected.length) return finish("protected", [...sidecars.protected, ...sidecars.skipped]);
   if (sidecars.skipped.length) return finish("skipped", sidecars.skipped);
 
   const lookup = lookupPullRequest(repo, run, { githubRunner: options.githubRunner, timeout: options.githubTimeout, maxBuffer: options.githubMaxBuffer });
@@ -184,6 +186,7 @@ function classifyEntry(repo, entry, sharedClaim, options) {
   if (pr.state === "OPEN") return finish("skipped", ["SKIPPED_PR_OPEN"]);
 
   const temporaryRef = temporaryRefFor(entry.entryName, options.invocationId ?? randomUUID());
+  options.registerTemporaryRef?.(temporaryRef);
   if (!verifyFetchedBase(repo, pr, temporaryRef, options.gitRunner ?? git)) return finish("skipped", ["SKIPPED_BASE_UNPROVABLE"], run.run_id, temporaryRef);
   const targetResult = inspectTargets(repo, run, temporaryRef, pr.base_sha, evidence, options.gitRunner ?? git);
   if (targetResult.reason) return finish("skipped", [targetResult.reason], run.run_id, temporaryRef);
@@ -218,7 +221,9 @@ function inspectSidecars(runDir, run, evidence, options) {
   const lockState = inspectRunLock(join(runDir, FILES.runLock), options.heldRunId === run.run_id);
   evidence.run_lock = { observed_before_acquire: lockState, held_by_sweep: options.heldRunId === run.run_id };
   if (lockState === "invalid") skipped.push("SKIPPED_RUN_LOCK_INVALID");
-  else if (lockState === "present" && options.heldRunId !== run.run_id) skipped.push("SKIPPED_RUN_LOCK_PRESENT_PREVIEW");
+  else if (lockState === "present" && options.heldRunId !== run.run_id) {
+    skipped.push(options.runLockContended ? "SKIPPED_RUN_LOCK_CONTENDED" : "SKIPPED_RUN_LOCK_PRESENT_PREVIEW");
+  }
   return { protected: dedupe(protectedReasons), skipped: dedupe(skipped) };
 }
 
@@ -239,6 +244,7 @@ function inspectHeartbeat(runDir, runId, options) {
 
 function inspectTargets(repo, run, temporaryRef, baseOid, evidence, gitRunner) {
   const targets = collectCleanupTargets(run);
+  const worktreeTargets = recordedWorktreeAssociations(run);
   let registered = [];
   if (targets.branches.length > 0 || targets.worktrees.length > 0) {
     const listed = gitRunner(repo, ["worktree", "list", "--porcelain"]);
@@ -246,7 +252,7 @@ function inspectTargets(repo, run, temporaryRef, baseOid, evidence, gitRunner) {
     registered = parseWorktreeListPorcelain(listed.stdout);
   }
   const worktreeRoot = join(repo, ".opencode", "worktrees");
-  const recordedPaths = new Set(targets.worktrees
+  const recordedPaths = new Set(worktreeTargets
     .map((item) => resolve(repo, item.worktree))
     .filter((path) => contained(worktreeRoot, path)));
   for (const branch of [...targets.branches].sort(utf8)) {
@@ -266,12 +272,70 @@ function inspectTargets(repo, run, temporaryRef, baseOid, evidence, gitRunner) {
     if (!ancestry?.ok) { record.state = "unprovable"; return { reason: "SKIPPED_BRANCH_UNPROVABLE" }; }
     record.state = "verified-ancestor";
   }
-  for (const target of [...targets.worktrees].sort((a, b) => utf8(String(a.worktree), String(b.worktree)))) {
+  const associationConflict = conflictingWorktreeAssociation(repo, worktreeTargets);
+  if (associationConflict) {
+    for (const target of associationConflict) {
+      evidence.worktrees.push({
+        recorded_path: String(target.worktree),
+        physical_path: physicalPathOrNull(resolve(repo, target.worktree)),
+        branch: target.branch ?? null,
+        head: null,
+        state: "branch-mismatch",
+      });
+    }
+    return { reason: "SKIPPED_WORKTREE_IDENTITY" };
+  }
+  for (const target of dedupeWorktreeAssociations(worktreeTargets)) {
     const result = inspectWorktree(repo, target, registered, evidence.branches);
     evidence.worktrees.push(result.record);
     if (result.reason) return { reason: result.reason };
   }
   return { reason: null };
+}
+
+function recordedWorktreeAssociations(run) {
+  const entries = [];
+  if (run.worktree) entries.push({ worktree: run.worktree, branch: run.branch });
+  if (Array.isArray(run.slices)) {
+    for (const slice of run.slices) if (slice?.worktree) entries.push({ worktree: slice.worktree, branch: slice.branch });
+  }
+  return entries.sort((left, right) => utf8(String(left.worktree), String(right.worktree)) || utf8(String(left.branch ?? ""), String(right.branch ?? "")));
+}
+
+function conflictingWorktreeAssociation(repo, targets) {
+  const associations = new Map();
+  for (const target of targets) {
+    const logical = resolve(repo, target.worktree);
+    const keys = new Set([logical]);
+    const physical = physicalPathOrNull(logical);
+    if (physical) keys.add(physical);
+    for (const key of keys) {
+      const byBranch = associations.get(key) ?? new Map();
+      const branch = target.branch ?? null;
+      const entries = byBranch.get(branch) ?? [];
+      entries.push(target);
+      byBranch.set(branch, entries);
+      associations.set(key, byBranch);
+    }
+  }
+  for (const byBranch of associations.values()) {
+    if (byBranch.size > 1) return [...byBranch.values()].flat().sort((left, right) => utf8(String(left.worktree), String(right.worktree)) || utf8(String(left.branch ?? ""), String(right.branch ?? "")));
+  }
+  return null;
+}
+
+function dedupeWorktreeAssociations(targets) {
+  const seen = new Set();
+  return targets.filter((target) => {
+    const key = `${String(target.worktree)}\0${String(target.branch ?? "")}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function physicalPathOrNull(path) {
+  try { return realpathSync(path); } catch { return null; }
 }
 
 function inspectWorktree(repo, target, registered, branches) {
