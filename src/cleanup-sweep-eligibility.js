@@ -209,7 +209,7 @@ function inspectSidecars(runDir, run, evidence, options) {
   const processInspector = options.inspectProcess ?? inspectProcessEvidenceForCleanup;
   let processResult;
   try { processResult = processInspector(runDir, { ...options.processOptions, runId: run.run_id }); } catch { processResult = { state: "indeterminate" }; }
-  const processHash = safeFileHash(join(runDir, FILES.process), options);
+  const processHash = Object.hasOwn(processResult || {}, "hash") ? processResult.hash : safeFileHash(join(runDir, FILES.process), options);
   evidence.process = { state: normalizeProcessState(processResult?.state), hash: processHash };
   if (evidence.process.state === "live-matching") protectedReasons.push("PROTECTED_LIVE_PROCESS");
   else if (!["missing", "absent"].includes(evidence.process.state)) skipped.push("SKIPPED_PROCESS_UNCERTAIN");

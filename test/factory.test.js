@@ -572,12 +572,14 @@ describe("factory public state operations", { concurrency: false }, () => {
         ["update-ref", "-d", "refs/heads/zeta", expectedHeads.zeta],
       ]);
       assert.equal(events[0].startsWith("before-worktree-remove:"), true);
-      assert.deepEqual(events.slice(1, 4), [
+      assert.equal(events[1].startsWith("after-worktree-final-validation:"), true);
+      assert.deepEqual(events.slice(2, 5), [
         "before-branch-delete:alpha",
         `before-branch-delete:${fixture.runId}`,
         "before-branch-delete:zeta",
       ]);
-      assert.equal(events[4], `before-run-dir-remove:${fixture.runDir}`);
+      assert.equal(events[5], `before-run-dir-remove:${fixture.runDir}`);
+      assert.equal(events[6], `after-run-dir-final-validation:${fixture.runDir}`);
     } finally {
       cleanup(fixture.repo);
     }

@@ -149,12 +149,15 @@ async function executeCandidate(repository, authorized, options, invocationId, t
   const runDir = join(repository.root_path, ".opencode", "factory", authorized.entry_name);
   const acquire = options.acquireRunLock ?? ((path, callback, lockOptions) => withRunJsonLock(path, callback, lockOptions));
   let completedCandidate = null;
+  const rawGitRunner = options.gitRunner ?? git;
+  const mutationGitRunner = repositoryGuardedGitRunner(repository, options, rawGitRunner);
+  const guardedOptions = { ...options, gitRunner: mutationGitRunner };
   try {
     return await acquire(runDir, async () => {
       await phase(options, "after-candidate-lock", { entry_name: authorized.entry_name });
       let reclassified;
       try {
-        reclassified = reclassifyHeldCandidate(repository, authorized, options, invocationId, temporaryRefs);
+        reclassified = reclassifyHeldCandidate(repository, authorized, guardedOptions, invocationId, temporaryRefs);
       } catch {
         return inspectionFailureCandidate(authorized);
       }
@@ -166,7 +169,7 @@ async function executeCandidate(repository, authorized, options, invocationId, t
       // window. Recompute every authorization field after it, then bind all
       // ancestry checks to the authorized base object rather than a movable ref.
       try {
-        reclassified = reclassifyHeldCandidate(repository, authorized, options, invocationId, temporaryRefs);
+        reclassified = reclassifyHeldCandidate(repository, authorized, guardedOptions, invocationId, temporaryRefs);
       } catch {
         return inspectionFailureCandidate(normalized);
       }
@@ -175,7 +178,7 @@ async function executeCandidate(repository, authorized, options, invocationId, t
 
       const baseRef = reclassified.temporary_ref;
       const baseOid = authorized.evidence.pr.base_sha;
-      const baseState = inspectAuthorizedTemporaryRef(repository.root_path, baseRef, baseOid, options.gitRunner ?? git);
+      const baseState = inspectAuthorizedTemporaryRef(repository.root_path, baseRef, baseOid, mutationGitRunner);
       if (baseState === "changed") return changedCandidate(normalized);
       if (baseState !== "matching") return inspectionFailureCandidate(normalized);
 
@@ -200,7 +203,8 @@ async function executeCandidate(repository, authorized, options, invocationId, t
           expectedWorktrees: normalized.evidence.worktrees,
           fetchedBaseRef: baseOid,
           fetchedBase: { ref: baseRef, oid: baseOid },
-          gitRunner: guardedCleanupGitRunner(repository.root_path, baseRef, baseOid, options.gitRunner ?? git),
+          gitRunner: guardedCleanupGitRunner(repository.root_path, baseRef, baseOid, mutationGitRunner),
+          assertMutationAuthorized: () => assertCandidateMutationAuthorized(repository, authorized, guardedOptions, invocationId, temporaryRefs),
           removeRunDir: options.removeRunDir,
           checkWorktreeIdentity: options.checkWorktreeIdentity,
           physicalPath: options.physicalPath,
@@ -402,7 +406,8 @@ async function cleanupTemporaryRefs(records, options) {
     byRef.set(record.ref, { ref: record.ref, expected_oid: record.expected_oid ?? previous?.expected_oid ?? null });
   }
   const unique = [...byRef.values()].sort((a, b) => utf8(a.ref, b.ref));
-  const gitRunner = options.gitRunner ?? git;
+  const rawGitRunner = options.gitRunner ?? git;
+  const gitRunner = options.repository ? repositoryGuardedGitRunner(options.repository, options, rawGitRunner) : rawGitRunner;
   let failed = false;
   for (const record of unique) {
     try {
@@ -418,9 +423,13 @@ async function cleanupTemporaryRefs(records, options) {
         failed = true;
         continue;
       }
-      const remove = options.deleteTemporaryRef
-        ? await options.deleteTemporaryRef(options.repository.root_path, record.ref, record.expected_oid)
-        : gitRunner(options.repository.root_path, ["update-ref", "-d", record.ref, record.expected_oid]);
+      let remove;
+      if (options.deleteTemporaryRef) {
+        assertRepositoryIdentity(options.repository, options, rawGitRunner);
+        remove = await options.deleteTemporaryRef(options.repository.root_path, record.ref, record.expected_oid);
+      } else {
+        remove = gitRunner(options.repository.root_path, ["update-ref", "-d", record.ref, record.expected_oid]);
+      }
       if (remove === false || (remove && typeof remove === "object" && remove.ok !== true)) failed = true;
     } catch {
       failed = true;
@@ -458,6 +467,47 @@ function guardedCleanupGitRunner(repo, baseRef, baseOid, gitRunner) {
     }
     return gitRunner(cwd, args, commandOptions);
   };
+}
+
+function assertCandidateMutationAuthorized(repository, authorized, options, invocationId, temporaryRefs) {
+  const reclassified = reclassifyHeldCandidate(repository, authorized, options, invocationId, temporaryRefs);
+  const normalized = normalizeHeldLockEvidence(reclassified.candidate);
+  if (sidecarAuthorizationRecord(normalized) !== sidecarAuthorizationRecord(authorized)) throw new CleanupRunChangedError();
+}
+
+function sidecarAuthorizationRecord(candidate) {
+  return canonicalJson({
+    entry_name: candidate.entry_name,
+    run_id: candidate.run_id,
+    entry: candidate.evidence.entry,
+    run: candidate.evidence.run,
+    factory_lock: candidate.evidence.factory_lock,
+    heartbeat: candidate.evidence.heartbeat,
+    process: candidate.evidence.process,
+  });
+}
+
+function repositoryGuardedGitRunner(repository, options, gitRunner) {
+  return (cwd, args, commandOptions) => {
+    if (isCleanupGitMutation(args)) {
+      try {
+        assertRepositoryIdentity(repository, options, gitRunner);
+      } catch {
+        return { ok: false, status: 2, stdout: "", stderr: "", command: null, signal: null, cleanupEvidenceChanged: true };
+      }
+    }
+    return gitRunner(cwd, args, commandOptions);
+  };
+}
+
+function isCleanupGitMutation(args) {
+  return args[0] === "fetch" || args[0] === "update-ref"
+    || args[0] === "worktree" && ["move", "remove"].includes(args[1]);
+}
+
+function assertRepositoryIdentity(expected, options, gitRunner) {
+  const current = resolveCleanupSweepRepository({ ...options, cwd: expected.root_path, gitRunner });
+  if (canonicalJson(current) !== canonicalJson(expected)) throw new CleanupRunChangedError();
 }
 
 function inspectPath(path, operation, options) {

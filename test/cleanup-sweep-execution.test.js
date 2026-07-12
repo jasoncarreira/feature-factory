@@ -283,6 +283,101 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
     } finally { fixture.cleanup(); }
   });
 
+  it("binds every activity sidecar through the first mutation", async () => {
+    for (const sidecar of ["factory.lock", "heartbeat.json", "process.json"]) {
+      const fixture = createCleanupSweepFixture(`execution-sidecar-${sidecar.replace(".", "-")}`);
+      try {
+        fixture.addRun("run", { branch: null });
+        const authorization = await preview(fixture);
+        const report = await execute(fixture, authorization.authorization.digest, {
+          phaseHook(name) {
+            if (name === "after-run-dir-final-validation") writeFileSync(join(fixture.factoryRoot, "run", sidecar), "{}\n", "utf8");
+          },
+        });
+        assert.deepEqual(report.candidates[0].reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"], sidecar);
+        assert.equal(report.candidates[0].attempted_cleanup, false, sidecar);
+        assert.equal(existsSync(join(fixture.factoryRoot, "run")), true, sidecar);
+      } finally { fixture.cleanup(); }
+    }
+  });
+
+  it("revalidates repository common-dir identity after digest authorization", async () => {
+    const fixture = createCleanupSweepFixture("execution-common-dir-race");
+    try {
+      fixture.addRun("run");
+      const authorization = await preview(fixture);
+      let changed = false;
+      const mutations = [];
+      const gitRunner = (cwd, args) => {
+        if (["fetch", "update-ref"].includes(args[0])) mutations.push([...args]);
+        return fixture.gitRunner(cwd, args);
+      };
+      const report = await execute(fixture, authorization.authorization.digest, {
+        gitRunner,
+        fsInspector(path, { operation, inspectDefault }) {
+          const value = inspectDefault();
+          if (changed && operation === "stat" && path === authorization.repository.git_common_dir_path) return { ...value, ino: Number(value.ino) + 1 };
+          return value;
+        },
+        phaseHook(name) { if (name === "after-digest-recompute") changed = true; },
+      });
+      assert.notEqual(report.candidates[0].classification, "deleted");
+      assert.equal(mutations.some((args) => args[0] === "update-ref" && args[1] === "-d" && args[2] === "refs/heads/run"), false);
+      assert.equal(existsSync(join(fixture.factoryRoot, "run")), true);
+    } finally { fixture.cleanup(); }
+  });
+
+  it("quarantines and verifies the run directory before recursive deletion", async () => {
+    const fixture = createCleanupSweepFixture("execution-run-dir-swap");
+    const displaced = join(fixture.factoryRoot, "authorized-run");
+    try {
+      fixture.addRun("run", { branch: null });
+      const authorization = await preview(fixture);
+      const runDir = join(fixture.factoryRoot, "run");
+      const sentinel = join(runDir, "replacement-sentinel");
+      const report = await execute(fixture, authorization.authorization.digest, {
+        phaseHook(name) {
+          if (name !== "after-run-dir-final-validation") return;
+          renameSync(runDir, displaced);
+          mkdirSync(runDir);
+          writeFileSync(sentinel, "replacement\n", "utf8");
+        },
+      });
+      assert.deepEqual(report.candidates[0].reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"]);
+      assert.equal(readFileSync(sentinel, "utf8"), "replacement\n");
+      assert.equal(existsSync(displaced), true);
+    } finally { fixture.cleanup(); }
+  });
+
+  it("never removes a worktree replacement installed after final validation", async () => {
+    const fixture = createCleanupSweepFixture("execution-worktree-final-swap");
+    const displaced = join(fixture.root, "authorized-worktree");
+    try {
+      fixture.addRun("run");
+      const worktree = fixture.addRecordedWorktree("run");
+      const authorization = await preview(fixture);
+      const sentinel = join(worktree, "replacement-sentinel");
+      let removeCommands = 0;
+      const gitRunner = fallbackRunner((_cwd, args) => {
+        if (args[0] === "worktree" && args[1] === "remove") removeCommands += 1;
+        return null;
+      }, fixture.gitRunner);
+      const report = await execute(fixture, authorization.authorization.digest, {
+        gitRunner,
+        phaseHook(name) {
+          if (name !== "after-worktree-final-validation") return;
+          renameSync(worktree, displaced);
+          mkdirSync(worktree);
+          writeFileSync(sentinel, "replacement\n", "utf8");
+        },
+      });
+      assert.notEqual(report.candidates[0].classification, "deleted");
+      assert.equal(readFileSync(sentinel, "utf8"), "replacement\n");
+      assert.equal(existsSync(displaced), true);
+      assert.equal(removeCommands, 0);
+    } finally { fixture.cleanup(); }
+  });
+
   it("revalidates bound worktree-root identity before every top-level and slice removal", async () => {
     for (const target of ["top-level", "slice"]) {
       const fixture = createCleanupSweepFixture(`execution-swapped-root-${target}`);

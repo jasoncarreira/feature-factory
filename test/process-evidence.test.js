@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   linkSync,
   mkdirSync,
@@ -137,6 +138,7 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
 
         assert.equal(result.state, item.expected, item.name);
         assert.equal(result.evidence.run_id, fixture.runId, item.name);
+        assert.equal(result.hash, `sha256:${createHash("sha256").update(before).digest("hex")}`, item.name);
         assert.deepEqual(readFileSync(path), before, item.name);
         assert.deepEqual(signals, [], item.name);
       } finally {
