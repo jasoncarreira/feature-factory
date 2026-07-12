@@ -253,6 +253,21 @@ describe("cli gate-decision", () => {
     }
   });
 
+  it("factory answer remains write-only for interactive runs and never launches", () => {
+    const fixture = createFixture("cli-interactive-answer-only", { mode: "interactive" });
+    try {
+      const pending = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--json"]);
+      assert.equal(pending.status, 0, pending.stderr);
+      const answered = runCli(fixture.repo, ["factory", "answer", "--json", fixture.runId, "story", "approve"]);
+      assert.equal(answered.status, 0, answered.stderr);
+      assert.equal(readFileSync(join(fixture.runDir, "gates", "story.answer"), "utf8"), "approve\n");
+      assert.equal(existsSync(join(fixture.runDir, "process.json")), false);
+      assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects empty changes answer text", () => {
     const fixture = createFixture("cli-empty-changes");
     try {

@@ -3,11 +3,57 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { consumeSteering, handoffApprovedInteractiveRun, persistFactoryRunResumeEnv, resumeFactory, startFactory, writeSteering } from "../src/factory.js";
-import { acquireLaunchClaim, recordDetachedProcessEvidence } from "../src/process-evidence.js";
+import { consumeSteering, persistFactoryRunResumeEnv, resumeFactory, startFactory, transitionGateDecisionAndHandoff, writeSteering } from "../src/factory.js";
+import { acquireLaunchClaim, recordDetachedProcessEvidence, writeProcessEvidence } from "../src/process-evidence.js";
 import { transitionGateDecision, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 
 describe("factory resume", () => {
+  const behavioralCases = [
+    { code: "matching-detached-shepherd-live", setup: (f) => writeRunningEvidence(f, "matching-live"), options: (f) => ({ inspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: f.repo }) }) },
+    { code: "protected-gate-pending", setup: async (f) => {
+      writeFileSync(join(f.runDir, "artifacts", "brief.md"), "brief\n");
+      writeFileSync(join(f.runDir, "gates", "brief.question.md"), "approve brief?\n");
+      await transitionGateDecision(f.runDir, "brief", { status: "pending", artifact: "artifacts/brief.md", question_ref: "gates/brief.question.md" });
+    } },
+    { code: "terminal-run", setup: (f) => mutateRun(f, (run) => Object.assign(run, { status: "completed", terminal_result: { status: "completed", run_id: f.runId, pr_url: null, reason: null, summary: "done", artifacts: {} } })) },
+    { code: "validated-cancelled", setup: (f) => writeStoppedEvidence(f, "cancelled") },
+    { code: "cancel-pending", setup: (f) => writeRunningEvidence(f, "exec-cancel", { cancel: { requested_at: new Date().toISOString(), signal: "SIGTERM", confirmed_at: null, result: "pending", reason: "pending" } }) },
+    { code: "approval-snapshot-mismatch", setup: (f) => writeFileSync(join(f.runDir, "artifacts", "story.md"), "changed\n") },
+    { code: "steering-generation-mismatch", setup: (f) => mutateRun(f, (run) => { run.steering = { ...run.steering, generation: (run.steering?.generation || 0) + 1 }; }) },
+    { code: "steering-state-not-clean", setup: (f) => mutateRun(f, (run) => { run.steering = { ...(run.steering || { schema_version: 1, generation: 0 }), boundary: { kind: "gate", token: "boundary1", generation: run.steering?.generation || 0, state_hash: `sha256:${"a".repeat(64)}`, created_at: new Date().toISOString() } }; }) },
+    { code: "resume-ineligible", setup: (f) => rmSync(f.worktree, { recursive: true, force: true }) },
+    { code: "launch-claim-invalid", setup: (f) => { mkdirSync(join(f.runDir, "process-launch.lock")); writeFileSync(join(f.runDir, "process-launch.lock", "owner.json"), "malformed claim bytes\n"); } },
+    { code: "launch-owner-indeterminate", setup: (f) => writeClaim(f, { hostname: "foreign-host" }) },
+    { code: "launch-claim-conflict", options: (f) => ({ inspectLaunchClaimFn: () => ({ ok: true, missing: false, owner_status: "live", claim: fakeClaim(f, { phase: "foreground-live" }) }) }) },
+    { code: "process-evidence-invalid", setup: (f) => writeFileSync(join(f.runDir, "process.json"), "malformed process bytes\n") },
+    { code: "process-identity-mismatch", setup: (f) => writeRunningEvidence(f, "exec-mismatch"), options: (f) => ({ inspectorFn: () => ({ ok: true, inspector: "test-inspector", pid: 9876, start_marker: "different", command_name: "opencode", cwd: f.repo }) }) },
+    { code: "prior-process-stopped", setup: (f) => writeStoppedEvidence(f, "exited") },
+    { code: "claim-acquisition-failed", options: () => ({ inspectLaunchClaimFn: () => ({ ok: false, missing: true }), acquireLaunchClaimFn: () => { throw new Error("injected acquisition failure"); } }) },
+    { code: "foreground-release-failed", options: (f) => fakeLaunchOptions(f, { transitionFailure: "predecessor-released" }) },
+    { code: "launch-spawn-failed", options: (f) => fakeLaunchOptions(f, { launchError: "spawn failed" }) },
+    { code: "launch-readiness-failed", options: (f) => fakeLaunchOptions(f, { launchError: "readiness timed out" }) },
+    { code: "launch-evidence-mismatch", options: (f) => fakeLaunchOptions(f, { mismatchedEvidence: true }) },
+  ];
+
+  for (const behavior of behavioralCases) {
+    it(`behaviorally reaches ${behavior.code} through accepted gate handoff`, async () => {
+      const fixture = await createApprovedHandoffFixture(`behavior-${behavior.code}`);
+      try {
+        await behavior.setup?.(fixture);
+        writeJson(join(fixture.runDir, "heartbeat.json"), { schema_version: 1, run_id: fixture.runId, phase: "builder-wave", pid: null, interval_ms: 30000, last_tick_at: "2000-01-01T00:00:00.000Z" });
+        const watched = snapshotSidecars(fixture.runDir);
+        const result = await transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, { cwd: fixture.repo, ...(behavior.options?.(fixture) || {}) });
+        assert.equal(result.gate_accepted, true);
+        assertBehaviorHandoff(result.handoff, behavior.code, fixture.runId);
+        assert.equal(result.handoff.status === "recovery-required" ? 2 : 0, behavior.code.startsWith("launch-") || ["approval-snapshot-mismatch", "steering-generation-mismatch", "steering-state-not-clean", "resume-ineligible", "process-evidence-invalid", "process-identity-mismatch", "prior-process-stopped", "claim-acquisition-failed", "foreground-release-failed"].includes(behavior.code) ? 2 : 0);
+        assert.equal(result.handoff.reason.includes("merge"), false);
+        if (result.handoff.status === "recovery-required") assertPreservedOriginalSidecars(fixture.runDir, watched);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  }
+
   for (const cleanupResult of [true, false]) {
     it(`${cleanupResult ? "releases before one spawn and starts" : "requires exact-token cleanup before reporting success"}`, async () => {
       const fixture = await createApprovedHandoffFixture(`handoff-cleanup-${cleanupResult}`);
@@ -33,8 +79,8 @@ describe("factory resume", () => {
         },
       };
       try {
-        const result = await handoffApprovedInteractiveRun(fixture.runDir, fixture.run, "story", {
-          repo: fixture.repo,
+        const result = await transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, {
+          cwd: fixture.repo,
           ...claimFns,
           inspectorFn,
           handoffHooks: {
@@ -51,8 +97,9 @@ describe("factory resume", () => {
         });
         assert.equal(spawnCount, 1);
         assert.equal(releaseCount, 1);
-        assert.equal(result.reason_code, cleanupResult ? "detached-shepherd-started" : "launch-evidence-mismatch");
-        assert.equal(result.launch_claim_ref, cleanupResult ? null : "process-launch.lock/owner.json");
+        assert.equal(result.gate_accepted, true);
+        assert.equal(result.handoff.reason_code, cleanupResult ? "detached-shepherd-started" : "launch-evidence-mismatch");
+        assert.equal(result.handoff.launch_claim_ref, cleanupResult ? null : "process-launch.lock/owner.json");
       } finally {
         cleanup(fixture.repo);
       }
@@ -60,9 +107,13 @@ describe("factory resume", () => {
   }
 
   for (const entry of [
-    { name: "resume foreground", invoke: (fixture, opts) => resumeFactory(fixture.runId, opts), flags: {} },
+    { name: "resume interactive foreground", invoke: (fixture, opts) => resumeFactory(fixture.runId, opts) },
+    { name: "resume headless foreground", invoke: (fixture, opts) => resumeFactory(fixture.runId, { ...opts, headless: true }) },
+    { name: "resume autonomous foreground", invoke: (fixture, opts) => resumeFactory(fixture.runId, { ...opts, autonomous: true }) },
     { name: "resume detached", invoke: (fixture, opts) => resumeFactory(fixture.runId, { ...opts, detached: true, headless: true }), flags: {} },
     { name: "start-resume headless", invoke: (fixture, opts) => startFactory([`resume ${fixture.runId}`], { ...opts, headless: true }), flags: {} },
+    { name: "start-resume autonomous", invoke: (fixture, opts) => startFactory([`resume ${fixture.runId}`], { ...opts, autonomous: true }) },
+    { name: "start-resume headless detached", invoke: (fixture, opts) => startFactory([`resume ${fixture.runId}`], { ...opts, headless: true, detached: true }) },
     { name: "start-resume autonomous detached", invoke: (fixture, opts) => startFactory([`resume ${fixture.runId}`], { ...opts, autonomous: true, detached: true, headless: true }), flags: {} },
   ]) {
     it(`boundedly reconciles a contended ${entry.name} only after matching execution evidence`, async () => {
@@ -286,7 +337,140 @@ async function createApprovedHandoffFixture(runId) {
   await transitionGateDecision(fixture.runDir, "story", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/story.question.md" });
   const boundary = await transitionSteeringBoundaryOpened(fixture.runDir, "gate");
   const accepted = await transitionGateDecision(fixture.runDir, "story", { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve" }, { boundaryToken: boundary.boundary.token });
-  return { ...fixture, run: accepted.run };
+  return { ...fixture, run: accepted.run, decision: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve" } };
+}
+
+function mutateRun(fixture, mutator) {
+  const run = readJson(join(fixture.runDir, "run.json"));
+  mutator(run);
+  writeJson(join(fixture.runDir, "run.json"), run);
+}
+
+function processIdentity() {
+  return { inspector: "test-inspector", start_marker: "test-start", command_name: "opencode" };
+}
+
+function ensureProcessLog(fixture) {
+  mkdirSync(join(fixture.runDir, "processes"), { recursive: true });
+  writeFileSync(join(fixture.runDir, "processes", "behavior.log"), "evidence\n", "utf8");
+}
+
+function writeRunningEvidence(fixture, executionId, overrides = {}) {
+  ensureProcessLog(fixture);
+  const now = new Date().toISOString();
+  writeProcessEvidence(fixture.runDir, {
+    schema_version: 1, kind: "opencode-process", run_id: fixture.runId, execution_id: executionId, pid: 9876,
+    started_at: now, updated_at: now, state: "running", cwd: fixture.repo, identity: processIdentity(), log_ref: "processes/behavior.log", cancel: null, ...overrides,
+  });
+}
+
+function writeStoppedEvidence(fixture, state) {
+  ensureProcessLog(fixture);
+  const now = new Date().toISOString();
+  writeProcessEvidence(fixture.runDir, {
+    schema_version: 1, kind: "opencode-process", run_id: fixture.runId, execution_id: `exec-${state}`, pid: 9876,
+    started_at: now, updated_at: now, state, cwd: fixture.repo, identity: processIdentity(), log_ref: "processes/behavior.log",
+    cancel: state === "cancelled" ? { requested_at: now, signal: "SIGTERM", confirmed_at: now, result: "cancelled", reason: null } : null,
+  });
+}
+
+function fakeClaim(fixture, overrides = {}) {
+  return {
+    schema_version: 1, kind: "opencode-launch-claim", run_id: fixture.runId, execution_id: "claim-execution", launch_kind: "approval-handoff",
+    phase: "spawning", pid: process.pid, hostname: "test-host", acquired_at: new Date().toISOString(),
+    identity: { inspector: "test-inspector", start_marker: "test-start", command_name: "node", cwd: fixture.repo }, approval: null,
+    nonce: "opaque-behavior-token-1234", ...overrides,
+  };
+}
+
+function writeClaim(fixture, overrides = {}) {
+  mkdirSync(join(fixture.runDir, "process-launch.lock"));
+  writeJson(join(fixture.runDir, "process-launch.lock", "owner.json"), fakeClaim(fixture, overrides));
+}
+
+function fakeLaunchOptions(fixture, options = {}) {
+  let claim = null;
+  let launches = 0;
+  return {
+    inspectLaunchClaimFn: () => ({ ok: false, missing: true }),
+    acquireLaunchClaimFn: (_runDir, input) => {
+      claim = fakeClaim(fixture, { execution_id: input.executionId, phase: input.phase, approval: input.approval });
+      return { ok: true, acquired: true, claim, token: claim.nonce };
+    },
+    transitionLaunchClaimPhaseFn: (_runDir, _token, phase) => {
+      if (phase === options.transitionFailure) throw new Error("injected transition failure");
+      claim = { ...claim, phase };
+      return { ok: true, claim };
+    },
+    releaseLaunchClaimFn: () => true,
+    detachedLaunchFn: async (_repo, _args, launchOpts) => {
+      if (options.transitionFailure) assert.fail("launch must not occur before cooperative release succeeds");
+      launches += 1;
+      assert.equal(launches, 1, "handoff must not retry launch");
+      assert.equal(_args.some((arg) => String(arg).includes("merge")), false, "handoff must not invoke merge");
+      if (options.launchError) throw new Error(options.launchError);
+      ensureProcessLog(fixture);
+      const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo });
+      recordDetachedProcessEvidence(fixture.runDir, {
+        runId: fixture.runId, executionId: options.mismatchedEvidence ? "different-execution" : launchOpts.executionId,
+        pid: 9876, cwd: fixture.repo, logRef: "processes/behavior.log", inspectorFn,
+      });
+      return { status: "started", pid: 9876 };
+    },
+    inspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo }),
+  };
+}
+
+const BEHAVIOR_ROWS = {
+  "matching-detached-shepherd-live": ["already-running", true, "A matching detached interactive shepherd is already running.", "watch"],
+  "protected-gate-pending": ["paused-at-protected-gate", false, "The run is paused at a protected gate awaiting an explicit answer.", "answer-protected-gate"],
+  "terminal-run": ["terminal", false, "The run is already terminal; inspect the durable terminal result.", "inspect-terminal-result"],
+  "validated-cancelled": ["stopped", false, "Validated process evidence shows that the detached shepherd is cancelled.", "confirm-cancellation"],
+  "cancel-pending": ["stopped", false, "Cancellation is pending for the validated detached shepherd.", "confirm-cancellation"],
+  "approval-snapshot-mismatch": ["recovery-required", false, "The accepted approval no longer matches its durable pending-gate snapshot.", "run-resume-check"],
+  "steering-generation-mismatch": ["recovery-required", false, "The steering generation changed after the approval was accepted.", "run-resume-check"],
+  "steering-state-not-clean": ["recovery-required", false, "Pending or uncheckpointed steering prevents automatic continuation.", "run-resume-check"],
+  "resume-ineligible": ["recovery-required", false, "The run is not eligible for detached continuation.", "run-resume-check"],
+  "launch-claim-invalid": ["recovery-required", false, "The preserved launch claim is invalid and requires manual ownership reconciliation.", "manual-ownership-reconciliation"],
+  "launch-owner-indeterminate": ["recovery-required", false, "The preserved launch claim owner cannot be safely proven live or absent.", "manual-ownership-reconciliation"],
+  "launch-claim-conflict": ["recovery-required", false, "Another launch claim conflicts with this execution and ownership is ambiguous.", "manual-ownership-reconciliation"],
+  "process-evidence-invalid": ["recovery-required", false, "Detached process evidence is invalid; preserve it and reconcile ownership manually.", "manual-ownership-reconciliation"],
+  "process-identity-mismatch": ["recovery-required", false, "Recorded detached process identity does not match live inspection; preserve the evidence and reconcile ownership manually.", "manual-ownership-reconciliation"],
+  "prior-process-stopped": ["recovery-required", false, "Prior process evidence is stopped or failed-closed; automatic relaunch is forbidden until manual reconciliation.", "manual-ownership-reconciliation"],
+  "claim-acquisition-failed": ["recovery-required", false, "The launch claim could not be acquired and no safe ownership decision was possible.", "manual-ownership-reconciliation"],
+  "foreground-release-failed": ["recovery-required", false, "The foreground predecessor could not be durably released, so ownership remains ambiguous.", "manual-ownership-reconciliation"],
+  "launch-spawn-failed": ["recovery-required", false, "Detached launch failed after predecessor release; process ownership is ambiguous.", "manual-ownership-reconciliation"],
+  "launch-readiness-failed": ["recovery-required", false, "Detached launch did not produce matching readiness evidence within the bounded wait.", "manual-ownership-reconciliation"],
+  "launch-evidence-mismatch": ["recovery-required", false, "Published detached process evidence does not match the launch claim execution.", "manual-ownership-reconciliation"],
+};
+
+function assertBehaviorHandoff(handoff, code, runId) {
+  const [status, automatic, reason, action] = BEHAVIOR_ROWS[code];
+  assert.equal(handoff.reason_code, code);
+  assert.equal(handoff.status, status);
+  assert.equal(handoff.automatic, automatic);
+  assert.equal(handoff.reason, reason);
+  assert.equal(handoff.action, action);
+  assert.equal(handoff.run_id, runId);
+  const live = code === "matching-detached-shepherd-live";
+  assert.equal(handoff.pid, live ? 9876 : null);
+  assert.equal(handoff.process_ref, live ? "process.json" : null);
+  assert.equal(handoff.log, live ? "processes/behavior.log" : null);
+  assert.equal(handoff.status_command, `feature-factory factory status ${runId} --json`);
+  assert.equal(handoff.watch_command, `feature-factory factory watch ${runId}`);
+  assert.equal(handoff.action_command, action === "watch" ? `feature-factory factory watch ${runId}` : action === "run-resume-check" ? `feature-factory factory resume-check ${runId} --json` : action === "inspect-terminal-result" ? `feature-factory factory status ${runId} --json` : action === "confirm-cancellation" ? (code === "cancel-pending" ? `feature-factory factory cancel ${runId} --json` : `feature-factory factory status ${runId} --json`) : null);
+  assert.equal(handoff.recovery_command, action === "run-resume-check" ? `feature-factory factory resume-check ${runId} --json` : null);
+  const claimExpected = ["launch-claim-invalid", "launch-owner-indeterminate", "launch-claim-conflict", "foreground-release-failed", "launch-spawn-failed", "launch-readiness-failed", "launch-evidence-mismatch"].includes(code);
+  assert.equal(handoff.launch_claim_ref, claimExpected ? "process-launch.lock/owner.json" : null);
+}
+
+function snapshotSidecars(runDir) {
+  const refs = ["process-launch.lock/owner.json", "process.json", "heartbeat.json"];
+  return Object.fromEntries(refs.filter((ref) => existsSync(join(runDir, ref))).map((ref) => [ref, readFileSync(join(runDir, ref), "utf8")]));
+}
+
+function assertPreservedOriginalSidecars(runDir, snapshot) {
+  for (const [ref, bytes] of Object.entries(snapshot)) assert.equal(readFileSync(join(runDir, ref), "utf8"), bytes, `${ref} must be byte-identical`);
 }
 
 function heartbeat(runId) {
