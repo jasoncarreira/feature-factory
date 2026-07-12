@@ -47,7 +47,6 @@ describe("factory resume", () => {
         const result = await transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, { cwd: fixture.repo, ...behaviorOptions });
         assert.equal(result.gate_accepted, true);
         assertBehaviorHandoff(result.handoff, behavior.code, fixture.runId);
-        assert.equal(result.handoff.status === "recovery-required" ? 2 : 0, behavior.code.startsWith("launch-") || ["approval-snapshot-mismatch", "steering-generation-mismatch", "steering-state-not-clean", "resume-ineligible", "process-evidence-invalid", "process-identity-mismatch", "prior-process-stopped", "claim-acquisition-failed", "foreground-release-failed"].includes(behavior.code) ? 2 : 0);
         assert.equal(result.handoff.reason.includes("merge"), false);
         if (result.handoff.status === "recovery-required") assertPreservedOriginalSidecars(fixture.runDir, watched);
         if (["foreground-release-failed", "launch-spawn-failed", "launch-readiness-failed", "launch-evidence-mismatch"].includes(behavior.code)) {
@@ -91,6 +90,7 @@ describe("factory resume", () => {
       const fixture = createFixture(`payload-${row.name.replaceAll(" ", "-")}`, { mode: row.durableMode });
       let payload;
       let launches = 0;
+      const runBytesBefore = readFileSync(join(fixture.runDir, "run.json"));
       const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: fixture.repo });
       const capture = async (_repo, args, launchOpts) => {
         launches += 1;
@@ -112,18 +112,9 @@ describe("factory resume", () => {
         });
         assert.equal(launches, 1);
         assert.equal(result.status, row.detached ? "started" : "completed");
-        assert.equal(payload.operator_request, `resume ${fixture.runId}`);
-        assert.equal(payload.driver.mode, row.driverMode);
-        assert.equal(payload.driver.ready, false);
-        assert.equal(payload.driver.pr_mode, null);
-        if (row.payloadKind === "resume") {
-          assert.deepEqual(payload.resume, { schema_version: 1, kind: "existing-run-resume", run_id: fixture.runId });
-          assert.deepEqual(payload.steering, { schema_version: 1, kind: "operator-steering-pointer", run_id: fixture.runId, pending: null, uncheckpointed: null, consume: null, raw_message_included: false });
-        } else {
-          assert.equal(payload.resume, null);
-          assert.equal(payload.steering, null);
-        }
+        assert.deepEqual(payload, expectedOwnershipPayload(fixture.runId, row.driverMode, row.payloadKind));
         assert.equal(readJson(join(fixture.runDir, "run.json")).mode, row.durableMode);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json")).equals(runBytesBefore), true, "launch coordination must preserve durable run bytes");
       } finally {
         cleanup(fixture.repo);
       }
@@ -400,6 +391,36 @@ function createFixture(runId, { prMode, mode } = {}) {
   if (mode !== undefined) run.mode = mode;
   writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId, worktree };
+}
+
+function expectedOwnershipPayload(runId, driverMode, payloadKind) {
+  const expected = {
+    operator_request: `resume ${runId}`,
+    driver: {
+      mode: driverMode,
+      ready: false,
+      pr_mode: null,
+      reviewer: null,
+      github_account: null,
+      run_id: null,
+    },
+    resume: null,
+    steering: null,
+    continuation: null,
+  };
+  if (payloadKind === "resume") {
+    expected.resume = { schema_version: 1, kind: "existing-run-resume", run_id: runId };
+    expected.steering = {
+      schema_version: 1,
+      kind: "operator-steering-pointer",
+      run_id: runId,
+      pending: null,
+      uncheckpointed: null,
+      consume: null,
+      raw_message_included: false,
+    };
+  }
+  return expected;
 }
 
 async function createApprovedHandoffFixture(runId) {

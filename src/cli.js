@@ -621,7 +621,7 @@ async function recover(args) {
 }
 
 async function gateDecision(args, dependencies = {}) {
-  const opts = options(args);
+  const opts = { ...options(args), ...(dependencies.gateDecisionOptions || {}) };
   const positional = positionals(args);
   const [runId, gate, statusValue] = positional;
   if (!stringValue(runId) || !stringValue(gate) || !stringValue(statusValue)) {
@@ -637,8 +637,7 @@ async function gateDecision(args, dependencies = {}) {
   if (stringValue(opts.decisionNote)) decision.decision_note = opts.decisionNote;
   if (stringValue(opts.answeredAt)) decision.answered_at = opts.answeredAt;
 
-  const transition = dependencies.transitionGateDecisionAndHandoff || transitionGateDecisionAndHandoff;
-  const result = await transition(resolveRunDir(runId, opts), gate, decision, opts);
+  const result = await transitionGateDecisionAndHandoff(resolveRunDir(runId, opts), gate, decision, opts);
   if (opts.json && result.handoff) {
     const projected = projectCliData(result);
     if (typeof result.handoff.log === "string" && /^processes\/[A-Za-z0-9._-]+\.log$/u.test(result.handoff.log)) projected.handoff.log = result.handoff.log;

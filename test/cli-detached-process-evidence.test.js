@@ -20,7 +20,7 @@ describe("cli detached process evidence", () => {
       assert.equal(output.status, "started", proc.stdout);
       assert.equal(existsSync(join(repo, ".opencode", "factory", "process.json")), false);
       assert.equal(existsSync(join(repo, ".opencode", "factory", "processes")), true);
-      stopProcess(output.pid);
+      stopProcess(output.pid, join(repo, "fake-opencode-ready"), join(repo, "fake-opencode-exited"));
     } finally {
       cleanup(repo);
     }
@@ -85,7 +85,7 @@ describe("cli detached process evidence", () => {
       assert.equal(processEvidence.state, "running");
       assert.doesNotMatch(processEvidence.identity.start_marker, /^unverified:/u);
       assert.match(processEvidence.log_ref, /^processes\/.+\.log$/u);
-      stopProcess(output.pid);
+      stopProcess(output.pid, join(repo, "fake-opencode-ready"), join(repo, "fake-opencode-exited"));
     } finally {
       cleanup(repo);
     }
@@ -100,7 +100,17 @@ function installFakeOpencode(repo) {
   const binDir = join(repo, "bin");
   const script = join(binDir, "opencode");
   mkdirSync(binDir, { recursive: true });
-  writeFileSync(script, "#!/usr/bin/env node\nsetTimeout(() => {}, 30000);\n", "utf8");
+  const exitMarker = join(repo, "fake-opencode-exited");
+  const readyMarker = join(repo, "fake-opencode-ready");
+  writeFileSync(script, `#!${process.execPath}
+const { writeFileSync } = require("node:fs");
+process.on("SIGTERM", () => {
+  writeFileSync(${JSON.stringify(exitMarker)}, "exited\\n");
+  process.exit(0);
+});
+writeFileSync(${JSON.stringify(readyMarker)}, "ready\\n");
+setInterval(() => {}, 30000);
+`, "utf8");
   chmodSync(script, 0o755);
   return binDir;
 }
@@ -120,23 +130,56 @@ function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function stopProcess(pid) {
+function stopProcess(pid, readyMarker, exitMarker) {
   if (!Number.isInteger(pid) || pid <= 0) return;
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    // Best-effort cleanup for detached test processes.
-  }
+  waitForMarker(readyMarker);
+  const parent = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" });
+  assert.equal(parent.status, 0, parent.stderr);
+  const supervisorPid = Number(parent.stdout.trim());
+  process.kill(pid, "SIGTERM");
+  const waiter = `
+    import { existsSync } from "node:fs";
+    import { execFileSync } from "node:child_process";
+    const pids = ${JSON.stringify([pid, supervisorPid])}.filter((pid) => Number.isInteger(pid) && pid > 1);
+    const marker = ${JSON.stringify(exitMarker)};
+    const deadline = Date.now() + 5000;
+    const active = (pid) => {
+      try {
+        const state = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
+        return state.length > 0 && !state.startsWith("Z");
+      } catch { return false; }
+    };
+    const observe = () => {
+      if (existsSync(marker) && pids.every((pid) => !active(pid))) process.exit(0);
+      if (Date.now() >= deadline) {
+        console.error(JSON.stringify({ marker: existsSync(marker), pids, states: pids.map((pid) => {
+          try { return execFileSync("ps", ["-o", "pid=,ppid=,stat=,command=", "-p", String(pid)], { encoding: "utf8" }).trim(); }
+          catch { return "absent"; }
+        }) }));
+        process.exit(2);
+      }
+      setImmediate(observe);
+    };
+    observe();
+  `;
+  const waited = spawnSync(process.execPath, ["--input-type=module", "--eval", waiter], { encoding: "utf8", timeout: 10000 });
+  assert.equal(waited.status, 0, `detached child/supervisor did not exit: ${waited.stderr}`);
+}
+
+function waitForMarker(marker) {
+  const waiter = `
+    import { existsSync, watch } from "node:fs";
+    const marker = ${JSON.stringify(marker)};
+    if (existsSync(marker)) process.exit(0);
+    const watcher = watch(${JSON.stringify(join(marker, ".."))}, () => {
+      if (existsSync(marker)) { watcher.close(); process.exit(0); }
+    });
+    setTimeout(() => { watcher.close(); process.exit(2); }, 5000).unref();
+  `;
+  const waited = spawnSync(process.execPath, ["--input-type=module", "--eval", waiter], { encoding: "utf8", timeout: 10000 });
+  assert.equal(waited.status, 0, `detached child did not publish readiness: ${waited.stderr}`);
 }
 
 function cleanup(path) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      rmSync(path, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if (error?.code !== "ENOTEMPTY" || attempt === 19) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-    }
-  }
+  rmSync(path, { recursive: true, force: true });
 }

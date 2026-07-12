@@ -1,11 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync as runSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handoffEnvelope } from "../src/factory.js";
+import { acquireLaunchClaim, recordDetachedProcessEvidence, writeProcessEvidence } from "../src/process-evidence.js";
+import { transitionGateDecision, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 
 const CLI = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -37,17 +38,17 @@ describe("cli gate-decision", () => {
   ];
 
   for (const [id, code, status, automatic, reason, action, commandKind, claim, live] of matrix) {
-    it(`${id} returns the exact ${code} response row and observes the CLI exit`, () => {
-      const runId = "matrix-run";
-      const evidence = live ? { pid: 4321, log_ref: "processes/execution.log" } : null;
-      const output = handoffEnvelope(runId, "brief", code, { claim, evidence });
+    it(`${id} drives ${code} through gate-decision and observes the CLI exit`, async () => {
+      const fixture = await createApprovedMatrixFixture(`cli-${id.toLowerCase()}`);
+      await prepareMatrixCondition(fixture, code);
+      const runId = fixture.runId;
       const commands = {
         watch: `feature-factory factory watch ${runId}`,
         status: `feature-factory factory status ${runId} --json`,
         cancel: `feature-factory factory cancel ${runId} --json`,
         resume: `feature-factory factory resume-check ${runId} --json`,
       };
-      assert.deepEqual(output, {
+      const expectedHandoff = {
         automatic,
         status,
         run_id: runId,
@@ -56,27 +57,28 @@ describe("cli gate-decision", () => {
         reason,
         action,
         action_command: commandKind ? commands[commandKind] : null,
-        pid: live ? 4321 : null,
+        pid: live ? 9876 : null,
         process_ref: live ? "process.json" : null,
         launch_claim_ref: claim ? "process-launch.lock/owner.json" : null,
-        log: live ? "processes/execution.log" : null,
+        log: live ? "processes/behavior.log" : null,
         status_command: commands.status,
         watch_command: commands.watch,
         recovery_command: commandKind === "resume" ? commands.resume : null,
-      });
-      assert.equal(output.automatic, ["started", "already-running"].includes(output.status));
-
-      const fixture = createFixture(`cli-${id.toLowerCase()}`);
+      };
+      const approvalBefore = structuredClone(readJson(join(fixture.runDir, "run.json")).gates.brief);
       try {
-        const cliResult = runInjectedGateCli(fixture, output);
+        const cliResult = runBehaviorGateCli(fixture, code);
         const expectedExit = Number(id.slice(1)) <= 7 ? 0 : 2;
-        assert.equal(cliResult.status, expectedExit, cliResult.stderr);
+        assert.equal(cliResult.status, expectedExit, `${cliResult.stderr}\n${cliResult.stdout}\n${readFileSync(join(fixture.runDir, "matrix-metrics.json"), "utf8")}`);
         const printed = JSON.parse(cliResult.stdout);
         assert.equal(printed.gate_accepted, true);
         assert.equal(printed.run.gates.brief.status, "approved");
-        assert.deepEqual(printed.handoff, output);
-        assert.equal(existsSync(join(fixture.runDir, "spawn-attempted")), false);
-        assert.equal(existsSync(join(fixture.runDir, "merge-attempted")), false);
+        assert.deepEqual(printed.handoff, expectedHandoff);
+        assert.deepEqual(readJson(join(fixture.runDir, "run.json")).gates.brief, approvalBefore, "accepted approval must be preserved");
+        const metrics = readMatrixMetrics(fixture);
+        assert.equal(metrics.spawnAttempts, id === "T01" || ["T21", "T22", "T23"].includes(id) ? 1 : 0);
+        assert.equal(metrics.signalAttempts, 0);
+        assert.equal(metrics.args.some((arg) => String(arg).includes("merge")), false);
       } finally {
         cleanup(fixture.repo);
       }
@@ -319,7 +321,7 @@ describe("cli gate-decision", () => {
 });
 
 function createFixture(runId, options = {}) {
-  const repo = mkdtempSync(join(tmpdir(), "cli-gate-simplified-"));
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "cli-gate-simplified-")));
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "gates"), { recursive: true });
@@ -334,7 +336,7 @@ function createFixture(runId, options = {}) {
     mkdirSync(run.worktree, { recursive: true });
   }
   writeJson(join(runDir, "run.json"), run);
-  return { repo, runDir, runId };
+  return { repo, runDir, runId, worktree: run.worktree };
 }
 
 function sha256File(file) {
@@ -345,30 +347,136 @@ function runCli(repo, args, bin) {
   return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: bin ? { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` } : process.env });
 }
 
-function runInjectedGateCli(fixture, handoff) {
+function runBehaviorGateCli(fixture, reasonCode) {
   const cliUrl = new URL("../src/cli.js", import.meta.url).href;
+  const evidenceUrl = new URL("../src/process-evidence.js", import.meta.url).href;
   const source = `
     import { runCliCommand } from ${JSON.stringify(cliUrl)};
-    const handoff = ${JSON.stringify(handoff)};
+    import { acquireLaunchClaim, recordDetachedProcessEvidence, transitionLaunchClaimPhase } from ${JSON.stringify(evidenceUrl)};
+    import { mkdirSync, writeFileSync } from "node:fs";
+    const repo = ${JSON.stringify(fixture.repo)};
+    const runDir = ${JSON.stringify(fixture.runDir)};
+    const reasonCode = ${JSON.stringify(reasonCode)};
+    const metricsPath = ${JSON.stringify(join(fixture.runDir, "matrix-metrics.json"))};
+    const metrics = { spawnAttempts: 0, signalAttempts: 0, sleepCalls: [], now: 0, args: [] };
+    const persistMetrics = () => writeFileSync(metricsPath, JSON.stringify(metrics));
+    const inspectorFn = (pid) => ({
+      ok: true,
+      inspector: "test-inspector",
+      pid,
+      start_marker: reasonCode === "process-identity-mismatch" ? "different-start" : "test-start",
+      command_name: pid === 9876 ? "opencode" : "node",
+      cwd: repo
+    });
+    const gateDecisionOptions = {
+      inspectorFn,
+      acquireLaunchClaimFn: (dir, input, opts) => {
+        try { return acquireLaunchClaim(dir, input, opts); }
+        catch (error) { metrics.acquireError = String(error?.stack || error); persistMetrics(); throw error; }
+      },
+      readyTimeoutMs: 100,
+      clock: () => metrics.now,
+      sleep: async (ms) => { metrics.sleepCalls.push(ms); metrics.now += ms; persistMetrics(); },
+      processSignalFn: () => { metrics.signalAttempts += 1; persistMetrics(); }
+    };
+    if (reasonCode === "claim-acquisition-failed") {
+      gateDecisionOptions.acquireLaunchClaimFn = () => { throw new Error("injected atomic acquisition failure"); };
+    }
+    if (reasonCode === "foreground-release-failed") {
+      gateDecisionOptions.transitionLaunchClaimPhaseFn = (dir, token, phase, updates, opts) => {
+        if (phase === "predecessor-released") throw new Error("injected predecessor release failure");
+        return transitionLaunchClaimPhase(dir, token, phase, updates, opts);
+      };
+    }
+    if (["detached-shepherd-started", "launch-spawn-failed", "launch-readiness-failed", "launch-evidence-mismatch"].includes(reasonCode)) {
+      gateDecisionOptions.detachedLaunchFn = async (_repo, args, launchOpts) => {
+        metrics.spawnAttempts += 1;
+        metrics.args = args;
+        persistMetrics();
+        if (reasonCode === "launch-spawn-failed") throw new Error("injected supervisor spawn failure");
+        if (reasonCode === "launch-readiness-failed") return { status: "started", pid: 9876 };
+        mkdirSync(runDir + "/processes", { recursive: true });
+        writeFileSync(runDir + "/processes/behavior.log", "ready\\n");
+        recordDetachedProcessEvidence(runDir, {
+          runId: ${JSON.stringify(fixture.runId)},
+          executionId: reasonCode === "launch-evidence-mismatch" ? "different-execution" : launchOpts.executionId,
+          pid: 9876,
+          cwd: repo,
+          logRef: "processes/behavior.log",
+          inspectorFn
+        });
+        return { status: "started", pid: 9876 };
+      };
+    }
+    persistMetrics();
     await runCliCommand([
       "factory", "gate-decision", ${JSON.stringify(fixture.runId)}, "brief", "approved",
       "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md",
       "--answer", "approve", "--json"
-    ], {
-      transitionGateDecisionAndHandoff: async (_runDir, gate, decision) => ({
-        updated: true,
-        gate,
-        gate_accepted: true,
-        run: { run_id: ${JSON.stringify(fixture.runId)}, gates: { brief: { ...decision } } },
-        handoff
-      })
-    });
+    ], { gateDecisionOptions });
+    persistMetrics();
   `;
   return runSync(process.execPath, ["--input-type=module", "--eval", source], {
     cwd: fixture.repo,
     encoding: "utf8",
     env: { ...process.env },
   });
+}
+
+async function createApprovedMatrixFixture(runId) {
+  const fixture = createFixture(runId, { interactive: true });
+  await transitionGateDecision(fixture.runDir, "brief", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/story.question.md" });
+  const boundary = await transitionSteeringBoundaryOpened(fixture.runDir, "gate");
+  await transitionGateDecision(fixture.runDir, "brief", { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve" }, { boundaryToken: boundary.boundary.token });
+  return fixture;
+}
+
+async function prepareMatrixCondition(fixture, code) {
+  const runFile = join(fixture.runDir, "run.json");
+  const mutate = (change) => { const run = readJson(runFile); change(run); writeJson(runFile, run); };
+  if (code === "matching-detached-shepherd-live") return writeMatrixProcess(fixture, "running", "matching-live");
+  if (code === "run-mode-not-interactive") return mutate((run) => { run.mode = "headless"; });
+  if (code === "protected-gate-pending") {
+    writeFileSync(join(fixture.runDir, "artifacts", "brief.md"), "brief\n");
+    writeFileSync(join(fixture.runDir, "gates", "brief.question.md"), "approve brief?\n");
+    return transitionGateDecision(fixture.runDir, "story", { status: "pending", artifact: "artifacts/brief.md", question_ref: "gates/brief.question.md" });
+  }
+  if (code === "terminal-run") return mutate((run) => { run.status = "completed"; run.terminal_result = { status: "completed", run_id: fixture.runId, pr_url: null, reason: null, summary: "done", artifacts: {} }; });
+  if (code === "validated-cancelled") return writeMatrixProcess(fixture, "cancelled", "cancelled");
+  if (code === "cancel-pending") return writeMatrixProcess(fixture, "running", "cancel-pending", { cancel: { requested_at: new Date().toISOString(), signal: "SIGTERM", confirmed_at: null, result: "pending", reason: "pending" } });
+  if (code === "approval-receipt-missing") return mutate((run) => { delete run.gates.brief.handoff_receipt; });
+  if (code === "approval-snapshot-mismatch") return writeFileSync(join(fixture.runDir, "artifacts", "story.md"), "changed\n");
+  if (code === "steering-generation-mismatch") return mutate((run) => { run.steering.generation += 1; });
+  if (code === "steering-state-not-clean") return transitionSteeringBoundaryOpened(fixture.runDir, "dispatch");
+  if (code === "resume-ineligible") return rmSync(fixture.worktree, { recursive: true, force: true });
+  if (code === "launch-claim-invalid") { mkdirSync(join(fixture.runDir, "process-launch.lock")); return writeFileSync(join(fixture.runDir, "process-launch.lock", "owner.json"), "malformed claim bytes\n"); }
+  if (code === "launch-owner-indeterminate") return writeMatrixClaim(fixture, { hostname: "foreign-host" });
+  if (code === "launch-claim-conflict") {
+    return acquireLaunchClaim(fixture.runDir, { runId: fixture.runId, executionId: "conflicting-execution", launchKind: "approval-handoff", phase: "spawning", pid: process.pid, cwd: fixture.repo }, { inspectorFn: matrixInspector(fixture) });
+  }
+  if (code === "process-evidence-invalid") return writeFileSync(join(fixture.runDir, "process.json"), "malformed process bytes\n");
+  if (code === "process-identity-mismatch") return writeMatrixProcess(fixture, "running", "mismatch");
+  if (code === "prior-process-stopped") return writeMatrixProcess(fixture, "exited", "stopped");
+}
+
+function writeMatrixProcess(fixture, state, executionId, overrides = {}) {
+  mkdirSync(join(fixture.runDir, "processes"), { recursive: true });
+  writeFileSync(join(fixture.runDir, "processes", "behavior.log"), "evidence\n");
+  const now = new Date().toISOString();
+  writeProcessEvidence(fixture.runDir, { schema_version: 1, kind: "opencode-process", run_id: fixture.runId, execution_id: executionId, pid: 9876, started_at: now, updated_at: now, state, cwd: fixture.repo, identity: { inspector: "test-inspector", start_marker: "test-start", command_name: "opencode" }, log_ref: "processes/behavior.log", cancel: state === "cancelled" ? { requested_at: now, signal: "SIGTERM", confirmed_at: now, result: "cancelled", reason: null } : null, ...overrides });
+}
+
+function writeMatrixClaim(fixture, overrides = {}) {
+  mkdirSync(join(fixture.runDir, "process-launch.lock"));
+  writeJson(join(fixture.runDir, "process-launch.lock", "owner.json"), { schema_version: 1, kind: "opencode-launch-claim", run_id: fixture.runId, execution_id: "claim-execution", launch_kind: "approval-handoff", phase: "spawning", pid: process.pid, hostname: "test-host", acquired_at: new Date().toISOString(), identity: { inspector: "test-inspector", start_marker: "test-start", command_name: "node", cwd: fixture.repo }, approval: null, nonce: "opaque-matrix-token-1234", ...overrides });
+}
+
+function matrixInspector(fixture) {
+  return (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: fixture.repo });
+}
+
+function readMatrixMetrics(fixture) {
+  return readJson(join(fixture.runDir, "matrix-metrics.json"));
 }
 
 function openBoundary(fixture, kind, bin) {
@@ -395,13 +503,5 @@ function writeJson(file, value) {
 }
 
 function cleanup(repo) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      rmSync(repo, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if (error?.code !== "ENOTEMPTY" || attempt === 19) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-    }
-  }
+  rmSync(repo, { recursive: true, force: true });
 }
