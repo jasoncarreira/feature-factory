@@ -1074,6 +1074,7 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   const resolvePhysicalPath = opts.physicalPath || physicalPath;
   const gitRunner = opts.gitRunner || git;
   const phaseHook = typeof opts.phaseHook === "function" ? opts.phaseHook : () => {};
+  const expectedWorktrees = normalizeExpectedWorktreeIdentities(opts.expectedWorktrees);
   const cleanup = {
     worktrees: [],
     branches: [],
@@ -1094,7 +1095,7 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   };
 
   const worktrees = targets.worktrees
-    .map((entry) => sweepWorktreeTarget(repo, entry, resolvePhysicalPath, opts.expectedWorktreeRoot))
+    .map((entry) => sweepWorktreeTarget(repo, entry, resolvePhysicalPath, opts.expectedWorktreeRoot, expectedWorktrees.get(String(entry.worktree))))
     .sort((a, b) => Buffer.from(a.physical_path || a.recorded_path).compare(Buffer.from(b.physical_path || b.recorded_path)));
   for (const target of worktrees) {
     const record = {
@@ -1113,6 +1114,7 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
         resolvePhysicalPath,
         worktreeIdentity,
         expectedWorktreeRoot: opts.expectedWorktreeRoot,
+        expectedWorktree: target.expected_worktree,
       });
       if (!revalidated) {
         changed();
@@ -1198,25 +1200,26 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   return cleanup;
 }
 
-function sweepWorktreeTarget(repo, entry, resolvePhysicalPath = physicalPath, expectedWorktreeRoot = null) {
+function sweepWorktreeTarget(repo, entry, resolvePhysicalPath = physicalPath, expectedWorktreeRoot = null, expectedWorktree = null) {
   const recordedPath = String(entry.worktree);
   const resolved = resolve(repo, recordedPath);
   if (!validSweepWorktreeRoot(repo, expectedWorktreeRoot) || !insideWorktreeRoot(repo, resolved) || !existsSync(resolved)) {
-    return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, valid: false };
+    return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, expected_worktree: expectedWorktree, valid: false };
   }
   try {
     const physical = resolvePhysicalPath(resolved);
-    if (!insideDirectory(expectedWorktreeRoot.physical_path, physical)) return { recorded_path: recordedPath, physical_path: physical, branch: entry.branch || null, valid: false };
-    return { recorded_path: recordedPath, physical_path: physical, branch: entry.branch || null, valid: true };
+    if (!insideDirectory(expectedWorktreeRoot.physical_path, physical)) return { recorded_path: recordedPath, physical_path: physical, branch: entry.branch || null, expected_worktree: expectedWorktree, valid: false };
+    return { recorded_path: recordedPath, physical_path: physical, branch: entry.branch || null, expected_worktree: expectedWorktree, valid: true };
   } catch {
-    return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, valid: false };
+    return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, expected_worktree: expectedWorktree, valid: false };
   }
 }
 
 function revalidateSweepWorktree(repo, authorized, expectedHead, opts) {
   if (!authorized.valid || !authorized.branch || !expectedHead) return false;
-  const current = sweepWorktreeTarget(repo, { worktree: authorized.recorded_path, branch: authorized.branch }, opts.resolvePhysicalPath, opts.expectedWorktreeRoot);
+  const current = sweepWorktreeTarget(repo, { worktree: authorized.recorded_path, branch: authorized.branch }, opts.resolvePhysicalPath, opts.expectedWorktreeRoot, opts.expectedWorktree);
   if (!current.valid || current.physical_path !== authorized.physical_path) return false;
+  if (!matchesAuthorizedWorktreeDirectory(current.physical_path, opts.expectedWorktree)) return false;
   const identity = opts.worktreeIdentity(repo, current.physical_path, { branch: authorized.branch, head: expectedHead });
   if (!identity.ok || identity.worktree !== current.physical_path) return false;
   const registered = registeredWorktrees(repo, opts.gitRunner);
@@ -1229,8 +1232,24 @@ function revalidateSweepWorktree(repo, authorized, expectedHead, opts) {
     }
   });
   if (!entry || entry.branch !== authorized.branch || entry.head !== expectedHead || entry.bare || entry.detached) return false;
-  const finalTarget = sweepWorktreeTarget(repo, { worktree: authorized.recorded_path, branch: authorized.branch }, opts.resolvePhysicalPath, opts.expectedWorktreeRoot);
-  return finalTarget.valid && finalTarget.physical_path === authorized.physical_path;
+  const finalTarget = sweepWorktreeTarget(repo, { worktree: authorized.recorded_path, branch: authorized.branch }, opts.resolvePhysicalPath, opts.expectedWorktreeRoot, opts.expectedWorktree);
+  return finalTarget.valid
+    && finalTarget.physical_path === authorized.physical_path
+    && matchesAuthorizedWorktreeDirectory(finalTarget.physical_path, opts.expectedWorktree);
+}
+
+function matchesAuthorizedWorktreeDirectory(path, expected) {
+  if (!expected || expected.state !== "verified" || expected.physical_path !== path || !stringValue(expected.device) || !stringValue(expected.inode)) return false;
+  try {
+    const entry = lstatSync(path);
+    return !entry.isSymbolicLink()
+      && entry.isDirectory()
+      && realpathSync(path) === expected.physical_path
+      && String(entry.dev) === expected.device
+      && String(entry.ino) === expected.inode;
+  } catch {
+    return false;
+  }
 }
 
 function validSweepWorktreeRoot(repo, expected) {
@@ -1292,6 +1311,11 @@ function normalizeExpectedBranchHeads(value) {
   if (Array.isArray(value)) return new Map(value.map((entry) => [entry.name, entry.expected_head]));
   if (value && typeof value === "object") return new Map(Object.entries(value));
   return new Map();
+}
+
+function normalizeExpectedWorktreeIdentities(value) {
+  if (!Array.isArray(value)) return new Map();
+  return new Map(value.map((entry) => [entry.recorded_path, entry]));
 }
 
 function compareUtf8(a, b) {

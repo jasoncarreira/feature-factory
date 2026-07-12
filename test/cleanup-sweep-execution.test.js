@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { executeCleanupSweep, previewCleanupSweep } from "../src/cleanup-sweep.js";
@@ -319,6 +319,52 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
         assert.equal(report.exit_code, 0, target);
         assert.equal(removalCommands, 0, target);
         assert.equal(existsSync(join(externalRoot, target === "top-level" ? "run" : "slice")), true, target);
+      } finally { fixture.cleanup(); }
+    }
+  });
+
+  it("rejects replacement directories at authorized top-level and slice worktree paths before mutation", async () => {
+    for (const target of ["top-level", "slice"]) {
+      const fixture = createCleanupSweepFixture(`execution-replaced-worktree-${target}`);
+      try {
+        let worktree;
+        if (target === "top-level") {
+          fixture.addRun("run");
+          worktree = fixture.addRecordedWorktree("run");
+        } else {
+          fixture.createBranch("slice");
+          worktree = fixture.addRegisteredWorktree("slice", "slice");
+          fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree }] });
+        }
+        const authorization = await preview(fixture);
+        const authorizedIdentity = authorization.candidates[0].evidence.worktrees[0];
+        const original = `${worktree}-authorized-original`;
+        let removalCommands = 0;
+        const gitRunner = fallbackRunner((_cwd, args) => {
+          if (args[0] === "worktree" && args[1] === "remove") removalCommands += 1;
+          return null;
+        }, fixture.gitRunner);
+        const report = await execute(fixture, authorization.authorization.digest, {
+          gitRunner,
+          phaseHook(name) {
+            if (name !== "before-worktree-remove" || existsSync(original)) return;
+            renameSync(worktree, original);
+            mkdirSync(worktree);
+            copyFileSync(join(original, ".git"), join(worktree, ".git"));
+            writeFileSync(join(worktree, "victim.txt"), "replacement must survive\n");
+          },
+        });
+        const candidate = report.candidates[0];
+        assert.deepEqual(candidate.reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"], target);
+        assert.equal(candidate.attempted_cleanup, false, target);
+        assert.equal(candidate.cleanup, null, target);
+        assert.equal(report.attempted_cleanup_failures, 0, target);
+        assert.equal(report.exit_code, 0, target);
+        assert.equal(removalCommands, 0, target);
+        assert.equal(existsSync(join(worktree, "victim.txt")), true, target);
+        assert.equal(existsSync(join(original, "README.md")), true, target);
+        assert.notEqual(String(lstatSync(worktree).ino), authorizedIdentity.inode, target);
+        assert.equal(String(lstatSync(original).ino), authorizedIdentity.inode, target);
       } finally { fixture.cleanup(); }
     }
   });

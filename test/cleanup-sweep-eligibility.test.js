@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { discoverCleanupSweepCandidates } from "../src/cleanup-sweep-eligibility.js";
@@ -347,7 +347,14 @@ test("R34 fails closed when git worktree list cannot be established", () => {
 test("R36-R41 verify recorded worktree containment, registration, branch/head identity, and eligibility", async (t) => {
   await t.test("verified identity is eligible", () => {
     const fixture = createCleanupSweepFixture("worktree-ok");
-    try { fixture.addRun("run"); fixture.addRecordedWorktree("run"); assert.equal(inspect(fixture).candidates[0].classification, "eligible"); }
+    try {
+      fixture.addRun("run");
+      const worktree = fixture.addRecordedWorktree("run");
+      const candidate = inspect(fixture).candidates[0];
+      assert.equal(candidate.classification, "eligible");
+      assert.equal(candidate.evidence.worktrees[0].device, String(lstatSync(worktree).dev));
+      assert.equal(candidate.evidence.worktrees[0].inode, String(lstatSync(worktree).ino));
+    }
     finally { fixture.cleanup(); }
   });
   await t.test("symlinked repository worktree root is unsafe and external worktrees survive preview", () => {

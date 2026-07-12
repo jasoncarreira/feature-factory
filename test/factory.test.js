@@ -914,6 +914,8 @@ function writeJson(file, value) {
 function sweepPathEvidence(fixture) {
   const worktreeRoot = join(fixture.repo, ".opencode", "worktrees");
   const runDirStat = lstatSync(fixture.runDir);
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const expectedWorktrees = [];
   let expectedWorktreeRoot = { state: "missing", logical_path: worktreeRoot, physical_path: null, device: null, inode: null };
   if (existsSync(worktreeRoot)) {
     const worktreeRootStat = lstatSync(worktreeRoot);
@@ -925,8 +927,21 @@ function sweepPathEvidence(fixture) {
       inode: String(worktreeRootStat.ino),
     };
   }
+  if (run.worktree && existsSync(run.worktree)) {
+    const worktreeStat = lstatSync(run.worktree);
+    expectedWorktrees.push({
+      recorded_path: run.worktree,
+      physical_path: realpathSync(run.worktree),
+      device: String(worktreeStat.dev),
+      inode: String(worktreeStat.ino),
+      branch: run.branch,
+      head: branchHead(fixture.repo, run.branch),
+      state: "verified",
+    });
+  }
   return {
     expectedWorktreeRoot,
+    expectedWorktrees,
     expectedRunDirectory: {
       kind: "directory",
       logical_path: fixture.runDir,

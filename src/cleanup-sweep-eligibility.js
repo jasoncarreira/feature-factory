@@ -377,13 +377,27 @@ function targetsForRegistrationConflict(records, targets, repo, options) {
 
 function appendConflictingWorktreeEvidence(evidence, repo, targets, options) {
   for (const target of targets) {
+    const logical = resolve(repo, target.worktree);
+    const directoryIdentity = noFollowDirectoryIdentity(logical, options);
     evidence.worktrees.push({
       recorded_path: String(target.worktree),
-      physical_path: physicalPathOrNull(resolve(repo, target.worktree), options),
+      physical_path: physicalPathOrNull(logical, options),
+      device: directoryIdentity?.device ?? null,
+      inode: directoryIdentity?.inode ?? null,
       branch: target.branch ?? null,
       head: null,
       state: "branch-mismatch",
     });
+  }
+}
+
+function noFollowDirectoryIdentity(path, options) {
+  try {
+    const entry = inspectFilesystem(path, "lstat", options);
+    if (entry.isSymbolicLink() || !entry.isDirectory()) return null;
+    return { device: String(entry.dev), inode: String(entry.ino) };
+  } catch {
+    return null;
   }
 }
 
@@ -413,13 +427,15 @@ function physicalPathOrNull(path, options) {
 function inspectWorktree(repo, target, registered, branches, worktreeRoot, options) {
   const recordedPath = String(target.worktree);
   const logical = resolve(repo, recordedPath);
-  const record = { recorded_path: recordedPath, physical_path: null, branch: target.branch ?? null, head: null, state: "unprovable" };
+  const record = { recorded_path: recordedPath, physical_path: null, device: null, inode: null, branch: target.branch ?? null, head: null, state: "unprovable" };
   const root = worktreeRoot.logical_path ?? join(repo, ".opencode", "worktrees");
   if (!contained(root, logical)) { record.state = "outside-root"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
   let value;
   try { value = inspectFilesystem(logical, "lstat", options); } catch { record.state = "missing"; return { record, reason: "SKIPPED_WORKTREE_MISSING" }; }
   if (value.isSymbolicLink()) { record.state = "symlink"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
   if (!value.isDirectory()) { record.state = "missing"; return { record, reason: "SKIPPED_WORKTREE_MISSING" }; }
+  record.device = String(value.dev);
+  record.inode = String(value.ino);
   try { record.physical_path = inspectFilesystem(logical, "realpath", options); } catch { record.state = "unprovable"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
   if (worktreeRoot.state !== "valid" || worktreeRoot.physical_path !== root || !contained(root, record.physical_path)) { record.state = "outside-root"; return { record, reason: "SKIPPED_WORKTREE_UNSAFE" }; }
   const registeredEntries = registered.filter((item) => pathIdentityKeys(repo, item.path, options).has(record.physical_path));

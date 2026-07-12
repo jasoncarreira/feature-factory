@@ -353,9 +353,10 @@ function normalizeWorktrees(value) {
   if (!Array.isArray(value)) throw new TypeError("candidate.evidence.worktrees must be an array");
   return value.map((item, index) => {
     const path = `candidate.evidence.worktrees[${index}]`;
-    const worktree = exactRecord(item, ["recorded_path", "physical_path", "branch", "head", "state"], path);
-    assertNonEmptyString(worktree.recorded_path, `${path}.recorded_path`); nullableString(worktree.physical_path, `${path}.physical_path`); nullableString(worktree.branch, `${path}.branch`); nullableString(worktree.head, `${path}.head`);
+    const worktree = exactRecord(item, ["recorded_path", "physical_path", "device", "inode", "branch", "head", "state"], path);
+    assertNonEmptyString(worktree.recorded_path, `${path}.recorded_path`); nullableString(worktree.physical_path, `${path}.physical_path`); decimalStringOrNull(worktree.device, `${path}.device`); decimalStringOrNull(worktree.inode, `${path}.inode`); nullableString(worktree.branch, `${path}.branch`); nullableString(worktree.head, `${path}.head`);
     enumValue(worktree.state, ["verified", "outside-root", "missing", "symlink", "unregistered", "branch-mismatch", "head-mismatch", "unprovable"], `${path}.state`);
+    if (worktree.state === "verified" && (worktree.device === null || worktree.inode === null)) throw new TypeError(`${path} verified identity requires device and inode`);
     return { ...worktree };
   }).sort((left, right) => utf8Collator(left.physical_path ?? left.recorded_path, right.physical_path ?? right.recorded_path));
 }
@@ -523,6 +524,7 @@ function validateOutcomeReason(outcome, reasonCode, path) {
   createReason(reasonCode);
 }
 function hashOrNull(value, path) { if (value !== null && (typeof value !== "string" || !HASH.test(value))) throw new TypeError(`${path} must be a sha256 hash or null`); }
+function decimalStringOrNull(value, path) { if (value !== null && (typeof value !== "string" || !/^\d+$/u.test(value))) throw new TypeError(`${path} must be a decimal string or null`); return value; }
 function nullableString(value, path) { if (value !== null && typeof value !== "string") throw new TypeError(`${path} must be a string or null`); return value; }
 function nullableBoolean(value, path) { if (value !== null && typeof value !== "boolean") throw new TypeError(`${path} must be a boolean or null`); return value; }
 function requiredString(value, path) { assertNonEmptyString(value, path); return value; }

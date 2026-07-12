@@ -197,6 +197,7 @@ async function executeCandidate(repository, authorized, options, invocationId, t
           expectedBranchHeads: branches,
           expectedRunDirectory: normalized.evidence.entry,
           expectedWorktreeRoot: normalized.evidence.worktree_root,
+          expectedWorktrees: normalized.evidence.worktrees,
           fetchedBaseRef: baseOid,
           fetchedBase: { ref: baseRef, oid: baseOid },
           gitRunner: guardedCleanupGitRunner(repository.root_path, baseRef, baseOid, options.gitRunner ?? git),
