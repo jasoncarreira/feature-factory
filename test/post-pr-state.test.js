@@ -39,7 +39,7 @@ describe("post-PR schema-v1 state", () => {
   });
 
   it("enforces closed terminal phase/reason combinations", () => {
-    const factBoundReasons = new Set(["post-pr-account-switch-failed", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged"]);
+    const factBoundReasons = new Set(["post-pr-account-switch-failed", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged", "post-pr-push-failed", "post-pr-panel-attribution-unsafe"]);
     for (const [status, reasons] of Object.entries(POST_PR_TERMINAL_REASONS)) {
       for (const reason of reasons) {
         if (factBoundReasons.has(reason)) continue;

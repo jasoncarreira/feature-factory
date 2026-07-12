@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, relative, resolve } from "node:path";
+import { types as utilTypes } from "node:util";
 
 export const GITHUB_LIMITS = Object.freeze({
   switch: Object.freeze({ timeoutMs: 10_000, stdoutCap: 16 * 1024, stderrCap: 16 * 1024 }),
@@ -23,6 +24,9 @@ const UNSAFE_RUNTIME_PATHS = new Set([
 const STACK_ROUTES = Object.freeze({ backend: "backend-builder", frontend: "frontend-builder" });
 const OWNERSHIP_REASONS = new Set(["review-changes-requested", "check-owner-ambiguous", "check-owner-conflict", "changed-files-incomplete",
   "unsafe-path-or-change", "check-file-conflict", "unknown-slice-stack", "path-owner-ambiguous", "integration-fallback", "check-slice-id", "changed-files"]);
+const PANEL_VERDICTS = Object.freeze({ validator: new Set(["GO", "GO-WITH-NITS", "NO-GO"]), security: new Set(["PASS", "BLOCK"]) });
+const AFFECTED_LIMITS = Object.freeze({ depth: 32, occurrences: 8_192, entries: 8_192, arrayLength: 4_096, stringBytes: 4_096, totalStringBytes: 1_048_576, emittedBytes: 1_048_576 });
+export const EMPTY_AFFECTED_PATHS_HASH = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 export class PostPrCiError extends Error {
   constructor(errorClass, message, options = {}) {
@@ -34,6 +38,165 @@ export class PostPrCiError extends Error {
     this.exitCode = Number.isInteger(options.exitCode) ? options.exitCode : null;
     this.retryAfterMs = Number.isInteger(options.retryAfterMs) && options.retryAfterMs >= 0 ? options.retryAfterMs : 0;
   }
+}
+
+/**
+ * Inspect a successful panel transport without reading inherited properties or
+ * invoking accessors/proxy traps. `absent` is intentionally distinct from a
+ * present malformed value because only the former has an unknown dispatch
+ * outcome.
+ */
+export function inspectPanelRunnerResult(outer, activity) {
+  panelVocabulary(activity);
+  if (!isReflectableRecord(outer)) return { disposition: "absent" };
+  let descriptor;
+  try { descriptor = Object.getOwnPropertyDescriptor(outer, "result"); } catch { return { disposition: "absent" }; }
+  if (descriptor === undefined) return { disposition: "absent" };
+  if (!("value" in descriptor)) return { disposition: "malformed", issue: "non-object" };
+  const classified = classifyPanelResult(descriptor.value, activity);
+  return classified.ok ? { disposition: "valid", ...classified } : { disposition: "malformed", issue: classified.issue };
+}
+
+export function inspectPanelRunnerReturn(outer, activity) {
+  panelVocabulary(activity);
+  if (!isReflectableRecord(outer)) return { disposition: "transport-unknown" };
+  try {
+    const started = Object.getOwnPropertyDescriptor(outer, "started");
+    const exitCode = Object.getOwnPropertyDescriptor(outer, "exit_code");
+    const signal = Object.getOwnPropertyDescriptor(outer, "signal");
+    if (!started || !("value" in started) || started.value !== true || !exitCode || !("value" in exitCode) || exitCode.value !== 0 || !signal || !("value" in signal) || signal.value !== null) return { disposition: "transport-unknown" };
+  } catch { return { disposition: "transport-unknown" }; }
+  return inspectPanelRunnerResult(outer, activity);
+}
+
+/** Side-effect-free own-descriptor classifier for validator/security results. */
+export function classifyPanelResult(value, activity) {
+  const vocabulary = panelVocabulary(activity);
+  if (!isAdmissibleRecord(value)) return { ok: false, issue: "non-object" };
+  let keys;
+  try { keys = Reflect.ownKeys(value); } catch { return { ok: false, issue: "non-object" }; }
+  const hasVerdict = keys.some((key) => key === "verdict");
+  if (!hasVerdict) return { ok: false, issue: "missing-verdict" };
+  let verdictDescriptor;
+  let affectedDescriptor;
+  try {
+    for (const key of keys) {
+      if (typeof key === "symbol" || key !== "verdict" && key !== "affected_paths") return { ok: false, issue: "unexpected-result-keys" };
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) return { ok: false, issue: "unexpected-result-keys" };
+      if (key === "verdict") verdictDescriptor = descriptor;
+      else affectedDescriptor = descriptor;
+    }
+  } catch { return { ok: false, issue: "unexpected-result-keys" }; }
+  if (typeof verdictDescriptor?.value !== "string" || !vocabulary.has(verdictDescriptor.value)) return { ok: false, issue: "invalid-verdict" };
+  return { ok: true, verdict: verdictDescriptor.value, affectedDescriptor: affectedDescriptor ?? null };
+}
+
+/**
+ * Copy an untrusted affected_paths value into a bounded primitive graph. The
+ * returned graph has no accessors, proxies, prototypes with behavior, or
+ * callable JSON hooks and is therefore safe to serialize.
+ */
+export function snapshotPanelAffectedValue(descriptor) {
+  if (descriptor === null || descriptor === undefined) return { ok: false, category: "missing-paths" };
+  if (!("value" in descriptor)) return { ok: false, category: "missing-paths" };
+  const counters = { occurrences: 0, entries: 0, stringBytes: 0 };
+  try {
+    const value = copyAffectedValue(descriptor.value, 0, new Set(), counters);
+    const json = JSON.stringify(value, null, 2);
+    if (typeof json !== "string" || Buffer.byteLength(json, "utf8") > AFFECTED_LIMITS.emittedBytes) throw new Error("affected JSON limit");
+    return { ok: true, value, json };
+  } catch { return { ok: false, category: "missing-paths" }; }
+}
+
+/** Validate/canonicalize a snapshotted affected_paths value. */
+export function canonicalizePanelAffectedPaths(value, worktree) {
+  if (!Array.isArray(value)) return affectedClassification("invalid-paths", []);
+  if (value.length === 0) return affectedClassification("empty-paths", []);
+  const canonical = [];
+  try {
+    for (const item of value) {
+      if (typeof item !== "string") throw new Error("non-string path");
+      canonical.push(canonicalAffectedPath(item, worktree));
+    }
+  } catch { return affectedClassification("invalid-paths", []); }
+  const paths = [...new Set(canonical)].sort(byteSort);
+  return { ok: true, category: null, paths, hash: affectedPathsHash(paths) };
+}
+
+export function affectedPathsHash(paths) {
+  const bytes = Buffer.from(JSON.stringify(paths), "utf8");
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function affectedClassification(category, paths) { return { ok: false, category, paths, hash: affectedPathsHash(paths) }; }
+function byteSort(left, right) { return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")); }
+function panelVocabulary(activity) { const value = PANEL_VERDICTS[activity]; if (!value) throw new Error("panel activity must be validator or security"); return value; }
+function isReflectableRecord(value) { return value !== null && typeof value === "object" && !utilTypes.isProxy(value); }
+function isAdmissibleRecord(value) {
+  if (!isReflectableRecord(value) || Array.isArray(value)) return false;
+  try { const prototype = Object.getPrototypeOf(value); return prototype === Object.prototype || prototype === null; } catch { return false; }
+}
+function hasWellFormedUnicode(value) { return !/(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/u.test(value); }
+function copyString(value, counters) {
+  if (!hasWellFormedUnicode(value)) throw new Error("malformed Unicode");
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes > AFFECTED_LIMITS.stringBytes || counters.stringBytes + bytes > AFFECTED_LIMITS.totalStringBytes) throw new Error("string limit");
+  counters.stringBytes += bytes;
+  return value;
+}
+function copyAffectedValue(value, depth, ancestors, counters) {
+  if (depth > AFFECTED_LIMITS.depth) throw new Error("depth limit");
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") return copyString(value, counters);
+  if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("non-finite"); return Object.is(value, -0) ? 0 : value; }
+  if (typeof value !== "object" || utilTypes.isProxy(value)) throw new Error("unsupported value");
+  if (++counters.occurrences > AFFECTED_LIMITS.occurrences) throw new Error("occurrence limit");
+  let prototype;
+  let keys;
+  try { prototype = Object.getPrototypeOf(value); keys = Reflect.ownKeys(value); } catch { throw new Error("reflection failed"); }
+  const array = Array.isArray(value);
+  if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) throw new Error("unsupported prototype");
+  if (ancestors.has(value)) throw new Error("cycle");
+  ancestors.add(value);
+  try {
+    if (array) {
+      const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+      const length = lengthDescriptor?.value;
+      if (!Number.isInteger(length) || length < 0 || length > AFFECTED_LIMITS.arrayLength || keys.length !== length + 1) throw new Error("sparse or extra array key");
+      const result = new Array(length);
+      for (let index = 0; index < length; index += 1) {
+        const key = String(index);
+        if (keys[index] !== key && !keys.includes(key)) throw new Error("sparse array");
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true || ++counters.entries > AFFECTED_LIMITS.entries) throw new Error("invalid array descriptor");
+        result[index] = copyAffectedValue(descriptor.value, depth + 1, ancestors, counters);
+      }
+      return result;
+    }
+    if (keys.some((key) => typeof key === "symbol")) throw new Error("symbol key");
+    const names = keys.sort(byteSort);
+    const result = Object.create(null);
+    for (const key of names) {
+      copyString(key, counters);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true || ++counters.entries > AFFECTED_LIMITS.entries) throw new Error("invalid record descriptor");
+      result[key] = copyAffectedValue(descriptor.value, depth + 1, ancestors, counters);
+    }
+    return result;
+  } finally { ancestors.delete(value); }
+}
+function canonicalAffectedPath(value, worktree) {
+  if (!hasWellFormedUnicode(value)) throw new Error("malformed path Unicode");
+  const normalized = value.normalize("NFC");
+  if (!normalized || Buffer.byteLength(normalized, "utf8") > 4_096 || /[\0-\x1f\x7f\\]/u.test(normalized) || normalized.startsWith("/") || /^[A-Za-z]:/u.test(normalized)) throw new Error("invalid path");
+  const segments = normalized.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..") || posix.normalize(normalized) !== normalized) throw new Error("invalid path segments");
+  const root = resolve(worktree);
+  const candidate = resolve(root, normalized);
+  const contained = relative(root, candidate);
+  if (!contained || contained.startsWith("..") || contained.startsWith("/") || contained.includes("\\")) throw new Error("path escapes worktree");
+  return normalized;
 }
 
 export function normalizeCheck(entry) {
@@ -254,7 +417,8 @@ export function classifyOwnership(input) {
 
 export function validateLane(input) {
   const paths = (input.paths ?? []).map(normalizeRepositoryPath);
-  if (hasUnsafeChanges(input) || paths.some(isUnsafeRuntimePath)) return { ok: false, reason: "unsafe-change-kind" };
+  const changes = input.changes ?? [];
+  if (input.hasRename || input.hasDelete || input.hasGenerated || input.hasSymlink || changes.some((change) => !["modified", "added", "untracked", "deleted", "renamed", "copied"].includes(change?.status))) return { ok: false, reason: "unsafe-change-kind" };
   if (input.lane === "test") return paths.every(isTestLanePath) ? { ok: true } : { ok: false, reason: "path-outside-test-lane" };
   if (input.lane !== "slice" || !input.slice) return { ok: false, reason: "invalid-lane" };
   const slice = validateSlices([input.slice])[0];

@@ -205,13 +205,13 @@ describe("post-PR workflow orchestration", () => {
     try {
       const result = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, ...refs,
         executeGithub: async () => { switches += 1; return { exitCode: 1, stdout: "", stderr: "authentication failed" }; } });
-      assert.equal(result.action, "push-needs-human");
+      assert.equal(result.action, "terminal");
       const run = readRun(fixture);
-      assert.equal(run.post_pr.phase, "push-pending");
-      assert.equal(run.post_pr.remediation.push.consecutive_transient_errors, run.post_pr.policy.max_transient_errors);
+      assert.equal(run.post_pr.phase, "needs-human");
+      assert.equal(run.terminal_result.reason, "post-pr-account-switch-failed");
+      assert.equal(run.post_pr.remediation.push.consecutive_transient_errors, 1);
       assert.equal(run.post_pr.remediation.push.next_retry_at, null);
-      const replay = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:11:00.000Z" });
-      assert.equal(replay.action, "push-needs-human");
+      await assert.rejects(postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:11:00.000Z" }), /terminal run|requires revalidating/u);
       assert.equal(switches, 1);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -228,6 +228,20 @@ describe("post-PR workflow orchestration", () => {
       assert.equal(replay.action, "push-not-due");
       assert.equal(operations, 1);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("T18 push failed by operation and classification", async () => {
+    for (const [classification, stderr] of [["permanent", "HTTP 403 permission denied"], ["exhausted", "HTTP 503 unavailable"]]) {
+      const fixture = createRevalidationFixture(`post-pr-push-${classification}`); const refs = writePassingRevalidationArtifacts(fixture); const operations = [];
+      if (classification === "exhausted") updateRunFile(fixture, (run) => { run.post_pr.policy.max_transient_errors = 1; });
+      try {
+        const result = await postPrRemediation(fixture.runId, 1, "complete", { cwd: fixture.repo, now: "2026-07-12T12:10:00.000Z", headSha: fixture.candidate, ...refs,
+          executeGithub: async () => ({ exitCode: 0, stdout: "", stderr: "" }), executeGitOperation: async ({ operation }) => { operations.push(operation); return { exitCode: 1, stdout: "", stderr }; } });
+        assert.equal(result.status, "needs-human"); assert.equal(result.reason, "post-pr-push-failed");
+        const run = readRun(fixture); assert.equal(run.post_pr.terminal_fact.classification, classification); assert.equal(run.post_pr.terminal_fact.operation, "remote-head");
+        assert.equal(run.post_pr.remediation.push.next_retry_at, null); assert.deepEqual(operations, ["remote-head"]); assert.equal(operations.includes("force-push"), false);
+      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+    }
   });
 
   it("reconciles crash-after-push from remote candidate without pushing twice", async () => {
@@ -381,6 +395,150 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(security.repo, { recursive: true, force: true }); }
   });
 
+  it("P25 malformed panel runner result is metadata-unsafe", async () => {
+    const classValue = new (class PanelResult { constructor(verdict) { this.verdict = verdict; } })("GO");
+    const crossRealm = (await import("node:vm")).runInNewContext('({ verdict: "GO" })');
+    const revoked = Proxy.revocable({ verdict: "GO" }, {}); revoked.revoke();
+    const throwingToJson = { verdict: "GO", toJSON() { throw new Error("must not run"); } };
+    const cases = [
+      ["non-object", null], ["non-object", []], ["non-object", undefined], ["non-object", 1], ["non-object", true], ["non-object", 1n], ["non-object", Symbol("x")], ["non-object", () => {}], ["non-object", "GO"], ["non-object", new Date()], ["non-object", classValue], ["non-object", crossRealm],
+      ["non-object", new Proxy({ verdict: "GO" }, { ownKeys() { throw new Error("trap must not run"); } })], ["non-object", revoked.proxy],
+      ["missing-verdict", {}], ["missing-verdict", { affected_paths: ["src/api.js"] }], ["missing-verdict", { extra: true }],
+      ["unexpected-result-keys", { verdict: "GO", extra: true }], ["unexpected-result-keys", Object.defineProperty({ verdict: "GO" }, "affected_paths", { get() { throw new Error("getter must not run"); } })],
+      ["unexpected-result-keys", throwingToJson], ["unexpected-result-keys", { verdict: "GO", [Symbol("secret")]: true }],
+      ["invalid-verdict", { verdict: "WRONG" }], ["invalid-verdict", { verdict: 1 }],
+    ];
+    for (const activity of ["validator", "security"]) {
+      for (const [issue, supplied] of cases) {
+        const result = supplied;
+        const fixture = createPanelRecoveryFixture(`p25-${activity}-${issue}-${Math.random().toString(16).slice(2)}`, activity);
+        let dispatches = 0; let terminalChecks = 0;
+        try {
+          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => {
+            dispatches += 1;
+            return { started: true, exit_code: 0, signal: null, result };
+          }, beforePostPrTerminal: () => { terminalChecks += 1; assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null); } }), /terminal-run|resume ineligible/u);
+          const run = readRun(fixture); const job = run.post_pr.remediation.revalidation.jobs[activity];
+          assert.equal(run.status, "needs-human");
+          assert.equal(run.terminal_result.reason, "post-pr-metadata-unsafe");
+          assert.deepEqual(run.post_pr.terminal_fact, { schema_version: 1, kind: "panel-runner-result-malformed", observed_at: "2026-07-12T12:05:00.000Z", attempt: 1, activity,
+            dispatch_id: job.dispatch_id, candidate_head_sha: fixture.candidate, issue });
+          for (const ref of fixedPanelRefs(activity)) assert.equal(existsSync(join(fixture.runDir, ref)), false);
+          assert.equal(job.status, "running");
+          assert.equal(run.post_pr.attempt, 1);
+          assert.equal(activity === "validator" ? run.post_pr.remediation.revalidation.jobs.security : undefined, undefined);
+          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u);
+          assert.equal(dispatches, 1); assert.equal(terminalChecks, 1);
+        } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+      }
+    }
+
+    for (const activity of ["validator", "security"]) {
+      const verdict = activity === "validator" ? "GO" : "PASS";
+      const inherited = Object.assign(Object.create({ result: { verdict, affected_paths: ["src/api.js"] } }), { started: true, exit_code: 0, signal: null });
+      const outerProxy = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error("proxy trap must not run"); } });
+      const unknownReturns = [{ started: true, exit_code: 0, signal: null }, inherited, { started: true, exit_code: 1, signal: null, result: { verdict } }, { started: true, exit_code: 0, signal: "SIGTERM", result: { verdict } }, outerProxy];
+      for (const returned of unknownReturns) {
+        const fixture = createPanelRecoveryFixture(`p25-unknown-${activity}-${Math.random().toString(16).slice(2)}`, activity); let dispatches = 0;
+        try {
+          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => { dispatches += 1; return returned; } }), /terminal-run|resume ineligible/u);
+          const run = readRun(fixture); assert.equal(run.terminal_result.reason, "post-pr-dispatch-start-unknown");
+          assert.ok(fixedPanelRefs(activity).every((ref) => !existsSync(join(fixture.runDir, ref))));
+          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u);
+          assert.equal(dispatches, 1);
+        } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+      }
+      const accessorFixture = createPanelRecoveryFixture(`p25-accessor-${activity}`, activity); const accessorOuter = { started: true, exit_code: 0, signal: null };
+      Object.defineProperty(accessorOuter, "result", { get() { throw new Error("result getter must not run"); } });
+      try {
+        await assert.rejects(resumeFactory(accessorFixture.runId, { cwd: accessorFixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => accessorOuter }), /terminal-run|resume ineligible/u);
+        assert.equal(readRun(accessorFixture).post_pr.terminal_fact.issue, "non-object");
+      } finally { rmSync(accessorFixture.repo, { recursive: true, force: true }); }
+    }
+
+    for (const activity of ["validator", "security"]) {
+      for (const affected of [undefined, "src/api.js", [], ["../escape"]]) {
+        const fixture = createPanelRecoveryFixture(`p25-attribution-${activity}-${Math.random().toString(16).slice(2)}`, activity);
+        try {
+          const verdict = activity === "validator" ? "GO" : "PASS";
+          const panel = affected === undefined ? { verdict } : { verdict, affected_paths: affected };
+          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z",
+            executePostPrRecoveryJob: async () => ({ started: true, exit_code: 0, signal: null, result: panel }) }), /terminal-run|resume ineligible/u);
+          const run = readRun(fixture);
+          assert.equal(run.terminal_result.reason, "post-pr-panel-attribution-unsafe");
+          assert.ok(fixedPanelRefs(activity).every((ref) => existsSync(join(fixture.runDir, ref))));
+          assert.equal(run.post_pr.remediation.revalidation.jobs[activity].status, "running");
+        } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+      }
+    }
+  });
+
+  for (const [name, activity] of [
+    ["P15 canonical durable-running pre-start crash is return-unknown", "canonical"],
+    ["P16 canonical returned-before-publication crash is never rerun", "canonical"],
+    ["P19 validator absent-result crash points are return-unknown", "validator"],
+    ["P22 security absent-result crash points are return-unknown", "security"],
+  ]) it(name, async () => {
+    const fixture = createPanelRecoveryFixture(`crash-${name.slice(0, 3).toLowerCase()}`, activity === "canonical" ? "validator" : activity); let dispatches = 0;
+    try {
+      updateRunFile(fixture, (run) => {
+        const jobs = run.post_pr.remediation.revalidation.jobs;
+        if (activity === "canonical") { jobs.canonical = panelJob("canonical", "running"); delete jobs.validator; Object.assign(run.post_pr.remediation.revalidation, { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null }); rmSync(join(fixture.runDir, "evidence", "post-pr-canonical.attempt-1.json"), { force: true }); }
+        else jobs[activity] = panelJob(activity, "running");
+      });
+      await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u);
+      assert.equal(readRun(fixture).terminal_result.reason, "post-pr-dispatch-start-unknown"); assert.equal(dispatches, 0);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("P17 canonical published-unbound evidence binds without rerun", async () => {
+    const fixture = createPanelRecoveryFixture("crash-p17", "validator");
+    try {
+      updateRunFile(fixture, (run) => { run.post_pr.remediation.revalidation.jobs.canonical = panelJob("canonical", "running"); delete run.post_pr.remediation.revalidation.jobs.validator; Object.assign(run.post_pr.remediation.revalidation, { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null }); });
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => { throw new Error("must not rerun"); } });
+      assert.equal(result.status, "dry-run"); assert.equal(readRun(fixture).post_pr.remediation.revalidation.jobs.canonical.status, "bound");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("P18 canonical bound replay preserves one successor transition", async () => {
+    const fixture = createPanelRecoveryFixture("crash-p18", "validator"); let dispatches = 0;
+    try {
+      await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => { dispatches += 1; return { started: true, exit_code: 0, signal: null, result: { verdict: "GO", affected_paths: ["src/api.js"] } }; } });
+      assert.equal(dispatches, 1); assert.equal(readRun(fixture).post_pr.remediation.revalidation.jobs.validator.status, "bound"); assert.ok(readRun(fixture).post_pr.remediation.revalidation.jobs.security);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("P20 validator report-only publication crash is metadata-unsafe", async () => {
+    const fixture = createPanelRecoveryFixture("crash-p20", "validator");
+    try {
+      updateRunFile(fixture, (run) => { run.post_pr.remediation.revalidation.jobs.validator = panelJob("validator", "running"); });
+      writeFileSync(join(fixture.runDir, "artifacts", "post-pr-validator.attempt-1.md"), "partial\n");
+      await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" }), /terminal-run|resume ineligible/u);
+      assert.equal(readRun(fixture).terminal_result.reason, "post-pr-metadata-unsafe");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  for (const [name, activity] of [["P21 validator complete publication binds and plans security once", "validator"], ["P23 security published-unbound review binds and evaluates once", "security"]]) it(name, async () => {
+    const fixture = createPanelRecoveryFixture(`crash-${name.slice(0, 3).toLowerCase()}`, activity);
+    try {
+      updateRunFile(fixture, (run) => { run.post_pr.remediation.revalidation.jobs[activity] = panelJob(activity, "running"); });
+      writeRecoveryPanelArtifact(fixture, activity);
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
+      assert.equal(result.status, "dry-run"); assert.equal(readRun(fixture).post_pr.remediation.revalidation.jobs[activity].status, "bound");
+      if (activity === "validator") assert.ok(readRun(fixture).post_pr.remediation.revalidation.jobs.security);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("P24 missing-panel binding and replay permutation matrix", async () => {
+    const fixture = createPanelRecoveryFixture("crash-p24", "security");
+    try {
+      updateRunFile(fixture, (run) => { run.post_pr.remediation.revalidation.jobs.security = panelJob("security", "running"); }); writeRecoveryPanelArtifact(fixture, "security");
+      await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:06:00.000Z" });
+      assert.equal(result.status, "dry-run"); assert.equal(readRun(fixture).post_pr.phase, "validated");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
   it("builds a hash-bound new-PR continuation without mutating the parent and rejects tampering", async () => {
     const fixture = createRevalidationFixture("post-pr-continuation");
     try {
@@ -456,6 +614,45 @@ function writePassingRevalidationArtifacts(fixture, { validatorHead = fixture.ca
   writeJson(join(fixture.runDir, "reviews", "implementation-validator.attempt-1.json"), { kind: "implementation-validator", run_id: fixture.runId, attempt: 1, head_sha: validatorHead, fresh: true, verdict: "GO", report: "artifacts/validation-report.attempt-1.md", affected_paths: ["src/api.js"] });
   writeJson(join(fixture.runDir, "reviews", "security-reviewer.attempt-1.json"), { kind: "security-reviewer", run_id: fixture.runId, attempt: 1, head_sha: fixture.candidate, fresh: true, verdict: "PASS", affected_paths: ["src/api.js"] });
   return { testEvidenceRef: "evidence/post-pr-canonical.attempt-1.json", validatorReportRef: "artifacts/validation-report.attempt-1.md", validatorReviewRef: "reviews/implementation-validator.attempt-1.json", securityReviewRef: "reviews/security-reviewer.attempt-1.json" };
+}
+
+function createPanelRecoveryFixture(runId, activity) {
+  const fixture = createRevalidationFixture(runId);
+  const canonicalRef = "evidence/post-pr-canonical.attempt-1.json";
+  writeJson(join(fixture.runDir, canonicalRef), { kind: "post-pr-canonical", run_id: fixture.runId, attempt: 1, head_sha: fixture.candidate, command: { program: "npm", args: ["run", "check"] }, verdict: "pass" });
+  updateRunFile(fixture, (run) => {
+    const revalidation = run.post_pr.remediation.revalidation;
+    Object.assign(revalidation, { canonical_evidence_ref: canonicalRef, canonical_evidence_hash: fileHash(join(fixture.runDir, canonicalRef)), canonical_verdict: "pass", jobs: {
+      canonical: panelJob("canonical", "bound", canonicalRef, fileHash(join(fixture.runDir, canonicalRef)), "pass"),
+    } });
+    if (activity === "security") {
+      const reportRef = "artifacts/post-pr-validator.attempt-1.md"; const reviewRef = "reviews/post-pr-validator.attempt-1.json";
+      writeFileSync(join(fixture.runDir, reportRef), "# Post-PR validator report\n\n```json\n{}\n```\n");
+      writeJson(join(fixture.runDir, reviewRef), { schema_version: 1, kind: "post-pr-validator-review", activity: "validator", run_id: fixture.runId, attempt: 1, dispatch_id: "validator-1", head_sha: fixture.candidate, fresh: true, verdict: "GO", affected_paths: ["src/api.js"], report: { ref: reportRef, hash: fileHash(join(fixture.runDir, reportRef)) }, started_at: "2026-07-12T12:03:00.000Z", completed_at: "2026-07-12T12:04:00.000Z" });
+      Object.assign(revalidation, { validator_review_ref: reviewRef, validator_review_hash: fileHash(join(fixture.runDir, reviewRef)), validator_verdict: "GO" });
+      revalidation.jobs.validator = panelJob("validator", "bound", reviewRef, revalidation.validator_review_hash, "GO");
+    }
+    revalidation.jobs[activity] = panelJob(activity, "planned");
+  });
+  return fixture;
+}
+
+function panelJob(activity, status, ref = null, hash = null, verdict = null) {
+  return { dispatch_id: `${activity}-1`, status, action_token: status === "running" ? `token-${activity}` : null, steering_generation: status === "running" ? 0 : null, started_at: ["running", "bound"].includes(status) ? "2026-07-12T12:03:00.000Z" : null,
+    returned_at: status === "bound" ? "2026-07-12T12:04:00.000Z" : null, result_ref: ref, result_hash: hash, verdict, transient_error_count: 0, next_retry_at: null, last_error: null };
+}
+
+function fixedPanelRefs(activity) { return activity === "validator" ? ["artifacts/post-pr-validator.attempt-1.md", "reviews/post-pr-validator.attempt-1.json"] : ["reviews/post-pr-security.attempt-1.json"]; }
+
+function writeRecoveryPanelArtifact(fixture, activity) {
+  const run = readRun(fixture); const job = run.post_pr.remediation.revalidation.jobs[activity];
+  const base = { schema_version: 1, activity, run_id: fixture.runId, attempt: 1, dispatch_id: job.dispatch_id, head_sha: fixture.candidate, fresh: true,
+    verdict: activity === "validator" ? "GO" : "PASS", affected_paths: ["src/api.js"] };
+  if (activity === "validator") {
+    const reportRef = "artifacts/post-pr-validator.attempt-1.md"; const reportPayload = { schema_version: 1, kind: "post-pr-validator-report", ...Object.fromEntries(Object.entries(base).filter(([key]) => key !== "schema_version")), started_at: job.started_at, completed_at: "2026-07-12T12:04:00.000Z" };
+    writeFileSync(join(fixture.runDir, reportRef), `# Post-PR validator report\n\n\`\`\`json\n${JSON.stringify(reportPayload, null, 2)}\n\`\`\`\n`);
+    writeJson(join(fixture.runDir, "reviews", "post-pr-validator.attempt-1.json"), { schema_version: 1, kind: "post-pr-validator-review", ...Object.fromEntries(Object.entries(base).filter(([key]) => key !== "schema_version")), report: { ref: reportRef, hash: fileHash(join(fixture.runDir, reportRef)) }, started_at: job.started_at, completed_at: "2026-07-12T12:04:00.000Z" });
+  } else writeJson(join(fixture.runDir, "reviews", "post-pr-security.attempt-1.json"), { schema_version: 1, kind: "post-pr-security-review", ...Object.fromEntries(Object.entries(base).filter(([key]) => key !== "schema_version")), started_at: job.started_at, completed_at: "2026-07-12T12:04:00.000Z" });
 }
 
 function runGit(repo, args) { const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8" }); assert.equal(proc.status, 0, proc.stderr); }

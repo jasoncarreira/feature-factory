@@ -49,7 +49,7 @@ export const POST_PR_PHASES = Object.freeze(["disabled", "awaiting-pr", "observi
 export const POST_PR_TERMINAL_REASONS = Object.freeze({
   completed: ["post-pr-ci-green", "post-pr-draft-ci-green", "post-pr-external-merge"],
   blocked: ["post-pr-retry-exhausted", "post-pr-observation-timeout", "post-pr-observer-infrastructure", "post-pr-pr-closed"],
-  "needs-human": ["post-pr-review-changes-requested", "post-pr-owner-ambiguous", "post-pr-account-switch-failed", "post-pr-head-mismatch", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged", "post-pr-metadata-unsafe"],
+  "needs-human": ["post-pr-review-changes-requested", "post-pr-owner-ambiguous", "post-pr-account-switch-failed", "post-pr-head-mismatch", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged", "post-pr-metadata-unsafe", "post-pr-push-failed", "post-pr-panel-attribution-unsafe"],
 });
 const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
@@ -554,8 +554,10 @@ function validatePostPrTerminalFact(errors, run, postPr, path) {
     ["post-pr-dispatch-start-unknown", "dispatch-start-unknown"],
     ["post-pr-path-lane-violation", "path-lane-violation"],
     ["post-pr-remote-head-diverged", "remote-head-diverged"],
+    ["post-pr-push-failed", "push-failed"],
+    ["post-pr-panel-attribution-unsafe", "panel-attribution-unsafe"],
   ]);
-  const expectedKind = expectedKinds.get(reason);
+  const expectedKind = expectedKinds.get(reason) || (reason === "post-pr-metadata-unsafe" && fact?.kind === "panel-runner-result-malformed" ? "panel-runner-result-malformed" : null);
   if (fact === undefined || fact === null) {
     if (expectedKind) errors.push({ path, message: `is required for ${reason}` });
     return;
@@ -569,20 +571,36 @@ function validatePostPrTerminalFact(errors, run, postPr, path) {
   if (!Number.isFinite(Date.parse(fact.observed_at || ""))) errors.push({ path: `${path}.observed_at`, message: "must be an ISO timestamp" });
   const remediation = postPr.remediation;
   if (expectedKind === "account-switch-failed") {
-    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "operation", "github_account", "error_class", "exit_code"]), path);
-    requiredEnum(errors, fact, "operation", new Set(["gh-auth-switch"]), `${path}.operation`);
-    requiredString(errors, fact, "github_account", `${path}.github_account`);
+    const pushPhase = fact.operation !== "gh-auth-switch";
+    allowedKeys(errors, fact, pushPhase
+      ? new Set(["schema_version", "kind", "observed_at", "attempt", "operation", "error_class", "exit_code", "classification", "error_count", "error_limit", "expected_remote_sha", "candidate_head_sha", "next_retry_at"])
+      : new Set(["schema_version", "kind", "observed_at", "operation", "github_account", "error_class", "exit_code"]), path);
+    requiredEnum(errors, fact, "operation", pushPhase ? new Set(["remote-head", "fast-forward-push", "remote-confirmation"]) : new Set(["gh-auth-switch"]), `${path}.operation`);
     requiredEnum(errors, fact, "error_class", new Set(["account-auth", "permission", "not-found", "protocol", "command"]), `${path}.error_class`);
     if (fact.exit_code !== null) boundedInteger(errors, fact, "exit_code", 0, 255, `${path}.exit_code`);
-    if (fact.github_account !== run.github_account) errors.push({ path: `${path}.github_account`, message: "must match run.github_account" });
-    if (fact.error_class !== postPr.observation?.last_error?.class || fact.exit_code !== (postPr.observation?.last_error?.exit_code ?? null) || fact.observed_at !== postPr.observation?.last_error?.occurred_at) errors.push({ path, message: "must bind the persisted account-switch error exactly" });
+    if (pushPhase) {
+      boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+      requiredEnum(errors, fact, "classification", new Set(["permanent"]), `${path}.classification`);
+      boundedInteger(errors, fact, "error_count", 1, Number.MAX_SAFE_INTEGER, `${path}.error_count`);
+      boundedInteger(errors, fact, "error_limit", 1, Number.MAX_SAFE_INTEGER, `${path}.error_limit`);
+      for (const key of ["expected_remote_sha", "candidate_head_sha"]) requiredFullGitSha(errors, fact, key, `${path}.${key}`);
+      if (fact.next_retry_at !== null || fact.operation !== remediation?.push?.last_error?.operation) errors.push({ path, message: "must bind the persisted push account failure exactly" });
+    } else {
+      requiredString(errors, fact, "github_account", `${path}.github_account`);
+      if (fact.github_account !== run.github_account) errors.push({ path: `${path}.github_account`, message: "must match run.github_account" });
+      if (fact.error_class !== postPr.observation?.last_error?.class || fact.exit_code !== (postPr.observation?.last_error?.exit_code ?? null) || fact.observed_at !== postPr.observation?.last_error?.occurred_at) errors.push({ path, message: "must bind the persisted account-switch error exactly" });
+    }
   } else if (expectedKind === "dispatch-start-unknown") {
-    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "dispatch_id", "dispatch_started_at", "outcome"]), path);
+    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "activity", "dispatch_id", "dispatch_started_at", "candidate_head_sha", "outcome"]), path);
     boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
     requiredString(errors, fact, "dispatch_id", `${path}.dispatch_id`);
     requiredString(errors, fact, "dispatch_started_at", `${path}.dispatch_started_at`);
+    if (fact.activity !== undefined) requiredEnum(errors, fact, "activity", new Set(["remediation", "canonical", "validator", "security"]), `${path}.activity`);
+    if (fact.candidate_head_sha !== undefined && fact.candidate_head_sha !== null) requiredFullGitSha(errors, fact, "candidate_head_sha", `${path}.candidate_head_sha`);
     requiredEnum(errors, fact, "outcome", new Set(["return-unknown"]), `${path}.outcome`);
-    if (fact.attempt !== postPr.attempt || fact.dispatch_id !== remediation?.dispatch?.id || fact.dispatch_started_at !== remediation?.dispatch?.started_at || remediation?.dispatch?.status !== "running") errors.push({ path, message: "must bind the running dispatch identity exactly" });
+    const dispatch = fact.activity && fact.activity !== "remediation" ? remediation?.revalidation?.jobs?.[fact.activity] : remediation?.dispatch;
+    const dispatchId = fact.activity && fact.activity !== "remediation" ? dispatch?.dispatch_id : dispatch?.id;
+    if (fact.attempt !== postPr.attempt || fact.dispatch_id !== dispatchId || fact.dispatch_started_at !== dispatch?.started_at || dispatch?.status !== "running") errors.push({ path, message: "must bind the running dispatch identity exactly" });
   } else if (expectedKind === "path-lane-violation") {
     allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "lane", "source", "violation", "path_b64url", "changes_hash"]), path);
     boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
@@ -602,6 +620,35 @@ function validatePostPrTerminalFact(errors, run, postPr, path) {
     for (const key of ["expected_remote_sha", "candidate_head_sha", "observed_remote_sha"]) requiredFullGitSha(errors, fact, key, `${path}.${key}`);
     if (fact.attempt !== postPr.attempt || fact.expected_remote_sha !== remediation?.push?.remote_before_sha || fact.candidate_head_sha !== remediation?.candidate_head_sha) errors.push({ path, message: "must bind the push-pending remote and candidate heads exactly" });
     if (fact.observed_remote_sha === fact.expected_remote_sha || fact.observed_remote_sha === fact.candidate_head_sha) errors.push({ path: `${path}.observed_remote_sha`, message: "must differ from both expected remote and candidate heads" });
+  } else if (expectedKind === "panel-runner-result-malformed") {
+    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "activity", "dispatch_id", "candidate_head_sha", "issue"]), path);
+    boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+    requiredEnum(errors, fact, "activity", new Set(["validator", "security"]), `${path}.activity`);
+    requiredString(errors, fact, "dispatch_id", `${path}.dispatch_id`);
+    requiredFullGitSha(errors, fact, "candidate_head_sha", `${path}.candidate_head_sha`);
+    requiredEnum(errors, fact, "issue", new Set(["non-object", "missing-verdict", "unexpected-result-keys", "invalid-verdict"]), `${path}.issue`);
+    const job = remediation?.revalidation?.jobs?.[fact.activity];
+    if (fact.attempt !== postPr.attempt || fact.candidate_head_sha !== remediation?.candidate_head_sha || fact.dispatch_id !== job?.dispatch_id || job?.status !== "running") errors.push({ path, message: "must bind the running panel job exactly" });
+  } else if (expectedKind === "push-failed") {
+    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "operation", "error_class", "exit_code", "classification", "error_count", "error_limit", "expected_remote_sha", "candidate_head_sha", "next_retry_at"]), path);
+    boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+    requiredEnum(errors, fact, "operation", new Set(["remote-head", "fast-forward-push", "remote-confirmation"]), `${path}.operation`);
+    requiredEnum(errors, fact, "error_class", new Set(["timeout", "network", "rate-limit", "server", "account-auth", "permission", "not-found", "protocol", "command", "non-fast-forward"]), `${path}.error_class`);
+    if (fact.exit_code !== null) boundedInteger(errors, fact, "exit_code", 0, 255, `${path}.exit_code`);
+    requiredEnum(errors, fact, "classification", new Set(["permanent", "exhausted"]), `${path}.classification`);
+    boundedInteger(errors, fact, "error_count", 1, Number.MAX_SAFE_INTEGER, `${path}.error_count`);
+    boundedInteger(errors, fact, "error_limit", 1, Number.MAX_SAFE_INTEGER, `${path}.error_limit`);
+    for (const key of ["expected_remote_sha", "candidate_head_sha"]) requiredFullGitSha(errors, fact, key, `${path}.${key}`);
+    if (fact.next_retry_at !== null) errors.push({ path: `${path}.next_retry_at`, message: "must be null for terminal push failures" });
+    if (fact.attempt !== postPr.attempt || fact.error_count !== remediation?.push?.consecutive_transient_errors || fact.error_limit !== postPr.policy?.max_transient_errors || fact.operation !== remediation?.push?.last_error?.operation) errors.push({ path, message: "must bind the persisted push failure exactly" });
+  } else if (expectedKind === "panel-attribution-unsafe") {
+    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "candidate_head_sha", "panel", "category", "affected_paths_hash"]), path);
+    boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+    requiredFullGitSha(errors, fact, "candidate_head_sha", `${path}.candidate_head_sha`);
+    requiredEnum(errors, fact, "panel", new Set(["validator", "security", "combined"]), `${path}.panel`);
+    requiredEnum(errors, fact, "category", new Set(["missing-paths", "invalid-paths", "empty-paths", "mixed-owner", "unowned-path", "owner-conflict", "security-block-without-slice-owner"]), `${path}.category`);
+    requiredHash(errors, fact, "affected_paths_hash", `${path}.affected_paths_hash`);
+    if (fact.attempt !== postPr.attempt || fact.candidate_head_sha !== remediation?.candidate_head_sha) errors.push({ path, message: "must bind the current panel candidate exactly" });
   }
 }
 
@@ -761,15 +808,28 @@ function validatePostPrDispatch(errors, dispatch, path, remediation) {
 
 function validatePostPrChanges(errors, changes, path) {
   if (!isRecord(changes)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, changes, new Set(["paths", "tree_hash"]), path);
+  allowedKeys(errors, changes, new Set(["paths", "entries", "tree_hash"]), path);
   validateStringArray(errors, changes.paths, `${path}.paths`, { required: true });
+  if (changes.entries !== undefined) {
+    if (!Array.isArray(changes.entries)) errors.push({ path: `${path}.entries`, message: "must be an array" });
+    else changes.entries.forEach((entry, index) => validatePostPrChangeEntry(errors, entry, `${path}.entries[${index}]`));
+  }
   optionalNullableHash(errors, changes, "tree_hash", `${path}.tree_hash`);
+}
+
+function validatePostPrChangeEntry(errors, entry, path) {
+  if (!isRecord(entry)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, entry, new Set(["source", "status", "index_status", "worktree_status", "path", "previous_path", "old_mode", "new_mode"]), path);
+  requiredEnum(errors, entry, "source", new Set(["worktree", "commit"]), `${path}.source`);
+  requiredEnum(errors, entry, "status", new Set(["modified", "added", "untracked", "deleted", "renamed", "copied"]), `${path}.status`);
+  requiredString(errors, entry, "path", `${path}.path`);
+  for (const key of ["index_status", "worktree_status", "previous_path", "old_mode", "new_mode"]) if (entry[key] !== undefined && entry[key] !== null && typeof entry[key] !== "string") errors.push({ path: `${path}.${key}`, message: "must be a string or null" });
 }
 
 function validatePostPrRevalidation(errors, value, path) {
   if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
   const refs = ["canonical_evidence", "validator_review", "security_review"];
-  allowedKeys(errors, value, new Set(refs.flatMap((name) => [`${name}_ref`, `${name}_hash`]).concat(["canonical_verdict", "validator_verdict", "security_verdict"])), path);
+  allowedKeys(errors, value, new Set(refs.flatMap((name) => [`${name}_ref`, `${name}_hash`]).concat(["canonical_verdict", "validator_verdict", "security_verdict", "jobs"])), path);
   for (const name of refs) {
     optionalNullableString(errors, value, `${name}_ref`, `${path}.${name}_ref`);
     optionalNullableHash(errors, value, `${name}_hash`, `${path}.${name}_hash`);
@@ -778,16 +838,47 @@ function validatePostPrRevalidation(errors, value, path) {
   optionalNullableEnum(errors, value, "canonical_verdict", new Set(["pass", "fail"]), `${path}.canonical_verdict`);
   optionalNullableEnum(errors, value, "validator_verdict", VALIDATOR_VERDICTS, `${path}.validator_verdict`);
   optionalNullableEnum(errors, value, "security_verdict", SECURITY_VERDICTS, `${path}.security_verdict`);
+  if (value.jobs !== undefined) validatePostPrJobs(errors, value.jobs, `${path}.jobs`);
+}
+
+function validatePostPrJobs(errors, jobs, path) {
+  if (!isRecord(jobs)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, jobs, new Set(["canonical", "validator", "security"]), path);
+  for (const activity of ["canonical", "validator", "security"]) if (jobs[activity] !== undefined) validatePostPrJob(errors, jobs[activity], `${path}.${activity}`, activity);
+}
+
+function validatePostPrJob(errors, job, path, activity) {
+  if (!isRecord(job)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, job, new Set(["dispatch_id", "status", "action_token", "steering_generation", "started_at", "returned_at", "result_ref", "result_hash", "verdict", "transient_error_count", "next_retry_at", "last_error"]), path);
+  requiredString(errors, job, "dispatch_id", `${path}.dispatch_id`);
+  requiredEnum(errors, job, "status", new Set(["planned", "running", "retry-wait", "bound"]), `${path}.status`);
+  for (const key of ["action_token", "started_at", "returned_at", "result_ref", "result_hash", "verdict", "next_retry_at", "last_error"]) if (job[key] !== null && job[key] !== undefined && typeof job[key] !== "string") errors.push({ path: `${path}.${key}`, message: "must be a string or null" });
+  if (job.steering_generation !== null && job.steering_generation !== undefined && (!Number.isInteger(job.steering_generation) || job.steering_generation < 0)) errors.push({ path: `${path}.steering_generation`, message: "must be a non-negative integer or null" });
+  boundedInteger(errors, job, "transient_error_count", 0, Number.MAX_SAFE_INTEGER, `${path}.transient_error_count`);
+  if (job.status === "running" && (!stringValue(job.action_token) || !stringValue(job.started_at))) errors.push({ path, message: "running job requires action token and start time" });
+  if (job.status === "bound" && (!stringValue(job.returned_at) || !stringValue(job.result_ref) || !stringValue(job.result_hash) || !stringValue(job.verdict))) errors.push({ path, message: "bound job requires return/ref/hash/verdict" });
+  const vocabulary = activity === "canonical" ? new Set(["pass", "red"]) : activity === "validator" ? VALIDATOR_VERDICTS : SECURITY_VERDICTS;
+  if (stringValue(job.verdict) && !vocabulary.has(job.verdict)) errors.push({ path: `${path}.verdict`, message: "is outside the activity verdict vocabulary" });
 }
 
 function validatePostPrPush(errors, push, path) {
   if (!isRecord(push)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, push, new Set(["status", "remote_before_sha", "local_head_sha", "remote_after_sha", "consecutive_transient_errors", "next_retry_at", "pushed_at"]), path);
+  allowedKeys(errors, push, new Set(["status", "remote_before_sha", "local_head_sha", "remote_after_sha", "consecutive_transient_errors", "next_retry_at", "pushed_at", "last_error"]), path);
   requiredEnum(errors, push, "status", new Set(["not-ready", "pending", "confirmed"]), `${path}.status`);
   for (const key of ["remote_before_sha", "local_head_sha", "remote_after_sha"]) optionalNullableFullGitSha(errors, push, key, `${path}.${key}`);
   boundedInteger(errors, push, "consecutive_transient_errors", 0, Number.MAX_SAFE_INTEGER, `${path}.consecutive_transient_errors`);
   optionalNullableString(errors, push, "next_retry_at", `${path}.next_retry_at`);
   optionalNullableString(errors, push, "pushed_at", `${path}.pushed_at`);
+  if (push.last_error !== undefined && push.last_error !== null) {
+    const error = push.last_error;
+    if (!isRecord(error)) errors.push({ path: `${path}.last_error`, message: "must be an object or null" });
+    else {
+      allowedKeys(errors, error, new Set(["operation", "observed_at", "error_class", "exit_code", "classification", "error_count", "error_limit", "expected_remote_sha", "candidate_head_sha", "next_retry_at"]), `${path}.last_error`);
+      requiredEnum(errors, error, "operation", new Set(["remote-head", "fast-forward-push", "remote-confirmation"]), `${path}.last_error.operation`);
+      requiredEnum(errors, error, "classification", new Set(["transient", "permanent", "exhausted"]), `${path}.last_error.classification`);
+      requiredString(errors, error, "observed_at", `${path}.last_error.observed_at`);
+    }
+  }
 }
 
 function validatePostPrValidated(errors, remediation, path) {

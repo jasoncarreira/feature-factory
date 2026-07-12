@@ -6,10 +6,10 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
-  PostPrCiError, aggregateObservation, buildFailureEvidenceInput, classifyGitHubFailure, classifyOwnership,
+  PostPrCiError, aggregateObservation, affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyGitHubFailure, classifyOwnership, classifyPanelResult,
   decideObservationSchedule, decideTransientSchedule, encodeUntrustedMetadata, fetchChangedFiles,
   normalizeCheck, normalizeChecks, normalizePullRequestResponse, normalizeRepositoryPath, normalizeReview, parseRetryDelay,
-  queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, validateLane,
+  inspectPanelRunnerReturn, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane,
 } from "../src/post-pr-ci.js";
 
 const SHA = "a".repeat(40);
@@ -155,9 +155,10 @@ describe("untrusted metadata, paths, ownership, and evidence", () => {
     assert.equal(validateLane({ lane: "slice", slice: slices[0], paths: ["src/ui/x.js"] }).ok, false);
     assert.equal(validateLane({ lane: "test", paths: [".github/workflows/ci.yml"] }).ok, true);
     assert.equal(validateLane({ lane: "test", paths: ["test/x.js"], hasDelete: true }).ok, false);
-    for (const unsafe of [{ hasRename: true }, { hasGenerated: true }, { hasSymlink: true }, { paths: ["package.json"] }]) {
+    for (const unsafe of [{ hasRename: true }, { hasGenerated: true }, { hasSymlink: true }]) {
       assert.equal(validateLane({ lane: "slice", slice: { id: "root", stack: "backend", paths: ["package.json", "src/**"] }, paths: ["src/x.js"], ...unsafe }).ok, false);
     }
+    assert.equal(validateLane({ lane: "slice", slice: { id: "root", stack: "backend", paths: ["package.json", "src/**"] }, paths: ["package.json"] }).ok, true);
   });
 
   it("constructs sorted deterministic sanitized evidence inputs", () => {
@@ -200,6 +201,61 @@ describe("untrusted metadata, paths, ownership, and evidence", () => {
     assert.equal(evidence.primary_failure, "review-red");
     assert.equal(evidence.ownership.route, null);
     assert.equal(JSON.stringify(evidence).includes("ignore me"), false);
+  });
+});
+
+describe("panel result and affected-path trust boundaries", () => {
+  it("classifies only own descriptor-safe panel results without invoking behavior", () => {
+    let calls = 0;
+    const accessorOuter = { started: true, exit_code: 0, signal: null };
+    Object.defineProperty(accessorOuter, "result", { get() { calls += 1; throw new Error("must not run"); } });
+    assert.deepEqual(inspectPanelRunnerReturn(accessorOuter, "validator"), { disposition: "malformed", issue: "non-object" });
+    const inherited = Object.create({ result: { verdict: "GO" } }); Object.assign(inherited, { started: true, exit_code: 0, signal: null });
+    assert.deepEqual(inspectPanelRunnerReturn(inherited, "validator"), { disposition: "absent" });
+    const outerProxy = new Proxy({}, { getOwnPropertyDescriptor() { calls += 1; throw new Error("must not run"); } });
+    assert.deepEqual(inspectPanelRunnerReturn(outerProxy, "validator"), { disposition: "transport-unknown" });
+    const resultProxy = new Proxy({ verdict: "GO" }, { ownKeys() { calls += 1; throw new Error("must not run"); } });
+    assert.equal(classifyPanelResult(resultProxy, "validator").issue, "non-object");
+    const throwing = { verdict: "GO", toJSON() { calls += 1; throw new Error("must not run"); } };
+    assert.equal(classifyPanelResult(throwing, "validator").issue, "unexpected-result-keys");
+    const getter = Object.defineProperty({ verdict: "GO" }, "affected_paths", { get() { calls += 1; throw new Error("must not run"); } });
+    assert.equal(classifyPanelResult(getter, "validator").issue, "unexpected-result-keys");
+    assert.equal(calls, 0);
+    assert.equal(classifyPanelResult({}, "validator").issue, "missing-verdict");
+    assert.equal(classifyPanelResult({ extra: true }, "validator").issue, "missing-verdict");
+    assert.equal(classifyPanelResult({ verdict: "WRONG", extra: true }, "validator").issue, "unexpected-result-keys");
+    assert.equal(classifyPanelResult({ verdict: "WRONG" }, "validator").issue, "invalid-verdict");
+    assert.equal(classifyPanelResult(Object.assign(Object.create(null), { verdict: "PASS" }), "security").ok, true);
+  });
+
+  it("takes bounded deterministic affected-value snapshots without getters, proxies, cycles, or JSON hooks", () => {
+    const descriptor = (value) => ({ value, writable: true, enumerable: true, configurable: true });
+    assert.deepEqual(snapshotPanelAffectedValue(descriptor(-0)).value, 0);
+    assert.deepEqual(snapshotPanelAffectedValue(descriptor({ z: 1, a: [true, null, "x"] })).value, Object.assign(Object.create(null), { a: [true, null, "x"], z: 1 }));
+    const repeated = { x: 1 }; assert.equal(snapshotPanelAffectedValue(descriptor([repeated, repeated])).ok, true);
+    const cycle = {}; cycle.self = cycle; assert.equal(snapshotPanelAffectedValue(descriptor(cycle)).ok, false);
+    for (const value of [undefined, 1n, Symbol("x"), () => {}, NaN, Infinity, new Date(), Object.create({}), new Proxy({}, {})]) assert.equal(snapshotPanelAffectedValue(descriptor(value)).ok, false);
+    assert.equal(snapshotPanelAffectedValue(descriptor("\uD800")).ok, false);
+    assert.equal(snapshotPanelAffectedValue(descriptor("a".repeat(4096))).ok, true);
+    assert.equal(snapshotPanelAffectedValue(descriptor("a".repeat(4097))).ok, false);
+    assert.equal(snapshotPanelAffectedValue(descriptor(new Array(4096).fill(null))).ok, true);
+    assert.equal(snapshotPanelAffectedValue(descriptor(new Array(4097).fill(null))).ok, false);
+    const sparse = []; sparse.length = 1; assert.equal(snapshotPanelAffectedValue(descriptor(sparse)).ok, false);
+    const extra = ["x"]; extra.extra = true; assert.equal(snapshotPanelAffectedValue(descriptor(extra)).ok, false);
+    const nestedAccessor = {}; Object.defineProperty(nestedAccessor, "x", { enumerable: true, get() { throw new Error("must not run"); } });
+    assert.equal(snapshotPanelAffectedValue(descriptor(nestedAccessor)).ok, false);
+  });
+
+  it("canonicalizes the closed path grammar, NFC duplicates, byte order, and hashes", () => {
+    const root = "/tmp/panel-root";
+    const valid = canonicalizePanelAffectedPaths(["src/é.js", "src/e\u0301.js", "src/a.js"], root);
+    assert.equal(valid.ok, true);
+    assert.deepEqual(valid.paths, ["src/a.js", "src/é.js"]);
+    assert.equal(valid.hash, affectedPathsHash(["src/a.js", "src/é.js"]));
+    assert.equal(canonicalizePanelAffectedPaths([], root).category, "empty-paths");
+    for (const value of [[1], [""], ["/x"], ["C:/x"], ["a\\b"], ["a\u0001b"], ["a//b"], ["a/./b"], ["a/../b"], ["../x"], ["\uD800"], ["a".repeat(4097)]]) {
+      const result = canonicalizePanelAffectedPaths(value, root); assert.equal(result.category, "invalid-paths"); assert.equal(result.hash, affectedPathsHash([]));
+    }
   });
 });
 

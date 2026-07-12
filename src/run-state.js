@@ -897,6 +897,7 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
   if (!POST_PR_TERMINAL_PHASE[status] || !POST_PR_TERMINAL_REASONS[status]?.includes(reason)) throw new Error(`invalid closed post-PR terminal reason '${reason}' for ${status}`);
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
     assertPostPrMutationReady(runDir, current, options, "post-PR terminal transition");
+    if (stringValue(options.boundaryToken)) consumeSteeringBoundary(draft, "terminal", options.boundaryToken);
     const phase = POST_PR_TERMINAL_PHASE[status];
     if (current.post_pr?.phase === phase && current.status === status && current.terminal_result?.reason === reason) return;
     if (!current.post_pr?.policy?.enabled) throw new Error("post-PR terminal transition requires enabled persisted policy");
@@ -1634,7 +1635,7 @@ function assertPostPrMutationReady(runDir, run, options, label) {
   if (run.status !== "running") throw new Error(`${label} requires a running run`);
   if (!run.post_pr?.policy?.enabled) throw new Error(`${label} requires enabled persisted post-PR policy`);
   assertSteeringBoundaryClear(run, label);
-  if (isRecord(run.steering?.boundary)) throw new Error(`${label} rejected: open steering boundary`);
+  if (isRecord(run.steering?.boundary) && !(stringValue(options.boundaryToken) && run.steering.boundary.kind === "terminal")) throw new Error(`${label} rejected: open steering boundary`);
   if (isRecord(run.steering?.pr_fence)) throw new Error(`${label} rejected: active pre-PR fence`);
   assertNoFreshHeartbeat(runDir, options, `${label} requires inactive heartbeat`);
 }
@@ -1693,6 +1694,7 @@ function assertPostPrMonotonicState(current, next) {
     assertRankDoesNotDecrease(currentRemediation.dispatch?.status, nextRemediation.dispatch?.status, ["planned", "running", "returned"], "post-PR remediation dispatch status");
     for (const key of ["candidate_head_sha", "remediation_evidence_ref", "remediation_evidence_hash"]) assertOnceBound(currentRemediation, nextRemediation, key, `post-PR remediation ${key}`);
     for (const key of ["canonical_evidence_ref", "canonical_evidence_hash", "canonical_verdict", "validator_review_ref", "validator_review_hash", "validator_verdict", "security_review_ref", "security_review_hash", "security_verdict"]) assertOnceBound(currentRemediation.revalidation, nextRemediation.revalidation, key, `post-PR remediation revalidation.${key}`);
+    for (const activity of ["canonical", "validator", "security"]) assertPostPrJobMonotonic(currentRemediation.revalidation?.jobs?.[activity], nextRemediation.revalidation?.jobs?.[activity], activity);
     for (const key of ["remote_before_sha", "local_head_sha", "remote_after_sha", "pushed_at"]) assertOnceBound(currentRemediation.push, nextRemediation.push, key, `post-PR remediation push.${key}`);
     assertRankDoesNotDecrease(currentRemediation.push?.status, nextRemediation.push?.status, ["not-ready", "pending", "confirmed"], "post-PR remediation push status");
     if (["changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"].includes(currentRemediation.stage) && !sameJson(currentRemediation.changes, nextRemediation.changes)) throw new Error("post-PR observed remediation changes are immutable");
@@ -1700,6 +1702,16 @@ function assertPostPrMonotonicState(current, next) {
   const currentRefs = new Map((current.evidence_refs || []).map((item) => [item.ref, item.hash]));
   const nextRefs = new Map((next.evidence_refs || []).map((item) => [item.ref, item.hash]));
   for (const [ref, hash] of currentRefs) if (nextRefs.get(ref) !== hash) throw new Error("post-PR evidence bindings are append-only and immutable");
+}
+
+function assertPostPrJobMonotonic(current, next, activity) {
+  if (!isRecord(current)) return;
+  if (!isRecord(next)) throw new Error(`post-PR ${activity} job cannot be removed`);
+  if (current.dispatch_id !== next.dispatch_id) throw new Error(`post-PR ${activity} dispatch id is immutable`);
+  const transitions = { planned: new Set(["planned", "running"]), running: new Set(["running", "retry-wait", "bound"]), "retry-wait": new Set(["retry-wait", "running"]), bound: new Set(["bound"]) };
+  if (!transitions[current.status]?.has(next.status)) throw new Error(`invalid post-PR ${activity} job transition '${current.status}' -> '${next.status}'`);
+  for (const key of ["result_ref", "result_hash", "verdict", "returned_at"]) assertOnceBound(current, next, key, `post-PR ${activity} job ${key}`);
+  if (next.transient_error_count < current.transient_error_count) throw new Error(`post-PR ${activity} transient error count cannot decrease`);
 }
 
 function observationResultIdentity(observation) {
@@ -1799,16 +1811,20 @@ function assertPostPrTerminalPreconditions(run, status, reason, input, options) 
     return;
   }
   if (reason === "post-pr-account-switch-failed") {
-    if (postPr.phase !== "observing") throw new Error(`${reason} requires observing phase`);
+    if (!["observing", "push-pending"].includes(postPr.phase)) throw new Error(`${reason} requires observing or push-pending phase`);
     requirePostPrTerminalFact(reason, input.trigger_fact, "account-switch-failed");
     return;
   }
   if (reason === "post-pr-owner-ambiguous" || reason === "post-pr-metadata-unsafe") {
-    if (!["observing", "failure-recording"].includes(postPr.phase) || observation?.last_verdict !== "red") throw new Error(`${reason} requires an explicit red observation`);
+    const malformed = input.trigger_fact?.kind === "panel-runner-result-malformed" && postPr.phase === "revalidating";
+    if (!malformed && (!['observing', 'failure-recording', 'revalidating'].includes(postPr.phase) || postPr.phase !== "revalidating" && observation?.last_verdict !== "red")) throw new Error(`${reason} requires an explicit red observation or unsafe revalidation metadata`);
+    if (malformed) requirePostPrTerminalFact(reason, input.trigger_fact, "panel-runner-result-malformed");
     return;
   }
   if (reason === "post-pr-dispatch-start-unknown") {
-    if (postPr.phase !== "remediation-running" || remediation?.dispatch?.status !== "running") throw new Error(`${reason} requires running remediation dispatch`);
+    const activity = input.trigger_fact?.activity || "remediation";
+    const running = activity === "remediation" ? postPr.phase === "remediation-running" && remediation?.dispatch?.status === "running" : postPr.phase === "revalidating" && remediation?.revalidation?.jobs?.[activity]?.status === "running";
+    if (!running) throw new Error(`${reason} requires a running remediation or revalidation dispatch`);
     requirePostPrTerminalFact(reason, input.trigger_fact, "dispatch-start-unknown");
     return;
   }
@@ -1820,6 +1836,16 @@ function assertPostPrTerminalPreconditions(run, status, reason, input, options) 
   if (reason === "post-pr-remote-head-diverged") {
     if (postPr.phase !== "push-pending" || remediation?.stage !== "push-pending") throw new Error(`${reason} requires push-pending remediation`);
     requirePostPrTerminalFact(reason, input.trigger_fact, "remote-head-diverged");
+    return;
+  }
+  if (reason === "post-pr-push-failed") {
+    if (postPr.phase !== "push-pending") throw new Error(`${reason} requires push-pending remediation`);
+    requirePostPrTerminalFact(reason, input.trigger_fact, "push-failed");
+    return;
+  }
+  if (reason === "post-pr-panel-attribution-unsafe") {
+    if (postPr.phase !== "revalidating") throw new Error(`${reason} requires revalidating remediation`);
+    requirePostPrTerminalFact(reason, input.trigger_fact, "panel-attribution-unsafe");
     return;
   }
   if (reason === "post-pr-retry-exhausted") {
@@ -1839,7 +1865,8 @@ function requirePostPrTerminalFact(reason, fact, kind) {
 }
 
 function normalizedPostPrTerminalFact(reason, fact) {
-  const factReasons = new Set(["post-pr-account-switch-failed", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged"]);
+  const factReasons = new Set(["post-pr-account-switch-failed", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged", "post-pr-push-failed", "post-pr-panel-attribution-unsafe"]);
+  if (reason === "post-pr-metadata-unsafe" && fact?.kind === "panel-runner-result-malformed") return cloneJson(fact);
   if (!factReasons.has(reason)) {
     if (fact !== undefined && fact !== null) throw new Error(`${reason} does not accept a terminal trigger fact`);
     return null;
