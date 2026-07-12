@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -254,17 +254,25 @@ async function factory(args) {
 }
 
 async function cleanupSweep(args) {
+  process.exitCode = await runCleanupSweepCli(args);
+}
+
+export async function runCleanupSweepCli(args, dependencies = {}) {
+  const runCommand = dependencies.runCommand ?? runCleanupSweepCommand;
+  const render = dependencies.render ?? renderCleanupSweepReport;
+  const stdout = dependencies.stdout ?? console.log;
+  const stderr = dependencies.stderr ?? console.error;
   try {
-    const result = await runCleanupSweepCommand(args, {
-      preview: previewCleanupSweep,
-      execute: executeCleanupSweep,
+    const result = await runCommand(args, {
+      preview: dependencies.preview ?? previewCleanupSweep,
+      execute: dependencies.execute ?? executeCleanupSweep,
     });
-    console.log(renderCleanupSweepReport(result.report, { json: args.includes("--json") }));
-    process.exitCode = result.exitCode;
+    stdout(render(result.report, { json: args.includes("--json") }));
+    return result.exitCode;
   } catch (error) {
     if (!(error instanceof CleanupSweepCommandError)) throw error;
-    console.error(renderCleanupSweepCommandError());
-    process.exitCode = 1;
+    stderr(renderCleanupSweepCommandError());
+    return 1;
   }
 }
 
@@ -1091,7 +1099,15 @@ function pluginEntrySpec(entry) {
   return Array.isArray(entry) ? entry[0] : entry;
 }
 
-main(process.argv.slice(2)).catch((error) => {
-  console.error(`error: ${renderErrorForTerminal(error)}`);
-  process.exitCode = 1;
-});
+if (isDirectCliExecution()) {
+  main(process.argv.slice(2)).catch((error) => {
+    console.error(`error: ${renderErrorForTerminal(error)}`);
+    process.exitCode = 1;
+  });
+}
+
+function isDirectCliExecution() {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(cliPath); }
+  catch { return resolve(process.argv[1]) === cliPath; }
+}

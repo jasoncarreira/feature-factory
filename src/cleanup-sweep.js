@@ -148,16 +148,32 @@ async function executeCandidate(repository, authorized, options, invocationId, t
   try {
     return await acquire(runDir, async () => {
       await phase(options, "after-candidate-lock", { entry_name: authorized.entry_name });
-      const reclassified = classifyCleanupSweepCandidate(repository.root_path, authorized.entry_name, {
-        ...discoveryOptions(options, invocationId),
-        heldRunId: authorized.run_id,
-      });
-      if (reclassified.temporary_ref) {
-        temporaryRefs.push({ ref: reclassified.temporary_ref, expected_oid: reclassified.candidate.evidence.pr.base_sha });
+      let reclassified;
+      try {
+        reclassified = reclassifyHeldCandidate(repository, authorized, options, invocationId, temporaryRefs);
+      } catch {
+        return inspectionFailureCandidate(authorized);
       }
-      const normalized = normalizeHeldLockEvidence(reclassified.candidate);
-      await phase(options, "after-candidate-revalidation", { entry_name: authorized.entry_name, candidate: normalized });
+      let normalized = normalizeHeldLockEvidence(reclassified.candidate);
       if (authorizationRecord(normalized) !== authorizationRecord(authorized)) return changedCandidate(normalized);
+      await phase(options, "after-candidate-revalidation", { entry_name: authorized.entry_name, candidate: normalized });
+
+      // The phase hook deliberately opens the last deterministic mutation
+      // window. Recompute every authorization field after it, then bind all
+      // ancestry checks to the authorized base object rather than a movable ref.
+      try {
+        reclassified = reclassifyHeldCandidate(repository, authorized, options, invocationId, temporaryRefs);
+      } catch {
+        return inspectionFailureCandidate(normalized);
+      }
+      normalized = normalizeHeldLockEvidence(reclassified.candidate);
+      if (authorizationRecord(normalized) !== authorizationRecord(authorized)) return changedCandidate(normalized);
+
+      const baseRef = reclassified.temporary_ref;
+      const baseOid = authorized.evidence.pr.base_sha;
+      const baseState = inspectAuthorizedTemporaryRef(repository.root_path, baseRef, baseOid, options.gitRunner ?? git);
+      if (baseState === "changed") return changedCandidate(normalized);
+      if (baseState !== "matching") return inspectionFailureCandidate(normalized);
 
       let run;
       try {
@@ -166,30 +182,36 @@ async function executeCandidate(repository, authorized, options, invocationId, t
         return changedCandidate(normalized);
       }
       const branches = normalized.evidence.branches.filter((item) => item.state === "verified-ancestor");
+      let cleanup;
       try {
-        const cleanup = cleanupRunLocked(runDir, run, {
+        cleanup = cleanupRunLocked(runDir, run, {
           mode: "cleanup-sweep",
           repo: repository.root_path,
           force: false,
           dryRun: false,
           expectedRunHash: normalized.evidence.run.hash,
           expectedBranchHeads: branches,
-          fetchedBaseRef: reclassified.temporary_ref,
-          fetchedBase: { ref: reclassified.temporary_ref, oid: normalized.evidence.pr.base_sha },
-          gitRunner: options.gitRunner,
+          fetchedBaseRef: baseOid,
+          fetchedBase: { ref: baseRef, oid: baseOid },
+          gitRunner: guardedCleanupGitRunner(repository.root_path, baseRef, baseOid, options.gitRunner ?? git),
           removeRunDir: options.removeRunDir,
           checkWorktreeIdentity: options.checkWorktreeIdentity,
           physicalPath: options.physicalPath,
           phaseHook: options.phaseHook,
         });
-        completedCandidate = candidateFromCleanup(normalized, cleanup);
-        return completedCandidate;
       } catch (error) {
         if (error instanceof CleanupRunUnexpectedError || error?.code === "FAILED_CLEANUP_UNEXPECTED") {
-          return unexpectedCleanupCandidate(normalized, error.cleanup, runDir);
+          completedCandidate = unexpectedCleanupCandidate(normalized, error.cleanup, runDir);
+          return completedCandidate;
         }
-        return changedCandidate(normalized);
+        return inspectionFailureCandidate(normalized);
       }
+      try {
+        completedCandidate = candidateFromCleanup(normalized, cleanup);
+      } catch {
+        completedCandidate = unexpectedCleanupCandidate(normalized, cleanup, runDir);
+      }
+      return completedCandidate;
     }, { reclaimMode: "never" });
   } catch (error) {
     if (completedCandidate) {
@@ -207,7 +229,7 @@ async function executeCandidate(repository, authorized, options, invocationId, t
 }
 
 function candidateFromCleanup(candidate, cleanup) {
-  normalizePartialCleanup(cleanup);
+  normalizePartialCleanup(cleanup, candidate);
   const reasonCodes = [];
   if (cleanup.worktrees.some((item) => item.outcome === "failed")) reasonCodes.push("FAILED_CLEANUP_WORKTREE");
   if (cleanup.branches.some((item) => item.outcome === "failed")) reasonCodes.push("FAILED_CLEANUP_BRANCH");
@@ -225,13 +247,18 @@ function unexpectedCleanupCandidate(candidate, cleanup, runDir) {
   const value = cleanup ?? { worktrees: [], branches: [], run_dir: { path: runDir, outcome: "retained", reason_code: "FAILED_CLEANUP_UNEXPECTED" } };
   const hasTargetFailure = value.worktrees.some((item) => item.outcome === "failed") || value.branches.some((item) => item.outcome !== "deleted");
   value.run_dir = { path: value.run_dir?.path ?? runDir, outcome: "retained", reason_code: hasTargetFailure ? "RETAINED_AFTER_PARTIAL_FAILURE" : "FAILED_CLEANUP_UNEXPECTED" };
-  normalizePartialCleanup(value);
+  normalizePartialCleanup(value, candidate);
   return replacementCandidate(candidate, "failed", ["FAILED_CLEANUP_UNEXPECTED"], {
     failure_stage: "cleanup", attempted_cleanup: true, cleanup: value,
   });
 }
 
-function normalizePartialCleanup(cleanup) {
+function normalizePartialCleanup(cleanup, candidate) {
+  for (const worktree of cleanup.worktrees) {
+    if (worktree.branch !== null) continue;
+    const authorized = candidate.evidence.worktrees.find((item) => item.physical_path === worktree.physical_path && item.recorded_path === worktree.recorded_path);
+    if (authorized?.branch) worktree.branch = authorized.branch;
+  }
   const failedBranches = new Set(cleanup.worktrees.filter((item) => item.outcome === "failed" && item.branch).map((item) => item.branch));
   for (const branch of cleanup.branches) {
     if (branch.outcome === "not-attempted" && failedBranches.has(branch.name)) branch.reason_code = "RETAINED_AFTER_PARTIAL_FAILURE";
@@ -240,6 +267,10 @@ function normalizePartialCleanup(cleanup) {
 
 function changedCandidate(candidate) {
   return replacementCandidate(candidate, "skipped", ["SKIPPED_CHANGED_DURING_EXECUTION"]);
+}
+
+function inspectionFailureCandidate(candidate) {
+  return replacementCandidate(candidate, "failed", ["FAILED_INSPECTION"], { failure_stage: "inspection" });
 }
 
 function replacementCandidate(candidate, classification, reasonCodes, overrides = {}) {
@@ -310,23 +341,69 @@ async function finalizeAfterTemporaryRefs(report, context) {
 }
 
 async function cleanupTemporaryRefs(records, options) {
-  const unique = [...new Map(records.filter((item) => item?.ref).map((item) => [item.ref, item])).values()].sort((a, b) => utf8(a.ref, b.ref));
-  const gitRunner = options.gitRunner ?? git;
-  for (const record of unique) {
-    await phase(options, "before-temp-ref-delete", { ref: record.ref, expected_oid: record.expected_oid });
-    const present = gitRunner(options.repository.root_path, ["show-ref", "--verify", "--quiet", record.ref]);
-    if (!present?.ok) {
-      if (present?.status === 1) continue;
-      throw new Error("temporary ref could not be inspected");
-    }
-    const current = gitRunner(options.repository.root_path, ["rev-parse", "--verify", `${record.ref}^{commit}`]);
-    if (!current?.ok) throw new Error("temporary ref could not be resolved");
-    if (!record.expected_oid || current.stdout.trim() !== record.expected_oid) throw new Error("temporary ref changed");
-    const remove = options.deleteTemporaryRef
-      ? await options.deleteTemporaryRef(options.repository.root_path, record.ref, record.expected_oid)
-      : gitRunner(options.repository.root_path, ["update-ref", "-d", record.ref, record.expected_oid]);
-    if (remove === false || (remove && typeof remove === "object" && remove.ok !== true)) throw new Error("temporary ref deletion failed");
+  const byRef = new Map();
+  for (const record of records.filter((item) => item?.ref)) {
+    const previous = byRef.get(record.ref);
+    byRef.set(record.ref, { ref: record.ref, expected_oid: record.expected_oid ?? previous?.expected_oid ?? null });
   }
+  const unique = [...byRef.values()].sort((a, b) => utf8(a.ref, b.ref));
+  const gitRunner = options.gitRunner ?? git;
+  let failed = false;
+  for (const record of unique) {
+    try {
+      await phase(options, "before-temp-ref-delete", { ref: record.ref, expected_oid: record.expected_oid });
+      const present = gitRunner(options.repository.root_path, ["show-ref", "--verify", "--quiet", record.ref]);
+      if (!present?.ok) {
+        if (present?.status === 1) continue;
+        failed = true;
+        continue;
+      }
+      const current = gitRunner(options.repository.root_path, ["rev-parse", "--verify", `${record.ref}^{commit}`]);
+      if (!current?.ok || !record.expected_oid || current.stdout.trim() !== record.expected_oid) {
+        failed = true;
+        continue;
+      }
+      const remove = options.deleteTemporaryRef
+        ? await options.deleteTemporaryRef(options.repository.root_path, record.ref, record.expected_oid)
+        : gitRunner(options.repository.root_path, ["update-ref", "-d", record.ref, record.expected_oid]);
+      if (remove === false || (remove && typeof remove === "object" && remove.ok !== true)) failed = true;
+    } catch {
+      failed = true;
+    }
+  }
+  if (failed) throw new Error("one or more temporary refs could not be removed safely");
+}
+
+function reclassifyHeldCandidate(repository, authorized, options, invocationId, temporaryRefs) {
+  const result = classifyCleanupSweepCandidate(repository.root_path, authorized.entry_name, {
+    ...discoveryOptions(options, invocationId),
+    heldRunId: authorized.run_id,
+  });
+  if (result.temporary_ref) {
+    temporaryRefs.push({ ref: result.temporary_ref, expected_oid: result.candidate.evidence.pr.base_sha });
+  }
+  return result;
+}
+
+function inspectAuthorizedTemporaryRef(repo, ref, expectedOid, gitRunner) {
+  if (!ref || !expectedOid) return "uncertain";
+  try {
+    const resolved = gitRunner(repo, ["rev-parse", "--verify", `${ref}^{commit}`]);
+    if (!resolved?.ok) return "uncertain";
+    return resolved.stdout.trim() === expectedOid ? "matching" : "changed";
+  } catch {
+    return "uncertain";
+  }
+}
+
+function guardedCleanupGitRunner(repo, baseRef, baseOid, gitRunner) {
+  return (cwd, args, commandOptions) => {
+    if (args[0] === "merge-base" && args[1] === "--is-ancestor" && args[3] === baseOid) {
+      const state = inspectAuthorizedTemporaryRef(repo, baseRef, baseOid, gitRunner);
+      if (state !== "matching") return { ok: false, status: 2, stdout: "", stderr: "", command: null, signal: null };
+    }
+    return gitRunner(cwd, args, commandOptions);
+  };
 }
 
 function inspectPath(path, operation, options) {
