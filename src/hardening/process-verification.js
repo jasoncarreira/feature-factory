@@ -8,6 +8,27 @@ export const VERIFIED_PROCESS_SIGNAL = "SIGTERM";
 export const PROCESS_SIGNAL_RACE_LIMITATION =
   "Portable process inspection and signaling are not atomic; exit or PID reuse after the final identity check can still cause SIGTERM to reach a replacement process.";
 
+export function normalizeLegacyBooleanLiveness(value) {
+  if (value === true) return "live";
+  if (value === false) return "absent";
+  return "indeterminate";
+}
+
+export function probeLegacyBooleanLiveness(callback, ...args) {
+  if (typeof callback !== "function") return "indeterminate";
+  try {
+    return normalizeLegacyBooleanLiveness(callback(...args));
+  } catch {
+    return "indeterminate";
+  }
+}
+
+export function publicLivenessBoolean(status) {
+  if (status === "live") return true;
+  if (status === "absent") return false;
+  return null;
+}
+
 const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 const DEFAULT_COMMAND_MAX_BUFFER = 1024 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 200;

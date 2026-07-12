@@ -7,13 +7,37 @@ import {
   PROCESS_SIGNAL_RACE_LIMITATION,
   PROCESS_VERIFICATION_CODES,
   inspectProcessIdentity,
+  normalizeLegacyBooleanLiveness,
+  probeLegacyBooleanLiveness,
   probeProcessLiveness,
+  publicLivenessBoolean,
   signalVerifiedProcess,
   verifyProcessIdentity,
 } from "../src/hardening/process-verification.js";
 
 const PID = 4242;
 const CWD = resolve("/tmp/process-verification-repo");
+
+describe("legacy boolean liveness", () => {
+  it("normalizes only primitive booleans and maps indeterminate publicly to null", () => {
+    assert.equal(normalizeLegacyBooleanLiveness(true), "live");
+    assert.equal(normalizeLegacyBooleanLiveness(false), "absent");
+    for (const value of ["true", "false", new Boolean(true), {}, [], 1, 0, null, undefined]) {
+      assert.equal(normalizeLegacyBooleanLiveness(value), "indeterminate");
+    }
+    assert.equal(publicLivenessBoolean("live"), true);
+    assert.equal(publicLivenessBoolean("absent"), false);
+    assert.equal(publicLivenessBoolean("indeterminate"), null);
+    assert.equal(publicLivenessBoolean("malformed"), null);
+  });
+
+  it("treats malformed callback results and throws as indeterminate", () => {
+    assert.equal(probeLegacyBooleanLiveness(() => true), "live");
+    assert.equal(probeLegacyBooleanLiveness(() => false), "absent");
+    assert.equal(probeLegacyBooleanLiveness(() => ({ status: "absent" })), "indeterminate");
+    assert.equal(probeLegacyBooleanLiveness(() => { throw new Error("probe failed"); }), "indeterminate");
+  });
+});
 
 function codedError(code, message = "sensitive operating system detail") {
   const error = new Error(message);

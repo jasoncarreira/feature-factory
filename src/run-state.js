@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
 import { git } from "./git.js";
+import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
 import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
@@ -323,14 +324,10 @@ function sameReclaimClaim(left, right) {
 function inspectLockOwnerLiveness(owner, options = {}) {
   if (!isDurableLockOwner(owner) || owner.hostname !== hostname()) return "indeterminate";
   if (typeof options.processAliveFn === "function") {
-    try {
-      const result = options.processAliveFn(owner.pid);
-      if (result === true || result === "alive" || result?.status === "alive") return "alive";
-      if (result === false || result === "dead" || result?.status === "dead") return "dead";
-      return "indeterminate";
-    } catch {
-      return "indeterminate";
-    }
+    const status = probeLegacyBooleanLiveness(options.processAliveFn, owner.pid);
+    if (status === "live") return "alive";
+    if (status === "absent") return "dead";
+    return "indeterminate";
   }
   try {
     process.kill(owner.pid, 0);
@@ -1079,8 +1076,8 @@ function inspectRecoverableHeartbeat(runDir, options = {}) {
     return { ok: true, reason: `invalid-heartbeat:${error.message}`, heartbeat: null };
   }
   const liveness = inspectHeartbeatLiveness(heartbeat, options);
-  if (!liveness.fresh) return { ok: true, reason: liveness.reason, heartbeat };
-  return { ok: false, reason: "fresh-heartbeat", heartbeat };
+  if (liveness.status === "absent") return { ok: true, reason: liveness.reason, heartbeat };
+  return { ok: false, reason: liveness.reason, heartbeat };
 }
 
 function assertNoFreshHeartbeatForSteeringConsume(runDir, options = {}) {
@@ -1104,9 +1101,13 @@ function assertNoFreshHeartbeat(runDir, options = {}, prefix) {
   } catch (error) {
     throw new Error(`${prefix}: invalid-run-state (${error.message})`);
   }
-  if (inspectHeartbeatLiveness(heartbeat, options).fresh) {
-    throw new Error(`${prefix}: active-heartbeat`);
-  }
+  const liveness = inspectHeartbeatLiveness(heartbeat, options);
+  // A live PID is not by itself proof that a long-wait heartbeat is still
+  // active. Once its tick evidence is stale, the lock winner may establish a
+  // fence; a queued heartbeat tick will then observe that fence and stop.
+  // Other ambiguous evidence remains fail-closed.
+  if (liveness.status === "absent" || liveness.reason === "stale-heartbeat") return;
+  throw new Error(`${prefix}: active-heartbeat`);
 }
 
 async function stopHeartbeatForRecovery(runDir, heartbeat, now) {
@@ -1124,22 +1125,23 @@ function inspectHeartbeatLiveness(heartbeat, options = {}) {
   const lastTickMs = Date.parse(heartbeat.last_tick_at || "");
   const intervalMs = Number.isInteger(heartbeat.interval_ms) && heartbeat.interval_ms > 0 ? heartbeat.interval_ms : DEFAULT_HEARTBEAT_INTERVAL_MS;
   const staleMs = Math.max(2 * intervalMs, MIN_STALE_HEARTBEAT_MS);
-  const processAlive = isProcessAlive(heartbeat.pid, options);
-  if (!processAlive) return { fresh: false, reason: "dead-heartbeat-process" };
-  if (!Number.isFinite(nowMs) || !Number.isFinite(lastTickMs)) return { fresh: false, reason: "invalid-heartbeat-time" };
-  if (nowMs - lastTickMs > staleMs) return { fresh: false, reason: "stale-heartbeat" };
-  return { fresh: true, reason: "fresh-heartbeat" };
+  const status = inspectProcessLiveness(heartbeat.pid, options);
+  if (status === "absent") return { status, fresh: false, reason: "dead-heartbeat-process" };
+  if (status === "indeterminate") return { status, fresh: false, reason: "indeterminate-heartbeat-process" };
+  if (!Number.isFinite(nowMs) || !Number.isFinite(lastTickMs)) return { status, fresh: false, reason: "invalid-heartbeat-time" };
+  if (nowMs - lastTickMs > staleMs) return { status, fresh: false, reason: "stale-heartbeat" };
+  return { status, fresh: true, reason: "fresh-heartbeat" };
 }
 
-function isProcessAlive(pid, options = {}) {
-  if (typeof options.processAliveFn === "function") return Boolean(options.processAliveFn(pid));
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+function inspectProcessLiveness(pid, options = {}) {
+  if (typeof options.processAliveFn === "function") return probeLegacyBooleanLiveness(options.processAliveFn, pid);
+  if (!Number.isInteger(pid) || pid <= 0) return "absent";
   try {
     process.kill(pid, 0);
-    return true;
+    return "live";
   } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    return false;
+    if (error?.code === "ESRCH") return "absent";
+    return "indeterminate";
   }
 }
 

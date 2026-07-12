@@ -1140,6 +1140,13 @@ describe("simplified run-state transitions", () => {
     const cases = [
       ["remote", "remote-host.invalid", () => false],
       ["undefined", hostname(), () => undefined],
+      ["true-string", hostname(), () => "true"],
+      ["false-string", hostname(), () => "false"],
+      ["boxed-boolean", hostname(), () => new Boolean(false)],
+      ["object", hostname(), () => ({})],
+      ["array", hostname(), () => []],
+      ["number", hostname(), () => 0],
+      ["null", hostname(), () => null],
       ["unknown-status", hostname(), () => ({ status: "unknown" })],
       ["eperm", hostname(), () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); }],
       ["probe-error", hostname(), () => { throw new Error("probe failed"); }],
@@ -1163,6 +1170,60 @@ describe("simplified run-state transitions", () => {
       } finally {
         cleanup(fixture.repo);
       }
+    }
+  });
+
+  it("clears heartbeat evidence only for literal-false legacy liveness", async () => {
+    const cases = [
+      ["live", () => true, false, /fresh-heartbeat/u],
+      ["absent", () => false, true, null],
+      ["string", () => "false", false, /indeterminate-heartbeat-process/u],
+      ["boxed", () => new Boolean(false), false, /indeterminate-heartbeat-process/u],
+      ["object", () => ({ status: "dead" }), false, /indeterminate-heartbeat-process/u],
+      ["array", () => [], false, /indeterminate-heartbeat-process/u],
+      ["number", () => 0, false, /indeterminate-heartbeat-process/u],
+      ["null", () => null, false, /indeterminate-heartbeat-process/u],
+      ["undefined", () => undefined, false, /indeterminate-heartbeat-process/u],
+      ["throw", () => { throw new Error("probe failed"); }, false, /indeterminate-heartbeat-process/u],
+    ];
+    for (const [name, processAliveFn, recoverable, rejection] of cases) {
+      const fixture = createFixture(`heartbeat-liveness-${name}`);
+      try {
+        writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
+        if (recoverable) {
+          const result = await transitionRecoverOrphan(fixture.runDir, "confirmed absent", { now: NOW, processAliveFn });
+          assert.equal(result.recovery.reason, "dead-heartbeat-process");
+          assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, null);
+          assert.equal(readJson(join(fixture.runDir, "run.json")).status, "needs-human");
+        } else {
+          await assert.rejects(
+            transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, processAliveFn }),
+            rejection,
+          );
+          assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, process.pid);
+          assert.equal(readJson(join(fixture.runDir, "run.json")).status, "running");
+        }
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("does not clear stale heartbeat evidence while its process is live", async () => {
+    const fixture = createFixture("heartbeat-live-stale");
+    try {
+      writeJson(join(fixture.runDir, "heartbeat.json"), {
+        ...heartbeat(fixture.runId),
+        last_tick_at: "2026-07-08T11:00:00.000Z",
+      });
+      await assert.rejects(
+        transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, processAliveFn: () => true }),
+        /stale-heartbeat/u,
+      );
+      assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, process.pid);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).status, "running");
+    } finally {
+      cleanup(fixture.repo);
     }
   });
 });

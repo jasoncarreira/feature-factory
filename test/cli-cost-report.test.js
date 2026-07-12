@@ -92,6 +92,26 @@ describe("factory cost-report CLI", () => {
     }
   });
 
+  it("redacts credentials and encodes controls in human and JSON cost output", () => {
+    const repo = tempRepo();
+    const secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
+    seedRun(repo, { cost_attribution: { entries: [availableEntry({
+      agent: `Authorization: Basic ${secret}`,
+      step: "build\u001B]0;pwned\u0007",
+      slice_id: "slice\u202Ehidden",
+    })] } });
+    try {
+      for (const args of [[RUN_ID], [RUN_ID, "--json"]]) {
+        const proc = runCostReportSuccess(repo, args);
+        assert.doesNotMatch(proc.stdout, new RegExp(secret, "u"));
+        assert.doesNotMatch(proc.stdout, /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u202A-\u202E]/u);
+        assert.match(proc.stdout, /\[redacted\]|\\u001B/u);
+      }
+    } finally {
+      cleanup(repo);
+    }
+  });
+
   it("returns well-formed unavailable reports for absent and empty attribution", () => {
     for (const [name, attribution] of [
       ["absent", undefined],

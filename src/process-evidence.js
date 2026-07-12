@@ -6,6 +6,7 @@ import { writeProtectedJsonAtomicSync } from "./hardening/atomic-write.js";
 import {
   PROCESS_INSPECTOR,
   inspectProcessIdentity as inspectVerifiedProcessIdentity,
+  probeLegacyBooleanLiveness,
   signalVerifiedProcess,
   verifyProcessIdentity,
 } from "./hardening/process-verification.js";
@@ -498,7 +499,7 @@ function processVerificationOptions(opts = {}) {
     && typeof opts.livenessProbeFn !== "function"
     && typeof opts.processLivenessProbe !== "function"
   ) {
-    options.livenessProbe = (pid) => ({ status: opts.processAliveFn(pid) ? "live" : "absent" });
+    options.livenessProbe = (pid) => ({ status: probeLegacyBooleanLiveness(opts.processAliveFn, pid) });
   }
   if (typeof opts.commandRunnerFn === "function" && typeof opts.commandRunner !== "function") {
     options.commandRunner = opts.commandRunnerFn;

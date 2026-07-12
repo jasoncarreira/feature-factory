@@ -140,6 +140,41 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
     }
   });
 
+  it("never signals for malformed or throwing legacy processAliveFn results", async () => {
+    const callbacks = [
+      () => "false",
+      () => new Boolean(false),
+      () => ({ status: "absent" }),
+      () => [],
+      () => 0,
+      () => null,
+      () => undefined,
+      () => { throw new Error("probe failed"); },
+    ];
+    for (const [index, processAliveFn] of callbacks.entries()) {
+      const fixture = createFixture(`legacy-liveness-${index}`);
+      const signals = [];
+      try {
+        writeProcessEvidence(fixture.runDir, evidence(fixture));
+        const result = await cancelProcessFromEvidence(fixture.runDir, {
+          runId: fixture.runId,
+          cancelWaitMs: 0,
+          platform: "linux",
+          processAliveFn,
+          procReadFile: (path) => path.endsWith("/stat") ? linuxStat(PID, "111") : "/usr/local/bin/opencode\n",
+          procReadlink: () => fixture.runDir,
+          signalFn: (pid, signal) => signals.push({ pid, signal }),
+        });
+        assert.equal(result.status, "failed-closed");
+        assert.equal(result.signaled, false);
+        assert.deepEqual(signals, []);
+        assert.equal(readProcessEvidence(fixture.runDir, { runId: fixture.runId }).evidence.state, "running");
+      } finally {
+        cleanup(fixture.root);
+      }
+    }
+  });
+
   it("fails closed when legacy Darwin commandRunnerFn observes a changed final start marker", async () => {
     const fixture = createFixture("darwin-final-marker-change");
     const signals = [];

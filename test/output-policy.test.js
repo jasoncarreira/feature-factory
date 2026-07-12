@@ -68,6 +68,33 @@ describe("typed output segments", () => {
 });
 
 describe("terminal segment rendering", () => {
+  it("inherits credential-only flattened Basic redaction through public APIs", () => {
+    const credential = "dXNlcjpwYXNz==";
+    const source = `before\r\nAuthorization\t=\tBASIC ${credential}\rafter`;
+    const rendered = renderTerminalSegments([freeformSegment(source)]);
+    assert.equal(rendered, "before\\u000D\\u000AAuthorization\\u0009=\\u0009BASIC [redacted]\\u000Dafter");
+    assert.equal(rendered.includes(credential), false);
+    assert.doesNotMatch(rendered, /[\r\n\u001B\u0007]/u);
+
+    const projected = projectFreeformData({ detail: source });
+    assert.equal(projected.detail, `before\r\nAuthorization\t=\tBASIC [redacted]\rafter`);
+    assert.equal(serializeTerminalJson(projected).includes(credential), false);
+  });
+
+  it("redacts Proxy-Authorization Basic credentials through public APIs", () => {
+    // Standard credential-bearing header (RFC 7235 section 4.4); previously the
+    // lookalike boundary excluded the Proxy- prefix and let the token through.
+    const credential = "dXNlcjpwYXNz";
+    const source = `Proxy-Authorization: Basic ${credential}`;
+    const rendered = renderTerminalSegments([freeformSegment(source)]);
+    assert.equal(rendered, "Proxy-Authorization: Basic [redacted]");
+    assert.equal(rendered.includes(credential), false);
+
+    const projected = projectFreeformData({ detail: source });
+    assert.equal(projected.detail, "Proxy-Authorization: Basic [redacted]");
+    assert.equal(serializeTerminalJson(projected).includes(credential), false);
+  });
+
   it("never scrubs identity and always renders it with the ASCII identity profile", () => {
     const identity = `${SECRET}\u001B\u202Eé`;
     assert.equal(renderTerminalSegments([identitySegment(identity)]), `${SECRET}\\u001B\\u202E\\u00E9`);
