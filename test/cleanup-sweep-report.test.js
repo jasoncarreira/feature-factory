@@ -132,6 +132,109 @@ describe("cleanup sweep report and digest", () => {
     assert.equal(report.exit_code, 1);
   });
 
+  it("rejects every invalid candidate mutation and failure-stage cross-field state", () => {
+    const successfulCleanup = cleanupResult("run");
+    const failedDetails = emptyFailedCleanup("FAILED_CLEANUP_RUN_DIR");
+    const invalid = [
+      ["cleanup failure without an attempt", { classification: "failed", failure_stage: "cleanup", attempted_cleanup: false, cleanup: null }, /cleanup-failed candidate must be attempted with cleanup details/u],
+      ["cleanup failure with details but no attempt", { classification: "failed", failure_stage: "cleanup", attempted_cleanup: false, cleanup: failedDetails }, /cleanup-failed candidate must be attempted with cleanup details/u],
+      ["cleanup failure without details", { classification: "failed", failure_stage: "cleanup", attempted_cleanup: true, cleanup: null }, /cleanup-failed candidate must be attempted with cleanup details/u],
+      ["inspection failure with an attempt", { classification: "failed", failure_stage: "inspection", attempted_cleanup: true, cleanup: successfulCleanup }, /inspection-failed candidate must be unattempted with null cleanup/u],
+      ["inspection failure with attempt but no details", { classification: "failed", failure_stage: "inspection", attempted_cleanup: true, cleanup: null }, /inspection-failed candidate must be unattempted with null cleanup/u],
+      ["inspection failure with details", { classification: "failed", failure_stage: "inspection", attempted_cleanup: false, cleanup: successfulCleanup }, /inspection-failed candidate must be unattempted with null cleanup/u],
+      ["failed without a stage", { classification: "failed", failure_stage: null, attempted_cleanup: false, cleanup: null }, /failed candidate requires inspection or cleanup failure_stage/u],
+      ["eligible mutation", { classification: "eligible", failure_stage: null, attempted_cleanup: true, cleanup: successfulCleanup }, /attempted cleanup is allowed only/u],
+      ["eligible attempt without details", { classification: "eligible", failure_stage: null, attempted_cleanup: true, cleanup: null }, /attempted cleanup is allowed only/u],
+      ["skipped mutation details", { classification: "skipped", failure_stage: null, attempted_cleanup: false, cleanup: failedDetails }, /attempted cleanup is allowed only/u],
+      ["non-failed candidate with failure stage", { classification: "protected", failure_stage: "inspection", attempted_cleanup: false, cleanup: null }, /only a failed candidate may have failure_stage/u],
+      ["deleted without an attempt", { classification: "deleted", failure_stage: null, attempted_cleanup: false, cleanup: null }, /deleted candidate must be attempted with cleanup details/u],
+      ["deleted with details but no attempt", { classification: "deleted", failure_stage: null, attempted_cleanup: false, cleanup: successfulCleanup }, /deleted candidate must be attempted with cleanup details/u],
+      ["deleted attempt without details", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: null }, /deleted candidate must be attempted with cleanup details/u],
+      ["deleted with failure stage", { classification: "deleted", failure_stage: "cleanup", attempted_cleanup: true, cleanup: successfulCleanup }, /only a failed candidate may have failure_stage/u],
+      ["deleted with failed worktree", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, worktrees: [{ recorded_path: "/r", physical_path: "/p", branch: "b", outcome: "failed", reason_code: "FAILED_CLEANUP_WORKTREE" }] } }, /deleted candidate requires wholly successful cleanup outcomes/u],
+      ["deleted with unattempted branch", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, branches: [{ name: "b", expected_head: "oid", outcome: "not-attempted", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" }] } }, /deleted candidate requires wholly successful cleanup outcomes/u],
+      ["deleted with retained run directory", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, run_dir: { path: "/run", outcome: "retained", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" } } }, /deleted candidate requires wholly successful cleanup outcomes/u],
+    ];
+    for (const [label, overrides, expected] of invalid) {
+      assert.throws(() => createCandidate(candidateInput("run", overrides)), expected, label);
+    }
+    assert.throws(
+      () => createCandidate(candidateInput("run", { classification: "failed", failure_stage: "cleanup", attempted_cleanup: true, cleanup: { ...failedDetails, run_dir: { path: "/run", outcome: "failed", reason_code: null } } })),
+      /unsuccessful outcome requires reason_code/u,
+    );
+    assert.throws(
+      () => createCandidate(candidateInput("run", { classification: "deleted", attempted_cleanup: true, cleanup: { ...successfulCleanup, run_dir: { path: "/run", outcome: "removed", reason_code: "DELETED" } } })),
+      /successful outcome requires null reason_code/u,
+    );
+  });
+
+  it("rejects every invalid previewed report authorization, exit, confirmation, and candidate state", () => {
+    const base = previewReportInput();
+    const invalid = [
+      ["wrong mode", (value) => { value.mode = "execute"; value.confirmation = { argv: null, shell_command: null }; }, /previewed report must use preview mode/u],
+      ["missing repository", (value) => { value.repository = null; }, /previewed report requires repository identity/u],
+      ["missing digest", (value) => { value.authorization.digest = null; }, /recomputed digest/u],
+      ["stale digest", (value) => { value.authorization.digest = foreignDigest(); }, /recomputed digest/u],
+      ["provided digest", (value) => { value.authorization.provided_digest = value.authorization.digest; }, /null execution authorization fields/u],
+      ["matched authorization", (value) => { value.authorization.matched = true; }, /null execution authorization fields/u],
+      ["refusal authorization", (value) => { value.authorization.refusal_code = "DIGEST_STALE"; }, /only a refused report may have a refusal code/u],
+      ["attempted candidate", (value) => { value.candidates = [deletedCandidate("deleted")]; }, /cannot contain attempted or deleted candidates/u],
+      ["missing confirmation", (value) => { value.confirmation = { argv: null, shell_command: null }; }, /requires confirmation/u],
+      ["nonzero exit", (value) => { value.exit_code = 1; }, /requires exit_code 0/u],
+    ];
+    for (const [label, mutate, expected] of invalid) assertInvalidReport(base, mutate, expected, label);
+  });
+
+  it("rejects every invalid completed report authorization, exit, and final candidate state", () => {
+    const base = completedReportInput();
+    const invalid = [
+      ["wrong mode", (value) => { value.mode = "preview"; }, /completed report must use execute mode/u],
+      ["missing repository", (value) => { value.repository = null; }, /completed report requires repository identity/u],
+      ["missing digest", (value) => { value.authorization.digest = null; }, /equal matched authorization digests/u],
+      ["missing provided digest", (value) => { value.authorization.provided_digest = null; }, /equal matched authorization digests/u],
+      ["unequal digest", (value) => { value.authorization.provided_digest = foreignDigest(); }, /equal matched authorization digests/u],
+      ["foreign digest", (value) => { value.authorization.digest = foreignDigest(); value.authorization.provided_digest = foreignDigest(); }, /bound to its repository identity/u],
+      ["malformed equal digest", (value) => { value.authorization.digest = "malformed"; value.authorization.provided_digest = "malformed"; }, /digest is malformed/u],
+      ["unmatched", (value) => { value.authorization.matched = false; }, /equal matched authorization digests/u],
+      ["refusal code", (value) => { value.authorization.refusal_code = "DIGEST_FOREIGN"; }, /only a refused report may have a refusal code/u],
+      ["eligible remains", (value) => { value.candidates = [candidate("eligible")]; }, /cannot retain eligible candidates/u],
+      ["wrong success exit", (value) => { value.exit_code = 1; }, /exit_code must reflect attempted cleanup failures/u],
+      ["confirmation present", (value) => { value.confirmation = { argv: ["x"], shell_command: "'x'" }; }, /must have null confirmation/u],
+    ];
+    for (const [label, mutate, expected] of invalid) assertInvalidReport(base, mutate, expected, label);
+
+    const failed = completedReportInput([failedCleanup("failed", "FAILED_CLEANUP_RUN_DIR", emptyFailedCleanup("FAILED_CLEANUP_RUN_DIR"))], 1);
+    assertInvalidReport(failed, (value) => { value.exit_code = 0; }, /exit_code must reflect attempted cleanup failures/u, "attempted failure with zero exit");
+  });
+
+  it("rejects every invalid refused report and derives foreign versus stale from the supplied digest", () => {
+    const base = refusedReportInput();
+    const invalid = [
+      ["wrong mode", (value) => { value.mode = "preview"; }, /refused report must use execute mode/u],
+      ["missing repository", (value) => { value.repository = null; }, /refused report requires repository identity/u],
+      ["missing digest", (value) => { value.authorization.digest = null; }, /requires recomputed and provided unmatched digest/u],
+      ["missing provided digest", (value) => { value.authorization.provided_digest = null; }, /requires recomputed and provided unmatched digest/u],
+      ["matched flag", (value) => { value.authorization.matched = true; }, /requires recomputed and provided unmatched digest/u],
+      ["missing refusal", (value) => { value.authorization.refusal_code = null; }, /requires recomputed and provided unmatched digest/u],
+      ["wrong expected digest", (value) => { value.authorization.digest = foreignDigest(); }, /must derive from repository and candidate evidence/u],
+      ["wrong refusal derivation", (value) => { value.authorization.refusal_code = "DIGEST_STALE"; }, /must derive from repository and candidate evidence/u],
+      ["provided digest now matches", (value) => { value.authorization.provided_digest = value.authorization.digest; }, /must derive from repository and candidate evidence/u],
+      ["malformed provided digest", (value) => { value.authorization.provided_digest = "malformed"; }, /digest is malformed/u],
+      ["attempted candidate", (value) => { value.candidates = [deletedCandidate("deleted")]; }, /cannot contain attempted or deleted candidates/u],
+      ["zero exit", (value) => { value.exit_code = 0; }, /requires exit_code 1/u],
+      ["confirmation present", (value) => { value.confirmation = { argv: ["x"], shell_command: "'x'" }; }, /must have null confirmation/u],
+    ];
+    for (const [label, mutate, expected] of invalid) assertInvalidReport(base, mutate, expected, label);
+
+    const candidates = [candidate("run")];
+    const expected = createCleanupSweepDigest(REPOSITORY, candidates);
+    const parsed = parseCleanupSweepDigest(expected);
+    const stale = `ff-cleanup-v1.${parsed.repository_sha256}.${"f".repeat(64)}`;
+    assert.equal(createRefusedReport({ repository: REPOSITORY, candidates, provided_digest: stale }).authorization.refusal_code, "DIGEST_STALE");
+    assert.throws(() => createRefusedReport({ repository: REPOSITORY, candidates, provided_digest: foreignDigest(), refusal_code: "DIGEST_STALE" }), /code must be derived/u);
+    assert.throws(() => createRefusedReport({ repository: REPOSITORY, candidates, provided_digest: expected }), /matching digest cannot create a refused report/u);
+  });
+
   it("counts one attempted cleanup failure per failed candidate even when that candidate contains multiple failed operations", () => {
     const first = failedCleanup("a", "FAILED_CLEANUP_WORKTREE", {
       worktrees: [
@@ -150,7 +253,7 @@ describe("cleanup sweep report and digest", () => {
     assert.equal(report.attempted_cleanup_failures, 2);
     assert.equal(report.counts.failed, 3);
     assert.deepEqual(report.candidates[0].cleanup.worktrees.map((item) => item.physical_path), ["/p/a", "/p/b"]);
-    assert.throws(() => executeReport([first], 0), /require exit_code 1/u);
+    assert.throws(() => executeReport([first], 0), /exit_code must reflect attempted cleanup failures/u);
   });
 
   it("models R46-R52 cleanup outcomes and keeps report-level failures independent from attempted failures", () => {
@@ -197,6 +300,20 @@ function eligibleEvidence(entryName = "run") {
   return evidence;
 }
 
+function candidateInput(entryName, overrides = {}) {
+  return {
+    entry_name: entryName,
+    run_id: entryName,
+    classification: "eligible",
+    reason_codes: ["ELIGIBLE"],
+    failure_stage: null,
+    attempted_cleanup: false,
+    evidence: eligibleEvidence(entryName),
+    cleanup: null,
+    ...overrides,
+  };
+}
+
 function candidate(entryName, classification = "eligible", reasonCode = "ELIGIBLE") {
   return createCandidate({ entry_name: entryName, run_id: entryName, classification, reason_codes: [reasonCode], evidence: eligibleEvidence(entryName) });
 }
@@ -220,8 +337,53 @@ function deletedCandidate(entryName) {
   });
 }
 
+function cleanupResult(entryName) {
+  return { worktrees: [], branches: [], run_dir: { path: `/repo/.opencode/factory/${entryName}`, outcome: "removed", reason_code: null } };
+}
+
+function previewReportInput() {
+  const candidates = [candidate("run")];
+  return {
+    mode: "preview", status: "previewed", repository: REPOSITORY, candidates,
+    authorization: { schema_version: 1, digest: createCleanupSweepDigest(REPOSITORY, candidates), provided_digest: null, matched: null, refusal_code: null },
+    report_errors: [], confirmation: { argv: ["feature-factory"], shell_command: "'feature-factory'" }, exit_code: 0,
+  };
+}
+
+function completedReportInput(candidates = [deletedCandidate("run")], exitCode = 0) {
+  const digest = completedDigest();
+  return {
+    mode: "execute", status: "completed", repository: REPOSITORY, candidates,
+    authorization: { schema_version: 1, digest, provided_digest: digest, matched: true, refusal_code: null },
+    report_errors: [], confirmation: { argv: null, shell_command: null }, exit_code: exitCode,
+  };
+}
+
+function refusedReportInput() {
+  const candidates = [candidate("run")];
+  return {
+    mode: "execute", status: "refused", repository: REPOSITORY, candidates,
+    authorization: { schema_version: 1, digest: createCleanupSweepDigest(REPOSITORY, candidates), provided_digest: foreignDigest(), matched: false, refusal_code: "DIGEST_FOREIGN" },
+    report_errors: [], confirmation: { argv: null, shell_command: null }, exit_code: 1,
+  };
+}
+
+function foreignDigest() {
+  return `ff-cleanup-v1.${"0".repeat(64)}.${"1".repeat(64)}`;
+}
+
+function completedDigest() {
+  return `ff-cleanup-v1.${repositoryDigest(REPOSITORY)}.${"3".repeat(64)}`;
+}
+
+function assertInvalidReport(base, mutate, expected, label) {
+  const input = structuredClone(base);
+  mutate(input);
+  assert.throws(() => createCleanupSweepReport(input), expected, label);
+}
+
 function executeReport(candidates, exitCode) {
-  const digest = `ff-cleanup-v1.${"2".repeat(64)}.${"3".repeat(64)}`;
+  const digest = completedDigest();
   return createCleanupSweepReport({
     mode: "execute", status: "completed", repository: REPOSITORY, candidates,
     authorization: { schema_version: 1, digest, provided_digest: digest, matched: true, refusal_code: null },

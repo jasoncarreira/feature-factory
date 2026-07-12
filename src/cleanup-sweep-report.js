@@ -151,11 +151,7 @@ export function createCandidate(input) {
   const attemptedCleanup = input.attempted_cleanup ?? false;
   if (typeof attemptedCleanup !== "boolean") throw new TypeError("candidate.attempted_cleanup must be boolean");
   const cleanup = normalizeCleanup(input.cleanup ?? null);
-  if (attemptedCleanup !== (cleanup !== null)) throw new TypeError("candidate.cleanup must be present exactly when attempted_cleanup is true");
-  if (classification === "deleted" && !attemptedCleanup) throw new TypeError("a deleted candidate must have attempted cleanup");
-  if (classification === "failed" && failureStage === null) throw new TypeError("a failed candidate requires failure_stage");
-  if (classification !== "failed" && failureStage !== null) throw new TypeError("only a failed candidate may have failure_stage");
-  if (failureStage === "inspection" && attemptedCleanup) throw new TypeError("an inspection failure cannot have attempted cleanup");
+  assertCandidateMutationState({ classification, failureStage, attemptedCleanup, cleanup });
   return {
     schema_version: 1,
     kind: "factory-cleanup-candidate",
@@ -248,20 +244,13 @@ export function createCleanupSweepReport(input) {
   if (exitCode !== 0 && exitCode !== 1) throw new TypeError("report.exit_code must be 0 or 1");
   if (status === "failed" && reportErrors.length === 0) throw new TypeError("a failed report requires a report error");
   if (status !== "failed" && reportErrors.length !== 0) throw new TypeError("only a failed report may contain report errors");
-  if (status === "refused" && (authorization.matched !== false || authorization.refusal_code === null)) throw new TypeError("a refused report requires an unmatched authorization refusal");
   if (status !== "refused" && authorization.refusal_code !== null) throw new TypeError("only a refused report may have a refusal code");
-  if (status === "previewed" && mode !== "preview") throw new TypeError("a previewed report must use preview mode");
-  if ((status === "completed" || status === "refused") && mode !== "execute") throw new TypeError(`${status} reports must use execute mode`);
   if ((status === "refused" || status === "failed" || mode === "execute") && (confirmation.argv !== null || confirmation.shell_command !== null)) {
     throw new TypeError("execute, refused, and failed reports must have null confirmation");
   }
   if (status === "failed" && (authorization.digest !== null || confirmation.argv !== null)) throw new TypeError("failed reports cannot expose a usable digest or confirmation");
   const attemptedCleanupFailures = countAttemptedCleanupFailures(candidates);
-  if (mode === "preview" && candidates.some((candidate) => candidate.attempted_cleanup || candidate.classification === "deleted")) throw new TypeError("preview reports cannot contain attempted or deleted candidates");
-  if (status === "completed" && (authorization.digest === null || authorization.provided_digest === null || authorization.matched !== true)) throw new TypeError("a completed execution requires matched digest authorization");
-  if (attemptedCleanupFailures > 0 && exitCode !== 1) throw new TypeError("attempted cleanup failures require exit_code 1");
-  if (status === "completed" && exitCode !== (attemptedCleanupFailures > 0 ? 1 : 0)) throw new TypeError("completed execution exit_code must reflect attempted cleanup failures");
-  if ((status === "refused" || status === "failed") && exitCode !== 1) throw new TypeError("refused and failed reports require exit_code 1");
+  assertReportState({ mode, status, repository, authorization, confirmation, candidates, attemptedCleanupFailures, exitCode });
   return {
     schema_version: 1,
     kind: "factory-cleanup-sweep-report",
@@ -292,11 +281,15 @@ export function createReportLevelFailure({ mode, code, repository = null, candid
 }
 
 export function createRefusedReport({ repository, candidates, provided_digest, refusal_code, digest = null }) {
+  const comparison = compareCleanupSweepDigest(provided_digest, repository, candidates);
+  if (digest !== null && digest !== comparison.digest) throw new TypeError("refused report digest must match recomputed authorization");
+  if (refusal_code !== undefined && refusal_code !== comparison.refusal_code) throw new TypeError("refused report code must be derived from the provided digest");
+  if (comparison.matched) throw new TypeError("a matching digest cannot create a refused report");
   return createCleanupSweepReport({
     mode: "execute",
     status: "refused",
     repository,
-    authorization: { schema_version: 1, digest, provided_digest, matched: false, refusal_code },
+    authorization: { schema_version: 1, digest: comparison.digest, provided_digest, matched: false, refusal_code: comparison.refusal_code },
     candidates,
     report_errors: [],
     confirmation: { argv: null, shell_command: null },
@@ -370,17 +363,17 @@ function normalizeCleanup(value) {
   const worktrees = cleanup.worktrees.map((item, index) => {
     const result = exactRecord(item, ["recorded_path", "physical_path", "branch", "outcome", "reason_code"], `candidate.cleanup.worktrees[${index}]`);
     assertNonEmptyString(result.recorded_path, "cleanup worktree recorded_path"); assertNonEmptyString(result.physical_path, "cleanup worktree physical_path"); nullableString(result.branch, "cleanup worktree branch");
-    enumValue(result.outcome, ["removed", "failed"], "cleanup worktree outcome"); validateCleanupReason(result.reason_code);
+    enumValue(result.outcome, ["removed", "failed"], "cleanup worktree outcome"); validateOutcomeReason(result.outcome, result.reason_code, "cleanup worktree");
     return { ...result };
   }).sort((left, right) => utf8Collator(left.physical_path, right.physical_path));
   const branches = cleanup.branches.map((item, index) => {
     const result = exactRecord(item, ["name", "expected_head", "outcome", "reason_code"], `candidate.cleanup.branches[${index}]`);
     assertNonEmptyString(result.name, "cleanup branch name"); assertNonEmptyString(result.expected_head, "cleanup branch expected_head");
-    enumValue(result.outcome, ["deleted", "failed", "not-attempted"], "cleanup branch outcome"); validateCleanupReason(result.reason_code);
+    enumValue(result.outcome, ["deleted", "failed", "not-attempted"], "cleanup branch outcome"); validateOutcomeReason(result.outcome, result.reason_code, "cleanup branch");
     return { ...result };
   }).sort((left, right) => utf8Collator(left.name, right.name));
   const runDir = exactRecord(cleanup.run_dir, ["path", "outcome", "reason_code"], "candidate.cleanup.run_dir");
-  assertNonEmptyString(runDir.path, "cleanup run_dir path"); enumValue(runDir.outcome, ["removed", "failed", "retained"], "cleanup run_dir outcome"); validateCleanupReason(runDir.reason_code);
+  assertNonEmptyString(runDir.path, "cleanup run_dir path"); enumValue(runDir.outcome, ["removed", "failed", "retained"], "cleanup run_dir outcome"); validateOutcomeReason(runDir.outcome, runDir.reason_code, "cleanup run_dir");
   return { worktrees, branches, run_dir: { ...runDir } };
 }
 
@@ -408,7 +401,82 @@ function dedupeReasons(value) {
   return unique.sort((left, right) => REASON_ORDER.get(left) - REASON_ORDER.get(right));
 }
 
-function validateCleanupReason(value) { if (value !== null) createReason(value); }
+function assertCandidateMutationState({ classification, failureStage, attemptedCleanup, cleanup }) {
+  if (classification === "failed" && failureStage === "inspection") {
+    if (attemptedCleanup || cleanup !== null) throw new TypeError("an inspection-failed candidate must be unattempted with null cleanup");
+    return;
+  }
+  if (classification === "failed" && failureStage === "cleanup") {
+    if (!attemptedCleanup || cleanup === null) throw new TypeError("a cleanup-failed candidate must be attempted with cleanup details");
+    return;
+  }
+  if (classification === "failed") throw new TypeError("a failed candidate requires inspection or cleanup failure_stage");
+  if (failureStage !== null) throw new TypeError("only a failed candidate may have failure_stage");
+  if (classification === "deleted") {
+    if (!attemptedCleanup || cleanup === null) throw new TypeError("a deleted candidate must be attempted with cleanup details");
+    if (!cleanupWhollySuccessful(cleanup)) throw new TypeError("a deleted candidate requires wholly successful cleanup outcomes");
+    return;
+  }
+  if (attemptedCleanup || cleanup !== null) throw new TypeError("attempted cleanup is allowed only for deleted or cleanup-failed candidates");
+}
+
+function assertReportState({ mode, status, repository, authorization, confirmation, candidates, attemptedCleanupFailures, exitCode }) {
+  if (status === "previewed") {
+    if (mode !== "preview") throw new TypeError("a previewed report must use preview mode");
+    if (repository === null) throw new TypeError("a previewed report requires repository identity");
+    if (candidates.some((candidate) => candidate.attempted_cleanup || candidate.classification === "deleted")) throw new TypeError("a previewed report cannot contain attempted or deleted candidates");
+    const expectedDigest = createCleanupSweepDigest(repository, candidates);
+    if (authorization.digest !== expectedDigest || authorization.provided_digest !== null || authorization.matched !== null || authorization.refusal_code !== null) {
+      throw new TypeError("a previewed report requires its recomputed digest and null execution authorization fields");
+    }
+    if (confirmation.argv === null || confirmation.shell_command === null) throw new TypeError("a previewed report requires confirmation");
+    if (exitCode !== 0) throw new TypeError("a previewed report requires exit_code 0");
+    return;
+  }
+  if (status === "completed") {
+    if (mode !== "execute") throw new TypeError("a completed report must use execute mode");
+    if (repository === null) throw new TypeError("a completed report requires repository identity");
+    if (candidates.some((candidate) => candidate.classification === "eligible")) throw new TypeError("a completed report cannot retain eligible candidates");
+    if (authorization.digest === null || authorization.provided_digest === null || authorization.digest !== authorization.provided_digest || authorization.matched !== true || authorization.refusal_code !== null) {
+      throw new TypeError("a completed report requires equal matched authorization digests");
+    }
+    const parsed = parseCleanupSweepDigest(authorization.provided_digest);
+    if (parsed.repository_sha256 !== repositoryDigest(repository)) throw new TypeError("a completed report digest must be bound to its repository identity");
+    if (exitCode !== (attemptedCleanupFailures > 0 ? 1 : 0)) throw new TypeError("completed execution exit_code must reflect attempted cleanup failures");
+    return;
+  }
+  if (status === "refused") {
+    if (mode !== "execute") throw new TypeError("a refused report must use execute mode");
+    if (repository === null) throw new TypeError("a refused report requires repository identity");
+    if (candidates.some((candidate) => candidate.attempted_cleanup || candidate.classification === "deleted")) throw new TypeError("a refused report cannot contain attempted or deleted candidates");
+    if (authorization.digest === null || authorization.provided_digest === null || authorization.matched !== false || authorization.refusal_code === null) {
+      throw new TypeError("a refused report requires recomputed and provided unmatched digest authorization");
+    }
+    const comparison = compareCleanupSweepDigest(authorization.provided_digest, repository, candidates);
+    if (comparison.matched || authorization.digest !== comparison.digest || authorization.refusal_code !== comparison.refusal_code) {
+      throw new TypeError("a refused report authorization must derive from repository and candidate evidence");
+    }
+    if (exitCode !== 1) throw new TypeError("a refused report requires exit_code 1");
+    return;
+  }
+  if (exitCode !== 1) throw new TypeError("a failed report requires exit_code 1");
+}
+
+function cleanupWhollySuccessful(cleanup) {
+  return cleanup.worktrees.every((item) => item.outcome === "removed" && item.reason_code === null)
+    && cleanup.branches.every((item) => item.outcome === "deleted" && item.reason_code === null)
+    && cleanup.run_dir.outcome === "removed"
+    && cleanup.run_dir.reason_code === null;
+}
+
+function validateOutcomeReason(outcome, reasonCode, path) {
+  if (outcome === "removed" || outcome === "deleted") {
+    if (reasonCode !== null) throw new TypeError(`${path} successful outcome requires null reason_code`);
+    return;
+  }
+  if (reasonCode === null) throw new TypeError(`${path} unsuccessful outcome requires reason_code`);
+  createReason(reasonCode);
+}
 function hashOrNull(value, path) { if (value !== null && (typeof value !== "string" || !HASH.test(value))) throw new TypeError(`${path} must be a sha256 hash or null`); }
 function nullableString(value, path) { if (value !== null && typeof value !== "string") throw new TypeError(`${path} must be a string or null`); return value; }
 function nullableBoolean(value, path) { if (value !== null && typeof value !== "boolean") throw new TypeError(`${path} must be a boolean or null`); return value; }
