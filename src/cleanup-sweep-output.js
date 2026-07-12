@@ -21,7 +21,7 @@ export function createCleanupSweepConfirmation(digest, repositoryRoot, options =
   }
   const argv = [...CONFIRMATION_PREFIX, digest, "--repo", repositoryRoot];
   if (options.json === true) argv.push("--json");
-  return { argv, shell_command: shellQuoteArgv(argv) };
+  return { argv, shell_command: shellConfirmationCommand(argv, repositoryRoot) };
 }
 
 export function shellQuoteArgv(argv) {
@@ -39,15 +39,7 @@ export function renderCleanupSweepReportLines(report, options = {}) {
   const normalized = createCleanupSweepReport(report);
   const confirmation = exactReportConfirmation(normalized);
   if (options.json === true) {
-    const projected = projectReport(normalized);
-    if (confirmation !== null) {
-      projected.confirmation = createCleanupSweepConfirmation(
-        normalized.authorization.digest,
-        projected.repository.root_path,
-        { json: confirmation.argv.at(-1) === "--json" },
-      );
-    }
-    return [serializeTerminalJson(projected, { space: 2 })];
+    return [serializeTerminalJson(normalized, { space: 2 })];
   }
 
   const lines = [
@@ -85,7 +77,7 @@ export function renderCleanupSweepReportLines(report, options = {}) {
   ].join(" "))));
   lines.push(keyValueLine("attempted-cleanup-failures", identitySegment(normalized.attempted_cleanup_failures)));
   if (confirmation !== null) {
-    lines.push(keyValueLine("confirmation", identitySegment(projectConfirmationCommand(confirmation.argv))));
+    lines.push(keyValueLine("confirmation", identitySegment(confirmation.shell_command)));
   }
   return lines;
 }
@@ -117,27 +109,28 @@ function keyValueLine(key, valueSegment) {
   return renderTerminalSegments([identitySegment(key), TRUSTED_SEGMENTS.COLON_SPACE, valueSegment]);
 }
 
-function projectConfirmationCommand(argv) {
-  const projected = argv.map((arg, index) => {
-    if (index === 5) {
-      parseCleanupSweepDigest(arg);
-      return arg;
-    }
-    if (CONFIRMATION_PREFIX.includes(arg) || arg === "--repo" || arg === "--json") return arg;
-    return projectFreeformData(arg);
-  });
-  return shellQuoteArgv(projected);
+function shellConfirmationCommand(argv, repositoryRoot) {
+  assertRoundTrippablePath(repositoryRoot);
+  if (projectFreeformData(repositoryRoot) === repositoryRoot && isAsciiTerminalSafe(repositoryRoot)) {
+    return shellQuoteArgv(argv);
+  }
+
+  const repoIndex = argv.indexOf("--repo") + 1;
+  const beforeRepository = shellQuoteArgv(argv.slice(0, repoIndex));
+  const afterRepository = argv.slice(repoIndex + 1);
+  const suffix = afterRepository.length === 0 ? "" : ` ${shellQuoteArgv(afterRepository)}`;
+  const octalBytes = [...Buffer.from(repositoryRoot, "utf8")]
+    .map((byte) => `\\${byte.toString(8).padStart(3, "0")}`)
+    .join("");
+  return `_ff_cleanup_repo=$(printf '%b_' '${octalBytes}'); _ff_cleanup_repo=\${_ff_cleanup_repo%_}; ${beforeRepository} \"$_ff_cleanup_repo\"${suffix}`;
 }
 
-function projectReport(value, key = null) {
-  if (typeof value === "string") {
-    if ((key === "digest" || key === "provided_digest") && /^ff-cleanup-v1\.[0-9a-f]{64}\.[0-9a-f]{64}$/u.test(value)) return value;
-    if (key === "evidence_digest" && /^sha256:[0-9a-f]{64}$/u.test(value)) return value;
-    return projectFreeformData(value);
+function assertRoundTrippablePath(value) {
+  if (value.includes("\0") || Buffer.from(value, "utf8").toString("utf8") !== value) {
+    throw new TypeError("cleanup sweep confirmation requires a round-trippable physical repository root");
   }
-  if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((item) => projectReport(item, key));
-  const output = Object.create(null);
-  for (const [childKey, childValue] of Object.entries(value)) output[childKey] = projectReport(childValue, childKey);
-  return output;
+}
+
+function isAsciiTerminalSafe(value) {
+  return /^[\x20-\x7e]+$/u.test(value);
 }
