@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { executeCleanupSweep, previewCleanupSweep } from "../src/cleanup-sweep.js";
@@ -89,6 +89,30 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
     } finally { fixture.cleanup(); }
   });
 
+  it("refuses authorization changes injected after digest recompute or candidate lock", async () => {
+    for (const hook of ["after-digest-recompute", "after-candidate-lock"]) {
+      const fixture = createCleanupSweepFixture(`execution-mutation-${hook}`);
+      try {
+        fixture.addRun("run", { branch: null });
+        const authorization = await preview(fixture);
+        let mutated = false;
+        const report = await execute(fixture, authorization.authorization.digest, {
+          phaseHook(name) {
+            if (name !== hook || mutated) return;
+            mutated = true;
+            const run = fixture.readRun("run");
+            run.status = "running";
+            delete run.terminal_result;
+            fixture.writeRun("run", run);
+          },
+        });
+        assert.deepEqual(report.candidates[0].reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"], hook);
+        assert.equal(report.candidates[0].attempted_cleanup, false, hook);
+        assert.equal(existsSync(join(fixture.factoryRoot, "run")), true, hook);
+      } finally { fixture.cleanup(); }
+    }
+  });
+
   it("requires the final temporary ref to resolve to the authorized base OID", async () => {
     const fixture = createCleanupSweepFixture("execution-base-race");
     try {
@@ -137,10 +161,12 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
       fixture.addRecordedWorktree("run");
       const authorization = await preview(fixture);
       const phases = [];
-      const gitRunner = fallbackRunner((_cwd, args) => args[0] === "worktree" && args[1] === "remove"
-        ? commandFailure()
-        : null, fixture.gitRunner);
-      const report = await execute(fixture, authorization.authorization.digest, { gitRunner, phaseHook: (name) => phases.push(name) });
+      const report = await execute(fixture, authorization.authorization.digest, {
+        phaseHook(name, context) {
+          phases.push(name);
+          if (name === "before-worktree-remove") rmSync(context.physical_path, { recursive: true, force: true });
+        },
+      });
       const candidate = report.candidates[0];
       assert.equal(candidate.classification, "failed");
       assert.equal(candidate.reason_codes.includes("FAILED_CLEANUP_WORKTREE"), true);
@@ -148,6 +174,23 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
       assert.equal(candidate.cleanup.run_dir.outcome, "retained");
       assert.equal(phases.includes("before-worktree-remove"), true);
       assert.equal(report.exit_code, 1);
+    } finally { fixture.cleanup(); }
+  });
+
+  it("before-branch-delete mutation is refused by CAS and retains the run directory", async () => {
+    const fixture = createCleanupSweepFixture("execution-before-branch-delete");
+    try {
+      fixture.addRun("run");
+      const authorization = await preview(fixture);
+      const changedCommit = gitOutput(fixture.repo, ["commit-tree", `${fixture.baseSha}^{tree}`, "-p", fixture.baseSha, "-m", "branch changed"]);
+      const report = await execute(fixture, authorization.authorization.digest, {
+        phaseHook(name, context) {
+          if (name === "before-branch-delete") fixture.gitRunner(fixture.repo, ["update-ref", `refs/heads/${context.branch}`, changedCommit, context.expected_head]);
+        },
+      });
+      assert.deepEqual(report.candidates[0].reason_codes, ["FAILED_CLEANUP_BRANCH", "RETAINED_AFTER_PARTIAL_FAILURE"]);
+      assert.equal(report.candidates[0].cleanup.branches[0].outcome, "failed");
+      assert.equal(existsSync(join(fixture.factoryRoot, "run")), true);
     } finally { fixture.cleanup(); }
   });
 
@@ -178,6 +221,20 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
       assert.deepEqual(report.candidates[0].reason_codes, ["FAILED_CLEANUP_RUN_DIR"]);
       assert.equal(report.candidates[0].cleanup.run_dir.outcome, "failed");
       assert.equal(report.exit_code, 1);
+    } finally { fixture.cleanup(); }
+  });
+
+  it("before-run-dir-remove inspection exception is FAILED_INSPECTION and retains an unattempted run", async () => {
+    const fixture = createCleanupSweepFixture("execution-before-run-dir-remove");
+    try {
+      fixture.addRun("run", { branch: null });
+      const authorization = await preview(fixture);
+      const report = await execute(fixture, authorization.authorization.digest, {
+        phaseHook(name) { if (name === "before-run-dir-remove") throw new Error("injected pre-mutation inspection failure"); },
+      });
+      assert.deepEqual(report.candidates[0].reason_codes, ["FAILED_INSPECTION"]);
+      assert.equal(report.candidates[0].attempted_cleanup, false);
+      assert.equal(existsSync(join(fixture.factoryRoot, "run")), true);
     } finally { fixture.cleanup(); }
   });
 
@@ -234,6 +291,73 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
     } finally { fixture.cleanup(); }
   });
 
+  it("records authorized OIDs before initial and lock-held fetch inspection can throw", async () => {
+    for (const stage of ["initial", "lock-held"]) {
+      const fixture = createCleanupSweepFixture(`execution-ref-registration-${stage}`);
+      try {
+        fixture.addRun("run");
+        const deleted = [];
+        if (stage === "initial") {
+          const gitRunner = fallbackRunner((cwd, args) => {
+            if (args[0] !== "fetch") return null;
+            fixture.gitRunner(cwd, args);
+            throw new Error("injected after ref creation");
+          }, fixture.gitRunner);
+          const report = await preview(fixture, {
+            gitRunner,
+            deleteTemporaryRef(repo, ref, expectedOid) {
+              deleted.push([ref, expectedOid]);
+              return fixture.gitRunner(repo, ["update-ref", "-d", ref, expectedOid]);
+            },
+          });
+          assert.equal(report.status, "previewed");
+          assert.deepEqual(report.candidates[0].reason_codes, ["FAILED_INSPECTION"]);
+        } else {
+          const authorization = await preview(fixture);
+          let fetches = 0;
+          const gitRunner = fallbackRunner((cwd, args) => {
+            if (args[0] !== "fetch") return null;
+            fetches += 1;
+            if (fetches === 1) return fixture.gitRunner(cwd, args);
+            throw new Error("injected lock-held fetch failure");
+          }, fixture.gitRunner);
+          const report = await execute(fixture, authorization.authorization.digest, {
+            gitRunner,
+            deleteTemporaryRef(repo, ref, expectedOid) {
+              deleted.push([ref, expectedOid]);
+              return fixture.gitRunner(repo, ["update-ref", "-d", ref, expectedOid]);
+            },
+          });
+          assert.deepEqual(report.candidates[0].reason_codes, ["FAILED_INSPECTION"]);
+        }
+        assert.equal(deleted.length, 1, stage);
+        assert.equal(deleted[0][1], fixture.baseSha, stage);
+        assert.equal(listInvocationRefs(fixture).length, 0, stage);
+      } finally { fixture.cleanup(); }
+    }
+  });
+
+  it("registers an authorized missing ref when inspection throws before fetch", async () => {
+    const fixture = createCleanupSweepFixture("execution-ref-before-fetch");
+    try {
+      fixture.addRun("run");
+      const compared = [];
+      const gitRunner = fallbackRunner((_cwd, args) => {
+        if (args[0] === "check-ref-format" && String(args[1]).startsWith("refs/feature-factory/")) throw new Error("injected before fetch");
+        return null;
+      }, fixture.gitRunner);
+      const report = await preview(fixture, {
+        gitRunner,
+        phaseHook(name, context) { if (name === "before-temp-ref-delete") compared.push(context); },
+      });
+      assert.equal(report.status, "previewed");
+      assert.deepEqual(report.candidates[0].reason_codes, ["FAILED_INSPECTION"]);
+      assert.equal(compared.length, 1);
+      assert.equal(compared[0].expected_oid, fixture.baseSha);
+      assert.equal(listInvocationRefs(fixture).length, 0);
+    } finally { fixture.cleanup(); }
+  });
+
   it("R54 treats a missing temporary ref as clean and changed/undeletable refs as failure", async () => {
     for (const mode of ["missing", "changed", "undeletable"]) {
       const fixture = createCleanupSweepFixture(`execution-temp-${mode}`);
@@ -251,6 +375,23 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
         assert.equal(report.status, mode === "missing" ? "previewed" : "failed", mode);
       } finally { fixture.cleanup(); }
     }
+  });
+
+  it("retains pre-fetch authorization even when the run manifest disappears after ref creation", async () => {
+    const fixture = createCleanupSweepFixture("execution-temp-preserved-authorization");
+    try {
+      fixture.addRun("run");
+      const gitRunner = fallbackRunner((cwd, args) => {
+        if (args[0] !== "fetch") return null;
+        fixture.gitRunner(cwd, args);
+        rmSync(join(fixture.factoryRoot, "run", "run.json"));
+        throw new Error("authorization disappeared after ref creation");
+      }, fixture.gitRunner);
+      const report = await preview(fixture, { gitRunner });
+      assert.equal(report.status, "previewed");
+      assert.deepEqual(report.candidates[0].reason_codes, ["FAILED_INSPECTION"]);
+      assert.equal(listInvocationRefs(fixture).length, 0);
+    } finally { fixture.cleanup(); }
   });
 
   it("R55 preserves completed outcomes when lock orchestration fails after a candidate", async () => {

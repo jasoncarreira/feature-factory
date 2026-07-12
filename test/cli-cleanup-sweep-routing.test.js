@@ -56,6 +56,33 @@ describe("cleanup sweep CLI routing and output", () => {
     } finally { fixture.cleanup(); }
   });
 
+  it("routes successful execute reports once with exact human and JSON output and final exit coupling", async () => {
+    const fixture = createCleanupSweepFixture("cli-routing-success");
+    try {
+      fixture.addRun("run", { branch: null });
+      const authorization = await previewCleanupSweep(sweepOptions(fixture));
+      const completed = await executeCleanupSweep({ ...sweepOptions(fixture), digest: authorization.authorization.digest });
+      assert.equal(completed.status, "completed");
+      assert.equal(completed.candidates[0].classification, "deleted");
+      for (const json of [false, true]) {
+        let handlers = 0;
+        let renders = 0;
+        const stdout = [];
+        const args = ["--all", "--digest", DIGEST, ...(json ? ["--json"] : [])];
+        const exit = await runCleanupSweepCli(args, {
+          execute(command) { handlers += 1; assert.equal(command.mode, "execute"); return completed; },
+          preview() { throw new Error("wrong handler"); },
+          render(report, options) { renders += 1; return renderCleanupSweepReport(report, options); },
+          stdout: (line) => stdout.push(line),
+        });
+        assert.equal(handlers, 1);
+        assert.equal(renders, 1);
+        assert.deepEqual(stdout, [renderCleanupSweepReport(completed, { json })]);
+        assert.equal(exit, completed.exit_code);
+      }
+    } finally { fixture.cleanup(); }
+  });
+
   it("couples exit only to the final report and does not infer it from inspection/report errors", async () => {
     for (const report of [
       { mode: "execute", attempted_cleanup_failures: 1, report_errors: [], exit_code: 1 },

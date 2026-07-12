@@ -3,6 +3,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupRunLocked, CleanupRunUnexpectedError } from "./factory.js";
 import { git } from "./git.js";
+import { github } from "./github.js";
 import { classifyCleanupSweepCandidate, discoverCleanupSweepCandidates } from "./cleanup-sweep-eligibility.js";
 import { createCleanupSweepConfirmation } from "./cleanup-sweep-output.js";
 import {
@@ -17,6 +18,7 @@ import {
   parseCleanupSweepDigest,
 } from "./cleanup-sweep-report.js";
 import { RunJsonLockContendedError, withRunJsonLock } from "./run-state.js";
+import { canonicalizeGithubPrUrl } from "./refs.js";
 import { validateRun } from "./validate.js";
 
 const utf8 = (left, right) => Buffer.from(left, "utf8").compare(Buffer.from(right, "utf8"));
@@ -30,10 +32,11 @@ export async function previewCleanupSweep(options = {}) {
   try {
     const invocationId = invocationIdentifier(options);
     repository = resolveCleanupSweepRepository(options);
-    const discovery = discoverCleanupSweepCandidates(repository.root_path, discoveryOptions(options, invocationId));
+    const tracked = trackedDiscoveryOptions(options, invocationId, temporaryRefs);
+    const discovery = discoverCleanupSweepCandidates(repository.root_path, tracked.options);
     discoveryComplete = true;
     candidates = discovery.candidates;
-    temporaryRefs = temporaryRefRecords(discovery.temporary_refs, candidates);
+    temporaryRefs.push(...temporaryRefRecords(discovery.temporary_refs, candidates, repository, tracked.prBaseOids));
     const digest = createCleanupSweepDigest(repository, candidates);
     report = createCleanupSweepReport({
       mode: "preview",
@@ -66,10 +69,11 @@ export async function executeCleanupSweep(options = {}) {
   try {
     const invocationId = invocationIdentifier(options);
     repository = resolveCleanupSweepRepository(options);
-    const discovery = discoverCleanupSweepCandidates(repository.root_path, discoveryOptions(options, invocationId));
+    const tracked = trackedDiscoveryOptions(options, invocationId, temporaryRefs);
+    const discovery = discoverCleanupSweepCandidates(repository.root_path, tracked.options);
     discoveryComplete = true;
     candidates = discovery.candidates;
-    temporaryRefs = temporaryRefRecords(discovery.temporary_refs, candidates);
+    temporaryRefs.push(...temporaryRefRecords(discovery.temporary_refs, candidates, repository, tracked.prBaseOids));
     const comparison = compareCleanupSweepDigest(options.digest, repository, candidates);
     await phase(options, "after-digest-recompute", { repository, candidates });
     if (!comparison.matched) {
@@ -314,11 +318,58 @@ function discoveryOptions(options, invocationId) {
   };
 }
 
-function temporaryRefRecords(refs, candidates) {
+function temporaryRefRecords(refs, candidates, repository, prBaseOids) {
   return refs.map((ref) => {
-    const candidate = candidates.find((item) => item.run_id && ref.endsWith(sha256RunId(item.run_id)));
-    return { ref, expected_oid: candidate?.evidence?.pr?.base_sha ?? null };
+    const candidate = candidates.find((item) => ref.endsWith(sha256RunId(item.entry_name)));
+    const expectedOid = candidate?.evidence?.pr?.base_sha ?? recordedRunBaseOid(repository.root_path, candidate?.entry_name, prBaseOids);
+    return { ref, expected_oid: expectedOid ?? null };
   });
+}
+
+function trackedDiscoveryOptions(options, invocationId, temporaryRefs) {
+  const githubRunner = options.githubRunner ?? github;
+  const gitRunner = options.gitRunner ?? git;
+  const prBaseOids = new Map();
+  let currentBaseOid = null;
+  const trackedGithubRunner = (...args) => {
+    currentBaseOid = null;
+    const result = githubRunner(...args);
+    try {
+      const body = result?.ok ? JSON.parse(result.stdout) : null;
+      if (typeof body?.html_url === "string" && typeof body?.base?.sha === "string") {
+        currentBaseOid = body.base.sha;
+        prBaseOids.set(canonicalizeGithubPrUrl(body.html_url), currentBaseOid);
+      }
+    } catch {
+      // Invalid responses cannot authorize temporary-ref deletion.
+    }
+    return result;
+  };
+  const trackedGitRunner = (cwd, args, commandOptions) => {
+    if (args[0] === "check-ref-format" && typeof args[1] === "string" && args[1].startsWith("refs/feature-factory/cleanup-sweep/")) {
+      temporaryRefs.push({ ref: args[1], expected_oid: currentBaseOid });
+    }
+    return gitRunner(cwd, args, commandOptions);
+  };
+  return {
+    options: discoveryOptions({ ...options, githubRunner: trackedGithubRunner, gitRunner: trackedGitRunner }, invocationId),
+    prBaseOids,
+  };
+}
+
+function recordedRunBaseOid(repo, entryName, prBaseOids) {
+  if (!entryName) return null;
+  try {
+    const run = JSON.parse(readFileSync(join(repo, ".opencode", "factory", entryName, "run.json"), "utf8"));
+    const urls = [run?.pr_url, run?.terminal_result?.pr_url].filter((value) => typeof value === "string");
+    for (const url of urls) {
+      const canonical = canonicalizeGithubPrUrl(url);
+      if (prBaseOids.has(canonical)) return prBaseOids.get(canonical);
+    }
+  } catch {
+    // Missing authorization is handled as FAILED_TEMP_REF_CLEANUP if the ref exists.
+  }
+  return null;
 }
 
 function sha256RunId(value) {
@@ -375,13 +426,12 @@ async function cleanupTemporaryRefs(records, options) {
 }
 
 function reclassifyHeldCandidate(repository, authorized, options, invocationId, temporaryRefs) {
+  const registerTemporaryRef = (ref) => temporaryRefs.push({ ref, expected_oid: authorized.evidence.pr.base_sha });
   const result = classifyCleanupSweepCandidate(repository.root_path, authorized.entry_name, {
     ...discoveryOptions(options, invocationId),
     heldRunId: authorized.run_id,
+    registerTemporaryRef,
   });
-  if (result.temporary_ref) {
-    temporaryRefs.push({ ref: result.temporary_ref, expected_oid: result.candidate.evidence.pr.base_sha });
-  }
   return result;
 }
 
