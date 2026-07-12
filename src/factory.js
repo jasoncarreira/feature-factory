@@ -3,9 +3,9 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { assertRunJsonWriterAllowed, hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertRunJsonWriterAllowed, hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
-import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { git, repoRoot } from "./git.js";
@@ -19,6 +19,8 @@ import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
 import { publicLivenessBoolean, probeLegacyBooleanLiveness, probeProcessLiveness } from "./hardening/process-verification.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
+import { buildFailureEvidenceInput, classifyOwnership, decideObservationSchedule, decideTransientSchedule, fetchChangedFiles, isPollDue, normalizePullRequestResponse, queryPullRequest, requestReviewer, validateLane, PostPrCiError } from "./post-pr-ci.js";
+import { hashValue } from "./refs.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -105,6 +107,7 @@ export async function startFactory(args, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const resumeRunId = resumePromptRunId(args, opts);
   const requestedRunId = normalizeRequestedStartRunId(opts.runId);
+  assertPostPrCliOptions(opts, { command: "factory start" });
   if (resumeRunId && requestedRunId) throw new Error("factory start --run-id is only for new runs; use resume <run-id> to resume existing runs");
   if (requestedRunId) assertStartRunIdAvailable(repo, requestedRunId);
   if (resumeRunId) {
@@ -505,6 +508,7 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 }
 
 export function continueFactory(parentRunId, opts = {}) {
+  assertPostPrCliOptions(opts, { command: "factory continue" });
   const repo = repoRoot(opts.cwd || process.cwd());
   const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
   const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
@@ -527,6 +531,7 @@ export function continueFactory(parentRunId, opts = {}) {
 }
 
 export async function resumeFactory(runId, opts = {}) {
+  assertPostPrCliOptions(opts, { command: "factory resume", resume: true });
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const run = readRunFile(join(runDir, "run.json"));
@@ -542,6 +547,290 @@ export async function resumeFactory(runId, opts = {}) {
   commandArgs.push(encodeFeatureCommandPayload(payload));
   if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir }), env: launchEnv });
   return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
+}
+
+/** Perform at most one due verdict query (or one pending reviewer request). */
+export async function postPrObserve(runId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
+  const run = readRunFile(join(runDir, "run.json"));
+  const postPr = run.post_pr;
+  if (run.status !== "running" || postPr?.policy?.enabled !== true || postPr.phase !== "observing") {
+    throw new Error("post-pr-observe requires a running enabled observing run");
+  }
+  assertPostPrExternalWorkReady(runDir, run, opts);
+  const observation = postPr.observation;
+  const now = timestamp(opts.now);
+  if (!isPollDue(observation.next_poll_at, now)) {
+    return { run_id: run.run_id, action: "not-due", next_poll_at: observation.next_poll_at, post_pr: postPrSummary(run) };
+  }
+  if (Date.parse(now) >= Date.parse(observation.deadline_at)) {
+    return postPrTerminal(runDir, run, "blocked", "post-pr-observation-timeout", opts);
+  }
+  if (observation.review_request?.status === "pending") {
+    try {
+      await claimPostPrAction(runDir, "post-pr-observe", opts);
+      await requestReviewer(githubOperationInput(repo, run, opts, {
+        repository: persistedPrIdentity(run).repository,
+        prNumber: persistedPrIdentity(run).number,
+        reviewerLogin: postPr.policy.review.reviewer_login,
+      }));
+    } catch (error) {
+      return handleObserverError(runDir, run, error, opts);
+    }
+    const next = cloneJson(postPr);
+    next.observation.review_request = { status: "requested", attempts: observation.review_request.attempts + 1, requested_at: now };
+    next.observation.next_poll_at = new Date(Date.parse(now) + postPr.policy.initial_poll_ms).toISOString();
+    await transitionPostPrState(runDir, next, opts);
+    return { run_id: run.run_id, action: "reviewer-requested", next_poll_at: next.observation.next_poll_at, post_pr: postPrSummary({ ...run, post_pr: next }) };
+  }
+
+  let response;
+  try {
+    await claimPostPrAction(runDir, "post-pr-observe", opts);
+    response = await queryPullRequest(githubOperationInput(repo, run, opts, persistedPrIdentity(run)));
+  } catch (error) {
+    return handleObserverError(runDir, run, error, opts);
+  }
+  const normalized = normalizePullRequestResponse(response, {
+    startedAt: observation.started_at,
+    now,
+    checkStartGraceMs: postPr.policy.check_start_grace_ms,
+    expectedHeadSha: observation.expected_head_sha,
+    reviewerLogin: postPr.policy.review.reviewer_login,
+    reviewRequired: postPr.policy.review.required,
+  });
+  const fingerprint = hashJson(normalized);
+  const changed = fingerprint !== observation.last_fingerprint;
+  const schedule = decideObservationSchedule({
+    now, deadlineAt: observation.deadline_at, changed,
+    initialPollMs: postPr.policy.initial_poll_ms, currentIntervalMs: observation.current_interval_ms,
+    maxPollMs: postPr.policy.max_poll_ms, unchangedCount: observation.unchanged_count,
+  });
+  const next = cloneJson(postPr);
+  Object.assign(next.observation, {
+    poll_count: observation.poll_count + 1,
+    unchanged_count: schedule.unchanged_count ?? observation.unchanged_count,
+    current_interval_ms: schedule.interval_ms || observation.current_interval_ms,
+    consecutive_transient_errors: 0,
+    last_observed_at: now,
+    last_fingerprint: fingerprint,
+    last_check_verdict: normalized.checks.verdict,
+    last_review_verdict: normalized.review.verdict,
+    last_verdict: durableObservationVerdict(normalized.aggregate),
+    last_error: null,
+    next_poll_at: schedule.next_poll_at || observation.deadline_at,
+    snapshot: sanitizedObservationSnapshot(normalized),
+  });
+  await transitionPostPrState(runDir, next, opts);
+  const current = readRunFile(join(runDir, "run.json"));
+  return finishObservedVerdict(repo, runDir, current, normalized, opts);
+}
+
+export async function postPrRemediation(runId, attemptValue, event, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
+  const run = readRunFile(join(runDir, "run.json"));
+  assertPostPrExternalWorkReady(runDir, run, opts);
+  const attempt = Number(attemptValue);
+  if (!Number.isInteger(attempt) || attempt < 1 || attempt !== run.post_pr?.attempt || attempt !== run.post_pr?.remediation?.attempt) throw new Error("post-pr-remediation attempt must equal the current persisted attempt");
+  if (event === "running") return markPostPrRemediationRunning(runDir, run, opts);
+  if (event === "revalidating") return markPostPrRevalidating(runDir, run, opts);
+  if (event === "complete") return completePostPrRemediation(repo, runDir, run, opts);
+  if (event === "failed") return failPostPrRevalidation(runDir, run, opts);
+  throw new Error("post-pr-remediation event must be running, revalidating, failed, or complete");
+}
+
+async function finishObservedVerdict(repo, runDir, run, normalized, opts) {
+  const verdict = normalized.aggregate;
+  if (verdict.reason === "external-merge") return postPrTerminal(runDir, run, "completed", "post-pr-external-merge", opts);
+  if (verdict.reason === "external-state") return postPrTerminal(runDir, run, "blocked", "post-pr-pr-closed", opts);
+  if (verdict.reason === "head-mismatch") return postPrTerminal(runDir, run, "needs-human", "post-pr-head-mismatch", opts);
+  if (normalized.review.verdict === "red") return postPrTerminal(runDir, run, "needs-human", "post-pr-review-changes-requested", opts);
+  if (verdict.verdict === "green") {
+    return postPrTerminal(runDir, run, "completed", normalized.is_draft ? "post-pr-draft-ci-green" : "post-pr-ci-green", opts);
+  }
+  if (verdict.verdict !== "red") return { run_id: run.run_id, action: "scheduled", next_poll_at: run.post_pr.observation.next_poll_at, post_pr: postPrSummary(run) };
+
+  const failingChecks = normalized.checks.checks.filter((check) => check.verdict === "red");
+  const plan = acceptedSlicesPlan(runDir, run);
+  let changed = { paths: [], changes: [], complete: true };
+  let ownership = classifyOwnership({ slices: plan.slices, failingCheckNames: failingChecks.map((check) => check.name), paths: [] });
+  if (ownership.disposition !== "route" || ownership.owner?.kind === "integration") {
+    try {
+      changed = await fetchChangedFiles(githubOperationInput(repo, run, opts, persistedPrIdentity(run)));
+      ownership = classifyOwnership({ slices: plan.slices, failingCheckNames: failingChecks.map((check) => check.name), ...changed });
+    } catch (error) {
+      ownership = { disposition: "needs-human", owner: null, route: null, lane: null, reason: "changed-files-incomplete" };
+    }
+  }
+  const attempt = run.post_pr.attempt + 1;
+  const built = buildFailureEvidenceInput({
+    runId: run.run_id, attempt, observedAt: run.post_pr.observation.last_observed_at,
+    repository: persistedPrIdentity(run).repository, prNumber: persistedPrIdentity(run).number, prUrl: run.pr_url,
+    expectedHeadSha: run.post_pr.observation.expected_head_sha, observedHeadSha: normalized.head_sha,
+    failingChecks, review: null, ownership, exitCode: 0,
+  });
+  const evidence = { ...built, source: "check-red", failed_head_sha: run.post_pr.observation.expected_head_sha };
+  const binding = publishRunJsonEvidence(runDir, `evidence/post-pr-ci.attempt-${attempt}.json`, evidence);
+  if (ownership.disposition !== "route") {
+    return postPrTerminal(runDir, run, "needs-human", ownership.reason === "changed-files-incomplete" ? "post-pr-metadata-unsafe" : "post-pr-owner-ambiguous", opts, { latest_evidence: binding.ref });
+  }
+  const max = Number.isInteger(run.max_retries) ? run.max_retries : 3;
+  if (run.post_pr.attempt >= max) return exhaustPostPr(runDir, run, opts);
+  const remediation = newRemediation(run, attempt, evidence.failure_fingerprint, binding, ownership);
+  await transitionPostPrFailure(runDir, { remediation }, opts);
+  const reserved = readRunFile(join(runDir, "run.json"));
+  const planned = cloneJson(reserved.post_pr);
+  planned.phase = "remediation-planned";
+  planned.remediation.stage = "planned";
+  await transitionPostPrState(runDir, planned, opts);
+  return { run_id: run.run_id, action: "remediation-planned", attempt, route: ownership.route, owner: ownership.owner, evidence: binding, post_pr: postPrSummary({ ...run, post_pr: planned }) };
+}
+
+function newRemediation(run, attempt, fingerprint, binding, ownership) {
+  const failedHead = run.post_pr.observation.expected_head_sha;
+  return {
+    schema_version: 1, attempt, reason_code: "check-red", failure_fingerprint: fingerprint,
+    failed_head_sha: failedHead, failure_evidence_ref: binding.ref, failure_evidence_hash: binding.hash,
+    owner: ownership.owner, route: ownership.route, lane: ownership.lane, stage: "planned", baseline_head_sha: failedHead,
+    dispatch: { id: randomUUID(), status: "planned", role: ownership.route, subject: ownership.owner.kind === "slice" ? ownership.owner.slice_id : "integration", started_at: null, returned_at: null },
+    changes: { paths: [], tree_hash: null }, candidate_head_sha: null, remediation_evidence_ref: null, remediation_evidence_hash: null,
+    revalidation: { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null, validator_review_ref: null, validator_review_hash: null, validator_verdict: null, security_review_ref: null, security_review_hash: null, security_verdict: null },
+    push: { status: "not-ready", remote_before_sha: null, local_head_sha: null, remote_after_sha: null, consecutive_transient_errors: 0, next_retry_at: null, pushed_at: null },
+  };
+}
+
+async function handleObserverError(runDir, run, error, opts) {
+  const classified = error instanceof PostPrCiError ? error : new PostPrCiError("command", "GitHub observer failed", { cause: error });
+  const next = cloneJson(run.post_pr);
+  const count = next.observation.consecutive_transient_errors + 1;
+  if (classified.transient) {
+    const schedule = decideTransientSchedule({ now: timestamp(opts.now), deadlineAt: next.observation.deadline_at, consecutiveErrors: count,
+      maxTransientErrors: next.policy.max_transient_errors, retryAfterMs: classified.retryAfterMs, rateLimited: classified.rateLimited,
+      unchangedCount: next.observation.unchanged_count });
+    next.observation.consecutive_transient_errors = count;
+    const errorClass = durableErrorClass(classified.errorClass);
+    next.observation.last_error = { class: errorClass, exit_code: classified.exitCode, occurred_at: timestamp(opts.now), next_retry_at: schedule.next_poll_at };
+    if (schedule.action === "schedule") {
+      next.observation.next_poll_at = schedule.next_poll_at;
+      await transitionPostPrState(runDir, next, opts);
+      return { run_id: run.run_id, action: "transient-error", next_poll_at: schedule.next_poll_at, error_class: classified.errorClass };
+    }
+  }
+  next.observation.last_verdict = "infrastructure";
+  const errorClass = durableErrorClass(classified.errorClass);
+  next.observation.last_error = { class: errorClass, exit_code: classified.exitCode, occurred_at: timestamp(opts.now), next_retry_at: null };
+  await transitionPostPrState(runDir, next, opts);
+  const current = readRunFile(join(runDir, "run.json"));
+  if (classified.errorClass === "account-switch") {
+    return postPrTerminal(runDir, current, "needs-human", "post-pr-account-switch-failed", opts, {}, { schema_version: 1, kind: "account-switch-failed", observed_at: next.observation.last_error.occurred_at, operation: "gh-auth-switch", github_account: run.github_account, error_class: errorClass, exit_code: classified.exitCode });
+  }
+  return postPrTerminal(runDir, current, "blocked", "post-pr-observer-infrastructure", opts);
+}
+
+async function postPrTerminal(runDir, run, statusValue, reason, opts, artifacts = {}, triggerFact, continuationReview) {
+  await transitionPostPrTerminal(runDir, { status: statusValue, reason, artifacts, ...(triggerFact ? { trigger_fact: triggerFact } : {}), ...(continuationReview ? { continuation_review: continuationReview } : {}) }, opts);
+  const current = readRunFile(join(runDir, "run.json"));
+  return { run_id: run.run_id, action: "terminal", status: current.status, reason, terminal_result: current.terminal_result, post_pr: postPrSummary(current) };
+}
+
+async function markPostPrRemediationRunning(runDir, run, opts) {
+  let next = cloneJson(run.post_pr);
+  if (next.phase === "failure-recording") { next.phase = "remediation-planned"; await transitionPostPrState(runDir, next, opts); }
+  const current = readRunFile(join(runDir, "run.json"));
+  next = cloneJson(current.post_pr);
+  if (next.phase === "remediation-running" && next.remediation.dispatch.status === "running") return { run_id: run.run_id, action: "remediation-running", post_pr: postPrSummary(current) };
+  if (next.phase !== "remediation-planned") throw new Error("running remediation requires remediation-planned phase");
+  next.phase = "remediation-running"; next.remediation.stage = "running"; next.remediation.dispatch.status = "running"; next.remediation.dispatch.started_at = timestamp(opts.now);
+  await transitionPostPrState(runDir, next, opts);
+  return { run_id: run.run_id, action: "remediation-running", role: next.remediation.route, subject: next.remediation.dispatch.subject, post_pr: postPrSummary({ ...run, post_pr: next }) };
+}
+
+async function markPostPrRevalidating(runDir, run, opts) {
+  const ref = requiredStringOption(opts.remediationEvidenceRef, "--remediation-evidence-ref");
+  const evidence = readBoundRunJson(runDir, ref, "evidence");
+  const paths = Array.isArray(evidence.value.changed_paths) ? evidence.value.changed_paths : Array.isArray(evidence.value.paths) ? evidence.value.paths : [];
+  const plan = acceptedSlicesPlan(runDir, run);
+  const slice = run.post_pr.remediation.owner.kind === "slice" ? plan.slices.find((item) => item.id === run.post_pr.remediation.owner.slice_id) : null;
+  const lane = validateLane({ lane: run.post_pr.remediation.lane, slice, paths, changes: evidence.value.changes });
+  if (!lane.ok) return terminalLaneViolation(runDir, run, opts, lane.reason, paths);
+  const head = git(run.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!head.ok || head.stdout.trim() === run.post_pr.remediation.failed_head_sha) throw new Error("revalidating requires a new local candidate HEAD");
+  let next = cloneJson(run.post_pr);
+  next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.dispatch.status = "returned"; next.remediation.dispatch.returned_at = timestamp(opts.now);
+  next.remediation.changes = { paths, tree_hash: hashJson(paths) }; next.remediation.candidate_head_sha = head.stdout.trim(); next.remediation.remediation_evidence_ref = ref; next.remediation.remediation_evidence_hash = evidence.hash;
+  await transitionPostPrState(runDir, next, opts);
+  next.phase = "committed"; next.remediation.stage = "committed"; await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree });
+  next.phase = "revalidating"; next.remediation.stage = "revalidating"; await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree });
+  return { run_id: run.run_id, action: "revalidating", candidate_head_sha: next.remediation.candidate_head_sha, route: next.remediation.route };
+}
+
+async function terminalLaneViolation(runDir, run, opts, reason, paths) {
+  const path = paths[0] || "unknown";
+  const next = cloneJson(run.post_pr);
+  next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.changes = { paths: paths.length ? paths : [path], tree_hash: null };
+  await transitionPostPrState(runDir, next, opts);
+  const current = readRunFile(join(runDir, "run.json"));
+  return postPrTerminal(runDir, current, "needs-human", "post-pr-path-lane-violation", opts, {}, { schema_version: 1, kind: "path-lane-violation", observed_at: timestamp(opts.now), attempt: current.post_pr.attempt, lane: current.post_pr.remediation.lane, source: "remediation-diff", violation: reason === "unsafe-change-kind" ? "unsafe-change-kind" : "outside-lane", path_b64url: Buffer.from(path).toString("base64url"), changes_hash: hashJson(current.post_pr.remediation.changes) });
+}
+
+async function completePostPrRemediation(repo, runDir, run, opts) {
+  if (run.post_pr.phase !== "revalidating") throw new Error("complete remediation requires revalidating phase");
+  const candidate = requiredStringOption(opts.headSha, "--head-sha");
+  const canonical = readBoundRunJson(runDir, requiredStringOption(opts.testEvidenceRef, "--test-evidence-ref"), "evidence");
+  const validatorReport = readBoundRunFile(runDir, requiredStringOption(opts.validatorReportRef, "--validator-report-ref"), "artifacts");
+  const validator = readBoundRunJson(runDir, requiredStringOption(opts.validatorReviewRef, "--validator-review-ref"), "reviews");
+  const security = readBoundRunJson(runDir, requiredStringOption(opts.securityReviewRef, "--security-review-ref"), "reviews");
+  if (!/^[0-9a-f]{40}$/u.test(candidate) || candidate !== run.post_pr.remediation.candidate_head_sha) throw new Error("--head-sha must equal the new persisted candidate head");
+  if (validator.value.report !== undefined && validator.value.report !== validatorReport.ref) throw new Error("validator review report must match --validator-report-ref");
+  if (!["pass", "PASS"].includes(canonical.value.verdict) || !["GO", "GO-WITH-NITS"].includes(validator.value.verdict) || security.value.verdict !== "PASS") throw new Error("complete remediation requires canonical pass, validator GO|GO-WITH-NITS, and security PASS");
+  let next = cloneJson(run.post_pr);
+  Object.assign(next.remediation.revalidation, { canonical_evidence_ref: canonical.ref, canonical_evidence_hash: canonical.hash, canonical_verdict: "pass", validator_review_ref: validator.ref, validator_review_hash: validator.hash, validator_verdict: validator.value.verdict, security_review_ref: security.ref, security_review_hash: security.hash, security_verdict: "PASS" });
+  next.phase = "validated"; next.remediation.stage = "validated";
+  await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree });
+  const identity = persistedPrIdentity(run);
+  next.phase = "push-pending"; next.remediation.stage = "push-pending"; next.remediation.push = { ...next.remediation.push, status: "pending", remote_before_sha: next.remediation.baseline_head_sha, local_head_sha: candidate };
+  await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree });
+  await claimPostPrAction(runDir, "post-pr-push", opts);
+  const remoteBefore = remoteBranchHead(repo, run.branch);
+  let remoteAfter = remoteBefore;
+  if (remoteBefore !== candidate) {
+    if (remoteBefore !== next.remediation.baseline_head_sha) return postPrTerminal(runDir, readRunFile(join(runDir, "run.json")), "needs-human", "post-pr-remote-head-diverged", opts, {}, { schema_version: 1, kind: "remote-head-diverged", observed_at: timestamp(opts.now), attempt: run.post_pr.attempt, expected_remote_sha: next.remediation.baseline_head_sha, observed_remote_sha: remoteBefore, candidate_head_sha: candidate });
+    const pushed = git(run.worktree, ["push", "origin", `${run.branch}:${run.branch}`], { timeout: 30000 });
+    if (!pushed.ok) throw new Error("normal fast-forward post-PR push failed");
+    remoteAfter = remoteBranchHead(repo, run.branch);
+  }
+  if (remoteAfter !== candidate) throw new Error("post-PR push completed without confirming the candidate remote head");
+  next.phase = "remote-confirmed"; next.remediation.stage = "remote-confirmed"; next.remediation.push = { ...next.remediation.push, status: "confirmed", remote_after_sha: candidate, pushed_at: timestamp(opts.now) };
+  await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree });
+  const confirmed = cloneJson(next); const startedAt = timestamp(opts.now);
+  confirmed.phase = "observing"; confirmed.observation = { ...confirmed.observation, epoch: confirmed.observation.epoch + 1, expected_head_sha: candidate, started_at: startedAt, deadline_at: new Date(Date.parse(startedAt) + confirmed.policy.wait_ms).toISOString(), next_poll_at: startedAt, poll_count: 0, unchanged_count: 0, current_interval_ms: confirmed.policy.initial_poll_ms, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "not_started", last_review_verdict: confirmed.policy.review.required ? "pending" : "not_required", last_verdict: "pending", last_error: null, snapshot: null };
+  await transitionPostPrState(runDir, confirmed, { ...opts, worktree: run.worktree });
+  return { run_id: run.run_id, action: "observing", epoch: confirmed.observation.epoch, expected_head_sha: candidate, repository: identity.repository };
+}
+
+async function failPostPrRevalidation(runDir, run, opts) {
+  if (run.post_pr.phase !== "revalidating") throw new Error("failed remediation requires revalidating phase");
+  const ref = requiredStringOption(opts.failureEvidenceRef, "--failure-evidence-ref");
+  const binding = readBoundRunJson(runDir, ref, "evidence");
+  const max = Number.isInteger(run.max_retries) ? run.max_retries : 3;
+  if (run.post_pr.attempt >= max) return exhaustPostPr(runDir, run, opts);
+  const prior = run.post_pr.remediation;
+  const attempt = run.post_pr.attempt + 1;
+  if (binding.value.run_id !== run.run_id || binding.value.attempt !== attempt || binding.value.source !== "local-red" || binding.value.verdict !== "red"
+    || binding.value.failed_head_sha !== prior.candidate_head_sha || !/^sha256:[a-f0-9]{64}$/u.test(binding.value.failure_fingerprint || "")) {
+    throw new Error("local failure evidence must bind the next attempt, current candidate head, source local-red, and failure fingerprint");
+  }
+  const remediation = newRemediation(run, attempt, binding.value.failure_fingerprint, binding, { owner: prior.owner, route: prior.route, lane: prior.lane });
+  remediation.reason_code = "local-red";
+  remediation.failed_head_sha = prior.candidate_head_sha;
+  remediation.baseline_head_sha = prior.candidate_head_sha;
+  await transitionPostPrFailure(runDir, { remediation }, opts);
+  const current = readRunFile(join(runDir, "run.json"));
+  const next = cloneJson(current.post_pr); next.phase = "remediation-planned";
+  await transitionPostPrState(runDir, next, opts);
+  return { run_id: run.run_id, action: "remediation-planned", attempt, route: remediation.route, evidence: { ref: binding.ref, hash: binding.hash } };
 }
 
 export async function writeSteering(runId, message, opts = {}) {
@@ -667,6 +956,7 @@ export function listRuns(opts = {}) {
         steering: steeringSummary(run.value),
         cost_summary: publicCostSummaryOrNull(run.value),
         review_tier: selectedReviewTier(run.value),
+        post_pr: postPrSummary(run.value),
         updated_at: run.value.updated_at || null,
         path: file,
         diagnostics,
@@ -704,6 +994,7 @@ export function status(runId, opts = {}) {
     gates: run.gates || {},
     pr_url: run.pr_url || null,
     review_tier: run.review_tier || null,
+    post_pr: postPrSummary(run),
     terminal_result: run.terminal_result || null,
     updated_at: run.updated_at || null,
     diagnostics,
@@ -1157,6 +1448,10 @@ function buildContinuation(parentRunId, opts = {}) {
   if (parentRun.status !== "blocked") {
     throw new Error(`parent run '${parentRun.run_id}' must have status blocked`);
   }
+  const postPrParent = stringValue(parentRun.pr_url);
+  if (postPrParent && opts.newPr !== true) throw new Error("factory continue for a blocked parent with pr_url requires --new-pr");
+  if (!postPrParent && opts.newPr === true) throw new Error("factory continue --new-pr is accepted only for a blocked parent with pr_url");
+  if (postPrParent) assertPostPrContinuationParent(parentRun);
   if (!stringValue(parentRun.branch)) {
     throw new Error(`parent run '${parentRun.run_id}' must have a local branch`);
   }
@@ -1167,12 +1462,18 @@ function buildContinuation(parentRunId, opts = {}) {
   const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
   assertContinuationTargetAvailable(repo, targetRunId);
   const review = resolveContinuationReview(parentRunDir, requiredContinuationReview(opts.review));
+  if (postPrParent) {
+    if (review.ref !== parentRun.post_pr.continuation_review.ref) throw new Error("post-PR continuation must select run.post_pr.continuation_review.ref");
+    if (sha256File(review.path) !== parentRun.post_pr.continuation_review.hash) throw new Error("post-PR continuation review hash mismatch");
+    const failed = postPrConsistencyChecks(parentRunDir, parentRun).filter((check) => !check.ok);
+    if (failed.length) throw new Error("post-PR continuation parent has invalid evidence/review bindings");
+  }
   const reviewSource = resolveContinuationReviewSource(parentRun, review.ref);
   const reviewMetadata = validateContinuationReview(readReviewJson(review.path), review.ref, reviewSource, parentRunDir);
   const targetBaseRef = continuationBaseRef(parentRun);
   const targetBaseCommit = continuationBaseCommit(repo, parentRun, targetBaseRef);
 
-  return {
+  const continuation = {
     kind: "blocked-run-continuation",
     schema_version: 1,
     created_at: timestamp(opts.now),
@@ -1204,6 +1505,8 @@ function buildContinuation(parentRunId, opts = {}) {
     parent_reviews: collectContinuationParentReviews(parentRunDir, parentRun),
     planning_reuse: continuationPlanningReuse(parentRun, parentRunDir),
   };
+  if (postPrParent) continuation.post_pr = continuationPostPrBinding(parentRun);
+  return continuation;
 }
 
 function requiredParentWorktree(parentRun) {
@@ -1325,6 +1628,9 @@ function resolveContinuationReviewSource(parentRun, reviewRef) {
 function continuationReviewSources(parentRun) {
   const parentSubjects = new Set([parentRun.run_id, parentRun.branch, "feature-branch"].filter(stringValue).map((value) => String(value).trim()));
   const sources = [];
+  if (stringValue(parentRun.post_pr?.continuation_review?.ref)) {
+    sources.push({ kind: "post_pr", source: "run.post_pr.continuation_review.ref", ref: parentRun.post_pr.continuation_review.ref, expected_subjects: new Set([parentRun.run_id]) });
+  }
   if (stringValue(parentRun.validator?.review_ref)) {
     sources.push({ kind: "validator", source: "run.validator.review_ref", ref: parentRun.validator.review_ref, expected_subjects: parentSubjects });
   }
@@ -1590,6 +1896,7 @@ function collectContinuationParentEvidence(parentRunDir, parentRun) {
   const refs = [];
   for (const step of Array.isArray(parentRun.steps) ? parentRun.steps : []) if (stringValue(step?.evidence_ref)) refs.push(step.evidence_ref);
   for (const slice of Array.isArray(parentRun.slices) ? parentRun.slices : []) if (stringValue(slice?.evidence_ref)) refs.push(slice.evidence_ref);
+  if (stringValue(parentRun.post_pr?.remediation?.failure_evidence_ref)) refs.push(parentRun.post_pr.remediation.failure_evidence_ref);
   return hashUniqueParentRefs(parentRunDir, refs, "evidence", "evidence");
 }
 
@@ -2202,6 +2509,7 @@ function buildResumePayload(run, opts) {
       schema_version: 1,
       kind: "existing-run-resume",
       run_id: run.run_id,
+      ...(run.post_pr?.policy ? { post_pr_policy: cloneJson(run.post_pr.policy) } : {}),
     },
     steering,
   };
@@ -2298,9 +2606,12 @@ function featureCommandPayload(prompt, opts) {
     mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
     ready: Boolean(opts.ready),
     pr_mode: runPrModeOverride(opts),
-    reviewer: stringValue(opts.reviewer) ? opts.reviewer : null,
+    reviewer: stringValue(opts.reviewer) ? opts.reviewer : opts.continuation?.post_pr?.policy?.review?.reviewer_login || null,
     github_account: githubAccount,
   };
+  const postPrPolicy = postPrDriverOverride(opts);
+  if (postPrPolicy !== null) driver.post_pr_ci = postPrPolicy;
+  else if (opts.continuation?.post_pr?.policy) driver.post_pr_ci = Object.fromEntries(Object.entries(cloneJson(opts.continuation.post_pr.policy)).filter(([key]) => key !== "review"));
   if (stringValue(opts.requestedRunId)) driver.run_id = opts.requestedRunId;
   const payload = {
     operator_request: String(prompt),
@@ -2509,6 +2820,156 @@ function heartbeatLiveness(heartbeat, now, opts = {}) {
     age_ms: ageMs,
     stale_after: Number.isFinite(lastTickMs) ? new Date(lastTickMs + staleMs).toISOString() : null,
   };
+}
+
+function assertPostPrCliOptions(opts, { command, resume = false } = {}) {
+  if (opts.postPrCi && opts.noPostPrCi) throw new Error(`${command} accepts only one of --post-pr-ci or --no-post-pr-ci`);
+  const timing = [opts.postPrWaitMinutes, opts.postPrPollSeconds, opts.postPrMaxPollSeconds, opts.postPrCheckStartGraceSeconds, opts.postPrMaxTransientErrors];
+  if (resume && (opts.postPrCi || opts.noPostPrCi || timing.some((value) => value !== undefined))) throw new Error("factory resume rejects post-PR policy flags; the persisted policy is authoritative");
+  if (!resume && timing.some((value) => value !== undefined) && !opts.postPrCi) throw new Error(`${command} post-PR timing flags require --post-pr-ci`);
+  postPrDriverOverride(opts);
+}
+
+function postPrDriverOverride(opts = {}) {
+  const hasTiming = [opts.postPrWaitMinutes, opts.postPrPollSeconds, opts.postPrMaxPollSeconds, opts.postPrCheckStartGraceSeconds, opts.postPrMaxTransientErrors].some((value) => value !== undefined);
+  if (!opts.postPrCi && !opts.noPostPrCi && !hasTiming) return null;
+  const policy = { enabled: Boolean(opts.postPrCi) };
+  for (const [field, value, multiplier, min, max] of [
+    ["wait_ms", opts.postPrWaitMinutes, 60_000, 30, 1440], ["initial_poll_ms", opts.postPrPollSeconds, 1000, 15, 300],
+    ["max_poll_ms", opts.postPrMaxPollSeconds, 1000, 15, 600], ["check_start_grace_ms", opts.postPrCheckStartGraceSeconds, 1000, 60, 900],
+    ["max_transient_errors", opts.postPrMaxTransientErrors, 1, 1, 50],
+  ]) {
+    if (value === undefined) continue;
+    if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${field} must be an integer from ${min} to ${max}`);
+    policy[field] = value * multiplier;
+  }
+  if (policy.max_poll_ms !== undefined && policy.initial_poll_ms !== undefined && policy.max_poll_ms < policy.initial_poll_ms) throw new Error("post-PR maximum poll must be greater than or equal to initial poll");
+  return policy;
+}
+
+function assertPostPrExternalWorkReady(runDir, run, opts = {}) {
+  if (run.steering?.pending || run.steering?.uncheckpointed) throw new Error("post-PR work requires steering to be drained and acknowledged first");
+  if (run.steering?.boundary || run.steering?.action_claim || run.steering?.pr_fence) throw new Error("post-PR work requires no open steering boundary, action claim, or PR fence");
+  const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
+  if (heartbeat.error) throw new Error(`post-PR work requires valid inactive heartbeat: ${heartbeat.error}`);
+  if (heartbeat.value && heartbeatBlocksReplacement(heartbeat.value, timestamp(opts.now), opts)) throw new Error("post-PR work requires inactive heartbeat");
+}
+
+async function claimPostPrAction(runDir, kind, opts = {}) {
+  const opened = await transitionSteeringBoundaryOpened(runDir, kind, opts);
+  const crossed = await transitionSteeringBoundaryCrossed(runDir, kind, opened.boundary.token, opts);
+  await transitionSteeringActionStarted(runDir, kind, crossed.action_claim.token, opts);
+}
+
+function githubOperationInput(repo, run, opts, extra = {}) {
+  return { repositoryRoot: repo, cwd: repo, account: run.github_account, executable: opts.ghExecutable, execute: opts.executeGithub, spawnImpl: opts.spawnImpl, lockOptions: opts.githubLockOptions, ...extra };
+}
+
+function persistedPrIdentity(run) {
+  const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/u.exec(run.pr_url || "");
+  if (!match) throw new Error("post-PR observation requires canonical persisted PR identity");
+  return { repository: match[1], number: Number(match[2]), prNumber: Number(match[2]) };
+}
+
+function durableObservationVerdict(aggregate) {
+  if (aggregate.reason === "external-merge") return "external-merge";
+  if (aggregate.reason === "external-state") return "closed";
+  if (aggregate.reason === "head-mismatch") return "head-mismatch";
+  return aggregate.verdict === "green" ? "green" : aggregate.verdict === "red" || aggregate.verdict === "needs-human" ? "red" : "pending";
+}
+
+function sanitizedObservationSnapshot(normalized) {
+  return { head_sha: normalized.head_sha, state: normalized.state, is_draft: normalized.is_draft, checks: normalized.checks, review: normalized.review, aggregate: normalized.aggregate };
+}
+
+function durableErrorClass(value) {
+  if (value === "http-transient") return "server";
+  if (value === "account-switch" || value === "lock-timeout" || value === "lock-identity") return "command";
+  return ["timeout", "network", "rate-limit", "server", "account-auth", "permission", "not-found", "protocol", "command"].includes(value) ? value : "command";
+}
+
+function acceptedSlicesPlan(runDir, run) {
+  const file = join(runDir, "plan", "slices.json");
+  if (existsSync(file)) return validateSlicesPlan(JSON.parse(readFileSync(file, "utf8")));
+  const slices = (Array.isArray(run.slices) ? run.slices : []).filter((slice) => stringValue(slice?.id) && Array.isArray(slice.paths)).map((slice) => ({ id: slice.id, stack: slice.stack, paths: slice.paths }));
+  return { slices };
+}
+
+function publishRunJsonEvidence(runDir, ref, value) {
+  const path = resolve(runDir, ref);
+  const rootDir = join(runDir, ref.split("/")[0]);
+  if (!isLogicalContainedPath(rootDir, path, { allowEqual: false })) throw new Error("post-PR evidence ref escapes run directory");
+  const rootEntry = lstatOptionalNoSymlinks(runDir, rootDir, rootDir, "post-PR evidence root must not contain symlinks");
+  if (rootEntry && !rootEntry.isDirectory()) throw new Error("post-PR evidence root must be a directory");
+  if (!rootEntry) mkdirSync(rootDir, { recursive: false });
+  const bytes = `${JSON.stringify(value, null, 2)}\n`;
+  if (existsSync(path)) {
+    const entry = lstatRequiredNoSymlinks(runDir, path, ref, "post-PR evidence file must not contain symlinks");
+    if (!entry.isFile()) throw new Error("post-PR evidence destination must be a regular file");
+    if (readFileSync(path, "utf8") !== bytes) throw new Error(`conflicting post-PR evidence replay: ${ref}`);
+  } else writeFileSync(path, bytes, { flag: "wx" });
+  return { ref, hash: sha256File(path) };
+}
+
+function readBoundRunJson(runDir, ref, rootName) {
+  const bound = readBoundRunFile(runDir, ref, rootName);
+  const value = readReviewJson(bound.path);
+  return { ref: bound.ref, hash: bound.hash, value };
+}
+
+function readBoundRunFile(runDir, ref, rootName) {
+  if (!stringValue(ref) || isAbsolute(ref) || ref.includes("\\") || !ref.startsWith(`${rootName}/`)) throw new Error(`ref must be under ${rootName}/`);
+  const path = resolve(runDir, ref);
+  const entry = lstatRequiredNoSymlinks(runDir, path, ref, `${ref} must not contain symlinks`);
+  if (!entry.isFile()) throw new Error(`${ref} must be a regular file`);
+  return { ref, path, hash: sha256File(path) };
+}
+
+function requiredStringOption(value, flag) { if (!stringValue(value)) throw new Error(`post-pr-remediation requires ${flag}`); return String(value).trim(); }
+function cloneJson(value) { return JSON.parse(JSON.stringify(value)); }
+function hashJson(value) { return hashValue(value); }
+
+function postPrSummary(run) {
+  const value = run?.post_pr;
+  if (!value) return null;
+  return { enabled: value.policy?.enabled === true, phase: value.phase, attempt: value.attempt, max_retries: Number.isInteger(run.max_retries) ? run.max_retries : 3,
+    deadline_at: value.observation?.deadline_at || null, next_poll_at: value.observation?.next_poll_at || null, last_verdict: value.observation?.last_verdict || null,
+    error_class: value.observation?.last_error?.class || null, owner: value.remediation?.owner || null, route: value.remediation?.route || null,
+    latest_evidence: value.evidence_refs?.at(-1) || null };
+}
+
+function remoteBranchHead(repo, branch) {
+  const proc = git(repo, ["ls-remote", "--heads", "origin", `refs/heads/${branch}`], { timeout: 30000 });
+  if (!proc.ok) throw new Error("could not inspect remote branch head");
+  const value = proc.stdout.trim().split(/\s+/u)[0];
+  if (!/^[0-9a-f]{40}$/u.test(value || "")) throw new Error("remote branch head is missing or malformed");
+  return value;
+}
+
+function assertPostPrContinuationParent(run) {
+  if (run.post_pr?.phase !== "blocked" || run.terminal_result?.reason !== "post-pr-retry-exhausted" || !run.post_pr?.continuation_review?.ref) throw new Error("--new-pr requires a retry-exhausted blocked post-PR parent with continuation review");
+}
+
+function continuationPostPrBinding(run) {
+  const remediation = run.post_pr.remediation;
+  const postPrForHash = cloneJson(run.post_pr); delete postPrForHash.continuation_review;
+  const identity = persistedPrIdentity(run);
+  return { pr_url: run.pr_url, repository: identity.repository, pr_number: identity.number,
+    head_sha: run.post_pr.observation?.expected_head_sha || remediation.candidate_head_sha || remediation.failed_head_sha, disposition: "leave-unchanged",
+    policy: cloneJson(run.post_pr.policy), post_pr_hash: hashJson(postPrForHash), evidence_ref: remediation.failure_evidence_ref, evidence_hash: remediation.failure_evidence_hash,
+    continuation_review_ref: run.post_pr.continuation_review.ref, continuation_review_hash: run.post_pr.continuation_review.hash };
+}
+
+async function exhaustPostPr(runDir, run, opts) {
+  const remediation = run.post_pr.remediation;
+  const postPrForHash = cloneJson(run.post_pr); delete postPrForHash.continuation_review;
+  const identity = persistedPrIdentity(run);
+  const review = { kind: "post-pr-continuation", subject: run.run_id, verdict: "BLOCKED", attempt: run.post_pr.attempt, reason: "post-pr-retry-exhausted", route: remediation.route,
+    evidence_ref: remediation.failure_evidence_ref, evidence_hash: remediation.failure_evidence_hash, post_pr_hash: hashJson(postPrForHash), pr_url: run.pr_url,
+    repository: identity.repository, pr_number: identity.number, head_sha: run.post_pr.observation?.expected_head_sha || remediation.candidate_head_sha || remediation.failed_head_sha,
+    pr_disposition: "leave-unchanged", summary: "Post-PR remediation retry budget exhausted.", required_fixes: ["Resolve the recorded failing checks on a fresh continuation PR."] };
+  const binding = publishRunJsonEvidence(runDir, `reviews/post-pr-ci.attempt-${run.post_pr.attempt}.json`, review);
+  return postPrTerminal(runDir, run, "blocked", "post-pr-retry-exhausted", opts, { latest_failure: remediation.failure_evidence_ref, continuation_review: binding.ref }, undefined, binding);
 }
 
 function writeJsonAtomic(file, value) {
