@@ -87,6 +87,7 @@ describe("factory trace-context propagation", () => {
 
   it("propagates validated trace context into detached continue without putting it in the continuation payload", async () => {
     const fixture = createContinueLaunchFixture("continue-traceparent");
+    let detachedPid;
     try {
       await withLaunchEnv(fixture, {}, async () => {
         const result = await continueFactory(fixture.runId, {
@@ -97,6 +98,7 @@ describe("factory trace-context propagation", () => {
           traceparent,
         });
         assert.equal(result.status, "started");
+        detachedPid = result.pid;
         await waitForFile(fixture.captureFile);
       });
 
@@ -110,6 +112,7 @@ describe("factory trace-context propagation", () => {
       const payload = decoded.payload;
       assert.equal(JSON.stringify(payload).includes("TRACEPARENT"), false);
       assert.equal(JSON.stringify(payload).includes("4bf92f3577b34da6a3ce929d0e0e4736"), false);
+      await waitForProcessExit(detachedPid);
     } finally {
       cleanup(fixture.root);
     }
@@ -239,6 +242,20 @@ async function waitForFile(file) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`timed out waiting for ${file}`);
+}
+
+async function waitForProcessExit(pid) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() <= deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for detached process ${pid}`);
 }
 
 function initGitRepo(repo) {
