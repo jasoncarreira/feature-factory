@@ -91,6 +91,45 @@ describe("feature-factory install", () => {
       cleanup(home);
     }
   });
+
+  it("terminal-encodes both conflict path lists under a hostile HOME", () => {
+    const home = mkdtempSync(join(tmpdir(), "feature-factory-install-\u001B]0;pwned\u0007-"));
+    const skill = join(home, ".config", "opencode", "skills", "feature", "SKILL.md");
+    const agent = join(home, ".config", "opencode", "agent", "codebase-researcher.md");
+    try {
+      writeFile(skill, "old skill\n");
+      writeFile(agent, "old agent\n");
+      const proc = runInstall(home);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.match(proc.stderr, /existing global feature skill/u);
+      assert.match(proc.stderr, /existing global feature-factory agent definitions/u);
+      assert.equal((proc.stderr.match(/\\u001B/g) || []).length >= 2, true);
+      assert.doesNotMatch(`${proc.stdout}${proc.stderr}`, /[\u001B\u0007\u009B]/u);
+    } finally {
+      cleanup(home);
+    }
+  });
+
+  it("redacts Basic credentials from install and both conflict path outputs", () => {
+    const parent = tempHome();
+    const secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
+    const home = join(parent, `home Authorization: Basic ${secret},visible`);
+    const skill = join(home, ".config", "opencode", "skills", "feature", "SKILL.md");
+    const agent = join(home, ".config", "opencode", "agent", "codebase-researcher.md");
+    try {
+      writeFile(skill, "old skill\n");
+      writeFile(agent, "old agent\n");
+      const proc = runInstall(home);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.match(proc.stdout, /updated: .*Authorization: Basic \[redacted\],visible/u);
+      assert.match(proc.stderr, /existing global feature skill/u);
+      assert.match(proc.stderr, /existing global feature-factory agent definitions/u);
+      assert.equal((proc.stderr.match(/Authorization: Basic \[redacted\]/gu) || []).length, 2);
+      assert.doesNotMatch(`${proc.stdout}${proc.stderr}`, new RegExp(secret, "u"));
+    } finally {
+      cleanup(parent);
+    }
+  });
 });
 
 function runInstall(home) {
