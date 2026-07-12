@@ -17,6 +17,9 @@ export const HEARTBEAT_PHASES = Object.freeze([
   "implementation-validator",
   "security-reviewer",
   "remediation",
+  "post-pr-observation",
+  "post-pr-remediation",
+  "post-pr-revalidation",
 ]);
 export const HEARTBEAT_PROTECTED_GATES = Object.freeze(["story", "brief", "pre_pr"]);
 export const MAX_SLICE_DEPENDENCY_WAVES = 3;
@@ -42,6 +45,15 @@ const DEBUG_SNAPSHOT_EVENT_KEYS = new Set(["collected_at", "event", "diagnostic_
 const COST_ATTRIBUTION_STATUS_SET = new Set(COST_ATTRIBUTION_STATUSES);
 const COST_ATTRIBUTION_ENTRY_OPTIONAL_STRINGS = new Set(["step", "slice_id", "source", "operation", "provider", "model", "request_id", "cost_currency"]);
 const COST_ATTRIBUTION_NUMERIC_FIELDS = new Set([...USAGE_NUMERIC_FIELDS, ...COST_NUMERIC_FIELDS]);
+export const POST_PR_PHASES = Object.freeze(["disabled", "awaiting-pr", "observing", "failure-recording", "remediation-planned", "remediation-running", "changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed", "succeeded", "blocked", "needs-human"]);
+export const POST_PR_TERMINAL_REASONS = Object.freeze({
+  completed: ["post-pr-ci-green", "post-pr-draft-ci-green", "post-pr-external-merge"],
+  blocked: ["post-pr-retry-exhausted", "post-pr-observation-timeout", "post-pr-observer-infrastructure", "post-pr-pr-closed"],
+  "needs-human": ["post-pr-review-changes-requested", "post-pr-owner-ambiguous", "post-pr-account-switch-failed", "post-pr-head-mismatch", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged", "post-pr-metadata-unsafe"],
+});
+const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
+const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
+const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -80,6 +92,7 @@ export function validateRun(run) {
   validateDebugSnapshot(errors, run.debug_snapshot, "run.debug_snapshot");
   validateContinuation(errors, run, "run.continuation");
   validateSteering(errors, run.steering, "run.steering");
+  validatePostPr(errors, run, "run.post_pr");
 
   validateGateMap(errors, run.gates, "run.gates");
   validateRunSlices(errors, run.slices, "run.slices");
@@ -262,8 +275,49 @@ export function checkRunConsistency(runDir, run) {
   }
 
   checks.push(...steeringConsistencyChecks(runDir, validRun));
+  checks.push(...postPrConsistencyChecks(runDir, validRun));
 
   return { ok: checks.every((item) => item.ok), checks };
+}
+
+export function postPrConsistencyChecks(runDir, run) {
+  const postPr = run?.post_pr;
+  if (!isRecord(postPr)) return [];
+  const checks = [];
+  for (const [index, ref] of (Array.isArray(postPr.evidence_refs) ? postPr.evidence_refs : []).entries()) {
+    checks.push(refHashCheck(`run.post_pr.evidence_refs[${index}]`, runDir, ref, resolveEvidenceRef));
+  }
+  const remediation = postPr.remediation;
+  if (isRecord(remediation)) {
+    for (const [refKey, hashKey, resolver] of [
+      ["failure_evidence_ref", "failure_evidence_hash", resolveEvidenceRef],
+      ["remediation_evidence_ref", "remediation_evidence_hash", resolveEvidenceRef],
+      ["canonical_evidence_ref", "canonical_evidence_hash", resolveEvidenceRef, "revalidation"],
+      ["validator_review_ref", "validator_review_hash", resolveReviewRef, "revalidation"],
+      ["security_review_ref", "security_review_hash", resolveReviewRef, "revalidation"],
+    ]) {
+      const owner = argumentsForNestedRef(remediation, refKey, hashKey, resolver);
+      if (owner) checks.push(refHashCheck(`run.post_pr.remediation.${owner.prefix}${refKey}`, runDir, owner.value, resolver));
+    }
+  }
+  if (isRecord(postPr.continuation_review)) checks.push(refHashCheck("run.post_pr.continuation_review", runDir, postPr.continuation_review, resolveReviewRef));
+  return checks;
+}
+
+function argumentsForNestedRef(remediation, refKey, hashKey, resolver) {
+  const nested = ["canonical_evidence_ref", "validator_review_ref", "security_review_ref"].includes(refKey);
+  const source = nested ? remediation.revalidation : remediation;
+  if (!isRecord(source) || !stringValue(source[refKey])) return null;
+  return { prefix: nested ? "revalidation." : "", value: { ref: source[refKey], hash: source[hashKey] }, resolver };
+}
+
+function refHashCheck(name, runDir, value, resolver) {
+  return runCheck(name, () => {
+    const resolved = resolver(runDir, value.ref);
+    const actualHash = hashFile(resolved.path);
+    if (actualHash !== value.hash) fail([{ path: `${name}.hash`, message: "must match referenced file" }]);
+    return { ref: resolved.ref, path: resolved.path, hash: actualHash };
+  });
 }
 
 export function steeringConsistencyChecks(runDir, run) {
@@ -414,6 +468,7 @@ function validateContinuation(errors, run, path) {
   validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
   validateContinuationSelectedReview(errors, continuation, path);
   validateContinuationPlanningReuse(errors, continuation.planning_reuse, `${path}.planning_reuse`);
+  validateContinuationPostPr(errors, continuation.post_pr, `${path}.post_pr`);
 }
 
 function validateContinuationPlanningReuse(errors, reuse, path) {
@@ -429,6 +484,274 @@ function validateContinuationPlanningReuse(errors, reuse, path) {
     requiredString(errors, reuse, "spec_artifact_ref", `${path}.spec_artifact_ref`);
     requiredHash(errors, reuse, "spec_artifact_hash", `${path}.spec_artifact_hash`);
   }
+}
+
+function validateContinuationPostPr(errors, value, path) {
+  if (value === undefined || value === null) return;
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, new Set(["pr_url", "repository", "pr_number", "head_sha", "disposition", "policy", "post_pr_hash", "evidence_ref", "evidence_hash", "continuation_review_ref", "continuation_review_hash"]), path);
+  requiredString(errors, value, "pr_url", `${path}.pr_url`);
+  requiredString(errors, value, "repository", `${path}.repository`);
+  boundedInteger(errors, value, "pr_number", 1, Number.MAX_SAFE_INTEGER, `${path}.pr_number`);
+  requiredFullGitSha(errors, value, "head_sha", `${path}.head_sha`);
+  requiredEnum(errors, value, "disposition", new Set(["leave-unchanged"]), `${path}.disposition`);
+  validatePostPrPolicy(errors, value.policy, `${path}.policy`);
+  for (const key of ["post_pr_hash", "evidence_hash", "continuation_review_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
+  for (const key of ["evidence_ref", "continuation_review_ref"]) requiredString(errors, value, key, `${path}.${key}`);
+}
+
+function validatePostPr(errors, run, path) {
+  const value = run.post_pr;
+  if (value === undefined || value === null) return;
+  if (!isRecord(value)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  allowedKeys(errors, value, new Set(["schema_version", "policy", "phase", "attempt", "observation", "remediation", "evidence_refs", "continuation_review"]), path);
+  requiredInteger(errors, value, "schema_version", `${path}.schema_version`);
+  if (value.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  validatePostPrPolicy(errors, value.policy, `${path}.policy`);
+  requiredEnum(errors, value, "phase", POST_PR_PHASE_SET, `${path}.phase`);
+  requiredInteger(errors, value, "attempt", `${path}.attempt`);
+  if (Number.isInteger(value.attempt) && value.attempt < 0) errors.push({ path: `${path}.attempt`, message: "must be non-negative" });
+  if (Number.isInteger(value.attempt) && Number.isInteger(run.max_retries) && value.attempt > run.max_retries) errors.push({ path: `${path}.attempt`, message: "must not exceed run.max_retries" });
+  validatePostPrObservation(errors, value.observation, `${path}.observation`);
+  validatePostPrRemediation(errors, value.remediation, `${path}.remediation`);
+  validatePostPrRefHashArray(errors, value.evidence_refs, `${path}.evidence_refs`);
+  validatePostPrRefHash(errors, value.continuation_review, `${path}.continuation_review`, { optional: true });
+
+  const enabled = value.policy?.enabled === true;
+  if (!enabled && value.phase !== "disabled") errors.push({ path: `${path}.phase`, message: "disabled policy requires disabled phase" });
+  if (enabled && value.phase === "disabled") errors.push({ path: `${path}.phase`, message: "enabled policy cannot use disabled phase" });
+  if (enabled && POST_PR_ACTIVE_PHASES.has(value.phase)) {
+    if (run.status !== "running") errors.push({ path: "run.status", message: `must be running while post-PR phase is ${value.phase}` });
+    if (!stringValue(run.pr_url)) errors.push({ path: "run.pr_url", message: `is required while post-PR phase is ${value.phase}` });
+    if (run.terminal_result !== undefined && run.terminal_result !== null) errors.push({ path: "run.terminal_result", message: "must be null during active post-PR state" });
+  }
+  if (["observing", "remote-confirmed", "succeeded"].includes(value.phase) && !isRecord(value.observation)) errors.push({ path: `${path}.observation`, message: `is required for ${value.phase}` });
+  if (isRecord(value.observation) && isRecord(value.policy)) {
+    if (value.observation.current_interval_ms < value.policy.initial_poll_ms || value.observation.current_interval_ms > value.policy.max_poll_ms) errors.push({ path: `${path}.observation.current_interval_ms`, message: "must stay within persisted poll policy" });
+    if (value.observation.consecutive_transient_errors > value.policy.max_transient_errors) errors.push({ path: `${path}.observation.consecutive_transient_errors`, message: "must not exceed persisted transient error budget" });
+  }
+  if (["failure-recording", "remediation-planned", "remediation-running", "changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"].includes(value.phase) && !isRecord(value.remediation)) errors.push({ path: `${path}.remediation`, message: `is required for ${value.phase}` });
+  if (isRecord(value.remediation) && value.remediation.attempt !== value.attempt) errors.push({ path: `${path}.remediation.attempt`, message: "must equal run.post_pr.attempt" });
+  if (isRecord(value.remediation)) {
+    const expectedStage = new Map([["remediation-planned", "planned"], ["remediation-running", "running"], ["changes-observed", "changes-observed"], ["committed", "committed"], ["revalidating", "revalidating"], ["validated", "validated"], ["push-pending", "push-pending"], ["remote-confirmed", "remote-confirmed"]]).get(value.phase);
+    if (expectedStage && value.remediation.stage !== expectedStage) errors.push({ path: `${path}.remediation.stage`, message: `must be ${expectedStage} while phase is ${value.phase}` });
+    const boundFailure = Array.isArray(value.evidence_refs) && value.evidence_refs.some((item) => item?.ref === value.remediation.failure_evidence_ref && item?.hash === value.remediation.failure_evidence_hash);
+    if (!boundFailure) errors.push({ path: `${path}.evidence_refs`, message: "must bind the current failure evidence ref/hash" });
+  }
+  if (isRecord(value.continuation_review) && !(value.phase === "blocked" && run.terminal_result?.reason === "post-pr-retry-exhausted")) errors.push({ path: `${path}.continuation_review`, message: "is allowed only for retry exhaustion" });
+  validatePostPrTerminalConsistency(errors, run, value, path);
+}
+
+function validatePostPrPolicy(errors, policy, path) {
+  if (!isRecord(policy)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  allowedKeys(errors, policy, new Set(["enabled", "wait_ms", "initial_poll_ms", "max_poll_ms", "check_start_grace_ms", "max_transient_errors", "review"]), path);
+  requiredBoolean(errors, policy, "enabled", `${path}.enabled`);
+  boundedInteger(errors, policy, "wait_ms", 1_800_000, 86_400_000, `${path}.wait_ms`);
+  boundedInteger(errors, policy, "initial_poll_ms", 15_000, 300_000, `${path}.initial_poll_ms`);
+  boundedInteger(errors, policy, "max_poll_ms", 15_000, 600_000, `${path}.max_poll_ms`);
+  boundedInteger(errors, policy, "check_start_grace_ms", 60_000, 900_000, `${path}.check_start_grace_ms`);
+  boundedInteger(errors, policy, "max_transient_errors", 1, 50, `${path}.max_transient_errors`);
+  if (Number.isInteger(policy.initial_poll_ms) && Number.isInteger(policy.max_poll_ms) && policy.max_poll_ms < policy.initial_poll_ms) errors.push({ path: `${path}.max_poll_ms`, message: "must be greater than or equal to initial_poll_ms" });
+  const review = policy.review;
+  if (!isRecord(review)) errors.push({ path: `${path}.review`, message: "must be an object" });
+  else {
+    allowedKeys(errors, review, new Set(["required", "reviewer_login", "source"]), `${path}.review`);
+    requiredBoolean(errors, review, "required", `${path}.review.required`);
+    requiredEnum(errors, review, "source", new Set(["driver", "none"]), `${path}.review.source`);
+    if (review.required === true) {
+      requiredString(errors, review, "reviewer_login", `${path}.review.reviewer_login`);
+      if (stringValue(review.reviewer_login) && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(review.reviewer_login)) errors.push({ path: `${path}.review.reviewer_login`, message: "must be a valid GitHub login" });
+      if (review.source !== "driver") errors.push({ path: `${path}.review.source`, message: "required review must use driver source" });
+    } else if (review.reviewer_login !== null) errors.push({ path: `${path}.review.reviewer_login`, message: "must be null when review is not required" });
+  }
+}
+
+function validatePostPrObservation(errors, observation, path) {
+  if (observation === undefined || observation === null) return;
+  if (!isRecord(observation)) {
+    errors.push({ path, message: "must be an object or null" });
+    return;
+  }
+  allowedKeys(errors, observation, new Set(["epoch", "expected_head_sha", "started_at", "deadline_at", "next_poll_at", "poll_count", "unchanged_count", "current_interval_ms", "consecutive_transient_errors", "last_observed_at", "last_fingerprint", "last_check_verdict", "last_review_verdict", "last_verdict", "last_error", "review_request", "snapshot"]), path);
+  boundedInteger(errors, observation, "epoch", 1, Number.MAX_SAFE_INTEGER, `${path}.epoch`);
+  requiredFullGitSha(errors, observation, "expected_head_sha", `${path}.expected_head_sha`);
+  for (const key of ["started_at", "deadline_at", "next_poll_at"]) requiredString(errors, observation, key, `${path}.${key}`);
+  for (const key of ["poll_count", "unchanged_count", "consecutive_transient_errors"]) boundedInteger(errors, observation, key, 0, Number.MAX_SAFE_INTEGER, `${path}.${key}`);
+  boundedInteger(errors, observation, "current_interval_ms", 1, 600_000, `${path}.current_interval_ms`);
+  for (const key of ["last_observed_at", "last_fingerprint"]) optionalNullableString(errors, observation, key, `${path}.${key}`);
+  requiredEnum(errors, observation, "last_check_verdict", new Set(["not_started", "not_applicable", "pending", "pass", "red", "indeterminate"]), `${path}.last_check_verdict`);
+  requiredEnum(errors, observation, "last_review_verdict", new Set(["not_required", "pending", "pass", "red", "indeterminate", "deferred"]), `${path}.last_review_verdict`);
+  requiredEnum(errors, observation, "last_verdict", new Set(["pending", "green", "red", "external-merge", "closed", "head-mismatch", "infrastructure"]), `${path}.last_verdict`);
+  validatePostPrLastError(errors, observation.last_error, `${path}.last_error`);
+  validatePostPrReviewRequest(errors, observation.review_request, `${path}.review_request`);
+  if (observation.snapshot !== undefined && observation.snapshot !== null) validatePostPrSanitizedSnapshot(errors, observation.snapshot, `${path}.snapshot`);
+  const started = Date.parse(observation.started_at || "");
+  const deadline = Date.parse(observation.deadline_at || "");
+  const nextPoll = Date.parse(observation.next_poll_at || "");
+  if (Number.isFinite(started) && Number.isFinite(deadline) && deadline <= started) errors.push({ path: `${path}.deadline_at`, message: "must be after started_at" });
+  if (Number.isFinite(deadline) && Number.isFinite(nextPoll) && nextPoll > deadline) errors.push({ path: `${path}.next_poll_at`, message: "must not exceed deadline_at" });
+}
+
+function validatePostPrLastError(errors, value, path) {
+  if (value === undefined || value === null) return;
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object or null" }); return; }
+  allowedKeys(errors, value, new Set(["class", "exit_code", "occurred_at", "next_retry_at"]), path);
+  requiredEnum(errors, value, "class", new Set(["timeout", "network", "rate-limit", "server", "account-auth", "permission", "not-found", "protocol", "command"]), `${path}.class`);
+  if (value.exit_code !== undefined) optionalNullableInteger(errors, value, "exit_code", `${path}.exit_code`);
+  requiredString(errors, value, "occurred_at", `${path}.occurred_at`);
+  optionalNullableString(errors, value, "next_retry_at", `${path}.next_retry_at`);
+}
+
+function validatePostPrReviewRequest(errors, value, path) {
+  if (value === undefined || value === null) return;
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object or null" }); return; }
+  allowedKeys(errors, value, new Set(["status", "attempts", "requested_at"]), path);
+  requiredEnum(errors, value, "status", new Set(["pending", "requested"]), `${path}.status`);
+  boundedInteger(errors, value, "attempts", 0, Number.MAX_SAFE_INTEGER, `${path}.attempts`);
+  optionalNullableString(errors, value, "requested_at", `${path}.requested_at`);
+  if (value.status === "requested" && !stringValue(value.requested_at)) errors.push({ path: `${path}.requested_at`, message: "is required after reviewer request" });
+}
+
+function validatePostPrSanitizedSnapshot(errors, value, path) {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) validatePostPrSanitizedSnapshot(errors, item, `${path}[${index}]`);
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const [key, item] of Object.entries(value)) {
+    if (/^(?:raw|body|stdout|stderr|headers?|token|credentials?)$/iu.test(key)) errors.push({ path: `${path}.${key}`, message: "untrusted raw or sensitive data is not allowed" });
+    validatePostPrSanitizedSnapshot(errors, item, `${path}.${key}`);
+  }
+}
+
+function validatePostPrRemediation(errors, remediation, path) {
+  if (remediation === undefined || remediation === null) return;
+  if (!isRecord(remediation)) {
+    errors.push({ path, message: "must be an object or null" });
+    return;
+  }
+  allowedKeys(errors, remediation, new Set(["schema_version", "attempt", "reason_code", "failure_fingerprint", "failed_head_sha", "failure_evidence_ref", "failure_evidence_hash", "owner", "route", "lane", "stage", "baseline_head_sha", "dispatch", "changes", "candidate_head_sha", "remediation_evidence_ref", "remediation_evidence_hash", "revalidation", "push"]), path);
+  requiredInteger(errors, remediation, "schema_version", `${path}.schema_version`);
+  if (remediation.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  boundedInteger(errors, remediation, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+  requiredEnum(errors, remediation, "reason_code", new Set(["check-red", "local-red"]), `${path}.reason_code`);
+  requiredHash(errors, remediation, "failure_fingerprint", `${path}.failure_fingerprint`);
+  requiredFullGitSha(errors, remediation, "failed_head_sha", `${path}.failed_head_sha`);
+  requiredString(errors, remediation, "failure_evidence_ref", `${path}.failure_evidence_ref`);
+  requiredHash(errors, remediation, "failure_evidence_hash", `${path}.failure_evidence_hash`);
+  validatePostPrOwner(errors, remediation.owner, `${path}.owner`, remediation.route, remediation.lane);
+  requiredEnum(errors, remediation, "route", new Set(["backend-builder", "frontend-builder", "test-verifier"]), `${path}.route`);
+  requiredEnum(errors, remediation, "lane", new Set(["slice", "test"]), `${path}.lane`);
+  requiredEnum(errors, remediation, "stage", new Set(["planned", "running", "changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"]), `${path}.stage`);
+  requiredFullGitSha(errors, remediation, "baseline_head_sha", `${path}.baseline_head_sha`);
+  validatePostPrDispatch(errors, remediation.dispatch, `${path}.dispatch`, remediation);
+  validatePostPrChanges(errors, remediation.changes, `${path}.changes`);
+  optionalNullableFullGitSha(errors, remediation, "candidate_head_sha", `${path}.candidate_head_sha`);
+  optionalNullableString(errors, remediation, "remediation_evidence_ref", `${path}.remediation_evidence_ref`);
+  optionalNullableHash(errors, remediation, "remediation_evidence_hash", `${path}.remediation_evidence_hash`);
+  if ((remediation.remediation_evidence_ref === null) !== (remediation.remediation_evidence_hash === null)) errors.push({ path, message: "remediation evidence ref/hash must be set together" });
+  validatePostPrRevalidation(errors, remediation.revalidation, `${path}.revalidation`);
+  validatePostPrPush(errors, remediation.push, `${path}.push`);
+  if (stringValue(remediation.candidate_head_sha) && remediation.candidate_head_sha === remediation.failed_head_sha) errors.push({ path: `${path}.candidate_head_sha`, message: "must differ from failed_head_sha" });
+  if (["validated", "push-pending", "remote-confirmed"].includes(remediation.stage)) validatePostPrValidated(errors, remediation, path);
+  if (remediation.stage === "push-pending" && remediation.push?.local_head_sha !== remediation.candidate_head_sha) errors.push({ path: `${path}.push.local_head_sha`, message: "must equal candidate_head_sha while push is pending" });
+  if (remediation.stage === "remote-confirmed" && (remediation.push?.status !== "confirmed" || remediation.push?.remote_after_sha !== remediation.candidate_head_sha)) errors.push({ path: `${path}.push`, message: "remote-confirmed requires confirmed remote_after_sha equal to candidate_head_sha" });
+}
+
+function validatePostPrOwner(errors, owner, path, route, lane) {
+  if (!isRecord(owner)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, owner, new Set(["kind", "slice_id", "stack", "path_b64url", "method"]), path);
+  requiredEnum(errors, owner, "kind", new Set(["slice", "integration"]), `${path}.kind`);
+  requiredString(errors, owner, "method", `${path}.method`);
+  if (owner.kind === "slice") {
+    requiredString(errors, owner, "slice_id", `${path}.slice_id`);
+    requiredEnum(errors, owner, "stack", new Set(["backend", "frontend"]), `${path}.stack`);
+    if (lane !== "slice" || route !== `${owner.stack}-builder`) errors.push({ path, message: "slice owner requires matching slice lane and builder route" });
+  } else if (lane !== "test" || route !== "test-verifier") errors.push({ path, message: "integration owner requires test lane and test-verifier route" });
+}
+
+function validatePostPrDispatch(errors, dispatch, path, remediation) {
+  if (!isRecord(dispatch)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, dispatch, new Set(["id", "status", "role", "subject", "started_at", "returned_at"]), path);
+  requiredString(errors, dispatch, "id", `${path}.id`);
+  requiredEnum(errors, dispatch, "status", new Set(["planned", "running", "returned"]), `${path}.status`);
+  requiredString(errors, dispatch, "role", `${path}.role`);
+  requiredString(errors, dispatch, "subject", `${path}.subject`);
+  optionalNullableString(errors, dispatch, "started_at", `${path}.started_at`);
+  optionalNullableString(errors, dispatch, "returned_at", `${path}.returned_at`);
+  if (stringValue(remediation.route) && dispatch.role !== remediation.route) errors.push({ path: `${path}.role`, message: "must match remediation route" });
+}
+
+function validatePostPrChanges(errors, changes, path) {
+  if (!isRecord(changes)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, changes, new Set(["paths", "tree_hash"]), path);
+  validateStringArray(errors, changes.paths, `${path}.paths`, { required: true });
+  optionalNullableHash(errors, changes, "tree_hash", `${path}.tree_hash`);
+}
+
+function validatePostPrRevalidation(errors, value, path) {
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  const refs = ["canonical_evidence", "validator_review", "security_review"];
+  allowedKeys(errors, value, new Set(refs.flatMap((name) => [`${name}_ref`, `${name}_hash`]).concat(["canonical_verdict", "validator_verdict", "security_verdict"])), path);
+  for (const name of refs) {
+    optionalNullableString(errors, value, `${name}_ref`, `${path}.${name}_ref`);
+    optionalNullableHash(errors, value, `${name}_hash`, `${path}.${name}_hash`);
+    if ((value[`${name}_ref`] === null) !== (value[`${name}_hash`] === null)) errors.push({ path, message: `${name} ref/hash must be set together` });
+  }
+  optionalNullableEnum(errors, value, "canonical_verdict", new Set(["pass", "fail"]), `${path}.canonical_verdict`);
+  optionalNullableEnum(errors, value, "validator_verdict", VALIDATOR_VERDICTS, `${path}.validator_verdict`);
+  optionalNullableEnum(errors, value, "security_verdict", SECURITY_VERDICTS, `${path}.security_verdict`);
+}
+
+function validatePostPrPush(errors, push, path) {
+  if (!isRecord(push)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, push, new Set(["status", "remote_before_sha", "local_head_sha", "remote_after_sha", "consecutive_transient_errors", "next_retry_at", "pushed_at"]), path);
+  requiredEnum(errors, push, "status", new Set(["not-ready", "pending", "confirmed"]), `${path}.status`);
+  for (const key of ["remote_before_sha", "local_head_sha", "remote_after_sha"]) optionalNullableFullGitSha(errors, push, key, `${path}.${key}`);
+  boundedInteger(errors, push, "consecutive_transient_errors", 0, Number.MAX_SAFE_INTEGER, `${path}.consecutive_transient_errors`);
+  optionalNullableString(errors, push, "next_retry_at", `${path}.next_retry_at`);
+  optionalNullableString(errors, push, "pushed_at", `${path}.pushed_at`);
+}
+
+function validatePostPrValidated(errors, remediation, path) {
+  const value = remediation.revalidation;
+  if (value?.canonical_verdict !== "pass") errors.push({ path: `${path}.revalidation.canonical_verdict`, message: "must be pass when validated" });
+  if (!PASSING_VALIDATOR_VERDICTS.has(value?.validator_verdict)) errors.push({ path: `${path}.revalidation.validator_verdict`, message: "must be GO or GO-WITH-NITS when validated" });
+  if (!PASSING_SECURITY_VERDICTS.has(value?.security_verdict)) errors.push({ path: `${path}.revalidation.security_verdict`, message: "must be PASS when validated" });
+  for (const key of ["canonical_evidence_ref", "canonical_evidence_hash", "validator_review_ref", "validator_review_hash", "security_review_ref", "security_review_hash"]) if (!stringValue(value?.[key])) errors.push({ path: `${path}.revalidation.${key}`, message: "is required when validated" });
+  if (!stringValue(remediation.candidate_head_sha)) errors.push({ path: `${path}.candidate_head_sha`, message: "is required when validated" });
+}
+
+function validatePostPrTerminalConsistency(errors, run, postPr, path) {
+  const expected = postPr.phase === "succeeded" ? "completed" : postPr.phase === "blocked" ? "blocked" : postPr.phase === "needs-human" ? "needs-human" : null;
+  if (!expected) return;
+  if (run.status !== expected) errors.push({ path: "run.status", message: `must be ${expected} when post-PR phase is ${postPr.phase}` });
+  const reason = run.terminal_result?.reason;
+  if (!POST_PR_TERMINAL_REASONS[expected]?.includes(reason)) errors.push({ path: "run.terminal_result.reason", message: `must be a closed post-PR ${expected} reason` });
+}
+
+function validatePostPrRefHashArray(errors, items, path) {
+  if (!Array.isArray(items)) { errors.push({ path, message: "must be an array" }); return; }
+  const refs = new Set();
+  for (const [index, item] of items.entries()) {
+    validatePostPrRefHash(errors, item, `${path}[${index}]`);
+    if (stringValue(item?.ref) && refs.has(item.ref)) errors.push({ path: `${path}[${index}].ref`, message: "must be unique" });
+    if (stringValue(item?.ref)) refs.add(item.ref);
+  }
+}
+
+function validatePostPrRefHash(errors, value, path, { optional = false } = {}) {
+  if (value === undefined || value === null) { if (!optional) errors.push({ path, message: "must be an object" }); return; }
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, new Set(["ref", "hash"]), path);
+  requiredString(errors, value, "ref", `${path}.ref`);
+  requiredHash(errors, value, "hash", `${path}.hash`);
 }
 
 function validateSteering(errors, steering, path) {
@@ -498,7 +821,7 @@ function validateSteeringBoundary(errors, boundary, path, options = {}) {
     errors.push({ path, message: "must be an object or null" });
     return;
   }
-  if (!options.fence) requiredEnum(errors, boundary, "kind", new Set(["gate", "dispatch", "remediation", "terminal"]), `${path}.kind`);
+  if (!options.fence) requiredEnum(errors, boundary, "kind", new Set(["gate", "dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]), `${path}.kind`);
   requiredString(errors, boundary, "token", `${path}.token`);
   if (stringValue(boundary.token) && !/^[A-Za-z0-9_-]{8,128}$/u.test(boundary.token)) errors.push({ path: `${path}.token`, message: "must use 8-128 safe characters" });
   requiredInteger(errors, boundary, "generation", `${path}.generation`);
@@ -513,7 +836,7 @@ function validateSteeringAction(errors, action, path, options = {}) {
     errors.push({ path, message: "must be an object or null" });
     return;
   }
-  requiredEnum(errors, action, "kind", new Set(["dispatch", "remediation"]), `${path}.kind`);
+  requiredEnum(errors, action, "kind", new Set(["dispatch", "remediation", "post-pr-observe", "post-pr-push"]), `${path}.kind`);
   requiredString(errors, action, "token", `${path}.token`);
   if (stringValue(action.token) && !/^[A-Za-z0-9_-]{8,128}$/u.test(action.token)) errors.push({ path: `${path}.token`, message: "must use 8-128 safe characters" });
   requiredInteger(errors, action, "generation", `${path}.generation`);
@@ -1066,6 +1389,42 @@ function optionalInteger(errors, obj, key, path) {
 function optionalBoolean(errors, obj, key, path) {
   if (obj[key] === undefined || obj[key] === null) return;
   if (typeof obj[key] !== "boolean") errors.push({ path, message: "must be a boolean" });
+}
+
+function requiredBoolean(errors, obj, key, path) {
+  if (typeof obj[key] !== "boolean") errors.push({ path, message: "must be a boolean" });
+}
+
+function boundedInteger(errors, obj, key, min, max, path) {
+  if (!Number.isInteger(obj?.[key]) || obj[key] < min || obj[key] > max) errors.push({ path, message: `must be an integer from ${min} to ${max}` });
+}
+
+function optionalNullableString(errors, obj, key, path) {
+  if (obj[key] === undefined || obj[key] === null) return;
+  if (!stringValue(obj[key])) errors.push({ path, message: "must be a non-empty string or null" });
+}
+
+function optionalNullableEnum(errors, obj, key, values, path) {
+  if (obj[key] === undefined || obj[key] === null) return;
+  requiredEnum(errors, obj, key, values, path);
+}
+
+function optionalNullableHash(errors, obj, key, path) {
+  if (obj[key] === undefined || obj[key] === null) return;
+  requiredHash(errors, obj, key, path);
+}
+
+function requiredFullGitSha(errors, obj, key, path) {
+  if (typeof obj[key] !== "string" || !FULL_GIT_SHA_PATTERN.test(obj[key])) errors.push({ path, message: "must be a full 40-character lowercase git SHA" });
+}
+
+function optionalNullableFullGitSha(errors, obj, key, path) {
+  if (obj[key] === undefined || obj[key] === null) return;
+  requiredFullGitSha(errors, obj, key, path);
+}
+
+function allowedKeys(errors, value, allowed, path) {
+  for (const key of Object.keys(value)) if (!allowed.has(key)) errors.push({ path: `${path}.${key}`, message: "is not allowed" });
 }
 
 function requiredInteger(errors, obj, key, path) {

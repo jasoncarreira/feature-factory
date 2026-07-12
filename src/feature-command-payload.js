@@ -1,11 +1,13 @@
 import { basename, resolve } from "node:path";
 import { validateRun } from "./validate.js";
+import { normalizePostPrCiDriverOverride } from "./config.js";
 
 const PREFIX = "ffpayload-v1:";
 const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
+const DRIVER_KEYS = new Set(["mode", "ready", "pr_mode", "reviewer", "github_account", "run_id", "post_pr_ci"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse"]);
+const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "post_pr"]);
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
@@ -17,7 +19,7 @@ const STEERING_KEYS = new Set(["schema_version", "kind", "run_id", "pending", "u
 const STEERING_PENDING_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at"]);
 const STEERING_UNCHECKPOINTED_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at", "consumed_at"]);
 const STEERING_CONSUME_KEYS = new Set(["command", "args"]);
-const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice"]);
+const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice", "post_pr"]);
 const CONTINUATION_ARTIFACT_KINDS = new Map([
   ["artifacts/story.md", "story"],
   ["artifacts/research-map.md", "research_map"],
@@ -57,12 +59,19 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
 
   const driver = payload.driver === undefined ? {} : payload.driver;
   if (!plainObject(driver)) return { ok: false, reason: "invalid-driver" };
+  if (!hasOnlyKeys(driver, DRIVER_KEYS)) return { ok: false, reason: "invalid-driver" };
   const mode = driver.mode === undefined ? "interactive" : driver.mode;
   if (!DRIVER_MODES.has(mode)) return { ok: false, reason: "invalid-driver-mode" };
   if (driver.pr_mode !== undefined && driver.pr_mode !== null && !["draft", "ready"].includes(driver.pr_mode)) return { ok: false, reason: "invalid-pr-mode" };
   if (driver.ready !== undefined && typeof driver.ready !== "boolean") return { ok: false, reason: "invalid-ready" };
   for (const field of ["reviewer", "github_account", "run_id"]) {
     if (driver[field] !== undefined && driver[field] !== null && !nonEmptyString(driver[field])) return { ok: false, reason: `invalid-driver-${field}` };
+  }
+  let postPrCi = null;
+  try {
+    postPrCi = normalizePostPrCiDriverOverride(driver.post_pr_ci);
+  } catch {
+    return { ok: false, reason: "invalid-driver-post-pr-ci" };
   }
   if (driver.run_id !== undefined && driver.run_id !== null && !safeRunId(driver.run_id)) return { ok: false, reason: "invalid-driver-run_id" };
 
@@ -89,6 +98,7 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
       reviewer: stringOrNull(driver.reviewer),
       github_account: stringOrNull(driver.github_account),
       run_id: stringOrNull(driver.run_id),
+      post_pr_ci: postPrCi,
     },
     resume: null,
     steering: null,
@@ -221,6 +231,17 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
     || continuation.parent_reviews.some((item) => item.kind !== "review" || !canonicalJsonRef(item.ref, "reviews/"))) {
     return { ok: false, reason: "invalid-continuation-refs" };
   }
+  if (review.kind === "post_pr") {
+    const postPr = continuation.post_pr;
+    const evidence = continuation.parent_evidence.find((item) => item.ref === postPr?.evidence_ref);
+    if (!plainObject(postPr)
+      || review.source !== "run.post_pr.continuation_review.ref"
+      || review.ref !== postPr.continuation_review_ref
+      || review.hash !== postPr.continuation_review_hash
+      || !evidence
+      || evidence.hash !== postPr.evidence_hash
+      || postPr.disposition !== "leave-unchanged") return { ok: false, reason: "invalid-continuation-post-pr-binding" };
+  } else if (continuation.post_pr !== undefined) return { ok: false, reason: "invalid-continuation-post-pr-binding" };
   const expectedRequest = `Continue blocked feature-factory run '${parent.run_id}' as '${target.run_id}' using review '${review.ref}'.`;
   if (operatorRequest !== expectedRequest || continuation.operator_summary !== `Continue blocked run '${parent.run_id}' from ${review.ref}.`) {
     return { ok: false, reason: "continuation-request-mismatch" };
@@ -262,6 +283,7 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       parent_evidence: continuation.parent_evidence.map(normalizedRefHash),
       parent_reviews: continuation.parent_reviews.map(normalizedRefHash),
       ...(planningReuse === undefined ? {} : { planning_reuse: normalizedPlanningReuse(planningReuse) }),
+      ...(continuation.post_pr === undefined ? {} : { post_pr: cloneJson(continuation.post_pr) }),
     },
   };
 }
@@ -325,6 +347,7 @@ function validContinuationReviewSource(kind, source) {
   if (kind === "security_review") return source === "run.security_review.review_ref";
   if (kind === "step") return source.startsWith("run.steps.") && source.endsWith(".review_ref") && source.length > "run.steps..review_ref".length;
   if (kind === "slice") return source.startsWith("run.slices.") && source.endsWith(".review_ref") && source.length > "run.slices..review_ref".length;
+  if (kind === "post_pr") return source === "run.post_pr.continuation_review.ref";
   return false;
 }
 
@@ -338,4 +361,8 @@ function nonEmptyString(value) {
 
 function stringOrNull(value) {
   return nonEmptyString(value) ? value.trim() : null;
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }

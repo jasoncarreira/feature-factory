@@ -8,7 +8,7 @@ import { git } from "./git.js";
 import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
 import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, pendingProtectedGate, validateHeartbeatState, validateRun } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -27,8 +27,23 @@ const LOCK_DIR = "run-json.lock";
 const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
 const HEARTBEAT_FILE = "heartbeat.json";
-const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "terminal"]);
-const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation"]);
+const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
+const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "post-pr-observe", "post-pr-push"]);
+const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
+const POST_PR_TERMINAL_PHASE = Object.freeze({ completed: "succeeded", blocked: "blocked", "needs-human": "needs-human" });
+const POST_PR_TRANSITIONS = new Map([
+  ["awaiting-pr", new Set(["observing"])],
+  ["observing", new Set(["observing", "failure-recording", "succeeded", "blocked", "needs-human"])],
+  ["failure-recording", new Set(["failure-recording", "remediation-planned", "blocked", "needs-human"])],
+  ["remediation-planned", new Set(["remediation-planned", "remediation-running", "needs-human"])],
+  ["remediation-running", new Set(["remediation-running", "changes-observed", "needs-human"])],
+  ["changes-observed", new Set(["changes-observed", "committed", "needs-human"])],
+  ["committed", new Set(["committed", "revalidating", "needs-human"])],
+  ["revalidating", new Set(["revalidating", "remediation-planned", "validated", "blocked", "needs-human"])],
+  ["validated", new Set(["validated", "push-pending", "needs-human"])],
+  ["push-pending", new Set(["push-pending", "remote-confirmed", "needs-human"])],
+  ["remote-confirmed", new Set(["remote-confirmed", "observing", "needs-human"])],
+]);
 
 export async function withRunJsonLock(runDir, fn, options = {}) {
   if (typeof fn !== "function") throw new Error("withRunJsonLock requires a callback");
@@ -389,6 +404,12 @@ function sameLockDirectoryIdentity(left, right) {
 
 export function hashRunState(run) {
   return hashValue(validateRun(cloneJson(run)));
+}
+
+export function createPostPrState(policy) {
+  const postPr = { schema_version: 1, policy: cloneJson(policy), phase: policy?.enabled === true ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null };
+  validateRun({ schema_version: 1, run_id: "post-pr-policy-check", status: "running", max_retries: 3, gates: {}, post_pr: postPr });
+  return postPr;
 }
 
 export function assertRunJsonWriterAllowed(run, label, options = {}) {
@@ -809,14 +830,83 @@ export async function transitionPrCreated(runDir, input, options = {}) {
       assertPrFence(draft, options.fenceToken);
       assertPrCreatedPreconditions(draft, request);
       draft.pr_url = request.pr_url;
-      draft.status = "completed";
-      draft.terminal_result = normalizePrCreatedTerminalResult(draft, request);
+      if (draft.post_pr?.policy?.enabled === true) {
+        draft.status = "running";
+        draft.terminal_result = null;
+        draft.post_pr = initializePostPrObservation(draft.post_pr, request, options.now);
+      } else {
+        draft.status = "completed";
+        draft.terminal_result = normalizePrCreatedTerminalResult(draft, request);
+      }
       draft.steering = normalizedSteeringState(draft, { boundary: null, pr_fence: null });
     },
     options,
     { prCreated: true },
   ), options);
   return { ...result, pr_url: result.run.pr_url, terminal_result: result.run.terminal_result };
+}
+
+/** Checked replacement used by the orchestration layer after external work is inactive. */
+export async function transitionPostPrState(runDir, postPr, options = {}) {
+  if (!isRecord(postPr)) throw new Error("transitionPostPrState requires post_pr state");
+  return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+    assertPostPrMutationReady(runDir, current, options, "post-PR transition");
+    const nextPostPr = cloneJson(postPr);
+    if (sameJson(current.post_pr, nextPostPr)) return;
+    assertPostPrPhaseTransition(current.post_pr, nextPostPr);
+    assertPostPrAttemptTransition(current, nextPostPr);
+    assertPostPrCandidateGitState(current, nextPostPr, options);
+    draft.post_pr = nextPostPr;
+    draft.updated_at = timestamp(options.now);
+  }, options, { postPr: true, beforeWrite: (next) => assertPostPrRefsConsistent(runDir, next) }), options);
+}
+
+/** Reserve exactly one routable check-red attempt. Matching replay is a no-op. */
+export async function transitionPostPrFailure(runDir, input, options = {}) {
+  if (!isRecord(input?.remediation)) throw new Error("post-PR failure requires remediation state");
+  return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+    assertPostPrMutationReady(runDir, current, options, "post-PR failure");
+    if (!current.post_pr || !["observing", "failure-recording", "revalidating"].includes(current.post_pr.phase)) throw new Error(`post-PR failure cannot start from '${current.post_pr?.phase ?? "absent"}'`);
+    const remediation = cloneJson(input.remediation);
+    const replay = current.post_pr.remediation;
+    if (isRecord(replay) && replay.attempt === remediation.attempt) {
+      if (sameJson(replay, remediation)) return;
+      throw new Error("conflicting post-PR failure replay");
+    }
+    const expectedAttempt = current.post_pr.attempt + 1;
+    if (remediation.attempt !== expectedAttempt) throw new Error(`post-PR attempt must advance exactly from ${current.post_pr.attempt} to ${expectedAttempt}`);
+    if (expectedAttempt > (Number.isInteger(current.max_retries) ? current.max_retries : 3)) throw new Error(`post-PR attempt ${expectedAttempt} exceeds max_retries`);
+    const evidenceRefs = Array.isArray(current.post_pr.evidence_refs) ? cloneJson(current.post_pr.evidence_refs) : [];
+    const failureBinding = { ref: remediation.failure_evidence_ref, hash: remediation.failure_evidence_hash };
+    if (!evidenceRefs.some((item) => sameJson(item, failureBinding))) evidenceRefs.push(failureBinding);
+    draft.post_pr = { ...cloneJson(current.post_pr), phase: "failure-recording", attempt: expectedAttempt, remediation, evidence_refs: evidenceRefs };
+    draft.updated_at = timestamp(options.now);
+  }, options, { postPr: true, beforeWrite: (next) => assertPostPrRefsConsistent(runDir, next) }), options);
+}
+
+export async function transitionPostPrTerminal(runDir, input, options = {}) {
+  if (!isRecord(input)) throw new Error("transitionPostPrTerminal requires an input object");
+  const status = requireNonEmptyString(input.status, "post-PR terminal status");
+  const reason = requireNonEmptyString(input.reason, "post-PR terminal reason");
+  if (!POST_PR_TERMINAL_PHASE[status] || !POST_PR_TERMINAL_REASONS[status]?.includes(reason)) throw new Error(`invalid closed post-PR terminal reason '${reason}' for ${status}`);
+  return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+    assertPostPrMutationReady(runDir, current, options, "post-PR terminal transition");
+    const phase = POST_PR_TERMINAL_PHASE[status];
+    if (current.post_pr?.phase === phase && current.status === status && current.terminal_result?.reason === reason) return;
+    if (!current.post_pr?.policy?.enabled) throw new Error("post-PR terminal transition requires enabled persisted policy");
+    assertPostPrPhaseTransition(current.post_pr, { ...current.post_pr, phase });
+    draft.status = status;
+    draft.post_pr = { ...cloneJson(current.post_pr), phase };
+    draft.terminal_result = {
+      status,
+      run_id: current.run_id,
+      pr_url: current.pr_url,
+      reason,
+      summary: stringValue(input.summary) ? input.summary : reason,
+      artifacts: isRecord(input.artifacts) ? cloneJson(input.artifacts) : {},
+    };
+    draft.updated_at = timestamp(options.now);
+  }, options, { postPr: true, postPrTerminal: true, beforeWrite: (next) => assertPostPrRefsConsistent(runDir, next) }), options);
 }
 
 export async function transitionTerminalResult(runDir, terminalResult, options = {}) {
@@ -1039,6 +1129,7 @@ export async function heartbeatOnce(runDir, { now } = {}, options = {}) {
 export function hasInFlightHeartbeatWork(run) {
   if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) return true;
   if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) return true;
+  if (run?.status === "running" && run?.post_pr?.policy?.enabled === true && POST_PR_HEARTBEAT_PHASES.has(run.post_pr.phase)) return true;
   return false;
 }
 
@@ -1054,6 +1145,7 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
     nextValue = draft;
   }
 
+  assertPostPrGenericMutation(current, nextValue, hooks);
   const next = validateRun(nextValue);
   assertGateDecisionTransitions(current, next, hooks);
   assertTerminalTransition(current, next, hooks);
@@ -1196,7 +1288,7 @@ function normalizeSteeringBoundaryKind(kind) {
 
 function normalizeSteeringActionKind(kind) {
   const value = requireNonEmptyString(kind, "action kind").trim();
-  if (!STEERING_ACTION_KINDS.has(value)) throw new Error("action kind must be dispatch or remediation");
+  if (!STEERING_ACTION_KINDS.has(value)) throw new Error("action kind must be dispatch, remediation, post-pr-observe, or post-pr-push");
   return value;
 }
 
@@ -1494,11 +1586,98 @@ function assertGateDecisionTransitions(current, next, hooks = {}) {
   if (errors.length > 0) throw new Error(formatErrorItems(errors));
 }
 
+function initializePostPrObservation(postPr, request, now) {
+  if (postPr.phase !== "awaiting-pr") throw new Error(`enabled pr-created requires post_pr phase awaiting-pr, found '${postPr.phase}'`);
+  if (!stringValue(request.head_sha) || !/^[0-9a-f]{40}$/u.test(request.head_sha)) throw new Error("enabled pr-created requires a full 40-character lowercase head SHA");
+  const startedAt = timestamp(now);
+  const deadlineAt = new Date(Date.parse(startedAt) + postPr.policy.wait_ms).toISOString();
+  return {
+    ...cloneJson(postPr),
+    phase: "observing",
+    attempt: 0,
+    observation: {
+      epoch: 1,
+      expected_head_sha: request.head_sha,
+      started_at: startedAt,
+      deadline_at: deadlineAt,
+      next_poll_at: startedAt,
+      poll_count: 0,
+      unchanged_count: 0,
+      current_interval_ms: postPr.policy.initial_poll_ms,
+      consecutive_transient_errors: 0,
+      last_observed_at: null,
+      last_fingerprint: null,
+      last_check_verdict: "not_started",
+      last_review_verdict: postPr.policy.review.required ? "pending" : "not_required",
+      last_verdict: "pending",
+      last_error: null,
+      review_request: postPr.policy.review.required ? { status: "pending", attempts: 0, requested_at: null } : null,
+      snapshot: null,
+    },
+    remediation: null,
+    evidence_refs: Array.isArray(postPr.evidence_refs) ? cloneJson(postPr.evidence_refs) : [],
+    continuation_review: null,
+  };
+}
+
+function assertPostPrMutationReady(runDir, run, options, label) {
+  if (TERMINAL_RUN_STATUSES.has(run.status)) throw new Error(`${label} rejected: terminal run '${run.status}'`);
+  if (run.status !== "running") throw new Error(`${label} requires a running run`);
+  if (!run.post_pr?.policy?.enabled) throw new Error(`${label} requires enabled persisted post-PR policy`);
+  assertSteeringBoundaryClear(run, label);
+  if (isRecord(run.steering?.boundary)) throw new Error(`${label} rejected: open steering boundary`);
+  if (isRecord(run.steering?.pr_fence)) throw new Error(`${label} rejected: active pre-PR fence`);
+  assertNoFreshHeartbeat(runDir, options, `${label} requires inactive heartbeat`);
+}
+
+function assertPostPrPhaseTransition(current, next) {
+  if (!isRecord(current) || !isRecord(next)) throw new Error("post-PR transition requires current and next state");
+  if (current.schema_version !== next.schema_version || !sameJson(current.policy, next.policy)) throw new Error("persisted post-PR schema and policy are immutable");
+  if (current.phase === next.phase) return;
+  if (!POST_PR_TRANSITIONS.get(current.phase)?.has(next.phase)) throw new Error(`invalid post-PR phase transition '${current.phase}' -> '${next.phase}'`);
+  if (current.phase === "remote-confirmed" && next.phase === "observing") {
+    if (next.observation?.epoch !== current.observation?.epoch + 1) throw new Error("new post-PR observation must advance epoch exactly once");
+    if (next.observation?.expected_head_sha !== current.remediation?.candidate_head_sha) throw new Error("new post-PR observation must bind the confirmed candidate head");
+  }
+}
+
+function assertPostPrAttemptTransition(currentRun, nextPostPr) {
+  const current = currentRun.post_pr;
+  if (nextPostPr.attempt !== current.attempt) throw new Error("post-PR attempt changes must use transitionPostPrFailure");
+  if (nextPostPr.attempt > (Number.isInteger(currentRun.max_retries) ? currentRun.max_retries : 3)) throw new Error("post-PR attempt exceeds max_retries");
+  if (isRecord(current.remediation) && nextPostPr.attempt === current.attempt && isRecord(nextPostPr.remediation)
+    && current.remediation.failure_fingerprint !== nextPostPr.remediation.failure_fingerprint) throw new Error("post-PR failure fingerprint is immutable within an attempt");
+}
+
+function assertPostPrCandidateGitState(currentRun, nextPostPr, options = {}) {
+  const remediation = nextPostPr.remediation;
+  if (!isRecord(remediation) || !stringValue(remediation.candidate_head_sha)) return;
+  if (!["committed", "revalidating", "validated", "push-pending", "remote-confirmed"].includes(remediation.stage)) return;
+  const cwd = options.worktree || currentRun.worktree;
+  if (!stringValue(cwd)) throw new Error("post-PR candidate verification requires run.worktree");
+  const head = git(cwd, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!head.ok || head.stdout.trim() !== remediation.candidate_head_sha) throw new Error("post-PR candidate head must equal local branch HEAD");
+  const ancestor = git(cwd, ["merge-base", "--is-ancestor", remediation.baseline_head_sha, remediation.candidate_head_sha]);
+  if (!ancestor.ok) throw new Error("post-PR candidate head must descend from baseline_head_sha");
+}
+
+function assertPostPrRefsConsistent(runDir, run) {
+  const failed = postPrConsistencyChecks(runDir, run).filter((check) => !check.ok);
+  if (failed.length) throw new Error(`post-PR ref/hash invariant failed: ${failed.flatMap((check) => check.errors).map((error) => error.message).join("; ")}`);
+}
+
+function assertPostPrGenericMutation(current, next, hooks = {}) {
+  if (hooks.postPr === true || hooks.prCreated === true) return;
+  const active = current.post_pr?.policy?.enabled === true && !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(current.post_pr.phase);
+  if (active && !sameJson(current.post_pr, next.post_pr)) throw new Error("active post-PR state can only be changed by checked post-PR transitions");
+  if (active && current.status !== next.status) throw new Error("active post-PR runs can only terminalize through transitionPostPrTerminal");
+}
+
 function assertTerminalTransition(current, next, hooks = {}) {
   if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot be mutated`);
   if (current.status === next.status) return;
   if (!TERMINAL_RUN_STATUSES.has(next.status)) return;
-  if (hooks.prCreated === true || hooks.terminal === true) return;
+  if (hooks.prCreated === true || hooks.terminal === true || hooks.postPrTerminal === true) return;
   throw new Error(next.status === "completed" ? "completed terminal transitions must use transitionPrCreated" : "terminal transitions must use transitionTerminalResult");
 }
 
@@ -1555,7 +1734,15 @@ function normalizePrCreatedInput(input) {
     pr_number: normalizePrNumber(input.pr_number ?? input.prNumber),
     repository,
     draft: input.draft === undefined ? false : normalizeBoolean(input.draft, "draft"),
+    head_sha: normalizeOptionalHeadSha(input.head_sha ?? input.headSha),
   };
+}
+
+function normalizeOptionalHeadSha(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const sha = String(value).trim();
+  if (!/^[0-9a-f]{40}$/u.test(sha)) throw new Error("head_sha must be a full 40-character lowercase git SHA");
+  return sha;
 }
 
 function normalizeSliceMergedInput(input) {
