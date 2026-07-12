@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 describe("cli detached process evidence", () => {
-  it("does not write run-scoped process evidence for generic detached starts without an explicit run id", () => {
+  it("does not write run-scoped process evidence for generic detached starts without an explicit run id", async () => {
     const repo = tempRepo("generic-detached-start");
     const opencodeBin = installFakeOpencode(repo);
     try {
@@ -20,7 +20,7 @@ describe("cli detached process evidence", () => {
       assert.equal(output.status, "started");
       assert.equal(existsSync(join(repo, ".opencode", "factory", "process.json")), false);
       assert.equal(existsSync(join(repo, ".opencode", "factory", "processes")), true);
-      stopProcess(output.pid);
+      await stopProcess(output.pid);
     } finally {
       cleanup(repo);
     }
@@ -53,7 +53,7 @@ describe("cli detached process evidence", () => {
     }
   });
 
-  it("writes run-scoped process evidence for detached resume with an explicit run id", () => {
+  it("writes run-scoped process evidence for detached resume with an explicit run id", async () => {
     const repo = tempRepo("detached-resume");
     const opencodeBin = installFakeOpencode(repo);
     const runId = "resume-detached-run";
@@ -85,7 +85,7 @@ describe("cli detached process evidence", () => {
       assert.equal(processEvidence.state, "running");
       assert.doesNotMatch(processEvidence.identity.start_marker, /^unverified:/u);
       assert.match(processEvidence.log_ref, /^processes\/.+\.log$/u);
-      stopProcess(output.pid);
+      await stopProcess(output.pid, processEvidencePath);
     } finally {
       cleanup(repo);
     }
@@ -120,15 +120,38 @@ function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function stopProcess(pid) {
+async function stopProcess(pid, processEvidencePath = null) {
   if (!Number.isInteger(pid) || pid <= 0) return;
   try {
     process.kill(pid, "SIGTERM");
   } catch {
     // Best-effort cleanup for detached test processes.
   }
+  await waitFor(() => !isProcessAlive(pid));
+  if (processEvidencePath) {
+    await waitFor(() => existsSync(processEvidencePath)
+      && JSON.parse(readFileSync(processEvidencePath, "utf8")).state === "exited");
+  }
 }
 
 function cleanup(path) {
   rmSync(path, { recursive: true, force: true });
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 25 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  if (!predicate()) throw new Error(`timed out after ${timeoutMs}ms`);
 }
