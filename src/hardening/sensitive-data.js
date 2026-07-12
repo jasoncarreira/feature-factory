@@ -1,7 +1,7 @@
 const BASELINE_SENSITIVE_KEY_PATTERN = /(?:secret|token|password|passwd|pwd|api[_-]?key|private[_-]?key|credential|authorization|auth[_-]?header|access[_-]?key|bearer|cookie)/iu;
 const BASELINE_SENSITIVE_VALUE_PATTERN = /(?:secret|token|password|passwd|api[_-]?key|private[_-]?key)/iu;
-const FLATTENED_BASIC_HEADER_PATTERN = /(^|[\r\n]|[^A-Za-z0-9_-])(Authorization[ \t]*[:=][ \t]*Basic[ \t]+)([A-Za-z0-9._~+/-]+={0,})(?![A-Za-z0-9._~+/=-])/iu;
-const FLATTENED_BASIC_HEADER_GLOBAL_PATTERN = /(^|[\r\n]|[^A-Za-z0-9_-])(Authorization[ \t]*[:=][ \t]*Basic[ \t]+)([A-Za-z0-9._~+/-]+={0,})(?![A-Za-z0-9._~+/=-])/giu;
+const FLATTENED_BASIC_HEADER_PATTERN = /(^|[\r\n]|[^A-Za-z0-9_-])((?:Proxy-)?Authorization[ \t]*[:=][ \t]*Basic[ \t]+)([A-Za-z0-9._~+/-]+={0,})(?![A-Za-z0-9._~+/=-])/iu;
+const FLATTENED_BASIC_HEADER_GLOBAL_PATTERN = /(^|[\r\n]|[^A-Za-z0-9_-])((?:Proxy-)?Authorization[ \t]*[:=][ \t]*Basic[ \t]+)([A-Za-z0-9._~+/-]+={0,})(?![A-Za-z0-9._~+/=-])/giu;
 const TOKEN_SHAPED_VALUE_PATTERNS = Object.freeze([
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/iu,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/iu,

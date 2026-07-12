@@ -15,6 +15,9 @@ describe("sensitive-data policy", () => {
   it("redacts only flattened Basic credential values across supported variants", () => {
     const cases = [
       ["Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [redacted]"],
+      // Proxy-Authorization is a standard credential-bearing header (RFC 7235), not a lookalike.
+      ["Proxy-Authorization: Basic dXNlcjpwYXNz", "Proxy-Authorization: Basic [redacted]"],
+      ["proxy-authorization\t=\tBASIC\tdXNlcjpwYXNz==", "proxy-authorization\t=\tBASIC\t[redacted]"],
       ["authorization\t=\tBASIC\tdXNlcjpwYXNz==", "authorization\t=\tBASIC\t[redacted]"],
       ["prefix (Authorization : Basic abc+/~._-) suffix", "prefix (Authorization : Basic [redacted]) suffix"],
       [
@@ -42,7 +45,7 @@ describe("sensitive-data policy", () => {
     for (const value of [
       "XAuthorization: Basic abc",
       "X-Authorization: Basic abc",
-      "Proxy-Authorization: Basic abc",
+      "X-Proxy-Authorization: Basic abc",
       "Authorization Basic abc",
       "Authorization: Basic",
       "Authorization: Basic ",
