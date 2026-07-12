@@ -37,9 +37,10 @@ describe("cleanup sweep output", () => {
     assert.deepEqual(createCleanupSweepReport(parsed), createCleanupSweepReport(report));
   });
 
-  it("round-trips confirmation argv byte-for-byte through /bin/sh for ordinary and encoded roots", () => {
+  it("extracts the complete human report confirmation and round-trips argv byte-for-byte through /bin/sh", () => {
     const roots = [
       "/tmp/repo with spaces/and 'quotes'",
+      "/tmp/repo\\with-literal-backslash",
       "/tmp/répo/雪",
       "/tmp/repo\u001b[31m",
       SENSITIVE_ROOT,
@@ -47,15 +48,17 @@ describe("cleanup sweep output", () => {
     ];
     for (const root of roots) {
       const repo = repository(root);
-      const digest = createCleanupSweepDigest(repo, []);
-      const confirmation = createCleanupSweepConfirmation(digest, root, { json: true });
+      const report = previewReport(repo, [], true);
+      const confirmation = report.confirmation;
       assert.deepEqual(confirmation.argv, [
-        "feature-factory", "factory", "cleanup", "--all", "--digest", digest, "--repo", root, "--json",
+        "feature-factory", "factory", "cleanup", "--all", "--digest", report.authorization.digest, "--repo", root, "--json",
       ]);
-      assert.deepEqual(runConfirmationAsSet(confirmation.shell_command), confirmation.argv, root);
+      const extracted = extractHumanConfirmation(renderCleanupSweepReport(report));
+      assert.equal(extracted, confirmation.shell_command, root);
+      assert.deepEqual(runConfirmationAsSet(extracted), confirmation.argv, root);
       if (root === SENSITIVE_ROOT || /[^\x20-\x7e]/u.test(root)) {
-        assert.match(confirmation.shell_command, /^_ff_cleanup_repo=\$\(printf '%b_' /u, root);
-        assert.doesNotMatch(confirmation.shell_command, new RegExp(escapeRegExp(root), "u"), root);
+        assert.match(extracted, /^_ff_cleanup_repo=\$\(printf '%b_' /u, root);
+        assert.doesNotMatch(extracted, new RegExp(escapeRegExp(root), "u"), root);
       }
     }
   });
@@ -200,6 +203,13 @@ function runConfirmationAsSet(shellCommand) {
   const setCommand = shellCommand.replace("'feature-factory'", "set -- 'feature-factory'");
   const output = execFileSync("/bin/sh", ["-c", `${setCommand}; printf '%s\\0' "$@"`]);
   return output.toString("utf8").split("\0").slice(0, -1);
+}
+
+function extractHumanConfirmation(renderedReport) {
+  const prefix = "confirmation: ";
+  const line = renderedReport.split("\n").find((item) => item.startsWith(prefix));
+  assert.notEqual(line, undefined, "human report must contain a confirmation line");
+  return line.slice(prefix.length);
 }
 
 function differentHash(hash) {

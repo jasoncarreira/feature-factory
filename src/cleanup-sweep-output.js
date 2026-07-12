@@ -77,7 +77,10 @@ export function renderCleanupSweepReportLines(report, options = {}) {
   ].join(" "))));
   lines.push(keyValueLine("attempted-cleanup-failures", identitySegment(normalized.attempted_cleanup_failures)));
   if (confirmation !== null) {
-    lines.push(keyValueLine("confirmation", identitySegment(confirmation.shell_command)));
+    // This command is constructed above from fixed ASCII framing and either
+    // shell-quoted terminal-safe text or octal UTF-8 bytes. Re-encoding it as a
+    // diagnostic identity would change the executable backslashes.
+    lines.push(`confirmation: ${confirmation.shell_command}`);
   }
   return lines;
 }
