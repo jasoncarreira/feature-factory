@@ -89,7 +89,7 @@ describe("factory trace-context propagation", () => {
     const fixture = createContinueLaunchFixture("continue-traceparent");
     let detachedPid;
     try {
-      await withLaunchEnv(fixture, {}, async () => {
+      await withLaunchEnv(fixture, { OPENCODE_KEEPALIVE: "1" }, async () => {
         const result = await continueFactory(fixture.runId, {
           cwd: fixture.repo,
           review: "reviewer.json",
@@ -112,6 +112,7 @@ describe("factory trace-context propagation", () => {
       const payload = decoded.payload;
       assert.equal(JSON.stringify(payload).includes("TRACEPARENT"), false);
       assert.equal(JSON.stringify(payload).includes("4bf92f3577b34da6a3ce929d0e0e4736"), false);
+      process.kill(detachedPid, "SIGTERM");
       await waitForProcessExit(detachedPid);
     } finally {
       cleanup(fixture.root);
@@ -201,6 +202,7 @@ const keys = [
 ];
 const env = Object.fromEntries(keys.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]))
 writeFileSync(process.env.OPENCODE_CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(2), env }, null, 2) + "\\n", "utf8");
+if (process.env.OPENCODE_KEEPALIVE === "1") setInterval(() => {}, 1000);
 `, "utf8");
   chmodSync(script, 0o755);
   return bin;

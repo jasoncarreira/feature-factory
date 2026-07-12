@@ -94,7 +94,7 @@ describe("cli gate-decision", () => {
       assert.equal(proc.status, 0, proc.stderr);
       const boundary = openBoundary(fixture, "gate", bin);
       proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer", "approve", "--boundary-token", boundary.token, "--json"], bin);
-      assert.equal(proc.status, 0, proc.stderr);
+      assert.equal(proc.status, 0, `${proc.stderr}\n${proc.stdout}\n${existsSync(join(fixture.runDir, "process.json")) ? readFileSync(join(fixture.runDir, "process.json"), "utf8") : "process.json missing"}`);
       const output = JSON.parse(proc.stdout);
       pid = output.handoff.pid;
       assert.deepEqual(output.handoff, {
