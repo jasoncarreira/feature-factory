@@ -1108,6 +1108,15 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
       reason_code: "FAILED_CLEANUP_WORKTREE",
     };
     cleanup.worktrees.push(record);
+    let quarantine = null;
+    let movedToQuarantine = false;
+    const restoreWorktree = () => {
+      if (!movedToQuarantine) return;
+      record.physical_path = restoreQuarantinedWorktree(repo, target, quarantine, {
+        gitRunner,
+      });
+      movedToQuarantine = record.physical_path !== target.physical_path;
+    };
     try {
       phaseHook("before-worktree-remove", { ...target });
       const expectedHead = expectedHeads.get(target.branch) || null;
@@ -1125,7 +1134,7 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
       }
       phaseHook("after-worktree-final-validation", { ...target });
       assertMutationAuthorized();
-      const quarantine = quarantinePath(target.physical_path, "worktree");
+      quarantine = quarantinePath(target.physical_path, "worktree");
       let proc;
       const mutationWasStarted = mutationStarted;
       mutationStarted = true;
@@ -1139,12 +1148,19 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
         if (target.branch) failedWorktreeBranches.add(target.branch);
         continue;
       }
+      movedToQuarantine = true;
       if (!matchesAuthorizedDirectoryAt(quarantine, target.expected_worktree)
         || !revalidateMovedSweepWorktree(repo, quarantine, target.branch, expectedHead, { gitRunner, worktreeIdentity, resolvePhysicalPath })) {
+        restoreWorktree();
         if (target.branch) failedWorktreeBranches.add(target.branch);
         continue;
       }
-      assertMutationAuthorized();
+      try {
+        assertMutationAuthorized();
+      } catch (error) {
+        restoreWorktree();
+        throw error;
+      }
       try {
         proc = gitRunner(repo, ["worktree", "remove", "--force", quarantine]);
       } catch (error) {
@@ -1152,12 +1168,15 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
       }
       if (proc?.cleanupEvidenceChanged) unexpected(new CleanupRunChangedError());
       if (!proc.ok) {
+        restoreWorktree();
         if (target.branch) failedWorktreeBranches.add(target.branch);
         continue;
       }
+      movedToQuarantine = false;
       record.outcome = "removed";
       record.reason_code = null;
     } catch (error) {
+      restoreWorktree();
       if (error instanceof CleanupRunUnexpectedError) throw error;
       unexpected(error);
     }
@@ -1217,21 +1236,64 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   }
   phaseHook("after-run-dir-final-validation", { path: runDir });
   assertMutationAuthorized();
-  const quarantine = quarantinePath(runDir, "run");
+  const quarantine = quarantinePath(opts.expectedRunDirectory.physical_path, "run");
+  let movedToQuarantine = false;
   try {
     renameSync(runDir, quarantine);
+    movedToQuarantine = true;
     if (!matchesAuthorizedRunDirectoryAt(quarantine, opts.expectedRunHash, opts.expectedRunDirectory)) {
-      try { renameSync(quarantine, runDir); } catch (error) { mutationStarted = true; unexpected(error); }
+      try { renameSync(quarantine, runDir); movedToQuarantine = false; } catch (error) { mutationStarted = true; unexpected(error); }
       changed();
     }
     mutationStarted = true;
     runDirRemover(quarantine);
+    movedToQuarantine = false;
     cleanup.run_dir.outcome = "removed";
   } catch {
+    if (movedToQuarantine) {
+      cleanup.run_dir.path = restoreQuarantinedRunDirectory(runDir, quarantine, opts.expectedRunDirectory);
+    }
     cleanup.run_dir.outcome = "failed";
     cleanup.run_dir.reason_code = "FAILED_CLEANUP_RUN_DIR";
   }
   return cleanup;
+}
+
+function restoreQuarantinedWorktree(repo, target, quarantine, opts) {
+  if (!stringValue(quarantine) || !matchesAuthorizedDirectoryAt(quarantine, target.expected_worktree)) return quarantine || target.physical_path;
+  try {
+    if (existsSync(target.physical_path)) return quarantine;
+    const restored = opts.gitRunner(repo, ["worktree", "move", quarantine, target.physical_path]);
+    if (!restored?.ok) return quarantine;
+    return matchesAuthorizedDirectoryAt(target.physical_path, target.expected_worktree) ? target.physical_path : quarantine;
+  } catch {
+    return quarantine;
+  }
+}
+
+function restoreQuarantinedRunDirectory(runDir, quarantine, expectedDirectory) {
+  if (!matchesAuthorizedDirectoryAt(quarantine, expectedDirectory)) {
+    return matchesAuthorizedOriginalRunDirectory(runDir, expectedDirectory) ? runDir : quarantine;
+  }
+  try {
+    if (existsSync(runDir)) return quarantine;
+    renameSync(quarantine, runDir);
+    return matchesAuthorizedOriginalRunDirectory(runDir, expectedDirectory) ? runDir : quarantine;
+  } catch {
+    return quarantine;
+  }
+}
+
+function matchesAuthorizedOriginalRunDirectory(runDir, expectedDirectory) {
+  try {
+    const entry = lstatSync(runDir);
+    return !entry.isSymbolicLink() && entry.isDirectory()
+      && realpathSync(runDir) === expectedDirectory.physical_path
+      && String(entry.dev) === expectedDirectory.device
+      && String(entry.ino) === expectedDirectory.inode;
+  } catch {
+    return false;
+  }
 }
 
 function revalidateMovedSweepWorktree(repo, path, branch, expectedHead, opts) {
