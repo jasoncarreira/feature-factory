@@ -81,6 +81,18 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
+  it("treats aggregate CHANGES_REQUESTED as blocking when review policy is optional", async () => {
+    const fixture = createFixture("post-pr-aggregate-review-red");
+    try {
+      const result = await postPrObserve(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z", executeGithub: async ({ args }) => {
+        if (args[0] === "auth") return { exitCode: 0, stdout: "", stderr: "" };
+        return { exitCode: 0, stderr: "", stdout: JSON.stringify({ headRefOid: SHA, isDraft: false, reviewDecision: "CHANGES_REQUESTED", reviews: [], state: "OPEN", statusCheckRollup: [{ __typename: "CheckRun", name: "unit", status: "COMPLETED", conclusion: "SUCCESS" }] }) };
+      } });
+      assert.equal(result.status, "needs-human");
+      assert.equal(result.reason, "post-pr-review-changes-requested");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
   it("publishes checked evidence and reserves exactly one owner-routed red attempt", async () => {
     const fixture = createFixture("post-pr-red");
     try {
@@ -374,6 +386,7 @@ describe("post-PR workflow orchestration", () => {
       const run = readRun(fixture);
       assert.equal(run.terminal_result.reason, "post-pr-retry-exhausted");
       assert.equal(run.post_pr.evidence_refs.at(-1).ref, "evidence/post-pr-local-failure.attempt-2.json");
+      assert.equal(JSON.parse(readFileSync(join(fixture.runDir, run.post_pr.continuation_review.ref), "utf8")).head_sha, fixture.candidate);
       assert.equal(run.terminal_result.artifacts.latest_failure_hash, fileHash(join(fixture.runDir, "evidence", "post-pr-local-failure.attempt-2.json")));
       assert.equal(run.terminal_result.artifacts.continuation_review_hash, run.post_pr.continuation_review.hash);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
@@ -631,6 +644,7 @@ describe("post-PR workflow orchestration", () => {
       assert.doesNotThrow(() => decodeFeatureCommandPayload(encodeFeatureCommandPayload(result.payload)));
       assert.equal(result.payload.continuation.post_pr.disposition, "leave-unchanged");
       assert.equal(result.payload.continuation.post_pr.evidence_ref, "evidence/post-pr-local-failure.attempt-2.json");
+      assert.equal(result.payload.continuation.post_pr.head_sha, fixture.candidate);
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), parentBefore);
       writeFileSync(join(fixture.runDir, parent.post_pr.continuation_review.ref), "{}\n");
       assert.throws(() => continueFactory(fixture.runId, { cwd: fixture.repo, review: parent.post_pr.continuation_review.ref, runId: "post-pr-continuation-tampered", newPr: true, dryRun: true }), /hash mismatch|invalid evidence\/review bindings/u);

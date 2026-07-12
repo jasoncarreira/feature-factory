@@ -292,8 +292,8 @@ export function normalizeReview(input = {}) {
   }
   const decision = upper(input.reviewDecision);
   if (input.reviewDecision != null && !["CHANGES_REQUESTED", "APPROVED", "REVIEW_REQUIRED"].includes(decision)) return { verdict: "indeterminate", review: null };
-  if (!required) return { verdict: "not_required", review: null };
   if (decision === "CHANGES_REQUESTED") return { verdict: "red", review: null };
+  if (!required) return { verdict: "not_required", review: null };
   if (decision === "APPROVED") return { verdict: "pass", review: null };
   if (decision === "REVIEW_REQUIRED" || input.reviewDecision == null) return { verdict: "pending", review: null };
   return { verdict: "indeterminate", review: null };

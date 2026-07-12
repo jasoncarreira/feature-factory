@@ -1861,7 +1861,7 @@ function buildContinuation(parentRunId, opts = {}) {
     parent_reviews: collectContinuationParentReviews(parentRunDir, parentRun),
     planning_reuse: continuationPlanningReuse(parentRun, parentRunDir),
   };
-  if (postPrParent) continuation.post_pr = continuationPostPrBinding(parentRun);
+  if (postPrParent) continuation.post_pr = continuationPostPrBinding(parentRun, parentRunDir);
   return continuation;
 }
 
@@ -3943,15 +3943,25 @@ function assertPostPrContinuationParent(run) {
   if (run.post_pr?.phase !== "blocked" || run.terminal_result?.reason !== "post-pr-retry-exhausted" || !run.post_pr?.continuation_review?.ref) throw new Error("--new-pr requires a retry-exhausted blocked post-PR parent with continuation review");
 }
 
-function continuationPostPrBinding(run) {
+function continuationPostPrBinding(run, runDir) {
   const remediation = run.post_pr.remediation;
-  const latestEvidence = run.post_pr.evidence_refs?.at(-1) || { ref: remediation.failure_evidence_ref, hash: remediation.failure_evidence_hash };
+  const latestEvidence = latestPostPrFailure(runDir, run);
+  const continuationReview = readBoundRunJson(runDir, run.post_pr.continuation_review.ref, "reviews");
+  if (continuationReview.hash !== run.post_pr.continuation_review.hash || continuationReview.value.head_sha !== latestEvidence.failedHeadSha) throw new Error("post-PR continuation review does not bind the latest failed head");
   const postPrForHash = cloneJson(run.post_pr); delete postPrForHash.continuation_review;
   const identity = persistedPrIdentity(run);
   return { pr_url: run.pr_url, repository: identity.repository, pr_number: identity.number,
-    head_sha: run.post_pr.observation?.expected_head_sha || remediation.candidate_head_sha || remediation.failed_head_sha, disposition: "leave-unchanged",
-    policy: cloneJson(run.post_pr.policy), post_pr_hash: hashJson(postPrForHash), evidence_ref: latestEvidence.ref, evidence_hash: latestEvidence.hash,
+    head_sha: latestEvidence.failedHeadSha, disposition: "leave-unchanged",
+    policy: cloneJson(run.post_pr.policy), post_pr_hash: hashJson(postPrForHash), evidence_ref: latestEvidence.binding.ref, evidence_hash: latestEvidence.binding.hash,
     continuation_review_ref: run.post_pr.continuation_review.ref, continuation_review_hash: run.post_pr.continuation_review.hash };
+}
+
+function latestPostPrFailure(runDir, run) {
+  const remediation = run.post_pr.remediation;
+  const expected = run.post_pr.evidence_refs?.at(-1) || { ref: remediation.failure_evidence_ref, hash: remediation.failure_evidence_hash };
+  const binding = readBoundRunJson(runDir, expected.ref, "evidence");
+  if (binding.hash !== expected.hash || !/^[0-9a-f]{40}$/u.test(binding.value.failed_head_sha || "")) throw new Error("latest post-PR failure evidence is invalid");
+  return { binding, failedHeadSha: binding.value.failed_head_sha };
 }
 
 async function exhaustPostPr(runDir, run, opts, latestFailure) {
@@ -3964,18 +3974,19 @@ async function exhaustPostPr(runDir, run, opts, latestFailure) {
     transitionOpts = { ...withoutExpectedHash(opts), expectedCurrentHash: hashRunState(run) };
   }
   const remediation = run.post_pr.remediation;
+  const latest = latestPostPrFailure(runDir, run);
   const postPrForHash = cloneJson(run.post_pr); delete postPrForHash.continuation_review;
   const identity = persistedPrIdentity(run);
   const review = { kind: "post-pr-continuation", subject: run.run_id, verdict: "BLOCKED", attempt: run.post_pr.attempt, reason: "post-pr-retry-exhausted", route: remediation.route,
     evidence_ref: remediation.failure_evidence_ref, evidence_hash: remediation.failure_evidence_hash, post_pr_hash: hashJson(postPrForHash), pr_url: run.pr_url,
-    repository: identity.repository, pr_number: identity.number, head_sha: run.post_pr.observation?.expected_head_sha || remediation.candidate_head_sha || remediation.failed_head_sha,
-    latest_failure_ref: latestFailure?.ref || remediation.failure_evidence_ref, latest_failure_hash: latestFailure?.hash || remediation.failure_evidence_hash,
+    repository: identity.repository, pr_number: identity.number, head_sha: latest.failedHeadSha,
+    latest_failure_ref: latest.binding.ref, latest_failure_hash: latest.binding.hash,
     pr_disposition: "leave-unchanged", summary: "Post-PR remediation retry budget exhausted.", required_fixes: ["Resolve the recorded failing checks on a fresh continuation PR."] };
   assertFactoryStateHash(runDir, transitionOpts.expectedCurrentHash);
   const binding = publishRunJsonEvidence(runDir, `reviews/post-pr-ci.attempt-${run.post_pr.attempt}.json`, review);
   assertFactoryStateHash(runDir, transitionOpts.expectedCurrentHash);
   const artifacts = Object.fromEntries([
-    ["latest_failure", latestFailure?.ref || remediation.failure_evidence_ref], ["latest_failure_hash", latestFailure?.hash || remediation.failure_evidence_hash],
+    ["latest_failure", latest.binding.ref], ["latest_failure_hash", latest.binding.hash],
     ["failure_evidence", remediation.failure_evidence_ref], ["failure_evidence_hash", remediation.failure_evidence_hash],
     ["remediation_evidence", remediation.remediation_evidence_ref], ["remediation_evidence_hash", remediation.remediation_evidence_hash],
     ["canonical_evidence", remediation.revalidation?.canonical_evidence_ref], ["canonical_evidence_hash", remediation.revalidation?.canonical_evidence_hash],

@@ -1923,6 +1923,11 @@ function bindPostPrContinuationReview(runDir, run, binding) {
   if (actualHash !== binding.hash) throw new Error("post-PR continuation review exact-byte hash mismatch");
   const review = parseJsonObjectFile(resolved.path, "post-PR continuation review");
   const remediation = run.post_pr.remediation;
+  const latestFailure = run.post_pr.evidence_refs?.at(-1) || { ref: remediation.failure_evidence_ref, hash: remediation.failure_evidence_hash };
+  const failurePath = resolveEvidenceRef(runDir, latestFailure.ref).path;
+  if (hashFile(failurePath, { mode: "raw" }) !== latestFailure.hash) throw new Error("latest post-PR failure evidence hash mismatch");
+  const failure = parseJsonObjectFile(failurePath, "latest post-PR failure evidence");
+  if (!/^[0-9a-f]{40}$/u.test(failure.failed_head_sha || "")) throw new Error("latest post-PR failure evidence head is invalid");
   const postPrForHash = cloneJson(run.post_pr);
   delete postPrForHash.continuation_review;
   const pr = githubPrUrlParts(run.pr_url);
@@ -1939,7 +1944,7 @@ function bindPostPrContinuationReview(runDir, run, binding) {
     pr_url: run.pr_url,
     repository: pr.repository,
     pr_number: pr.number,
-    head_sha: run.post_pr.observation?.expected_head_sha ?? remediation.candidate_head_sha ?? remediation.failed_head_sha,
+    head_sha: failure.failed_head_sha,
     pr_disposition: "leave-unchanged",
   };
   for (const [key, value] of Object.entries(expected)) if (review[key] !== value) throw new Error(`post-PR continuation review ${key} mismatch`);
