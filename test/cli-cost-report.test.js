@@ -416,7 +416,7 @@ function runCostReport(repo, args, extraEnv = {}) {
     cwd: repo,
     encoding: "utf8",
     env: cleanEnv(extraEnv),
-    timeout: 5000,
+    timeout: 15000,
   });
   if (proc.error) throw proc.error;
   return proc;

@@ -130,5 +130,5 @@ function stopProcess(pid) {
 }
 
 function cleanup(path) {
-  rmSync(path, { recursive: true, force: true });
+  rmSync(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }

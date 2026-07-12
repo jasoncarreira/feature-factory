@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { basename, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { timestamp } from "./utils.js";
@@ -39,6 +39,50 @@ export function readProcessEvidence(runDir, opts = {}) {
     return { ok: true, missing: false, reason: null, path: file, evidence: validation.evidence };
   } catch (error) {
     return { ok: false, missing: false, reason: `invalid process evidence: ${error.message}`, path: file, evidence: null };
+  }
+}
+
+export function inspectProcessEvidenceForCleanup(runDir, opts = {}) {
+  const read = readProcessEvidenceForCleanup(runDir);
+  if (read.missing) return cleanupProcessInspection("missing", null, read.reason);
+  if (!read.ok) return cleanupProcessInspection("invalid", read.evidence, read.reason);
+
+  const evidence = read.evidence;
+  if (nonEmptyString(opts.runId) && evidence.run_id !== opts.runId) {
+    return cleanupProcessInspection("mismatched", evidence, "process evidence run_id does not match requested run");
+  }
+  if (evidence.state !== "running") {
+    return cleanupProcessInspection("absent", evidence, `process evidence state is ${evidence.state}`);
+  }
+
+  const verification = verifyEvidenceProcess(evidence, opts);
+  if (verification.status === "live-and-matching") return cleanupProcessInspection("live-matching", evidence, null);
+  if (verification.status === "absent") return cleanupProcessInspection("absent", evidence, verification.reason);
+  if (verification.status === "mismatched") return cleanupProcessInspection("mismatched", evidence, verification.reason);
+  return cleanupProcessInspection("indeterminate", evidence, verification.reason);
+}
+
+function cleanupProcessInspection(state, evidence, reason) {
+  return { state, evidence, reason: reason || null };
+}
+
+function readProcessEvidenceForCleanup(runDir) {
+  const file = processEvidencePath(runDir);
+  let descriptor;
+  try {
+    descriptor = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    if (!fstatSync(descriptor).isFile()) {
+      return { ok: false, missing: false, reason: "process evidence must be a regular file", evidence: null };
+    }
+    const evidence = JSON.parse(readFileSync(descriptor, "utf8"));
+    const validation = validateProcessEvidence(evidence, { runDir });
+    if (!validation.ok) return { ok: false, missing: false, reason: validation.reason, evidence };
+    return { ok: true, missing: false, reason: null, evidence: validation.evidence };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { ok: false, missing: true, reason: "missing process evidence", evidence: null };
+    return { ok: false, missing: false, reason: `invalid process evidence: ${error.message}`, evidence: null };
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 

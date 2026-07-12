@@ -20,6 +20,7 @@ import {
   transitionSteeringQueued,
   transitionTerminalResult,
   transitionSliceMerged,
+  RunJsonLockContendedError,
   withRunJsonLock,
 } from "../src/run-state.js";
 import { MAX_COST_ATTRIBUTION_ENTRIES, recomputeCostAttribution } from "../src/cost-attribution.js";
@@ -817,6 +818,55 @@ describe("simplified run-state transitions", () => {
       assert.equal(observedOwner.stolen_from.hostname, hostname());
       assert.equal(observedOwner.stolen_from.nonce, undefined);
       assert.match(observedOwner.nonce, /^[0-9a-f-]{36}$/u);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("fails immediately without owner inspection or recovery when reclaimMode is never", async () => {
+    const fixture = createFixture("never-reclaim-lock");
+    const lockDir = join(fixture.runDir, "run-json.lock");
+    const owner = { pid: 999999, hostname: hostname(), acquired_at: NOW, nonce: "12121212-1212-4212-8212-121212121212" };
+    const calls = [];
+    try {
+      mkdirSync(lockDir);
+      writeJson(join(lockDir, "owner.json"), owner);
+
+      await assert.rejects(
+        withRunJsonLock(fixture.runDir, () => { calls.push("callback"); }, {
+          reclaimMode: "never",
+          timeoutMs: 60000,
+          processAliveFn: () => { calls.push("inspect-owner"); return false; },
+          lockHooks: {
+            onContended: () => calls.push("contended"),
+            onBeforeReclaimClaim: () => calls.push("before-reclaim"),
+            onReclaimClaimed: () => calls.push("reclaimed"),
+          },
+        }),
+        (error) => {
+          assert.equal(error instanceof RunJsonLockContendedError, true);
+          assert.equal(error.code, "RUN_JSON_LOCK_CONTENDED");
+          assert.equal(error.lockDir, lockDir);
+          return true;
+        },
+      );
+
+      assert.deepEqual(calls, []);
+      assert.deepEqual(readJson(join(lockDir, "owner.json")), owner);
+      assert.deepEqual(readdirSync(fixture.runDir).filter((entry) => entry.includes("reclaim") || entry.includes("quarantine")), []);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("accepts only the exact run-json lock reclaim modes", async () => {
+    const fixture = createFixture("reclaim-mode-validation");
+    try {
+      await assert.rejects(
+        withRunJsonLock(fixture.runDir, () => {}, { reclaimMode: "Never" }),
+        /reclaimMode must be dead-owner or never/u,
+      );
+      assert.equal(existsSync(join(fixture.runDir, "run-json.lock")), false);
     } finally {
       cleanup(fixture.repo);
     }
