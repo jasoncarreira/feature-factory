@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
-import { buildCostReport, formatCostReport, serializeCostReport } from "./cost-report.js";
+import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
@@ -16,6 +16,9 @@ import { normalizePrNumber as normalizeTransitionPrNumber, transitionGateDecisio
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
+import { printCliResult, projectCostReport, renderCliIdentity } from "./cli-output.js";
+import { freeformSegment, identitySegment, renderErrorForTerminal, renderTerminalSegments, StructuredOutputError, TRUSTED_SEGMENTS } from "./hardening/output-policy.js";
+import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
@@ -118,8 +121,8 @@ function install(args) {
   if (hit !== -1 && !Array.isArray(cfg.plugin[hit])) cfg.plugin[hit] = pluginSpec;
   if (hit !== -1) cfg.plugin = cfg.plugin.filter((entry, index) => index === hit || !matchesSpec(entry));
   writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n");
-  console.log(`configured opencode plugin: ${pluginSpec}`);
-  console.log(`updated: ${configPath}`);
+  console.log(`configured opencode plugin: ${renderCliIdentity(pluginSpec)}`);
+  console.log(`updated: ${renderCliIdentity(configPath)}`);
   console.log("restart opencode for plugin changes to take effect");
   warnGlobalFeatureSkillConflicts(findGlobalFeatureSkillConflicts(home));
   warnGlobalAgentConflicts(findGlobalAgentConflicts(home));
@@ -139,7 +142,7 @@ function warnGlobalAgentConflicts(paths) {
     "",
     "WARNING: existing global feature-factory agent definitions detected.",
     "These files are not managed by opencode-feature-factory and can shadow the plugin's current prompts:",
-    ...paths.map((path) => `- ${path}`),
+    ...paths.map((path) => `- ${renderCliIdentity(path)}`),
     "Remove stale files, or replace them with delegators that defer to the plugin-owned agents.",
     "Restart opencode after changing agent files.",
   ].join("\n"));
@@ -160,7 +163,7 @@ function warnGlobalFeatureSkillConflicts(paths) {
     "",
     "WARNING: existing global feature skill detected.",
     "These files are not installed or managed by opencode-feature-factory and can shadow or conflict with the plugin's current feature workflow:",
-    ...paths.map((path) => `- ${path}`),
+    ...paths.map((path) => `- ${renderCliIdentity(path)}`),
     "Remove stale files, or replace them with a delegator that reads the repo-seeded .opencode/skills/feature/SKILL.md before mutating factory state.",
     "Restart opencode after changing skill files.",
   ].join("\n"));
@@ -193,7 +196,7 @@ async function factory(args) {
   }
   if (sub === "continue") {
     if (positional.length !== 1) throw new Error("factory continue requires exactly one <blocked-run-id>");
-    return print(continueFactory(positional[0], opts), opts);
+    return print(await continueFactory(positional[0], opts), opts);
   }
   if (sub === "adopt-continuation") {
     if (positional.length !== 1) throw new Error("factory adopt-continuation requires exactly one <child-run-id>");
@@ -235,7 +238,11 @@ async function factory(args) {
     watchRun(positional[0], opts);
     return;
   }
-  console.error(`unknown factory command: ${sub || ""}`.trim());
+  console.error(renderTerminalSegments([
+    freeformSegment("unknown factory command"),
+    TRUSTED_SEGMENTS.COLON_SPACE,
+    freeformSegment(sub || ""),
+  ]).trim());
   usage(console.error);
   process.exitCode = 1;
 }
@@ -311,7 +318,7 @@ async function prFence(args) {
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory pr-fence requires exactly one <run-id>");
   if (opts.clear) return print(await clearPrePrFence(runId, requiredOption(opts.fenceToken, "--fence-token", "factory pr-fence --clear"), opts), opts);
-  if (opts.fenceToken) throw new Error("factory pr-fence accepts --fence-token only with --clear");
+  if (opts.fenceToken) throw staticCliError("factory pr-fence accepts --fence-token only with --clear");
   return print(await establishPrePrFence(runId, opts), opts);
 }
 
@@ -357,11 +364,26 @@ function costReport(args) {
     const run = readCostReportRunJson(runDir);
     if (!run || typeof run !== "object" || Array.isArray(run)) throw new Error("run.json must contain an object");
 
-    const report = buildCostReport(basename(runDir), run.cost_attribution, { telemetry: opts.telemetry });
-    console.log(opts.json ? serializeCostReport(report) : formatCostReport(report));
+    const report = projectCostReport(buildCostReport(basename(runDir), run.cost_attribution, { telemetry: opts.telemetry }));
+    console.log(opts.json ? serializeTerminalJson(report, { space: 2 }) : formatCostReport(report));
   } catch (error) {
-    throw new Error(terminalSafeCostReportError(error?.message));
+    throw structuredCostReportError(error);
   }
+}
+
+function structuredCostReportError(error) {
+  const message = typeof error?.message === "string" ? error.message : "cost-report failed";
+  const jsonPrefix = "run.json must be valid JSON:";
+  if (message.startsWith(jsonPrefix)) {
+    return new StructuredOutputError(message, [
+      identitySegment(jsonPrefix),
+      freeformSegment(message.slice(jsonPrefix.length)),
+    ]);
+  }
+  if (/^cost attribution aggregate overflow for [a-z_]+$/u.test(message)) {
+    return new StructuredOutputError(message, [identitySegment(message)]);
+  }
+  return error;
 }
 
 async function resume(args) {
@@ -491,10 +513,17 @@ function options(args) {
 }
 
 function parseCostNumericOption(flag, raw) {
-  if (typeof raw !== "string" || raw.trim() === "") throw new Error(`${flag} must be a finite non-negative number`);
+  if (typeof raw !== "string" || raw.trim() === "") throw costNumericOptionError(flag);
   const value = Number(raw);
-  if (!Number.isFinite(value) || value < 0) throw new Error(`${flag} must be a finite non-negative number`);
+  if (!Number.isFinite(value) || value < 0) throw costNumericOptionError(flag);
   return value;
+}
+
+function costNumericOptionError(flag) {
+  return new StructuredOutputError(`${flag} must be a finite non-negative number`, [
+    identitySegment(flag),
+    identitySegment(" must be a finite non-negative number"),
+  ]);
 }
 
 function assertKnownOptions(args) {
@@ -770,8 +799,12 @@ function costRecordInput(opts) {
 }
 
 function requiredOption(value, flag, command = "factory pr-created") {
-  if (!stringValue(value)) throw new Error(`${command} requires ${flag}`);
+  if (!stringValue(value)) throw staticCliError(`${command} requires ${flag}`);
   return value;
+}
+
+function staticCliError(message) {
+  return new StructuredOutputError(message, [identitySegment(message)]);
 }
 
 function normalizeGateDecisionStatus(value) {
@@ -856,29 +889,12 @@ function readCostReportRunJson(runDir) {
 }
 
 function print(value, opts) {
-  if (value === undefined) return;
-  if (value === null || opts.json || typeof value !== "object") {
-    console.log(typeof value === "string" ? value : JSON.stringify(value, null, 2));
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) console.log(`${item.run_id}\t${item.status}\t${item.gate || "-"}\t${item.updated_at || "-"}\t${formatListCostColumn(item)}\t${formatDiagnosticColumn(item.diagnostics)}`);
-    return;
-  }
-  for (const [key, val] of Object.entries(value)) console.log(`${key}: ${typeof val === "object" ? JSON.stringify(val) : val}`);
+  return printCliResult(value, opts, { formatListCostColumn, cleanDiagnosticText });
 }
 
 function formatListCostColumn(item) {
   if (!item?.cost_summary) return "-";
   return cleanDiagnosticText(formatCostAttributionSummary({ totals: item.cost_summary, updated_at: item.cost_summary.updated_at }));
-}
-
-function formatDiagnosticColumn(diagnostics) {
-  if (!diagnostics || typeof diagnostics !== "object") return "-";
-  if (diagnostics.status === "ok") return "ok";
-  const prefix = [diagnostics.classification, diagnostics.status].filter(stringValue).join("/") || "diagnostic";
-  const summary = cleanDiagnosticText(diagnostics.summary || "check diagnostics");
-  return `${prefix}:${summary}`;
 }
 
 function cleanDiagnosticText(value) {
@@ -1019,18 +1035,6 @@ function normalizeCostReportRunId(runId) {
   return value;
 }
 
-function terminalSafeCostReportError(message) {
-  const value = String(message ?? "cost-report failed");
-  let safe = "";
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    safe += code >= 0x20 && code <= 0x7E
-      ? value[index]
-      : `\\u${code.toString(16).toUpperCase().padStart(4, "0")}`;
-  }
-  return safe;
-}
-
 function insideDirectory(parent, child) {
   return isContainedPath(parent, child, { allowEqual: false });
 }
@@ -1067,6 +1071,6 @@ function pluginEntrySpec(entry) {
 }
 
 main(process.argv.slice(2)).catch((error) => {
-  console.error(`error: ${error.message}`);
+  console.error(`error: ${renderErrorForTerminal(error)}`);
   process.exitCode = 1;
 });

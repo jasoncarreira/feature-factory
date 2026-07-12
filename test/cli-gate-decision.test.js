@@ -123,6 +123,11 @@ describe("cli gate-decision", () => {
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /unknown factory command/u);
 
+      proc = runCli(fixture.repo, ["factory", "bad\u001B]0;pwned\u0007"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /bad\\u001B/u);
+      assert.doesNotMatch(proc.stderr, /[\u001B\u0007\u009B]/u);
+
       proc = runCli(fixture.repo, ["factory", "status", "--repo", "--json"]);
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /--repo requires a value/u);

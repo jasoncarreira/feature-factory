@@ -5,8 +5,16 @@ import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { readJsoncConfig, readStrictJsonConfig } from "./config.js";
-import { REDACTED_ENV_VALUE, collectEnv, resolvePluginConfig, scrubSecretEnv } from "./env-snapshot.js";
+import { REDACTED_ENV_VALUE, collectEnv, resolvePluginConfig } from "./env-snapshot.js";
 import { checkOpenTelemetryApiLoadability, evaluateContentCaptureRisk, sanitizeOtlpEnv } from "./telemetry.js";
+import {
+  isSensitiveKey,
+  isSensitiveValue,
+  scrubSensitiveData,
+  scrubSensitiveString,
+} from "./hardening/sensitive-data.js";
+import { freeformSegment, projectFreeformData, renderTerminalSegments } from "./hardening/output-policy.js";
+import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const SUBAGENTS = [
@@ -35,10 +43,6 @@ const OTEL_ENDPOINT_KEYS = ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER
 const OTEL_HEADER_KEYS = ["OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS"];
 const OTEL_RESOURCE_ATTRIBUTES = "OTEL_RESOURCE_ATTRIBUTES";
 const OTEL_SERVICE_NAME = "OTEL_SERVICE_NAME";
-const ENDPOINT_SECRET_KEY_PATTERN = /(?:key|token|secret|password|authorization|credential|access|team|api[_-]?key)/iu;
-const ENDPOINT_SECRET_VALUE_PATTERN = /(?:hc[a-z0-9_-]*|gh[pousr]|github_pat|sk(?:-proj)?|xox[abp]|glpat)[_-][A-Za-z0-9_-]{10,}/iu;
-const ENDPOINT_BARE_HEX_SECRET_PATTERN = /^[A-Fa-f0-9]{32,}$/u;
-const ENDPOINT_LONG_TOKEN_PATTERN = /^[A-Za-z0-9._~+/-]{16,}$/u;
 
 export async function runDoctor(options = {}) {
   const configPath = join(homedir(), ".config", "opencode", "opencode.jsonc");
@@ -108,11 +112,12 @@ export async function runDoctor(options = {}) {
     add(checks, "provider smoke", false, "run with --provider-smoke before long scripted runs", "warn");
   }
 
+  const payload = projectFreeformData(telemetry ? { checks, env, telemetry } : { checks, env });
   if (options.json) {
-    console.log(JSON.stringify(telemetry ? { checks, env, telemetry } : { checks, env }, null, 2));
+    console.log(serializeTerminalJson(payload, { space: 2 }));
   } else {
     if (options.profiles) printProfileMap(env.resolved_models, env.resolved_variants);
-    for (const check of checks) console.log(`${check.level}: ${check.label} (${check.detail})`);
+    for (const check of payload.checks) console.log(renderDoctorRow(check));
   }
   return checks.every((check) => check.level !== "missing");
 }
@@ -124,7 +129,7 @@ export function readOpencodeConfig(configPath = join(homedir(), ".config", "open
 export async function collectTelemetryReadiness({ cfg = {}, pluginOptions = {}, env = process.env, instrumentationLoadability } = {}) {
   const loadability = instrumentationLoadability || await checkOpenTelemetryApiLoadability();
   const opencode = evaluateOpenTelemetryConfigReadiness(cfg);
-  return scrubSecretEnv({
+  return scrubSensitiveData({
     opencode,
     otlpEnv: evaluateOtlpEnvReadiness(env),
     companionPlugin: evaluateCompanionTelemetryPluginReadiness(cfg),
@@ -221,7 +226,7 @@ export function evaluatePackageInstrumentationLoadability(loadability = {}) {
     exports: Array.isArray(loadability.exports) ? loadability.exports : [],
     detail: loadability.ok === true
       ? `${loadability.package || "@opentelemetry/api"} loadable`
-      : scrubSecretEnv(loadability.error || `${loadability.package || "@opentelemetry/api"} is not loadable`),
+      : safeValue(loadability.error || `${loadability.package || "@opentelemetry/api"} is not loadable`),
   };
 }
 
@@ -369,11 +374,12 @@ function normalizePackageSpec(value) {
 function sanitizePublicName(value) {
   const name = String(value || "").trim();
   if (!name) return null;
-  return scrubSecretEnv(name);
+  if (isSensitiveKey(name, { mode: "baseline" })) return REDACTED_ENV_VALUE;
+  return scrubSensitiveString(name, { mode: "baseline" });
 }
 
 function safeValue(value) {
-  return scrubSecretEnv(String(value ?? ""));
+  return scrubSensitiveString(String(value ?? ""), { mode: "baseline" });
 }
 
 function sanitizeEndpointSummary(value) {
@@ -397,7 +403,7 @@ function sanitizeEndpointSummary(value) {
 function sanitizeEndpointHost(parsed) {
   const hostname = parsed.hostname;
   const port = parsed.port ? `:${parsed.port}` : "";
-  if (!hostname) return scrubSecretEnv(parsed.host || "");
+  if (!hostname) return scrubSensitiveString(parsed.host || "", { mode: "endpoint" });
   if (hostname.startsWith("[") && hostname.endsWith("]")) return `${hostname}${port}`;
   const safeHostname = hostname
     .split(".")
@@ -409,15 +415,15 @@ function sanitizeEndpointHost(parsed) {
 function sanitizeEndpointHostLabel(label) {
   if (!label) return label;
   const decoded = safeDecodeURIComponent(label);
-  if (endpointValueLooksSensitive(decoded)) return REDACTED_ENV_VALUE;
-  return scrubSecretEnv(label);
+  if (isSensitiveValue(decoded, { mode: "endpoint" })) return REDACTED_ENV_VALUE;
+  return scrubSensitiveString(label, { mode: "endpoint" });
 }
 
 function sanitizeEndpointPathSegment(segment) {
   if (!segment) return segment;
   const decoded = safeDecodeURIComponent(segment);
-  if (endpointValueLooksSensitive(decoded)) return REDACTED_ENV_VALUE;
-  return scrubSecretEnv(segment);
+  if (isSensitiveValue(decoded, { mode: "endpoint" })) return REDACTED_ENV_VALUE;
+  return scrubSensitiveString(segment, { mode: "endpoint" });
 }
 
 function endpointSearchHasValues(searchParams) {
@@ -428,18 +434,7 @@ function endpointSearchHasValues(searchParams) {
 }
 
 function endpointValueLooksSensitive(value) {
-  const string = String(value || "").trim();
-  if (!string) return false;
-  if (scrubSecretEnv(string) === REDACTED_ENV_VALUE) return true;
-  if (ENDPOINT_SECRET_VALUE_PATTERN.test(string)) return true;
-  if (ENDPOINT_BARE_HEX_SECRET_PATTERN.test(string)) return true;
-  if (ENDPOINT_SECRET_KEY_PATTERN.test(string) && /[=:]/u.test(string)) return true;
-  if (ENDPOINT_LONG_TOKEN_PATTERN.test(string) && string.length >= 24 && mixedTokenChars(string)) return true;
-  return false;
-}
-
-function mixedTokenChars(value) {
-  return /[A-Z]/u.test(value) && /[a-z]/u.test(value) && /[0-9]/u.test(value);
+  return isSensitiveValue(String(value || "").trim(), { mode: "endpoint" });
 }
 
 function safeDecodeURIComponent(value) {
@@ -553,7 +548,7 @@ function providerEnv(provider) {
 
 function smokeProvider(model, cwd) {
   const proc = runOpencode(["run", "--dir", cwd, "--model", model, "Reply OK only."], { cwd, maxBuffer: 1024 * 1024 });
-  const output = scrubSecretEnv(`${proc.stdout || ""}\n${proc.stderr || ""}`.trim());
+  const output = projectFreeformData(`${proc.stdout || ""}\n${proc.stderr || ""}`.trim());
   return { ok: proc.ok, detail: proc.ok ? "smoke passed" : output.slice(0, 300) };
 }
 
@@ -583,6 +578,21 @@ function normalizeCommandOutput(value) {
 
 function printProfileMap(models, variants) {
   for (const [agent, model] of Object.entries(models)) {
-    console.log(`profile: ${agent} -> model=${model || "<opencode default>"} variant=${variants[agent] || "<opencode default>"}`);
+    console.log([
+      "profile: ", renderDoctorValue(agent),
+      " -> model=", renderDoctorValue(model || "<opencode default>"),
+      " variant=", renderDoctorValue(variants[agent] || "<opencode default>"),
+    ].join(""));
   }
+}
+
+function renderDoctorRow(check) {
+  return [
+    renderDoctorValue(check.level), ": ", renderDoctorValue(check.label),
+    " (", renderDoctorValue(check.detail), ")",
+  ].join("");
+}
+
+function renderDoctorValue(value) {
+  return renderTerminalSegments([freeformSegment(value)]);
 }

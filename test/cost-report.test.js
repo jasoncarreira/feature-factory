@@ -7,6 +7,7 @@ import {
   formatCostReport,
   serializeCostReport,
 } from "../src/cost-report.js";
+import { projectCostReport } from "../src/cli-output.js";
 
 const TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 const NUMERIC_FIELDS = [
@@ -252,6 +253,19 @@ describe("cost report domain", () => {
     assert.equal(Object.hasOwn(decoded.by_agent, raw), true);
     assert.match(serialized, /group\\u0085\\u2028\\u202Ex\\u2066\\u2067\\u2068\\u2069/u);
     assert.doesNotMatch(serialized, /[\u007F-\u009F\u2028-\u202E\u2066-\u2069]/u);
+  });
+
+  it("projects dynamic cost headings before human formatting", () => {
+    const secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
+    const report = buildCostReport("run-123", { entries: [availableEntry({
+      agent: `Authorization: Basic ${secret}`,
+      step: "step\u001B[2J",
+      slice_id: "slice\u202Ehidden",
+    })] });
+    const output = formatCostReport(projectCostReport(report));
+    assert.doesNotMatch(output, new RegExp(secret, "u"));
+    assert.doesNotMatch(output, /[\u001B\u009B\u202E]/u);
+    assert.match(output, /Authorization: Basic \[redacted\]/u);
   });
 
   it("adds only opt-in invocation telemetry correlation and ignores ambient context by default", () => {

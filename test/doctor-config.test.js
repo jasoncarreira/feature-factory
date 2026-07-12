@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,6 +81,51 @@ describe("doctor opencode config parsing", () => {
       });
     } finally {
       cleanup(dir);
+    }
+  });
+});
+
+describe("doctor output projection", () => {
+  it("projects the whole JSON payload and human profile rows", () => {
+    const fixture = doctorFixture({
+      profiles: {
+        "backend-builder": { model: "provider/safe-model", variant: "safe-variant" },
+        "test-verifier": { model: "provider/control\u001B]0;pwned\u0007", variant: "variant\u202Ehidden" },
+      },
+    });
+    try {
+      const human = runDoctorFixture(fixture, ["--profiles"]);
+      assert.match(human.stdout, /profile: backend-builder -> model=provider\/safe-model variant=safe-variant/u);
+      assert.match(human.stdout, /provider\/control\\u001B/u);
+      assert.doesNotMatch(human.stdout, /[\u001B\u0007\u009B\u202E]/u);
+
+      const json = runDoctorFixture(fixture, ["--json"], { FAKE_OPENCODE_VERSION: "safe\u001B[2J" });
+      const payload = JSON.parse(json.stdout);
+      assert.equal(payload.env.resolved_models["backend-builder"], "provider/safe-model");
+      assert.equal(payload.env.resolved_models["test-verifier"], "provider/control\u001B]0;pwned\u0007");
+      assert.match(json.stdout, /safe\\u001B/iu);
+      assert.doesNotMatch(json.stdout, /[\u001B\u0007\u009B\u202E]/u);
+    } finally {
+      cleanup(fixture.dir);
+    }
+  });
+
+  it("redacts smoke credentials before applying the detail cap", () => {
+    const fixture = doctorFixture({
+      profiles: { "backend-builder": { model: "provider/safe-model" } },
+    });
+    const secret = "QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
+    try {
+      const proc = runDoctorFixture(fixture, ["--provider-smoke", "--json"], {
+        FAKE_SMOKE_FAILURE: `prefix Authorization: Basic ${secret}\u001B]0;pwned\u0007${"x".repeat(400)}`,
+      });
+      const payload = JSON.parse(proc.stdout);
+      const smoke = payload.checks.find((check) => check.label === "provider provider smoke");
+      assert.equal(smoke.detail.length <= 300, true);
+      assert.doesNotMatch(proc.stdout, new RegExp(secret, "u"));
+      assert.doesNotMatch(proc.stdout, /[\u001B\u0007\u009B]/u);
+    } finally {
+      cleanup(fixture.dir);
     }
   });
 });
@@ -437,4 +482,50 @@ function cleanup(dir) {
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function doctorFixture(pluginOptions = {}) {
+  const dir = tempDir();
+  const repo = join(dir, "repo");
+  const home = join(dir, "home");
+  const bin = join(dir, "bin");
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(home, ".config", "opencode", "opencode.jsonc"), JSON.stringify({
+    plugin: [["opencode-feature-factory", pluginOptions]],
+  }), "utf8");
+  writeExecutable(join(bin, "opencode"), `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' "\${FAKE_OPENCODE_VERSION:-opencode-safe}"
+elif [ "$1" = "run" ] && [ "$2" = "--help" ]; then
+  printf '%s\\n' '--command --dir'
+elif [ "$1" = "providers" ]; then
+  printf '%s\\n' 'provider'
+elif [ "$1" = "run" ]; then
+  printf '%s\\n' "$FAKE_SMOKE_FAILURE" >&2
+  exit 1
+fi
+`);
+  writeExecutable(join(bin, "git"), "#!/bin/sh\nif [ \"$1\" = \"symbolic-ref\" ]; then printf '%s\\n' 'origin/main'; fi\n");
+  writeExecutable(join(bin, "gh"), "#!/bin/sh\nexit 0\n");
+  return { dir, repo, home, bin };
+}
+
+function runDoctorFixture(fixture, args = [], extraEnv = {}) {
+  return spawnSync(process.execPath, [CLI, "doctor", ...args], {
+    cwd: fixture.repo,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: fixture.home,
+      PATH: `${fixture.bin}:${process.env.PATH}`,
+      ...extraEnv,
+    },
+  });
+}
+
+function writeExecutable(path, contents) {
+  writeFileSync(path, contents, "utf8");
+  chmodSync(path, 0o755);
 }
