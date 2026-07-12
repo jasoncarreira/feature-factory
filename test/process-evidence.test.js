@@ -20,6 +20,7 @@ import {
   cancelProcessFromEvidence,
   inspectLaunchClaim,
   inspectProcessEvidence,
+  inspectProcessEvidenceForCleanup,
   inspectProcessIdentity,
   readProcessEvidence,
   recordDetachedProcessEvidence,
@@ -163,6 +164,77 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
 
     function linuxOptions() {
       return processOptions(fixture.runDir);
+    }
+  });
+
+  it("inspects cleanup process evidence with finite states and no writes or signals", () => {
+    const cases = [
+      { name: "live", expected: "live-matching", liveness: "live" },
+      { name: "absent", expected: "absent", liveness: "absent" },
+      { name: "mismatched-identity", expected: "mismatched", liveness: "live", marker: "222" },
+      { name: "indeterminate", expected: "indeterminate", liveness: "indeterminate" },
+    ];
+    for (const item of cases) {
+      const fixture = createFixture(`cleanup-${item.name}`);
+      const signals = [];
+      try {
+        writeProcessEvidence(fixture.runDir, evidence(fixture));
+        const path = join(fixture.runDir, PROCESS_EVIDENCE_FILE);
+        const before = readFileSync(path);
+        const result = inspectProcessEvidenceForCleanup(fixture.runDir, {
+          runId: fixture.runId,
+          ...processOptions(fixture.runDir, {
+            livenessProbe: () => ({ status: item.liveness }),
+            marker: () => item.marker || "111",
+          }),
+          signalFn: (pid, signal) => signals.push({ pid, signal }),
+        });
+
+        assert.equal(result.state, item.expected, item.name);
+        assert.equal(result.evidence.run_id, fixture.runId, item.name);
+        assert.deepEqual(readFileSync(path), before, item.name);
+        assert.deepEqual(signals, [], item.name);
+      } finally {
+        cleanup(fixture.root);
+      }
+    }
+  });
+
+  it("classifies missing, invalid, run-mismatched, and non-running cleanup evidence without mutation", () => {
+    const fixture = createFixture("cleanup-static-states");
+    try {
+      assert.equal(inspectProcessEvidenceForCleanup(fixture.runDir, { runId: fixture.runId }).state, "missing");
+
+      const path = join(fixture.runDir, PROCESS_EVIDENCE_FILE);
+      writeFileSync(path, "not json\n", "utf8");
+      const invalidBefore = readFileSync(path);
+      assert.equal(inspectProcessEvidenceForCleanup(fixture.runDir, { runId: fixture.runId }).state, "invalid");
+      assert.deepEqual(readFileSync(path), invalidBefore);
+
+      writeProcessEvidence(fixture.runDir, evidence(fixture));
+      assert.equal(inspectProcessEvidenceForCleanup(fixture.runDir, { runId: "another-run" }).state, "mismatched");
+
+      writeProcessEvidence(fixture.runDir, evidence(fixture, { state: "exited" }));
+      const exitedBefore = readFileSync(path);
+      assert.equal(inspectProcessEvidenceForCleanup(fixture.runDir, { runId: fixture.runId }).state, "absent");
+      assert.deepEqual(readFileSync(path), exitedBefore);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("rejects symlinked cleanup process evidence without following or modifying it", () => {
+    const fixture = createFixture("cleanup-symlink");
+    const outside = join(fixture.root, "outside-process.json");
+    try {
+      writeFileSync(outside, `${JSON.stringify(evidence(fixture))}\n`, "utf8");
+      symlinkSync(outside, join(fixture.runDir, PROCESS_EVIDENCE_FILE));
+      const before = readFileSync(outside);
+
+      assert.equal(inspectProcessEvidenceForCleanup(fixture.runDir, { runId: fixture.runId }).state, "invalid");
+      assert.deepEqual(readFileSync(outside), before);
+    } finally {
+      cleanup(fixture.root);
     }
   });
 

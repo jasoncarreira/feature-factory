@@ -33,6 +33,8 @@ const SPEC_WRITER_PROMPT = readDoc("../assets/agent/spec-writer.md");
 const WORK_DECOMPOSER_PROMPT = readDoc("../assets/agent/work-decomposer.md");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
 const TEST_VERIFIER_PROMPT = readDoc("../assets/agent/test-verifier.md");
+const BACKEND_BUILDER_PROMPT = readDoc("../assets/agent/backend-builder.md");
+const FRONTEND_BUILDER_PROMPT = readDoc("../assets/agent/frontend-builder.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
 const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
@@ -538,6 +540,35 @@ describe("decomposition depth contract", () => {
       /Existing durable runs with older, deeper seeded plans remain readable and resumable/i,
       "SCHEMA must state grandfathered seeded plans remain runnable",
     );
+  });
+});
+
+describe("producer self-check contract", () => {
+  it("gives both builders a pre-submit self-check mirroring the reviewer bar", () => {
+    // Alignment, not accretion: surface the reviewer's build-slice bar to the
+    // producer as a pre-return self-check (same pattern as the spec-writer
+    // acceptance-bar alignment), so builders stop paying a guaranteed rejection
+    // round. Each concept below is enforced by work-reviewer AND self-checked by
+    // both builders — the pair must not drift apart.
+    for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
+      assert.match(prompt, /## Pre-submit self-check/i, `${name}-builder must carry the pre-submit self-check`);
+      assert.match(prompt, /Imports resolve to real exports[\s\S]*do not invent a similar name or a guessed path/i, `${name}-builder must self-check import resolution`);
+      assert.match(prompt, /No vaporware[\s\S]*TODO[\s\S]*STUB[\s\S]*stub bodies/i, `${name}-builder must self-check vaporware`);
+      assert.match(prompt, /Mechanically complete[\s\S]*unused imports[\s\S]*unreachable\/dead code/i, `${name}-builder must self-check mechanical completeness`);
+      assert.match(prompt, /In lane[\s\S]*within the slice `paths`/i, `${name}-builder must self-check lane discipline`);
+      assert.match(prompt, /Every AC is implemented and tested[\s\S]*exact-value assertion/i, `${name}-builder must self-check AC test coverage`);
+      assert.match(prompt, /Verified, not masked[\s\S]*never worked around by weakening an assertion/i, `${name}-builder must self-check honest verification`);
+    }
+    // Reviewer still owns the enforcing bar these self-checks mirror.
+    assert.match(WORK_REVIEWER_PROMPT, /out-of-lane edits outside slice `paths`/i, "work-reviewer must enforce lane discipline");
+  });
+
+  it("gives test-verifier a self-review with an exact-value assertion floor", () => {
+    assert.match(TEST_VERIFIER_PROMPT, /## Self-review before reporting/i);
+    assert.match(TEST_VERIFIER_PROMPT, /every acceptance criterion maps to at least one real assertion/i);
+    assert.match(TEST_VERIFIER_PROMPT, /No presence-only checks \(`toBeTruthy`\/`toBeDefined`[\s\S]*test theater/i);
+    assert.match(TEST_VERIFIER_PROMPT, /a real source bug is reported as a `fail`[\s\S]*never silenced/i);
+    assert.match(TEST_VERIFIER_PROMPT, /Never weaken to pass[\s\S]*A `fail` is a valid, correct result/i);
   });
 });
 
@@ -1607,6 +1638,31 @@ describe("0.2.0 public documentation contract", () => {
     assert.match(cleanupAndTui, /running evidence is refused[\s\S]*cancel first/i);
     assert.match(cleanupAndTui, /malformed, unreadable, or mismatched evidence fails closed[\s\S]*requires verifying the process is dead and rerunning with `--force`/i);
     assert.match(cleanupAndTui, /refuses to remove run directories outside `\.opencode\/factory`/i);
+  });
+
+  it("documents conservative repository cleanup preview, confirmation, and reporting", () => {
+    const sweep = markdownSection(README, "Repository-wide conservative cleanup");
+    assert.match(sweep, /cleanup --all --dry-run --repo \/path\/to\/repo/i);
+    assert.match(sweep, /cleanup --all --digest ff-cleanup-v1\.<repository-sha256>\.<envelope-sha256>/i);
+    assert.match(sweep, /repository-and-candidate-set digest[\s\S]*exact confirmation command/i);
+    for (const classification of ["eligible", "protected", "skipped", "failed", "deleted"]) {
+      assert.match(sweep, literalPattern(classification), `cleanup sweep docs missing ${classification}`);
+    }
+    assert.match(sweep, /status is exactly `completed`[\s\S]*GitHub PR is currently merged or closed[\s\S]*freshly fetched PR base/i);
+    assert.match(sweep, /recomputes[\s\S]*`DIGEST_FOREIGN`[\s\S]*`DIGEST_STALE`/i);
+    assert.match(sweep, /physical root, device\/inode identity, Git common-directory identity, and object format bind authorization/i);
+    assert.match(sweep, /Both refusals preserve the recomputed unattempted candidates and counts[\s\S]*no confirmation action[\s\S]*fresh preview/i);
+    assert.match(sweep, /fully revalidated immediately before mutation/i);
+    assert.match(sweep, /retains the run directory after a partial target failure[\s\S]*continues processing independent candidates/i);
+    assert.match(sweep, /attempted-cleanup failure[\s\S]*exit nonzero/i);
+    assert.match(sweep, /Human diagnostics apply sensitive-value projection and terminal-safe encoding[\s\S]*displayed repository[\s\S]*never authorization input/i);
+    assert.match(sweep, /confirmation\.argv[\s\S]*exact authorized physical root[\s\S]*POSIX `\/bin\/sh` octal variable[\s\S]*trailing newlines/i);
+    assert.match(sweep, /JSON is the exact normalized machine report[\s\S]*not semantically redacted/i);
+    assert.match(sweep, /Execute, refused, and failed reports always have null confirmation/i);
+    assert.match(sweep, /flags may appear in any order[\s\S]*exactly one mode[\s\S]*no repository inspection/i);
+    assert.match(sweep, /one complete selected report on stdout with empty stderr[\s\S]*grammar rejection[\s\S]*stderr/i);
+    assert.match(sweep, /`blocked`, `partial`, or `needs-human`[\s\S]*protected recoverable work[\s\S]*never automatically deleted/i);
+    assert.match(sweep, /handle that work/i);
   });
 
   it("keeps every relative README link resolvable inside the published package", () => {

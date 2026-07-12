@@ -23,6 +23,15 @@ Own the final integration test gate. Prove the approved story works and the repo
 - On a retry, rerun the complete canonical command against the current integrated HEAD, not only the previously failing test.
 - Commit test changes separately in the feature branch.
 
+## Self-review before reporting
+
+`work-reviewer` reviews this step against the checklist below and rejects on any gap. Run it against your own work first — a rejection round here is pure waste:
+
+- **Coverage.** Re-read each source the ACs exercise; every acceptance criterion maps to at least one real assertion. An AC with no automated coverage is listed explicitly as uncovered with a reason — never implied as covered.
+- **Exact-value assertions.** Every test makes at least one exact-value assertion (expected output, count, state, or error). No presence-only checks (`toBeTruthy`/`toBeDefined`/"is not null") that pass regardless of behavior — those are test theater and a reviewer will reject them.
+- **Executed, not just written.** You ran every test; `WRITTEN-NOT-RUN` appears only with an explicit reason. A test that fails because it found a real source bug is reported as a `fail` with the owning path — that is a good outcome, never silenced.
+- **Never weaken to pass.** Do not relax an assertion, delete a case, or narrow scope to turn red green. A `fail` is a valid, correct result.
+
 ## Output
 
 Return exactly this structure:
