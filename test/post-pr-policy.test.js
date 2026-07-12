@@ -72,6 +72,24 @@ describe("durable default-off post-PR policy", () => {
     assert.deepEqual(decodeFeatureCommandPayload(encodeFeatureCommandPayload({ operator_request: "start", driver: { post_pr_ci_enabled: true } })), { ok: false, reason: "invalid-driver" });
   });
 
+  it("rejects resume policy overrides while carrying an exact persisted policy", () => {
+    const runId = "resume-policy";
+    const steering = { schema_version: 1, kind: "operator-steering-pointer", run_id: runId, pending: null, consume: null, raw_message_included: false };
+    const persisted = resolvePostPrCiPolicy({ driver: { enabled: true }, reviewer: "octocat" });
+    const token = (driver, resume = {}) => encodeFeatureCommandPayload({
+      operator_request: `resume ${runId}`,
+      driver,
+      resume: { schema_version: 1, kind: "existing-run-resume", run_id: runId, ...resume },
+      steering,
+    });
+
+    assert.deepEqual(decodeFeatureCommandPayload(token({ mode: "autonomous", post_pr_ci: { enabled: false } })), { ok: false, reason: "resume-post-pr-policy-override" });
+    const carried = decodeFeatureCommandPayload(token({ mode: "autonomous" }, { post_pr_policy: persisted }));
+    assert.equal(carried.ok, true);
+    assert.deepEqual(carried.payload.resume.post_pr_policy, persisted);
+    assert.deepEqual(decodeFeatureCommandPayload(token({ mode: "autonomous" }, { post_pr_policy: { enabled: true } })), { ok: false, reason: "invalid-resume-post-pr-policy" });
+  });
+
   it("injects the complete normalized policy and rejects invalid canonical plugin config", async () => {
     const instance = await plugin({}, { postPrCi: { enabled: true, waitMinutes: 30 } });
     const cfg = {};

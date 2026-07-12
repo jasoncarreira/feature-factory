@@ -39,7 +39,7 @@ const POST_PR_TRANSITIONS = new Map([
   ["remediation-running", new Set(["remediation-running", "changes-observed", "needs-human"])],
   ["changes-observed", new Set(["changes-observed", "committed", "needs-human"])],
   ["committed", new Set(["committed", "revalidating", "needs-human"])],
-  ["revalidating", new Set(["revalidating", "remediation-planned", "validated", "blocked", "needs-human"])],
+  ["revalidating", new Set(["revalidating", "failure-recording", "validated", "blocked", "needs-human"])],
   ["validated", new Set(["validated", "push-pending", "needs-human"])],
   ["push-pending", new Set(["push-pending", "remote-confirmed", "needs-human"])],
   ["remote-confirmed", new Set(["remote-confirmed", "observing", "needs-human"])],
@@ -855,6 +855,7 @@ export async function transitionPostPrState(runDir, postPr, options = {}) {
     if (sameJson(current.post_pr, nextPostPr)) return;
     assertPostPrPhaseTransition(current.post_pr, nextPostPr);
     assertPostPrAttemptTransition(current, nextPostPr);
+    assertPostPrMonotonicState(current.post_pr, nextPostPr);
     assertPostPrCandidateGitState(current, nextPostPr, options);
     draft.post_pr = nextPostPr;
     draft.updated_at = timestamp(options.now);
@@ -866,13 +867,18 @@ export async function transitionPostPrFailure(runDir, input, options = {}) {
   if (!isRecord(input?.remediation)) throw new Error("post-PR failure requires remediation state");
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
     assertPostPrMutationReady(runDir, current, options, "post-PR failure");
-    if (!current.post_pr || !["observing", "failure-recording", "revalidating"].includes(current.post_pr.phase)) throw new Error(`post-PR failure cannot start from '${current.post_pr?.phase ?? "absent"}'`);
     const remediation = cloneJson(input.remediation);
     const replay = current.post_pr.remediation;
     if (isRecord(replay) && replay.attempt === remediation.attempt) {
-      if (sameJson(replay, remediation)) return;
+      assertPostPrFailureEvidence(runDir, current, remediation);
+      if (sameJson(replay, remediation)) {
+        assertPostPrFailureReplayContext(current, remediation);
+        return;
+      }
       throw new Error("conflicting post-PR failure replay");
     }
+    assertPostPrFailureSource(current, remediation);
+    assertPostPrFailureEvidence(runDir, current, remediation);
     const expectedAttempt = current.post_pr.attempt + 1;
     if (remediation.attempt !== expectedAttempt) throw new Error(`post-PR attempt must advance exactly from ${current.post_pr.attempt} to ${expectedAttempt}`);
     if (expectedAttempt > (Number.isInteger(current.max_retries) ? current.max_retries : 3)) throw new Error(`post-PR attempt ${expectedAttempt} exceeds max_retries`);
@@ -894,9 +900,11 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
     const phase = POST_PR_TERMINAL_PHASE[status];
     if (current.post_pr?.phase === phase && current.status === status && current.terminal_result?.reason === reason) return;
     if (!current.post_pr?.policy?.enabled) throw new Error("post-PR terminal transition requires enabled persisted policy");
+    assertPostPrTerminalPreconditions(current, status, reason, input, options);
     assertPostPrPhaseTransition(current.post_pr, { ...current.post_pr, phase });
     draft.status = status;
     draft.post_pr = { ...cloneJson(current.post_pr), phase };
+    if (reason === "post-pr-retry-exhausted") draft.post_pr.continuation_review = bindPostPrContinuationReview(runDir, current, input.continuation_review);
     draft.terminal_result = {
       status,
       run_id: current.run_id,
@@ -1649,6 +1657,209 @@ function assertPostPrAttemptTransition(currentRun, nextPostPr) {
     && current.remediation.failure_fingerprint !== nextPostPr.remediation.failure_fingerprint) throw new Error("post-PR failure fingerprint is immutable within an attempt");
 }
 
+function assertPostPrMonotonicState(current, next) {
+  const currentObservation = current.observation;
+  const nextObservation = next.observation;
+  if (isRecord(currentObservation) && !isRecord(nextObservation)) throw new Error("post-PR observation state cannot be removed");
+  if (isRecord(currentObservation) && isRecord(nextObservation)) {
+    if (nextObservation.epoch < currentObservation.epoch) throw new Error("post-PR observation epoch cannot decrease");
+    if (nextObservation.epoch > currentObservation.epoch && current.phase !== "remote-confirmed") throw new Error("post-PR observation epoch can advance only after remote confirmation");
+    if (nextObservation.epoch === currentObservation.epoch) {
+      for (const key of ["expected_head_sha", "started_at", "deadline_at"]) {
+        if (nextObservation[key] !== currentObservation[key]) throw new Error(`post-PR observation ${key} is immutable within an epoch`);
+      }
+      if (nextObservation.poll_count < currentObservation.poll_count) throw new Error("post-PR observation poll_count cannot decrease");
+      if (dateBefore(nextObservation.last_observed_at, currentObservation.last_observed_at)) throw new Error("post-PR last_observed_at cannot move backwards");
+      if (nextObservation.last_fingerprint === currentObservation.last_fingerprint && nextObservation.unchanged_count < currentObservation.unchanged_count) throw new Error("post-PR unchanged_count cannot decrease for the same fingerprint");
+      if (nextObservation.last_fingerprint === currentObservation.last_fingerprint && nextObservation.current_interval_ms < currentObservation.current_interval_ms) throw new Error("post-PR poll interval cannot decrease for the same fingerprint");
+      if (Date.parse(nextObservation.next_poll_at) < Date.parse(currentObservation.next_poll_at)) throw new Error("post-PR next_poll_at cannot move backwards within an epoch");
+      const resultChanged = !sameJson(observationResultIdentity(currentObservation), observationResultIdentity(nextObservation));
+      if (resultChanged && nextObservation.poll_count <= currentObservation.poll_count) throw new Error("post-PR observation result changes must advance poll_count");
+      if (nextObservation.consecutive_transient_errors < currentObservation.consecutive_transient_errors
+        && !(nextObservation.consecutive_transient_errors === 0 && nextObservation.last_error === null && resultChanged)) throw new Error("post-PR transient error counter can reset only after a valid observation");
+      assertMonotonicReviewerRequest(currentObservation.review_request, nextObservation.review_request);
+    }
+  }
+  const currentRemediation = current.remediation;
+  const nextRemediation = next.remediation;
+  if (isRecord(currentRemediation) && !isRecord(nextRemediation)) throw new Error("post-PR remediation identity cannot be removed");
+  if (isRecord(currentRemediation) && isRecord(nextRemediation) && currentRemediation.attempt === nextRemediation.attempt) {
+    for (const key of ["schema_version", "attempt", "reason_code", "failure_fingerprint", "failed_head_sha", "failure_evidence_ref", "failure_evidence_hash", "owner", "route", "lane", "baseline_head_sha"]) {
+      if (!sameJson(currentRemediation[key], nextRemediation[key])) throw new Error(`post-PR remediation ${key} is immutable within an attempt`);
+    }
+    for (const key of ["id", "role", "subject"]) if (currentRemediation.dispatch?.[key] !== nextRemediation.dispatch?.[key]) throw new Error(`post-PR remediation dispatch.${key} is immutable within an attempt`);
+    assertRankDoesNotDecrease(currentRemediation.stage, nextRemediation.stage, ["planned", "running", "changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"], "post-PR remediation stage");
+    assertRankDoesNotDecrease(currentRemediation.dispatch?.status, nextRemediation.dispatch?.status, ["planned", "running", "returned"], "post-PR remediation dispatch status");
+    for (const key of ["candidate_head_sha", "remediation_evidence_ref", "remediation_evidence_hash"]) assertOnceBound(currentRemediation, nextRemediation, key, `post-PR remediation ${key}`);
+    for (const key of ["canonical_evidence_ref", "canonical_evidence_hash", "canonical_verdict", "validator_review_ref", "validator_review_hash", "validator_verdict", "security_review_ref", "security_review_hash", "security_verdict"]) assertOnceBound(currentRemediation.revalidation, nextRemediation.revalidation, key, `post-PR remediation revalidation.${key}`);
+    for (const key of ["remote_before_sha", "local_head_sha", "remote_after_sha", "pushed_at"]) assertOnceBound(currentRemediation.push, nextRemediation.push, key, `post-PR remediation push.${key}`);
+    assertRankDoesNotDecrease(currentRemediation.push?.status, nextRemediation.push?.status, ["not-ready", "pending", "confirmed"], "post-PR remediation push status");
+    if (["changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"].includes(currentRemediation.stage) && !sameJson(currentRemediation.changes, nextRemediation.changes)) throw new Error("post-PR observed remediation changes are immutable");
+  }
+  const currentRefs = new Map((current.evidence_refs || []).map((item) => [item.ref, item.hash]));
+  const nextRefs = new Map((next.evidence_refs || []).map((item) => [item.ref, item.hash]));
+  for (const [ref, hash] of currentRefs) if (nextRefs.get(ref) !== hash) throw new Error("post-PR evidence bindings are append-only and immutable");
+}
+
+function observationResultIdentity(observation) {
+  return Object.fromEntries(["last_observed_at", "last_fingerprint", "last_check_verdict", "last_review_verdict", "last_verdict", "last_error", "snapshot"].map((key) => [key, observation?.[key] ?? null]));
+}
+
+function assertMonotonicReviewerRequest(current, next) {
+  if (!isRecord(current)) return;
+  if (!isRecord(next)) throw new Error("post-PR reviewer request state cannot be removed");
+  assertRankDoesNotDecrease(current.status, next.status, ["pending", "requested"], "post-PR reviewer request status");
+  if (next.attempts < current.attempts) throw new Error("post-PR reviewer request attempts cannot decrease");
+  assertOnceBound(current, next, "requested_at", "post-PR reviewer requested_at");
+}
+
+function assertRankDoesNotDecrease(current, next, order, label) {
+  const currentRank = order.indexOf(current);
+  const nextRank = order.indexOf(next);
+  if (currentRank >= 0 && nextRank >= 0 && nextRank < currentRank) throw new Error(`${label} cannot move backwards`);
+}
+
+function assertOnceBound(current, next, key, label) {
+  if (current?.[key] !== undefined && current?.[key] !== null && next?.[key] !== current[key]) throw new Error(`${label} cannot change once bound`);
+}
+
+function dateBefore(next, current) {
+  if (!stringValue(current)) return false;
+  if (!stringValue(next)) return true;
+  return Date.parse(next) < Date.parse(current);
+}
+
+function assertPostPrFailureSource(run, remediation) {
+  const reason = remediation.reason_code;
+  if (reason === "check-red") {
+    if (run.post_pr.phase !== "observing") throw new Error("check-red failure requires observing phase");
+    if (remediation.failed_head_sha !== run.post_pr.observation?.expected_head_sha) throw new Error("check-red failure must bind the current expected observation head");
+    if (run.post_pr.observation?.last_verdict !== "red" || run.post_pr.observation?.last_check_verdict !== "red") throw new Error("check-red failure requires an explicit red check observation");
+    return;
+  }
+  if (reason === "local-red") {
+    if (run.post_pr.phase !== "revalidating") throw new Error("local-red failure requires revalidating phase");
+    if (remediation.failed_head_sha !== run.post_pr.remediation?.candidate_head_sha) throw new Error("local-red failure must bind the current remediation candidate head");
+    return;
+  }
+  throw new Error(`unsupported post-PR failure source '${reason}'`);
+}
+
+function assertPostPrFailureEvidence(runDir, run, remediation) {
+  const resolved = resolveEvidenceRef(runDir, remediation.failure_evidence_ref);
+  const actualHash = hashFile(resolved.path, { mode: "raw" });
+  if (actualHash !== remediation.failure_evidence_hash) throw new Error("post-PR failure evidence exact-byte hash mismatch");
+  const evidence = parseJsonObjectFile(resolved.path, "post-PR failure evidence");
+  const expected = {
+    run_id: run.run_id,
+    attempt: remediation.attempt,
+    source: remediation.reason_code,
+    verdict: "red",
+    failed_head_sha: remediation.failed_head_sha,
+    failure_fingerprint: remediation.failure_fingerprint,
+  };
+  for (const [key, value] of Object.entries(expected)) if (evidence[key] !== value) throw new Error(`post-PR failure evidence ${key} mismatch`);
+}
+
+function assertPostPrFailureReplayContext(run, remediation) {
+  if (run.post_pr.phase !== "observing") return;
+  const observation = run.post_pr.observation;
+  if (remediation.reason_code !== "check-red" || observation?.last_check_verdict !== "red" || observation?.expected_head_sha !== remediation.failed_head_sha) {
+    throw new Error("stale post-PR failure replay does not match the current observation phase/head/source");
+  }
+}
+
+function assertPostPrTerminalPreconditions(run, status, reason, input, options) {
+  const postPr = run.post_pr;
+  const observation = postPr.observation;
+  const remediation = postPr.remediation;
+  const requireObservation = (verdict) => {
+    if (postPr.phase !== "observing" || observation?.last_verdict !== verdict) throw new Error(`${reason} requires observing phase with '${verdict}' verdict`);
+  };
+  if (reason === "post-pr-ci-green" || reason === "post-pr-draft-ci-green") {
+    requireObservation("green");
+    if (reason === "post-pr-draft-ci-green" && run.pr_mode !== "draft") throw new Error("post-pr-draft-ci-green requires draft PR mode");
+    if (reason === "post-pr-ci-green" && run.pr_mode === "draft") throw new Error("draft PR success must use post-pr-draft-ci-green");
+    return;
+  }
+  if (reason === "post-pr-external-merge") return requireObservation("external-merge");
+  if (reason === "post-pr-pr-closed") return requireObservation("closed");
+  if (reason === "post-pr-head-mismatch") return requireObservation("head-mismatch");
+  if (reason === "post-pr-review-changes-requested") {
+    if (postPr.phase !== "observing" || observation?.last_review_verdict !== "red") throw new Error(`${reason} requires current-head red review observation`);
+    return;
+  }
+  if (reason === "post-pr-observation-timeout") {
+    if (postPr.phase !== "observing" || Date.parse(timestamp(options.now)) < Date.parse(observation?.deadline_at || "")) throw new Error(`${reason} requires an expired observing deadline`);
+    return;
+  }
+  if (reason === "post-pr-observer-infrastructure") {
+    if (postPr.phase !== "observing" || observation?.last_verdict !== "infrastructure") throw new Error(`${reason} requires observing infrastructure verdict`);
+    return;
+  }
+  if (reason === "post-pr-account-switch-failed") {
+    if (postPr.phase !== "observing" || observation?.last_error?.class !== "account-auth") throw new Error(`${reason} requires observing account-auth error`);
+    return;
+  }
+  if (reason === "post-pr-owner-ambiguous" || reason === "post-pr-metadata-unsafe") {
+    if (!["observing", "failure-recording"].includes(postPr.phase) || observation?.last_verdict !== "red") throw new Error(`${reason} requires an explicit red observation`);
+    return;
+  }
+  if (reason === "post-pr-dispatch-start-unknown") {
+    if (postPr.phase !== "remediation-running" || remediation?.dispatch?.status !== "running") throw new Error(`${reason} requires running remediation dispatch`);
+    return;
+  }
+  if (reason === "post-pr-path-lane-violation") {
+    if (!["remediation-running", "changes-observed", "committed"].includes(postPr.phase)) throw new Error(`${reason} requires active remediation changes`);
+    return;
+  }
+  if (reason === "post-pr-remote-head-diverged") {
+    if (postPr.phase !== "push-pending" || remediation?.stage !== "push-pending") throw new Error(`${reason} requires push-pending remediation`);
+    return;
+  }
+  if (reason === "post-pr-retry-exhausted") {
+    const max = Number.isInteger(run.max_retries) ? run.max_retries : 3;
+    if (postPr.attempt !== max || !isRecord(remediation) || remediation.attempt !== max) throw new Error(`${reason} requires attempt equal to max_retries`);
+    if (!["observing", "failure-recording", "revalidating"].includes(postPr.phase)) throw new Error(`${reason} requires an explicit red failure phase`);
+    if (postPr.phase === "observing" && (observation?.last_check_verdict !== "red" || observation?.expected_head_sha !== remediation.candidate_head_sha)) throw new Error(`${reason} observing exhaustion requires red checks on the current candidate head`);
+    if (postPr.phase === "revalidating" && !stringValue(remediation.candidate_head_sha)) throw new Error(`${reason} revalidation exhaustion requires a current candidate head`);
+    if (postPr.phase === "failure-recording" && remediation.reason_code === "check-red" && (observation?.last_check_verdict !== "red" || remediation.failed_head_sha !== observation?.expected_head_sha)) throw new Error(`${reason} check exhaustion requires red checks on the expected head`);
+    if (postPr.phase === "failure-recording" && remediation.reason_code === "local-red" && remediation.failed_head_sha !== remediation.baseline_head_sha) throw new Error(`${reason} local exhaustion requires the failed candidate head`);
+    if (!input.continuation_review) throw new Error(`${reason} requires a continuation review binding`);
+  }
+}
+
+function bindPostPrContinuationReview(runDir, run, binding) {
+  if (!isRecord(binding) || !stringValue(binding.ref) || !stringValue(binding.hash)) throw new Error("retry exhaustion requires continuation_review ref/hash");
+  const resolved = resolveReviewRef(runDir, binding.ref);
+  const actualHash = hashFile(resolved.path, { mode: "raw" });
+  if (actualHash !== binding.hash) throw new Error("post-PR continuation review exact-byte hash mismatch");
+  const review = parseJsonObjectFile(resolved.path, "post-PR continuation review");
+  const remediation = run.post_pr.remediation;
+  const postPrForHash = cloneJson(run.post_pr);
+  delete postPrForHash.continuation_review;
+  const pr = githubPrUrlParts(run.pr_url);
+  const expected = {
+    kind: "post-pr-continuation",
+    subject: run.run_id,
+    verdict: "BLOCKED",
+    attempt: run.post_pr.attempt,
+    reason: "post-pr-retry-exhausted",
+    route: remediation.route,
+    evidence_ref: remediation.failure_evidence_ref,
+    evidence_hash: remediation.failure_evidence_hash,
+    post_pr_hash: hashValue(postPrForHash),
+    pr_url: run.pr_url,
+    repository: pr.repository,
+    pr_number: pr.number,
+    head_sha: run.post_pr.observation?.expected_head_sha ?? remediation.candidate_head_sha ?? remediation.failed_head_sha,
+    pr_disposition: "leave-unchanged",
+  };
+  for (const [key, value] of Object.entries(expected)) if (review[key] !== value) throw new Error(`post-PR continuation review ${key} mismatch`);
+  if (!stringValue(review.summary) && !(Array.isArray(review.required_fixes) && review.required_fixes.some(stringValue))) throw new Error("post-PR continuation review requires summary or required_fixes");
+  return { ref: binding.ref, hash: actualHash };
+}
+
 function assertPostPrCandidateGitState(currentRun, nextPostPr, options = {}) {
   const remediation = nextPostPr.remediation;
   if (!isRecord(remediation) || !stringValue(remediation.candidate_head_sha)) return;
@@ -1668,8 +1879,12 @@ function assertPostPrRefsConsistent(runDir, run) {
 
 function assertPostPrGenericMutation(current, next, hooks = {}) {
   if (hooks.postPr === true || hooks.prCreated === true) return;
+  const persisted = isRecord(current.post_pr);
   const active = current.post_pr?.policy?.enabled === true && !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(current.post_pr.phase);
-  if (active && !sameJson(current.post_pr, next.post_pr)) throw new Error("active post-PR state can only be changed by checked post-PR transitions");
+  if (persisted && !sameJson(current.post_pr, next.post_pr)) throw new Error("persisted post-PR state can only be changed by checked post-PR transitions");
+  for (const key of ["pr_url", "github_account", "max_retries"]) {
+    if (persisted && current[key] !== next[key]) throw new Error(`persisted post-PR ${key} can only be changed by checked lifecycle transitions`);
+  }
   if (active && current.status !== next.status) throw new Error("active post-PR runs can only terminalize through transitionPostPrTerminal");
 }
 

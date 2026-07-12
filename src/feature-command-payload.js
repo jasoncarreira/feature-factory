@@ -81,6 +81,7 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   if (hasResume !== hasSteering) return { ok: false, reason: "incomplete-resume-route" };
   if (hasResume && hasContinuation) return { ok: false, reason: "ambiguous-route" };
   if (driver.run_id !== undefined && driver.run_id !== null && (hasResume || hasContinuation)) return { ok: false, reason: "invalid-driver-run-id-route" };
+  if (hasResume && postPrCi !== null) return { ok: false, reason: "resume-post-pr-policy-override" };
 
   let continuation = null;
   if (hasContinuation) {
@@ -106,13 +107,22 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   };
 
   if (hasResume) {
-    if (!plainObject(payload.resume) || payload.resume.schema_version !== 1 || payload.resume.kind !== "existing-run-resume" || !nonEmptyString(payload.resume.run_id)) {
+    if (!plainObject(payload.resume) || !hasOnlyKeys(payload.resume, new Set(["schema_version", "kind", "run_id", "post_pr_policy"])) || payload.resume.schema_version !== 1 || payload.resume.kind !== "existing-run-resume" || !nonEmptyString(payload.resume.run_id)) {
       return { ok: false, reason: "invalid-resume" };
     }
     const runId = payload.resume.run_id.trim();
     if (!safeRunId(runId)) return { ok: false, reason: "invalid-resume-run-id" };
     if (normalized.operator_request !== `resume ${runId}`) return { ok: false, reason: "resume-request-mismatch" };
-    normalized.resume = { schema_version: 1, kind: "existing-run-resume", run_id: runId };
+    let postPrPolicy = null;
+    if (payload.resume.post_pr_policy !== undefined && payload.resume.post_pr_policy !== null) {
+      try {
+        validateRun({ schema_version: 1, run_id: runId, status: "running", max_retries: 3, gates: {}, post_pr: { schema_version: 1, policy: payload.resume.post_pr_policy, phase: payload.resume.post_pr_policy.enabled === true ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null } });
+        postPrPolicy = cloneJson(payload.resume.post_pr_policy);
+      } catch {
+        return { ok: false, reason: "invalid-resume-post-pr-policy" };
+      }
+    }
+    normalized.resume = { schema_version: 1, kind: "existing-run-resume", run_id: runId, ...(postPrPolicy === null ? {} : { post_pr_policy: postPrPolicy }) };
 
     const steering = normalizeSteering(payload.steering, runId);
     if (!steering.ok) return steering;
