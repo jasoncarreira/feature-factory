@@ -890,9 +890,27 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
     stepIndex = update.index;
     if (!update.changed) return;
     if (!hadSteps) draft.steps = steps;
-    if (stepIndex >= 0) bindStepAcceptance(runDir, steps[stepIndex]);
+    if (stepIndex >= 0) {
+      assertTestVerifierIntegrationGate(draft, steps[stepIndex]);
+      bindStepAcceptance(runDir, steps[stepIndex]);
+    }
   }, options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
+}
+
+function assertTestVerifierIntegrationGate(run, step) {
+  if (step?.agent !== "test-verifier" || step.status !== "running") return;
+  const incomplete = Array.isArray(run.slices) ? run.slices.filter((slice) => slice?.status !== "merged") : [];
+  if (incomplete.length > 0) {
+    throw new Error(`test-verifier integration gate requires all slices merged: ${incomplete.map((slice) => slice?.id || "unknown").join(", ")}`);
+  }
+  if (!Number.isInteger(step.attempts) || step.attempts < 1) {
+    throw new Error("test-verifier integration gate requires a positive attempt number");
+  }
+  const maxAttempts = Number.isInteger(run.max_retries) ? run.max_retries : 3;
+  if (step.attempts > maxAttempts) {
+    throw new Error(`test-verifier integration gate attempt ${step.attempts} exceeds max_retries ${maxAttempts}`);
+  }
 }
 
 // Bind the exact accepted bytes to the step at the acceptance transition, so a

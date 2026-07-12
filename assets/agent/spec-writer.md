@@ -64,6 +64,7 @@ Return exactly this structure:
 ### Test plan
 - AC1 -> <test file/command/assertion>
 - AC2 -> <test file/command/assertion>
+- Repository integration gate -> <exact canonical full-suite/build/package command run by test-verifier after all slices merge>
 
 ### Out of scope / follow-ups
 - <...>
@@ -90,3 +91,4 @@ Producer self-checks (not reviewer contract text — these are the observed caus
 
 - **Internally consistent.** No exception, carve-out, or legacy allowance elsewhere in the brief contradicts an acceptance criterion or another section. Reread the draft specifically hunting for contradictions.
 - **Unambiguous ownership.** Every file and test the plan touches appears in the implementation plan with clear ownership; call out shared or contested paths explicitly so decomposition can assign each to exactly one slice.
+- **Separate integration ownership.** Name the canonical repository-wide check once for the post-merge `test-verifier` gate; do not make the last implementation slice own cross-slice integration health.

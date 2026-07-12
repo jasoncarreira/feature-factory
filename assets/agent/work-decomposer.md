@@ -27,6 +27,7 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 - Same-wave slices must be file-disjoint.
 - Dependencies must be real consumption dependencies, not blanket backend-before-frontend ordering.
 - For each test command, identify the changed slice outputs it validates. Add dependencies on every sibling slice whose changed output must exist before that command runs. Broad regression commands do not imply dependencies on unaffected code.
+- Keep each slice `test_plan` limited to focused and directly impacted checks that can attribute failure to that slice. Do not assign the repository-wide full-suite/build/package command to any implementation slice, including the final slice; preserve it as the post-merge `test-verifier` integration gate.
 - Shared hotspots must be serialized into different waves.
 - Generated files have one owning slice.
 - Prefer fewer coherent slices over many tiny slices.
@@ -90,6 +91,9 @@ Return exactly this structure:
 - AC1 -> <slice id>
 - AC2 -> <slice id>
 - Unmapped ACs: <none | list, blocker>
+
+### Test-verifier integration gate
+- `<exact canonical repository-wide command from the accepted brief>` - runs after every slice is merged
 
 ### Risks
 - <parallelism risk, giant slice, ambiguous dependency, generated code, migration, or none>

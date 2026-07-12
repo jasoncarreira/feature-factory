@@ -168,6 +168,37 @@ describe("cli write surface", () => {
     }
   });
 
+  it("starts the bounded test-verifier integration gate only after every slice is merged", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-test-verifier-gate-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      initGitRepo(repo);
+      seedRun(runDir);
+      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+      const seeded = readJson(join(runDir, "run.json"));
+      seeded.max_retries = 3;
+      seeded.steps.push({ agent: "test-verifier", status: "blocked", attempts: 0 });
+      writeJson(join(runDir, "run.json"), seeded);
+
+      const beforeMerge = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "1", "--json"]);
+      assert.match(beforeMerge.stderr, /test-verifier integration gate requires all slices merged: slice/u);
+      assert.equal(readJson(join(runDir, "run.json")).steps.at(-1).status, "blocked");
+
+      const merged = readJson(join(runDir, "run.json"));
+      merged.slices[0].status = "merged";
+      merged.slices[0].merge_commit = "abc1234";
+      writeJson(join(runDir, "run.json"), merged);
+      runFactory(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "1", "--json"]);
+      assert.deepEqual(readJson(join(runDir, "run.json")).steps.at(-1), { agent: "test-verifier", status: "running", attempts: 1 });
+
+      const exhausted = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "4", "--json"]);
+      assert.match(exhausted.stderr, /test-verifier integration gate attempt 4 exceeds max_retries 3/u);
+      assert.equal(readJson(join(runDir, "run.json")).steps.at(-1).attempts, 1);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("rejects blank cost numeric flags without mutating run.json", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-cost-invalid-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
