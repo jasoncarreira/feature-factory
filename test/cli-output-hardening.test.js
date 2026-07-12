@@ -140,6 +140,27 @@ describe("centralized CLI output", () => {
     }
   });
 
+  it("rejects provider credentials from every token identity and preserves contractual tokens", () => {
+    const keys = ["token", "boundary_token", "action_token", "fence_token"];
+    const legitimate = [
+      "boundary-token-value",
+      "550e8400-e29b-41d4-a716-446655440000",
+    ];
+
+    for (const key of keys) {
+      for (const value of legitimate) {
+        assert.equal(projectCliData({ [key]: value })[key], value, `${key}: ${value}`);
+        assert.equal(JSON.parse(renderCliResultLines({ [key]: value }, { json: true })[0])[key], value);
+      }
+
+      const projected = projectCliData({ [key]: TOKEN });
+      assert.equal(projected[key], "[redacted]", key);
+      const output = renderCliResultLines({ [key]: TOKEN }, { json: true })[0];
+      assert.equal(JSON.parse(output)[key], "[redacted]", key);
+      assert.doesNotMatch(output, new RegExp(TOKEN, "u"));
+    }
+  });
+
   it("keeps controls escaped and credentials absent in non-identity freeform fields", () => {
     const output = renderCliResultLines({ summary: HOSTILE, detail: `token ${PAT}` }, { json: true })[0];
     assert.doesNotMatch(output, new RegExp(SECRET, "u"));
