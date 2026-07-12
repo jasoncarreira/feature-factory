@@ -539,6 +539,30 @@ Cleanup removes `.opencode/factory/<run-id>`, recorded worktrees under `.opencod
 
 When a compatible opencode host loads the separate TUI export on a session route, its observational `Feature Factory` panel reads runs under `.opencode/factory/*/run.json` in the current session directory or nested repos below it. It refreshes data every 5 seconds, caches root discovery for 30 seconds, scans at most 2,000 directories, and displays at most three run rows. When no runs exist, `No factory runs yet` keeps the panel mounted so runs started later appear during the same TUI session; an initially nonexistent cached factory root is rescanned as soon as it appears rather than waiting for the 30-second root-cache TTL. It lists active runs across those repos, including status, mode, pending gate, slice progress, validation/security verdicts, PR URL, terminal reason, and branch. Completed runs are hidden once healthy, with two exceptions: the most recent completed run stays listed, and any completed run still carrying a non-ok diagnostic remains listed until its diagnostics clear — so more than one completed run can appear at once. Restart or reload the TUI after plugin bundle changes. Package installation alone does not prove that a host discovers or automatically activates this export.
 
+### Conservative repository cleanup sweep
+
+Repository-wide cleanup is an explicit two-step operation. First preview the selected repository's direct `.opencode/factory/` entries without changing cleanup targets:
+
+```sh
+feature-factory factory cleanup --all --dry-run [--repo PATH] [--json]
+```
+
+The preview emits a repository- and evidence-bound digest plus an exact confirmation command. Execute only by copying that digest into the second form:
+
+```sh
+feature-factory factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> [--repo PATH] [--json]
+```
+
+The sweep never accepts a positional run id, `--force`, or unrelated options. It deletes only runs whose status is exactly `completed` and whose current evidence positively proves all cleanup conditions: canonical PR metadata resolves to the exact merged or closed PR; every recorded local branch is contained in a freshly fetched trustworthy PR base; every recorded worktree and branch has safe containment and exact identity; and no active factory ownership, fresh heartbeat, identity-matching live process, run-state lock, shared target, or contradictory evidence remains. Open or unavailable PRs, unmerged or unprovable branches, malformed state, pre-manifest entries, unsafe paths, and any filesystem, Git, GitHub, lock, heartbeat, process, or sidecar uncertainty are skipped rather than deleted.
+
+Execution first recomputes the complete digest and refuses a foreign or stale digest before attempting any candidate. It then acquires each candidate's run-state lock without reclaiming a contested lock and repeats the complete eligibility check while holding that lock. Evidence that changed during lock-held revalidation is skipped. The sweep never takes over a lock, force-deletes a branch, repairs a run, or broadens the recorded cleanup targets.
+
+Human and JSON reports deterministically list every candidate with stable reason codes and aggregate `eligible`, `protected`, `skipped`, `deleted`, and `failed` counts. Preview exits 0 even when entries are protected, skipped, or fail inspection. Refused digests and report-level failures exit 1. Execution continues with independent candidates after a cleanup failure, then exits 1 if any candidate's cleanup was actually attempted and failed; ordinary fail-closed skips do not make execution fail.
+
+Partial cleanup failures report the exact retained resources. The run directory is retained whenever an earlier worktree or branch operation fails, so operators can inspect and recover remaining artifacts rather than losing the control plane.
+
+Runs in `blocked`, `partial`, or `needs-human` status are protected recoverable work and are never automatically deleted. Review their report reasons and handle them manually with the documented continuation, rebaseline, recovery, cancel, or single-run cleanup workflow. Use single-run `--force` only as an intentional manual decision after preserving any unique work; the repository sweep itself never uses force.
+
 For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url` only through the `pr-created` transition.
 
 ### Environment snapshots and PR recording
