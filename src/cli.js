@@ -16,7 +16,7 @@ import { normalizePrNumber as normalizeTransitionPrNumber, transitionGateDecisio
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
-import { printCliResult, projectCostReport, renderCliIdentity } from "./cli-output.js";
+import { printCliResult, projectCostReport, renderCliPath } from "./cli-output.js";
 import { freeformSegment, identitySegment, renderErrorForTerminal, renderTerminalSegments, StructuredOutputError, TRUSTED_SEGMENTS } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
@@ -121,8 +121,8 @@ function install(args) {
   if (hit !== -1 && !Array.isArray(cfg.plugin[hit])) cfg.plugin[hit] = pluginSpec;
   if (hit !== -1) cfg.plugin = cfg.plugin.filter((entry, index) => index === hit || !matchesSpec(entry));
   writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n");
-  console.log(`configured opencode plugin: ${renderCliIdentity(pluginSpec)}`);
-  console.log(`updated: ${renderCliIdentity(configPath)}`);
+  console.log(`configured opencode plugin: ${renderCliPath(pluginSpec)}`);
+  console.log(`updated: ${renderCliPath(configPath)}`);
   console.log("restart opencode for plugin changes to take effect");
   warnGlobalFeatureSkillConflicts(findGlobalFeatureSkillConflicts(home));
   warnGlobalAgentConflicts(findGlobalAgentConflicts(home));
@@ -142,7 +142,7 @@ function warnGlobalAgentConflicts(paths) {
     "",
     "WARNING: existing global feature-factory agent definitions detected.",
     "These files are not managed by opencode-feature-factory and can shadow the plugin's current prompts:",
-    ...paths.map((path) => `- ${renderCliIdentity(path)}`),
+    ...paths.map((path) => `- ${renderCliPath(path)}`),
     "Remove stale files, or replace them with delegators that defer to the plugin-owned agents.",
     "Restart opencode after changing agent files.",
   ].join("\n"));
@@ -163,7 +163,7 @@ function warnGlobalFeatureSkillConflicts(paths) {
     "",
     "WARNING: existing global feature skill detected.",
     "These files are not installed or managed by opencode-feature-factory and can shadow or conflict with the plugin's current feature workflow:",
-    ...paths.map((path) => `- ${renderCliIdentity(path)}`),
+    ...paths.map((path) => `- ${renderCliPath(path)}`),
     "Remove stale files, or replace them with a delegator that reads the repo-seeded .opencode/skills/feature/SKILL.md before mutating factory state.",
     "Restart opencode after changing skill files.",
   ].join("\n"));

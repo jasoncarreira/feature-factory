@@ -19,11 +19,13 @@ describe("centralized CLI output", () => {
       status: "running",
       boundary_token: "boundary-token-value",
       summary: HOSTILE,
+      model: HOSTILE,
     }, { json: true })[0];
     assert.deepEqual(JSON.parse(json), {
       status: "running",
       boundary_token: "boundary-token-value",
       summary: `visible\u001B]0;pwned\u0007 Authorization: Basic [redacted]`,
+      model: `visible\u001B]0;pwned\u0007 Authorization: Basic [redacted]`,
     });
     assertSafe(json);
 
@@ -37,7 +39,17 @@ describe("centralized CLI output", () => {
     assert.equal(table.split("\t").length, 6);
     assertSafe(table.replaceAll("\t", ""));
 
-    const keyValue = renderCliResultLines({ status: "running", reason: HOSTILE }, {});
+    const hostileTable = renderCliResultLines([{
+      run_id: HOSTILE,
+      status: HOSTILE,
+      gate: HOSTILE,
+      updated_at: HOSTILE,
+      diagnostics: null,
+    }], {}, { formatListCostColumn: () => HOSTILE })[0];
+    assert.equal(hostileTable.split("\t").length, 6);
+    assertSafe(hostileTable.replaceAll("\t", ""));
+
+    const keyValue = renderCliResultLines({ status: "running", model: HOSTILE, reason: HOSTILE }, {});
     assert.equal(keyValue[0], "status: running");
     assertSafe(keyValue.join("\n"));
   });
