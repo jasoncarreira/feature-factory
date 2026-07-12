@@ -6,7 +6,9 @@ const DIGEST = `ff-cleanup-v1.${"a".repeat(64)}.${"b".repeat(64)}`;
 
 const R42_CASES = [
   ["R42-A", ["--digest", DIGEST], "factory cleanup --digest requires --all"],
-  ["R42-B", ["--json", "--dry-run"], "factory cleanup sweep requires --all"],
+  ["R42-B dry-run", ["--dry-run"], "factory cleanup sweep requires --all"],
+  ["R42-B repo", ["--repo", "repo"], "factory cleanup sweep requires --all"],
+  ["R42-B json", ["--json"], "factory cleanup sweep requires --all"],
   ["R42-C", ["--all"], "factory cleanup --all requires exactly one of --dry-run or --digest"],
   ["R42-D", ["--digest", DIGEST, "--all", "--dry-run"], "factory cleanup --all requires exactly one of --dry-run or --digest"],
   ["R42-E missing", ["--all", "--digest"], "factory cleanup --all requires a value for --digest"],

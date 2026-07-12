@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "./helpers/git-fixture.js";
 import { describe, it } from "node:test";
 import {
   createCandidate,
