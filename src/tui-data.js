@@ -1,13 +1,34 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { formatCostAttributionSummary, publicCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
-import { diagnoseRunFile, diagnoseRunObject, diagnosticEnvelope, diagnosticItem } from "./factory-diagnostics.js";
+import { publicCostAttributionSummary } from "./cost-attribution.js";
+import {
+  DIAGNOSTIC_CLASSIFICATIONS,
+  DIAGNOSTIC_CONDITIONS,
+  DIAGNOSTIC_SEVERITIES,
+  DIAGNOSTIC_STATUSES,
+  diagnoseRunFile,
+  diagnoseRunObject,
+  diagnosticEnvelope,
+  diagnosticItem,
+} from "./factory-diagnostics.js";
+import {
+  freeformSegment,
+  projectDiagnosticData,
+  projectFreeformData,
+  renderTerminalSegmentsOrFallback,
+} from "./hardening/output-policy.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
 const MAX_SCAN_DIRS = 2000;
 const MAX_DIAGNOSTIC_SUMMARY = 180;
 const ROOT_CACHE_TTL_MS = 30000;
 const FAIL_CLOSED_CONDITIONS = new Set(["invalid-run-state"]);
+const DIAGNOSTIC_IDENTITIES = Object.freeze({
+  condition: new Set(DIAGNOSTIC_CONDITIONS),
+  classification: new Set(DIAGNOSTIC_CLASSIFICATIONS),
+  severity: new Set(DIAGNOSTIC_SEVERITIES),
+  status: new Set(DIAGNOSTIC_STATUSES),
+});
 const rootCache = new Map();
 
 export function factoryRoots(api, options = {}) {
@@ -156,30 +177,30 @@ function parseErrorDiagnostics(file, error) {
 
 function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
   return {
-    run_id: String(run.run_id || fallbackID),
-    status: String(run.status || "unknown"),
-    mode: run.mode ? String(run.mode) : null,
-    gate: pendingGate(run),
-    branch: run.branch ? String(run.branch) : null,
-    pr_url: run.pr_url ? String(run.pr_url) : null,
-    review_tier: stringOrNull(run.review_tier),
+    run_id: projectFreeformText(run.run_id || fallbackID),
+    status: projectFreeformText(run.status || "unknown"),
+    mode: projectOptionalFreeformText(run.mode),
+    gate: projectOptionalFreeformText(pendingGate(run)),
+    branch: projectOptionalFreeformText(run.branch),
+    pr_url: projectOptionalFreeformText(run.pr_url),
+    review_tier: projectOptionalFreeformText(stringOrNull(run.review_tier)),
     review_tier_source: null,
-    updated_at: run.updated_at ? String(run.updated_at) : null,
-    current: currentSummary(run),
+    updated_at: projectOptionalFreeformText(run.updated_at),
+    current: projectOptionalFreeformText(currentSummary(run)),
     steering: steeringSummary(run),
     cost: costSummary(run.cost_attribution),
     slices: sliceSummary(run),
-    panel: panelSummary(run),
-    terminal_reason: run.terminal_result?.reason ? String(run.terminal_result.reason) : null,
-    file,
-    run_dir: dirname(file),
+    panel: projectOptionalFreeformText(panelSummary(run)),
+    terminal_reason: projectOptionalFreeformText(run.terminal_result?.reason),
+    file: projectFreeformText(file),
+    run_dir: projectFreeformText(dirname(file)),
     ...diagnosticSummary(diagnostics),
   };
 }
 
 function fallbackRun(fallbackID, file, diagnostics) {
   return {
-    run_id: String(fallbackID),
+    run_id: projectFreeformText(fallbackID),
     status: "invalid",
     mode: null,
     gate: null,
@@ -194,8 +215,8 @@ function fallbackRun(fallbackID, file, diagnostics) {
     slices: null,
     panel: null,
     terminal_reason: null,
-    file,
-    run_dir: dirname(file),
+    file: projectFreeformText(file),
+    run_dir: projectFreeformText(dirname(file)),
     ...diagnosticSummary(diagnostics),
   };
 }
@@ -237,7 +258,7 @@ function safeDiagnoseRunObject(run, file, options) {
 }
 
 function diagnosticSummary(diagnostics) {
-  const envelope = sanitizeDiagnosticProjection(diagnostics || healthyDiagnostics());
+  const envelope = projectTuiDiagnosticData(diagnostics || healthyDiagnostics());
   return {
     diagnostics: envelope,
     diagnostic_status: stringOrDefault(envelope.status, "ok"),
@@ -247,11 +268,10 @@ function diagnosticSummary(diagnostics) {
   };
 }
 
-function sanitizeDiagnosticProjection(value) {
-  if (typeof value === "string") return sanitizePublicCostText(value);
-  if (Array.isArray(value)) return value.map(sanitizeDiagnosticProjection);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeDiagnosticProjection(item)]));
+export function projectTuiDiagnosticData(diagnostics) {
+  return terminalSafeProjection(plainProjection(projectDiagnosticData(diagnostics, {
+    validatedIdentityPaths: validatedDiagnosticIdentityPaths(diagnostics),
+  })));
 }
 
 function healthyDiagnostics() {
@@ -300,23 +320,23 @@ function steeringSummary(run) {
   if (!steering || typeof steering !== "object" || Array.isArray(steering)) return { pending: null, uncheckpointed: null, consumed_count: 0, latest_consumed: null, boundary: null, action_claim: null, last_action: null, pr_fence: null };
   const pending = steering.pending && typeof steering.pending === "object" && !Array.isArray(steering.pending)
     ? {
-      id: stringOrNull(steering.pending.id),
-      ref: stringOrNull(steering.pending.ref),
-      hash: stringOrNull(steering.pending.hash),
+      id: projectOptionalFreeformText(stringOrNull(steering.pending.id)),
+      ref: projectOptionalFreeformText(stringOrNull(steering.pending.ref)),
+      hash: projectOptionalFreeformText(stringOrNull(steering.pending.hash)),
       message_chars: Number.isInteger(steering.pending.message_chars) ? steering.pending.message_chars : null,
-      created_at: stringOrNull(steering.pending.created_at),
+      created_at: projectOptionalFreeformText(stringOrNull(steering.pending.created_at)),
     }
     : null;
   const consumed = Array.isArray(steering.history) ? steering.history.filter((item) => item?.event === "consumed") : [];
   const latest = consumed[consumed.length - 1];
   const uncheckpointed = steering.uncheckpointed && typeof steering.uncheckpointed === "object" && !Array.isArray(steering.uncheckpointed)
     ? {
-      id: stringOrNull(steering.uncheckpointed.id),
-      ref: stringOrNull(steering.uncheckpointed.ref),
-      hash: stringOrNull(steering.uncheckpointed.hash),
+      id: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.id)),
+      ref: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.ref)),
+      hash: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.hash)),
       message_chars: Number.isInteger(steering.uncheckpointed.message_chars) ? steering.uncheckpointed.message_chars : null,
-      created_at: stringOrNull(steering.uncheckpointed.created_at),
-      consumed_at: stringOrNull(steering.uncheckpointed.consumed_at),
+      created_at: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.created_at)),
+      consumed_at: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.consumed_at)),
     }
     : null;
   return {
@@ -324,21 +344,21 @@ function steeringSummary(run) {
     uncheckpointed,
     consumed_count: consumed.length,
     latest_consumed: latest ? {
-      ref: stringOrNull(latest.ref),
-      consumed_at: stringOrNull(latest.consumed_at),
+      ref: projectOptionalFreeformText(stringOrNull(latest.ref)),
+      consumed_at: projectOptionalFreeformText(stringOrNull(latest.consumed_at)),
     } : null,
     boundary: steering.boundary && typeof steering.boundary === "object" ? {
-      kind: stringOrNull(steering.boundary.kind),
-      token: stringOrNull(steering.boundary.token),
+      kind: projectOptionalFreeformText(stringOrNull(steering.boundary.kind)),
+      token: projectOptionalFreeformText(stringOrNull(steering.boundary.token)),
       generation: Number.isInteger(steering.boundary.generation) ? steering.boundary.generation : null,
-      created_at: stringOrNull(steering.boundary.created_at),
+      created_at: projectOptionalFreeformText(stringOrNull(steering.boundary.created_at)),
     } : null,
     action_claim: steeringActionSummary(steering.action_claim),
     last_action: steeringActionSummary(steering.last_action),
     pr_fence: steering.pr_fence && typeof steering.pr_fence === "object" ? {
-      token: stringOrNull(steering.pr_fence.token),
+      token: projectOptionalFreeformText(stringOrNull(steering.pr_fence.token)),
       generation: Number.isInteger(steering.pr_fence.generation) ? steering.pr_fence.generation : null,
-      created_at: stringOrNull(steering.pr_fence.created_at),
+      created_at: projectOptionalFreeformText(stringOrNull(steering.pr_fence.created_at)),
     } : null,
   };
 }
@@ -346,21 +366,19 @@ function steeringSummary(run) {
 function steeringActionSummary(action) {
   if (!action || typeof action !== "object" || Array.isArray(action)) return null;
   return {
-    kind: stringOrNull(action.kind),
-    token: stringOrNull(action.token),
+    kind: projectOptionalFreeformText(stringOrNull(action.kind)),
+    token: projectOptionalFreeformText(stringOrNull(action.token)),
     generation: Number.isInteger(action.generation) ? action.generation : null,
-    claimed_at: stringOrNull(action.claimed_at),
-    outcome: stringOrNull(action.outcome),
-    resolved_at: stringOrNull(action.resolved_at),
+    claimed_at: projectOptionalFreeformText(stringOrNull(action.claimed_at)),
+    outcome: projectOptionalFreeformText(stringOrNull(action.outcome)),
+    resolved_at: projectOptionalFreeformText(stringOrNull(action.resolved_at)),
   };
 }
 
 function costSummary(costAttribution) {
   if (!costAttribution || typeof costAttribution !== "object" || Array.isArray(costAttribution)) return null;
-  return {
-    ...publicCostAttributionSummary(costAttribution),
-    label: formatCostAttributionSummary(costAttribution),
-  };
+  const summary = projectPublicStrings(publicCostAttributionSummary(costAttribution));
+  return { ...summary, label: formatProjectedCostSummary(summary) };
 }
 
 function inferredPrePrPanelSummary(run) {
@@ -387,18 +405,89 @@ function firstByStatus(items, statuses) {
 }
 
 function summarizeWorkItem(name, status, attempts) {
-  const label = stringOrNull(name) ? sanitizePublicCostText(name) : null;
+  const label = projectOptionalFreeformData(stringOrNull(name));
   if (!label || !status) return null;
-  const normalizedStatus = String(status);
+  const normalizedStatus = projectFreeformData(String(status));
   const attempt = Number.isInteger(attempts) && attempts > 0 ? ` a${attempts}` : "";
   return `${label} ${normalizedStatus}${attempt}`;
 }
 
 function panelSummary(run) {
-  const validator = run.validator?.verdict ? String(run.validator.verdict) : null;
-  const security = run.security_review?.verdict ? String(run.security_review.verdict) : null;
+  const validator = projectOptionalFreeformData(run.validator?.verdict);
+  const security = projectOptionalFreeformData(run.security_review?.verdict);
   if (!validator && !security) return null;
   return [validator, security].filter(Boolean).join(" / ");
+}
+
+function validatedDiagnosticIdentityPaths(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const paths = [];
+  for (const field of ["status", "severity", "classification"]) {
+    if (DIAGNOSTIC_IDENTITIES[field].has(value[field])) paths.push([field]);
+  }
+  if (!Array.isArray(value.items)) return paths;
+  for (let index = 0; index < value.items.length; index += 1) {
+    const item = value.items[index];
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    for (const field of ["condition", "status", "severity", "classification"]) {
+      if (DIAGNOSTIC_IDENTITIES[field].has(item[field])) paths.push(["items", String(index), field]);
+    }
+  }
+  return paths;
+}
+
+function plainProjection(value) {
+  if (Array.isArray(value)) return value.map(plainProjection);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, plainProjection(item)]));
+  }
+  return value;
+}
+
+function terminalSafeProjection(value) {
+  if (typeof value === "string") return projectFreeformText(value);
+  if (Array.isArray(value)) return value.map(terminalSafeProjection);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, terminalSafeProjection(item)]));
+  }
+  return value;
+}
+
+function projectPublicStrings(value) {
+  if (typeof value === "string") return projectFreeformText(value);
+  if (Array.isArray(value)) return value.map(projectPublicStrings);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, projectPublicStrings(item)]));
+  }
+  return value;
+}
+
+function projectFreeformText(value) {
+  return renderTerminalSegmentsOrFallback([freeformSegment(String(value))]);
+}
+
+function projectOptionalFreeformText(value) {
+  return value === null || value === undefined ? null : projectFreeformText(value);
+}
+
+function projectOptionalFreeformData(value) {
+  return value === null || value === undefined ? null : projectFreeformData(String(value));
+}
+
+function formatProjectedCostSummary(summary) {
+  const parts = [`cost ${summary.status}`, `${summary.entry_count} ${summary.entry_count === 1 ? "entry" : "entries"}`];
+  if (summary.total_tokens !== undefined) parts.push(`${summary.total_tokens} tokens`);
+  else if (summary.input_tokens !== undefined || summary.output_tokens !== undefined) {
+    parts.push(`${summary.input_tokens ?? "?"}/${summary.output_tokens ?? "?"} tokens`);
+  }
+  if (summary.mixed_currency) parts.push("mixed currency");
+  else if (summary.cost_total !== undefined) parts.push(`${formatCost(summary.cost_total)} ${summary.cost_currency || ""}`.trim());
+  if (summary.missing.length > 0) parts.push(`missing ${summary.missing.join(",")}`);
+  return parts.join(" · ");
+}
+
+function formatCost(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(6).replace(/0+$/u, "").replace(/\.$/u, "");
 }
 
 function stringOrNull(value) {

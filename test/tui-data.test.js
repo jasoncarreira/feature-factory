@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { factoryRoots, findFactoryRoots, readRuns, selectVisibleRuns } from "../src/tui-data.js";
+import { factoryRoots, findFactoryRoots, projectTuiDiagnosticData, readRuns, selectVisibleRuns } from "../src/tui-data.js";
 
 describe("sidebar run visibility", () => {
   const run = (run_id, status, diagnostic_status = "ok") => ({ run_id, status, diagnostic_status });
@@ -170,7 +170,11 @@ describe("TUI factory scanner", () => {
       const [sidebarRun] = readRuns(sidebarRoots, { diagnostics: false });
 
       for (const run of [diagnosticRun, sidebarRun]) {
-        assert.deepEqual(run.steering.pending, fixture.pending);
+        assert.equal(run.steering.pending.id, fixture.pending.id);
+        assert.equal(run.steering.pending.ref, "[redacted]");
+        assert.equal(run.steering.pending.hash, "[redacted]");
+        assert.equal(run.steering.pending.message_chars, fixture.pending.message_chars);
+        assert.equal(run.steering.pending.created_at, fixture.pending.created_at);
         assert.deepEqual(Object.keys(run.steering.pending).sort(), ["created_at", "hash", "id", "message_chars", "ref"]);
         assert.equal(run.steering.consumed_count, 0);
         assert.equal(run.steering.latest_consumed, null);
@@ -253,7 +257,7 @@ describe("TUI factory scanner", () => {
 
     const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
 
-    assert.equal(run.current, "active[2J-slice running a2");
+    assert.equal(run.current, "active\\u001B[2J-slice\\u009B running a2");
     assert.equal(hasTerminalControl(run.current), false);
     cleanup(repo);
   });
@@ -269,7 +273,7 @@ describe("TUI factory scanner", () => {
 
     const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
 
-    assert.equal(run.current, "active]0;pwned-step running a3");
+    assert.equal(run.current, "active\\u001B]0;pwned\\u0007-step\\u0085 running a3");
     assert.equal(hasTerminalControl(run.current), false);
     cleanup(repo);
   });
@@ -386,6 +390,62 @@ describe("TUI factory scanner", () => {
     assert.match(run.diagnostics.items[0].evidence.error, /must not contain control characters/u);
     assert.equal(diagnosticStrings(run.diagnostics).some(hasTerminalControl), false);
     cleanup(repo);
+  });
+
+  it("projects every freeform row field before it reaches the renderer", () => {
+    const repo = tempDir();
+    const secret = "Authorization: Basic dXNlcjpwYXNzd29yZA==";
+    writeRun(repo, "projection-run", {
+      run_id: secret,
+      status: "running",
+      mode: `headless\u001b[2J`,
+      branch: secret,
+      pr_url: `https://example.test/${secret}`,
+      updated_at: `2026-07-05 ${secret}`,
+      gates: { [secret]: { status: "pending" } },
+      slices: [{ id: secret, status: "running", attempts: 1 }],
+      steering: {
+        pending: { id: secret, ref: secret, hash: secret, message_chars: 1, created_at: secret },
+        boundary: { kind: secret, token: secret, generation: 1, created_at: secret },
+        last_action: { kind: secret, token: secret, generation: 1, claimed_at: secret, outcome: secret, resolved_at: secret },
+      },
+      validator: { verdict: secret },
+      terminal_result: { reason: secret },
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+    const serialized = JSON.stringify(run);
+
+    assert.equal(serialized.includes("dXNlcjpwYXNzd29yZA=="), false, serialized);
+    assert.equal(diagnosticStrings(run).some(hasTerminalControl), false);
+    for (const value of [run.run_id, run.gate, run.current, run.branch, run.pr_url, run.panel, run.terminal_reason, run.steering.pending.ref]) {
+      assert.equal(value.includes("[redacted]"), true);
+    }
+    cleanup(repo);
+  });
+
+  it("bypasses freeform redaction only for validated diagnostic identity enums", () => {
+    const secret = "Authorization: Basic dXNlcjpwYXNzd29yZA==";
+    const projected = projectTuiDiagnosticData({
+      status: "warning",
+      severity: "warning",
+      classification: "recoverable",
+      summary: secret,
+      items: [{
+        condition: "stale-heartbeat",
+        status: secret,
+        severity: "warning",
+        classification: "recoverable",
+        message: `message ${secret}\u001b[2J`,
+        evidence: { path: `/tmp/${secret}`, process_alive: null },
+      }],
+    });
+
+    assert.equal(projected.status, "warning");
+    assert.equal(projected.items[0].condition, "stale-heartbeat");
+    assert.equal(projected.items[0].status, "Authorization: Basic [redacted]");
+    assert.equal(JSON.stringify(projected).includes("dXNlcjpwYXNzd29yZA=="), false);
+    assert.equal(diagnosticStrings(projected).some(hasTerminalControl), false);
   });
 
   it("can skip expensive diagnostics for responsive sidebar refreshes", () => {
@@ -520,11 +580,14 @@ function writeRun(repo, id, input) {
   const dir = join(repo, ".opencode", "factory", id);
   mkdirSync(dir, { recursive: true });
   const run = {
-    run_id: id,
+    run_id: input.run_id === undefined ? id : input.run_id,
     status: input.status,
     updated_at: input.updated_at,
     gates: input.gates === undefined ? { story: { status: "pending" } } : input.gates,
   };
+  if (input.mode !== undefined) run.mode = input.mode;
+  if (input.branch !== undefined) run.branch = input.branch;
+  if (input.pr_url !== undefined) run.pr_url = input.pr_url;
   if (input.review_tier !== undefined) run.review_tier = input.review_tier;
   if (input.slices !== undefined) run.slices = input.slices;
   if (input.steps !== undefined) run.steps = input.steps;
@@ -532,6 +595,7 @@ function writeRun(repo, id, input) {
   if (input.security_review !== undefined) run.security_review = input.security_review;
   if (input.steering !== undefined) run.steering = input.steering;
   if (input.cost_attribution !== undefined) run.cost_attribution = input.cost_attribution;
+  if (input.terminal_result !== undefined) run.terminal_result = input.terminal_result;
   if (["completed", "blocked", "partial", "needs-human"].includes(input.status)) {
     run.terminal_result = {
       run_id: id,

@@ -65,9 +65,55 @@ describe("factory diagnostics", () => {
       assert.deepEqual(diagnostics.items.map((item) => item.condition), ["missing-heartbeat-process", "stale-heartbeat"]);
       assert.equal(diagnostics.classification, "recoverable");
       assert.equal(diagnostics.items[0].evidence.liveness_only, true);
+      assert.equal(diagnostics.items[0].evidence.process_alive, false);
     } finally {
       cleanup(repo);
     }
+  });
+
+  it("accepts only primitive booleans from legacy heartbeat liveness callbacks", () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({ heartbeat_at: "2026-07-08T11:00:00.000Z" }));
+    writeJson(join(runDir, "heartbeat.json"), heartbeatState({ last_tick_at: "2026-07-08T11:00:00.000Z" }));
+
+    try {
+      for (const value of ["false", new Boolean(false), {}, [], 0, 1, null, undefined]) {
+        const diagnostics = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => value });
+        assert.deepEqual(diagnostics.items.map((item) => item.condition), ["stale-heartbeat"]);
+        assert.equal(diagnostics.items[0].evidence.process_alive, null);
+      }
+      const thrown = diagnoseRunDir(runDir, {
+        cwd: repo,
+        now: CHECKED_AT,
+        processAliveFn: () => { throw new Error("probe failed"); },
+      });
+      assert.deepEqual(thrown.items.map((item) => item.condition), ["stale-heartbeat"]);
+      assert.equal(thrown.items[0].evidence.process_alive, null);
+
+      const live = diagnoseRunDir(runDir, { cwd: repo, now: CHECKED_AT, processAliveFn: () => true });
+      assert.deepEqual(live.items.map((item) => item.condition), ["stale-heartbeat"]);
+      assert.equal(live.items[0].evidence.process_alive, true);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("projects final public diagnostic envelopes while preserving validated enums", () => {
+    const secret = "Authorization: Basic dXNlcjpwYXNzd29yZA==";
+    const envelope = diagnosticEnvelope([
+      diagnosticItem("invalid-run-state", {
+        checkedAt: CHECKED_AT,
+        message: `Unsafe ${secret}\u001b[2J`,
+        evidence: { source: "run.json", error: secret, path: `/tmp/${secret}` },
+      }),
+    ], { checkedAt: CHECKED_AT, authoritative: false });
+
+    assert.equal(envelope.status, "error");
+    assert.equal(envelope.classification, "invalid");
+    assert.equal(envelope.items[0].condition, "invalid-run-state");
+    assert.equal(JSON.stringify(envelope).includes("dXNlcjpwYXNzd29yZA=="), false);
+    assert.equal(envelope.items[0].evidence.error.includes("[redacted]"), true);
   });
 
   it("suppresses stale heartbeat alarms when no heartbeat-bracketed work is in flight", () => {
