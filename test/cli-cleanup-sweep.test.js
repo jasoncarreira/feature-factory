@@ -3,17 +3,15 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "./helpers/git-fixture.js";
 import {
-  CleanupSweepCommandError,
   parseCleanupSweepCommand,
-  renderCleanupSweepCommandError,
   runCleanupSweepCommand,
 } from "../src/cleanup-sweep-command.js";
 import {
   createCleanupSweepConfirmation,
-  renderCleanupSweepHumanLines,
-  renderCleanupSweepJson,
   renderCleanupSweepReport,
+  renderCleanupSweepReportLines,
 } from "../src/cleanup-sweep-output.js";
+import { StructuredOutputError } from "../src/hardening/output-policy.js";
 import {
   createCandidate,
   createCleanupSweepDigest,
@@ -35,7 +33,7 @@ describe("cleanup sweep closed command grammar", () => {
     );
   });
 
-  it("rejects every duplicate, missing, empty, next-flag, positional, and unrelated form with one fixed error", () => {
+  it("rejects every duplicate, missing, empty, next-flag, positional, and unrelated form with structured errors", () => {
     const invalid = [
       [],
       ["--all"],
@@ -64,12 +62,11 @@ describe("cleanup sweep closed command grammar", () => {
     ];
     for (const args of invalid) {
       assert.throws(() => parseCleanupSweepCommand(args), (error) => {
-        assert.ok(error instanceof CleanupSweepCommandError);
-        assert.equal(error.message, "invalid cleanup sweep command");
+        assert.ok(error instanceof StructuredOutputError);
+        assert.equal(error.message.length > 0, true);
         return true;
       }, args.join(" "));
     }
-    assert.equal(renderCleanupSweepCommandError(), "error: invalid cleanup sweep command");
   });
 
   it("parses before handlers, invokes exactly one mode handler, and returns the report exit code", async () => {
@@ -95,7 +92,7 @@ describe("cleanup sweep closed command grammar", () => {
     assert.deepEqual(calls.map(([mode]) => mode), ["execute"]);
 
     calls.length = 0;
-    await assert.rejects(runCleanupSweepCommand(["--all", "--force", "--dry-run"], handlers), CleanupSweepCommandError);
+    await assert.rejects(runCleanupSweepCommand(["--all", "--force", "--dry-run"], handlers), StructuredOutputError);
     assert.deepEqual(calls, []);
   });
 });
@@ -122,25 +119,25 @@ describe("cleanup sweep confirmation and rendering", () => {
         createCandidate({ entry_name: "a", run_id: "a", classification: "eligible", reason_codes: ["ELIGIBLE"] }),
       ],
     });
-    const lines = renderCleanupSweepHumanLines(report);
-    assert.match(lines[0], /^mode\/status: preview\/previewed$/u);
-    assert.match(lines[1], /^repository: /u);
-    assert.match(lines[2], /^digest: ff-cleanup-v1\./u);
-    assert.match(lines[3], /^eligible\ta\tELIGIBLE\t/u);
-    assert.match(lines[4], /^skipped\tz\\u001B\[31m\tSKIPPED_PR_OPEN\t/u);
-    assert.match(lines[5], /^counts: eligible=1 protected=0 skipped=1 deleted=0 failed=0$/u);
-    assert.equal(lines[6], "attempted cleanup failures: 0");
-    assert.match(lines[7], /^confirmation: /u);
+    const lines = renderCleanupSweepReportLines(report);
+    assert.equal(lines[0], "mode: preview");
+    assert.equal(lines[1], "status: previewed");
+    assert.match(lines[2], /^repository: /u);
+    assert.match(lines[3], /^digest: ff-cleanup-v1\./u);
+    assert.match(lines[4], /^eligible\ta\tELIGIBLE\t/u);
+    assert.match(lines[5], /^skipped\tz\\u001B\[31m\tSKIPPED_PR_OPEN\t/u);
+    assert.match(lines[6], /^counts: eligible=1 protected=0 skipped=1 deleted=0 failed=0$/u);
+    assert.equal(lines[7], "attempted-cleanup-failures: 0");
+    assert.match(lines[8], /^confirmation: /u);
     assert.doesNotMatch(lines.join("\n"), /\u001b/u);
   });
 
   it("renders terminal-safe stable JSON without adding raw operational errors", () => {
     const report = previewReport();
     report.raw_error = "fatal: credential helper failed";
-    const rendered = renderCleanupSweepJson(report);
+    const rendered = renderCleanupSweepReport(report, { json: true });
     assert.deepEqual(JSON.parse(rendered), createCleanupSweepReport(report));
     assert.doesNotMatch(rendered, /credential helper/u);
-    assert.equal(renderCleanupSweepReport(report, { json: true }), rendered);
   });
 });
 

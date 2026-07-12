@@ -135,7 +135,7 @@ async function stopProcess(pid, processEvidencePath = null) {
 }
 
 function cleanup(path) {
-  rmSync(path, { recursive: true, force: true });
+  rmSync(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
 function isProcessAlive(pid) {

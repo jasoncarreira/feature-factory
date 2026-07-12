@@ -19,6 +19,13 @@ import { fileURLToPath } from "node:url";
 import { createTrackedProcessCleanup } from "./process-cleanup-helper.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+// Spawn deadline for the CLI subprocess. This is a hang-guard, not a performance
+// assertion: `npm run check` runs many test files concurrently and several of them
+// (this one included) spawn their own `node` CLI, so a correct invocation can be
+// slow to start under CPU oversubscription. The bound must be generous enough that
+// only a genuinely stuck process trips it — a slow-but-progressing start must not.
+// (A tight 5s bound previously flaked with ETIMEDOUT under full-suite concurrency.)
+const CLI_TIMEOUT_MS = 30000;
 const RUN_ID = "cli-cost-report";
 const TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
@@ -416,7 +423,7 @@ function runCostReport(repo, args, extraEnv = {}) {
     cwd: repo,
     encoding: "utf8",
     env: cleanEnv(extraEnv),
-    timeout: 5000,
+    timeout: CLI_TIMEOUT_MS,
   });
   if (proc.error) throw proc.error;
   return proc;
@@ -432,10 +439,10 @@ function runCostReportAsync(owner, repo, args, extraEnv = {}) {
     let stdout = "";
     let stderr = "";
     const timeout = setTimeout(() => {
-      const error = new Error("factory cost-report result collection timed out after 5000ms");
+      const error = new Error(`factory cost-report result collection timed out after ${CLI_TIMEOUT_MS}ms`);
       error.code = "CLI_RESULT_TIMEOUT";
       reject(error);
-    }, 5000);
+    }, CLI_TIMEOUT_MS);
     child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
     child.once("error", (error) => {

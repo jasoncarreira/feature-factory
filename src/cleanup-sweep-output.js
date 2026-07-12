@@ -1,93 +1,139 @@
 import {
   CLEANUP_SWEEP_REFUSAL_REGISTRY,
   createCleanupSweepReport,
+  parseCleanupSweepDigest,
 } from "./cleanup-sweep-report.js";
 import {
   freeformSegment,
   identitySegment,
+  projectFreeformData,
   renderTerminalSegments,
   TRUSTED_SEGMENTS,
 } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
-export function createCleanupSweepConfirmation(digest, physicalRoot, { json = false } = {}) {
-  const argv = [
-    "feature-factory", "factory", "cleanup", "--all", "--digest", digest,
-    "--repo", physicalRoot,
-  ];
-  if (json) argv.push("--json");
-  return { argv, shell_command: argv.map(shellQuote).join(" ") };
+const CONFIRMATION_PREFIX = Object.freeze(["feature-factory", "factory", "cleanup", "--all", "--digest"]);
+
+export function createCleanupSweepConfirmation(digest, repositoryRoot, options = {}) {
+  parseCleanupSweepDigest(digest);
+  if (typeof repositoryRoot !== "string" || repositoryRoot.length === 0) {
+    throw new TypeError("cleanup sweep confirmation requires a physical repository root");
+  }
+  const argv = [...CONFIRMATION_PREFIX, digest, "--repo", repositoryRoot];
+  if (options.json === true) argv.push("--json");
+  return { argv, shell_command: shellConfirmationCommand(argv, repositoryRoot) };
 }
 
-export function shellQuoteCleanupSweepArgument(value) {
-  return shellQuote(value);
+export function shellQuoteArgv(argv) {
+  if (!Array.isArray(argv) || argv.length === 0 || argv.some((arg) => typeof arg !== "string")) {
+    throw new TypeError("shell argv must be a non-empty array of strings");
+  }
+  return argv.map((arg) => `'${arg.replaceAll("'", `'"'"'`)}'`).join(" ");
 }
 
-export function renderCleanupSweepReport(report, { json = false } = {}) {
-  return json ? renderCleanupSweepJson(report) : renderCleanupSweepHuman(report);
+export function renderCleanupSweepReport(report, options = {}) {
+  return renderCleanupSweepReportLines(report, options).join("\n");
 }
 
-export function renderCleanupSweepJson(report) {
-  return serializeTerminalJson(createCleanupSweepReport(report), { space: 2 });
-}
-
-export function renderCleanupSweepHuman(report) {
-  return renderCleanupSweepHumanLines(report).join("\n");
-}
-
-export function renderCleanupSweepHumanLines(report) {
+export function renderCleanupSweepReportLines(report, options = {}) {
   const normalized = createCleanupSweepReport(report);
-  const lines = [];
-  lines.push(row("mode/status", identitySegment(`${normalized.mode}/${normalized.status}`)));
-  lines.push(row("repository", normalized.repository === null
-    ? identitySegment("-")
-    : freeformSegment(normalized.repository.root_path)));
+  const confirmation = exactReportConfirmation(normalized);
+  if (options.json === true) {
+    return [serializeTerminalJson(normalized, { space: 2 })];
+  }
+
+  const lines = [
+    keyValueLine("mode", identitySegment(normalized.mode)),
+    keyValueLine("status", identitySegment(normalized.status)),
+    keyValueLine("repository", normalized.repository === null
+      ? identitySegment("-")
+      : freeformSegment(normalized.repository.root_path)),
+  ];
 
   if (normalized.authorization.digest !== null) {
-    lines.push(row("digest", identitySegment(normalized.authorization.digest)));
+    lines.push(keyValueLine("digest", identitySegment(normalized.authorization.digest)));
   }
   if (normalized.authorization.refusal_code !== null) {
     const refusal = CLEANUP_SWEEP_REFUSAL_REGISTRY[normalized.authorization.refusal_code];
-    lines.push(detailRow("refusal", refusal.code, refusal.message));
+    lines.push(renderTerminalSegments([
+      identitySegment("refusal"), TRUSTED_SEGMENTS.COLON_SPACE,
+      identitySegment(refusal.code), TRUSTED_SEGMENTS.DASH_SEPARATOR, freeformSegment(refusal.message),
+    ]));
   }
   for (const error of normalized.report_errors) {
-    lines.push(detailRow("report error", error.code, error.message));
+    lines.push(renderTerminalSegments([
+      identitySegment("report-error"), TRUSTED_SEGMENTS.COLON_SPACE,
+      identitySegment(error.code), TRUSTED_SEGMENTS.DASH_SEPARATOR, freeformSegment(error.message),
+    ]));
   }
-  for (const candidate of normalized.candidates) lines.push(candidateRow(candidate));
+  for (const candidate of normalized.candidates) lines.push(candidateLine(candidate));
 
-  const counts = normalized.counts;
-  lines.push(row("counts", identitySegment(
-    `eligible=${counts.eligible} protected=${counts.protected} skipped=${counts.skipped} deleted=${counts.deleted} failed=${counts.failed}`,
-  )));
-  lines.push(row("attempted cleanup failures", identitySegment(normalized.attempted_cleanup_failures)));
-  if (normalized.confirmation.shell_command !== null) {
-    lines.push(row("confirmation", identitySegment(normalized.confirmation.shell_command)));
+  lines.push(keyValueLine("counts", identitySegment([
+    `eligible=${normalized.counts.eligible}`,
+    `protected=${normalized.counts.protected}`,
+    `skipped=${normalized.counts.skipped}`,
+    `deleted=${normalized.counts.deleted}`,
+    `failed=${normalized.counts.failed}`,
+  ].join(" "))));
+  lines.push(keyValueLine("attempted-cleanup-failures", identitySegment(normalized.attempted_cleanup_failures)));
+  if (confirmation !== null) {
+    // This command is constructed above from fixed ASCII framing and either
+    // shell-quoted terminal-safe text or octal UTF-8 bytes. Re-encoding it as a
+    // diagnostic identity would change the executable backslashes.
+    lines.push(`confirmation: ${confirmation.shell_command}`);
   }
   return lines;
 }
 
-function candidateRow(candidate) {
+function exactReportConfirmation(report) {
+  if (report.confirmation.argv === null) return null;
+  const hasJson = report.confirmation.argv.at(-1) === "--json";
+  const expected = createCleanupSweepConfirmation(
+    report.authorization.digest,
+    report.repository.root_path,
+    { json: hasJson },
+  );
+  if (JSON.stringify(report.confirmation) !== JSON.stringify(expected)) {
+    throw new TypeError("cleanup sweep preview confirmation does not match the report authorization");
+  }
+  return expected;
+}
+
+function candidateLine(candidate) {
   return renderTerminalSegments([
     identitySegment(candidate.classification), TRUSTED_SEGMENTS.TAB,
     freeformSegment(candidate.entry_name), TRUSTED_SEGMENTS.TAB,
-    identitySegment(candidate.reason_codes.length === 0 ? "-" : candidate.reason_codes.join(",")),
-    TRUSTED_SEGMENTS.TAB,
-    freeformSegment(candidate.reasons.length === 0 ? "-" : candidate.reasons.map(({ message }) => message).join("; ")),
+    identitySegment(candidate.reason_codes.join(",")), TRUSTED_SEGMENTS.TAB,
+    freeformSegment(candidate.reasons.map((reason) => reason.message).join(" | ")),
   ]);
 }
 
-function detailRow(label, code, message) {
-  return renderTerminalSegments([
-    identitySegment(label), TRUSTED_SEGMENTS.COLON_SPACE,
-    identitySegment(code), TRUSTED_SEGMENTS.DASH_SEPARATOR, freeformSegment(message),
-  ]);
+function keyValueLine(key, valueSegment) {
+  return renderTerminalSegments([identitySegment(key), TRUSTED_SEGMENTS.COLON_SPACE, valueSegment]);
 }
 
-function row(label, valueSegment) {
-  return renderTerminalSegments([identitySegment(label), TRUSTED_SEGMENTS.COLON_SPACE, valueSegment]);
+function shellConfirmationCommand(argv, repositoryRoot) {
+  assertRoundTrippablePath(repositoryRoot);
+  if (projectFreeformData(repositoryRoot) === repositoryRoot && isAsciiTerminalSafe(repositoryRoot)) {
+    return shellQuoteArgv(argv);
+  }
+
+  const repoIndex = argv.indexOf("--repo") + 1;
+  const beforeRepository = shellQuoteArgv(argv.slice(0, repoIndex));
+  const afterRepository = argv.slice(repoIndex + 1);
+  const suffix = afterRepository.length === 0 ? "" : ` ${shellQuoteArgv(afterRepository)}`;
+  const octalBytes = [...Buffer.from(repositoryRoot, "utf8")]
+    .map((byte) => `\\${byte.toString(8).padStart(3, "0")}`)
+    .join("");
+  return `_ff_cleanup_repo=$(printf '%b_' '${octalBytes}'); _ff_cleanup_repo=\${_ff_cleanup_repo%_}; ${beforeRepository} \"$_ff_cleanup_repo\"${suffix}`;
 }
 
-function shellQuote(value) {
-  if (typeof value !== "string") throw new TypeError("cleanup sweep shell arguments must be strings");
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
+function assertRoundTrippablePath(value) {
+  if (value.includes("\0") || Buffer.from(value, "utf8").toString("utf8") !== value) {
+    throw new TypeError("cleanup sweep confirmation requires a round-trippable physical repository root");
+  }
+}
+
+function isAsciiTerminalSafe(value) {
+  return /^[\x20-\x7e]+$/u.test(value);
 }

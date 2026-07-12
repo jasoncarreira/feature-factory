@@ -19,7 +19,7 @@ import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js
 import { printCliResult, projectCostReport, renderCliPath } from "./cli-output.js";
 import { freeformSegment, identitySegment, renderErrorForTerminal, renderTerminalSegments, StructuredOutputError, TRUSTED_SEGMENTS } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
-import { CleanupSweepCommandError, renderCleanupSweepCommandError, runCleanupSweepCommand } from "./cleanup-sweep-command.js";
+import { runCleanupSweepCommand } from "./cleanup-sweep-command.js";
 import { renderCleanupSweepReport } from "./cleanup-sweep-output.js";
 import { executeCleanupSweep, previewCleanupSweep } from "./cleanup-sweep.js";
 
@@ -270,8 +270,8 @@ export async function runCleanupSweepCli(args, dependencies = {}) {
     stdout(render(result.report, { json: args.includes("--json") }));
     return result.exitCode;
   } catch (error) {
-    if (!(error instanceof CleanupSweepCommandError)) throw error;
-    stderr(renderCleanupSweepCommandError());
+    if (!(error instanceof StructuredOutputError)) throw error;
+    stderr(`error: ${renderErrorForTerminal(error)}`);
     return 1;
   }
 }
