@@ -518,6 +518,26 @@ describe("factory continue", () => {
       cleanup(fixture.repo);
     }
   });
+
+  it("returns an awaitable foreground launch and preserves continuation payload arguments", async () => {
+    const fixture = createFixture("foreground-continue");
+    const binDir = join(fixture.repo, "bin");
+    const script = join(binDir, "opencode");
+    mkdirSync(binDir);
+    writeFileSync(script, "#!/usr/bin/env node\nprocess.stdout.write('continued\\n');\n", "utf8");
+    const { chmodSync } = await import("node:fs");
+    chmodSync(script, 0o755);
+    const previousPath = process.env.PATH;
+    try {
+      process.env.PATH = `${binDir}:${previousPath || ""}`;
+      const launch = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "foreground-continue-next" });
+      assert.equal(typeof launch?.then, "function");
+      await launch;
+    } finally {
+      process.env.PATH = previousPath;
+      cleanup(fixture.repo);
+    }
+  });
 });
 
 describe("continuation planning-artifact reuse", () => {

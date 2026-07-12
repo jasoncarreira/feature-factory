@@ -89,7 +89,7 @@ describe("factory trace-context propagation", () => {
     const fixture = createContinueLaunchFixture("continue-traceparent");
     try {
       await withLaunchEnv(fixture, {}, async () => {
-        const result = continueFactory(fixture.runId, {
+        const result = await continueFactory(fixture.runId, {
           cwd: fixture.repo,
           review: "reviewer.json",
           runId: "continue-traceparent-next",

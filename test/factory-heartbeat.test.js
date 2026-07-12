@@ -129,6 +129,43 @@ describe("factory heartbeat lifecycle", () => {
     }
   });
 
+  it("keeps indeterminate liveness distinct and refuses heartbeat replacement", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun());
+    writeJson(join(runDir, "heartbeat.json"), heartbeatRecord(424242));
+    try {
+      const opts = { cwd: repo, now: "2026-07-06T11:05:01.000Z", processAliveFn: () => "truthy-but-malformed" };
+      assert.equal(heartbeatStatus(RUN_ID, opts).process_alive, null);
+      await assert.rejects(startHeartbeat(RUN_ID, { phase: "slice-review", intervalMs: 1000 }, opts), /already active/i);
+      assert.equal(readJson(join(runDir, "heartbeat.json")).pid, 424242);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("signals live lifecycle owners, clears absent owners, and fails closed for indeterminate pids", async () => {
+    for (const [name, value, clears, signalCount] of [["absent", false, true, 0], ["live", true, true, 1], ["indeterminate", {}, false, 0]]) {
+      const repo = tempRepo();
+      const runDir = createRunDir(repo);
+      const signals = [];
+      const originalKill = process.kill;
+      writeJson(join(runDir, "run.json"), runningRun());
+      writeJson(join(runDir, "heartbeat.json"), heartbeatRecord(424242));
+      try {
+        process.kill = (pid, signal) => { signals.push({ pid, signal }); return true; };
+        const action = stopHeartbeat(RUN_ID, {}, { cwd: repo, processAliveFn: () => value });
+        if (clears) assert.equal((await action).pid, null, name);
+        else await assert.rejects(action, /refusing to clear foreign pid/i, name);
+        assert.equal(signals.length, signalCount, name);
+        if (signalCount) assert.deepEqual(signals[0], { pid: 424242, signal: "SIGTERM" });
+      } finally {
+        process.kill = originalKill;
+        cleanup(repo);
+      }
+    }
+  });
+
   it("exits quietly when work becomes terminal, gated, or no longer in flight", async () => {
     for (const [name, nextRun] of [
       ["terminal", terminalRun("completed")],
@@ -206,6 +243,17 @@ function protectedGates(pending) {
       question_ref: `gates/${pending}.question.md`,
       answer_ref: `gates/${pending}.answer`,
     },
+  };
+}
+
+function heartbeatRecord(pid) {
+  return {
+    schema_version: 1,
+    run_id: RUN_ID,
+    phase: "builder-wave",
+    pid,
+    last_tick_at: "2026-07-06T11:05:00.000Z",
+    interval_ms: 1000,
   };
 }
 

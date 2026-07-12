@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { assertRunJsonWriterAllowed, hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
@@ -13,8 +13,12 @@ import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.j
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv } from "./telemetry.js";
-import { PROCESS_EVIDENCE_FILE, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, readProcessEvidence, recordDetachedProcessEvidence } from "./process-evidence.js";
+import { PROCESS_EVIDENCE_FILE, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, readProcessEvidence } from "./process-evidence.js";
 import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
+import { createSanitizedLineWriter } from "./hardening/line-output.js";
+import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
+import { publicLivenessBoolean, probeLegacyBooleanLiveness, probeProcessLiveness } from "./hardening/process-verification.js";
+import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -24,6 +28,8 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
 const MIN_HEARTBEAT_INTERVAL_MS = 1000;
 const HEARTBEAT_TICK_LOCK_TIMEOUT_MS = 1000;
 const HEARTBEAT_TICK_LOCK_RETRIES = 3;
+const DETACHED_READY_TIMEOUT_MS = 5000;
+const DETACHED_ABORT_GRACE_MS = 1000;
 const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
@@ -115,11 +121,7 @@ export async function startFactory(args, opts = {}) {
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo, requestedRunId }));
   if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, opts), env: launchEnv });
-  try {
-    execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
-  } catch (error) {
-    throw new Error(`opencode exited ${error.status ?? 1}`);
-  }
+  return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
 }
 
 export async function recoverDisruptedRun(runId, opts = {}) {
@@ -521,11 +523,7 @@ export function continueFactory(parentRunId, opts = {}) {
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(encodeFeatureCommandPayload(payload));
   if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: continuation.target.run_id, runDir: join(factoryRoot(repo), continuation.target.run_id) }), env: launchEnv });
-  try {
-    execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
-  } catch (error) {
-    throw new Error(`opencode exited ${error.status ?? 1}`);
-  }
+  return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
 }
 
 export async function resumeFactory(runId, opts = {}) {
@@ -543,11 +541,7 @@ export async function resumeFactory(runId, opts = {}) {
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(encodeFeatureCommandPayload(payload));
   if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir }), env: launchEnv });
-  try {
-    execFileSync("opencode", commandArgs, { cwd: repo, env: launchEnv, stdio: "inherit" });
-  } catch (error) {
-    throw new Error(`opencode exited ${error.status ?? 1}`);
-  }
+  return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
 }
 
 export async function writeSteering(runId, message, opts = {}) {
@@ -748,7 +742,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
     }
     const current = tryReadHeartbeatFile(heartbeatFile);
     if (current.error) throw new Error(`invalid heartbeat at ${heartbeatFile}: ${current.error}`);
-    if (current.value && heartbeatIsFresh(current.value, startedAt, opts)) {
+    if (current.value && heartbeatBlocksReplacement(current.value, startedAt, opts)) {
       throw new Error(`heartbeat already active for run '${run.run_id}'`);
     }
 
@@ -791,12 +785,12 @@ export async function stopHeartbeat(runId, config = {}, opts = {}) {
 
     const heartbeat = current.value;
     stopActiveHeartbeatLoop(runDir);
-    if (heartbeat.pid && heartbeat.pid !== process.pid && isProcessAlive(heartbeat.pid)) {
-      try {
-        process.kill(heartbeat.pid, "SIGTERM");
-      } catch {
-        // Best-effort stop; the liveness rule handles dead or inaccessible processes.
+    if (heartbeat.pid && heartbeat.pid !== process.pid) {
+      const liveness = heartbeatProcessLiveness(heartbeat.pid, opts);
+      if (liveness === "indeterminate") {
+        throw new Error(`heartbeat ownership is ${liveness}; refusing to clear foreign pid ${heartbeat.pid}`);
       }
+      if (liveness === "live") process.kill(heartbeat.pid, "SIGTERM");
     }
     stopped = validateHeartbeatState({ ...heartbeat, pid: null, last_tick_at: stoppedAt });
     writeHeartbeatFile(heartbeatFile, stopped);
@@ -840,7 +834,7 @@ export function watchRun(runId, opts = {}) {
   let timer = null;
   let stopped = false;
   const emit = (value) => {
-    const current = JSON.stringify(value);
+    const current = serializeTerminalJson(projectFactoryWatchValue(value));
     if (current !== last) {
       last = current;
       console.log(current);
@@ -853,7 +847,7 @@ export function watchRun(runId, opts = {}) {
   };
   const print = () => {
     try {
-      emit(opts.all ? listRuns(opts) : status(runId, opts));
+      emit(typeof opts.watchValueFn === "function" ? opts.watchValueFn() : opts.all ? listRuns(opts) : status(runId, opts));
     } catch (error) {
       if (/run not found|no factory runs found/u.test(error.message)) {
         finish({ run_id: runId || null, status: "removed", error: error.message });
@@ -1002,7 +996,7 @@ export async function cleanupRun(runId, opts = {}) {
     }
     const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
     if (heartbeat.error) throw new Error(`invalid heartbeat at ${heartbeatPath(runDir)}: ${heartbeat.error}`);
-    if (heartbeat.value && heartbeatIsFresh(heartbeat.value, timestamp(opts.now), opts) && !opts.force) {
+    if (heartbeat.value && heartbeatBlocksReplacement(heartbeat.value, timestamp(opts.now), opts) && !opts.force) {
       throw new Error(`run '${run.run_id}' has a fresh heartbeat; cleanup requires --force`);
     }
     if (heartbeat.value && opts.force && !opts.dryRun) stopHeartbeatForCleanup(runDir, heartbeat.value, opts);
@@ -1030,12 +1024,10 @@ export async function cleanupRun(runId, opts = {}) {
 
 function stopHeartbeatForCleanup(runDir, heartbeat, opts = {}) {
   stopActiveHeartbeatLoop(runDir);
-  if (heartbeat.pid && heartbeat.pid !== process.pid && isProcessAlive(heartbeat.pid, opts)) {
-    try {
-      process.kill(heartbeat.pid, "SIGTERM");
-    } catch {
-      // Best-effort cleanup stop.
-    }
+  if (heartbeat.pid && heartbeat.pid !== process.pid) {
+    const liveness = heartbeatProcessLiveness(heartbeat.pid, opts);
+    if (liveness === "indeterminate") throw new Error(`heartbeat ownership is ${liveness}; refusing to clear foreign pid ${heartbeat.pid}`);
+    if (liveness === "live") process.kill(heartbeat.pid, "SIGTERM");
   }
   writeHeartbeatFile(heartbeatPath(runDir), validateHeartbeatState({ ...heartbeat, pid: null, last_tick_at: timestamp(opts.now) }));
 }
@@ -1764,6 +1756,51 @@ function allRunDirs(opts = {}) {
   return dirs;
 }
 
+function runForegroundFactory(repo, commandArgs, opts = {}) {
+  const spawnProcess = typeof opts.spawnFn === "function" ? opts.spawnFn : spawn;
+  return new Promise((resolveRun, rejectRun) => {
+    let settled = false;
+    const writer = createSanitizedLineWriter({
+      write(stream, buffer) {
+        const destination = stream === "stderr" ? process.stderr : process.stdout;
+        return new Promise((resolveWrite, rejectWrite) => {
+          destination.write(buffer, (error) => error ? rejectWrite(error) : resolveWrite());
+        });
+      },
+    });
+    let child;
+    try {
+      child = spawnProcess("opencode", commandArgs, {
+        cwd: repo,
+        env: opts.env || process.env,
+        stdio: ["inherit", "pipe", "pipe"],
+      });
+    } catch (error) {
+      rejectRun(new Error(`opencode failed to start: ${renderErrorForTerminal(error)}`));
+      return;
+    }
+    child.stdout.pipe(writer.stdout);
+    child.stderr.pipe(writer.stderr);
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      rejectRun(new Error(`opencode failed to start: ${renderErrorForTerminal(error)}`));
+    });
+    child.once("close", async (code) => {
+      if (settled) return;
+      try {
+        await writer.finished();
+        if (code !== 0) throw new Error(`opencode exited ${code ?? 1}`);
+        settled = true;
+        resolveRun(undefined);
+      } catch (error) {
+        settled = true;
+        rejectRun(new Error(renderErrorForTerminal(error)));
+      }
+    });
+  });
+}
+
 function startDetached(repo, commandArgs, opts = {}) {
   const env = opts.env || process.env;
   const scopedRunDir = opts.runDir || null;
@@ -1779,56 +1816,68 @@ function startDetached(repo, commandArgs, opts = {}) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const executionId = opts.executionId || randomUUID();
   const log = join(processes, scopedRunDir ? `${stamp}-${executionId}.log` : `${stamp}.log`);
-  const out = openSync(log, "a");
-  const child = spawn("opencode", commandArgs, {
+  const spawnProcess = typeof opts.supervisorSpawnFn === "function" ? opts.supervisorSpawnFn : spawn;
+  const supervisorPath = fileURLToPath(new URL("./detached-log-supervisor.js", import.meta.url));
+  const supervisor = spawnProcess(process.execPath, [supervisorPath], {
     cwd: repo,
     detached: true,
     env,
-    stdio: ["ignore", out, out],
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
-  child.on("error", (error) => {
-    try {
-      appendFileSync(log, `\n[feature-factory] failed to start opencode: ${error.message}\n`);
-    } catch {
-      // The launch dir may already have been cleaned up after a spawn failure.
-    }
+  return awaitDetachedReadiness(supervisor, {
+    repo, commandArgs, env, scopedRunDir, recordsProcessEvidence, executionId, log,
+    runId: opts.runId || null, now: opts.now, readyTimeoutMs: opts.readyTimeoutMs,
   });
-  child.unref();
-  closeSync(out);
-  if (recordsProcessEvidence) {
-    if (!child.pid) {
-      removeFailedDetachedLaunchDir(scopedRunDir);
-      throw new Error("failed to record detached process evidence: missing child pid");
-    }
-    try {
-      recordDetachedProcessEvidence(scopedRunDir, {
-        runId: opts.runId,
-        executionId,
-        pid: child.pid,
-        cwd: repo,
-        commandName: "opencode",
-        logRef: relativeRef(scopedRunDir, log),
-        now: opts.now,
-        inspectorFn: opts.inspectorFn || opts.processInspectorFn,
-      });
-    } catch (error) {
-      appendFileSync(log, `\n[feature-factory] failed to record process evidence: ${error.message}\n`);
-      try {
-        process.kill(child.pid, "SIGTERM");
-      } catch {
-        // Best-effort cleanup for a detached launch that could not be evidenced.
+}
+
+function awaitDetachedReadiness(supervisor, init) {
+  return new Promise((resolveReady, rejectReady) => {
+    let settled = false;
+    let actualPid = null;
+    const timeoutMs = normalizePositiveInteger(init.readyTimeoutMs, DETACHED_READY_TIMEOUT_MS, "readyTimeoutMs");
+    const finishFailure = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { supervisor.send?.({ type: "abort" }); } catch { /* best effort */ }
+      setTimeout(() => {
+        try { process.kill(supervisor.pid, "SIGTERM"); } catch { /* already exited */ }
+        if (init.scopedRunDir && !existsSync(join(init.scopedRunDir, "run.json")) && !existsSync(join(init.scopedRunDir, PROCESS_EVIDENCE_FILE))) removeFailedDetachedLaunchDir(init.scopedRunDir);
+      }, DETACHED_ABORT_GRACE_MS).unref?.();
+      rejectReady(new Error(`detached launch failed: ${renderErrorForTerminal(error)}`));
+    };
+    const timer = setTimeout(() => finishFailure(new Error("readiness timed out")), timeoutMs);
+    supervisor.once("error", finishFailure);
+    supervisor.once("disconnect", () => finishFailure(new Error("supervisor disconnected before readiness")));
+    supervisor.once("exit", (code) => finishFailure(new Error(`supervisor exited ${code ?? 1} before readiness`)));
+    supervisor.on("message", (message) => {
+      if (message?.type === "spawned" && Number.isInteger(message.pid)) actualPid = message.pid;
+      if (message?.type === "error") finishFailure(new Error(message.error || "supervisor failed safely"));
+      if (message?.type !== "ready" || settled) return;
+      if (!Number.isInteger(message.pid) || message.pid <= 0 || (actualPid && actualPid !== message.pid)) {
+        finishFailure(new Error("supervisor returned invalid child pid evidence"));
+        return;
       }
-      removeFailedDetachedLaunchDir(scopedRunDir);
-      throw new Error(`failed to record detached process evidence: ${error.message}`);
-    }
-  }
-  return {
-    status: "started",
-    pid: child.pid,
-    repo,
-    log,
-    command: ["opencode", ...commandArgs].join(" "),
-  };
+      settled = true;
+      clearTimeout(timer);
+      supervisor.unref?.();
+      supervisor.disconnect?.();
+      resolveReady({ status: "started", pid: message.pid, repo: init.repo, log: init.log, command: ["opencode", ...init.commandArgs].join(" ") });
+    });
+    supervisor.send({
+      type: "init",
+      repo: init.repo,
+      commandArgs: init.commandArgs,
+      env: init.env,
+      runDir: init.scopedRunDir,
+      runId: init.runId,
+      executionId: init.executionId,
+      log: init.log,
+      logRef: init.scopedRunDir ? relativeRef(init.scopedRunDir, init.log) : null,
+      recordEvidence: init.recordsProcessEvidence,
+      now: init.now,
+    }, (error) => { if (error) finishFailure(error); });
+  });
 }
 
 function factoryLaunchEnv(opts = {}) {
@@ -2168,7 +2217,7 @@ function resumeEligibility(runDir, run, opts = {}) {
   if (Array.isArray(diagnostics.items) && diagnostics.items.some((item) => item?.condition === "missing-worktree")) reasons.push("missing-worktree");
   const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
   if (heartbeat.error) reasons.push("invalid-run-state");
-  else if (heartbeat.value && heartbeatIsFresh(heartbeat.value, timestamp(opts.now), opts)) reasons.push("active-heartbeat");
+  else if (heartbeat.value && heartbeatBlocksReplacement(heartbeat.value, timestamp(opts.now), opts)) reasons.push("active-heartbeat");
   if (run.steering?.action_claim) reasons.push("action-start-pending");
   if (run.steering?.pr_fence) reasons.push("pre-pr-fence-active");
   return { eligible: reasons.length === 0, reasons: [...new Set(reasons)], diagnostics, steering_checks: steeringChecks, heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null };
@@ -2451,10 +2500,11 @@ function heartbeatLiveness(heartbeat, now, opts = {}) {
   const lastTickMs = Date.parse(heartbeat.last_tick_at || "");
   const intervalMs = Number.isInteger(heartbeat.interval_ms) && heartbeat.interval_ms > 0 ? heartbeat.interval_ms : DEFAULT_HEARTBEAT_INTERVAL_MS;
   const staleMs = Math.max(2 * intervalMs, 120000);
-  const processAlive = isProcessAlive(heartbeat.pid, opts);
+  const processStatus = heartbeatProcessLiveness(heartbeat.pid, opts);
+  const processAlive = publicLivenessBoolean(processStatus);
   const ageMs = Number.isFinite(nowMs) && Number.isFinite(lastTickMs) ? Math.max(0, nowMs - lastTickMs) : null;
   return {
-    fresh: Boolean(processAlive && ageMs !== null && ageMs <= staleMs),
+    fresh: processAlive === true && ageMs !== null && ageMs <= staleMs,
     process_alive: processAlive,
     age_ms: ageMs,
     stale_after: Number.isFinite(lastTickMs) ? new Date(lastTickMs + staleMs).toISOString() : null,
@@ -2531,16 +2581,33 @@ function normalizePositiveInteger(value, fallback, name) {
   return next;
 }
 
-function isProcessAlive(pid, opts = {}) {
-  if (typeof opts.processAliveFn === "function") return Boolean(opts.processAliveFn(pid));
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    return false;
-  }
+function heartbeatBlocksReplacement(heartbeat, now, opts = {}) {
+  if (heartbeat.pid === null) return false;
+  const liveness = heartbeatLiveness(heartbeat, now, opts);
+  return liveness.process_alive === null || liveness.fresh;
+}
+
+function heartbeatProcessLiveness(pid, opts = {}) {
+  if (pid === null) return "absent";
+  if (typeof opts.processAliveFn === "function") return probeLegacyBooleanLiveness(opts.processAliveFn, pid);
+  return probeProcessLiveness(pid, opts).status;
+}
+
+function projectFactoryWatchValue(value, path = []) {
+  if (Array.isArray(value)) return value.map((item) => projectFactoryWatchValue(item, path));
+  if (!value || typeof value !== "object") return factoryWatchPathIsFreeform(path) ? projectFreeformData(value) : value;
+  const projected = {};
+  for (const [key, item] of Object.entries(value)) projected[key] = projectFactoryWatchValue(item, [...path, key]);
+  return projected;
+}
+
+function factoryWatchPathIsFreeform(path) {
+  if (path.length === 1 && path[0] === "error") return true;
+  if (path.length === 3 && path[0] === "gates" && (path[2] === "answer" || path[2] === "decision_note")) return true;
+  if (path.length === 2 && path[0] === "terminal_result" && (path[1] === "reason" || path[1] === "summary")) return true;
+  const diagnosticIndex = path.indexOf("diagnostics");
+  return diagnosticIndex >= 0 && path.length > diagnosticIndex + 1
+    && ["error", "message", "reason", "detail", "summary", "action"].includes(path.at(-1));
 }
 
 function stringValue(value) {
