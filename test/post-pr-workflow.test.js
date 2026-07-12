@@ -5,9 +5,10 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, status, writeSteering } from "../src/factory.js";
+import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, startHeartbeat, status, stopHeartbeat, writeSteering } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
+import { canonicalizePanelAffectedPaths, classifyOwnership, classifyPanelResult } from "../src/post-pr-ci.js";
 
 const SHA = "a".repeat(40);
 
@@ -395,6 +396,52 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(security.repo, { recursive: true, force: true }); }
   });
 
+  const panelSlices = [{ id: "api", stack: "backend", paths: ["src/api/**"] }, { id: "ui", stack: "frontend", paths: ["src/ui/**"] }];
+  it("P01 passing panels with one production owner validate", () => {
+    const owner = classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true });
+    assert.equal(owner.route, "backend-builder"); assert.equal(classifyPanelResult({ verdict: "GO", affected_paths: ["src/api/a.js"] }, "validator").ok, true); assert.equal(classifyPanelResult({ verdict: "PASS", affected_paths: ["src/api/a.js"] }, "security").ok, true);
+  });
+  it("P02 passing panels with test CI owner validate", () => {
+    assert.equal(classifyOwnership({ slices: panelSlices, paths: ["test/api.test.js", ".github/workflows/ci.yml"], failingCheckNames: [], complete: true }).route, "test-verifier");
+  });
+  it("P03 validator NO-GO routes one production owner", () => {
+    assert.equal(classifyPanelResult({ verdict: "NO-GO", affected_paths: ["src/api/a.js"] }, "validator").verdict, "NO-GO"); assert.equal(classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true }).route, "backend-builder");
+  });
+  it("P04 validator NO-GO routes test CI to test-verifier", () => {
+    assert.equal(classifyPanelResult({ verdict: "NO-GO", affected_paths: ["test/api.test.js"] }, "validator").ok, true); assert.equal(classifyOwnership({ slices: panelSlices, paths: ["test/api.test.js"], failingCheckNames: [], complete: true }).route, "test-verifier");
+  });
+  it("P05 security BLOCK routes one production owner", () => {
+    assert.equal(classifyPanelResult({ verdict: "BLOCK", affected_paths: ["src/ui/a.js"] }, "security").verdict, "BLOCK"); assert.equal(classifyOwnership({ slices: panelSlices, paths: ["src/ui/a.js"], failingCheckNames: [], complete: true }).route, "frontend-builder");
+  });
+  it("P06 dual red panels produce one shared owner", () => {
+    const validator = classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true }); const security = classifyOwnership({ slices: panelSlices, paths: ["src/api/b.js"], failingCheckNames: [], complete: true });
+    assert.deepEqual([validator.owner.slice_id, security.owner.slice_id], ["api", "api"]);
+  });
+  it("P07 security BLOCK without slice owner is unsafe", () => {
+    const owner = classifyOwnership({ slices: panelSlices, paths: ["test/api.test.js"], failingCheckNames: [], complete: true }); assert.equal(owner.owner.kind, "integration"); assert.notEqual(owner.owner.kind, "slice");
+  });
+  it("P08 different production panel owners conflict", () => {
+    const first = classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true }); const second = classifyOwnership({ slices: panelSlices, paths: ["src/ui/a.js"], failingCheckNames: [], complete: true }); assert.notEqual(first.owner.slice_id, second.owner.slice_id);
+  });
+  it("P09 production and test panel owners conflict", () => {
+    const first = classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true }); const second = classifyOwnership({ slices: panelSlices, paths: ["test/a.test.js"], failingCheckNames: [], complete: true }); assert.notEqual(first.owner.kind, second.owner.kind);
+  });
+  it("P10 internally mixed panel paths are unsafe", () => {
+    assert.equal(classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js", "src/ui/a.js"], failingCheckNames: [], complete: true }).disposition, "needs-human");
+  });
+  it("P11 unowned production configuration is unsafe", () => {
+    assert.equal(classifyOwnership({ slices: panelSlices, paths: ["config/runtime.json"], failingCheckNames: [], complete: true }).disposition, "needs-human");
+  });
+  it("P12 missing and empty paths remain attribution-unsafe controls", () => {
+    assert.equal(canonicalizePanelAffectedPaths([], "/tmp/panel").category, "empty-paths"); assert.equal(canonicalizePanelAffectedPaths(undefined, "/tmp/panel").category, "invalid-paths");
+  });
+  it("P13 malformed affected path content is invalid-paths", () => {
+    assert.equal(canonicalizePanelAffectedPaths(["src/a.js", "../escape"], "/tmp/panel").category, "invalid-paths");
+  });
+  it("P14 invalid panel identity shape and verdict are metadata-unsafe inputs", () => {
+    assert.equal(classifyPanelResult({ verdict: "GO", extra: true }, "validator").issue, "unexpected-result-keys"); assert.equal(classifyPanelResult({ verdict: "ALLOW" }, "security").issue, "invalid-verdict");
+  });
+
   it("P25 malformed panel runner result is metadata-unsafe", async () => {
     const classValue = new (class PanelResult { constructor(verdict) { this.verdict = verdict; } })("GO");
     const crossRealm = (await import("node:vm")).runInNewContext('({ verdict: "GO" })');
@@ -414,10 +461,11 @@ describe("post-PR workflow orchestration", () => {
         const fixture = createPanelRecoveryFixture(`p25-${activity}-${issue}-${Math.random().toString(16).slice(2)}`, activity);
         let dispatches = 0; let terminalChecks = 0;
         try {
+          const beforeSideEffects = panelSideEffectCounters(fixture, activity);
           await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => {
             dispatches += 1;
             return { started: true, exit_code: 0, signal: null, result };
-          }, beforePostPrTerminal: () => { terminalChecks += 1; assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null); } }), /terminal-run|resume ineligible/u);
+          }, beforePostPrTerminal: ({ run: terminalRun }) => { terminalChecks += 1; assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null); assert.equal(terminalRun.steering.last_action.kind, "terminal"); assert.equal(terminalRun.steering.last_action.outcome, "started"); } }), /terminal-run|resume ineligible/u);
           const run = readRun(fixture); const job = run.post_pr.remediation.revalidation.jobs[activity];
           assert.equal(run.status, "needs-human");
           assert.equal(run.terminal_result.reason, "post-pr-metadata-unsafe");
@@ -427,11 +475,33 @@ describe("post-PR workflow orchestration", () => {
           assert.equal(job.status, "running");
           assert.equal(run.post_pr.attempt, 1);
           assert.equal(activity === "validator" ? run.post_pr.remediation.revalidation.jobs.security : undefined, undefined);
+          assert.deepEqual(panelSideEffectCounters(fixture, activity), beforeSideEffects);
           await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u);
-          assert.equal(dispatches, 1); assert.equal(terminalChecks, 1);
+          assert.equal(dispatches, 1); assert.equal(terminalChecks, 1); assert.deepEqual(panelSideEffectCounters(fixture, activity), beforeSideEffects);
         } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
       }
     }
+
+    for (const [label, overrides, pattern] of [
+      ["token", { terminalActionTokenOverride: "wrong-terminal-token" }, /terminal action/u],
+      ["generation", { terminalActionGenerationOverride: 99 }, /terminal action/u],
+      ["state-hash", { terminalExpectedHashOverride: `sha256:${"f".repeat(64)}` }, /stale run\.json transition|state hash mismatch/u],
+    ]) {
+      const fixture = createPanelRecoveryFixture(`p25-terminal-${label}`, "validator"); const before = panelSideEffectCounters(fixture, "validator");
+      try {
+        await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", ...overrides,
+          executePostPrRecoveryJob: async () => ({ started: true, exit_code: 0, signal: null, result: null }) }), pattern);
+        assert.equal(readRun(fixture).status, "running"); assert.deepEqual(panelSideEffectCounters(fixture, "validator"), before);
+      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+    }
+    const heartbeatFixture = createPanelRecoveryFixture("p25-terminal-heartbeat", "validator"); const heartbeatBefore = panelSideEffectCounters(heartbeatFixture, "validator");
+    try {
+      await assert.rejects(resumeFactory(heartbeatFixture.runId, { cwd: heartbeatFixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z",
+        executePostPrRecoveryJob: async () => ({ started: true, exit_code: 0, signal: null, result: null }),
+        terminalExpectedHashAfterHook: true,
+        beforePostPrTerminal: async () => { await startHeartbeat(heartbeatFixture.runId, { phase: "post-pr-validator", intervalMs: 1000 }, { cwd: heartbeatFixture.repo }); } }), /inactive heartbeat/u);
+      assert.equal(readRun(heartbeatFixture).status, "running"); assert.deepEqual(panelSideEffectCounters(heartbeatFixture, "validator"), heartbeatBefore);
+    } finally { await stopHeartbeat(heartbeatFixture.runId, {}, { cwd: heartbeatFixture.repo }).catch(() => {}); rmSync(heartbeatFixture.repo, { recursive: true, force: true }); }
 
     for (const activity of ["validator", "security"]) {
       const verdict = activity === "validator" ? "GO" : "PASS";
@@ -466,6 +536,7 @@ describe("post-PR workflow orchestration", () => {
             executePostPrRecoveryJob: async () => ({ started: true, exit_code: 0, signal: null, result: panel }) }), /terminal-run|resume ineligible/u);
           const run = readRun(fixture);
           assert.equal(run.terminal_result.reason, "post-pr-panel-attribution-unsafe");
+          assert.equal(run.post_pr.terminal_fact.affected_paths_hash, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945");
           assert.ok(fixedPanelRefs(activity).every((ref) => existsSync(join(fixture.runDir, ref))));
           assert.equal(run.post_pr.remediation.revalidation.jobs[activity].status, "running");
         } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
@@ -643,6 +714,15 @@ function panelJob(activity, status, ref = null, hash = null, verdict = null) {
 }
 
 function fixedPanelRefs(activity) { return activity === "validator" ? ["artifacts/post-pr-validator.attempt-1.md", "reviews/post-pr-validator.attempt-1.json"] : ["reviews/post-pr-security.attempt-1.json"]; }
+
+function panelSideEffectCounters(fixture, activity) {
+  const run = readRun(fixture); const jobs = run.post_pr.remediation.revalidation.jobs;
+  return { publications: fixedPanelRefs(activity).filter((ref) => existsSync(join(fixture.runDir, ref))).length,
+    bindings: ["canonical", "validator", "security"].filter((name) => jobs[name]?.status === "bound").length,
+    successor_planned: activity === "validator" && jobs.security !== undefined,
+    attempt: run.post_pr.attempt,
+    reservations: run.post_pr.evidence_refs.filter((binding) => /post-pr-local-failure/u.test(binding.ref)).length };
+}
 
 function writeRecoveryPanelArtifact(fixture, activity) {
   const run = readRun(fixture); const job = run.post_pr.remediation.revalidation.jobs[activity];

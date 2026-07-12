@@ -26,7 +26,7 @@ const OWNERSHIP_REASONS = new Set(["review-changes-requested", "check-owner-ambi
   "unsafe-path-or-change", "check-file-conflict", "unknown-slice-stack", "path-owner-ambiguous", "integration-fallback", "check-slice-id", "changed-files"]);
 const PANEL_VERDICTS = Object.freeze({ validator: new Set(["GO", "GO-WITH-NITS", "NO-GO"]), security: new Set(["PASS", "BLOCK"]) });
 const AFFECTED_LIMITS = Object.freeze({ depth: 32, occurrences: 8_192, entries: 8_192, arrayLength: 4_096, stringBytes: 4_096, totalStringBytes: 1_048_576, emittedBytes: 1_048_576 });
-export const EMPTY_AFFECTED_PATHS_HASH = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
+export const EMPTY_AFFECTED_PATHS_HASH = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 export class PostPrCiError extends Error {
   constructor(errorClass, message, options = {}) {
@@ -103,8 +103,7 @@ export function snapshotPanelAffectedValue(descriptor) {
   const counters = { occurrences: 0, entries: 0, stringBytes: 0 };
   try {
     const value = copyAffectedValue(descriptor.value, 0, new Set(), counters);
-    const json = JSON.stringify(value, null, 2);
-    if (typeof json !== "string" || Buffer.byteLength(json, "utf8") > AFFECTED_LIMITS.emittedBytes) throw new Error("affected JSON limit");
+    const json = emitAffectedJson(value, { pretty: true, byteLimit: AFFECTED_LIMITS.emittedBytes });
     return { ok: true, value, json };
   } catch { return { ok: false, category: "missing-paths" }; }
 }
@@ -125,8 +124,46 @@ export function canonicalizePanelAffectedPaths(value, worktree) {
 }
 
 export function affectedPathsHash(paths) {
-  const bytes = Buffer.from(JSON.stringify(paths), "utf8");
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  const bytes = Buffer.from(emitAffectedJson(paths, { pretty: false, byteLimit: AFFECTED_LIMITS.emittedBytes }), "utf8");
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+export function emitAffectedJson(value, { pretty = true, byteLimit = AFFECTED_LIMITS.emittedBytes } = {}) {
+  let output = ""; let bytes = 0;
+  const append = (chunk) => { bytes += Buffer.byteLength(chunk, "utf8"); if (bytes > byteLimit) throw new Error("affected JSON limit"); output += chunk; };
+  const write = (item, depth) => {
+    if (item === null) return append("null");
+    if (typeof item === "boolean") return append(item ? "true" : "false");
+    if (typeof item === "number") { if (!Number.isFinite(item)) throw new Error("unsupported emitted number"); return append(Object.is(item, -0) ? "0" : String(item)); }
+    if (typeof item === "string") return append(quotedJsonString(item));
+    const indent = pretty ? "  ".repeat(depth) : ""; const childIndent = pretty ? "  ".repeat(depth + 1) : ""; const separator = pretty ? ",\n" : ",";
+    if (Array.isArray(item)) {
+      append("["); if (!item.length) return append("]"); if (pretty) append("\n");
+      item.forEach((child, index) => { if (pretty) append(childIndent); write(child, depth + 1); if (index + 1 < item.length) append(separator); });
+      if (pretty) append(`\n${indent}`); return append("]");
+    }
+    if (!item || typeof item !== "object") throw new Error("unsupported emitted value");
+    const keys = Object.keys(item); append("{"); if (!keys.length) return append("}"); if (pretty) append("\n");
+    keys.forEach((key, index) => { if (pretty) append(childIndent); append(quotedJsonString(key)); append(pretty ? ": " : ":"); write(item[key], depth + 1); if (index + 1 < keys.length) append(separator); });
+    if (pretty) append(`\n${indent}`); append("}");
+  };
+  write(value, 0); return output;
+}
+
+function quotedJsonString(value) {
+  let output = '"';
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index); const character = value[index];
+    if (character === '"' || character === "\\") output += `\\${character}`;
+    else if (character === "\b") output += "\\b";
+    else if (character === "\f") output += "\\f";
+    else if (character === "\n") output += "\\n";
+    else if (character === "\r") output += "\\r";
+    else if (character === "\t") output += "\\t";
+    else if (code < 0x20) output += `\\u${code.toString(16).padStart(4, "0")}`;
+    else output += character;
+  }
+  return `${output}"`;
 }
 
 function affectedClassification(category, paths) { return { ok: false, category, paths, hash: affectedPathsHash(paths) }; }

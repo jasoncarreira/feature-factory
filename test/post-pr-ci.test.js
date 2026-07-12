@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
   PostPrCiError, aggregateObservation, affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyGitHubFailure, classifyOwnership, classifyPanelResult,
-  decideObservationSchedule, decideTransientSchedule, encodeUntrustedMetadata, fetchChangedFiles,
+  decideObservationSchedule, decideTransientSchedule, emitAffectedJson, encodeUntrustedMetadata, fetchChangedFiles,
   normalizeCheck, normalizeChecks, normalizePullRequestResponse, normalizeRepositoryPath, normalizeReview, parseRetryDelay,
   inspectPanelRunnerReturn, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane,
 } from "../src/post-pr-ci.js";
@@ -246,15 +246,59 @@ describe("panel result and affected-path trust boundaries", () => {
     assert.equal(snapshotPanelAffectedValue(descriptor(nestedAccessor)).ok, false);
   });
 
+  it("covers every affected snapshot limit at the boundary and one over", () => {
+    const descriptor = (value) => ({ value, writable: true, enumerable: true, configurable: true });
+    for (const value of [null, false, true, "safe", 0, -0, 1.25]) assert.equal(snapshotPanelAffectedValue(descriptor(value)).ok, true);
+    const depthValue = (containers) => { let root = {}; let cursor = root; for (let index = 1; index < containers; index += 1) { cursor.x = {}; cursor = cursor.x; } cursor.x = null; return root; };
+    assert.equal(snapshotPanelAffectedValue(descriptor(depthValue(32))).ok, true);
+    assert.equal(snapshotPanelAffectedValue(descriptor(depthValue(33))).ok, false);
+    assert.equal(snapshotPanelAffectedValue(descriptor(new Array(4096).fill(null))).ok, true);
+    assert.equal(snapshotPanelAffectedValue(descriptor(new Array(4097).fill(null))).ok, false);
+    const occurrenceTree = (extras) => { const root = {}; let level = [root]; for (let depth = 0; depth < 12; depth += 1) { const next = []; for (const node of level) { node.a = {}; node.b = {}; next.push(node.a, node.b); } level = next; } if (extras > 0) level[0].x = {}; if (extras > 1) level[0].y = {}; return root; };
+    assert.equal(snapshotPanelAffectedValue(descriptor(occurrenceTree(1))).ok, true);
+    assert.equal(snapshotPanelAffectedValue(descriptor(occurrenceTree(2))).ok, false);
+    const exactEntries = Object.fromEntries(Array.from({ length: 8192 }, (_, index) => [`k${index.toString(16).padStart(4, "0")}`, null]));
+    assert.equal(snapshotPanelAffectedValue(descriptor(exactEntries)).ok, true);
+    exactEntries.overflow = null; assert.equal(snapshotPanelAffectedValue(descriptor(exactEntries)).ok, false);
+    const nearAggregate = new Array(255).fill("a".repeat(4096));
+    assert.equal(snapshotPanelAffectedValue(descriptor(nearAggregate)).ok, true);
+    const exactAggregate = new Array(256).fill("a".repeat(4096));
+    assert.equal(snapshotPanelAffectedValue(descriptor(exactAggregate)).ok, false); // exact aggregate strings necessarily exceed the independent pretty-emission ceiling
+    exactAggregate.push("a"); assert.equal(snapshotPanelAffectedValue(descriptor(exactAggregate)).ok, false);
+    const emitted = new Array(255).fill("a".repeat(4096));
+    const baseBytes = Buffer.byteLength(JSON.stringify([...emitted, ""], null, 2), "utf8");
+    emitted.push("a".repeat(1_048_576 - baseBytes));
+    const exactEmission = snapshotPanelAffectedValue(descriptor(emitted));
+    assert.equal(exactEmission.ok, true); assert.equal(Buffer.byteLength(exactEmission.json, "utf8"), 1_048_576);
+    emitted[emitted.length - 1] += "a"; assert.equal(snapshotPanelAffectedValue(descriptor(emitted)).ok, false);
+    assert.equal(emitAffectedJson({ a: ["\b\f\n\r\t", "\u0000", "é"] }), '{\n  "a": [\n    "\\b\\f\\n\\r\\t",\n    "\\u0000",\n    "é"\n  ]\n}');
+  });
+
+  it("rejects every exceptional affected container without invoking behavior", () => {
+    const descriptor = (value) => ({ value, writable: true, enumerable: true, configurable: true }); let calls = 0;
+    const symbolArray = ["x"]; symbolArray[Symbol("x")] = true;
+    const accessorArray = ["x"]; Object.defineProperty(accessorArray, "0", { enumerable: true, get() { calls += 1; throw new Error("must not run"); } });
+    const nestedProxy = [{ value: new Proxy({}, { ownKeys() { calls += 1; throw new Error("must not run"); } }) }];
+    const callableToJson = { toJSON() { calls += 1; return "unsafe"; } };
+    const inheritedToJson = Object.create({ toJSON() { calls += 1; } }); inheritedToJson.value = true;
+    for (const value of [symbolArray, accessorArray, nestedProxy, callableToJson, inheritedToJson, new String("x"), /x/u, new Map(), new Set(), { value: 1n }, { value: Symbol("x") }, { value() {} }, { value: -Infinity }]) {
+      assert.equal(snapshotPanelAffectedValue(descriptor(value)).ok, false);
+    }
+    assert.equal(calls, 0);
+  });
+
   it("canonicalizes the closed path grammar, NFC duplicates, byte order, and hashes", () => {
     const root = "/tmp/panel-root";
     const valid = canonicalizePanelAffectedPaths(["src/é.js", "src/e\u0301.js", "src/a.js"], root);
     assert.equal(valid.ok, true);
     assert.deepEqual(valid.paths, ["src/a.js", "src/é.js"]);
-    assert.equal(valid.hash, affectedPathsHash(["src/a.js", "src/é.js"]));
+    assert.equal(valid.hash, "6baaa1bd8c026a2daf4fd9dd32ed05c9c277a310b2f9f3824662133657648cb0");
+    assert.equal(affectedPathsHash(["src/a.js"]), "8401f45c9f8a46344b10c43978d5498580842854aaebf2033cfa84e828bc4cc5");
+    assert.equal(affectedPathsHash([]), "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945");
     assert.equal(canonicalizePanelAffectedPaths([], root).category, "empty-paths");
-    for (const value of [[1], [""], ["/x"], ["C:/x"], ["a\\b"], ["a\u0001b"], ["a//b"], ["a/./b"], ["a/../b"], ["../x"], ["\uD800"], ["a".repeat(4097)]]) {
-      const result = canonicalizePanelAffectedPaths(value, root); assert.equal(result.category, "invalid-paths"); assert.equal(result.hash, affectedPathsHash([]));
+    assert.equal(canonicalizePanelAffectedPaths(["a".repeat(4096)], root).ok, true);
+    for (const value of [[1], [new String("x")], [""], ["/x"], ["C:/x"], ["c:/x"], ["a\\b"], ["a\u0000b"], ["a\u001fb"], ["a\u007fb"], ["a//b"], ["a/"], ["a/./b"], ["a/../b"], ["../x"], ["\uD800"], ["a".repeat(4097)], ["src/a.js", "../bad"]]) {
+      const result = canonicalizePanelAffectedPaths(value, root); assert.equal(result.category, "invalid-paths"); assert.equal(result.hash, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945");
     }
   });
 });

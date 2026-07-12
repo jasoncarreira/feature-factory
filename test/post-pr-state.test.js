@@ -7,6 +7,7 @@ import { resolvePostPrCiPolicy } from "../src/config.js";
 import { hashFile, hashValue } from "../src/refs.js";
 import {
   createPostPrState,
+  hashRunState,
   hasInFlightHeartbeatWork,
   transitionPostPrFailure,
   transitionPostPrState,
@@ -14,6 +15,10 @@ import {
   transitionPrePrFenceEstablished,
   transitionPrCreated,
   transitionRunJson,
+  transitionSteeringActionClosed,
+  transitionSteeringActionStarted,
+  transitionSteeringBoundaryCrossed,
+  transitionSteeringBoundaryOpened,
 } from "../src/run-state.js";
 import { POST_PR_TERMINAL_REASONS, ValidationError, validateRun } from "../src/validate.js";
 
@@ -143,7 +148,7 @@ describe("checked post-PR transitions", () => {
       green.post_pr.observation.last_verdict = "green";
       green.post_pr.observation.last_check_verdict = "pass";
       writeJson(join(fixture.runDir, "run.json"), green);
-      const done = await transitionPostPrTerminal(fixture.runDir, { status: "completed", reason: "post-pr-ci-green" }, { now: NOW });
+      const done = await transitionPostPrTerminal(fixture.runDir, { status: "completed", reason: "post-pr-ci-green" }, { now: NOW, ...(await freshTerminalOptions(fixture)) });
       assert.equal(done.run.post_pr.phase, "succeeded");
       await assert.rejects(transitionPostPrState(fixture.runDir, done.run.post_pr), /terminal run/u);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
@@ -305,7 +310,7 @@ describe("checked post-PR transitions", () => {
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, { status: "blocked", reason: "post-pr-retry-exhausted", continuation_review: { ...binding, hash: `sha256:${"f".repeat(64)}` } }), /exact-byte hash mismatch/u);
       assert.equal(readJson(join(fixture.runDir, "run.json")).post_pr.continuation_review, null);
 
-      const result = await transitionPostPrTerminal(fixture.runDir, { status: "blocked", reason: "post-pr-retry-exhausted", continuation_review: binding });
+      const result = await transitionPostPrTerminal(fixture.runDir, { status: "blocked", reason: "post-pr-retry-exhausted", continuation_review: binding }, await freshTerminalOptions(fixture));
       assert.equal(result.run.status, "blocked");
       assert.deepEqual(result.run.post_pr.continuation_review, binding);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
@@ -322,7 +327,7 @@ describe("checked post-PR transitions", () => {
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, input), /requires persisted account-switch-failed trigger fact/u);
       const fact = { schema_version: 1, kind: "account-switch-failed", observed_at: NOW, operation: "gh-auth-switch", github_account: "octocat", error_class: "command", exit_code: 1 };
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: { ...fact, github_account: "other" } }), /must match run.github_account/u);
-      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact });
+      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact }, await freshTerminalOptions(fixture));
       assert.deepEqual(result.run.post_pr.terminal_fact, fact);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -338,7 +343,7 @@ describe("checked post-PR transitions", () => {
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, input), /requires persisted dispatch-start-unknown trigger fact/u);
       const fact = { schema_version: 1, kind: "dispatch-start-unknown", observed_at: "2026-07-12T12:05:00.000Z", attempt: 1, dispatch_id: run.post_pr.remediation.dispatch.id, dispatch_started_at: NOW, outcome: "return-unknown" };
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: { ...fact, dispatch_id: "other" } }), /bind the running dispatch identity exactly/u);
-      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact });
+      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact }, await freshTerminalOptions(fixture));
       assert.deepEqual(result.run.post_pr.terminal_fact, fact);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -356,7 +361,7 @@ describe("checked post-PR transitions", () => {
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, input), /requires persisted path-lane-violation trigger fact/u);
       const fact = { schema_version: 1, kind: "path-lane-violation", observed_at: "2026-07-12T12:02:00.000Z", attempt: 1, lane: "slice", source: "remediation-diff", violation: "outside-lane", path_b64url: Buffer.from("package.json").toString("base64url"), changes_hash: hashValue(run.post_pr.remediation.changes) };
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: { ...fact, path_b64url: Buffer.from("other.json").toString("base64url") } }), /identify a persisted changed path/u);
-      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact });
+      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact }, await freshTerminalOptions(fixture));
       assert.deepEqual(result.run.post_pr.terminal_fact, fact);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -370,7 +375,7 @@ describe("checked post-PR transitions", () => {
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, input), /requires persisted remote-head-diverged trigger fact/u);
       const fact = { schema_version: 1, kind: "remote-head-diverged", observed_at: "2026-07-12T12:03:00.000Z", attempt: 1, expected_remote_sha: "c".repeat(40), candidate_head_sha: "b".repeat(40), observed_remote_sha: "d".repeat(40) };
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: { ...fact, observed_remote_sha: fact.expected_remote_sha } }), /must differ from both expected remote and candidate heads/u);
-      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact });
+      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact }, await freshTerminalOptions(fixture));
       assert.deepEqual(result.run.post_pr.terminal_fact, fact);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -480,5 +485,19 @@ async function preparePushPendingState(fixture) {
 }
 
 function mutate(value, fn) { const copy = structuredClone(value); fn(copy); return copy; }
+
+async function freshTerminalOptions(fixture) {
+  const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+  const phase = run.post_pr.phase;
+  const originKind = ["observing", "failure-recording"].includes(phase) ? "post-pr-observe" : phase === "push-pending" ? "post-pr-push" : "remediation";
+  const originBoundary = await transitionSteeringBoundaryOpened(fixture.runDir, originKind, { expectedCurrentHash: hashRunState(run), now: NOW });
+  const originClaim = await transitionSteeringBoundaryCrossed(fixture.runDir, originKind, originBoundary.boundary.token, { expectedCurrentHash: hashRunState(originBoundary.run), now: NOW });
+  const originStarted = await transitionSteeringActionStarted(fixture.runDir, originKind, originClaim.action_claim.token, { expectedCurrentHash: hashRunState(originClaim.run), now: NOW });
+  const closed = await transitionSteeringActionClosed(fixture.runDir, originKind, originStarted.action.token, { expectedCurrentHash: hashRunState(originStarted.run), now: NOW });
+  const terminalBoundary = await transitionSteeringBoundaryOpened(fixture.runDir, "terminal", { expectedCurrentHash: hashRunState(closed.run), now: NOW });
+  const terminalClaim = await transitionSteeringBoundaryCrossed(fixture.runDir, "terminal", terminalBoundary.boundary.token, { expectedCurrentHash: hashRunState(terminalBoundary.run), now: NOW });
+  const terminalStarted = await transitionSteeringActionStarted(fixture.runDir, "terminal", terminalClaim.action_claim.token, { expectedCurrentHash: hashRunState(terminalClaim.run), now: NOW });
+  return { now: NOW, expectedCurrentHash: hashRunState(terminalStarted.run), terminalActionToken: terminalStarted.action.token, terminalActionGeneration: terminalStarted.action.generation };
+}
 function writeJson(path, value) { writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`); }
 function readJson(path) { return JSON.parse(readFileSync(path, "utf8")); }

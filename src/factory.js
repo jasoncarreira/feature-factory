@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { assertRunJsonWriterAllowed, hashRunState, hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertRunJsonWriterAllowed, hashRunState, hasInFlightHeartbeatWork, resolveGateAnswerTarget, transitionCostUsage, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -19,7 +19,7 @@ import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
 import { publicLivenessBoolean, probeLegacyBooleanLiveness, probeProcessLiveness } from "./hardening/process-verification.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
-import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyOwnership, decideObservationSchedule, decideTransientSchedule, fetchChangedFiles, inspectPanelRunnerReturn, isPollDue, normalizePullRequestResponse, normalizeRepositoryPath, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane, PostPrCiError } from "./post-pr-ci.js";
+import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyOwnership, decideObservationSchedule, decideTransientSchedule, emitAffectedJson, fetchChangedFiles, inspectPanelRunnerReturn, isPollDue, normalizePullRequestResponse, normalizeRepositoryPath, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane, PostPrCiError } from "./post-pr-ci.js";
 import { hashValue } from "./refs.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -747,19 +747,28 @@ async function handleObserverError(runDir, run, error, opts) {
 }
 
 async function postPrTerminal(runDir, run, statusValue, reason, opts, artifacts = {}, triggerFact, continuationReview) {
-  let transitionOpts = opts;
-  if (!stringValue(opts.expectedCurrentHash)) {
-    const kind = run.post_pr?.phase === "observing" || run.post_pr?.phase === "failure-recording" ? "post-pr-observe"
-      : run.post_pr?.phase === "push-pending" ? "post-pr-push" : "remediation";
-    const action = await claimPostPrAction(runDir, kind, opts);
-    transitionOpts = { ...opts, expectedCurrentHash: action.state_hash };
+  const originKind = run.post_pr?.phase === "observing" || run.post_pr?.phase === "failure-recording" ? "post-pr-observe"
+    : run.post_pr?.phase === "push-pending" ? "post-pr-push" : "remediation";
+  if (stringValue(opts.expectedCurrentHash)) assertFactoryStateHash(runDir, opts.expectedCurrentHash);
+  let current = readRunFile(join(runDir, "run.json"));
+  let origin = current.steering?.last_action;
+  if (!origin || origin.kind !== originKind || origin.outcome !== "started" || origin.generation !== (current.steering?.generation ?? 0)) {
+    const claimed = await claimPostPrAction(runDir, originKind, { ...withoutExpectedHash(opts), expectedCurrentHash: hashRunState(current) });
+    current = readRunFile(join(runDir, "run.json")); origin = current.steering.last_action;
+    if (origin.token !== claimed.token) throw new Error("post-PR origin claim identity changed");
   }
-  const opened = await transitionSteeringBoundaryOpened(runDir, "terminal", transitionOpts);
-  transitionOpts = { ...withoutExpectedHash(transitionOpts), expectedCurrentHash: hashRunState(opened.run), boundaryToken: opened.boundary.token };
+  const closed = await transitionSteeringActionClosed(runDir, originKind, origin.token, { ...withoutExpectedHash(opts), expectedCurrentHash: hashRunState(current) });
+  const opened = await transitionSteeringBoundaryOpened(runDir, "terminal", { ...withoutExpectedHash(opts), expectedCurrentHash: hashRunState(closed.run) });
+  const crossed = await transitionSteeringBoundaryCrossed(runDir, "terminal", opened.boundary.token, { ...withoutExpectedHash(opts), expectedCurrentHash: hashRunState(opened.run) });
+  const started = await transitionSteeringActionStarted(runDir, "terminal", crossed.action_claim.token, { ...withoutExpectedHash(opts), expectedCurrentHash: hashRunState(crossed.run) });
+  const transitionOpts = { ...withoutExpectedHash(opts), expectedCurrentHash: opts.terminalExpectedHashOverride || hashRunState(started.run),
+    terminalActionToken: opts.terminalActionTokenOverride || started.action.token,
+    terminalActionGeneration: opts.terminalActionGenerationOverride ?? started.action.generation };
   if (typeof opts.beforePostPrTerminal === "function") await opts.beforePostPrTerminal({ run: cloneJson(readRunFile(join(runDir, "run.json"))), status: statusValue, reason, trigger_fact: triggerFact ? cloneJson(triggerFact) : null });
+  if (opts.terminalExpectedHashAfterHook === true) transitionOpts.expectedCurrentHash = hashRunState(readRunFile(join(runDir, "run.json")));
   await transitionPostPrTerminal(runDir, { status: statusValue, reason, artifacts, ...(triggerFact ? { trigger_fact: triggerFact } : {}), ...(continuationReview ? { continuation_review: continuationReview } : {}) }, transitionOpts);
-  const current = readRunFile(join(runDir, "run.json"));
-  return { run_id: run.run_id, action: "terminal", status: current.status, reason, terminal_result: current.terminal_result, post_pr: postPrSummary(current) };
+  const terminalRun = readRunFile(join(runDir, "run.json"));
+  return { run_id: run.run_id, action: "terminal", status: terminalRun.status, reason, terminal_result: terminalRun.terminal_result, post_pr: postPrSummary(terminalRun) };
 }
 
 async function markPostPrRemediationRunning(runDir, run, opts) {
@@ -3272,11 +3281,15 @@ async function publishPanelRecoveryResult(runDir, run, activity, inspected, opts
   if (activity === "validator") {
     const reportPayload = { schema_version: 1, kind: "post-pr-validator-report", ...Object.fromEntries(Object.entries(identity).filter(([key]) => key !== "schema_version")), started_at: job.started_at, completed_at: completedAt };
     const reportRef = fixedPostPrJobRefs(run.post_pr.attempt, activity)[0];
-    const reportBytes = `# Post-PR validator report\n\n\`\`\`json\n${JSON.stringify(reportPayload, null, 2)}\n\`\`\`\n`;
+    const reportBytes = `# Post-PR validator report\n\n\`\`\`json\n${emitAffectedJson(reportPayload, { pretty: true, byteLimit: 2_097_152 })}\n\`\`\`\n`;
     const report = publishRunBytes(runDir, reportRef, reportBytes);
     const reviewRef = fixedPostPrJobRefs(run.post_pr.attempt, activity)[1];
-    binding = publishRunJsonEvidence(runDir, reviewRef, { schema_version: 1, kind: "post-pr-validator-review", ...Object.fromEntries(Object.entries(identity).filter(([key]) => key !== "schema_version")), report, started_at: job.started_at, completed_at: completedAt });
-  } else binding = publishRunJsonEvidence(runDir, fixedPostPrJobRefs(run.post_pr.attempt, activity)[0], { schema_version: 1, kind: "post-pr-security-review", ...Object.fromEntries(Object.entries(identity).filter(([key]) => key !== "schema_version")), started_at: job.started_at, completed_at: completedAt });
+    const reviewValue = { schema_version: 1, kind: "post-pr-validator-review", ...Object.fromEntries(Object.entries(identity).filter(([key]) => key !== "schema_version")), report, started_at: job.started_at, completed_at: completedAt };
+    binding = publishRunBytes(runDir, reviewRef, `${emitAffectedJson(reviewValue, { pretty: true, byteLimit: 2_097_152 })}\n`);
+  } else {
+    const securityValue = { schema_version: 1, kind: "post-pr-security-review", ...Object.fromEntries(Object.entries(identity).filter(([key]) => key !== "schema_version")), started_at: job.started_at, completed_at: completedAt };
+    binding = publishRunBytes(runDir, fixedPostPrJobRefs(run.post_pr.attempt, activity)[0], `${emitAffectedJson(securityValue, { pretty: true, byteLimit: 2_097_152 })}\n`);
+  }
   const attribution = snapshot.ok ? canonicalizePanelAffectedPaths(snapshot.value, run.worktree) : { ok: false, category: "missing-paths", paths: [], hash: affectedPathsHash([]) };
   if (!attribution.ok) return terminalPanelAttribution(runDir, run, activity, attribution, opts);
   const owner = classifyPanelOwner(runDir, run, attribution.paths, activity, inspected.verdict);

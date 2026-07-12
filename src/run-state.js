@@ -28,7 +28,7 @@ const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
 const HEARTBEAT_FILE = "heartbeat.json";
 const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
-const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "post-pr-observe", "post-pr-push"]);
+const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
 const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
 const POST_PR_TERMINAL_PHASE = Object.freeze({ completed: "succeeded", blocked: "blocked", "needs-human": "needs-human" });
 const POST_PR_TRANSITIONS = new Map([
@@ -681,6 +681,7 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-open ${boundaryKind}`);
+    if (boundaryKind === "terminal" && current.post_pr?.policy?.enabled === true && current.steering?.last_action?.outcome !== "closed") throw new Error("post-PR terminal boundary requires a closed origin action");
     const createdAt = timestamp(options.now);
     const token = safeBoundaryToken(options.token || randomUUID());
     const base = {
@@ -703,7 +704,7 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
 
 export async function transitionSteeringBoundaryCrossed(runDir, kind, token, options = {}) {
   const boundaryKind = normalizeSteeringBoundaryKind(kind);
-  if (!STEERING_ACTION_KINDS.has(boundaryKind)) throw new Error("boundary-cross supports dispatch or remediation");
+  if (!STEERING_ACTION_KINDS.has(boundaryKind)) throw new Error("boundary-cross supports dispatch, remediation, terminal, post-pr-observe, or post-pr-push");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
@@ -733,6 +734,24 @@ export async function transitionSteeringActionStarted(runDir, kind, token, optio
 
 export async function transitionSteeringActionAborted(runDir, kind, token, options = {}) {
   return transitionSteeringActionResolved(runDir, kind, token, "aborted", options);
+}
+
+export async function transitionSteeringActionClosed(runDir, kind, token, options = {}) {
+  const actionKind = normalizeSteeringActionKind(kind);
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    assertSteeringBoundaryClear(current, "action-close");
+    if (isRecord(current.steering?.boundary) || isRecord(current.steering?.pr_fence)) throw new Error("action-close requires no boundary or PR fence");
+    assertNoFreshHeartbeat(runDir, options, "action-close requires inactive heartbeat");
+    const action = current.steering?.last_action;
+    const requestedToken = safeBoundaryToken(token);
+    if (!isRecord(action) || action.kind !== actionKind || action.token !== requestedToken || action.outcome !== "started" || action.generation !== steeringGeneration(current)) throw new Error("origin action is missing, stale, or not started");
+    const closedAt = timestamp(options.now);
+    const next = validateRun({ ...cloneJson(current), updated_at: closedAt, steering: normalizedSteeringState(current, { last_action: { ...cloneJson(action), outcome: "closed", resolved_at: closedAt } }) });
+    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    return { updated: true, status: next.status, run: next, action: cloneJson(next.steering.last_action) };
+  }, options);
 }
 
 async function transitionSteeringActionResolved(runDir, kind, token, outcome, options = {}) {
@@ -897,7 +916,6 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
   if (!POST_PR_TERMINAL_PHASE[status] || !POST_PR_TERMINAL_REASONS[status]?.includes(reason)) throw new Error(`invalid closed post-PR terminal reason '${reason}' for ${status}`);
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
     assertPostPrMutationReady(runDir, current, options, "post-PR terminal transition");
-    if (stringValue(options.boundaryToken)) consumeSteeringBoundary(draft, "terminal", options.boundaryToken);
     const phase = POST_PR_TERMINAL_PHASE[status];
     if (current.post_pr?.phase === phase && current.status === status && current.terminal_result?.reason === reason) return;
     if (!current.post_pr?.policy?.enabled) throw new Error("post-PR terminal transition requires enabled persisted policy");
@@ -914,6 +932,12 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
       summary: stringValue(input.summary) ? input.summary : reason,
       artifacts: isRecord(input.artifacts) ? cloneJson(input.artifacts) : {},
     };
+    validateRun(draft);
+    const terminalAction = current.steering?.last_action;
+    if (!stringValue(options.terminalActionToken) || !Number.isInteger(options.terminalActionGeneration)
+      || terminalAction?.kind !== "terminal" || terminalAction?.token !== options.terminalActionToken || terminalAction?.generation !== options.terminalActionGeneration || terminalAction?.outcome !== "started") {
+      throw new Error("post-PR terminal transition requires the exact fresh started terminal action");
+    }
     draft.updated_at = timestamp(options.now);
   }, options, { postPr: true, postPrTerminal: true, beforeWrite: (next) => assertPostPrRefsConsistent(runDir, next) }), options);
 }
@@ -1297,7 +1321,7 @@ function normalizeSteeringBoundaryKind(kind) {
 
 function normalizeSteeringActionKind(kind) {
   const value = requireNonEmptyString(kind, "action kind").trim();
-  if (!STEERING_ACTION_KINDS.has(value)) throw new Error("action kind must be dispatch, remediation, post-pr-observe, or post-pr-push");
+  if (!STEERING_ACTION_KINDS.has(value)) throw new Error("action kind must be dispatch, remediation, terminal, post-pr-observe, or post-pr-push");
   return value;
 }
 

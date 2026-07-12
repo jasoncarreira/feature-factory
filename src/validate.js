@@ -647,13 +647,17 @@ function validatePostPrTerminalFact(errors, run, postPr, path) {
     requiredFullGitSha(errors, fact, "candidate_head_sha", `${path}.candidate_head_sha`);
     requiredEnum(errors, fact, "panel", new Set(["validator", "security", "combined"]), `${path}.panel`);
     requiredEnum(errors, fact, "category", new Set(["missing-paths", "invalid-paths", "empty-paths", "mixed-owner", "unowned-path", "owner-conflict", "security-block-without-slice-owner"]), `${path}.category`);
-    requiredHash(errors, fact, "affected_paths_hash", `${path}.affected_paths_hash`);
+    requiredBareSha256(errors, fact, "affected_paths_hash", `${path}.affected_paths_hash`);
     if (fact.attempt !== postPr.attempt || fact.candidate_head_sha !== remediation?.candidate_head_sha) errors.push({ path, message: "must bind the current panel candidate exactly" });
   }
 }
 
 function hashValueForValidation(value) {
   return value === undefined ? null : hashValue(value);
+}
+
+function requiredBareSha256(errors, object, key, path) {
+  if (typeof object?.[key] !== "string" || !/^[0-9a-f]{64}$/u.test(object[key])) errors.push({ path, message: "must be a bare lowercase SHA-256 digest" });
 }
 
 function decodeCanonicalBase64url(value) {
@@ -998,14 +1002,14 @@ function validateSteeringAction(errors, action, path, options = {}) {
     errors.push({ path, message: "must be an object or null" });
     return;
   }
-  requiredEnum(errors, action, "kind", new Set(["dispatch", "remediation", "post-pr-observe", "post-pr-push"]), `${path}.kind`);
+  requiredEnum(errors, action, "kind", new Set(["dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]), `${path}.kind`);
   requiredString(errors, action, "token", `${path}.token`);
   if (stringValue(action.token) && !/^[A-Za-z0-9_-]{8,128}$/u.test(action.token)) errors.push({ path: `${path}.token`, message: "must use 8-128 safe characters" });
   requiredInteger(errors, action, "generation", `${path}.generation`);
   if (Number.isInteger(action.generation) && action.generation < 0) errors.push({ path: `${path}.generation`, message: "must be non-negative" });
   requiredString(errors, action, "claimed_at", `${path}.claimed_at`);
   if (options.resolved) {
-    requiredEnum(errors, action, "outcome", new Set(["started", "aborted"]), `${path}.outcome`);
+    requiredEnum(errors, action, "outcome", new Set(["started", "aborted", "closed"]), `${path}.outcome`);
     requiredString(errors, action, "resolved_at", `${path}.resolved_at`);
   }
 }
