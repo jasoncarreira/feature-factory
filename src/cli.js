@@ -178,7 +178,7 @@ async function factory(args, dependencies = {}) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
   if (sub === "cost-report") return costReport(rest);
-  const opts = options(rest);
+  const opts = { ...options(rest), ...(dependencies.factoryOptions || {}) };
   const positional = positionals(rest);
   if (sub === "start") {
     if (opts.dryRun) throw new Error("factory start --dry-run is unsupported");
@@ -213,7 +213,7 @@ async function factory(args, dependencies = {}) {
   if (sub === "action-abort") return actionAbort(rest);
   if (sub === "pr-fence") return prFence(rest);
   if (sub === "cost-record") return costRecord(rest);
-  if (sub === "resume") return resume(rest);
+  if (sub === "resume") return resume(rest, dependencies);
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
   if (sub === "heartbeat") return heartbeat(rest);
@@ -386,8 +386,8 @@ function structuredCostReportError(error) {
   return error;
 }
 
-async function resume(args) {
-  const opts = options(args);
+async function resume(args, dependencies = {}) {
+  const opts = { ...options(args), ...(dependencies.factoryOptions || {}) };
   const positional = positionals(args);
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory resume requires exactly one <run-id>");
