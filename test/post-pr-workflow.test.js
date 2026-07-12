@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, startHeartbeat, status, stopHeartbeat, writeSteering } from "../src/factory.js";
@@ -535,7 +535,7 @@ describe("post-PR workflow orchestration", () => {
       missing("inherited-toJSON", () => Object.assign(Object.create({ toJSON() { throw new Error("must not run"); } }), { x: true })), missing("malformed-unicode", () => "\uD800"),
       invalid("string-byte-limit", () => "a".repeat(4096)), missing("string-byte-limit-plus-one", () => "a".repeat(4097)),
       { label: "array-length-limit", make: () => new Array(4096).fill("src/api.js"), success: true }, missing("array-length-limit-plus-one", () => new Array(4097).fill("src/api.js")),
-      invalid("depth-limit", () => affectedDepthValue(32)), missing("depth-limit-plus-one", () => affectedDepthValue(33)),
+      invalid("depth-32-container-primitive-child", () => affectedDepthValue(32)), missing("depth-33-container", () => affectedDepthValue(33)),
       invalid("occurrence-limit", () => affectedOccurrenceTree(1)), missing("occurrence-limit-plus-one", () => affectedOccurrenceTree(2)),
       invalid("entry-limit", () => affectedEntryObject(8192)), missing("entry-limit-plus-one", () => affectedEntryObject(8193)),
       missing("aggregate-string-limit", () => new Array(256).fill("a".repeat(4096))), missing("aggregate-string-limit-plus-one", () => [...new Array(256).fill("a".repeat(4096)), "a"]),

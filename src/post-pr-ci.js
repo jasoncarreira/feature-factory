@@ -183,11 +183,11 @@ function copyString(value, counters) {
   return value;
 }
 function copyAffectedValue(value, depth, ancestors, counters) {
-  if (depth > AFFECTED_LIMITS.depth) throw new Error("depth limit");
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "string") return copyString(value, counters);
   if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("non-finite"); return Object.is(value, -0) ? 0 : value; }
   if (typeof value !== "object" || utilTypes.isProxy(value)) throw new Error("unsupported value");
+  if (depth >= AFFECTED_LIMITS.depth) throw new Error("depth limit");
   if (++counters.occurrences > AFFECTED_LIMITS.occurrences) throw new Error("occurrence limit");
   let prototype;
   let keys;
