@@ -6,7 +6,9 @@ import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  cleanupRunLocked,
   cleanupRun,
+  collectCleanupTargets,
   latestRunId,
   listRuns,
   persistFactoryRunCreatedEnv,
@@ -516,6 +518,157 @@ describe("factory public state operations", { concurrency: false }, () => {
       cleanup(fixture.repo);
     }
   });
+
+  it("collects the same deduplicated run and slice targets used by single-run cleanup", () => {
+    const run = {
+      branch: "run-branch",
+      worktree: "/repo/.opencode/worktrees/run-branch",
+      slices: [
+        { id: "one", branch: "slice-branch", worktree: "/repo/.opencode/worktrees/slice-branch" },
+        { id: "duplicate", branch: "run-branch", worktree: "/repo/.opencode/worktrees/run-branch" },
+      ],
+    };
+
+    assert.deepEqual(collectCleanupTargets(run), {
+      worktrees: [
+        { branch: "run-branch", worktree: "/repo/.opencode/worktrees/run-branch" },
+        { branch: "slice-branch", slice_id: "one", worktree: "/repo/.opencode/worktrees/slice-branch" },
+      ],
+      branches: ["run-branch", "slice-branch"],
+    });
+  });
+
+  it("removes sweep targets in canonical order and deletes branches only by CAS", () => {
+    const fixture = createFixture("cleanup-sweep-order", { terminal: true, git: true });
+    try {
+      runGit(fixture.repo, ["branch", "zeta"]);
+      runGit(fixture.repo, ["branch", "alpha"]);
+      const runFile = join(fixture.runDir, "run.json");
+      const run = { ...readJson(runFile), slices: [{ branch: "zeta" }, { branch: "alpha" }] };
+      const expectedHeads = Object.fromEntries(collectCleanupTargets(run).branches.map((branch) => [branch, branchHead(fixture.repo, branch)]));
+      const events = [];
+      const commands = [];
+
+      const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
+        mode: "sweep",
+        repo: fixture.repo,
+        expectedRunHash: hashFile(runFile),
+        expectedBranchHeads: expectedHeads,
+        fetchedBaseRef: "main",
+        gitRunner: recordingGitRunner(commands),
+        phaseHook: (phase, detail) => events.push(`${phase}:${detail.branch || detail.physical_path || detail.path}`),
+      });
+
+      assert.deepEqual(cleanupResult.worktrees.map((item) => item.outcome), ["removed"]);
+      assert.deepEqual(cleanupResult.branches.map((item) => item.name), ["alpha", fixture.runId, "zeta"]);
+      assert.deepEqual(cleanupResult.branches.map((item) => item.outcome), ["deleted", "deleted", "deleted"]);
+      assert.equal(cleanupResult.run_dir.outcome, "removed");
+      assert.deepEqual(commands.filter((args) => args[0] === "update-ref"), [
+        ["update-ref", "-d", "refs/heads/alpha", expectedHeads.alpha],
+        ["update-ref", "-d", `refs/heads/${fixture.runId}`, expectedHeads[fixture.runId]],
+        ["update-ref", "-d", "refs/heads/zeta", expectedHeads.zeta],
+      ]);
+      assert.equal(events[0].startsWith("before-worktree-remove:"), true);
+      assert.deepEqual(events.slice(1, 4), [
+        "before-branch-delete:alpha",
+        `before-branch-delete:${fixture.runId}`,
+        "before-branch-delete:zeta",
+      ]);
+      assert.equal(events[4], `before-run-dir-remove:${fixture.runDir}`);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("retains sweep state after worktree failure, skips its branch, and continues independent branches", () => {
+    const fixture = createFixture("cleanup-sweep-worktree-failure", { terminal: true, git: true });
+    try {
+      runGit(fixture.repo, ["branch", "independent"]);
+      const runFile = join(fixture.runDir, "run.json");
+      const run = { ...readJson(runFile), slices: [{ branch: "independent" }] };
+      const expectedHeads = Object.fromEntries(collectCleanupTargets(run).branches.map((branch) => [branch, branchHead(fixture.repo, branch)]));
+      const runner = recordingGitRunner([], (args) => args[0] === "worktree" && args[1] === "remove");
+
+      const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
+        mode: "sweep",
+        repo: fixture.repo,
+        expectedRunHash: hashFile(runFile),
+        expectedBranchHeads: expectedHeads,
+        fetchedBaseRef: "main",
+        gitRunner: runner,
+      });
+
+      assert.equal(cleanupResult.worktrees[0].outcome, "failed");
+      assert.deepEqual(cleanupResult.branches.map(({ name, outcome }) => ({ name, outcome })), [
+        { name: fixture.runId, outcome: "not-attempted" },
+        { name: "independent", outcome: "deleted" },
+      ]);
+      assert.deepEqual(cleanupResult.run_dir, {
+        path: fixture.runDir,
+        outcome: "retained",
+        reason_code: "RETAINED_AFTER_PARTIAL_FAILURE",
+      });
+      assert.equal(existsSync(runFile), true);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("continues branch CAS deletion after a failure and retains the run directory", () => {
+    const fixture = createFixture("cleanup-sweep-cas-failure", { terminal: true, git: false });
+    try {
+      initGitRepo(fixture.repo, "unused-worktree");
+      runGit(fixture.repo, ["branch", "alpha"]);
+      runGit(fixture.repo, ["branch", "zeta"]);
+      const runFile = join(fixture.runDir, "run.json");
+      const run = { ...readJson(runFile), branch: "zeta", worktree: null, slices: [{ branch: "alpha" }] };
+      const expectedHeads = Object.fromEntries(collectCleanupTargets(run).branches.map((branch) => [branch, branchHead(fixture.repo, branch)]));
+      const runner = recordingGitRunner([], (args) => args[0] === "update-ref" && args[2] === "refs/heads/alpha");
+
+      const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
+        mode: "sweep",
+        repo: fixture.repo,
+        expectedRunHash: hashFile(runFile),
+        expectedBranchHeads: expectedHeads,
+        fetchedBaseRef: "main",
+        gitRunner: runner,
+      });
+
+      assert.deepEqual(cleanupResult.branches.map(({ name, outcome }) => ({ name, outcome })), [
+        { name: "alpha", outcome: "failed" },
+        { name: "zeta", outcome: "deleted" },
+      ]);
+      assert.equal(cleanupResult.run_dir.outcome, "retained");
+      assert.equal(branchExists(fixture.repo, "alpha"), true);
+      assert.equal(branchExists(fixture.repo, "zeta"), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("reports run-directory removal failure after all sweep targets succeed", () => {
+    const fixture = createFixture("cleanup-sweep-run-dir-failure", { terminal: true });
+    try {
+      const runFile = join(fixture.runDir, "run.json");
+      const cleanupResult = cleanupRunLocked(fixture.runDir, readJson(runFile), {
+        mode: "sweep",
+        repo: fixture.repo,
+        expectedRunHash: hashFile(runFile),
+        expectedBranchHeads: {},
+        fetchedBaseRef: "main",
+        removeRunDir: () => { throw new Error("injected failure"); },
+      });
+
+      assert.deepEqual(cleanupResult.run_dir, {
+        path: fixture.runDir,
+        outcome: "failed",
+        reason_code: "FAILED_CLEANUP_RUN_DIR",
+      });
+      assert.equal(existsSync(runFile), true);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
 });
 
 function createFixture(runId, { gate = false, terminal = false, git = false, repo = mkdtempSync(join(tmpdir(), "factory-simplified-")), updatedAt = undefined } = {}) {
@@ -579,6 +732,21 @@ function commitInWorktree(worktree, file, content) {
 function branchExists(repo, branch) {
   const proc = spawnSync("git", ["show-ref", "--verify", `refs/heads/${branch}`], { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
   return proc.status === 0;
+}
+
+function branchHead(repo, branch) {
+  const proc = spawnSync("git", ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`], { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(proc.status, 0, proc.stderr || proc.stdout);
+  return proc.stdout.trim();
+}
+
+function recordingGitRunner(commands, shouldFail = () => false) {
+  return (repo, args) => {
+    commands.push([...args]);
+    if (shouldFail(args)) return { ok: false, status: 1, stdout: "", stderr: "injected failure" };
+    const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+    return { ok: proc.status === 0, status: proc.status, stdout: proc.stdout || "", stderr: proc.stderr || "" };
+  };
 }
 
 function hashFile(file) {

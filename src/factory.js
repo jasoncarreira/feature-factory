@@ -1001,25 +1001,161 @@ export async function cleanupRun(runId, opts = {}) {
     }
     if (heartbeat.value && opts.force && !opts.dryRun) stopHeartbeatForCleanup(runDir, heartbeat.value, opts);
 
-    const result = {
-      run_id: run.run_id,
-      status: run.status,
-      dry_run: Boolean(opts.dryRun),
-      removed_worktrees: [],
-      skipped_worktrees: [],
-      deleted_branches: [],
-      skipped_branches: [],
-      removed_run_dir: false,
-      run_dir: runDir,
-    };
-
-    for (const worktree of cleanupWorktrees(run)) removeWorktree(repo, worktree, result, opts);
-    for (const branch of cleanupBranches(run)) deleteBranch(repo, branch, result, opts);
-
-    if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
-    result.removed_run_dir = !opts.dryRun;
-    return result;
+    return cleanupRunLocked(runDir, run, { ...opts, repo, mode: "single-run" });
   }, opts);
+}
+
+export function collectCleanupTargets(run) {
+  return {
+    worktrees: cleanupWorktrees(run),
+    branches: cleanupBranches(run),
+  };
+}
+
+// The caller owns the run-json lock. Public single-run cleanup uses the legacy
+// result contract; sweep mode uses compare-and-delete and retains the run
+// directory whenever a target operation fails.
+export function cleanupRunLocked(runDir, run, opts = {}) {
+  const repo = opts.repo || factoryRepoFromRunDir(runDir);
+  if (!insideFactoryRoot(repo, runDir)) {
+    throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
+  }
+  const targets = collectCleanupTargets(run);
+  if (opts.mode !== "single-run") return cleanupSweepTargetsLocked(repo, runDir, targets, opts);
+
+  const result = {
+    run_id: run.run_id,
+    status: run.status,
+    dry_run: Boolean(opts.dryRun),
+    removed_worktrees: [],
+    skipped_worktrees: [],
+    deleted_branches: [],
+    skipped_branches: [],
+    removed_run_dir: false,
+    run_dir: runDir,
+  };
+
+  for (const worktree of targets.worktrees) removeWorktree(repo, worktree, result, opts);
+  for (const branch of targets.branches) deleteBranch(repo, branch, result, opts);
+
+  if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
+  result.removed_run_dir = !opts.dryRun;
+  return result;
+}
+
+function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
+  if (opts.force || opts.dryRun) throw new Error("sweep cleanup must be lock-held execution without force or dry-run");
+  assertExpectedRunHash(runDir, opts.expectedRunHash);
+  const expectedHeads = normalizeExpectedBranchHeads(opts.expectedBranchHeads);
+  const baseRef = opts.fetchedBaseRef || opts.fetchedBase?.ref || null;
+  const runDirRemover = opts.removeRunDir || ((path) => rmSync(path, { recursive: true, force: true }));
+  const worktreeIdentity = opts.checkWorktreeIdentity || checkWorktreeIdentity;
+  const gitRunner = opts.gitRunner || git;
+  const phaseHook = typeof opts.phaseHook === "function" ? opts.phaseHook : () => {};
+  const cleanup = {
+    worktrees: [],
+    branches: [],
+    run_dir: { path: runDir, outcome: "retained", reason_code: null },
+  };
+  const failedWorktreeBranches = new Set();
+
+  const worktrees = targets.worktrees
+    .map((entry) => sweepWorktreeTarget(repo, entry))
+    .sort((a, b) => Buffer.from(a.physical_path || a.recorded_path).compare(Buffer.from(b.physical_path || b.recorded_path)));
+  for (const target of worktrees) {
+    const record = {
+      recorded_path: target.recorded_path,
+      physical_path: target.physical_path,
+      branch: null,
+      outcome: "failed",
+      reason_code: "FAILED_CLEANUP_WORKTREE",
+    };
+    try {
+      if (!target.valid) throw new Error("worktree path is no longer safe");
+      const identity = worktreeIdentity(repo, target.physical_path, { branch: target.branch });
+      if (!identity.ok) throw new Error("worktree identity changed");
+      phaseHook("before-worktree-remove", { ...target });
+      const proc = gitRunner(repo, ["worktree", "remove", "--force", target.physical_path]);
+      if (!proc.ok) throw new Error("worktree removal failed");
+      record.outcome = "removed";
+      record.reason_code = null;
+    } catch {
+      if (target.branch) failedWorktreeBranches.add(target.branch);
+    }
+    cleanup.worktrees.push(record);
+  }
+
+  for (const branch of [...targets.branches].map((value) => String(value).trim()).filter(Boolean).sort(compareUtf8)) {
+    const expectedHead = expectedHeads.get(branch) || null;
+    const record = { name: branch, expected_head: expectedHead, outcome: "failed", reason_code: "FAILED_CLEANUP_BRANCH" };
+    if (failedWorktreeBranches.has(branch)) {
+      record.outcome = "not-attempted";
+      cleanup.branches.push(record);
+      continue;
+    }
+    try {
+      if (!resolveCleanupBranchPermission(branch).allowed || !expectedHead || !baseRef) throw new Error("branch evidence is incomplete");
+      const current = gitRunner(repo, ["branch", "--show-current"]);
+      if (!current.ok || current.stdout.trim() === branch) throw new Error("branch is current");
+      const resolvedHead = gitRunner(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+      if (!resolvedHead.ok || resolvedHead.stdout.trim() !== expectedHead) throw new Error("branch head changed");
+      const ancestry = gitRunner(repo, ["merge-base", "--is-ancestor", expectedHead, baseRef]);
+      if (!ancestry.ok) throw new Error("branch ancestry changed");
+      phaseHook("before-branch-delete", { branch, expected_head: expectedHead, base_ref: baseRef });
+      const proc = gitRunner(repo, ["update-ref", "-d", `refs/heads/${branch}`, expectedHead]);
+      if (!proc.ok) throw new Error("branch compare-and-delete failed");
+      record.outcome = "deleted";
+      record.reason_code = null;
+    } catch {
+      // Keep the fixed failure record and continue with independent branches.
+    }
+    cleanup.branches.push(record);
+  }
+
+  const targetFailed = cleanup.worktrees.some((item) => item.outcome === "failed")
+    || cleanup.branches.some((item) => item.outcome !== "deleted");
+  if (targetFailed) {
+    cleanup.run_dir.reason_code = "RETAINED_AFTER_PARTIAL_FAILURE";
+    return cleanup;
+  }
+  try {
+    phaseHook("before-run-dir-remove", { path: runDir });
+    runDirRemover(runDir);
+    cleanup.run_dir.outcome = "removed";
+  } catch {
+    cleanup.run_dir.outcome = "failed";
+    cleanup.run_dir.reason_code = "FAILED_CLEANUP_RUN_DIR";
+  }
+  return cleanup;
+}
+
+function sweepWorktreeTarget(repo, entry) {
+  const recordedPath = String(entry.worktree);
+  const resolved = resolve(repo, recordedPath);
+  if (!insideWorktreeRoot(repo, resolved) || !existsSync(resolved)) {
+    return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, valid: false };
+  }
+  try {
+    return { recorded_path: recordedPath, physical_path: physicalPath(resolved), branch: entry.branch || null, valid: true };
+  } catch {
+    return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, valid: false };
+  }
+}
+
+function assertExpectedRunHash(runDir, expectedRunHash) {
+  if (!stringValue(expectedRunHash)) throw new Error("sweep cleanup requires an expected run hash");
+  if (sha256File(join(runDir, "run.json")) !== expectedRunHash) throw new Error("run manifest changed before cleanup");
+}
+
+function normalizeExpectedBranchHeads(value) {
+  if (value instanceof Map) return new Map(value);
+  if (Array.isArray(value)) return new Map(value.map((entry) => [entry.name, entry.expected_head]));
+  if (value && typeof value === "object") return new Map(Object.entries(value));
+  return new Map();
+}
+
+function compareUtf8(a, b) {
+  return Buffer.from(a).compare(Buffer.from(b));
 }
 
 function stopHeartbeatForCleanup(runDir, heartbeat, opts = {}) {
