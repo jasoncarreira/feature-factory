@@ -1,13 +1,73 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync as runSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { handoffEnvelope } from "../src/factory.js";
 
 const CLI = new URL("../src/cli.js", import.meta.url).pathname;
 
 describe("cli gate-decision", () => {
+  const matrix = [
+    ["T01", "detached-shepherd-started", "started", true, "Detached interactive shepherd started.", "watch", "watch", false, true],
+    ["T02", "matching-detached-shepherd-live", "already-running", true, "A matching detached interactive shepherd is already running.", "watch", "watch", false, true],
+    ["T03", "run-mode-not-interactive", "manual", false, "The durable run mode is not interactive; the external driver remains responsible for continuation.", "external-driver-continues", null, false, false],
+    ["T04", "protected-gate-pending", "paused-at-protected-gate", false, "The run is paused at a protected gate awaiting an explicit answer.", "answer-protected-gate", null, false, false],
+    ["T05", "terminal-run", "terminal", false, "The run is already terminal; inspect the durable terminal result.", "inspect-terminal-result", "status", false, false],
+    ["T06", "validated-cancelled", "stopped", false, "Validated process evidence shows that the detached shepherd is cancelled.", "confirm-cancellation", "status", false, false],
+    ["T07", "cancel-pending", "stopped", false, "Cancellation is pending for the validated detached shepherd.", "confirm-cancellation", "cancel", false, false],
+    ["T08", "approval-receipt-missing", "recovery-required", false, "The accepted approval has no valid durable handoff receipt.", "run-resume-check", "resume", false, false],
+    ["T09", "approval-snapshot-mismatch", "recovery-required", false, "The accepted approval no longer matches its durable pending-gate snapshot.", "run-resume-check", "resume", false, false],
+    ["T10", "steering-generation-mismatch", "recovery-required", false, "The steering generation changed after the approval was accepted.", "run-resume-check", "resume", false, false],
+    ["T11", "steering-state-not-clean", "recovery-required", false, "Pending or uncheckpointed steering prevents automatic continuation.", "run-resume-check", "resume", false, false],
+    ["T12", "resume-ineligible", "recovery-required", false, "The run is not eligible for detached continuation.", "run-resume-check", "resume", false, false],
+    ["T13", "launch-claim-invalid", "recovery-required", false, "The preserved launch claim is invalid and requires manual ownership reconciliation.", "manual-ownership-reconciliation", null, true, false],
+    ["T14", "launch-owner-indeterminate", "recovery-required", false, "The preserved launch claim owner cannot be safely proven live or absent.", "manual-ownership-reconciliation", null, true, false],
+    ["T15", "launch-claim-conflict", "recovery-required", false, "Another launch claim conflicts with this execution and ownership is ambiguous.", "manual-ownership-reconciliation", null, true, false],
+    ["T16", "process-evidence-invalid", "recovery-required", false, "Detached process evidence is invalid; preserve it and reconcile ownership manually.", "manual-ownership-reconciliation", null, false, false],
+    ["T17", "process-identity-mismatch", "recovery-required", false, "Recorded detached process identity does not match live inspection; preserve the evidence and reconcile ownership manually.", "manual-ownership-reconciliation", null, false, false],
+    ["T18", "prior-process-stopped", "recovery-required", false, "Prior process evidence is stopped or failed-closed; automatic relaunch is forbidden until manual reconciliation.", "manual-ownership-reconciliation", null, false, false],
+    ["T19", "claim-acquisition-failed", "recovery-required", false, "The launch claim could not be acquired and no safe ownership decision was possible.", "manual-ownership-reconciliation", null, false, false],
+    ["T20", "foreground-release-failed", "recovery-required", false, "The foreground predecessor could not be durably released, so ownership remains ambiguous.", "manual-ownership-reconciliation", null, true, false],
+    ["T21", "launch-spawn-failed", "recovery-required", false, "Detached launch failed after predecessor release; process ownership is ambiguous.", "manual-ownership-reconciliation", null, true, false],
+    ["T22", "launch-readiness-failed", "recovery-required", false, "Detached launch did not produce matching readiness evidence within the bounded wait.", "manual-ownership-reconciliation", null, true, false],
+    ["T23", "launch-evidence-mismatch", "recovery-required", false, "Published detached process evidence does not match the launch claim execution.", "manual-ownership-reconciliation", null, true, false],
+  ];
+
+  for (const [id, code, status, automatic, reason, action, commandKind, claim, live] of matrix) {
+    it(`${id} returns the exact ${code} response row`, () => {
+      const runId = "matrix-run";
+      const evidence = live ? { pid: 4321, log_ref: "processes/execution.log" } : null;
+      const output = handoffEnvelope(runId, "brief", code, { claim, evidence });
+      const commands = {
+        watch: `feature-factory factory watch ${runId}`,
+        status: `feature-factory factory status ${runId} --json`,
+        cancel: `feature-factory factory cancel ${runId} --json`,
+        resume: `feature-factory factory resume-check ${runId} --json`,
+      };
+      assert.deepEqual(output, {
+        automatic,
+        status,
+        run_id: runId,
+        gate: "brief",
+        reason_code: code,
+        reason,
+        action,
+        action_command: commandKind ? commands[commandKind] : null,
+        pid: live ? 4321 : null,
+        process_ref: live ? "process.json" : null,
+        launch_claim_ref: claim ? "process-launch.lock/owner.json" : null,
+        log: live ? "processes/execution.log" : null,
+        status_command: commands.status,
+        watch_command: commands.watch,
+        recovery_command: commandKind === "resume" ? commands.resume : null,
+      });
+      assert.equal(output.automatic, ["started", "already-running"].includes(output.status));
+    });
+  }
+
   it("returns the exact started envelope after interactive approval readiness", () => {
     const fixture = createFixture("cli-interactive-handoff", { interactive: true });
     const bin = installFakeOpencode(fixture.repo);
@@ -41,6 +101,60 @@ describe("cli gate-decision", () => {
       assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false);
     } finally {
       if (pid) try { process.kill(pid, "SIGTERM"); } catch { /* already exited */ }
+      cleanup(fixture.repo);
+    }
+  });
+
+  for (const mode of ["headless", "autonomous", null]) {
+    it(`keeps ${mode || "missing"} durable mode transition-only`, () => {
+      const fixture = createFixture(`cli-mode-${mode || "missing"}`, { mode });
+      try {
+        let proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--json"]);
+        assert.equal(proc.status, 0, proc.stderr);
+        const boundary = openBoundary(fixture, "gate");
+        proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer", "approve", "--boundary-token", boundary.token, "--json"]);
+        assert.equal(proc.status, 0, proc.stderr);
+        const output = JSON.parse(proc.stdout);
+        assert.equal(output.gate_accepted, true);
+        assert.equal(output.handoff.reason_code, "run-mode-not-interactive");
+        assert.equal(existsSync(join(fixture.runDir, "process.json")), false);
+        assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  }
+
+  it("prints accepted recovery-required JSON and exits 2 when a receipt is missing", () => {
+    const fixture = createFixture("cli-missing-receipt", { mode: "interactive" });
+    try {
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...readJson(join(fixture.runDir, "run.json")),
+        gates: {
+          story: {
+            status: "approved",
+            artifact: "artifacts/story.md",
+            question_ref: "gates/story.question.md",
+            answer: "approve",
+            answered_at: "2026-07-12T12:00:00.000Z",
+            approval_source: "human",
+            pending_snapshot: {
+              question_ref: "gates/story.question.md",
+              question_hash: sha256File(join(fixture.runDir, "gates", "story.question.md")),
+              artifact_ref: "artifacts/story.md",
+              artifact_hash: sha256File(join(fixture.runDir, "artifacts", "story.md")),
+              created_at: "2026-07-12T11:59:00.000Z"
+            }
+          }
+        }
+      });
+      const proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer", "approve", "--json"]);
+      assert.equal(proc.status, 2, proc.stderr);
+      const output = JSON.parse(proc.stdout);
+      assert.equal(output.gate_accepted, true);
+      assert.equal(output.handoff.reason_code, "approval-receipt-missing");
+      assert.equal(output.handoff.pid, null);
+    } finally {
       cleanup(fixture.repo);
     }
   });
@@ -182,8 +296,8 @@ function createFixture(runId, options = {}) {
   writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
   writeFileSync(join(runDir, "gates", "story.question.md"), "approve?\n");
   const run = { schema_version: 1, run_id: runId, status: "running", gates: {} };
-  if (options.interactive) {
-    run.mode = "interactive";
+  if (options.interactive || options.mode) {
+    run.mode = options.mode || "interactive";
     run.worktree = join(repo, ".opencode", "worktrees", runId);
     run.branch = runId;
     run.slices = [{ id: "slice", status: "pending", attempts: 0 }];
@@ -191,6 +305,10 @@ function createFixture(runId, options = {}) {
   }
   writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId };
+}
+
+function sha256File(file) {
+  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 }
 
 function runCli(repo, args, bin) {

@@ -13,6 +13,11 @@ describe("cli factory cancel", () => {
     const fixture = createFixture("cli-cancel-missing-evidence");
     try {
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      const claimDir = join(fixture.runDir, "process-launch.lock");
+      mkdirSync(claimDir);
+      const claimPath = join(claimDir, "owner.json");
+      writeFileSync(claimPath, "preserve claim bytes exactly\n", "utf8");
+      const claimBefore = readFileSync(claimPath, "utf8");
 
       const proc = runCli(fixture.repo, ["factory", "cancel", fixture.runId, "--json"]);
 
@@ -24,6 +29,7 @@ describe("cli factory cancel", () => {
       assert.match(output.reason, /missing process evidence/u);
       assert.equal(output.signaled, false);
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      assert.equal(readFileSync(claimPath, "utf8"), claimBefore);
     } finally {
       cleanup(fixture.repo);
     }

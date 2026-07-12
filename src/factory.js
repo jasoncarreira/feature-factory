@@ -137,6 +137,14 @@ export async function startFactory(args, opts = {}) {
   let resumedRun = null;
   let resumedRunDir = null;
   if (resumeRunId) {
+    const ownershipTarget = resolveRecoveryRunTarget(resumeRunId, { ...opts, cwd: repo, repoRoot: repo });
+    if (!ownershipTarget.error) {
+      const ownershipRead = readDurableRecoveryRun(repo, ownershipTarget.runDir, ownershipTarget.runFile);
+      if (!ownershipRead.error) {
+        const ownership = await existingRunOwnershipOutcome(ownershipTarget.runDir, ownershipRead.run, { ...opts, repo });
+        if (ownership) return ownership;
+      }
+    }
     const activeHeartbeatPreflight = startResumeActiveHeartbeatPreflight(resumeRunId, { ...opts, cwd: repo, repoRoot: repo });
     if (activeHeartbeatPreflight) return activeHeartbeatPreflight;
     const preflight = await recoverDisruptedRun(resumeRunId, { ...opts, cwd: repo });
@@ -181,6 +189,17 @@ export async function recoverDisruptedRun(runId, opts = {}) {
     recovered: false,
     runDir: target.runDir,
     reason: `run '${run.run_id}' is already terminal with status '${run.status}'`,
+  });
+
+  const ownership = inspectRecoveryOwnership(target.runDir, run, opts);
+  if (ownership) return recoveryEnvelope(run, {
+    ok: false,
+    durable: true,
+    updated: false,
+    recovered: false,
+    runDir: target.runDir,
+    reason: ownership.reason,
+    ownership,
   });
 
   const worktree = resolveRecoveryWorktree(repo, run);
@@ -394,7 +413,27 @@ function recoveryEnvelope(run, details = {}) {
     branch_head: details.branchHead || null,
     terminal_result: run.terminal_result || null,
     reason: details.reason || run.terminal_result?.reason || null,
+    recovery_required: Boolean(details.ownership),
+    ownership: details.ownership || null,
   };
+}
+
+function inspectRecoveryOwnership(runDir, run, opts = {}) {
+  let claim;
+  let processState;
+  try {
+    claim = inspectLaunchClaim(runDir, { ...opts, runId: run.run_id });
+    processState = inspectProcessEvidence(runDir, { ...opts, runId: run.run_id });
+  } catch (error) {
+    return { condition: "unsafe-ownership", reason_code: "process-evidence-invalid", reason: `Resume check found ownership evidence that could not be safely inspected: ${error.message}`, launch_claim_ref: null, process_ref: null };
+  }
+  if (claim.missing && processState.missing) return null;
+  if (!claim.missing && !claim.ok) return { condition: "unsafe-ownership", reason_code: "launch-claim-invalid", reason: "Resume check preserved an invalid launch claim; reconcile ownership manually.", launch_claim_ref: LAUNCH_CLAIM_REF, process_ref: processState.missing ? null : PROCESS_EVIDENCE_FILE };
+  if (!processState.missing && !processState.ok) return { condition: "unsafe-ownership", reason_code: "process-evidence-invalid", reason: "Resume check preserved invalid detached process evidence; reconcile ownership manually.", launch_claim_ref: claim.missing ? null : LAUNCH_CLAIM_REF, process_ref: PROCESS_EVIDENCE_FILE };
+  if (!claim.missing && claim.owner_status !== "live") return { condition: "unsafe-ownership", reason_code: claim.owner_status === "indeterminate" ? "launch-owner-indeterminate" : "launch-claim-conflict", reason: "Resume check cannot safely prove the preserved launch claim owner.", launch_claim_ref: LAUNCH_CLAIM_REF, process_ref: processState.missing ? null : PROCESS_EVIDENCE_FILE };
+  if (!processState.missing && processState.evidence.state === "running" && processState.verification?.status !== "live-and-matching") return { condition: "unsafe-ownership", reason_code: "process-identity-mismatch", reason: "Resume check cannot safely prove the recorded detached process identity.", launch_claim_ref: claim.missing ? null : LAUNCH_CLAIM_REF, process_ref: PROCESS_EVIDENCE_FILE };
+  if (!claim.missing && !processState.missing && processState.evidence.execution_id !== claim.claim.execution_id) return { condition: "unsafe-ownership", reason_code: "launch-claim-conflict", reason: "Resume check found contradictory launch and process execution identities.", launch_claim_ref: LAUNCH_CLAIM_REF, process_ref: PROCESS_EVIDENCE_FILE };
+  return { condition: "unsafe-ownership", reason_code: !processState.missing && processState.evidence.state === "running" ? "matching-detached-shepherd-live" : "launch-claim-conflict", reason: "Resume check preserved active or ambiguous run ownership; no recovery mutation was attempted.", launch_claim_ref: claim.missing ? null : LAUNCH_CLAIM_REF, process_ref: processState.missing ? null : PROCESS_EVIDENCE_FILE };
 }
 
 function resolveRecoveryWorktree(repo, run) {
@@ -572,7 +611,7 @@ export async function resumeFactory(runId, opts = {}) {
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const run = readRunFile(join(runDir, "run.json"));
   if (!opts.dryRun) {
-    const ownership = existingRunOwnershipOutcome(runDir, run, { ...opts, repo });
+    const ownership = await existingRunOwnershipOutcome(runDir, run, { ...opts, repo });
     if (ownership) return ownership;
   }
   const eligibility = resumeEligibility(runDir, run, { ...opts, cwd: repo, repoRoot: repo });
@@ -596,32 +635,37 @@ export async function resumeFactory(runId, opts = {}) {
   });
 }
 
-function existingRunOwnershipOutcome(runDir, run, opts = {}) {
-  const processState = inspectProcessEvidence(runDir, { ...opts, runId: run.run_id });
+async function existingRunOwnershipOutcome(runDir, run, opts = {}) {
+  let processState;
+  let claim;
+  try {
+    processState = inspectProcessEvidence(runDir, { ...opts, runId: run.run_id });
+    claim = inspectLaunchClaim(runDir, { ...opts, runId: run.run_id });
+  } catch (error) {
+    return { status: "recovery-required", reason_code: "process-evidence-invalid", reason: error.message };
+  }
   if (!processState.missing) {
     if (!processState.ok) return { status: "recovery-required", reason_code: "process-evidence-invalid", reason: processState.reason };
     if (processState.evidence.state === "running" && processState.verification?.status === "live-and-matching") {
+      if (!claim.missing && (!claim.ok || claim.claim.execution_id !== processState.evidence.execution_id)) {
+        return { status: "recovery-required", reason_code: "launch-claim-conflict", launch_claim_ref: LAUNCH_CLAIM_REF };
+      }
       return { status: "already-running", pid: processState.evidence.pid, repo: opts.repo, log: join(runDir, processState.evidence.log_ref), execution_id: processState.evidence.execution_id };
     }
     return { status: "recovery-required", reason_code: processState.evidence.state === "running" ? "process-identity-mismatch" : "prior-process-stopped" };
   }
-  const claim = inspectLaunchClaim(runDir, { ...opts, runId: run.run_id });
   if (claim.missing) return null;
-  return { status: "recovery-required", reason_code: !claim.ok ? "launch-claim-invalid" : claim.owner_status === "indeterminate" ? "launch-owner-indeterminate" : "launch-claim-conflict", launch_claim_ref: LAUNCH_CLAIM_REF };
+  if (!claim.ok) return { status: "recovery-required", reason_code: "launch-claim-invalid", launch_claim_ref: LAUNCH_CLAIM_REF };
+  if (claim.owner_status === "indeterminate") return { status: "recovery-required", reason_code: "launch-owner-indeterminate", launch_claim_ref: LAUNCH_CLAIM_REF };
+  const matched = await waitForMatchingClaimEvidence(runDir, run.run_id, claim, opts);
+  if (matched) return { status: "already-running", pid: matched.pid, repo: opts.repo, log: join(runDir, matched.log_ref), execution_id: matched.execution_id };
+  return { status: "recovery-required", reason_code: "launch-claim-conflict", launch_claim_ref: LAUNCH_CLAIM_REF };
 }
 
 async function coordinateExistingRunLaunch(runDir, run, opts) {
-  const existingProcess = inspectProcessEvidence(runDir, { ...opts, runId: run.run_id });
-  if (!existingProcess.missing) {
-    if (existingProcess.ok && existingProcess.evidence.state === "running" && existingProcess.verification?.status === "live-and-matching") {
-      return { status: "already-running", pid: existingProcess.evidence.pid, repo: opts.repo, log: join(runDir, existingProcess.evidence.log_ref), execution_id: existingProcess.evidence.execution_id };
-    }
-    if (!existingProcess.ok) return { status: "recovery-required", reason_code: "process-evidence-invalid", reason: existingProcess.reason };
-    return { status: "recovery-required", reason_code: existingProcess.evidence.state === "running" ? "process-identity-mismatch" : "prior-process-stopped" };
-  }
+  const ownership = await existingRunOwnershipOutcome(runDir, run, opts);
+  if (ownership) return ownership;
   const claimFns = launchClaimFunctions(opts);
-  const existingClaim = claimFns.inspect(runDir, { ...opts, runId: run.run_id });
-  if (!existingClaim.missing) return { status: "recovery-required", reason_code: !existingClaim.ok ? "launch-claim-invalid" : existingClaim.owner_status === "indeterminate" ? "launch-owner-indeterminate" : "launch-claim-conflict", launch_claim_ref: LAUNCH_CLAIM_REF };
   const detached = opts.launchKind.endsWith("detached");
   const executionId = opts.executionId || randomUUID();
   let acquired;
@@ -639,7 +683,13 @@ async function coordinateExistingRunLaunch(runDir, run, opts) {
   } catch (error) {
     return { status: "recovery-required", reason_code: "claim-acquisition-failed", reason: error.message };
   }
-  if (!acquired.acquired) return { status: "recovery-required", reason_code: "launch-claim-conflict", launch_claim_ref: LAUNCH_CLAIM_REF };
+  if (!acquired.acquired) {
+    if (!acquired.ok) return { status: "recovery-required", reason_code: "launch-claim-invalid", launch_claim_ref: LAUNCH_CLAIM_REF };
+    const matched = await waitForMatchingClaimEvidence(runDir, run.run_id, acquired, opts);
+    return matched
+      ? { status: "already-running", pid: matched.pid, repo: opts.repo, log: join(runDir, matched.log_ref), execution_id: matched.execution_id }
+      : { status: "recovery-required", reason_code: "launch-claim-conflict", launch_claim_ref: LAUNCH_CLAIM_REF };
+  }
   const token = acquired.token;
   const env = { ...(opts.launchEnv || factoryLaunchEnv(opts)), [FACTORY_LAUNCH_CLAIM_ENV]: token };
   try {
@@ -649,14 +699,23 @@ async function coordinateExistingRunLaunch(runDir, run, opts) {
       if (!evidence.ok || evidence.evidence.execution_id !== executionId || evidence.verification?.status !== "live-and-matching") {
         return { status: "recovery-required", reason_code: "launch-evidence-mismatch", launch_claim_ref: LAUNCH_CLAIM_REF };
       }
-      claimFns.release(runDir, token, { ...opts, expectedPhase: "spawning", runId: run.run_id });
+      try {
+        if (!claimFns.release(runDir, token, { ...opts, expectedPhase: "spawning", runId: run.run_id })) return { status: "recovery-required", reason_code: "launch-evidence-mismatch", launch_claim_ref: LAUNCH_CLAIM_REF };
+      } catch (error) {
+        return { status: "recovery-required", reason_code: "launch-evidence-mismatch", reason: error.message, launch_claim_ref: LAUNCH_CLAIM_REF };
+      }
     }
     return result;
   } catch (error) {
     if (detached) return { status: "recovery-required", reason_code: /readiness|timed out/iu.test(error.message) ? "launch-readiness-failed" : "launch-spawn-failed", reason: error.message, launch_claim_ref: LAUNCH_CLAIM_REF };
     throw error;
   } finally {
-    if (!detached) claimFns.release(runDir, token, { ...opts, expectedPhase: "foreground-live", runId: run.run_id });
+    if (!detached) {
+      const current = claimFns.inspect(runDir, { ...opts, runId: run.run_id });
+      if (current.ok && current.claim.nonce === token && current.claim.phase === "foreground-live") {
+        if (!claimFns.release(runDir, token, { ...opts, expectedPhase: "foreground-live", runId: run.run_id })) throw new Error("foreground launch claim cleanup failed");
+      }
+    }
   }
 }
 
@@ -683,37 +742,48 @@ export async function transitionGateDecisionAndHandoff(runIdOrDir, gateName, dec
   }
   if (decision.status !== "approved") return { ...transition, gate_accepted: false, handoff: null };
   const run = transition.run;
-  const handoff = await handoffApprovedInteractiveRun(runDir, run, gateName, { ...opts, repo });
+  let handoff;
+  try {
+    handoff = await handoffApprovedInteractiveRun(runDir, run, gateName, { ...opts, repo });
+  } catch (error) {
+    handoff = handoffEnvelope(run.run_id, gateName, error?.handoffCode || "claim-acquisition-failed", error?.preservedClaim ? { claim: true } : {});
+  }
   return { ...transition, gate_accepted: true, handoff };
 }
 
 export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, opts = {}) {
-  const run = validateRun(runInput);
+  let run;
+  try { run = validateRun(runInput); } catch { return handoffEnvelope(runInput?.run_id || "unknown-run", gateName, "resume-ineligible"); }
   const runId = run.run_id;
   if (run.mode !== "interactive") return handoffEnvelope(runId, gateName, "run-mode-not-interactive");
   if (TERMINAL_STATUSES.has(run.status)) return handoffEnvelope(runId, gateName, "terminal-run");
   if (pendingProtectedGate(run)) return handoffEnvelope(runId, gateName, "protected-gate-pending");
 
-  const processState = inspectProcessForHandoff(runDir, runId, opts);
+  let processState;
+  try { processState = inspectProcessForHandoff(runDir, runId, opts); } catch { return handoffEnvelope(runId, gateName, "process-evidence-invalid"); }
   if (processState) return handoffEnvelope(runId, gateName, processState.code, processState.live);
 
-  const receipt = inspectApprovalHandoffReceipt(runDir, run, gateName);
+  let receipt;
+  try { receipt = inspectApprovalHandoffReceipt(runDir, run, gateName); } catch { return handoffEnvelope(runId, gateName, "approval-snapshot-mismatch"); }
   if (!receipt.ok) return handoffEnvelope(runId, gateName, receipt.reason_code);
-  const eligibility = resumeEligibility(runDir, run, { ...opts, repoRoot: opts.repo || factoryRepoFromRunDir(runDir), ignoreLaunchOwnership: true });
+  let eligibility;
+  try { eligibility = resumeEligibility(runDir, run, { ...opts, repoRoot: opts.repo || factoryRepoFromRunDir(runDir), ignoreLaunchOwnership: true }); } catch { return handoffEnvelope(runId, gateName, "resume-ineligible"); }
   if (!eligibility.eligible) return handoffEnvelope(runId, gateName, "resume-ineligible");
 
   const claimFunctions = launchClaimFunctions(opts);
   let claim;
   const inheritedToken = process.env[FACTORY_LAUNCH_CLAIM_ENV];
   if (stringValue(inheritedToken)) {
-    const observed = claimFunctions.inspect(runDir, { ...opts, runId });
+    let observed;
+    try { observed = claimFunctions.inspect(runDir, { ...opts, runId }); } catch { return handoffEnvelope(runId, gateName, "launch-claim-invalid", { claim: true }); }
     if (!observed.ok) return handoffEnvelope(runId, gateName, observed.missing ? "launch-claim-conflict" : "launch-claim-invalid", { claim: true });
     if (observed.claim.nonce !== inheritedToken || observed.claim.run_id !== runId || observed.claim.phase !== "foreground-live") {
       return handoffEnvelope(runId, gateName, "launch-claim-conflict", { claim: true });
     }
     claim = { ...observed, acquired: false, token: inheritedToken };
   } else {
-    const existing = claimFunctions.inspect(runDir, { ...opts, runId });
+    let existing;
+    try { existing = claimFunctions.inspect(runDir, { ...opts, runId }); } catch { return handoffEnvelope(runId, gateName, "launch-claim-invalid", { claim: true }); }
     if (!existing.missing) return await classifyClaimContention(runDir, runId, gateName, existing, opts);
     try {
       claim = claimFunctions.acquire(runDir, {
@@ -768,11 +838,16 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
     return handoffEnvelope(runId, gateName, code, { claim: true });
   }
 
-  const evidence = inspectProcessEvidence(runDir, { ...opts, runId });
+  let evidence;
+  try { evidence = inspectProcessEvidence(runDir, { ...opts, runId }); } catch { return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true }); }
   if (!evidence.ok || evidence.evidence.execution_id !== claim.claim.execution_id || evidence.evidence.pid !== started.pid || evidence.verification?.status !== "live-and-matching") {
     return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true });
   }
-  claimFunctions.release(runDir, token, { ...opts, expectedPhase: "spawning", runId });
+  try {
+    if (!claimFunctions.release(runDir, token, { ...opts, expectedPhase: "spawning", runId })) return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true });
+  } catch {
+    return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true });
+  }
   return handoffEnvelope(runId, gateName, "detached-shepherd-started", { evidence: evidence.evidence });
 }
 
@@ -791,23 +866,28 @@ function inspectProcessForHandoff(runDir, runId, opts) {
 async function classifyClaimContention(runDir, runId, gateName, observed, opts = {}) {
   if (!observed.ok) return handoffEnvelope(runId, gateName, "launch-claim-invalid", { claim: true });
   if (observed.owner_status === "indeterminate") return handoffEnvelope(runId, gateName, "launch-owner-indeterminate", { claim: true });
-  if (observed.owner_status === "live" && ["predecessor-active", "predecessor-released", "spawning"].includes(observed.claim.phase)) {
-    const timeoutMs = normalizePositiveInteger(opts.readyTimeoutMs, DETACHED_READY_TIMEOUT_MS, "readyTimeoutMs");
-    const clock = typeof opts.clock === "function" ? opts.clock : Date.now;
-    const sleepFn = typeof opts.sleep === "function" ? opts.sleep : (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
-    const start = clock();
-    const deadline = Number.isFinite(start) ? start + timeoutMs : null;
-    for (let count = 0; count <= Math.ceil(timeoutMs / 25); count += 1) {
-      const evidence = inspectProcessEvidence(runDir, { ...opts, runId });
-      if (evidence.ok && evidence.evidence.execution_id === observed.claim.execution_id && evidence.verification?.status === "live-and-matching") {
-        return handoffEnvelope(runId, gateName, "matching-detached-shepherd-live", { evidence: evidence.evidence });
-      }
-      const now = clock();
-      if (deadline === null || !Number.isFinite(now) || now >= deadline) break;
-      await sleepFn(Math.min(25, deadline - now));
-    }
-  }
+  let evidence;
+  try { evidence = await waitForMatchingClaimEvidence(runDir, runId, observed, opts); } catch { return handoffEnvelope(runId, gateName, "launch-claim-conflict", { claim: true }); }
+  if (evidence) return handoffEnvelope(runId, gateName, "matching-detached-shepherd-live", { evidence });
   return handoffEnvelope(runId, gateName, "launch-claim-conflict", { claim: true });
+}
+
+async function waitForMatchingClaimEvidence(runDir, runId, observed, opts = {}) {
+  if (!observed?.ok || observed.owner_status !== "live" || !["predecessor-active", "predecessor-released", "spawning"].includes(observed.claim.phase)) return null;
+  const timeoutMs = normalizePositiveInteger(opts.readyTimeoutMs, DETACHED_READY_TIMEOUT_MS, "readyTimeoutMs");
+  const clock = typeof opts.clock === "function" ? opts.clock : Date.now;
+  const sleepFn = typeof opts.sleep === "function" ? opts.sleep : (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+  const start = clock();
+  const deadline = Number.isFinite(start) ? start + timeoutMs : null;
+  for (let count = 0; count <= Math.ceil(timeoutMs / 25); count += 1) {
+    let evidence;
+    try { evidence = inspectProcessEvidence(runDir, { ...opts, runId }); } catch { return null; }
+    if (evidence.ok && evidence.evidence.execution_id === observed.claim.execution_id && evidence.verification?.status === "live-and-matching") return evidence.evidence;
+    const now = clock();
+    if (deadline === null || !Number.isFinite(now) || now >= deadline) break;
+    try { await sleepFn(Math.min(25, deadline - now)); } catch { return null; }
+  }
+  return null;
 }
 
 function launchClaimFunctions(opts = {}) {

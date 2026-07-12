@@ -19,6 +19,7 @@ import {
   acquireLaunchClaim,
   cancelProcessFromEvidence,
   inspectLaunchClaim,
+  inspectProcessEvidence,
   inspectProcessIdentity,
   readProcessEvidence,
   recordDetachedProcessEvidence,
@@ -52,6 +53,30 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
       assert.equal(inspectLaunchClaim(fixture.runDir, { ...opts, runId: fixture.runId }).claim.execution_id, "exec-claim");
       assert.equal(releaseLaunchClaim(fixture.runDir, acquired.token, { ...opts, expectedPhase: "predecessor-active" }), true);
       assert.equal(inspectLaunchClaim(fixture.runDir, opts).missing, true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("rejects symlinked run roots and symlinked process-log ancestors without following them", () => {
+    const fixture = createFixture("ancestor-symlinks");
+    const alias = join(fixture.root, "run-alias");
+    try {
+      symlinkSync(fixture.runDir, alias);
+      assert.throws(() => acquireLaunchClaim(alias, {
+        runId: fixture.runId, executionId: "exec", launchKind: "resume-foreground", pid: PID, cwd: fixture.runDir, hostname: "test-host", now: NOW,
+      }, processOptions(fixture.runDir)), /non-symlink directory/u);
+
+      const outside = join(fixture.root, "outside-logs");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "opencode.log"), "outside\n", "utf8");
+      rmSync(join(fixture.runDir, "processes"), { recursive: true });
+      symlinkSync(outside, join(fixture.runDir, "processes"));
+      writeFileSync(join(fixture.runDir, PROCESS_EVIDENCE_FILE), `${JSON.stringify(evidence(fixture), null, 2)}\n`, "utf8");
+      const inspected = inspectProcessEvidence(fixture.runDir, { runId: fixture.runId, ...processOptions(fixture.runDir) });
+      assert.equal(inspected.ok, false);
+      assert.match(inspected.reason, /non-symlink|symlink/u);
+      assert.equal(readFileSync(join(outside, "opencode.log"), "utf8"), "outside\n");
     } finally {
       cleanup(fixture.root);
     }

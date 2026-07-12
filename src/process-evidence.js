@@ -203,10 +203,13 @@ export function inspectProcessEvidence(runDir, opts = {}) {
 }
 
 export function readProcessEvidence(runDir, opts = {}) {
-  const file = processEvidencePath(runDir);
+  const root = resolve(runDir);
+  const file = processEvidencePath(root);
   if (!existsSync(file)) return { ok: false, missing: true, reason: "missing process evidence", path: file, evidence: null };
   let fd;
   try {
+    const rootStat = lstatSync(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("run directory must be a non-symlink directory");
     fd = openSync(file, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
     if (!fstatSync(fd).isFile()) throw new Error("process evidence must be a regular file");
     const evidence = JSON.parse(readFileSync(fd, "utf8"));
@@ -806,10 +809,19 @@ function validateProcessLogEntry(runDir, ref) {
     const log = resolve(root, ref);
     const prefix = processes.endsWith(sep) ? processes : `${processes}${sep}`;
     if (!log.startsWith(prefix)) return { ok: false, reason: "process log escapes processes/" };
+    const rootStat = lstatSync(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return { ok: false, reason: "run directory must be a non-symlink directory" };
+    const relativeParts = log.slice(prefix.length).split(sep).filter(Boolean);
+    let current = processes;
     const processesStat = lstatSync(processes);
-    const logStat = lstatSync(log);
     if (!processesStat.isDirectory() || processesStat.isSymbolicLink()) return { ok: false, reason: "processes directory must be a non-symlink directory" };
-    if (!logStat.isFile() || logStat.isSymbolicLink()) return { ok: false, reason: "process log must be a non-symlink regular file" };
+    for (const [index, part] of relativeParts.entries()) {
+      current = join(current, part);
+      const entry = lstatSync(current);
+      if (entry.isSymbolicLink()) return { ok: false, reason: "process log ancestors must not be symlinks" };
+      if (index < relativeParts.length - 1 && !entry.isDirectory()) return { ok: false, reason: "process log ancestor must be a directory" };
+      if (index === relativeParts.length - 1 && !entry.isFile()) return { ok: false, reason: "process log must be a regular file" };
+    }
     return { ok: true };
   } catch (error) {
     return { ok: false, reason: `process log is inaccessible: ${error.message}` };

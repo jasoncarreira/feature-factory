@@ -361,7 +361,7 @@ function validateGateMap(errors, gates, path) {
   }
   for (const [name, gate] of Object.entries(gates)) {
     validateGateName(errors, name, `${path}.${name}`);
-    validateGate(errors, gate, `${path}.${name}`);
+    validateGate(errors, gate, `${path}.${name}`, name);
   }
 }
 
@@ -621,7 +621,7 @@ function validateRedactedEnv(errors, value, path) {
   }
 }
 
-function validateGate(errors, gate, path) {
+function validateGate(errors, gate, path, gateName) {
   if (!isRecord(gate)) {
     errors.push({ path, message: "must be an object" });
     return;
@@ -635,10 +635,10 @@ function validateGate(errors, gate, path) {
   optionalString(errors, gate, "decision_note", `${path}.decision_note`);
   optionalEnum(errors, gate, "approval_source", APPROVAL_SOURCES, `${path}.approval_source`);
   validatePendingSnapshot(errors, gate.pending_snapshot, `${path}.pending_snapshot`);
-  validateGateHandoffReceipt(errors, gate.handoff_receipt, `${path}.handoff_receipt`);
+  validateGateHandoffReceipt(errors, gate.handoff_receipt, `${path}.handoff_receipt`, gateName);
 }
 
-function validateGateHandoffReceipt(errors, receipt, path) {
+function validateGateHandoffReceipt(errors, receipt, path, gateName) {
   if (receipt === undefined || receipt === null) return;
   if (!isRecord(receipt)) {
     errors.push({ path, message: "must be an object" });
@@ -649,6 +649,7 @@ function validateGateHandoffReceipt(errors, receipt, path) {
   requiredString(errors, receipt, "kind", `${path}.kind`);
   if (stringValue(receipt.kind) && receipt.kind !== HANDOFF_RECEIPT_KIND) errors.push({ path: `${path}.kind`, message: `must equal ${HANDOFF_RECEIPT_KIND}` });
   requiredString(errors, receipt, "gate", `${path}.gate`);
+  if (stringValue(receipt.gate) && receipt.gate !== gateName) errors.push({ path: `${path}.gate`, message: "must match its gate key" });
   requiredHash(errors, receipt, "approval_fingerprint", `${path}.approval_fingerprint`);
   requiredHash(errors, receipt, "pending_snapshot_hash", `${path}.pending_snapshot_hash`);
   requiredHash(errors, receipt, "answer_hash", `${path}.answer_hash`);

@@ -406,12 +406,16 @@ export async function transitionRunJson(runDir, mutator, options = {}) {
 export async function transitionGateDecision(runDir, gateName, gate, options = {}) {
   if (!stringValue(gateName)) throw new Error("transitionGateDecision requires a gate name");
   assertSafeGateName(gateName);
+  const redeliveryInput = {
+    answeredAtExplicit: Object.prototype.hasOwnProperty.call(gate || {}, "answered_at") || stringValue(options.answeredAt),
+    rawAnswer: typeof gate?.answer === "string" ? gate.answer : null,
+  };
   const nextGate = normalizeGateDecision(gateName, gate, options);
   const answerArchives = [];
   const result = await withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
     if (nextGate.status === "approved" && current.gates?.[gateName]?.status === "approved") {
-      return reconcileApprovedGateRedelivery(runDir, current, gateName, nextGate, options);
+      return reconcileApprovedGateRedelivery(runDir, current, gateName, nextGate, redeliveryInput);
     }
     return transitionRunJsonLocked(
       runDir,
@@ -463,7 +467,7 @@ export function inspectApprovalHandoffReceipt(runDir, run, gateName) {
   } catch {
     return { ok: false, reason_code: "approval-snapshot-mismatch" };
   }
-  if (receipt.answer_hash !== approvedAnswerHash(runDir, gate)) return { ok: false, reason_code: "approval-snapshot-mismatch" };
+  if (stringValue(gate.answer_ref) && receipt.answer_hash !== approvedAnswerHash(runDir, gate)) return { ok: false, reason_code: "approval-snapshot-mismatch" };
   if (receipt.approval_fingerprint !== approvalFingerprint(gateName, gate, receipt)) return { ok: false, reason_code: "approval-snapshot-mismatch" };
   if (receipt.steering_generation !== steeringGeneration(run)) return { ok: false, reason_code: "steering-generation-mismatch" };
   if (!cleanSteeringForHandoff(run.steering)) return { ok: false, reason_code: "steering-state-not-clean" };
@@ -1455,7 +1459,7 @@ function cleanSteeringForHandoff(steering) {
     && !isRecord(steering.pr_fence);
 }
 
-function reconcileApprovedGateRedelivery(runDir, run, gateName, requested, options = {}) {
+function reconcileApprovedGateRedelivery(runDir, run, gateName, requested, input = {}) {
   const approved = run.gates[gateName];
   const receiptCheck = inspectApprovalHandoffReceipt(runDir, run, gateName);
   if (!receiptCheck.ok) throw handoffReceiptError(receiptCheck.reason_code);
@@ -1464,14 +1468,14 @@ function reconcileApprovedGateRedelivery(runDir, run, gateName, requested, optio
     && requested.question_ref === approved.question_ref
     && requested.approval_source === approved.approval_source
     && (requested.decision_note || null) === (approved.decision_note || null)
-    && (!stringValue(options.answeredAt) || requested.answered_at === approved.answered_at)
-    && exactRedeliveredAnswer(runDir, requested, approved, receiptCheck.receipt);
+    && (!input.answeredAtExplicit || requested.answered_at === approved.answered_at)
+    && exactRedeliveredAnswer(runDir, requested, approved, receiptCheck.receipt, input);
   if (!same) throw handoffReceiptError("approval-snapshot-mismatch");
   return { updated: false, reason: "redelivered-approved", status: run.status, run };
 }
 
-function exactRedeliveredAnswer(runDir, requested, approved, receipt) {
-  if (stringValue(requested.answer)) return normalizeGateAnswer(receipt.gate, requested.answer) === approved.answer && hashValue(approved.answer) === receipt.answer_hash;
+function exactRedeliveredAnswer(runDir, requested, approved, receipt, input = {}) {
+  if (stringValue(requested.answer)) return normalizeGateAnswer(receipt.gate, requested.answer) === approved.answer && hashValue(input.rawAnswer ?? requested.answer) === receipt.answer_hash;
   if (!stringValue(requested.answer_ref) || requested.answer_ref !== approved.pending_snapshot?.answer_ref) return false;
   // The ingress file is expected to have moved to the archived approved ref.
   return approvedAnswerHash(runDir, approved) === receipt.answer_hash;
@@ -1486,7 +1490,7 @@ function handoffReceiptError(code) {
 function readGateDecisionAnswer(runDir, gateName, gate) {
   if (stringValue(gate.answer)) {
     const answer = normalizeGateAnswer(gateName, String(gate.answer).trim());
-    return { answer, answerHash: hashValue(answer), archive: null };
+    return { answer, answerHash: hashValue(String(gate.answer)), archive: null };
   }
   const answerRef = requireNonEmptyString(gate.answer_ref, "answer_ref");
   const answer = readGateDecisionAnswerRef(runDir, gateName, answerRef);
