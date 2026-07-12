@@ -8,9 +8,9 @@ import { join } from "node:path";
 import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, startHeartbeat, status, stopHeartbeat, writeSteering } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
-import { canonicalizePanelAffectedPaths, classifyOwnership, classifyPanelResult } from "../src/post-pr-ci.js";
 
 const SHA = "a".repeat(40);
+const EMPTY_PATHS_HASH = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 describe("post-PR workflow orchestration", () => {
   it("does no GitHub work before next_poll_at and exposes a read-only summary", async () => {
@@ -396,51 +396,20 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(security.repo, { recursive: true, force: true }); }
   });
 
-  const panelSlices = [{ id: "api", stack: "backend", paths: ["src/api/**"] }, { id: "ui", stack: "frontend", paths: ["src/ui/**"] }];
-  it("P01 passing panels with one production owner validate", () => {
-    const owner = classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true });
-    assert.equal(owner.route, "backend-builder"); assert.equal(classifyPanelResult({ verdict: "GO", affected_paths: ["src/api/a.js"] }, "validator").ok, true); assert.equal(classifyPanelResult({ verdict: "PASS", affected_paths: ["src/api/a.js"] }, "security").ok, true);
-  });
-  it("P02 passing panels with test CI owner validate", () => {
-    assert.equal(classifyOwnership({ slices: panelSlices, paths: ["test/api.test.js", ".github/workflows/ci.yml"], failingCheckNames: [], complete: true }).route, "test-verifier");
-  });
-  it("P03 validator NO-GO routes one production owner", () => {
-    assert.equal(classifyPanelResult({ verdict: "NO-GO", affected_paths: ["src/api/a.js"] }, "validator").verdict, "NO-GO"); assert.equal(classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true }).route, "backend-builder");
-  });
-  it("P04 validator NO-GO routes test CI to test-verifier", () => {
-    assert.equal(classifyPanelResult({ verdict: "NO-GO", affected_paths: ["test/api.test.js"] }, "validator").ok, true); assert.equal(classifyOwnership({ slices: panelSlices, paths: ["test/api.test.js"], failingCheckNames: [], complete: true }).route, "test-verifier");
-  });
-  it("P05 security BLOCK routes one production owner", () => {
-    assert.equal(classifyPanelResult({ verdict: "BLOCK", affected_paths: ["src/ui/a.js"] }, "security").verdict, "BLOCK"); assert.equal(classifyOwnership({ slices: panelSlices, paths: ["src/ui/a.js"], failingCheckNames: [], complete: true }).route, "frontend-builder");
-  });
-  it("P06 dual red panels produce one shared owner", () => {
-    const validator = classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true }); const security = classifyOwnership({ slices: panelSlices, paths: ["src/api/b.js"], failingCheckNames: [], complete: true });
-    assert.deepEqual([validator.owner.slice_id, security.owner.slice_id], ["api", "api"]);
-  });
-  it("P07 security BLOCK without slice owner is unsafe", () => {
-    const owner = classifyOwnership({ slices: panelSlices, paths: ["test/api.test.js"], failingCheckNames: [], complete: true }); assert.equal(owner.owner.kind, "integration"); assert.notEqual(owner.owner.kind, "slice");
-  });
-  it("P08 different production panel owners conflict", () => {
-    const first = classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true }); const second = classifyOwnership({ slices: panelSlices, paths: ["src/ui/a.js"], failingCheckNames: [], complete: true }); assert.notEqual(first.owner.slice_id, second.owner.slice_id);
-  });
-  it("P09 production and test panel owners conflict", () => {
-    const first = classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js"], failingCheckNames: [], complete: true }); const second = classifyOwnership({ slices: panelSlices, paths: ["test/a.test.js"], failingCheckNames: [], complete: true }); assert.notEqual(first.owner.kind, second.owner.kind);
-  });
-  it("P10 internally mixed panel paths are unsafe", () => {
-    assert.equal(classifyOwnership({ slices: panelSlices, paths: ["src/api/a.js", "src/ui/a.js"], failingCheckNames: [], complete: true }).disposition, "needs-human");
-  });
-  it("P11 unowned production configuration is unsafe", () => {
-    assert.equal(classifyOwnership({ slices: panelSlices, paths: ["config/runtime.json"], failingCheckNames: [], complete: true }).disposition, "needs-human");
-  });
-  it("P12 missing and empty paths remain attribution-unsafe controls", () => {
-    assert.equal(canonicalizePanelAffectedPaths([], "/tmp/panel").category, "empty-paths"); assert.equal(canonicalizePanelAffectedPaths(undefined, "/tmp/panel").category, "invalid-paths");
-  });
-  it("P13 malformed affected path content is invalid-paths", () => {
-    assert.equal(canonicalizePanelAffectedPaths(["src/a.js", "../escape"], "/tmp/panel").category, "invalid-paths");
-  });
-  it("P14 invalid panel identity shape and verdict are metadata-unsafe inputs", () => {
-    assert.equal(classifyPanelResult({ verdict: "GO", extra: true }, "validator").issue, "unexpected-result-keys"); assert.equal(classifyPanelResult({ verdict: "ALLOW" }, "security").issue, "invalid-verdict");
-  });
+  it("P01 passing panels with one production owner publish, bind, and validate in order", async () => assertPassingPanelWorkflow("p01", ["src/api.js"]));
+  it("P02 passing panels with test CI owner publish, bind, and validate in order", async () => assertPassingPanelWorkflow("p02", ["test/api.test.js"]));
+  it("P03 validator NO-GO reserves exactly one production-owner remediation", async () => assertRedPanelWorkflow("p03", { validatorVerdict: "NO-GO", securityVerdict: "PASS", paths: ["src/api.js"], route: "backend-builder", ownerKind: "slice" }));
+  it("P04 validator NO-GO reserves exactly one test-verifier remediation", async () => assertRedPanelWorkflow("p04", { validatorVerdict: "NO-GO", securityVerdict: "PASS", paths: ["test/api.test.js"], route: "test-verifier", ownerKind: "integration" }));
+  it("P05 security BLOCK reserves exactly one production-owner remediation", async () => assertRedPanelWorkflow("p05", { validatorVerdict: "GO", securityVerdict: "BLOCK", paths: ["src/api.js"], route: "backend-builder", ownerKind: "slice" }));
+  it("P06 dual red panels create one combined reservation", async () => assertRedPanelWorkflow("p06", { validatorVerdict: "NO-GO", securityVerdict: "BLOCK", paths: ["src/api.js"], route: "backend-builder", ownerKind: "slice", panel: "combined" }));
+  it("P07 security BLOCK without slice owner terminalizes without binding or reservation", async () => assertAttributionWorkflow("p07", { validatorPaths: ["test/api.test.js"], securityPaths: ["test/api.test.js"], securityVerdict: "BLOCK", category: "security-block-without-slice-owner", panel: "security", hash: "227d01439b737014689e36a67684c31b2ebb5bfa22028d8d25daa2154c8380c9" }));
+  it("P08 different production owners terminalize owner-conflict", async () => assertAttributionWorkflow("p08", { validatorPaths: ["src/api.js"], securityPaths: ["src/ui.js"], category: "owner-conflict", panel: "combined", hash: "c9f977b393149f7f2e8d3610db7c98e65f101595531f09adc9143a6f93d8a6d8" }));
+  it("P09 production and test owners terminalize owner-conflict", async () => assertAttributionWorkflow("p09", { validatorPaths: ["src/api.js"], securityPaths: ["test/api.test.js"], category: "owner-conflict", panel: "combined", hash: "2f976d81ca6cdbeec8123186abfdb21687e092b0b59c0793f4b87f5bfd8c31b9" }));
+  it("P10 internally mixed paths terminalize mixed-owner", async () => assertAttributionWorkflow("p10", { securityPaths: ["src/api.js", "test/api.test.js"], category: "mixed-owner", panel: "security", hash: "2f976d81ca6cdbeec8123186abfdb21687e092b0b59c0793f4b87f5bfd8c31b9" }));
+  it("P11 unowned production path terminalizes unowned-path", async () => assertAttributionWorkflow("p11", { securityPaths: ["config/runtime.json"], category: "unowned-path", panel: "security", hash: "4def1fdb847720b875f333f663cd3dd7d82419c37375c93b412ef00c6d3801d4" }));
+  it("P12 missing and empty paths publish then terminalize exact categories", async () => { await assertAttributionWorkflow("p12-missing", { omitSecurityPaths: true, category: "missing-paths", panel: "security", hash: EMPTY_PATHS_HASH }); await assertAttributionWorkflow("p12-empty", { securityPaths: [], category: "empty-paths", panel: "security", hash: EMPTY_PATHS_HASH }); });
+  it("P13 malformed path content publishes then terminalizes invalid-paths", async () => assertAttributionWorkflow("p13", { securityPaths: ["src/api.js", "../escape"], category: "invalid-paths", panel: "security", hash: EMPTY_PATHS_HASH }));
+  it("P14 stale published panel identity terminalizes metadata-unsafe without dispatch or binding", async () => assertStalePanelWorkflow("p14"));
 
   it("P25 malformed panel runner result is metadata-unsafe", async () => {
     const classValue = new (class PanelResult { constructor(verdict) { this.verdict = verdict; } })("GO");
@@ -509,20 +478,25 @@ describe("post-PR workflow orchestration", () => {
       const outerProxy = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error("proxy trap must not run"); } });
       const unknownReturns = [{ started: true, exit_code: 0, signal: null }, inherited, { started: true, exit_code: 1, signal: null, result: { verdict } }, { started: true, exit_code: 0, signal: "SIGTERM", result: { verdict } }, outerProxy];
       for (const returned of unknownReturns) {
-        const fixture = createPanelRecoveryFixture(`p25-unknown-${activity}-${Math.random().toString(16).slice(2)}`, activity); let dispatches = 0;
+        const fixture = createPanelRecoveryFixture(`p25-unknown-${activity}-${Math.random().toString(16).slice(2)}`, activity); let dispatches = 0; let terminalChecks = 0;
         try {
-          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => { dispatches += 1; return returned; } }), /terminal-run|resume ineligible/u);
-          const run = readRun(fixture); assert.equal(run.terminal_result.reason, "post-pr-dispatch-start-unknown");
+          const before = panelSideEffectCounters(fixture, activity);
+          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => { dispatches += 1; return returned; }, beforePostPrTerminal: () => { terminalChecks += 1; assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null); } }), /terminal-run|resume ineligible/u);
+          const run = readRun(fixture); const job = run.post_pr.remediation.revalidation.jobs[activity]; assert.equal(run.terminal_result.reason, "post-pr-dispatch-start-unknown");
+          assert.deepEqual(run.post_pr.terminal_fact, { schema_version: 1, kind: "dispatch-start-unknown", observed_at: "2026-07-12T12:05:00.000Z", attempt: 1, activity, dispatch_id: job.dispatch_id, dispatch_started_at: job.started_at, candidate_head_sha: fixture.candidate, outcome: "return-unknown" });
           assert.ok(fixedPanelRefs(activity).every((ref) => !existsSync(join(fixture.runDir, ref))));
+          assert.equal(job.status, "running"); assert.equal(localReservationCount(run), 0); if (activity === "validator") assert.equal(run.post_pr.remediation.revalidation.jobs.security, undefined); assert.deepEqual(panelSideEffectCounters(fixture, activity), before);
           await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u);
-          assert.equal(dispatches, 1);
+          assert.equal(dispatches, 1); assert.equal(terminalChecks, 1); assert.deepEqual(panelSideEffectCounters(fixture, activity), before);
         } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
       }
       const accessorFixture = createPanelRecoveryFixture(`p25-accessor-${activity}`, activity); const accessorOuter = { started: true, exit_code: 0, signal: null };
       Object.defineProperty(accessorOuter, "result", { get() { throw new Error("result getter must not run"); } });
       try {
+        const before = panelSideEffectCounters(accessorFixture, activity);
         await assert.rejects(resumeFactory(accessorFixture.runId, { cwd: accessorFixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => accessorOuter }), /terminal-run|resume ineligible/u);
-        assert.equal(readRun(accessorFixture).post_pr.terminal_fact.issue, "non-object");
+        const run = readRun(accessorFixture); assert.equal(run.post_pr.terminal_fact.issue, "non-object"); assert.equal(run.post_pr.terminal_fact.activity, activity); assert.deepEqual(panelSideEffectCounters(accessorFixture, activity), before);
+        await assert.rejects(resumeFactory(accessorFixture.runId, { cwd: accessorFixture.repo, dryRun: true }), /terminal-run|resume ineligible/u); assert.deepEqual(panelSideEffectCounters(accessorFixture, activity), before);
       } finally { rmSync(accessorFixture.repo, { recursive: true, force: true }); }
     }
 
@@ -541,6 +515,41 @@ describe("post-PR workflow orchestration", () => {
           assert.equal(run.post_pr.remediation.revalidation.jobs[activity].status, "running");
         } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
       }
+    }
+  });
+
+  it("P25 mandatory affected-value path and exact-limit rows run through both panels", async () => {
+    const invalid = (label, make) => ({ label, make, category: "invalid-paths", hash: EMPTY_PATHS_HASH });
+    const missing = (label, make, omit = false) => ({ label, make, omit, category: "missing-paths", hash: EMPTY_PATHS_HASH });
+    const rows = [
+      missing("absent", () => undefined, true), missing("undefined", () => undefined),
+      invalid("null", () => null), invalid("boolean", () => true), invalid("safe-string", () => "src/api.js"), invalid("finite-number", () => 1.5), invalid("negative-zero", () => -0), invalid("safe-record", () => ({ a: true })),
+      { label: "empty-array", make: () => [], category: "empty-paths", hash: EMPTY_PATHS_HASH },
+      { label: "mixed-array", make: () => ["src/api.js", "test/api.test.js"], category: "mixed-owner", hash: "2f976d81ca6cdbeec8123186abfdb21687e092b0b59c0793f4b87f5bfd8c31b9" },
+      missing("sparse-array", () => { const value = []; value.length = 1; return value; }), missing("extra-key-array", () => Object.assign(["src/api.js"], { extra: true })),
+      missing("symbol-key-array", () => { const value = ["src/api.js"]; value[Symbol("x")] = true; return value; }), missing("accessor-array", () => Object.defineProperty(["src/api.js"], "0", { enumerable: true, get() { throw new Error("must not run"); } })),
+      missing("nested-accessor", () => ({ value: Object.defineProperty({}, "x", { enumerable: true, get() { throw new Error("must not run"); } }) })), missing("nested-proxy", () => ({ value: new Proxy({}, { ownKeys() { throw new Error("must not run"); } }) })),
+      missing("cycle", () => { const value = {}; value.self = value; return value; }), invalid("repeated-reference", () => { const shared = { x: true }; return { first: shared, second: shared }; }),
+      missing("bigint", () => ({ value: 1n })), missing("symbol", () => ({ value: Symbol("x") })), missing("function", () => ({ value() {} })), missing("nan", () => ({ value: NaN })), missing("infinity", () => ({ value: Infinity })),
+      missing("unsupported-date", () => new Date()), missing("unsupported-custom-prototype", () => Object.assign(Object.create({}), { x: true })), missing("callable-toJSON", () => ({ toJSON() { throw new Error("must not run"); } })),
+      missing("inherited-toJSON", () => Object.assign(Object.create({ toJSON() { throw new Error("must not run"); } }), { x: true })), missing("malformed-unicode", () => "\uD800"),
+      invalid("string-byte-limit", () => "a".repeat(4096)), missing("string-byte-limit-plus-one", () => "a".repeat(4097)),
+      { label: "array-length-limit", make: () => new Array(4096).fill("src/api.js"), success: true }, missing("array-length-limit-plus-one", () => new Array(4097).fill("src/api.js")),
+      invalid("depth-limit", () => affectedDepthValue(32)), missing("depth-limit-plus-one", () => affectedDepthValue(33)),
+      invalid("occurrence-limit", () => affectedOccurrenceTree(1)), missing("occurrence-limit-plus-one", () => affectedOccurrenceTree(2)),
+      invalid("entry-limit", () => affectedEntryObject(8192)), missing("entry-limit-plus-one", () => affectedEntryObject(8193)),
+      missing("aggregate-string-limit", () => new Array(256).fill("a".repeat(4096))), missing("aggregate-string-limit-plus-one", () => [...new Array(256).fill("a".repeat(4096)), "a"]),
+      invalid("emitted-byte-limit", () => affectedEmissionObject(false)), missing("emitted-byte-limit-plus-one", () => affectedEmissionObject(true)),
+      invalid("path-non-string", () => [1]), missing("path-boxed-string", () => [new String("src/api.js")]), invalid("path-empty", () => [""]), invalid("path-absolute", () => ["/tmp/x"]), invalid("path-drive-upper", () => ["C:/x"]), invalid("path-drive-lower", () => ["c:/x"]),
+      invalid("path-backslash", () => ["a\\b"]), invalid("path-nul", () => ["a\u0000b"]), invalid("path-control", () => ["a\u001fb"]), invalid("path-del", () => ["a\u007fb"]), invalid("path-repeated-separator", () => ["a//b"]), invalid("path-trailing-separator", () => ["a/"]),
+      invalid("path-dot", () => ["a/./b"]), invalid("path-dotdot", () => ["a/../b"]), invalid("path-escape", () => ["../x"]), invalid("path-mixed-invalid", () => ["src/api.js", "../x"]),
+      { label: "path-byte-limit", make: () => ["a".repeat(4096)], category: "unowned-path", hash: "58850230e822043b8c75a23c51fa30686e3c6826d6a671773e6189308a33dde6" }, missing("path-byte-limit-plus-one", () => ["a".repeat(4097)]),
+      missing("path-malformed-unicode", () => ["\uD800"]),
+      { label: "path-nfc-duplicates-byte-sort", make: () => ["src/é.js", "src/e\u0301.js", "src/api.js"], category: "unowned-path", hash: "0c5966fdf11b361b50edc4de95bf8751a89f9dfc431be364c353c5197a9e1836" },
+    ];
+    for (const activity of ["validator", "security"]) for (const row of rows) {
+      if (row.success) await assertAffectedWorkflowSuccess(activity, row.label, row.make());
+      else await assertAffectedWorkflowTerminal(activity, row.label, row.make(), row);
     }
   });
 
@@ -714,6 +723,120 @@ function panelJob(activity, status, ref = null, hash = null, verdict = null) {
 }
 
 function fixedPanelRefs(activity) { return activity === "validator" ? ["artifacts/post-pr-validator.attempt-1.md", "reviews/post-pr-validator.attempt-1.json"] : ["reviews/post-pr-security.attempt-1.json"]; }
+
+async function assertPassingPanelWorkflow(id, paths) {
+  const fixture = createPanelRecoveryFixture(id, "validator"); const dispatches = [];
+  try {
+    configurePanelPlan(fixture);
+    await dispatchWorkflowPanel(fixture, "validator", { verdict: "GO", affected_paths: paths }, dispatches);
+    let run = readRun(fixture); assert.deepEqual(dispatches, ["validator"]); assert.equal(run.post_pr.remediation.revalidation.jobs.validator.status, "bound"); assert.equal(run.post_pr.remediation.revalidation.jobs.security.status, "planned");
+    assert.ok(fixedPanelRefs("validator").every((ref) => existsSync(join(fixture.runDir, ref)))); assert.equal(existsSync(join(fixture.runDir, fixedPanelRefs("security")[0])), false);
+    await dispatchWorkflowPanel(fixture, "security", { verdict: "PASS", affected_paths: paths }, dispatches);
+    run = readRun(fixture); assert.deepEqual(dispatches, ["validator", "security"]); assert.equal(run.post_pr.remediation.revalidation.jobs.security.status, "bound"); assert.ok(existsSync(join(fixture.runDir, fixedPanelRefs("security")[0])));
+    await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:07:00.000Z" });
+    run = readRun(fixture); assert.equal(run.post_pr.phase, "validated"); assert.equal(run.post_pr.attempt, 1); assert.equal(localReservationCount(run), 0);
+    const stable = fullWorkflowCounters(fixture); await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:08:00.000Z" }); assert.deepEqual(fullWorkflowCounters(fixture), stable); assert.deepEqual(dispatches, ["validator", "security"]);
+  } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+}
+
+async function assertRedPanelWorkflow(id, { validatorVerdict, securityVerdict, paths, route, ownerKind, panel }) {
+  const fixture = createPanelRecoveryFixture(id, "validator"); const dispatches = [];
+  try {
+    configurePanelPlan(fixture);
+    await dispatchWorkflowPanel(fixture, "validator", { verdict: validatorVerdict, affected_paths: paths }, dispatches);
+    await dispatchWorkflowPanel(fixture, "security", { verdict: securityVerdict, affected_paths: paths }, dispatches);
+    assert.deepEqual(dispatches, ["validator", "security"]); assert.equal(readRun(fixture).post_pr.remediation.revalidation.jobs.security.status, "bound");
+    await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:07:00.000Z" });
+    const run = readRun(fixture); assert.equal(run.post_pr.phase, "remediation-planned"); assert.equal(run.post_pr.attempt, 2); assert.equal(run.post_pr.remediation.route, route); assert.equal(run.post_pr.remediation.owner.kind, ownerKind); assert.equal(localReservationCount(run), 1);
+    const evidence = JSON.parse(readFileSync(join(fixture.runDir, "evidence", "post-pr-local-failure.attempt-2.json"), "utf8")); assert.equal(evidence.panel, panel || (validatorVerdict === "NO-GO" ? "validator" : "security"));
+    const stable = fullWorkflowCounters(fixture); await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:08:00.000Z" }); assert.deepEqual(fullWorkflowCounters(fixture), stable); assert.deepEqual(dispatches, ["validator", "security"]);
+  } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+}
+
+async function assertAttributionWorkflow(id, { validatorPaths = ["src/api.js"], securityPaths = ["src/api.js"], securityVerdict = "PASS", omitSecurityPaths = false, category, panel, hash }) {
+  const fixture = createPanelRecoveryFixture(id, "security"); let dispatches = 0; let terminalChecks = 0;
+  try {
+    configurePanelPlan(fixture); setBoundValidator(fixture, { verdict: "GO", paths: validatorPaths }); const beforeReservations = localReservationCount(readRun(fixture));
+    const result = omitSecurityPaths ? { verdict: securityVerdict } : { verdict: securityVerdict, affected_paths: securityPaths };
+    await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async (envelope) => {
+      dispatches += 1; assert.equal(envelope.activity, "security"); assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:05:00.000Z" }).fresh, true); return { started: true, exit_code: 0, signal: null, result };
+    }, beforePostPrTerminal: () => { terminalChecks += 1; assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null); } }), /terminal-run|resume ineligible/u);
+    const run = readRun(fixture); assert.equal(run.terminal_result.reason, "post-pr-panel-attribution-unsafe"); assert.deepEqual(run.post_pr.terminal_fact, { schema_version: 1, kind: "panel-attribution-unsafe", observed_at: "2026-07-12T12:05:00.000Z", attempt: 1, candidate_head_sha: fixture.candidate, panel, category, affected_paths_hash: hash });
+    assert.ok(existsSync(join(fixture.runDir, fixedPanelRefs("security")[0]))); assert.equal(run.post_pr.remediation.revalidation.jobs.security.status, "running"); assert.equal(localReservationCount(run), beforeReservations); assert.equal(dispatches, 1); assert.equal(terminalChecks, 1);
+    const stable = fullWorkflowCounters(fixture); await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u); assert.deepEqual(fullWorkflowCounters(fixture), stable); assert.equal(dispatches, 1);
+  } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+}
+
+async function assertStalePanelWorkflow(id) {
+  const fixture = createPanelRecoveryFixture(id, "security"); let dispatches = 0;
+  try {
+    configurePanelPlan(fixture); updateRunFile(fixture, (run) => { run.post_pr.remediation.revalidation.jobs.security = panelJob("security", "running"); });
+    writeRecoveryPanelArtifact(fixture, "security"); const ref = fixedPanelRefs("security")[0]; const artifact = JSON.parse(readFileSync(join(fixture.runDir, ref), "utf8")); artifact.head_sha = fixture.baseline; writeJson(join(fixture.runDir, ref), artifact);
+    const before = fullWorkflowCounters(fixture); await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u);
+    const run = readRun(fixture); assert.equal(run.terminal_result.reason, "post-pr-metadata-unsafe"); assert.equal(run.post_pr.remediation.revalidation.jobs.security.status, "running"); assert.equal(localReservationCount(run), 0); assert.equal(dispatches, 0);
+    const stable = fullWorkflowCounters(fixture); assert.equal(stable.publications, before.publications); await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true }), /terminal-run|resume ineligible/u); assert.deepEqual(fullWorkflowCounters(fixture), stable);
+  } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+}
+
+async function dispatchWorkflowPanel(fixture, activity, result, dispatches) {
+  const response = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: activity === "validator" ? "2026-07-12T12:05:00.000Z" : "2026-07-12T12:06:00.000Z", executePostPrRecoveryJob: async (envelope) => {
+    dispatches.push(envelope.activity); assert.equal(envelope.activity, activity); assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo, now: activity === "validator" ? "2026-07-12T12:05:00.000Z" : "2026-07-12T12:06:00.000Z" }).fresh, true); return { started: true, exit_code: 0, signal: null, result };
+  } });
+  assert.equal(response.status, "dry-run"); assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null);
+}
+
+function configurePanelPlan(fixture) {
+  writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+    { id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] },
+    { id: "ui", stack: "frontend", paths: ["src/ui.js"], depends_on: [], acceptance: ["UI works"], test_plan: ["node --test"] },
+  ] });
+}
+
+function setBoundValidator(fixture, { verdict, paths }) {
+  const ref = fixedPanelRefs("validator")[1]; const review = JSON.parse(readFileSync(join(fixture.runDir, ref), "utf8")); review.verdict = verdict; review.affected_paths = paths; writeJson(join(fixture.runDir, ref), review); const hash = fileHash(join(fixture.runDir, ref));
+  updateRunFile(fixture, (run) => { const revalidation = run.post_pr.remediation.revalidation; revalidation.validator_review_hash = hash; revalidation.validator_verdict = verdict; Object.assign(revalidation.jobs.validator, { result_hash: hash, verdict }); });
+}
+
+function localReservationCount(run) { return run.post_pr.evidence_refs.filter((binding) => /post-pr-local-failure/u.test(binding.ref)).length; }
+function fullWorkflowCounters(fixture) { const run = readRun(fixture); return { publications: [...fixedPanelRefs("validator"), ...fixedPanelRefs("security")].filter((ref) => existsSync(join(fixture.runDir, ref))).length,
+  bound: ["canonical", "validator", "security"].filter((activity) => run.post_pr.remediation.revalidation.jobs?.[activity]?.status === "bound").length,
+  attempt: run.post_pr.attempt, reservations: localReservationCount(run), phase: run.post_pr.phase, evidence: run.post_pr.evidence_refs.length }; }
+
+async function assertAffectedWorkflowTerminal(activity, label, affected, { omit = false, category, hash }) {
+  const fixture = createPanelRecoveryFixture(`affected-${activity}-${label}`, activity); let dispatches = 0; let terminalChecks = 0;
+  try {
+    configurePanelPlan(fixture); const before = fullWorkflowCounters(fixture); const verdict = activity === "validator" ? "GO" : "PASS"; const result = omit ? { verdict } : { verdict, affected_paths: affected };
+    await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async (envelope) => {
+      dispatches += 1; assert.equal(envelope.activity, activity); assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:05:00.000Z" }).fresh, true); return { started: true, exit_code: 0, signal: null, result };
+    }, beforePostPrTerminal: () => { terminalChecks += 1; assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null); } }), /terminal-run|resume ineligible/u, `${activity}:${label}`);
+    const run = readRun(fixture); assert.equal(run.terminal_result.reason, "post-pr-panel-attribution-unsafe", `${activity}:${label}`); assert.deepEqual(run.post_pr.terminal_fact, { schema_version: 1, kind: "panel-attribution-unsafe", observed_at: "2026-07-12T12:05:00.000Z", attempt: 1, candidate_head_sha: fixture.candidate, panel: activity, category, affected_paths_hash: hash }, `${activity}:${label}`);
+    assert.ok(fixedPanelRefs(activity).every((ref) => existsSync(join(fixture.runDir, ref))), `${activity}:${label}:publication`); const artifact = JSON.parse(readFileSync(join(fixture.runDir, fixedPanelRefs(activity).at(-1)), "utf8")); assert.equal(Object.hasOwn(artifact, "affected_paths"), category !== "missing-paths", `${activity}:${label}:affected publication`);
+    assert.equal(run.post_pr.remediation.revalidation.jobs[activity].status, "running"); assert.equal(localReservationCount(run), 0); if (activity === "validator") assert.equal(run.post_pr.remediation.revalidation.jobs.security, undefined);
+    assert.equal(dispatches, 1); assert.equal(terminalChecks, 1); const after = fullWorkflowCounters(fixture); assert.equal(after.bound, before.bound); assert.equal(after.reservations, before.reservations);
+    await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u); assert.deepEqual(fullWorkflowCounters(fixture), after); assert.equal(dispatches, 1);
+  } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+}
+
+async function assertAffectedWorkflowSuccess(activity, label, affected) {
+  const fixture = createPanelRecoveryFixture(`affected-success-${activity}-${label}`, activity); const dispatches = [];
+  try {
+    configurePanelPlan(fixture); const verdict = activity === "validator" ? "GO" : "PASS";
+    await dispatchWorkflowPanel(fixture, activity, { verdict, affected_paths: affected }, dispatches); let run = readRun(fixture); assert.equal(run.post_pr.remediation.revalidation.jobs[activity].status, "bound"); assert.equal(localReservationCount(run), 0);
+    if (activity === "validator") {
+      assert.equal(run.post_pr.remediation.revalidation.jobs.security.status, "planned"); await dispatchWorkflowPanel(fixture, "security", { verdict: "PASS", affected_paths: ["src/api.js"] }, dispatches); assert.deepEqual(dispatches, ["validator", "security"]);
+    }
+    await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:07:00.000Z" }); run = readRun(fixture); assert.equal(run.post_pr.phase, "validated"); assert.equal(localReservationCount(run), 0);
+    const stable = fullWorkflowCounters(fixture); await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:08:00.000Z" }); assert.deepEqual(fullWorkflowCounters(fixture), stable); assert.equal(dispatches.filter((value) => value === activity).length, 1);
+  } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+}
+
+function affectedDepthValue(containers) { let root = {}; let cursor = root; for (let index = 1; index < containers; index += 1) { cursor.x = {}; cursor = cursor.x; } cursor.x = null; return root; }
+function affectedOccurrenceTree(extras) { const root = {}; let level = [root]; for (let depth = 0; depth < 12; depth += 1) { const next = []; for (const node of level) { node.a = {}; node.b = {}; next.push(node.a, node.b); } level = next; } if (extras > 0) level[0].x = {}; if (extras > 1) level[0].y = {}; return root; }
+function affectedEntryObject(count) { return Object.fromEntries(Array.from({ length: count }, (_, index) => [`k${index.toString(16).padStart(4, "0")}`, null])); }
+function affectedEmissionObject(over) {
+  const value = Object.fromEntries(Array.from({ length: 255 }, (_, index) => [`k${index.toString(16).padStart(3, "0")}`, "a".repeat(4096)])); value.final = "";
+  const remaining = 1_048_576 - Buffer.byteLength(JSON.stringify(value, null, 2), "utf8"); assert.ok(remaining >= 0 && remaining <= 4096); value.final = "a".repeat(remaining + (over ? 1 : 0)); return value;
+}
 
 function panelSideEffectCounters(fixture, activity) {
   const run = readRun(fixture); const jobs = run.post_pr.remediation.revalidation.jobs;
