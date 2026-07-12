@@ -1140,6 +1140,13 @@ describe("simplified run-state transitions", () => {
     const cases = [
       ["remote", "remote-host.invalid", () => false],
       ["undefined", hostname(), () => undefined],
+      ["true-string", hostname(), () => "true"],
+      ["false-string", hostname(), () => "false"],
+      ["boxed-boolean", hostname(), () => new Boolean(false)],
+      ["object", hostname(), () => ({})],
+      ["array", hostname(), () => []],
+      ["number", hostname(), () => 0],
+      ["null", hostname(), () => null],
       ["unknown-status", hostname(), () => ({ status: "unknown" })],
       ["eperm", hostname(), () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); }],
       ["probe-error", hostname(), () => { throw new Error("probe failed"); }],
@@ -1160,6 +1167,33 @@ describe("simplified run-state transitions", () => {
           /timed out waiting for run\.json lock/u,
         );
         assert.equal(readJson(join(lockDir, "owner.json")).nonce, "66666666-6666-4666-8666-666666666666");
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("does not clear heartbeat evidence for malformed or throwing legacy liveness", async () => {
+    const callbacks = [
+      () => "false",
+      () => new Boolean(false),
+      () => ({ status: "dead" }),
+      () => [],
+      () => 0,
+      () => null,
+      () => undefined,
+      () => { throw new Error("probe failed"); },
+    ];
+    for (const [index, processAliveFn] of callbacks.entries()) {
+      const fixture = createFixture(`heartbeat-indeterminate-${index}`);
+      try {
+        writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
+        await assert.rejects(
+          transitionRecoverOrphan(fixture.runDir, "must stay running", { now: NOW, processAliveFn }),
+          /indeterminate-heartbeat-process/u,
+        );
+        assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, process.pid);
+        assert.equal(readJson(join(fixture.runDir, "run.json")).status, "running");
       } finally {
         cleanup(fixture.repo);
       }
