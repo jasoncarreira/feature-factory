@@ -188,12 +188,24 @@ describe("cli write surface", () => {
       merged.slices[0].status = "merged";
       merged.slices[0].merge_commit = "abc1234";
       writeJson(join(runDir, "run.json"), merged);
+
+      const omitted = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--json"]);
+      assert.match(omitted.stderr, /test-verifier integration gate requires a positive attempt number/u);
+      const zero = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "0", "--json"]);
+      assert.match(zero.stderr, /test-verifier integration gate requires a positive attempt number/u);
+
       runFactory(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "1", "--json"]);
       assert.deepEqual(readJson(join(runDir, "run.json")).steps.at(-1), { agent: "test-verifier", status: "running", attempts: 1 });
 
+      runFactory(repo, ["step", RUN_ID, "test-verifier", "rejected", "--attempts", "1", "--json"]);
+      const repeated = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "1", "--json"]);
+      assert.match(repeated.stderr, /test-verifier integration gate must advance from attempt 1 to 2/u);
+      assert.deepEqual(readJson(join(runDir, "run.json")).steps.at(-1), { agent: "test-verifier", status: "rejected", attempts: 1 });
+      runFactory(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "2", "--json"]);
+
       const exhausted = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "4", "--json"]);
       assert.match(exhausted.stderr, /test-verifier integration gate attempt 4 exceeds max_retries 3/u);
-      assert.equal(readJson(join(runDir, "run.json")).steps.at(-1).attempts, 1);
+      assert.equal(readJson(join(runDir, "run.json")).steps.at(-1).attempts, 2);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
