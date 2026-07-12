@@ -5,18 +5,20 @@ The items below are the remaining future work.
 
 ## Build And Review Workflow
 
-- Reviewer prompt consolidation (maintenance direction, not new rules)
-  - The reviewer prompts (`work-reviewer`, `security-reviewer`, `implementation-validator`) have accumulated interlocking rule blocks patch-by-patch: first-attempt completeness, acceptance bar, precedence, feasibility, trust-model rubric, structured BLOCK justification, delta/rerun rules, search discipline. Each earned its place against an observed failure, but the accretion pattern is the risk now.
-  - Future work: one consolidation rewrite per prompt for coherence and brevity — same rules, integrated instead of appended. Do not add further rules without first consolidating; new failure modes should prefer orchestrator-side enforcement over more prompt text.
+- [ ] Monitor reviewer entailment closure over the next few feature runs
+  - Evidence to watch: a later review introduces a required structural, compatibility, state-transition, rendered-output, or test consequence that was deterministically implied by an earlier finding against the same abstraction. The CR/CRLF line-writer finding appearing after prior ownership remediation is the initial example, not yet enough evidence for another prompt rule.
+  - If the pattern recurs, update the consolidated reviewer procedure so each `required_fixes` entry closes its direct, bounded entailments across known input classes, compatibility decisions, state transitions, exact outputs, and mapped assertions. Do not turn this into an open-ended edge-case search or add placeholder-word policing.
+
+- [ ] Treat post-PR CI failure as a validation failure and remediate (bounded)
+  - Today the workflow ends at `pr-created`: the factory creates the gated PR and stops, so a red CI run or a reviewer `changes_requested` is invisible to it. Close the loop by making CI status a first-class gate outcome — a failing required check is a NO-GO, handled by the same bounded remediation path as a pre-PR panel NO-GO, not a new subsystem.
+  - Shape: after `pr-created`, an opt-in bounded step polls `gh pr checks` and PR review state **until the first terminal verdict** (checks pass/fail, or changes requested). Green/approved → done. Red → capture the failing check name, log excerpt, and likely owning slice/path as observed CI evidence (attempt-suffixed), route the top failure to the owning builder or the `test-verifier` integration gate, re-observe, and re-run, counted against `run.json.max_retries` like every other remediation loop. On exhaustion, terminalize `blocked`/`needs-human` with the captured CI failure. A blocked-run continuation can resume it.
+  - Explicitly out of scope: a standing background monitor/daemon, an event bus, persistent PR subscriptions, or auto-reacting to arbitrary PR comments. This is one bounded watch per run reusing the existing remediation/continuation/terminal primitives — not always-on infrastructure.
+  - Security scanning is a project concern, not a builder concern: the factory reacts only to the pass/fail of whatever checks the repository's own CI already runs; it does not add SAST, secrets, dependency, or SBOM scanning of its own.
 
 ## Runnable Dogfood Epics
 
 Keep each run bounded to its named outcome, consume accepted shared primitives instead
 of reimplementing them, and do not write open-ended completeness acceptance criteria.
-
-### Centralized Hardening Completion
-
-- [ ] **Consumer migration rebaseline** (`centralized-hardening-consumer-migration-rebaseline`) - Active current-main rebaseline of the remaining consumers onto the accepted sensitive-data, terminal-output, protected-write, and process-verification primitives. Reconcile selectively reusable run-state, operator-output, and TUI work with merged PRs #52 and #53, then complete factory orchestration and CLI consumers. Preserve compatibility and focused tests; do not re-litigate accepted foundation contracts; keep generated `dist/tui.js` unowned.
 
 ### Lifecycle Cleanup
 
