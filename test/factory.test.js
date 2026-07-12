@@ -6,6 +6,7 @@ import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CleanupRunUnexpectedError,
   cleanupRunLocked,
   cleanupRun,
   collectCleanupTargets,
@@ -746,7 +747,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       const run = { ...readJson(runFile), branch: "zeta", worktree: null, slices: [{ branch: "alpha" }] };
       const expectedHeads = Object.fromEntries(collectCleanupTargets(run).branches.map((branch) => [branch, branchHead(fixture.repo, branch)]));
 
-      const error = assert.throws(() => cleanupRunLocked(fixture.runDir, run, {
+      const error = captureThrown(() => cleanupRunLocked(fixture.runDir, run, {
         mode: "sweep",
         repo: fixture.repo,
         expectedRunHash: hashFile(runFile),
@@ -758,7 +759,9 @@ describe("factory public state operations", { concurrency: false }, () => {
         },
       }));
 
+      assert.equal(error instanceof CleanupRunUnexpectedError, true);
       assert.equal(error.code, "FAILED_CLEANUP_UNEXPECTED");
+      assert.equal(error.cause?.message, "injected unexpected failure");
       assert.deepEqual(error.cleanup.branches.map(({ name, outcome }) => ({ name, outcome })), [
         { name: "alpha", outcome: "deleted" },
         { name: "zeta", outcome: "failed" },
@@ -853,6 +856,15 @@ function recordingGitRunner(commands, shouldFail = () => false) {
     const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
     return { ok: proc.status === 0, status: proc.status, stdout: proc.stdout || "", stderr: proc.stderr || "" };
   };
+}
+
+function captureThrown(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  assert.fail("expected function to throw");
 }
 
 function hashFile(file) {
