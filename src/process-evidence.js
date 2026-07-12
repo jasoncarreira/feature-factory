@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { timestamp } from "./utils.js";
 import { writeProtectedJsonAtomicSync } from "./hardening/atomic-write.js";
 import {
@@ -15,11 +16,20 @@ export const PROCESS_EVIDENCE_FILE = "process.json";
 export const PROCESS_EVIDENCE_KIND = "opencode-process";
 export const PROCESS_EVIDENCE_SCHEMA_VERSION = 1;
 export const PROCESS_EVIDENCE_SIGNAL = "SIGTERM";
+export const LAUNCH_CLAIM_DIR = "process-launch.lock";
+export const LAUNCH_CLAIM_FILE = "owner.json";
+export const LAUNCH_CLAIM_REF = `${LAUNCH_CLAIM_DIR}/${LAUNCH_CLAIM_FILE}`;
+export const LAUNCH_CLAIM_KIND = "opencode-launch-claim";
+export const LAUNCH_CLAIM_SCHEMA_VERSION = 1;
+export const LAUNCH_CLAIM_PHASES = Object.freeze(["foreground-live", "predecessor-active", "predecessor-released", "spawning"]);
+export const LAUNCH_KINDS = Object.freeze(["approval-handoff", "resume-foreground", "resume-detached", "start-resume-foreground", "start-resume-detached"]);
 
 const PROCESS_STATES = new Set(["running", "cancelled", "failed-closed", "exited"]);
 const DEFAULT_INSPECTOR = PROCESS_INSPECTOR;
 const DEFAULT_CANCEL_WAIT_MS = 5000;
 const CANCEL_POLL_INTERVAL_MS = 200;
+const LAUNCH_PHASE_SET = new Set(LAUNCH_CLAIM_PHASES);
+const LAUNCH_KIND_SET = new Set(LAUNCH_KINDS);
 
 export function processEvidencePath(runDir) {
   return join(resolve(runDir), PROCESS_EVIDENCE_FILE);
@@ -29,16 +39,184 @@ export function processEvidenceProcessesDir(runDir) {
   return join(resolve(runDir), "processes");
 }
 
+export function launchClaimPath(runDir) {
+  return join(resolve(runDir), LAUNCH_CLAIM_DIR, LAUNCH_CLAIM_FILE);
+}
+
+/**
+ * Inspect a transient launch claim without following either claim entry. Claims
+ * are deliberately never reclaimed here: an invalid or unprovable owner is
+ * durable evidence for manual reconciliation, not permission to relaunch.
+ */
+export function inspectLaunchClaim(runDir, opts = {}) {
+  const root = resolve(runDir);
+  const dir = join(root, LAUNCH_CLAIM_DIR);
+  const file = join(dir, LAUNCH_CLAIM_FILE);
+  let dirStat;
+  try {
+    const rootStat = lstatSync(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return invalidLaunchClaim(file, "run directory must be a non-symlink directory");
+    dirStat = lstatSync(dir);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { ok: false, missing: true, reason: "missing launch claim", path: file, claim: null, owner_status: "absent" };
+    return invalidLaunchClaim(file, `launch claim directory is inaccessible: ${error.message}`);
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return invalidLaunchClaim(file, "launch claim directory must be a non-symlink directory");
+
+  let fd;
+  try {
+    fd = openSync(file, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
+    const fileStat = fstatSync(fd);
+    if (!fileStat.isFile()) return invalidLaunchClaim(file, "launch claim owner must be a regular file");
+    const claim = JSON.parse(readFileSync(fd, "utf8"));
+    const validation = validateLaunchClaim(claim, { ...opts, runDir: root });
+    if (!validation.ok) return { ...validation, missing: false, path: file, owner_status: "invalid", identity: claimIdentity(dirStat, fileStat) };
+    const ownerStatus = inspectClaimOwner(validation.claim, opts);
+    return {
+      ok: true,
+      missing: false,
+      reason: null,
+      path: file,
+      claim: validation.claim,
+      owner_status: ownerStatus,
+      identity: claimIdentity(dirStat, fileStat),
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") return invalidLaunchClaim(file, "launch claim directory is ownerless");
+    return invalidLaunchClaim(file, `invalid launch claim: ${error.message}`);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+export function validateLaunchClaim(claim, opts = {}) {
+  const errors = [];
+  if (!plainObject(claim)) return invalidClaim("launch claim must be a JSON object");
+  if (claim.schema_version !== LAUNCH_CLAIM_SCHEMA_VERSION) errors.push("schema_version must be 1");
+  if (claim.kind !== LAUNCH_CLAIM_KIND) errors.push("kind must be opencode-launch-claim");
+  if (!nonEmptyString(claim.run_id)) errors.push("run_id must be a non-empty string");
+  if (nonEmptyString(opts.runId) && claim.run_id !== opts.runId) errors.push("run_id must match requested run");
+  if (!nonEmptyString(claim.execution_id)) errors.push("execution_id must be a non-empty string");
+  if (!LAUNCH_KIND_SET.has(claim.launch_kind)) errors.push("launch_kind is invalid");
+  if (!LAUNCH_PHASE_SET.has(claim.phase)) errors.push("phase is invalid");
+  if (!positivePid(claim.pid)) errors.push("pid must be a positive integer");
+  if (!nonEmptyString(claim.hostname)) errors.push("hostname must be a non-empty string");
+  if (!validTimestamp(claim.acquired_at)) errors.push("acquired_at must be an ISO timestamp");
+  if (!plainObject(claim.identity)) errors.push("identity must be an object");
+  else {
+    for (const field of ["inspector", "start_marker", "command_name", "cwd"]) if (!nonEmptyString(claim.identity[field])) errors.push(`identity.${field} must be a non-empty string`);
+    if (nonEmptyString(claim.identity?.cwd) && !isAbsolute(claim.identity.cwd)) errors.push("identity.cwd must be absolute");
+  }
+  if (!(claim.approval === null || plainObject(claim.approval))) errors.push("approval must be null or an object");
+  if (!nonEmptyString(claim.nonce) || !/^[A-Za-z0-9_-]{16,128}$/u.test(claim.nonce)) errors.push("nonce must be an opaque safe token");
+  if (errors.length) return invalidClaim(`invalid launch claim: ${errors.join("; ")}`);
+  return { ok: true, reason: null, claim };
+}
+
+export function acquireLaunchClaim(runDir, input = {}, opts = {}) {
+  const root = resolve(runDir);
+  const dir = join(root, LAUNCH_CLAIM_DIR);
+  const file = join(dir, LAUNCH_CLAIM_FILE);
+  assertContainedLaunchPath(root, dir);
+  const existing = inspectLaunchClaim(root, { ...opts, runId: input.runId });
+  if (!existing.missing) return { acquired: false, ...existing };
+  const pid = positivePid(input.pid) ? input.pid : process.pid;
+  const cwd = resolve(input.cwd || process.cwd());
+  const inspected = inspectProcessForEvidence(pid, opts);
+  const verified = requireVerifiedProcessIdentity(inspected, cwd);
+  const claim = {
+    schema_version: LAUNCH_CLAIM_SCHEMA_VERSION,
+    kind: LAUNCH_CLAIM_KIND,
+    run_id: input.runId,
+    execution_id: input.executionId || randomUUID(),
+    launch_kind: input.launchKind,
+    phase: input.phase || "foreground-live",
+    pid,
+    hostname: input.hostname || hostname(),
+    acquired_at: timestamp(input.now),
+    identity: {
+      inspector: stringOrDefault(inspected.inspector, DEFAULT_INSPECTOR),
+      start_marker: verified.startMarker,
+      command_name: verified.commandName,
+      cwd,
+    },
+    approval: input.approval ?? null,
+    nonce: input.nonce || randomUUID(),
+  };
+  const validation = validateLaunchClaim(claim, { runId: input.runId });
+  if (!validation.ok) throw new Error(validation.reason);
+  try {
+    mkdirSync(dir);
+    const dirStat = lstatSync(dir);
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw new Error("launch claim directory identity is invalid");
+    writeFileSync(file, `${JSON.stringify(claim, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (error?.code === "EEXIST") return { acquired: false, ...inspectLaunchClaim(root, { ...opts, runId: input.runId }) };
+    try {
+      if (!existsSync(file)) rmSync(dir, { force: true });
+    } catch { /* preserve unexpected evidence */ }
+    throw error;
+  }
+  const observed = inspectLaunchClaim(root, { ...opts, runId: input.runId });
+  if (!observed.ok || observed.claim.nonce !== claim.nonce) throw new Error("launch claim publication could not be verified");
+  return { acquired: true, ...observed, token: claim.nonce };
+}
+
+export function transitionLaunchClaimPhase(runDir, nonce, phase, updates = {}, opts = {}) {
+  if (!LAUNCH_PHASE_SET.has(phase)) throw new Error("invalid launch claim phase");
+  const observed = inspectLaunchClaim(runDir, opts);
+  if (!observed.ok || observed.claim.nonce !== nonce) throw new Error("launch claim exact-token ownership mismatch");
+  if (opts.expectedPhase && observed.claim.phase !== opts.expectedPhase) throw new Error(`launch claim phase must be ${opts.expectedPhase}`);
+  const next = { ...observed.claim, ...updates, phase, nonce: observed.claim.nonce };
+  const validation = validateLaunchClaim(next, { runId: observed.claim.run_id });
+  if (!validation.ok) throw new Error(validation.reason);
+  replaceExactClaim(runDir, observed, next);
+  const confirmed = inspectLaunchClaim(runDir, { ...opts, runId: next.run_id });
+  if (!confirmed.ok || confirmed.claim.nonce !== nonce || confirmed.claim.phase !== phase) throw new Error("launch claim phase transition could not be verified");
+  return confirmed;
+}
+
+export function releaseLaunchClaim(runDir, nonce, opts = {}) {
+  const observed = inspectLaunchClaim(runDir, opts);
+  if (!observed.ok || observed.claim.nonce !== nonce) return false;
+  if (opts.expectedPhase && observed.claim.phase !== opts.expectedPhase) return false;
+  const dir = join(resolve(runDir), LAUNCH_CLAIM_DIR);
+  const quarantine = join(resolve(runDir), `.process-launch.lock-quarantine-${randomUUID()}`);
+  const before = lstatSync(dir);
+  if (before.dev !== observed.identity.dir.dev || before.ino !== observed.identity.dir.ino) return false;
+  renameSync(dir, quarantine);
+  const moved = inspectLaunchClaimAt(quarantine, { ...opts, runId: observed.claim.run_id });
+  if (!moved.ok || moved.claim.nonce !== nonce || moved.identity.dir.dev !== observed.identity.dir.dev || moved.identity.dir.ino !== observed.identity.dir.ino) {
+    throw new Error("launch claim cleanup identity changed");
+  }
+  rmSync(quarantine, { recursive: true, force: true });
+  return true;
+}
+
+export function inspectProcessEvidence(runDir, opts = {}) {
+  const read = readProcessEvidence(runDir, opts);
+  if (!read.ok) return read;
+  const logValidation = validateProcessLogEntry(runDir, read.evidence.log_ref);
+  if (!logValidation.ok) return { ok: false, missing: false, reason: logValidation.reason, path: read.path, evidence: read.evidence };
+  const verification = read.evidence.state === "running" ? verifyEvidenceProcess(read.evidence, opts) : null;
+  return { ...read, verification };
+}
+
 export function readProcessEvidence(runDir, opts = {}) {
   const file = processEvidencePath(runDir);
   if (!existsSync(file)) return { ok: false, missing: true, reason: "missing process evidence", path: file, evidence: null };
+  let fd;
   try {
-    const evidence = JSON.parse(readFileSync(file, "utf8"));
+    fd = openSync(file, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
+    if (!fstatSync(fd).isFile()) throw new Error("process evidence must be a regular file");
+    const evidence = JSON.parse(readFileSync(fd, "utf8"));
     const validation = validateProcessEvidence(evidence, { ...opts, runDir });
     if (!validation.ok) return { ok: false, missing: false, reason: validation.reason, path: file, evidence };
     return { ok: true, missing: false, reason: null, path: file, evidence: validation.evidence };
   } catch (error) {
     return { ok: false, missing: false, reason: `invalid process evidence: ${error.message}`, path: file, evidence: null };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -520,12 +698,122 @@ function failClosed(runId, reason, processRef, pid = null) {
   };
 }
 
+function invalidLaunchClaim(path, reason) {
+  return { ok: false, missing: false, reason, path, claim: null, owner_status: "invalid", identity: null };
+}
+
+function invalidClaim(reason) {
+  return { ok: false, reason, claim: null };
+}
+
+function claimIdentity(dirStat, fileStat) {
+  return {
+    dir: { dev: dirStat.dev, ino: dirStat.ino },
+    file: { dev: fileStat.dev, ino: fileStat.ino },
+  };
+}
+
+function inspectClaimOwner(claim, opts = {}) {
+  if (claim.hostname !== (opts.hostname || hostname())) return "indeterminate";
+  const expected = {
+    pid: claim.pid,
+    cwd: claim.identity.cwd,
+    identity: {
+      inspector: claim.identity.inspector,
+      start_marker: claim.identity.start_marker,
+      command_name: claim.identity.command_name,
+    },
+  };
+  const injected = resolveLegacyInspector(opts);
+  const verified = injected
+    ? verifyEvidenceProcess({ ...expected, identity: expected.identity }, opts)
+    : verifyProcessIdentity(expected, processVerificationOptions(opts));
+  if (verified.status === "live-and-matching") return "live";
+  if (verified.status === "absent") return "dead";
+  if (verified.status === "mismatched") return "mismatched";
+  return "indeterminate";
+}
+
+function assertContainedLaunchPath(runDir, candidate) {
+  const prefix = runDir.endsWith(sep) ? runDir : `${runDir}${sep}`;
+  if (!candidate.startsWith(prefix)) throw new Error("launch claim path escapes the run directory");
+  const runStat = lstatSync(runDir);
+  if (!runStat.isDirectory() || runStat.isSymbolicLink()) throw new Error("run directory must be a non-symlink directory");
+}
+
+function replaceExactClaim(runDir, observed, next) {
+  const root = resolve(runDir);
+  const dir = join(root, LAUNCH_CLAIM_DIR);
+  const file = join(dir, LAUNCH_CLAIM_FILE);
+  const dirStat = lstatSync(dir);
+  const fileStat = lstatSync(file);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory() || fileStat.isSymbolicLink() || !fileStat.isFile()) throw new Error("launch claim identity changed");
+  if (dirStat.dev !== observed.identity.dir.dev || dirStat.ino !== observed.identity.dir.ino || fileStat.dev !== observed.identity.file.dev || fileStat.ino !== observed.identity.file.ino) {
+    throw new Error("launch claim identity changed");
+  }
+  const temp = join(dir, `.owner-${randomUUID()}.tmp`);
+  writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  try {
+    const current = inspectLaunchClaim(root, { runId: next.run_id });
+    if (!current.ok || current.claim.nonce !== observed.claim.nonce || current.identity.file.dev !== observed.identity.file.dev || current.identity.file.ino !== observed.identity.file.ino) {
+      throw new Error("launch claim identity changed before phase transition");
+    }
+    renameSync(temp, file);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function inspectLaunchClaimAt(dir, opts = {}) {
+  const runDir = dirnameForClaimDir(dir);
+  if (basename(dir) === LAUNCH_CLAIM_DIR) return inspectLaunchClaim(runDir, opts);
+  const file = join(dir, LAUNCH_CLAIM_FILE);
+  let fd;
+  try {
+    const dirStat = lstatSync(dir);
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return invalidLaunchClaim(file, "launch claim quarantine is invalid");
+    fd = openSync(file, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
+    const fileStat = fstatSync(fd);
+    if (!fileStat.isFile()) return invalidLaunchClaim(file, "launch claim owner must be regular");
+    const claim = JSON.parse(readFileSync(fd, "utf8"));
+    const validation = validateLaunchClaim(claim, opts);
+    if (!validation.ok) return invalidLaunchClaim(file, validation.reason);
+    return { ok: true, claim, identity: claimIdentity(dirStat, fileStat) };
+  } catch (error) {
+    return invalidLaunchClaim(file, error.message);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function dirnameForClaimDir(dir) {
+  const normalized = resolve(dir);
+  return normalized.slice(0, normalized.lastIndexOf(sep)) || sep;
+}
+
 function validProcessLogRef(ref) {
   if (!nonEmptyString(ref) || isAbsolute(ref) || ref.includes("\\") || ref.includes("\0")) return false;
   const normalized = normalize(ref).replaceAll(sep, "/");
   if (normalized === "." || normalized.startsWith("../") || normalized === "..") return false;
   if (!normalized.startsWith("processes/")) return false;
   return basename(normalized).length > 0 && normalized !== "processes";
+}
+
+function validateProcessLogEntry(runDir, ref) {
+  try {
+    const root = resolve(runDir);
+    const processes = join(root, "processes");
+    const log = resolve(root, ref);
+    const prefix = processes.endsWith(sep) ? processes : `${processes}${sep}`;
+    if (!log.startsWith(prefix)) return { ok: false, reason: "process log escapes processes/" };
+    const processesStat = lstatSync(processes);
+    const logStat = lstatSync(log);
+    if (!processesStat.isDirectory() || processesStat.isSymbolicLink()) return { ok: false, reason: "processes directory must be a non-symlink directory" };
+    if (!logStat.isFile() || logStat.isSymbolicLink()) return { ok: false, reason: "process log must be a non-symlink regular file" };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: `process log is inaccessible: ${error.message}` };
+  }
 }
 
 function normalizeCommandName(value) {

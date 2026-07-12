@@ -409,12 +409,21 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
   const nextGate = normalizeGateDecision(gateName, gate, options);
   const answerArchives = [];
   const result = await withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    if (nextGate.status === "approved" && current.gates?.[gateName]?.status === "approved") {
+      return reconcileApprovedGateRedelivery(runDir, current, gateName, nextGate, options);
+    }
     return transitionRunJsonLocked(
       runDir,
       (draft) => {
         if (nextGate.status === "approved") consumeSteeringBoundary(draft, "gate", options.boundaryToken);
         draft.gates = normalizeGateMap(draft.gates);
-        draft.gates[gateName] = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, (archive) => answerArchives.push(archive));
+        const prepared = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, (archive) => answerArchives.push(archive));
+        if (nextGate.status === "approved" && draft.mode === "interactive") {
+          prepared.handoff_receipt = createApprovalHandoffReceipt(runDir, gateName, prepared, draft);
+        }
+        delete prepared._handoff_answer_hash;
+        draft.gates[gateName] = prepared;
       },
       options,
       { authorizedGate: gateName, beforeWrite: async () => {
@@ -423,6 +432,42 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
     );
   }, options);
   return { ...result, gate: gateName };
+}
+
+export function inspectApprovalHandoffReceipt(runDir, run, gateName) {
+  const gate = run?.gates?.[gateName];
+  if (!isRecord(gate?.handoff_receipt)) return { ok: false, reason_code: "approval-receipt-missing" };
+  const receipt = gate.handoff_receipt;
+  try {
+    validateApprovalReceiptMaterial(receipt, gateName);
+  } catch {
+    return { ok: false, reason_code: "approval-receipt-missing" };
+  }
+  if (!isRecord(gate.pending_snapshot) || receipt.pending_snapshot_hash !== hashValue(gate.pending_snapshot)) {
+    return { ok: false, reason_code: "approval-snapshot-mismatch" };
+  }
+  try {
+    const fresh = createPendingGateSnapshot(
+      runDir,
+      gateName,
+      gate.pending_snapshot.artifact_ref,
+      gate.pending_snapshot.question_ref,
+      gate.pending_snapshot.created_at,
+      gate.pending_snapshot.answer_ref,
+    );
+    // The pending answer was archived on acceptance, so only immutable question
+    // and artifact fields are refreshed here.
+    for (const field of ["question_ref", "question_hash", "artifact_ref", "artifact_hash", "created_at"]) {
+      if (fresh[field] !== gate.pending_snapshot[field]) return { ok: false, reason_code: "approval-snapshot-mismatch" };
+    }
+  } catch {
+    return { ok: false, reason_code: "approval-snapshot-mismatch" };
+  }
+  if (receipt.answer_hash !== approvedAnswerHash(runDir, gate)) return { ok: false, reason_code: "approval-snapshot-mismatch" };
+  if (receipt.approval_fingerprint !== approvalFingerprint(gateName, gate, receipt)) return { ok: false, reason_code: "approval-snapshot-mismatch" };
+  if (receipt.steering_generation !== steeringGeneration(run)) return { ok: false, reason_code: "steering-generation-mismatch" };
+  if (!cleanSteeringForHandoff(run.steering)) return { ok: false, reason_code: "steering-state-not-clean" };
+  return { ok: true, receipt: cloneJson(receipt) };
 }
 
 export async function transitionSteeringQueued(runDir, message, options = {}) {
@@ -1279,7 +1324,7 @@ function prepareGateDecisionTransition(runDir, gateName, currentGate, gate, onAn
     onAnswerArchive?.(decision.archive);
     nextGate.answer_ref = decision.archive.toRef;
   }
-  return { ...nextGate, answer: decision.answer, pending_snapshot: cloneJson(currentGate.pending_snapshot) };
+  return { ...nextGate, answer: decision.answer, pending_snapshot: cloneJson(currentGate.pending_snapshot), _handoff_answer_hash: decision.answerHash };
 }
 
 function preparePendingGateDecision(runDir, gateName, gate) {
@@ -1350,12 +1395,104 @@ function assertPendingSnapshotMatches(gateName, actual, expected, label) {
   if (!stringValue(actual?.created_at)) throw new Error(`gate '${gateName}' ${label} created_at is missing`);
 }
 
+function createApprovalHandoffReceipt(_runDir, gateName, gate, run) {
+  const acceptedAt = gate.answered_at;
+  const receipt = {
+    schema_version: 1,
+    kind: "interactive-approval-handoff",
+    gate: gateName,
+    approval_fingerprint: "",
+    pending_snapshot_hash: hashValue(gate.pending_snapshot),
+    answer_hash: gate._handoff_answer_hash,
+    steering_generation: steeringGeneration(run),
+    accepted_at: acceptedAt,
+  };
+  receipt.approval_fingerprint = approvalFingerprint(gateName, gate, receipt);
+  return receipt;
+}
+
+function approvalFingerprint(gateName, gate, receipt) {
+  return hashValue({
+    gate: gateName,
+    status: gate.status,
+    artifact: gate.artifact,
+    question_ref: gate.question_ref,
+    answer_ref: gate.answer_ref || null,
+    answer: gate.answer,
+    approval_source: gate.approval_source,
+    decision_note: gate.decision_note || null,
+    answered_at: gate.answered_at,
+    pending_snapshot_hash: receipt.pending_snapshot_hash,
+    answer_hash: receipt.answer_hash,
+    steering_generation: receipt.steering_generation,
+    accepted_at: receipt.accepted_at,
+  });
+}
+
+function approvedAnswerHash(runDir, gate) {
+  if (stringValue(gate.answer_ref)) {
+    try { return hashFile(resolveGateRef(runDir, gate.answer_ref).path, { mode: "raw" }); } catch { return null; }
+  }
+  return hashValue(gate.answer);
+}
+
+function validateApprovalReceiptMaterial(receipt, gateName) {
+  if (receipt.schema_version !== 1 || receipt.kind !== "interactive-approval-handoff" || receipt.gate !== gateName) throw new Error("invalid receipt identity");
+  for (const field of ["approval_fingerprint", "pending_snapshot_hash", "answer_hash"]) {
+    if (typeof receipt[field] !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(receipt[field])) throw new Error(`invalid receipt ${field}`);
+  }
+  if (!Number.isInteger(receipt.steering_generation) || receipt.steering_generation < 0) throw new Error("invalid receipt steering generation");
+  if (!stringValue(receipt.accepted_at) || !Number.isFinite(Date.parse(receipt.accepted_at))) throw new Error("invalid receipt accepted_at");
+}
+
+function cleanSteeringForHandoff(steering) {
+  if (steering === undefined || steering === null) return true;
+  if (!isRecord(steering)) return false;
+  return !isRecord(steering.pending)
+    && !isRecord(steering.uncheckpointed)
+    && !isRecord(steering.boundary)
+    && !isRecord(steering.action_claim)
+    && !isRecord(steering.pr_fence);
+}
+
+function reconcileApprovedGateRedelivery(runDir, run, gateName, requested, options = {}) {
+  const approved = run.gates[gateName];
+  const receiptCheck = inspectApprovalHandoffReceipt(runDir, run, gateName);
+  if (!receiptCheck.ok) throw handoffReceiptError(receiptCheck.reason_code);
+  const same = requested.status === "approved"
+    && requested.artifact === approved.artifact
+    && requested.question_ref === approved.question_ref
+    && requested.approval_source === approved.approval_source
+    && (requested.decision_note || null) === (approved.decision_note || null)
+    && (!stringValue(options.answeredAt) || requested.answered_at === approved.answered_at)
+    && exactRedeliveredAnswer(runDir, requested, approved, receiptCheck.receipt);
+  if (!same) throw handoffReceiptError("approval-snapshot-mismatch");
+  return { updated: false, reason: "redelivered-approved", status: run.status, run };
+}
+
+function exactRedeliveredAnswer(runDir, requested, approved, receipt) {
+  if (stringValue(requested.answer)) return normalizeGateAnswer(receipt.gate, requested.answer) === approved.answer && hashValue(approved.answer) === receipt.answer_hash;
+  if (!stringValue(requested.answer_ref) || requested.answer_ref !== approved.pending_snapshot?.answer_ref) return false;
+  // The ingress file is expected to have moved to the archived approved ref.
+  return approvedAnswerHash(runDir, approved) === receipt.answer_hash;
+}
+
+function handoffReceiptError(code) {
+  const error = new Error(code);
+  error.handoffCode = code;
+  return error;
+}
+
 function readGateDecisionAnswer(runDir, gateName, gate) {
-  if (stringValue(gate.answer)) return { answer: normalizeGateAnswer(gateName, String(gate.answer).trim()), archive: null };
+  if (stringValue(gate.answer)) {
+    const answer = normalizeGateAnswer(gateName, String(gate.answer).trim());
+    return { answer, answerHash: hashValue(answer), archive: null };
+  }
   const answerRef = requireNonEmptyString(gate.answer_ref, "answer_ref");
   const answer = readGateDecisionAnswerRef(runDir, gateName, answerRef);
   return {
     answer: normalizeGateAnswer(gateName, answer.text),
+    answerHash: hashFile(answer.path, { mode: "raw" }),
     archive: nextConsumedGateAnswer(runDir, answerRef, answer.path),
   };
 }

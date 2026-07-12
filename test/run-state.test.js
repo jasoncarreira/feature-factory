@@ -6,6 +6,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   heartbeatOnce,
+  inspectApprovalHandoffReceipt,
   mutateRunJsonLocked,
   transitionCostUsage,
   transitionGateDecision,
@@ -49,6 +50,35 @@ describe("simplified run-state transitions", () => {
 
       assert.equal(result.run.gates.story.status, "approved");
       assert.equal(result.run.gates.story.approval_source, "external-driver");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("persists an interactive receipt and exactly redelivers approval without a second boundary", async () => {
+    const fixture = createFixture("interactive-redelivery");
+    try {
+      writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), mode: "interactive" });
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer_ref: "gates/story.answer",
+      });
+      writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
+      const decision = {
+        status: "approved",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer_ref: "gates/story.answer",
+      };
+      const accepted = await approveGateDecision(fixture.runDir, "story", decision, { now: NOW });
+      assert.equal(inspectApprovalHandoffReceipt(fixture.runDir, accepted.run, "story").ok, true);
+
+      const redelivered = await transitionGateDecision(fixture.runDir, "story", decision, { now: "2026-07-08T12:01:00.000Z" });
+      assert.equal(redelivered.updated, false);
+      assert.equal(redelivered.reason, "redelivered-approved");
+      assert.equal(redelivered.run.gates.story.handoff_receipt.kind, "interactive-approval-handoff");
     } finally {
       cleanup(fixture.repo);
     }

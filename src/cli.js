@@ -5,18 +5,18 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
 import { canonicalizeGithubPrUrl } from "./refs.js";
-import { normalizePrNumber as normalizeTransitionPrNumber, transitionGateDecision, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { normalizePrNumber as normalizeTransitionPrNumber, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
-import { printCliResult, projectCostReport, renderCliPath } from "./cli-output.js";
+import { printCliResult, projectCliData, projectCostReport, renderCliPath } from "./cli-output.js";
 import { freeformSegment, identitySegment, renderErrorForTerminal, renderTerminalSegments, StructuredOutputError, TRUSTED_SEGMENTS } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
@@ -637,7 +637,15 @@ async function gateDecision(args) {
   if (stringValue(opts.decisionNote)) decision.decision_note = opts.decisionNote;
   if (stringValue(opts.answeredAt)) decision.answered_at = opts.answeredAt;
 
-  return print(await transitionGateDecision(resolveRunDir(runId, opts), gate, decision, opts), opts);
+  const result = await transitionGateDecisionAndHandoff(resolveRunDir(runId, opts), gate, decision, opts);
+  if (opts.json && typeof result.handoff?.log === "string" && /^processes\/[A-Za-z0-9._-]+\.log$/u.test(result.handoff.log)) {
+    const projected = projectCliData(result);
+    projected.handoff.log = result.handoff.log;
+    console.log(serializeTerminalJson(projected, { space: 2 }));
+  } else {
+    print(result, opts);
+  }
+  if (result.handoff?.status === "recovery-required") process.exitCode = 2;
 }
 
 async function slicesSeed(args) {

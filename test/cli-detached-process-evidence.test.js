@@ -17,7 +17,7 @@ describe("cli detached process evidence", () => {
 
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
-      assert.equal(output.status, "started");
+      assert.equal(output.status, "started", proc.stdout);
       assert.equal(existsSync(join(repo, ".opencode", "factory", "process.json")), false);
       assert.equal(existsSync(join(repo, ".opencode", "factory", "processes")), true);
       stopProcess(output.pid);
@@ -76,7 +76,7 @@ describe("cli detached process evidence", () => {
 
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
-      assert.equal(output.status, "started");
+      assert.equal(output.status, "started", proc.stdout);
       const processEvidencePath = join(runDir, "process.json");
       assert.equal(existsSync(processEvidencePath), true);
       const processEvidence = JSON.parse(readFileSync(processEvidencePath, "utf8"));
@@ -130,5 +130,13 @@ function stopProcess(pid) {
 }
 
 function cleanup(path) {
-  rmSync(path, { recursive: true, force: true });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error?.code !== "ENOTEMPTY" || attempt === 19) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
 }

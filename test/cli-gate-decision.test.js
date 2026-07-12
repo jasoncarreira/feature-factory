@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync as runSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,43 @@ import { join } from "node:path";
 const CLI = new URL("../src/cli.js", import.meta.url).pathname;
 
 describe("cli gate-decision", () => {
+  it("returns the exact started envelope after interactive approval readiness", () => {
+    const fixture = createFixture("cli-interactive-handoff", { interactive: true });
+    const bin = installFakeOpencode(fixture.repo);
+    let pid;
+    try {
+      let proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--json"], bin);
+      assert.equal(proc.status, 0, proc.stderr);
+      const boundary = openBoundary(fixture, "gate", bin);
+      proc = runCli(fixture.repo, ["factory", "gate-decision", fixture.runId, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer", "approve", "--boundary-token", boundary.token, "--json"], bin);
+      assert.equal(proc.status, 0, proc.stderr);
+      const output = JSON.parse(proc.stdout);
+      pid = output.handoff.pid;
+      assert.deepEqual(output.handoff, {
+        automatic: true,
+        status: "started",
+        run_id: fixture.runId,
+        gate: "story",
+        reason_code: "detached-shepherd-started",
+        reason: "Detached interactive shepherd started.",
+        action: "watch",
+        action_command: `feature-factory factory watch ${fixture.runId}`,
+        pid,
+        process_ref: "process.json",
+        launch_claim_ref: null,
+        log: JSON.parse(readFileSync(join(fixture.runDir, "process.json"), "utf8")).log_ref,
+        status_command: `feature-factory factory status ${fixture.runId} --json`,
+        watch_command: `feature-factory factory watch ${fixture.runId}`,
+        recovery_command: null,
+      });
+      assert.equal(output.gate_accepted, true);
+      assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false);
+    } finally {
+      if (pid) try { process.kill(pid, "SIGTERM"); } catch { /* already exited */ }
+      cleanup(fixture.repo);
+    }
+  });
+
   it("approves with external-driver answer refs", () => {
     const fixture = createFixture("cli-gate");
     try {
@@ -137,25 +174,42 @@ describe("cli gate-decision", () => {
   });
 });
 
-function createFixture(runId) {
+function createFixture(runId, options = {}) {
   const repo = mkdtempSync(join(tmpdir(), "cli-gate-simplified-"));
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "gates"), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
   writeFileSync(join(runDir, "gates", "story.question.md"), "approve?\n");
-  writeJson(join(runDir, "run.json"), { schema_version: 1, run_id: runId, status: "running", gates: {} });
+  const run = { schema_version: 1, run_id: runId, status: "running", gates: {} };
+  if (options.interactive) {
+    run.mode = "interactive";
+    run.worktree = join(repo, ".opencode", "worktrees", runId);
+    run.branch = runId;
+    run.slices = [{ id: "slice", status: "pending", attempts: 0 }];
+    mkdirSync(run.worktree, { recursive: true });
+  }
+  writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId };
 }
 
-function runCli(repo, args) {
-  return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8" });
+function runCli(repo, args, bin) {
+  return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: bin ? { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` } : process.env });
 }
 
-function openBoundary(fixture, kind) {
-  const proc = runCli(fixture.repo, ["factory", "boundary-open", fixture.runId, kind, "--json"]);
+function openBoundary(fixture, kind, bin) {
+  const proc = runCli(fixture.repo, ["factory", "boundary-open", fixture.runId, kind, "--json"], bin);
   assert.equal(proc.status, 0, proc.stderr);
   return JSON.parse(proc.stdout).boundary;
+}
+
+function installFakeOpencode(repo) {
+  const bin = join(repo, "bin");
+  mkdirSync(bin, { recursive: true });
+  const script = join(bin, "opencode");
+  writeFileSync(script, "#!/usr/bin/env node\nsetTimeout(() => {}, 30000);\n", "utf8");
+  chmodSync(script, 0o755);
+  return bin;
 }
 
 function readJson(file) {
@@ -167,5 +221,13 @@ function writeJson(file, value) {
 }
 
 function cleanup(repo) {
-  rmSync(repo, { recursive: true, force: true });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      rmSync(repo, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error?.code !== "ENOTEMPTY" || attempt === 19) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
 }
