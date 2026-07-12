@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export const GITHUB_LIMITS = Object.freeze({
   switch: Object.freeze({ timeoutMs: 10_000, stdoutCap: 16 * 1024, stderrCap: 16 * 1024 }),
@@ -16,7 +16,13 @@ const CHECK_PASS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 const CHECK_RED = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const HTTP_TRANSIENT = new Set([408, 429, 500, 502, 503, 504]);
 const TEST_PREFIXES = ["test/", ".github/workflows/"];
+const UNSAFE_RUNTIME_PATHS = new Set([
+  "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+  ".nvmrc", ".node-version", ".npmrc", ".yarnrc", ".yarnrc.yml", "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+]);
 const STACK_ROUTES = Object.freeze({ backend: "backend-builder", frontend: "frontend-builder" });
+const OWNERSHIP_REASONS = new Set(["review-changes-requested", "check-owner-ambiguous", "check-owner-conflict", "changed-files-incomplete",
+  "unsafe-path-or-change", "check-file-conflict", "unknown-slice-stack", "path-owner-ambiguous", "integration-fallback", "check-slice-id", "changed-files"]);
 
 export class PostPrCiError extends Error {
   constructor(errorClass, message, options = {}) {
@@ -26,6 +32,7 @@ export class PostPrCiError extends Error {
     this.transient = Boolean(options.transient);
     this.rateLimited = Boolean(options.rateLimited);
     this.exitCode = Number.isInteger(options.exitCode) ? options.exitCode : null;
+    this.retryAfterMs = Number.isInteger(options.retryAfterMs) && options.retryAfterMs >= 0 ? options.retryAfterMs : 0;
   }
 }
 
@@ -66,14 +73,15 @@ export function normalizeChecks(entries, options = {}) {
 }
 
 export function normalizeReview(input = {}) {
-  const reviews = input.reviews ?? [];
+  const reviews = input.reviews === undefined ? [] : input.reviews;
   if (!Array.isArray(reviews)) throw protocol("reviews must be an array");
   if (reviews.length > 200) throw protocol("reviews exceeds 200 entries");
+  if (input.isDraft !== undefined && typeof input.isDraft !== "boolean") throw protocol("isDraft must be a boolean");
   const expectedHeadSha = fullSha(input.expectedHeadSha, "expectedHeadSha");
   const reviewerLogin = optionalLogin(input.reviewerLogin);
   const required = Boolean(input.required || reviewerLogin);
   const latest = latestApplicableReviews(reviews, expectedHeadSha);
-  const changeRequest = [...latest.values()].find((review) => review.state === "CHANGES_REQUESTED");
+  const changeRequest = [...latest.values()].filter((review) => review.state === "CHANGES_REQUESTED").sort(compareReviewLatest)[0];
   if (changeRequest) return { verdict: "red", review: safeReview(changeRequest) };
   if (input.isDraft) return { verdict: "not_required", review: null };
   if (reviewerLogin) {
@@ -82,8 +90,9 @@ export function normalizeReview(input = {}) {
       ? { verdict: "pass", review: safeReview(configured) }
       : { verdict: "pending", review: null };
   }
-  if (!required) return { verdict: "not_required", review: null };
   const decision = upper(input.reviewDecision);
+  if (input.reviewDecision != null && !["CHANGES_REQUESTED", "APPROVED", "REVIEW_REQUIRED"].includes(decision)) return { verdict: "indeterminate", review: null };
+  if (!required) return { verdict: "not_required", review: null };
   if (decision === "CHANGES_REQUESTED") return { verdict: "red", review: null };
   if (decision === "APPROVED") return { verdict: "pass", review: null };
   if (decision === "REVIEW_REQUIRED" || input.reviewDecision == null) return { verdict: "pending", review: null };
@@ -110,21 +119,27 @@ export function aggregateObservation(input) {
 
 export function normalizePullRequestResponse(response, options) {
   if (!response || typeof response !== "object" || Array.isArray(response)) throw protocol("PR response must be an object");
+  if (typeof response.isDraft !== "boolean") throw protocol("isDraft must be a boolean");
+  const state = upper(response.state);
+  if (!["OPEN", "CLOSED", "MERGED"].includes(state)) throw protocol("PR state is invalid");
+  if (!(response.reviewDecision === null || ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"].includes(upper(response.reviewDecision)))) {
+    throw protocol("reviewDecision is invalid");
+  }
   const started = timeMs(options.startedAt, "startedAt");
   const now = timeMs(options.now, "now");
-  const checks = normalizeChecks(response.statusCheckRollup ?? [], {
+  const checks = normalizeChecks(response.statusCheckRollup, {
     elapsedMs: Math.max(0, now - started), graceMs: options.checkStartGraceMs,
   });
   const review = normalizeReview({
-    reviews: response.reviews ?? [], reviewDecision: response.reviewDecision,
+    reviews: response.reviews, reviewDecision: response.reviewDecision,
     reviewerLogin: options.reviewerLogin, required: options.reviewRequired,
-    expectedHeadSha: options.expectedHeadSha, isDraft: Boolean(response.isDraft),
+    expectedHeadSha: options.expectedHeadSha, isDraft: response.isDraft,
   });
   return {
-    head_sha: fullSha(response.headRefOid, "headRefOid"), state: upper(response.state), is_draft: Boolean(response.isDraft),
+    head_sha: fullSha(response.headRefOid, "headRefOid"), state, is_draft: response.isDraft,
     checks, review,
     aggregate: aggregateObservation({ expectedHeadSha: options.expectedHeadSha, headRefOid: response.headRefOid,
-      state: response.state, isDraft: response.isDraft, checkVerdict: checks.verdict, reviewVerdict: review.verdict }),
+      state, isDraft: response.isDraft, checkVerdict: checks.verdict, reviewVerdict: review.verdict }),
   };
 }
 
@@ -132,11 +147,11 @@ export function decideObservationSchedule(input) {
   const now = timeMs(input.now, "now");
   const deadline = timeMs(input.deadlineAt, "deadlineAt");
   if (now >= deadline) return { action: "block", reason: "deadline", next_poll_at: null };
-  if (input.changed) return schedule(now, deadline, positiveInteger(input.initialPollMs, "initialPollMs"), 0);
+  if (input.changed) return { ...schedule(now, deadline, positiveInteger(input.initialPollMs, "initialPollMs"), 0), consecutive_transient_errors: 0, last_error: null };
   const previous = positiveInteger(input.currentIntervalMs, "currentIntervalMs");
   const maximum = positiveInteger(input.maxPollMs, "maxPollMs");
   const backedOff = Math.ceil((previous * 1.5) / 1000) * 1000;
-  return schedule(now, deadline, Math.min(maximum, backedOff), nonNegativeInteger(input.unchangedCount ?? 0, "unchangedCount") + 1);
+  return { ...schedule(now, deadline, Math.min(maximum, backedOff), nonNegativeInteger(input.unchangedCount ?? 0, "unchangedCount") + 1), consecutive_transient_errors: 0, last_error: null };
 }
 
 export function decideTransientSchedule(input) {
@@ -149,7 +164,29 @@ export function decideTransientSchedule(input) {
   const ordinary = Math.min(600_000, 60_000 * (2 ** Math.min(count - 1, 4)));
   const retryAfter = nonNegativeInteger(input.retryAfterMs ?? 0, "retryAfterMs");
   const delay = input.rateLimited ? Math.max(600_000, retryAfter) : Math.max(ordinary, retryAfter);
-  return schedule(now, deadline, delay, input.unchangedCount ?? 0);
+  return { ...schedule(now, deadline, delay, input.unchangedCount ?? 0), consecutive_transient_errors: count };
+}
+
+export function parseRetryDelay(headers, now = Date.now()) {
+  const normalized = normalizeHeaders(headers);
+  const current = timeMs(now, "now");
+  const candidates = [];
+  const retryAfter = normalized.get("retry-after");
+  if (retryAfter !== undefined) {
+    if (/^\d+$/u.test(retryAfter)) candidates.push(Number(retryAfter) * 1000);
+    else {
+      const parsed = Date.parse(retryAfter);
+      if (!Number.isFinite(parsed)) throw protocol("Retry-After header is invalid");
+      candidates.push(Math.max(0, parsed - current));
+    }
+  }
+  const reset = normalized.get("x-ratelimit-reset");
+  if (reset !== undefined) {
+    if (!/^\d+$/u.test(reset)) throw protocol("X-RateLimit-Reset header is invalid");
+    candidates.push(Math.max(0, (Number(reset) * 1000) - current));
+  }
+  if (candidates.some((value) => !Number.isSafeInteger(value))) throw protocol("retry delay is invalid");
+  return candidates.length ? Math.max(...candidates) : 0;
 }
 
 export function isPollDue(nextPollAt, now) {
@@ -187,29 +224,37 @@ export function classifyOwnership(input) {
   if (input.reviewVerdict === "red") return unsafe("review-changes-requested");
   const failingNames = (input.failingCheckNames ?? []).map((name) => rawMetadata(name));
   const nameOwners = failingNames.map((name) => sliceIdsInName(name, slices));
-  if (nameOwners.length && nameOwners.every((owners) => owners.length === 1)) {
-    const ids = new Set(nameOwners.map(([id]) => id));
-    if (ids.size === 1) return routeSlice(slices.find((slice) => slice.id === [...ids][0]), "check-slice-id");
-    return unsafe("check-owner-conflict");
-  }
+  if (nameOwners.some((owners) => owners.length > 1)) return unsafe("check-owner-ambiguous");
+  const namedIds = new Set(nameOwners.flat());
+  if (namedIds.size > 1) return unsafe("check-owner-conflict");
   if (input.complete === false || input.invalid === true) return unsafe("changed-files-incomplete");
   const paths = (input.paths ?? []).map(normalizeRepositoryPath);
+  if (paths.some(isUnsafeRuntimePath) || hasUnsafeChanges(input)) return unsafe("unsafe-path-or-change");
+  if (nameOwners.length && nameOwners.every((owners) => owners.length === 1)) {
+    const ids = new Set(nameOwners.map(([id]) => id));
+    if (ids.size === 1) {
+      const slice = slices.find((candidate) => candidate.id === [...ids][0]);
+      if (paths.length && paths.some((path) => !sliceOwnsPath(slice, path))) return unsafe("check-file-conflict");
+      return routeSlice(slice, "check-slice-id", paths);
+    }
+    return unsafe("check-owner-conflict");
+  }
   if (paths.length) {
     const owners = paths.map((path) => slices.filter((slice) => sliceOwnsPath(slice, path)).map((slice) => slice.id));
     if (owners.every((matches) => matches.length === 1) && new Set(owners.map(([id]) => id)).size === 1) {
       const slice = slices.find((candidate) => candidate.id === owners[0][0]);
       if (nameOwners.some((matches) => matches.length && !matches.includes(slice.id))) return unsafe("check-file-conflict");
-      return { ...routeSlice(slice, "changed-files"), path: [...paths].sort()[0] };
+      return routeSlice(slice, "changed-files", paths);
     }
-    if (paths.every(isTestLanePath) && nameOwners.every((matches) => matches.length === 0)) return integration();
+    if (paths.every(isTestLanePath) && nameOwners.every((matches) => matches.length === 0)) return integration(paths);
     return unsafe("path-owner-ambiguous");
   }
-  return nameOwners.every((matches) => matches.length === 0) ? integration() : unsafe("check-owner-ambiguous");
+  return nameOwners.every((matches) => matches.length === 0) ? integration(paths) : unsafe("check-owner-ambiguous");
 }
 
 export function validateLane(input) {
   const paths = (input.paths ?? []).map(normalizeRepositoryPath);
-  if (input.hasRename || input.hasDelete || input.hasGenerated || input.hasSymlink) return { ok: false, reason: "unsafe-change-kind" };
+  if (hasUnsafeChanges(input) || paths.some(isUnsafeRuntimePath)) return { ok: false, reason: "unsafe-change-kind" };
   if (input.lane === "test") return paths.every(isTestLanePath) ? { ok: true } : { ok: false, reason: "path-outside-test-lane" };
   if (input.lane !== "slice" || !input.slice) return { ok: false, reason: "invalid-lane" };
   const slice = validateSlices([input.slice])[0];
@@ -217,20 +262,25 @@ export function validateLane(input) {
 }
 
 export function buildFailureEvidenceInput(input) {
-  const failing = (input.failingChecks ?? []).map((check) => ({
-    name: check.name?.trust ? check.name : encodeUntrustedMetadata(String(check.name)), verdict: "red",
-  })).sort((a, b) => a.name.display.localeCompare(b.name.display));
+  const failing = (input.failingChecks ?? []).map((check) => {
+    if (!check || check.verdict !== undefined && check.verdict !== "red") throw protocol("failing check verdict is invalid");
+    return { name: canonicalMetadata(check?.name), verdict: "red" };
+  }).sort((a, b) => compareBytes(a.name.value_b64url, b.name.value_b64url));
   const repository = validRepository(input.repository);
   const prNumber = positiveInteger(input.prNumber, "prNumber");
   const canonicalPrUrl = `https://github.com/${repository}/pull/${prNumber}`;
   if (input.prUrl !== canonicalPrUrl) throw new Error("prUrl must match canonical PR identity");
+  const review = canonicalEvidenceReview(input.review);
+  const ownership = canonicalEvidenceOwnership(input.ownership);
+  if (!failing.length && review === null) throw protocol("failure evidence requires a red check or review");
+  if (review !== null && ownership.disposition !== "needs-human") throw protocol("review-red evidence cannot have a remediation route");
   const evidence = {
     schema_version: 1, kind: "post-pr-ci-failure", run_id: String(input.runId), attempt: positiveInteger(input.attempt, "attempt"),
     source: "github", verdict: "red", observed_at: new Date(timeMs(input.observedAt, "observedAt")).toISOString(),
     pr: { url: canonicalPrUrl, number: prNumber, repository },
     expected_head_sha: fullSha(input.expectedHeadSha, "expectedHeadSha"), observed_head_sha: fullSha(input.observedHeadSha, "observedHeadSha"),
-    failing_checks: failing, review: input.review ?? null, primary_failure: failing.length ? "check-red" : "review-red",
-    ownership: input.ownership, command: { program: "gh", args: ["pr", "view", String(prNumber), "--repo", repository, "--json", "headRefOid,isDraft,reviewDecision,reviews,state,statusCheckRollup"], exit_code: Number.isInteger(input.exitCode) ? input.exitCode : 0 },
+    failing_checks: failing, review, primary_failure: review !== null ? "review-red" : "check-red",
+    ownership, command: { program: "gh", args: ["pr", "view", String(prNumber), "--repo", repository, "--json", "headRefOid,isDraft,reviewDecision,reviews,state,statusCheckRollup"], exit_code: nonNegativeInteger(input.exitCode ?? 0, "exitCode") },
   };
   return { ...evidence, failure_fingerprint: `sha256:${createHash("sha256").update(stableJson(evidence)).digest("hex")}` };
 }
@@ -246,7 +296,7 @@ export async function runGitHubOperation(input) {
     requireSuccessful(switched, "account-switch");
     const result = await execute({ ...common, args: [...input.args], ...(input.limits ?? GITHUB_LIMITS.verdict) });
     requireSuccessful(result, "operation");
-    return result;
+    return { exitCode: result.exitCode, signal: result.signal ?? null, stdout: result.stdout ?? "" };
   }, input.lockOptions);
 }
 
@@ -266,19 +316,27 @@ export async function requestReviewer(input) {
 
 export async function fetchChangedFiles(input) {
   const identity = checkedIdentity(input.repository, input.prNumber);
-  const paths = [];
+  const paths = []; const changes = [];
   for (let page = 1; page <= 3; page += 1) {
     const endpoint = `repos/${identity.repository}/pulls/${identity.number}/files?per_page=100&page=${page}`;
     const result = await runGitHubOperation({ ...input, args: ["api", "--include", endpoint], limits: GITHUB_LIMITS.ownershipPage });
-    const body = parseIncludedArray(result.stdout);
+    const included = parseIncludedArray(result.stdout);
+    const body = included.body;
+    if (body.length > 100) throw protocol("changed-file page exceeds 100 entries");
     for (const file of body) {
       if (!file || typeof file !== "object") throw protocol("changed-file entry must be an object");
-      paths.push(normalizeRepositoryPath(file.filename));
-      if (file.previous_filename !== undefined) paths.push(normalizeRepositoryPath(file.previous_filename));
+      const path = normalizeRepositoryPath(file.filename);
+      const previousPath = file.previous_filename === undefined ? null : normalizeRepositoryPath(file.previous_filename);
+      const status = typeof file.status === "string" ? file.status.toLowerCase() : null;
+      if (!["added", "modified", "removed", "renamed", "copied", "changed", "unchanged"].includes(status)) throw protocol("changed-file status is invalid");
+      paths.push(path);
+      if (previousPath !== null) paths.push(previousPath);
+      changes.push({ path, previous_path: previousPath, status });
     }
-    if (body.length < 100) return { paths, complete: true, pages: page };
+    if (!included.hasNext) return { paths, changes, complete: true, pages: page };
+    if (page === 3) return { paths, changes, complete: false, pages: page };
   }
-  return { paths, complete: false, pages: 3 };
+  return { paths, changes, complete: true, pages: 3 };
 }
 
 export async function runBoundedProcess(input) {
@@ -308,10 +366,12 @@ export function classifyGitHubFailure(input = {}) {
   const exitCode = Number.isInteger(input.exitCode) ? input.exitCode : null;
   const embeddedStatus = text.match(/(?:http(?:\/\d(?:\.\d)?)?\s+|status[=: ]+)(401|403|404|408|429|500|502|503|504)\b/u)?.[1];
   const status = Number(input.httpStatus ?? embeddedStatus);
-  if (input.timedOut) return new PostPrCiError("timeout", "GitHub command timed out", { transient: true, exitCode });
-  if (status === 429 || /rate limit|secondary rate/u.test(text)) return new PostPrCiError("rate-limit", "GitHub rate limit", { transient: true, rateLimited: true, exitCode });
-  if (HTTP_TRANSIENT.has(status)) return new PostPrCiError("http-transient", `GitHub HTTP ${status}`, { transient: true, exitCode });
-  if (/econnreset|enotfound|eai_again|network|dns/u.test(text)) return new PostPrCiError("network", "GitHub network failure", { transient: true, exitCode });
+  let retryAfterMs = 0;
+  try { retryAfterMs = parseRetryDelay(input.headers, input.now); } catch (error) { return error; }
+  if (input.timedOut) return new PostPrCiError("timeout", "GitHub command timed out", { transient: true, exitCode, retryAfterMs });
+  if (status === 429 || /\b(?:api )?rate limit exceeded\b|\bsecondary rate limit\b/u.test(text)) return new PostPrCiError("rate-limit", "GitHub rate limit", { transient: true, rateLimited: true, exitCode, retryAfterMs });
+  if (HTTP_TRANSIENT.has(status)) return new PostPrCiError("http-transient", `GitHub HTTP ${status}`, { transient: true, exitCode, retryAfterMs });
+  if (/\b(?:econnreset|enotfound|eai_again|etimedout)\b/u.test(text)) return new PostPrCiError("network", "GitHub network failure", { transient: true, exitCode, retryAfterMs });
   if (status === 401 || /bad credentials|authentication failed/u.test(text)) return new PostPrCiError("account-auth", "GitHub authentication failure", { exitCode });
   if (status === 403) return new PostPrCiError("permission", "GitHub permission failure", { exitCode });
   if (status === 404) return new PostPrCiError("not-found", "GitHub resource not found", { exitCode });
@@ -320,40 +380,59 @@ export function classifyGitHubFailure(input = {}) {
 
 async function withGitHubOperationLock(repositoryRoot, fn, options = {}) {
   const factoryDir = join(repositoryRoot, ".opencode", "factory");
-  const lockDir = join(factoryDir, "github-operation.lock");
-  const ownerFile = join(lockDir, "owner.json");
+  const lockFile = join(factoryDir, "github-operation.lock");
   await mkdir(factoryDir, { recursive: true });
   const now = options?.now ?? Date.now;
   const sleep = options?.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
   const deadline = now() + (options?.timeoutMs ?? 10_000);
   let owner;
   while (!owner) {
+    const candidate = { pid: process.pid, hostname: hostname(), nonce: randomUUID() };
+    const claimFile = join(factoryDir, `.github-operation.lock-claim-${candidate.nonce}.json`);
     try {
-      await mkdir(lockDir);
-      owner = { pid: process.pid, hostname: hostname(), nonce: randomUUID() };
-      await writeFile(ownerFile, `${JSON.stringify(owner)}\n`, { flag: "wx" });
+      await writeFile(claimFile, `${JSON.stringify(candidate)}\n`, { flag: "wx" });
+      if (options?.onClaimPublished) await options.onClaimPublished({ claimFile, lockFile, owner: candidate });
+      await link(claimFile, lockFile);
+      await rm(claimFile, { force: true });
+      owner = candidate;
     } catch (error) {
+      await rm(claimFile, { force: true }).catch(() => {});
       if (error.code !== "EEXIST") throw error;
-      if (await reclaimDeadLocalLock(lockDir, ownerFile)) continue;
+      if (await reclaimDeadLocalLock(lockFile, options)) continue;
       if (now() >= deadline) throw new PostPrCiError("lock-timeout", "GitHub operation lock timed out", { transient: true });
       await sleep(Math.min(25, Math.max(1, deadline - now())));
     }
   }
   try { return await fn(); } finally {
     try {
-      const current = JSON.parse(await readFile(ownerFile, "utf8"));
-      if (current.nonce === owner.nonce) await rm(lockDir, { recursive: true, force: true });
+      const current = JSON.parse(await readFile(lockFile, "utf8"));
+      if (current.nonce === owner.nonce) await rm(lockFile, { force: true });
     } catch { /* Never remove a lock whose ownership cannot be confirmed. */ }
   }
 }
 
-async function reclaimDeadLocalLock(lockDir, ownerFile) {
+async function reclaimDeadLocalLock(lockFile, options = {}) {
   let owner;
-  try { owner = JSON.parse(await readFile(ownerFile, "utf8")); } catch { return false; }
+  try { owner = JSON.parse(await readFile(lockFile, "utf8")); } catch { return false; }
   if (owner.hostname !== hostname() || !Number.isInteger(owner.pid) || owner.pid <= 0 || typeof owner.nonce !== "string") return false;
-  try { process.kill(owner.pid, 0); return false; } catch (error) { if (error.code !== "ESRCH") return false; }
-  const quarantine = `${lockDir}.dead-${randomUUID()}`;
-  try { await rename(lockDir, quarantine); await rm(quarantine, { recursive: true, force: true }); return true; } catch { return false; }
+  if (options.isProcessAlive) { if (await options.isProcessAlive(owner.pid)) return false; }
+  else {
+    try { process.kill(owner.pid, 0); return false; } catch (error) { if (error.code !== "ESRCH") return false; }
+  }
+  const quarantine = `${lockFile}.dead-${randomUUID()}`;
+  try {
+    await rename(lockFile, quarantine);
+    const confirmed = JSON.parse(await readFile(quarantine, "utf8"));
+    if (confirmed.nonce !== owner.nonce || confirmed.pid !== owner.pid || confirmed.hostname !== owner.hostname) {
+      throw new PostPrCiError("lock-identity", "GitHub operation lock identity changed");
+    }
+    await rm(quarantine, { force: true });
+    await rm(join(dirname(lockFile), `.github-operation.lock-claim-${owner.nonce}.json`), { force: true });
+    return true;
+  } catch (error) {
+    if (error instanceof PostPrCiError) throw error;
+    return false;
+  }
 }
 
 function latestApplicableReviews(reviews, expectedHeadSha) {
@@ -376,19 +455,89 @@ function latestApplicableReviews(reviews, expectedHeadSha) {
 }
 
 function safeReview(review) { return { author: encodeUntrustedMetadata(review.login), state: review.state, submitted_at: review.submittedAt, commit_id: review.commitId }; }
+function compareReviewLatest(left, right) { return right._submitted - left._submitted || right._index - left._index; }
 function checkName(entry) { const name = entry?.name ?? entry?.context; if (typeof name !== "string" || name === "") throw protocol("check name is required"); return name; }
-function rawMetadata(value) { if (typeof value === "string") return value; if (value?.encoding === "base64url+terminal-safe-display-v1") return Buffer.from(value.value_b64url, "base64url").toString("utf8"); throw protocol("invalid check metadata"); }
+function rawMetadata(value) { return typeof value === "string" ? value : decodeCanonicalMetadata(value); }
 function sliceIdsInName(name, slices) { return slices.filter((slice) => new RegExp(`(^|[^A-Za-z0-9_-])${escapeRegex(slice.id)}(?=$|[^A-Za-z0-9_-])`, "u").test(name)).map((slice) => slice.id); }
 function validateSlices(slices) { if (!Array.isArray(slices)) throw new Error("slices must be an array"); return slices.map((slice) => { if (!slice || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(slice.id) || !Array.isArray(slice.paths)) throw new Error("invalid slice"); return { ...slice, paths: slice.paths.map(validatePlanPath) }; }); }
 function validatePlanPath(path) { if (typeof path !== "string") return null; if (path.endsWith("/**") && !/[*?[\]{}]/u.test(path.slice(0, -3))) return `${normalizeRepositoryPath(path.slice(0, -3))}/**`; if (/[*?[\]{}]/u.test(path)) return null; return normalizeRepositoryPath(path); }
 function sliceOwnsPath(slice, path) { return slice.paths.filter(Boolean).some((accepted) => accepted.endsWith("/**") ? path.startsWith(accepted.slice(0, -2)) : path === accepted); }
-function routeSlice(slice, method) { const route = STACK_ROUTES[slice.stack]; if (!route) return unsafe("unknown-slice-stack"); return { disposition: "route", owner: { kind: "slice", slice_id: slice.id, stack: slice.stack, path_b64url: null, method }, route, lane: "slice", reason: method }; }
-function integration() { return { disposition: "route", owner: { kind: "integration", slice_id: null, stack: "test", path_b64url: null, method: "integration" }, route: "test-verifier", lane: "test", reason: "integration-fallback" }; }
+function routeSlice(slice, method, paths = []) { const route = STACK_ROUTES[slice.stack]; if (!route) return unsafe("unknown-slice-stack"); const selected = paths.length ? sortPaths(paths)[0] : null; return { disposition: "route", owner: { kind: "slice", slice_id: slice.id, stack: slice.stack, path_b64url: selected === null ? null : Buffer.from(selected).toString("base64url"), method }, route, lane: "slice", reason: method }; }
+function integration(paths = []) { const selected = paths.length ? sortPaths(paths)[0] : null; return { disposition: "route", owner: { kind: "integration", slice_id: null, stack: "test", path_b64url: selected === null ? null : Buffer.from(selected).toString("base64url"), method: "integration" }, route: "test-verifier", lane: "test", reason: "integration-fallback" }; }
 function unsafe(reason) { return { disposition: "needs-human", owner: null, route: null, lane: null, reason }; }
 function isTestLanePath(path) { return TEST_PREFIXES.some((prefix) => path.startsWith(prefix)); }
+function isUnsafeRuntimePath(path) { return UNSAFE_RUNTIME_PATHS.has(path) || path.startsWith(".yarn/") || path.startsWith("node_modules/")
+  || (!path.includes("/") && (/^(?:tsconfig(?:\.[^.]+)?\.json|(?:eslint|prettier|babel|webpack|vite|vitest|jest)\.config\.[A-Za-z0-9]+)$/u.test(path) || /^\.env(?:\.|$)/u.test(path))); }
+function hasUnsafeChanges(input) { return Boolean(input.hasRename || input.hasDelete || input.hasGenerated || input.hasSymlink || input.changes?.some((change) => change?.previous_path || ["renamed", "removed", "deleted"].includes(String(change?.status).toLowerCase()))); }
 function requireSuccessful(result, phase) { if (!result || result.exitCode !== 0) { const classified = classifyGitHubFailure(result ?? {}); if (phase === "account-switch") throw new PostPrCiError("account-switch", "GitHub account switch failed", { exitCode: classified.exitCode }); throw classified; } }
 function parseJsonObject(text) { try { const value = JSON.parse(text); if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(); return value; } catch { throw protocol("malformed GitHub JSON response"); } }
-function parseIncludedArray(text) { const starts = [text.indexOf("["), text.indexOf("{")].filter((index) => index >= 0); if (!starts.length) throw protocol("malformed GitHub included response"); try { const value = JSON.parse(text.slice(Math.min(...starts))); if (!Array.isArray(value)) throw new Error(); return value; } catch { throw protocol("malformed GitHub included response"); } }
+function parseIncludedArray(text) {
+  if (typeof text !== "string") throw protocol("malformed GitHub included response");
+  const separator = text.match(/\r?\n\r?\n/u);
+  if (!separator?.index) throw protocol("malformed GitHub included response");
+  const headerText = text.slice(0, separator.index);
+  const lines = headerText.split(/\r?\n/u);
+  if (!/^HTTP\/\d(?:\.\d)?\s+\d{3}(?:\s|$)/u.test(lines.shift() ?? "")) throw protocol("malformed GitHub included response");
+  const headers = normalizeHeaders(lines.map((line) => {
+    const colon = line.indexOf(":");
+    if (colon <= 0) throw protocol("malformed GitHub response header");
+    return [line.slice(0, colon), line.slice(colon + 1).trim()];
+  }));
+  let body;
+  try { body = JSON.parse(text.slice(separator.index + separator[0].length)); } catch { throw protocol("malformed GitHub included response"); }
+  if (!Array.isArray(body)) throw protocol("malformed GitHub included response");
+  const link = headers.get("link");
+  if (link !== undefined && !/^<[^<>\r\n]+>;\s*rel="[a-z]+"(?:,\s*<[^<>\r\n]+>;\s*rel="[a-z]+")*$/u.test(link)) throw protocol("malformed Link header");
+  return { body, hasNext: link?.split(",").some((part) => /;\s*rel="next"$/u.test(part.trim())) ?? false };
+}
+function canonicalMetadata(value) { return encodeUntrustedMetadata(typeof value === "string" ? value : decodeCanonicalMetadata(value)); }
+function decodeCanonicalMetadata(value) {
+  if (!value || typeof value !== "object" || value.encoding !== "base64url+terminal-safe-display-v1" || typeof value.value_b64url !== "string" || !/^[A-Za-z0-9_-]*$/u.test(value.value_b64url)) throw protocol("invalid encoded metadata");
+  const bytes = Buffer.from(value.value_b64url, "base64url");
+  if (bytes.toString("base64url") !== value.value_b64url) throw protocol("non-canonical encoded metadata");
+  const raw = bytes.toString("utf8");
+  if (!Buffer.from(raw).equals(bytes)) throw protocol("metadata is not valid UTF-8");
+  return raw;
+}
+function canonicalEvidenceReview(review) {
+  if (review == null) return null;
+  if (!review || typeof review !== "object" || review.state !== "CHANGES_REQUESTED") throw protocol("evidence review is invalid");
+  const submitted = new Date(timeMs(review.submitted_at, "review.submitted_at")).toISOString();
+  return { author: canonicalMetadata(review.author), state: "CHANGES_REQUESTED", submitted_at: submitted, commit_id: fullSha(review.commit_id, "review.commit_id") };
+}
+function canonicalEvidenceOwnership(value) {
+  if (!value || typeof value !== "object" || !["route", "needs-human"].includes(value.disposition)) throw protocol("evidence ownership is invalid");
+  if (value.disposition === "needs-human") return { disposition: "needs-human", owner: null, route: null, lane: null, reason: safeReason(value.reason) };
+  if (!value.owner || !["slice", "integration"].includes(value.owner.kind)) throw protocol("evidence owner is invalid");
+  const route = value.owner.kind === "integration" ? "test-verifier" : STACK_ROUTES[value.owner.stack];
+  const lane = value.owner.kind === "integration" ? "test" : "slice";
+  if (!route || value.route !== route || value.lane !== lane) throw protocol("evidence owner route is invalid");
+  const pathB64 = value.owner.path_b64url;
+  if (pathB64 !== null) normalizeRepositoryPath(decodeBase64Url(pathB64, "owner path"));
+  const method = safeMethod(value.owner.method);
+  const expectedReason = method === "integration" ? "integration-fallback" : method;
+  if (value.reason !== expectedReason) throw protocol("ownership reason is invalid");
+  return { disposition: "route", owner: { kind: value.owner.kind, slice_id: value.owner.kind === "slice" ? safeSliceId(value.owner.slice_id) : null,
+    stack: value.owner.kind === "slice" ? value.owner.stack : "test", path_b64url: pathB64, method }, route, lane, reason: expectedReason };
+}
+function decodeBase64Url(value, label) { if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value)) throw protocol(`${label} is invalid`); const bytes = Buffer.from(value, "base64url"); if (bytes.toString("base64url") !== value) throw protocol(`${label} is invalid`); const decoded = bytes.toString("utf8"); if (!Buffer.from(decoded).equals(bytes)) throw protocol(`${label} is invalid`); return decoded; }
+function safeSliceId(value) { if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(value)) throw protocol("slice id is invalid"); return value; }
+function safeMethod(value) { if (!["check-slice-id", "changed-files", "integration"].includes(value)) throw protocol("owner method is invalid"); return value; }
+function safeReason(value) { if (!OWNERSHIP_REASONS.has(value)) throw protocol("ownership reason is invalid"); return value; }
+function compareBytes(left, right) { return Buffer.compare(Buffer.from(left, "base64url"), Buffer.from(right, "base64url")); }
+function sortPaths(paths) { return [...paths].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))); }
+function normalizeHeaders(headers) {
+  if (headers == null) return new Map();
+  const entries = headers instanceof Map ? [...headers] : Array.isArray(headers) ? headers : Object.entries(headers);
+  const result = new Map();
+  for (const entry of entries) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || typeof entry[1] !== "string" || !/^[A-Za-z0-9-]+$/u.test(entry[0]) || /[\r\n]/u.test(entry[1])) throw protocol("invalid response headers");
+    const key = entry[0].toLowerCase();
+    if (result.has(key)) throw protocol("duplicate response header");
+    result.set(key, entry[1].trim());
+  }
+  return result;
+}
 function checkedIdentity(repository, number) { return { repository: validRepository(repository), number: positiveInteger(number, "prNumber") }; }
 function validRepository(value) { if (typeof value !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(value)) throw new Error("invalid repository identity"); return value; }
 function optionalLogin(value) { if (value == null || value === "") return null; if (typeof value !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(value)) throw new Error("invalid GitHub login"); return value; }
