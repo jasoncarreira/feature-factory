@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
@@ -27,8 +27,8 @@ const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
 const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
-const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate"]);
+const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--new-pr"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
 const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
 const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
 const COST_NUMERIC_FLAGS = new Map([
@@ -52,9 +52,9 @@ function usage(write = console.log) {
 Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] [--telemetry] Check opencode/plugin/provider/tool prerequisites
-  factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
+  factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
-  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
+  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--new-pr] [--post-pr-ci|--no-post-pr-ci] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory cancel <run-id> [--json]
   factory steer <run-id> --message TEXT [--json]
   factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> [--json]
@@ -84,7 +84,12 @@ Commands:
   factory verdicts <run-id> --validator GO|GO-WITH-NITS|NO-GO --report artifacts/validation-report.md --security PASS|BLOCK --review-ref reviews/security-reviewer.json
   factory terminal <run-id> <blocked|partial|needs-human> --reason TEXT --boundary-token TOKEN
   factory slice-merged <run-id> <slice-id> --merge-commit SHA [--json]
-  factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN [--draft|--no-draft] [--json]
+  factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN [--head-sha SHA] [--draft|--no-draft] [--json]
+  factory post-pr-observe <run-id> [--json]
+  factory post-pr-remediation <run-id> <attempt> running [--json]
+  factory post-pr-remediation <run-id> <attempt> revalidating --remediation-evidence-ref REF [--json]
+  factory post-pr-remediation <run-id> <attempt> failed --failure-evidence-ref REF [--json]
+  factory post-pr-remediation <run-id> <attempt> complete --head-sha SHA --test-evidence-ref REF --validator-report-ref REF --validator-review-ref REF --security-review-ref REF [--json]
   factory watch [run-id] [--all] Print status changes as JSON
   factory env                   Print detected versions, models, and capabilities
   factory provenance            Alias for factory env
@@ -234,6 +239,14 @@ async function factory(args, dependencies = {}) {
   if (sub === "terminal") return terminal(rest);
   if (sub === "slice-merged") return sliceMerged(rest);
   if (sub === "pr-created") return prCreated(rest);
+  if (sub === "post-pr-observe") {
+    if (positional.length !== 1) throw new Error("factory post-pr-observe requires exactly one <run-id>");
+    return print(await postPrObserve(positional[0], opts), opts);
+  }
+  if (sub === "post-pr-remediation") {
+    if (positional.length !== 3) throw new Error("factory post-pr-remediation requires <run-id> <attempt> <running|revalidating|failed|complete>");
+    return print(await postPrRemediation(positional[0], positional[1], positional[2], opts), opts);
+  }
   if (sub === "watch") {
     watchRun(positional[0], opts);
     return;
@@ -454,6 +467,9 @@ function options(args) {
     heartbeatStatus: args.includes("--status"),
     foreground: args.includes("--foreground"),
     clear: args.includes("--clear"),
+    postPrCi: args.includes("--post-pr-ci"),
+    noPostPrCi: args.includes("--no-post-pr-ci"),
+    newPr: args.includes("--new-pr"),
   };
   if (args.includes("--draft")) opts.draft = true;
   if (args.includes("--no-draft")) opts.noDraft = true;
@@ -479,6 +495,7 @@ function options(args) {
     if (args[index] === "--pr-url") opts.prUrl = args[++index];
     if (args[index] === "--pr-number") opts.prNumber = args[++index];
     if (args[index] === "--repository") opts.repository = args[++index];
+    if (args[index] === "--head-sha") opts.headSha = args[++index];
     if (args[index] === "--branch") opts.branch = args[++index];
     if (args[index] === "--worktree") opts.worktree = args[++index];
     if (args[index] === "--attempts") opts.attempts = Number(args[++index]);
@@ -507,6 +524,17 @@ function options(args) {
     if (args[index] === "--parent-span-id") opts.parentSpanId = args[++index];
     if (args[index] === "--traceparent") opts.traceparent = args[++index];
     if (args[index] === "--tracestate") opts.tracestate = args[++index];
+    if (args[index] === "--post-pr-wait-minutes") opts.postPrWaitMinutes = Number(args[++index]);
+    if (args[index] === "--post-pr-poll-seconds") opts.postPrPollSeconds = Number(args[++index]);
+    if (args[index] === "--post-pr-max-poll-seconds") opts.postPrMaxPollSeconds = Number(args[++index]);
+    if (args[index] === "--post-pr-check-start-grace-seconds") opts.postPrCheckStartGraceSeconds = Number(args[++index]);
+    if (args[index] === "--post-pr-max-transient-errors") opts.postPrMaxTransientErrors = Number(args[++index]);
+    if (args[index] === "--remediation-evidence-ref") opts.remediationEvidenceRef = args[++index];
+    if (args[index] === "--failure-evidence-ref") opts.failureEvidenceRef = args[++index];
+    if (args[index] === "--test-evidence-ref") opts.testEvidenceRef = args[++index];
+    if (args[index] === "--validator-report-ref") opts.validatorReportRef = args[++index];
+    if (args[index] === "--validator-review-ref") opts.validatorReviewRef = args[++index];
+    if (args[index] === "--security-review-ref") opts.securityReviewRef = args[++index];
     if (COST_NUMERIC_FLAGS.has(args[index])) opts[COST_NUMERIC_FLAGS.get(args[index])] = parseCostNumericOption(args[index], args[++index]);
   }
   return opts;
@@ -750,6 +778,7 @@ async function prCreated(args) {
     repository: requiredOption(opts.repository, "--repository"),
     draft: opts.draft === true,
   };
+  if (stringValue(opts.headSha)) request.head_sha = opts.headSha;
   opts.fenceToken = requiredOption(opts.fenceToken, "--fence-token", "factory pr-created");
   return print(await transitionPrCreated(resolveRunDir(runId, opts), request, opts), opts);
 }
@@ -1015,6 +1044,7 @@ function readHeartbeatStartRun(runDir) {
 }
 
 function hasInFlightHeartbeatWork(run) {
+  if (run?.status === "running" && run?.post_pr?.policy?.enabled === true && ["observing", "remediation-running", "revalidating"].includes(run.post_pr.phase)) return true;
   if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) {
     return true;
   }

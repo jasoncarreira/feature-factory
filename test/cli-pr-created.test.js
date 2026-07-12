@@ -41,6 +41,26 @@ describe("cli pr-created", () => {
     }
   });
 
+  it("requires and records a full head SHA for enabled post-PR observation", () => {
+    const fixture = createFixture("cli-pr-post-pr", { postPr: true });
+    try {
+      const fence = JSON.parse(runCli(fixture.repo, ["factory", "pr-fence", fixture.runId, "--json"]).stdout).fence;
+      const base = ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--fence-token", fence.token];
+      const missing = runCli(fixture.repo, [...base, "--json"]);
+      assert.notEqual(missing.status, 0);
+      assert.match(missing.stderr, /full 40-character lowercase head SHA/u);
+      const proc = runCli(fixture.repo, [...base, "--head-sha", "a".repeat(40), "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(run.status, "running");
+      assert.equal(run.post_pr.phase, "observing");
+      assert.equal(run.post_pr.observation.expected_head_sha, "a".repeat(40));
+      assert.equal(run.terminal_result, null);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("requires validator, security, and pre_pr approval", () => {
     const fixture = createFixture("cli-pr-blocked", { ready: false });
     try {
@@ -120,7 +140,7 @@ describe("cli pr-created", () => {
   });
 });
 
-function createFixture(runId, { ready = true, continuation = false, ghIsDraft = false } = {}) {
+function createFixture(runId, { ready = true, continuation = false, ghIsDraft = false, postPr = false } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "cli-pr-simplified-"));
   writeFakeGh(repo, { isDraft: ghIsDraft, expectedRepository: "jasoncarreira/opencode-feature-factory", expectedNumber: "99" });
   const runDir = join(repo, ".opencode", "factory", runId);
@@ -140,6 +160,11 @@ function createFixture(runId, { ready = true, continuation = false, ghIsDraft = 
     validator: ready ? { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" } : null,
     security_review: ready ? { verdict: "PASS", review_ref: "reviews/security-reviewer.json" } : null,
     continuation: continuation ? continuationMetadata(runId) : undefined,
+    post_pr: postPr ? {
+      schema_version: 1,
+      policy: { enabled: true, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } },
+      phase: "awaiting-pr", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null,
+    } : undefined,
   };
   writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId };

@@ -266,6 +266,17 @@ describe("factory resume", () => {
     }
   });
 
+  it("carries the exact persisted post-PR policy and rejects resume overrides", async () => {
+    const policy = { enabled: true, wait_ms: 5400000, initial_poll_ms: 45000, max_poll_ms: 180000, check_start_grace_ms: 360000, max_transient_errors: 9, review: { required: false, reviewer_login: null, source: "none" } };
+    const fixture = createFixture("resume-post-pr-policy", { postPrPolicy: policy });
+    try {
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true });
+      assert.deepEqual(result.payload.resume.post_pr_policy, policy);
+      assert.equal(result.payload.driver.post_pr_ci, undefined);
+      await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, postPrCi: true }), /rejects post-PR policy flags/u);
+    } finally { cleanup(fixture.repo); }
+  });
+
   it("routes consumed-but-uncheckpointed steering to archived-text redelivery on resume", async () => {
     const fixture = createFixture("resume-uncheckpointed");
     try {
@@ -372,7 +383,7 @@ describe("factory resume", () => {
   });
 });
 
-function createFixture(runId, { prMode, mode } = {}) {
+function createFixture(runId, { prMode, mode, postPrPolicy } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "factory-resume-"));
   const runDir = join(repo, ".opencode", "factory", runId);
   const worktree = join(repo, ".opencode", "worktrees", runId);
@@ -389,6 +400,7 @@ function createFixture(runId, { prMode, mode } = {}) {
   };
   if (prMode !== undefined) run.pr_mode = prMode;
   if (mode !== undefined) run.mode = mode;
+  if (postPrPolicy) run.post_pr = { schema_version: 1, policy: postPrPolicy, phase: "awaiting-pr", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null };
   writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId, worktree };
 }
@@ -403,6 +415,7 @@ function expectedOwnershipPayload(runId, driverMode, payloadKind) {
       reviewer: null,
       github_account: null,
       run_id: null,
+      post_pr_ci: null,
     },
     resume: null,
     steering: null,

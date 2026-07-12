@@ -44,6 +44,25 @@ describe("cli resume-check and resume preflight", () => {
     }
   });
 
+  it("rejects post-PR policy flags on every resume entrypoint before mutation", () => {
+    const fixture = createCliRecoveryFixture("resume-policy-flags");
+    try {
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      const commands = [
+        ["factory", "resume", fixture.runId, "--post-pr-ci", "--dry-run", "--json"],
+        ["factory", "resume-check", fixture.runId, "--post-pr-ci", "--json"],
+        ["factory", "start", "--headless", "--post-pr-ci", "--json", `resume ${fixture.runId}`],
+        ["factory", "start", "--autonomous", "--post-pr-wait-minutes", "60", "--json", `resume ${fixture.runId}`],
+      ];
+      for (const args of commands) {
+        const proc = runCli(fixture.repo, args);
+        assert.notEqual(proc.status, 0);
+        assert.match(proc.stderr, /persisted policy is authoritative|rejects post-PR policy flags/u);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      }
+    } finally { cleanup(fixture.repo); }
+  });
+
   for (const mode of ["--headless", "--autonomous"]) {
     it(`rejects active heartbeat before ${mode} factory start resume mutates recovery state, seeds skills, or spawns opencode`, () => {
       const fixture = createCliRecoveryFixture(`start-resume-active-heartbeat-${mode.slice(2)}`, { recordWorktree: false });

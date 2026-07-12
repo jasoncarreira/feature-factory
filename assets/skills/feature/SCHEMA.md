@@ -195,6 +195,9 @@ Phase enum values and their conventional long-wait mapping:
 - `implementation-validator` - implementation-validator dispatch/wait.
 - `security-reviewer` - security-reviewer dispatch/wait.
 - `remediation` - routed builder or integration/test remediation dispatch/wait.
+- `post-pr-observation` - long GitHub checks/review observation wait after PR creation.
+- `post-pr-remediation` - post-PR builder or test-verifier remediation dispatch/wait.
+- `post-pr-revalidation` - post-PR panel and local revalidation wait before republishing.
 
 `phase` is opaque display data. Use the enum above for consistency, but schema validation accepts any non-empty string.
 

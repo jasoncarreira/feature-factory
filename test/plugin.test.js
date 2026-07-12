@@ -222,6 +222,31 @@ describe("feature command payload parsing", () => {
     assert.match(output.parts[0].text, /PLUGIN_PARSED_OPERATOR_PAYLOAD_START\nparse_status: valid/u);
   });
 
+  it("binds post-PR continuation review, evidence, state hash, PR identity, and inherited policy", () => {
+    const continuation = validContinuation();
+    const hash = `sha256:${"a".repeat(64)}`;
+    const reviewRef = "reviews/post-pr-ci.attempt-3.json";
+    const evidenceRef = "evidence/post-pr-ci.attempt-3.json";
+    continuation.review = { ...continuation.review, kind: "post_pr", ref: reviewRef, source: "run.post_pr.continuation_review.ref", verdict: "BLOCKED" };
+    continuation.operator_summary = `Continue blocked run '${continuation.parent.run_id}' from ${reviewRef}.`;
+    continuation.parent_reviews = [{ kind: "review", ref: reviewRef, hash }];
+    continuation.parent_evidence = [{ kind: "evidence", ref: evidenceRef, hash }];
+    continuation.post_pr = {
+      pr_url: "https://github.com/acme/repo/pull/7", repository: "acme/repo", pr_number: 7, head_sha: "d".repeat(40), disposition: "leave-unchanged",
+      policy: { enabled: true, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } },
+      post_pr_hash: hash, evidence_ref: evidenceRef, evidence_hash: hash, continuation_review_ref: reviewRef, continuation_review_hash: hash,
+    };
+
+    const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
+    assert.equal(decoded.ok, true);
+    assert.equal(decoded.payload.continuation.post_pr.disposition, "leave-unchanged");
+    assert.equal(decoded.payload.continuation.post_pr.policy.wait_ms, 3_600_000);
+
+    const forged = structuredClone(continuation);
+    forged.post_pr.evidence_hash = `sha256:${"b".repeat(64)}`;
+    assert.deepEqual(decodeFeatureCommandPayload(continuationToken(forged), { repo: process.cwd() }), { ok: false, reason: "invalid-continuation-post-pr-binding" });
+  });
+
   it("treats explicit null routes as absent and preserves hook idempotency", async () => {
     const instance = await plugin({});
     const cfg = {};

@@ -256,6 +256,9 @@ Phase mapping is a display convention for operators and monitors; validation kee
 | `implementation-validator` | implementation-validator dispatch/wait |
 | `security-reviewer` | security-reviewer dispatch/wait |
 | `remediation` | routed builder or integration/test remediation dispatch/wait |
+| `post-pr-observation` | long GitHub checks/review observation wait after PR creation |
+| `post-pr-remediation` | post-PR builder or test-verifier remediation dispatch/wait |
+| `post-pr-revalidation` | post-PR panel and local revalidation wait before republishing |
 
 Required heartbeat phases:
 
@@ -269,6 +272,9 @@ Required heartbeat phases:
 - `implementation-validator`
 - `security-reviewer`
 - `remediation`
+- `post-pr-observation`
+- `post-pr-remediation`
+- `post-pr-revalidation`
 
 `heartbeat.json` shape is `{ schema_version, run_id, phase, pid, interval_ms, last_tick_at }`. Freshness is derived at read time: `age(last_tick_at) <= max(2 * interval_ms, 120000ms)` and the recorded PID is alive. A stopped helper writes `pid: null`.
 
