@@ -37,7 +37,7 @@ describe("cli gate-decision", () => {
   ];
 
   for (const [id, code, status, automatic, reason, action, commandKind, claim, live] of matrix) {
-    it(`${id} returns the exact ${code} response row`, () => {
+    it(`${id} returns the exact ${code} response row and observes the CLI exit`, () => {
       const runId = "matrix-run";
       const evidence = live ? { pid: 4321, log_ref: "processes/execution.log" } : null;
       const output = handoffEnvelope(runId, "brief", code, { claim, evidence });
@@ -65,6 +65,21 @@ describe("cli gate-decision", () => {
         recovery_command: commandKind === "resume" ? commands.resume : null,
       });
       assert.equal(output.automatic, ["started", "already-running"].includes(output.status));
+
+      const fixture = createFixture(`cli-${id.toLowerCase()}`);
+      try {
+        const cliResult = runInjectedGateCli(fixture, output);
+        const expectedExit = Number(id.slice(1)) <= 7 ? 0 : 2;
+        assert.equal(cliResult.status, expectedExit, cliResult.stderr);
+        const printed = JSON.parse(cliResult.stdout);
+        assert.equal(printed.gate_accepted, true);
+        assert.equal(printed.run.gates.brief.status, "approved");
+        assert.deepEqual(printed.handoff, output);
+        assert.equal(existsSync(join(fixture.runDir, "spawn-attempted")), false);
+        assert.equal(existsSync(join(fixture.runDir, "merge-attempted")), false);
+      } finally {
+        cleanup(fixture.repo);
+      }
     });
   }
 
@@ -328,6 +343,32 @@ function sha256File(file) {
 
 function runCli(repo, args, bin) {
   return runSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: bin ? { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` } : process.env });
+}
+
+function runInjectedGateCli(fixture, handoff) {
+  const cliUrl = new URL("../src/cli.js", import.meta.url).href;
+  const source = `
+    import { runCliCommand } from ${JSON.stringify(cliUrl)};
+    const handoff = ${JSON.stringify(handoff)};
+    await runCliCommand([
+      "factory", "gate-decision", ${JSON.stringify(fixture.runId)}, "brief", "approved",
+      "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md",
+      "--answer", "approve", "--json"
+    ], {
+      transitionGateDecisionAndHandoff: async (_runDir, gate, decision) => ({
+        updated: true,
+        gate,
+        gate_accepted: true,
+        run: { run_id: ${JSON.stringify(fixture.runId)}, gates: { brief: { ...decision } } },
+        handoff
+      })
+    });
+  `;
+  return runSync(process.execPath, ["--input-type=module", "--eval", source], {
+    cwd: fixture.repo,
+    encoding: "utf8",
+    env: { ...process.env },
+  });
 }
 
 function openBoundary(fixture, kind, bin) {

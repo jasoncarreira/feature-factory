@@ -147,7 +147,8 @@ export async function startFactory(args, opts = {}) {
     }
     const activeHeartbeatPreflight = startResumeActiveHeartbeatPreflight(resumeRunId, { ...opts, cwd: repo, repoRoot: repo });
     if (activeHeartbeatPreflight) return activeHeartbeatPreflight;
-    const preflight = await recoverDisruptedRun(resumeRunId, { ...opts, cwd: repo });
+    const recover = opts.recoverDisruptedRunFn || recoverDisruptedRun;
+    const preflight = await recover(resumeRunId, { ...opts, cwd: repo });
     if (!preflight.ok) return preflight;
     const eligibility = startResumeEligibility(preflight, { ...opts, cwd: repo, repoRoot: repo });
     if (!eligibility.ok) return eligibility;
@@ -165,8 +166,8 @@ export async function startFactory(args, opts = {}) {
       repo,
       launchKind: opts.detached ? "start-resume-detached" : "start-resume-foreground",
       launch: ({ env, executionId }) => opts.detached
-        ? startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: resumedRun.run_id, runDir: resumedRunDir, executionId }), env })
-        : runForegroundFactory(repo, commandArgs, { ...opts, env }),
+        ? (opts.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: resumedRun.run_id, runDir: resumedRunDir, executionId }), env })
+        : (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env }),
     });
   }
   if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, opts), env: launchEnv });
@@ -629,8 +630,8 @@ export async function resumeFactory(runId, opts = {}) {
     repo,
     launchKind: opts.detached ? "resume-detached" : "resume-foreground",
     launch: ({ env, executionId }) => opts.detached
-      ? startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir, executionId }), env })
-      : runForegroundFactory(repo, commandArgs, { ...opts, env }),
+      ? (opts.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: run.run_id, runDir, executionId }), env })
+      : (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env }),
     launchEnv,
   });
 }
@@ -695,10 +696,8 @@ async function coordinateExistingRunLaunch(runDir, run, opts) {
   try {
     const result = await opts.launch({ env, executionId });
     if (detached) {
-      const evidence = inspectProcessEvidence(runDir, { ...opts, runId: run.run_id });
-      if (!evidence.ok || evidence.evidence.execution_id !== executionId || evidence.verification?.status !== "live-and-matching") {
-        return { status: "recovery-required", reason_code: "launch-evidence-mismatch", launch_claim_ref: LAUNCH_CLAIM_REF };
-      }
+      const readiness = await waitForPublishedLaunchEvidence(runDir, run.run_id, executionId, result?.pid, opts);
+      if (!readiness.evidence) return { status: "recovery-required", reason_code: readiness.reason_code, launch_claim_ref: LAUNCH_CLAIM_REF };
       try {
         if (!claimFns.release(runDir, token, { ...opts, expectedPhase: "spawning", runId: run.run_id })) return { status: "recovery-required", reason_code: "launch-evidence-mismatch", launch_claim_ref: LAUNCH_CLAIM_REF };
       } catch (error) {
@@ -838,17 +837,39 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
     return handoffEnvelope(runId, gateName, code, { claim: true });
   }
 
-  let evidence;
-  try { evidence = inspectProcessEvidence(runDir, { ...opts, runId }); } catch { return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true }); }
-  if (!evidence.ok || evidence.evidence.execution_id !== claim.claim.execution_id || evidence.evidence.pid !== started.pid || evidence.verification?.status !== "live-and-matching") {
-    return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true });
-  }
+  const readiness = await waitForPublishedLaunchEvidence(runDir, runId, claim.claim.execution_id, started?.pid, opts);
+  if (!readiness.evidence) return handoffEnvelope(runId, gateName, readiness.reason_code, { claim: true });
+  const evidence = readiness.evidence;
   try {
     if (!claimFunctions.release(runDir, token, { ...opts, expectedPhase: "spawning", runId })) return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true });
   } catch {
     return handoffEnvelope(runId, gateName, "launch-evidence-mismatch", { claim: true });
   }
-  return handoffEnvelope(runId, gateName, "detached-shepherd-started", { evidence: evidence.evidence });
+  return handoffEnvelope(runId, gateName, "detached-shepherd-started", { evidence });
+}
+
+async function waitForPublishedLaunchEvidence(runDir, runId, executionId, pid, opts = {}) {
+  const timeoutMs = normalizePositiveInteger(opts.readyTimeoutMs, DETACHED_READY_TIMEOUT_MS, "readyTimeoutMs");
+  const clock = typeof opts.clock === "function" ? opts.clock : Date.now;
+  const sleepFn = typeof opts.sleep === "function" ? opts.sleep : (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+  const started = clock();
+  if (!Number.isFinite(started)) return { evidence: null, reason_code: "launch-readiness-failed" };
+  const deadline = started + timeoutMs;
+  const maximumPolls = Math.ceil(timeoutMs / 25) + 1;
+  for (let count = 0; count < maximumPolls; count += 1) {
+    let observed;
+    try { observed = inspectProcessEvidence(runDir, { ...opts, runId }); } catch { return { evidence: null, reason_code: "launch-evidence-mismatch" }; }
+    if (!observed.missing) {
+      if (observed.ok && observed.evidence.execution_id === executionId && observed.evidence.pid === pid && observed.verification?.status === "live-and-matching") {
+        return { evidence: observed.evidence, reason_code: null };
+      }
+      return { evidence: null, reason_code: "launch-evidence-mismatch" };
+    }
+    const now = clock();
+    if (!Number.isFinite(now) || now >= deadline) break;
+    try { await sleepFn(Math.min(25, deadline - now)); } catch { break; }
+  }
+  return { evidence: null, reason_code: "launch-readiness-failed" };
 }
 
 function inspectProcessForHandoff(runDir, runId, opts) {

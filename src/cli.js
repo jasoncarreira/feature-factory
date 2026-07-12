@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -91,12 +91,12 @@ Commands:
 `);
 }
 
-async function main(argv) {
+export async function runCliCommand(argv, dependencies = {}) {
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === "--help" || cmd === "-h") return usage();
   if (cmd === "install") return install(rest);
   if (cmd === "doctor") return doctor(rest);
-  if (cmd === "factory") return factory(rest);
+  if (cmd === "factory") return factory(rest, dependencies);
   throw new Error(`unknown command: ${cmd}`);
 }
 
@@ -174,7 +174,7 @@ async function doctor(args) {
   process.exitCode = ok ? 0 : 1;
 }
 
-async function factory(args) {
+async function factory(args, dependencies = {}) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
   if (sub === "cost-report") return costReport(rest);
@@ -226,7 +226,7 @@ async function factory(args) {
     return;
   }
   if (sub === "env" || sub === "provenance") return env(rest);
-  if (sub === "gate-decision") return gateDecision(rest);
+  if (sub === "gate-decision") return gateDecision(rest, dependencies);
   if (sub === "slices-seed") return slicesSeed(rest);
   if (sub === "slice-status") return sliceStatus(rest);
   if (sub === "step") return step(rest);
@@ -620,7 +620,7 @@ async function recover(args) {
   return print(await transitionRecoverOrphan(resolveRunDir(runId, opts), opts.reason || "recovered orphaned factory run", opts), opts);
 }
 
-async function gateDecision(args) {
+async function gateDecision(args, dependencies = {}) {
   const opts = options(args);
   const positional = positionals(args);
   const [runId, gate, statusValue] = positional;
@@ -637,10 +637,12 @@ async function gateDecision(args) {
   if (stringValue(opts.decisionNote)) decision.decision_note = opts.decisionNote;
   if (stringValue(opts.answeredAt)) decision.answered_at = opts.answeredAt;
 
-  const result = await transitionGateDecisionAndHandoff(resolveRunDir(runId, opts), gate, decision, opts);
-  if (opts.json && typeof result.handoff?.log === "string" && /^processes\/[A-Za-z0-9._-]+\.log$/u.test(result.handoff.log)) {
+  const transition = dependencies.transitionGateDecisionAndHandoff || transitionGateDecisionAndHandoff;
+  const result = await transition(resolveRunDir(runId, opts), gate, decision, opts);
+  if (opts.json && result.handoff) {
     const projected = projectCliData(result);
-    projected.handoff.log = result.handoff.log;
+    if (typeof result.handoff.log === "string" && /^processes\/[A-Za-z0-9._-]+\.log$/u.test(result.handoff.log)) projected.handoff.log = result.handoff.log;
+    if (result.handoff.launch_claim_ref === "process-launch.lock/owner.json") projected.handoff.launch_claim_ref = result.handoff.launch_claim_ref;
     console.log(serializeTerminalJson(projected, { space: 2 }));
   } else {
     print(result, opts);
@@ -1078,7 +1080,9 @@ function pluginEntrySpec(entry) {
   return Array.isArray(entry) ? entry[0] : entry;
 }
 
-main(process.argv.slice(2)).catch((error) => {
-  console.error(`error: ${renderErrorForTerminal(error)}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && realpathSync(process.argv[1]) === cliPath) {
+  runCliCommand(process.argv.slice(2)).catch((error) => {
+    console.error(`error: ${renderErrorForTerminal(error)}`);
+    process.exitCode = 1;
+  });
+}

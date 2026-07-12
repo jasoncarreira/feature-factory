@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { consumeSteering, persistFactoryRunResumeEnv, resumeFactory, startFactory, transitionGateDecisionAndHandoff, writeSteering } from "../src/factory.js";
-import { acquireLaunchClaim, recordDetachedProcessEvidence, writeProcessEvidence } from "../src/process-evidence.js";
+import { acquireLaunchClaim, recordDetachedProcessEvidence, transitionLaunchClaimPhase, writeProcessEvidence } from "../src/process-evidence.js";
+import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { transitionGateDecision, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 
 describe("factory resume", () => {
@@ -42,12 +43,87 @@ describe("factory resume", () => {
         await behavior.setup?.(fixture);
         writeJson(join(fixture.runDir, "heartbeat.json"), { schema_version: 1, run_id: fixture.runId, phase: "builder-wave", pid: null, interval_ms: 30000, last_tick_at: "2000-01-01T00:00:00.000Z" });
         const watched = snapshotSidecars(fixture.runDir);
-        const result = await transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, { cwd: fixture.repo, ...(behavior.options?.(fixture) || {}) });
+        const behaviorOptions = behavior.options?.(fixture) || {};
+        const result = await transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, { cwd: fixture.repo, ...behaviorOptions });
         assert.equal(result.gate_accepted, true);
         assertBehaviorHandoff(result.handoff, behavior.code, fixture.runId);
         assert.equal(result.handoff.status === "recovery-required" ? 2 : 0, behavior.code.startsWith("launch-") || ["approval-snapshot-mismatch", "steering-generation-mismatch", "steering-state-not-clean", "resume-ineligible", "process-evidence-invalid", "process-identity-mismatch", "prior-process-stopped", "claim-acquisition-failed", "foreground-release-failed"].includes(behavior.code) ? 2 : 0);
         assert.equal(result.handoff.reason.includes("merge"), false);
         if (result.handoff.status === "recovery-required") assertPreservedOriginalSidecars(fixture.runDir, watched);
+        if (["foreground-release-failed", "launch-spawn-failed", "launch-readiness-failed", "launch-evidence-mismatch"].includes(behavior.code)) {
+          const claimPath = join(fixture.runDir, "process-launch.lock", "owner.json");
+          assert.equal(existsSync(claimPath), true, "ambiguous launch claim must remain on disk");
+          assert.equal(readFileSync(claimPath).equals(behaviorOptions.metrics.claimBytes), true, "claim bytes must remain identical after the response");
+          assert.equal(behaviorOptions.metrics.spawnAttempts, behavior.code === "foreground-release-failed" ? 0 : 1);
+          assert.equal(behaviorOptions.metrics.signalAttempts, 0);
+          assert.equal(behaviorOptions.metrics.releaseAttempts, 0);
+          assert.equal(behaviorOptions.metrics.sleepCalls.length, behavior.code === "launch-readiness-failed" ? 4 : 0);
+          if (behavior.code === "launch-readiness-failed") {
+            assert.deepEqual(behaviorOptions.metrics.sleepCalls, [25, 25, 25, 25]);
+            assert.equal(behaviorOptions.metrics.now, 100);
+          }
+          if (behavior.code === "launch-evidence-mismatch") {
+            assert.equal(existsSync(join(fixture.runDir, "process.json")), true);
+            assert.equal(readFileSync(join(fixture.runDir, "process.json")).equals(behaviorOptions.metrics.processBytes), true);
+          }
+        }
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  }
+
+  const ownershipRows = [
+    { name: "interactive foreground resume", durableMode: "interactive", driverMode: "interactive", invoke: (f, o) => resumeFactory(f.runId, o), payloadKind: "resume" },
+    { name: "explicit headless foreground resume", durableMode: "headless", driverMode: "headless", invoke: (f, o) => resumeFactory(f.runId, { ...o, headless: true }), payloadKind: "resume" },
+    { name: "explicit autonomous foreground resume", durableMode: "autonomous", driverMode: "autonomous", invoke: (f, o) => resumeFactory(f.runId, { ...o, autonomous: true }), payloadKind: "resume" },
+    { name: "interactive detached resume", durableMode: "interactive", driverMode: "headless", detached: true, invoke: (f, o) => resumeFactory(f.runId, { ...o, detached: true, headless: true }), payloadKind: "resume" },
+    { name: "headless detached resume", durableMode: "headless", driverMode: "headless", detached: true, invoke: (f, o) => resumeFactory(f.runId, { ...o, detached: true, headless: true }), payloadKind: "resume" },
+    { name: "autonomous detached resume", durableMode: "autonomous", driverMode: "autonomous", detached: true, invoke: (f, o) => resumeFactory(f.runId, { ...o, detached: true, autonomous: true }), payloadKind: "resume" },
+    { name: "headless start-resume", durableMode: "headless", driverMode: "headless", invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, headless: true }), payloadKind: "start" },
+    { name: "autonomous start-resume", durableMode: "autonomous", driverMode: "autonomous", invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, autonomous: true }), payloadKind: "start" },
+    { name: "headless detached start-resume", durableMode: "headless", driverMode: "headless", detached: true, invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, headless: true, detached: true }), payloadKind: "start" },
+    { name: "autonomous detached start-resume", durableMode: "autonomous", driverMode: "autonomous", detached: true, invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, autonomous: true, detached: true }), payloadKind: "start" },
+  ];
+
+  for (const row of ownershipRows) {
+    it(`preserves exact outgoing payload and durable mode for ${row.name}`, async () => {
+      const fixture = createFixture(`payload-${row.name.replaceAll(" ", "-")}`, { mode: row.durableMode });
+      let payload;
+      let launches = 0;
+      const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: fixture.repo });
+      const capture = async (_repo, args, launchOpts) => {
+        launches += 1;
+        payload = decodeFeatureCommandPayload(args.at(-1)).payload;
+        if (row.detached) {
+          ensureProcessLog(fixture);
+          recordDetachedProcessEvidence(fixture.runDir, { runId: fixture.runId, executionId: launchOpts.executionId, pid: 9876, cwd: fixture.repo, logRef: "processes/behavior.log", inspectorFn });
+          return { status: "started", pid: 9876 };
+        }
+        return { status: "completed", code: 0 };
+      };
+      try {
+        const result = await row.invoke(fixture, {
+          cwd: fixture.repo,
+          inspectorFn,
+          foregroundLaunchFn: capture,
+          detachedLaunchFn: capture,
+          recoverDisruptedRunFn: async () => ({ ok: true, run_dir: fixture.runDir, run_file: join(fixture.runDir, "run.json") }),
+        });
+        assert.equal(launches, 1);
+        assert.equal(result.status, row.detached ? "started" : "completed");
+        assert.equal(payload.operator_request, `resume ${fixture.runId}`);
+        assert.equal(payload.driver.mode, row.driverMode);
+        assert.equal(payload.driver.ready, false);
+        assert.equal(payload.driver.pr_mode, null);
+        if (row.payloadKind === "resume") {
+          assert.deepEqual(payload.resume, { schema_version: 1, kind: "existing-run-resume", run_id: fixture.runId });
+          assert.deepEqual(payload.steering, { schema_version: 1, kind: "operator-steering-pointer", run_id: fixture.runId, pending: null, uncheckpointed: null, consume: null, raw_message_included: false });
+        } else {
+          assert.equal(payload.resume, null);
+          assert.equal(payload.steering, null);
+        }
+        assert.equal(readJson(join(fixture.runDir, "run.json")).mode, row.durableMode);
       } finally {
         cleanup(fixture.repo);
       }
@@ -305,7 +381,7 @@ describe("factory resume", () => {
   });
 });
 
-function createFixture(runId, { prMode } = {}) {
+function createFixture(runId, { prMode, mode } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "factory-resume-"));
   const runDir = join(repo, ".opencode", "factory", runId);
   const worktree = join(repo, ".opencode", "worktrees", runId);
@@ -321,6 +397,7 @@ function createFixture(runId, { prMode } = {}) {
     slices: [{ id: "slice", status: "running", attempts: 1, branch: runId, worktree }],
   };
   if (prMode !== undefined) run.pr_mode = prMode;
+  if (mode !== undefined) run.mode = mode;
   writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId, worktree };
 }
@@ -390,34 +467,48 @@ function writeClaim(fixture, overrides = {}) {
 
 function fakeLaunchOptions(fixture, options = {}) {
   let claim = null;
-  let launches = 0;
+  const metrics = { spawnAttempts: 0, signalAttempts: 0, releaseAttempts: 0, sleepCalls: [], now: 0, claimBytes: null, processBytes: null };
+  const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: fixture.repo });
   return {
+    metrics,
     inspectLaunchClaimFn: () => ({ ok: false, missing: true }),
     acquireLaunchClaimFn: (_runDir, input) => {
-      claim = fakeClaim(fixture, { execution_id: input.executionId, phase: input.phase, approval: input.approval });
-      return { ok: true, acquired: true, claim, token: claim.nonce };
+      const acquired = acquireLaunchClaim(_runDir, { ...input, nonce: "opaque-behavior-token-1234" }, { inspectorFn });
+      claim = acquired.claim;
+      return acquired;
     },
     transitionLaunchClaimPhaseFn: (_runDir, _token, phase) => {
-      if (phase === options.transitionFailure) throw new Error("injected transition failure");
-      claim = { ...claim, phase };
-      return { ok: true, claim };
+      if (phase === options.transitionFailure) {
+        metrics.claimBytes = readFileSync(join(_runDir, "process-launch.lock", "owner.json"));
+        throw new Error("injected transition failure");
+      }
+      const transitioned = transitionLaunchClaimPhase(_runDir, _token, phase, {}, { expectedPhase: claim.phase, inspectorFn });
+      claim = transitioned.claim;
+      metrics.claimBytes = readFileSync(join(_runDir, "process-launch.lock", "owner.json"));
+      return transitioned;
     },
-    releaseLaunchClaimFn: () => true,
+    releaseLaunchClaimFn: () => { metrics.releaseAttempts += 1; return true; },
     detachedLaunchFn: async (_repo, _args, launchOpts) => {
       if (options.transitionFailure) assert.fail("launch must not occur before cooperative release succeeds");
-      launches += 1;
-      assert.equal(launches, 1, "handoff must not retry launch");
+      metrics.spawnAttempts += 1;
+      assert.equal(metrics.spawnAttempts, 1, "handoff must not retry launch");
       assert.equal(_args.some((arg) => String(arg).includes("merge")), false, "handoff must not invoke merge");
-      if (options.launchError) throw new Error(options.launchError);
+      if (options.launchError && !/readiness/iu.test(options.launchError)) throw new Error(options.launchError);
+      if (/readiness/iu.test(options.launchError || "")) return { status: "started", pid: 9876 };
       ensureProcessLog(fixture);
       const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo });
       recordDetachedProcessEvidence(fixture.runDir, {
         runId: fixture.runId, executionId: options.mismatchedEvidence ? "different-execution" : launchOpts.executionId,
         pid: 9876, cwd: fixture.repo, logRef: "processes/behavior.log", inspectorFn,
       });
+      metrics.processBytes = readFileSync(join(fixture.runDir, "process.json"));
       return { status: "started", pid: 9876 };
     },
-    inspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: fixture.repo }),
+    readyTimeoutMs: 100,
+    clock: () => metrics.now,
+    sleep: async (ms) => { metrics.sleepCalls.push(ms); metrics.now += ms; },
+    processSignalFn: () => { metrics.signalAttempts += 1; },
+    inspectorFn,
   };
 }
 
