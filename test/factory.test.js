@@ -580,6 +580,72 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
+  it("revalidates the registered worktree branch and exact HEAD after an intervening mutation", () => {
+    const fixture = createFixture("cleanup-sweep-mutated-worktree", { terminal: true, git: true });
+    try {
+      const runFile = join(fixture.runDir, "run.json");
+      const run = readJson(runFile);
+      const expectedHeads = { [fixture.runId]: branchHead(fixture.repo, fixture.runId) };
+      const commands = [];
+
+      const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
+        mode: "sweep",
+        repo: fixture.repo,
+        expectedRunHash: hashFile(runFile),
+        expectedBranchHeads: expectedHeads,
+        fetchedBaseRef: "main",
+        gitRunner: recordingGitRunner(commands),
+        phaseHook: (phase) => {
+          if (phase === "before-worktree-remove") {
+            commitInWorktree(run.worktree, "changed-after-authorization.txt", "changed\n");
+          }
+        },
+      });
+
+      assert.equal(cleanupResult.worktrees[0].outcome, "failed");
+      assert.equal(cleanupResult.branches[0].outcome, "not-attempted");
+      assert.equal(cleanupResult.run_dir.outcome, "retained");
+      assert.equal(existsSync(run.worktree), true);
+      assert.equal(commands.some((args) => args[0] === "worktree" && args[1] === "remove"), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("refuses branch CAS when a new registered worktree checks out the branch", () => {
+    const fixture = createFixture("cleanup-sweep-unexpected-checkout", { terminal: true, git: true });
+    const unexpectedWorktree = join(fixture.repo, ".opencode", "worktrees", "unexpected-checkout");
+    try {
+      runGit(fixture.repo, ["branch", "target-branch"]);
+      const runFile = join(fixture.runDir, "run.json");
+      const run = { ...readJson(runFile), slices: [{ branch: "target-branch" }] };
+      const expectedHeads = Object.fromEntries(collectCleanupTargets(run).branches.map((branch) => [branch, branchHead(fixture.repo, branch)]));
+      const commands = [];
+
+      const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
+        mode: "sweep",
+        repo: fixture.repo,
+        expectedRunHash: hashFile(runFile),
+        expectedBranchHeads: expectedHeads,
+        fetchedBaseRef: "main",
+        gitRunner: recordingGitRunner(commands),
+        phaseHook: (phase, detail) => {
+          if (phase === "before-branch-delete" && detail.branch === "target-branch") {
+            runGit(fixture.repo, ["worktree", "add", unexpectedWorktree, "target-branch"]);
+          }
+        },
+      });
+
+      const target = cleanupResult.branches.find((item) => item.name === "target-branch");
+      assert.equal(target.outcome, "failed");
+      assert.equal(branchExists(fixture.repo, "target-branch"), true);
+      assert.equal(commands.some((args) => args[0] === "update-ref" && args[2] === "refs/heads/target-branch"), false);
+      assert.equal(cleanupResult.run_dir.outcome, "retained");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("retains sweep state after worktree failure, skips its branch, and continues independent branches", () => {
     const fixture = createFixture("cleanup-sweep-worktree-failure", { terminal: true, git: true });
     try {
@@ -664,6 +730,46 @@ describe("factory public state operations", { concurrency: false }, () => {
         outcome: "failed",
         reason_code: "FAILED_CLEANUP_RUN_DIR",
       });
+      assert.equal(existsSync(runFile), true);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("preserves R51 partial evidence when an unexpected failure follows mutation", () => {
+    const fixture = createFixture("cleanup-sweep-unexpected", { terminal: true, git: false });
+    try {
+      initGitRepo(fixture.repo, "unrelated-worktree");
+      runGit(fixture.repo, ["branch", "alpha"]);
+      runGit(fixture.repo, ["branch", "zeta"]);
+      const runFile = join(fixture.runDir, "run.json");
+      const run = { ...readJson(runFile), branch: "zeta", worktree: null, slices: [{ branch: "alpha" }] };
+      const expectedHeads = Object.fromEntries(collectCleanupTargets(run).branches.map((branch) => [branch, branchHead(fixture.repo, branch)]));
+
+      const error = assert.throws(() => cleanupRunLocked(fixture.runDir, run, {
+        mode: "sweep",
+        repo: fixture.repo,
+        expectedRunHash: hashFile(runFile),
+        expectedBranchHeads: expectedHeads,
+        fetchedBaseRef: "main",
+        gitRunner: recordingGitRunner([]),
+        phaseHook: (phase, detail) => {
+          if (phase === "before-branch-delete" && detail.branch === "zeta") throw new Error("injected unexpected failure");
+        },
+      }));
+
+      assert.equal(error.code, "FAILED_CLEANUP_UNEXPECTED");
+      assert.deepEqual(error.cleanup.branches.map(({ name, outcome }) => ({ name, outcome })), [
+        { name: "alpha", outcome: "deleted" },
+        { name: "zeta", outcome: "failed" },
+      ]);
+      assert.deepEqual(error.cleanup.run_dir, {
+        path: fixture.runDir,
+        outcome: "retained",
+        reason_code: "RETAINED_AFTER_PARTIAL_FAILURE",
+      });
+      assert.equal(branchExists(fixture.repo, "alpha"), false);
+      assert.equal(branchExists(fixture.repo, "zeta"), true);
       assert.equal(existsSync(runFile), true);
     } finally {
       cleanup(fixture.repo);

@@ -9,7 +9,7 @@ import { pendingProtectedGate, steeringConsistencyChecks, validateHeartbeatState
 import { collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { git, repoRoot } from "./git.js";
-import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
+import { checkWorktreeIdentity, deriveExpectedWorktreePath, parseWorktreeListPorcelain } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv } from "./telemetry.js";
@@ -1043,6 +1043,15 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
   return result;
 }
 
+export class CleanupRunUnexpectedError extends Error {
+  constructor(cause, cleanup) {
+    super("unexpected failure after cleanup mutation began", { cause });
+    this.name = "CleanupRunUnexpectedError";
+    this.code = "FAILED_CLEANUP_UNEXPECTED";
+    this.cleanup = cleanup;
+  }
+}
+
 function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   if (opts.force || opts.dryRun) throw new Error("sweep cleanup must be lock-held execution without force or dry-run");
   assertExpectedRunHash(runDir, opts.expectedRunHash);
@@ -1050,6 +1059,7 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   const baseRef = opts.fetchedBaseRef || opts.fetchedBase?.ref || null;
   const runDirRemover = opts.removeRunDir || ((path) => rmSync(path, { recursive: true, force: true }));
   const worktreeIdentity = opts.checkWorktreeIdentity || checkWorktreeIdentity;
+  const resolvePhysicalPath = opts.physicalPath || physicalPath;
   const gitRunner = opts.gitRunner || git;
   const phaseHook = typeof opts.phaseHook === "function" ? opts.phaseHook : () => {};
   const cleanup = {
@@ -1058,9 +1068,17 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
     run_dir: { path: runDir, outcome: "retained", reason_code: null },
   };
   const failedWorktreeBranches = new Set();
+  let mutationStarted = false;
+
+  const unexpected = (error) => {
+    if (!mutationStarted) throw error;
+    cleanup.run_dir.outcome = "retained";
+    cleanup.run_dir.reason_code = "RETAINED_AFTER_PARTIAL_FAILURE";
+    throw new CleanupRunUnexpectedError(error, cleanup);
+  };
 
   const worktrees = targets.worktrees
-    .map((entry) => sweepWorktreeTarget(repo, entry))
+    .map((entry) => sweepWorktreeTarget(repo, entry, resolvePhysicalPath))
     .sort((a, b) => Buffer.from(a.physical_path || a.recorded_path).compare(Buffer.from(b.physical_path || b.recorded_path)));
   for (const target of worktrees) {
     const record = {
@@ -1070,46 +1088,68 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
       outcome: "failed",
       reason_code: "FAILED_CLEANUP_WORKTREE",
     };
+    cleanup.worktrees.push(record);
     try {
-      if (!target.valid) throw new Error("worktree path is no longer safe");
-      const identity = worktreeIdentity(repo, target.physical_path, { branch: target.branch });
-      if (!identity.ok) throw new Error("worktree identity changed");
       phaseHook("before-worktree-remove", { ...target });
-      const proc = gitRunner(repo, ["worktree", "remove", "--force", target.physical_path]);
-      if (!proc.ok) throw new Error("worktree removal failed");
+      const expectedHead = expectedHeads.get(target.branch) || null;
+      const revalidated = revalidateSweepWorktree(repo, target, expectedHead, {
+        gitRunner,
+        resolvePhysicalPath,
+        worktreeIdentity,
+      });
+      if (!revalidated) {
+        if (target.branch) failedWorktreeBranches.add(target.branch);
+        continue;
+      }
+      mutationStarted = true;
+      let proc;
+      try {
+        proc = gitRunner(repo, ["worktree", "remove", "--force", target.physical_path]);
+      } catch (error) {
+        unexpected(error);
+      }
+      if (!proc.ok) {
+        if (target.branch) failedWorktreeBranches.add(target.branch);
+        continue;
+      }
       record.outcome = "removed";
       record.reason_code = null;
-    } catch {
-      if (target.branch) failedWorktreeBranches.add(target.branch);
+    } catch (error) {
+      if (error instanceof CleanupRunUnexpectedError) throw error;
+      unexpected(error);
     }
-    cleanup.worktrees.push(record);
   }
 
   for (const branch of [...targets.branches].map((value) => String(value).trim()).filter(Boolean).sort(compareUtf8)) {
     const expectedHead = expectedHeads.get(branch) || null;
     const record = { name: branch, expected_head: expectedHead, outcome: "failed", reason_code: "FAILED_CLEANUP_BRANCH" };
+    cleanup.branches.push(record);
     if (failedWorktreeBranches.has(branch)) {
       record.outcome = "not-attempted";
-      cleanup.branches.push(record);
       continue;
     }
+    if (!resolveCleanupBranchPermission(branch).allowed || !expectedHead || !baseRef) continue;
     try {
-      if (!resolveCleanupBranchPermission(branch).allowed || !expectedHead || !baseRef) throw new Error("branch evidence is incomplete");
-      const current = gitRunner(repo, ["branch", "--show-current"]);
-      if (!current.ok || current.stdout.trim() === branch) throw new Error("branch is current");
       const resolvedHead = gitRunner(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
-      if (!resolvedHead.ok || resolvedHead.stdout.trim() !== expectedHead) throw new Error("branch head changed");
+      if (!resolvedHead.ok || resolvedHead.stdout.trim() !== expectedHead) continue;
       const ancestry = gitRunner(repo, ["merge-base", "--is-ancestor", expectedHead, baseRef]);
-      if (!ancestry.ok) throw new Error("branch ancestry changed");
+      if (!ancestry.ok) continue;
       phaseHook("before-branch-delete", { branch, expected_head: expectedHead, base_ref: baseRef });
-      const proc = gitRunner(repo, ["update-ref", "-d", `refs/heads/${branch}`, expectedHead]);
-      if (!proc.ok) throw new Error("branch compare-and-delete failed");
+      if (branchIsCheckedOut(repo, branch, gitRunner)) continue;
+      mutationStarted = true;
+      let proc;
+      try {
+        proc = gitRunner(repo, ["update-ref", "-d", `refs/heads/${branch}`, expectedHead]);
+      } catch (error) {
+        unexpected(error);
+      }
+      if (!proc.ok) continue;
       record.outcome = "deleted";
       record.reason_code = null;
-    } catch {
-      // Keep the fixed failure record and continue with independent branches.
+    } catch (error) {
+      if (error instanceof CleanupRunUnexpectedError) throw error;
+      unexpected(error);
     }
-    cleanup.branches.push(record);
   }
 
   const targetFailed = cleanup.worktrees.some((item) => item.outcome === "failed")
@@ -1120,6 +1160,10 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   }
   try {
     phaseHook("before-run-dir-remove", { path: runDir });
+  } catch (error) {
+    unexpected(error);
+  }
+  try {
     runDirRemover(runDir);
     cleanup.run_dir.outcome = "removed";
   } catch {
@@ -1129,17 +1173,47 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   return cleanup;
 }
 
-function sweepWorktreeTarget(repo, entry) {
+function sweepWorktreeTarget(repo, entry, resolvePhysicalPath = physicalPath) {
   const recordedPath = String(entry.worktree);
   const resolved = resolve(repo, recordedPath);
   if (!insideWorktreeRoot(repo, resolved) || !existsSync(resolved)) {
     return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, valid: false };
   }
   try {
-    return { recorded_path: recordedPath, physical_path: physicalPath(resolved), branch: entry.branch || null, valid: true };
+    return { recorded_path: recordedPath, physical_path: resolvePhysicalPath(resolved), branch: entry.branch || null, valid: true };
   } catch {
     return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, valid: false };
   }
+}
+
+function revalidateSweepWorktree(repo, authorized, expectedHead, opts) {
+  if (!authorized.valid || !authorized.branch || !expectedHead) return false;
+  const current = sweepWorktreeTarget(repo, { worktree: authorized.recorded_path, branch: authorized.branch }, opts.resolvePhysicalPath);
+  if (!current.valid || current.physical_path !== authorized.physical_path) return false;
+  const identity = opts.worktreeIdentity(repo, current.physical_path, { branch: authorized.branch, head: expectedHead });
+  if (!identity.ok || identity.worktree !== current.physical_path) return false;
+  const registered = registeredWorktrees(repo, opts.gitRunner);
+  if (!registered.ok) return false;
+  const entry = registered.entries.find((item) => {
+    try {
+      return opts.resolvePhysicalPath(item.path) === current.physical_path;
+    } catch {
+      return false;
+    }
+  });
+  return Boolean(entry && entry.branch === authorized.branch && entry.head === expectedHead && !entry.bare && !entry.detached);
+}
+
+function branchIsCheckedOut(repo, branch, gitRunner) {
+  const registered = registeredWorktrees(repo, gitRunner);
+  if (!registered.ok) return true;
+  return registered.entries.some((entry) => entry.branch === branch);
+}
+
+function registeredWorktrees(repo, gitRunner) {
+  const result = gitRunner(repo, ["worktree", "list", "--porcelain"]);
+  if (!result.ok) return { ok: false, entries: [] };
+  return { ok: true, entries: parseWorktreeListPorcelain(result.stdout) };
 }
 
 function assertExpectedRunHash(runDir, expectedRunHash) {
