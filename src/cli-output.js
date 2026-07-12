@@ -17,6 +17,10 @@ const VALIDATED_STATUS_VALUES = new Set([
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{8,128}$/u;
 const SAFE_HASH_PATTERN = /^(?:sha256:)?[A-Fa-f0-9]{32,128}$/u;
+const SAFE_REF_PATTERN = /^(?![/\\])(?!.*(?:^|[/\\])\.\.(?:[/\\]|$))[A-Za-z0-9._/-]+$/u;
+const SAFE_BRANCH_PATTERN = /^(?![./])(?!.*(?:\.\.|@\{|[~^:?*[\\\s]))[A-Za-z0-9._/-]+$/u;
+const SAFE_PATH_PATTERN = /^(?!.*[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]).+$/u;
+const BASIC_CREDENTIAL_PATTERN = /Authorization[ \t]*[:=][ \t]*Basic[ \t]+[A-Za-z0-9._~+/-]+={0,}/iu;
 const SAFE_COST_COLUMN_PATTERN = /^cost (?:available|partial|unavailable) · [0-9]+ (?:entry|entries)(?: · (?:[0-9?]+(?:\/[0-9?]+)? tokens|mixed currency|[0-9]+(?:\.[0-9]{1,6})? [A-Z]{3,12}|missing [A-Za-z0-9_, -]+))*$/u;
 
 export function printCliResult(value, options = {}, helpers = {}) {
@@ -76,7 +80,7 @@ function renderListRow(item, helpers) {
     projectedTableSegment("status", item?.status), TRUSTED_SEGMENTS.TAB,
     projectedTableSegment("gate", item?.gate || "-"), TRUSTED_SEGMENTS.TAB,
     projectedTableSegment("updated_at", item?.updated_at || "-"), TRUSTED_SEGMENTS.TAB,
-    projectedTableSegment("cost", cost), TRUSTED_SEGMENTS.TAB,
+    ...projectedTableSegments("cost", cost), TRUSTED_SEGMENTS.TAB,
     ...diagnosticColumnSegments(item?.diagnostics, helpers),
   ]);
 }
@@ -115,10 +119,17 @@ function stringValue(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function projectedTableSegment(key, value) {
+function projectedTableSegments(key, value) {
   if (key === "cost" && (value === "-" || SAFE_COST_COLUMN_PATTERN.test(String(value)))) {
-    return identitySegment(value);
+    const parts = String(value).split(" · ");
+    return parts.flatMap((part, index) => index === 0
+      ? [identitySegment(part)]
+      : [freeformSegment(" · "), identitySegment(part)]);
   }
+  return [projectedTableSegment(key, value)];
+}
+
+function projectedTableSegment(key, value) {
   return projectedValueSegment(key, value);
 }
 
@@ -133,8 +144,13 @@ function validatedIdentity(key, value) {
   if (key === "token" || key === "boundary_token" || key === "action_token" || key === "fence_token") {
     return SAFE_TOKEN_PATTERN.test(value);
   }
-  if (key === "hash" || key === "state_hash" || key === "trace_id") return SAFE_HASH_PATTERN.test(value);
-  if (key === "merge_commit") return /^[A-Fa-f0-9]{7,64}$/u.test(value);
+  if (key === "hash" || key === "trace_id" || key?.endsWith("_hash")) return SAFE_HASH_PATTERN.test(value);
+  if (key === "ref" || key?.endsWith("_ref")) return SAFE_REF_PATTERN.test(value);
+  if (key === "branch") return SAFE_BRANCH_PATTERN.test(value);
+  if (key === "commit" || key?.endsWith("_commit")) return /^[A-Fa-f0-9]{7,64}$/u.test(value);
+  if (key === "worktree" || key === "path" || key?.endsWith("_path")) {
+    return SAFE_PATH_PATTERN.test(value) && !BASIC_CREDENTIAL_PATTERN.test(value);
+  }
   return false;
 }
 

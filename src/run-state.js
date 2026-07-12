@@ -1076,9 +1076,13 @@ function assertNoFreshHeartbeat(runDir, options = {}, prefix) {
   } catch (error) {
     throw new Error(`${prefix}: invalid-run-state (${error.message})`);
   }
-  if (inspectHeartbeatLiveness(heartbeat, options).status !== "absent") {
-    throw new Error(`${prefix}: active-heartbeat`);
-  }
+  const liveness = inspectHeartbeatLiveness(heartbeat, options);
+  // A live PID is not by itself proof that a long-wait heartbeat is still
+  // active. Once its tick evidence is stale, the lock winner may establish a
+  // fence; a queued heartbeat tick will then observe that fence and stop.
+  // Other ambiguous evidence remains fail-closed.
+  if (liveness.status === "absent" || liveness.reason === "stale-heartbeat") return;
+  throw new Error(`${prefix}: active-heartbeat`);
 }
 
 async function stopHeartbeatForRecovery(runDir, heartbeat, now) {
