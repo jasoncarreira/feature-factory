@@ -12,7 +12,7 @@ It ships:
 
 ## Documentation Status
 
-This README is the current packaged operator contract. The repository-only [contributor](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CONTRIBUTING.md), [release](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/RELEASING.md), and [change](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CHANGELOG.md) guides are current companion documentation but are not included in the published package. `SPEC.md` is proposed/internal planning, not implemented operator guidance. `DOGFOOD-LEARNINGS.md`, `RUN-LATENCY-FINDINGS.md`, and `SIMPLIFICATION.md` are historical or retrospective records, not the current contract. Protected backlog and extraction notes such as `TODO.md` and `EXTRACTION-SPEC.md` are also non-authoritative for current behavior.
+This README is the current packaged operator contract. The repository-only [contributor](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CONTRIBUTING.md), [release](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/RELEASING.md), and [change](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CHANGELOG.md) guides are current companion documentation but are not included in the published package. `SPEC.md` is proposed/internal planning, not implemented operator guidance. `DOGFOOD-LEARNINGS.md`, `RUN-LATENCY-FINDINGS.md`, and `SIMPLIFICATION.md` are historical or retrospective records, not the current contract. Protected backlog and extraction notes such as `TODO.md`, `EXTRACTION-SPEC.md`, and `CONTINUATION-SCOPE-DESIGN.md` are also non-authoritative for current behavior.
 
 ## Trust Model
 
