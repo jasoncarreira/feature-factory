@@ -844,6 +844,37 @@ describe("blocked-run continuation docs contract", () => {
   });
 });
 
+describe("blocked-work restart pattern docs contract", () => {
+  const restartPatterns = markdownSection(README, "Choosing continuation, rebaseline, or recovery");
+
+  it("distinguishes continuation by its still-valid bounded review authority", () => {
+    assert.match(restartPatterns, /Continuation run[\s\S]*parent is still based on an acceptable target[\s\S]*validated review's `required_fixes`/i);
+    assert.match(restartPatterns, literalPattern(BLOCKED_CONTINUE_COMMAND));
+    assert.match(restartPatterns, /continuation decomposition covers `continuation\.review\.required_fixes`[\s\S]*not every concern/i);
+  });
+
+  it("documents current-main rebaseline as a fresh run with read-only old evidence", () => {
+    assert.match(restartPatterns, /Rebaseline run[\s\S]*parent base or implementation branch is stale[\s\S]*current `main` contains authoritative behavior/i);
+    assert.match(restartPatterns, /factory start --autonomous --run-id <rebaseline-run-id>/i);
+    assert.match(restartPatterns, /read-only references[\s\S]*never merge or cherry-pick the stale branch wholesale/i);
+    assert.match(restartPatterns, /fresh gates, decomposition, observed evidence, tests, validator\/security verdicts, and PR state/i);
+  });
+
+  it("documents scope-expanding recovery without confusing state recovery commands", () => {
+    assert.match(restartPatterns, /Recovery run[\s\S]*multiple findings[\s\S]*scope\/ownership amendment[\s\S]*foundation change forbidden by the old brief/i);
+    assert.match(restartPatterns, /factory start --autonomous --run-id <recovery-run-id>/i);
+    assert.match(restartPatterns, /names every unresolved finding|every unresolved validator and security finding/i);
+    assert.match(restartPatterns, /`factory recover <run-id>` handles an orphaned or stale run-state heartbeat[\s\S]*does not rebase implementation work, amend an accepted brief, or create a replacement feature run/i);
+    assert.match(restartPatterns, /`factory resume-check`[\s\S]*without changing the feature's accepted scope/i);
+  });
+
+  it("keeps superseded evidence until replacement work no longer needs it", () => {
+    assert.match(restartPatterns, /Keep superseded runs, branches, and worktrees until the replacement has captured every reference it needs/i);
+    assert.match(restartPatterns, /factory cleanup <old-run-id> --dry-run[\s\S]*factory cleanup <old-run-id>/i);
+    assert.match(restartPatterns, /use `--force` only when intentionally discarding preserved unmerged branches/i);
+  });
+});
+
 describe("non-destructive disrupted-worktree recovery docs contract", () => {
   it("requires explicit resume-check recovery and forbids silent re-scaffolding", () => {
     for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README, SPEC })) {

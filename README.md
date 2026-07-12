@@ -384,6 +384,38 @@ To avoid re-planning from scratch, `factory continue` reuses the parent's planni
 
 Continuation does not bypass the factory. The child proceeds through the normal story and brief gates, research/spec/decomposition, slice build and acceptance tests, implementation-validator, security-reviewer, pre-PR gate, and checked PR creation. Review validation checks approved evidence and referenced refs/hashes; it does not rely on a special blocking verdict enum. Continuation uses the same effective PR mode as normal runs: plugin `prMode` by default, with per-run `--draft` or `--ready` / `--no-draft` overrides where supplied. The start-time effective mode is persisted as `run.json.pr_mode` so resume payloads do not fall back to a later plugin default. If bounded remediation is exhausted or the child remains blocked, terminal status is `blocked` with no PR URL (`terminal_result.pr_url: null`).
 
+### Choosing continuation, rebaseline, or recovery
+
+Blocked work does not always belong in `factory continue`. Choose the restart pattern from the authority that is still valid:
+
+| Pattern | Use when | Entry point | Reused authority |
+|---|---|---|---|
+| **Continuation run** | The blocked parent is still based on an acceptable target, and one validated review's `required_fixes` accurately bounds the remaining remediation. | `factory continue` | The validated parent relationship and, when durably accepted and unchanged, its planning artifacts. |
+| **Rebaseline run** | The parent base or implementation branch is stale, current `main` contains authoritative behavior that must win, or wholesale continuation would recreate superseded changes. | A new `factory start` run id on current `main`. | Old artifacts, evidence, commits, and worktrees are read-only implementation references only. |
+| **Recovery run** | Useful integrated work exists, but final validation exposes multiple findings, a required scope/ownership amendment, or a foundation change forbidden by the old brief. | A new `factory start` run id on current `main`, with the complete recovery scope in the operator request. | The blocked run is read-only evidence; the new story, brief, tests, and panel establish authority. |
+
+Use `feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>` when its validated review is the complete remaining work order. It is intentionally narrow: continuation decomposition covers `continuation.review.required_fixes`, not every concern that may appear elsewhere in a terminal summary or a different panel review. If multiple validator/security reviews contain independent blockers, or a required fix contradicts the accepted brief, start a recovery run that names every unresolved finding instead of selecting one review and silently dropping the others.
+
+Start a current-main rebaseline with a new run id and an explicit read-only reference policy:
+
+```sh
+feature-factory factory start --autonomous --run-id <rebaseline-run-id> \
+  "Rebaseline <objective> on current main. Treat <old-run-id> artifacts, worktrees, and branches as read-only references; selectively reconcile applicable changes, never merge or cherry-pick the stale branch wholesale, and rerun planning, tests, validation, and security review."
+```
+
+A rebaseline must record the fresh base, inventory current-main behavior that supersedes the old branch, assign current ownership, and produce fresh gates, decomposition, observed evidence, tests, validator/security verdicts, and PR state. Current `main` is authoritative when old tests or implementation conflict with behavior merged after the parent started.
+
+Start a scope-expanding recovery the same way, but make the failed panel the complete new work order:
+
+```sh
+feature-factory factory start --autonomous --run-id <recovery-run-id> \
+  "Recover <blocked-run-id> on current main. Preserve applicable integrated work as read-only reference, amend scope for every unresolved validator and security finding, reconcile behavior merged since the old base, and require fresh tests and a fresh final panel before one PR."
+```
+
+“Recovery run” here is an operator pattern, not a new CLI command. `factory recover <run-id>` handles an orphaned or stale run-state heartbeat and moves that existing run to human inspection; it does not rebase implementation work, amend an accepted brief, or create a replacement feature run. Likewise, `factory resume-check` repairs or validates durable resume state without changing the feature's accepted scope.
+
+Keep superseded runs, branches, and worktrees until the replacement has captured every reference it needs. After the replacement PR is merged or the old evidence is otherwise no longer recoverable work, preview and perform explicit cleanup with `factory cleanup <old-run-id> --dry-run` followed by `factory cleanup <old-run-id>`; use `--force` only when intentionally discarding preserved unmerged branches.
+
 Run in the background for external watchers or CI-style adapters:
 
 ```sh
