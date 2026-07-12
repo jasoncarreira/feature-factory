@@ -753,6 +753,8 @@ Terminal result shape:
 
 Builder claim blocks are not accepted directly as durable truth. The orchestrator translates builder claim `status: pass|blocked` into observed evidence fields: `status` records the observed outcome, and `review_ready` is true only when the orchestrator observed the diff and required checks itself.
 
+The `test-verifier` step is the post-merge integration gate. A transition to `running` requires every durable slice to be `merged`, a positive `attempts` value, and `attempts <= run.max_retries` (default 3). Entering `running` from a non-running state advances the prior durable attempt by exactly one; an idempotent `running` re-mark keeps the same attempt. Each gate pass runs the accepted brief's canonical repository-wide command and writes `evidence/test-verifier.attempt-N.json`. Red evidence records the step `rejected` and routes one bounded owner-specific remediation before the complete gate reruns at `N + 1`; max-attempt failure records the step and run blocked. Green evidence is reviewed at `reviews/test-verifier.attempt-N.json` before acceptance. Integration remediation has no separate free-form review subject or uncounted attempt loop; any production remediation diff receives its review in the mandatory full-diff pre-PR panel.
+
 Remediation attempts use attempt-suffixed evidence refs. A rejected slice fix writes a new file such as `evidence/be-api.attempt-2.json` and updates `run.json.slices[].evidence_ref` to that attempt before re-review.
 
 Slice evidence shape:

@@ -883,13 +883,38 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
     const hadSteps = Array.isArray(draft.steps);
     const steps = hadSteps ? draft.steps : [];
     if (options.mustExist && !collectionHasItem(steps, stepSelector, "agent")) throw new Error(`step '${formatSelector(stepSelector)}' not found`);
+    const priorIndex = selectCollectionItemIndex(steps, stepSelector, "step selector", "agent");
+    const priorStep = priorIndex >= 0 ? cloneJson(steps[priorIndex]) : null;
     const update = await applyCollectionItemUpdate({ items: steps, selector: stepSelector, updater, selectorLabel: "step selector", seed: seedRunStep(stepSelector), identityKey: "agent" });
     stepIndex = update.index;
     if (!update.changed) return;
     if (!hadSteps) draft.steps = steps;
-    if (stepIndex >= 0) bindStepAcceptance(runDir, steps[stepIndex]);
+    if (stepIndex >= 0) {
+      assertTestVerifierIntegrationGate(draft, steps[stepIndex], priorStep);
+      bindStepAcceptance(runDir, steps[stepIndex]);
+    }
   }, options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
+}
+
+function assertTestVerifierIntegrationGate(run, step, priorStep) {
+  if (step?.agent !== "test-verifier" || step.status !== "running") return;
+  const incomplete = Array.isArray(run.slices) ? run.slices.filter((slice) => slice?.status !== "merged") : [];
+  if (incomplete.length > 0) {
+    throw new Error(`test-verifier integration gate requires all slices merged: ${incomplete.map((slice) => slice?.id || "unknown").join(", ")}`);
+  }
+  if (!Number.isInteger(step.attempts) || step.attempts < 1) {
+    throw new Error("test-verifier integration gate requires a positive attempt number");
+  }
+  const maxAttempts = Number.isInteger(run.max_retries) ? run.max_retries : 3;
+  if (step.attempts > maxAttempts) {
+    throw new Error(`test-verifier integration gate attempt ${step.attempts} exceeds max_retries ${maxAttempts}`);
+  }
+  const priorAttempts = Number.isInteger(priorStep?.attempts) ? priorStep.attempts : 0;
+  const expectedAttempts = priorStep?.status === "running" ? priorAttempts : priorAttempts + 1;
+  if (step.attempts !== expectedAttempts) {
+    throw new Error(`test-verifier integration gate must advance from attempt ${priorAttempts} to ${expectedAttempts}`);
+  }
 }
 
 // Bind the exact accepted bytes to the step at the acceptance transition, so a
