@@ -68,7 +68,7 @@ export const CLEANUP_SWEEP_REFUSAL_REGISTRY = Object.freeze({
 });
 
 const REPOSITORY_KEYS = ["schema_version", "root_path", "root_device", "root_inode", "git_common_dir_path", "git_common_dir_device", "git_common_dir_inode", "object_format"];
-const EVIDENCE_KEYS = ["entry", "claims", "run", "factory_lock", "heartbeat", "process", "run_lock", "pr", "branches", "worktrees"];
+const EVIDENCE_KEYS = ["entry", "claims", "run", "factory_lock", "heartbeat", "process", "run_lock", "pr", "worktree_root", "branches", "worktrees"];
 const HASH = /^sha256:[0-9a-f]{64}$/u;
 const DIGEST = /^ff-cleanup-v1\.([0-9a-f]{64})\.([0-9a-f]{64})$/u;
 const REASON_ORDER = new Map(REASON_ENTRIES.map(([code], index) => [code, index]));
@@ -130,6 +130,7 @@ export function createEmptyEvidence(entryName, logicalPath = entryName) {
     process: { state: "missing", hash: null },
     run_lock: { observed_before_acquire: "missing", held_by_sweep: false },
     pr: { state: "not-checked", url: null, repository: null, number: null, base_ref: null, base_sha: null },
+    worktree_root: { state: "missing", logical_path: null, physical_path: null, device: null, inode: null },
     branches: [],
     worktrees: [],
   };
@@ -325,12 +326,15 @@ function normalizeEvidence(input) {
   enumValue(pr.state, ["not-checked", "merged", "closed", "open", "missing-metadata", "mismatch", "not-found", "inaccessible", "invalid-response"], "candidate.evidence.pr.state");
   for (const key of ["url", "repository", "base_ref", "base_sha"]) nullableString(pr[key], `candidate.evidence.pr.${key}`);
   if (pr.number !== null && (!Number.isSafeInteger(pr.number) || pr.number <= 0)) throw new TypeError("candidate.evidence.pr.number must be a positive integer or null");
+  const worktreeRoot = exactRecord(input.worktree_root, ["state", "logical_path", "physical_path", "device", "inode"], "candidate.evidence.worktree_root");
+  enumValue(worktreeRoot.state, ["missing", "valid", "unsafe"], "candidate.evidence.worktree_root.state");
+  for (const key of ["logical_path", "physical_path", "device", "inode"]) nullableString(worktreeRoot[key], `candidate.evidence.worktree_root.${key}`);
   const branches = normalizeBranches(input.branches);
   const worktrees = normalizeWorktrees(input.worktrees);
   return {
     entry: { ...entry },
     claims: { branches: stringArray(claims.branches, "candidate.evidence.claims.branches").sort(utf8Collator), worktrees: stringArray(claims.worktrees, "candidate.evidence.claims.worktrees").sort(utf8Collator) },
-    run: { ...run }, factory_lock: { ...factoryLock }, heartbeat: { ...heartbeat }, process: { ...process }, run_lock: { ...runLock }, pr: { ...pr }, branches, worktrees,
+    run: { ...run }, factory_lock: { ...factoryLock }, heartbeat: { ...heartbeat }, process: { ...process }, run_lock: { ...runLock }, pr: { ...pr }, worktree_root: { ...worktreeRoot }, branches, worktrees,
   };
 }
 

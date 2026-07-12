@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { discoverCleanupSweepCandidates } from "../src/cleanup-sweep-eligibility.js";
@@ -349,6 +349,21 @@ test("R36-R41 verify recorded worktree containment, registration, branch/head id
     const fixture = createCleanupSweepFixture("worktree-ok");
     try { fixture.addRun("run"); fixture.addRecordedWorktree("run"); assert.equal(inspect(fixture).candidates[0].classification, "eligible"); }
     finally { fixture.cleanup(); }
+  });
+  await t.test("symlinked repository worktree root is unsafe and external worktrees survive preview", () => {
+    const fixture = createCleanupSweepFixture("worktree-symlinked-root");
+    try {
+      const externalRoot = join(fixture.root, "external-worktrees");
+      renameSync(fixture.worktreeRoot, externalRoot);
+      symlinkSync(externalRoot, fixture.worktreeRoot, "dir");
+      fixture.addRun("run");
+      const externalWorktree = fixture.addRecordedWorktree("run");
+      const candidate = inspect(fixture).candidates[0];
+      assert.deepEqual(candidate.reason_codes, ["SKIPPED_WORKTREE_UNSAFE"]);
+      assert.equal(candidate.evidence.worktree_root.state, "unsafe");
+      assert.equal(candidate.evidence.worktree_root.device, null);
+      assert.equal(existsSync(externalWorktree), true);
+    } finally { fixture.cleanup(); }
   });
   await t.test("outside root is unsafe", () => {
     const fixture = createCleanupSweepFixture("worktree-outside");

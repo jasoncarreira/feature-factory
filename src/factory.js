@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -1052,9 +1052,21 @@ export class CleanupRunUnexpectedError extends Error {
   }
 }
 
+export class CleanupRunChangedError extends Error {
+  constructor() {
+    super("cleanup evidence changed before mutation began");
+    this.name = "CleanupRunChangedError";
+    this.code = "CLEANUP_EVIDENCE_CHANGED";
+  }
+}
+
 function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   if (opts.force || opts.dryRun) throw new Error("sweep cleanup must be lock-held execution without force or dry-run");
-  assertExpectedRunHash(runDir, opts.expectedRunHash);
+  try {
+    assertExpectedRunHash(runDir, opts.expectedRunHash);
+  } catch {
+    throw new CleanupRunChangedError();
+  }
   const expectedHeads = normalizeExpectedBranchHeads(opts.expectedBranchHeads);
   const baseRef = opts.fetchedBaseRef || opts.fetchedBase?.ref || null;
   const runDirRemover = opts.removeRunDir || ((path) => rmSync(path, { recursive: true, force: true }));
@@ -1070,6 +1082,10 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   const failedWorktreeBranches = new Set();
   let mutationStarted = false;
 
+  const changed = () => {
+    if (!mutationStarted) throw new CleanupRunChangedError();
+  };
+
   const unexpected = (error) => {
     if (!mutationStarted) throw error;
     cleanup.run_dir.outcome = "retained";
@@ -1078,7 +1094,7 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   };
 
   const worktrees = targets.worktrees
-    .map((entry) => sweepWorktreeTarget(repo, entry, resolvePhysicalPath))
+    .map((entry) => sweepWorktreeTarget(repo, entry, resolvePhysicalPath, opts.expectedWorktreeRoot))
     .sort((a, b) => Buffer.from(a.physical_path || a.recorded_path).compare(Buffer.from(b.physical_path || b.recorded_path)));
   for (const target of worktrees) {
     const record = {
@@ -1096,8 +1112,10 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
         gitRunner,
         resolvePhysicalPath,
         worktreeIdentity,
+        expectedWorktreeRoot: opts.expectedWorktreeRoot,
       });
       if (!revalidated) {
+        changed();
         if (target.branch) failedWorktreeBranches.add(target.branch);
         continue;
       }
@@ -1128,14 +1146,14 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
       record.outcome = "not-attempted";
       continue;
     }
-    if (!resolveCleanupBranchPermission(branch).allowed || !expectedHead || !baseRef) continue;
+    if (!resolveCleanupBranchPermission(branch).allowed || !expectedHead || !baseRef) { changed(); continue; }
     try {
       const resolvedHead = gitRunner(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
-      if (!resolvedHead.ok || resolvedHead.stdout.trim() !== expectedHead) continue;
+      if (!resolvedHead.ok || resolvedHead.stdout.trim() !== expectedHead) { changed(); continue; }
       const ancestry = gitRunner(repo, ["merge-base", "--is-ancestor", expectedHead, baseRef]);
-      if (!ancestry.ok) continue;
+      if (!ancestry.ok) { changed(); continue; }
       phaseHook("before-branch-delete", { branch, expected_head: expectedHead, base_ref: baseRef });
-      if (branchIsCheckedOut(repo, branch, gitRunner)) continue;
+      if (!revalidateSweepBranch(repo, branch, expectedHead, baseRef, gitRunner)) { changed(); continue; }
       mutationStarted = true;
       let proc;
       try {
@@ -1163,7 +1181,14 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   } catch (error) {
     unexpected(error);
   }
+  if (!revalidateSweepRunDirectory(runDir, opts.expectedRunHash, opts.expectedRunDirectory)) {
+    changed();
+    cleanup.run_dir.outcome = "failed";
+    cleanup.run_dir.reason_code = "FAILED_CLEANUP_RUN_DIR";
+    return cleanup;
+  }
   try {
+    mutationStarted = true;
     runDirRemover(runDir);
     cleanup.run_dir.outcome = "removed";
   } catch {
@@ -1173,14 +1198,16 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
   return cleanup;
 }
 
-function sweepWorktreeTarget(repo, entry, resolvePhysicalPath = physicalPath) {
+function sweepWorktreeTarget(repo, entry, resolvePhysicalPath = physicalPath, expectedWorktreeRoot = null) {
   const recordedPath = String(entry.worktree);
   const resolved = resolve(repo, recordedPath);
-  if (!insideWorktreeRoot(repo, resolved) || !existsSync(resolved)) {
+  if (!validSweepWorktreeRoot(repo, expectedWorktreeRoot) || !insideWorktreeRoot(repo, resolved) || !existsSync(resolved)) {
     return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, valid: false };
   }
   try {
-    return { recorded_path: recordedPath, physical_path: resolvePhysicalPath(resolved), branch: entry.branch || null, valid: true };
+    const physical = resolvePhysicalPath(resolved);
+    if (!insideDirectory(expectedWorktreeRoot.physical_path, physical)) return { recorded_path: recordedPath, physical_path: physical, branch: entry.branch || null, valid: false };
+    return { recorded_path: recordedPath, physical_path: physical, branch: entry.branch || null, valid: true };
   } catch {
     return { recorded_path: recordedPath, physical_path: resolved, branch: entry.branch || null, valid: false };
   }
@@ -1188,7 +1215,7 @@ function sweepWorktreeTarget(repo, entry, resolvePhysicalPath = physicalPath) {
 
 function revalidateSweepWorktree(repo, authorized, expectedHead, opts) {
   if (!authorized.valid || !authorized.branch || !expectedHead) return false;
-  const current = sweepWorktreeTarget(repo, { worktree: authorized.recorded_path, branch: authorized.branch }, opts.resolvePhysicalPath);
+  const current = sweepWorktreeTarget(repo, { worktree: authorized.recorded_path, branch: authorized.branch }, opts.resolvePhysicalPath, opts.expectedWorktreeRoot);
   if (!current.valid || current.physical_path !== authorized.physical_path) return false;
   const identity = opts.worktreeIdentity(repo, current.physical_path, { branch: authorized.branch, head: expectedHead });
   if (!identity.ok || identity.worktree !== current.physical_path) return false;
@@ -1201,7 +1228,46 @@ function revalidateSweepWorktree(repo, authorized, expectedHead, opts) {
       return false;
     }
   });
-  return Boolean(entry && entry.branch === authorized.branch && entry.head === expectedHead && !entry.bare && !entry.detached);
+  if (!entry || entry.branch !== authorized.branch || entry.head !== expectedHead || entry.bare || entry.detached) return false;
+  const finalTarget = sweepWorktreeTarget(repo, { worktree: authorized.recorded_path, branch: authorized.branch }, opts.resolvePhysicalPath, opts.expectedWorktreeRoot);
+  return finalTarget.valid && finalTarget.physical_path === authorized.physical_path;
+}
+
+function validSweepWorktreeRoot(repo, expected) {
+  if (!expected || expected.state !== "valid") return false;
+  const logical = resolve(repo, ".opencode", "worktrees");
+  if (expected.logical_path !== logical) return false;
+  try {
+    const entry = lstatSync(logical);
+    return !entry.isSymbolicLink() && entry.isDirectory()
+      && realpathSync(logical) === expected.physical_path
+      && String(entry.dev) === expected.device
+      && String(entry.ino) === expected.inode;
+  } catch {
+    return false;
+  }
+}
+
+function revalidateSweepBranch(repo, branch, expectedHead, baseRef, gitRunner) {
+  const head = gitRunner(repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (!head.ok || head.stdout.trim() !== expectedHead) return false;
+  if (!gitRunner(repo, ["merge-base", "--is-ancestor", expectedHead, baseRef]).ok) return false;
+  return !branchIsCheckedOut(repo, branch, gitRunner);
+}
+
+function revalidateSweepRunDirectory(runDir, expectedRunHash, expectedDirectory) {
+  try {
+    const entry = lstatSync(runDir);
+    return expectedDirectory?.kind === "directory"
+      && !entry.isSymbolicLink()
+      && entry.isDirectory()
+      && realpathSync(runDir) === expectedDirectory.physical_path
+      && String(entry.dev) === expectedDirectory.device
+      && String(entry.ino) === expectedDirectory.inode
+      && sha256File(join(runDir, "run.json")) === expectedRunHash;
+  } catch {
+    return false;
+  }
 }
 
 function branchIsCheckedOut(repo, branch, gitRunner) {

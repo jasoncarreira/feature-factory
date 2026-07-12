@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { executeCleanupSweep, previewCleanupSweep } from "../src/cleanup-sweep.js";
@@ -23,6 +23,13 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
       assert.equal(report.repository.object_format, "sha1");
       assert.equal(readFileSync(join(fixture.factoryRoot, "run", "run.json"), "utf8"), before);
       assert.equal(report.candidates[0].classification, "eligible");
+      assert.deepEqual(report.candidates[0].evidence.worktree_root, {
+        state: "valid",
+        logical_path: join(report.repository.root_path, ".opencode", "worktrees"),
+        physical_path: realpathSync(fixture.worktreeRoot),
+        device: String(lstatSync(fixture.worktreeRoot).dev),
+        inode: String(lstatSync(fixture.worktreeRoot).ino),
+      });
       assert.equal(report.authorization.digest, report.confirmation.argv[5]);
       assert.equal(listInvocationRefs(fixture).length, 0);
     } finally { fixture.cleanup(); }
@@ -154,7 +161,7 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
     } finally { fixture.cleanup(); }
   });
 
-  it("R46 records worktree failure, retains its branch/run directory, and invokes the worktree phase seam", async () => {
+  it("maps a pre-first-mutation worktree change to an ordinary changed-during-execution skip", async () => {
     const fixture = createCleanupSweepFixture("execution-worktree-failure");
     try {
       fixture.addRun("run");
@@ -168,16 +175,17 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
         },
       });
       const candidate = report.candidates[0];
-      assert.equal(candidate.classification, "failed");
-      assert.equal(candidate.reason_codes.includes("FAILED_CLEANUP_WORKTREE"), true);
-      assert.equal(candidate.cleanup.branches[0].outcome, "not-attempted");
-      assert.equal(candidate.cleanup.run_dir.outcome, "retained");
+      assert.equal(candidate.classification, "skipped");
+      assert.deepEqual(candidate.reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"]);
+      assert.equal(candidate.attempted_cleanup, false);
+      assert.equal(candidate.cleanup, null);
       assert.equal(phases.includes("before-worktree-remove"), true);
-      assert.equal(report.exit_code, 1);
+      assert.equal(report.attempted_cleanup_failures, 0);
+      assert.equal(report.exit_code, 0);
     } finally { fixture.cleanup(); }
   });
 
-  it("before-branch-delete mutation is refused by CAS and retains the run directory", async () => {
+  it("maps a pre-first-mutation branch change to an ordinary changed-during-execution skip", async () => {
     const fixture = createCleanupSweepFixture("execution-before-branch-delete");
     try {
       fixture.addRun("run");
@@ -188,9 +196,35 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
           if (name === "before-branch-delete") fixture.gitRunner(fixture.repo, ["update-ref", `refs/heads/${context.branch}`, changedCommit, context.expected_head]);
         },
       });
-      assert.deepEqual(report.candidates[0].reason_codes, ["FAILED_CLEANUP_BRANCH", "RETAINED_AFTER_PARTIAL_FAILURE"]);
-      assert.equal(report.candidates[0].cleanup.branches[0].outcome, "failed");
+      assert.deepEqual(report.candidates[0].reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"]);
+      assert.equal(report.candidates[0].attempted_cleanup, false);
+      assert.equal(report.candidates[0].cleanup, null);
+      assert.equal(report.attempted_cleanup_failures, 0);
+      assert.equal(report.exit_code, 0);
       assert.equal(existsSync(join(fixture.factoryRoot, "run")), true);
+    } finally { fixture.cleanup(); }
+  });
+
+  it("keeps post-mutation branch evidence changes as attempted cleanup failures", async () => {
+    const fixture = createCleanupSweepFixture("execution-post-mutation-branch-change");
+    try {
+      fixture.addRun("run");
+      fixture.addRecordedWorktree("run");
+      const authorization = await preview(fixture);
+      const changedCommit = gitOutput(fixture.repo, ["commit-tree", `${fixture.baseSha}^{tree}`, "-p", fixture.baseSha, "-m", "branch changed after worktree removal"]);
+      const report = await execute(fixture, authorization.authorization.digest, {
+        phaseHook(name, context) {
+          if (name === "before-branch-delete") fixture.gitRunner(fixture.repo, ["update-ref", `refs/heads/${context.branch}`, changedCommit, context.expected_head]);
+        },
+      });
+      const candidate = report.candidates[0];
+      assert.equal(candidate.classification, "failed");
+      assert.equal(candidate.attempted_cleanup, true);
+      assert.deepEqual(candidate.reason_codes, ["FAILED_CLEANUP_BRANCH", "RETAINED_AFTER_PARTIAL_FAILURE"]);
+      assert.equal(candidate.cleanup.worktrees[0].outcome, "removed");
+      assert.equal(candidate.cleanup.branches[0].outcome, "failed");
+      assert.equal(report.attempted_cleanup_failures, 1);
+      assert.equal(report.exit_code, 1);
     } finally { fixture.cleanup(); }
   });
 
@@ -222,6 +256,71 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
       assert.equal(report.candidates[0].cleanup.run_dir.outcome, "failed");
       assert.equal(report.exit_code, 1);
     } finally { fixture.cleanup(); }
+  });
+
+  it("maps a pre-first-mutation run-directory evidence change to an ordinary skip with exact exit accounting", async () => {
+    const fixture = createCleanupSweepFixture("execution-run-dir-change");
+    try {
+      fixture.addRun("run", { branch: null });
+      const authorization = await preview(fixture);
+      let removals = 0;
+      const report = await execute(fixture, authorization.authorization.digest, {
+        phaseHook(name) {
+          if (name !== "before-run-dir-remove") return;
+          const run = fixture.readRun("run");
+          run.changed_after_authorization = true;
+          fixture.writeRun("run", run);
+        },
+        removeRunDir() { removals += 1; },
+      });
+      assert.deepEqual(report.candidates[0].reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"]);
+      assert.equal(report.candidates[0].attempted_cleanup, false);
+      assert.equal(report.candidates[0].cleanup, null);
+      assert.equal(report.attempted_cleanup_failures, 0);
+      assert.equal(report.exit_code, 0);
+      assert.equal(removals, 0);
+      assert.equal(existsSync(join(fixture.factoryRoot, "run")), true);
+    } finally { fixture.cleanup(); }
+  });
+
+  it("revalidates bound worktree-root identity before every top-level and slice removal", async () => {
+    for (const target of ["top-level", "slice"]) {
+      const fixture = createCleanupSweepFixture(`execution-swapped-root-${target}`);
+      try {
+        let externalWorktree;
+        if (target === "top-level") {
+          fixture.addRun("run");
+          externalWorktree = fixture.addRecordedWorktree("run");
+        } else {
+          fixture.createBranch("slice");
+          externalWorktree = fixture.addRegisteredWorktree("slice", "slice");
+          fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree: externalWorktree }] });
+        }
+        const authorization = await preview(fixture);
+        const externalRoot = join(fixture.root, `external-${target}`);
+        let swapped = false;
+        let removalCommands = 0;
+        const gitRunner = fallbackRunner((_cwd, args) => {
+          if (args[0] === "worktree" && args[1] === "remove") removalCommands += 1;
+          return null;
+        }, fixture.gitRunner);
+        const report = await execute(fixture, authorization.authorization.digest, {
+          gitRunner,
+          phaseHook(name) {
+            if (name !== "before-worktree-remove" || swapped) return;
+            swapped = true;
+            renameSync(fixture.worktreeRoot, externalRoot);
+            symlinkSync(externalRoot, fixture.worktreeRoot, "dir");
+          },
+        });
+        assert.deepEqual(report.candidates[0].reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"], target);
+        assert.equal(report.candidates[0].attempted_cleanup, false, target);
+        assert.equal(report.attempted_cleanup_failures, 0, target);
+        assert.equal(report.exit_code, 0, target);
+        assert.equal(removalCommands, 0, target);
+        assert.equal(existsSync(join(externalRoot, target === "top-level" ? "run" : "slice")), true, target);
+      } finally { fixture.cleanup(); }
+    }
   });
 
   it("before-run-dir-remove inspection exception is FAILED_INSPECTION and retains an unattempted run", async () => {

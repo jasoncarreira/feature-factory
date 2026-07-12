@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { cleanupRunLocked, CleanupRunUnexpectedError } from "./factory.js";
+import { cleanupRunLocked, CleanupRunChangedError, CleanupRunUnexpectedError } from "./factory.js";
 import { git } from "./git.js";
 import { github } from "./github.js";
 import { classifyCleanupSweepCandidate, discoverCleanupSweepCandidates } from "./cleanup-sweep-eligibility.js";
@@ -195,6 +195,8 @@ async function executeCandidate(repository, authorized, options, invocationId, t
           dryRun: false,
           expectedRunHash: normalized.evidence.run.hash,
           expectedBranchHeads: branches,
+          expectedRunDirectory: normalized.evidence.entry,
+          expectedWorktreeRoot: normalized.evidence.worktree_root,
           fetchedBaseRef: baseOid,
           fetchedBase: { ref: baseRef, oid: baseOid },
           gitRunner: guardedCleanupGitRunner(repository.root_path, baseRef, baseOid, options.gitRunner ?? git),
@@ -204,6 +206,7 @@ async function executeCandidate(repository, authorized, options, invocationId, t
           phaseHook: options.phaseHook,
         });
       } catch (error) {
+        if (error instanceof CleanupRunChangedError || error?.code === "CLEANUP_EVIDENCE_CHANGED") return changedCandidate(normalized);
         if (error instanceof CleanupRunUnexpectedError || error?.code === "FAILED_CLEANUP_UNEXPECTED") {
           completedCandidate = unexpectedCleanupCandidate(normalized, error.cleanup, runDir);
           return completedCandidate;
