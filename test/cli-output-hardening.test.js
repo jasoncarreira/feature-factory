@@ -19,13 +19,13 @@ describe("centralized CLI output", () => {
 
     const json = renderCliResultLines({
       status: "running",
-      boundary_token: "boundary-token-value",
+      boundary_token: "550e8400-e29b-41d4-a716-446655440000",
       summary: HOSTILE,
       model: HOSTILE,
     }, { json: true })[0];
     assert.deepEqual(JSON.parse(json), {
       status: "running",
-      boundary_token: "boundary-token-value",
+      boundary_token: "550e8400-e29b-41d4-a716-446655440000",
       summary: `visible\u001B]0;pwned\u0007 Authorization: Basic [redacted]`,
       model: `visible\u001B]0;pwned\u0007 Authorization: Basic [redacted]`,
     });
@@ -140,23 +140,35 @@ describe("centralized CLI output", () => {
     }
   });
 
-  it("rejects provider credentials from every token identity and preserves contractual tokens", () => {
+  it("renders only factory-issued UUID-shaped tokens raw and redacts every other token value", () => {
     const keys = ["token", "boundary_token", "action_token", "fence_token"];
-    const legitimate = [
-      "boundary-token-value",
-      "550e8400-e29b-41d4-a716-446655440000",
+    // The raw-render contract for token identity fields is the factory's own
+    // issued shape (randomUUID), not a credential blocklist: descriptive
+    // strings that merely mention credential words are indistinguishable from
+    // credentials by heuristic, so both redact.
+    const factoryIssued = ["550e8400-e29b-41d4-a716-446655440000", "A0B1C2D3-E4F5-A6B7-C8D9-E0F1A2B3C4D5"];
+    const redacted = [
+      TOKEN, // provider credential
+      "boundary-token-value", // descriptive token, no longer contract-valid raw
+      "boundary-api-key-value", // descriptive token mentioning credential words
+      "boundary-private-key-value",
+      "550e8400e29b41d4a716446655440000", // UUID without delimiters is not the issued shape
     ];
 
     for (const key of keys) {
-      for (const value of legitimate) {
+      for (const value of factoryIssued) {
         assert.equal(projectCliData({ [key]: value })[key], value, `${key}: ${value}`);
         assert.equal(JSON.parse(renderCliResultLines({ [key]: value }, { json: true })[0])[key], value);
       }
 
-      const projected = projectCliData({ [key]: TOKEN });
-      assert.equal(projected[key], "[redacted]", key);
+      for (const value of redacted) {
+        const projected = projectCliData({ [key]: value });
+        assert.equal(projected[key], "[redacted]", `${key}: ${value}`);
+        const output = renderCliResultLines({ [key]: value }, { json: true })[0];
+        assert.equal(JSON.parse(output)[key], "[redacted]", `${key}: ${value}`);
+      }
+
       const output = renderCliResultLines({ [key]: TOKEN }, { json: true })[0];
-      assert.equal(JSON.parse(output)[key], "[redacted]", key);
       assert.doesNotMatch(output, new RegExp(TOKEN, "u"));
     }
   });

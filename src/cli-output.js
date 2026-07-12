@@ -15,7 +15,6 @@ const VALIDATED_STATUS_VALUES = new Set([
   "unavailable", "warn", "warning",
 ]);
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const SAFE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{8,128}$/u;
 const SAFE_UUID_PATTERN = /^[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}$/u;
 const SAFE_HASH_PATTERN = /^(?:sha256:)?[A-Fa-f0-9]{32,128}$/u;
 const SAFE_REF_CHARACTERS = /^[A-Za-z0-9._/-]+$/u;
@@ -144,8 +143,15 @@ function validatedIdentity(key, value) {
   if (key === "status" || key === "level") return VALIDATED_STATUS_VALUES.has(value);
   if (key === "run_id") return !isSensitiveValue(value, { mode: "baseline" }) && SAFE_RUN_ID_PATTERN.test(value);
   if (key === "token" || key === "boundary_token" || key === "action_token" || key === "fence_token") {
-    return SAFE_TOKEN_PATTERN.test(value)
-      && (SAFE_UUID_PATTERN.test(value) || !centrallyRecognizedProviderCredential(value));
+    // Factory-issued tokens have exactly one shape: the UUID minted at
+    // boundary/action/fence creation (run-state.js randomUUID()); operators only
+    // ever echo factory-issued tokens back. Render raw only that closed shape
+    // and redact everything else deterministically. This deliberately replaces
+    // credential classification for token fields: no blocklist heuristic can
+    // separate a provider credential from a descriptive string that mentions
+    // credential words, and chasing that precision/recall boundary is what
+    // exhausted the autonomous run that produced this slice.
+    return SAFE_UUID_PATTERN.test(value);
   }
   if (key === "hash" || key === "trace_id" || key?.endsWith("_hash")) return SAFE_HASH_PATTERN.test(value);
   if (key === "ref" || key?.endsWith("_ref")) return safeContractRef(value, { allowRunRoot: key === "run_ref" });
@@ -198,22 +204,6 @@ function safeContractPath(value) {
   // match the unchanged value before the marker.
   if (isSensitiveValue(`${value}#`, { mode: "baseline" })) return false;
   return value.split(/[\\/]/u).every((segment) => !centrallySensitiveStructuredSegment(segment));
-}
-
-function centrallyRecognizedProviderCredential(value) {
-  if (!isSensitiveValue(value, { mode: "baseline" })) return false;
-  // Contract tokens commonly contain descriptive words such as "token", which
-  // the baseline policy intentionally treats as sensitive prose. Neutralize
-  // only short components that the centralized policy recognizes on their own;
-  // provider prefixes and credential payloads remain intact for the same policy
-  // to classify, while UUID and descriptive boundary tokens remain contractual.
-  const providerProbe = value
-    .split(/([-_.]+)/u)
-    .map((component) => component.length <= 16 && isSensitiveValue(component, { mode: "baseline" })
-      ? "identity"
-      : component)
-    .join("");
-  return isSensitiveValue(providerProbe, { mode: "baseline" });
 }
 
 function centrallySensitiveStructuredSegment(segment) {
