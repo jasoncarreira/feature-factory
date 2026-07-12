@@ -13,6 +13,12 @@ import {
 import { PROCESS_EVIDENCE_FILE } from "./process-evidence.js";
 import { hasInFlightHeartbeatWork } from "./run-state.js";
 import { physicalPath, timestamp } from "./utils.js";
+import { projectDiagnosticData } from "./hardening/output-policy.js";
+import {
+  probeLegacyBooleanLiveness,
+  probeProcessLiveness,
+  publicLivenessBoolean,
+} from "./hardening/process-verification.js";
 
 export const DIAGNOSTIC_SCHEMA_VERSION = 1;
 export const HEARTBEAT_FILE = "heartbeat.json";
@@ -42,6 +48,12 @@ const TERMINAL_OVERRIDES = Object.freeze({
 });
 
 const TERMINAL_STATUSES = new Set(TERMINAL_RUN_STATUSES);
+const DIAGNOSTIC_IDENTITY_FIELDS = Object.freeze({
+  status: new Set(DIAGNOSTIC_STATUSES),
+  severity: new Set(DIAGNOSTIC_SEVERITIES),
+  classification: new Set(DIAGNOSTIC_CLASSIFICATIONS),
+  condition: new Set(DIAGNOSTIC_CONDITIONS),
+});
 
 export function diagnoseRunDir(runDir, options = {}) {
   return diagnoseRunFile(join(runDir, "run.json"), { ...options, runDir });
@@ -145,7 +157,7 @@ export function diagnosticEnvelope(items = [], options = {}) {
   const checkedAt = options.checkedAt || timestamp(options.now);
   const normalized = items.map((item) => normalizeDiagnosticItem(item, checkedAt));
   const aggregate = aggregateDiagnostics(normalized);
-  return {
+  const envelope = {
     schema_version: DIAGNOSTIC_SCHEMA_VERSION,
     checked_at: checkedAt,
     authoritative: Boolean(options.authoritative) && aggregate.classification !== "invalid",
@@ -155,6 +167,9 @@ export function diagnosticEnvelope(items = [], options = {}) {
     summary: aggregate.summary,
     items: normalized,
   };
+  return plainDiagnosticProjection(projectDiagnosticData(envelope, {
+    validatedIdentityPaths: validatedDiagnosticIdentityPaths(envelope),
+  }));
 }
 
 export function aggregateDiagnostics(items = []) {
@@ -308,8 +323,9 @@ function inspectHeartbeat(run, options) {
 
   const result = {};
   if (heartbeat) {
-    evidence.process_alive = processAlive(heartbeat.pid, options);
-    if (!evidence.process_alive) result.missingProcess = diagnosticItem("missing-heartbeat-process", {
+    const liveness = processLiveness(heartbeat.pid, options);
+    evidence.process_alive = publicLivenessBoolean(liveness);
+    if (liveness === "absent") result.missingProcess = diagnosticItem("missing-heartbeat-process", {
       checkedAt,
       authoritative: false,
       evidence: { ...evidence },
@@ -348,16 +364,33 @@ function inspectWorktree(run, options) {
   }
 }
 
-function processAlive(pid, options = {}) {
-  if (typeof options.processAliveFn === "function") return Boolean(options.processAliveFn(pid));
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    return false;
+function processLiveness(pid, options = {}) {
+  if (typeof options.processAliveFn === "function") {
+    return probeLegacyBooleanLiveness(options.processAliveFn, pid);
   }
+  return probeProcessLiveness(pid, options).status;
+}
+
+function validatedDiagnosticIdentityPaths(envelope) {
+  const paths = [];
+  for (const field of ["status", "severity", "classification"]) {
+    if (DIAGNOSTIC_IDENTITY_FIELDS[field].has(envelope[field])) paths.push([field]);
+  }
+  for (let index = 0; index < envelope.items.length; index += 1) {
+    const item = envelope.items[index];
+    for (const field of ["condition", "status", "severity", "classification"]) {
+      if (DIAGNOSTIC_IDENTITY_FIELDS[field].has(item[field])) paths.push(["items", String(index), field]);
+    }
+  }
+  return paths;
+}
+
+function plainDiagnosticProjection(value) {
+  if (Array.isArray(value)) return value.map(plainDiagnosticProjection);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, plainDiagnosticProjection(item)]));
+  }
+  return value;
 }
 
 function realpath(options, path) {

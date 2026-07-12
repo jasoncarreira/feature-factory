@@ -1,6 +1,7 @@
 /* @jsxImportSource @opentui/solid */
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { factoryRoots, readRuns, runHasNonOkDiagnostic as hasNonOkDiagnostic, selectVisibleRuns } from "./tui-data.js";
+import { renderHiddenRunsLine, renderRunTextFields } from "./tui-rendering.js";
 
 const REFRESH_INTERVAL_MS = 5000;
 const MAX_VISIBLE_RUNS = 3;
@@ -31,36 +32,6 @@ function diagnosticColor(theme, status) {
   if (status === "error") return theme.error;
   if (status === "warning") return theme.warning;
   return theme.textMuted;
-}
-
-function diagnosticLine(run) {
-  const classification = run.diagnostic_classification ? `${run.diagnostic_classification}: ` : "";
-  return `${classification}${run.diagnostic_summary || "Diagnostics require attention"}`;
-}
-
-function truncate(value, max) {
-  if (!value || value.length <= max) return value || "";
-  return `${value.slice(0, Math.max(0, max - 3))}...`;
-}
-
-function sliceLine(slices) {
-  if (!slices || typeof slices !== "object") return null;
-  const merged = Number.isInteger(slices.merged) ? slices.merged : 0;
-  const total = Number.isInteger(slices.total) ? slices.total : 0;
-  const blocked = Number.isInteger(slices.blocked) && slices.blocked > 0 ? ` | blocked ${slices.blocked}` : "";
-  return `slices: ${merged}/${total}${blocked}`;
-}
-
-function steeringLine(steering) {
-  if (!steering || typeof steering !== "object") return null;
-  if (steering.pending) return `steering pending: ${truncate(steering.pending.ref || "pending", 34)}`;
-  if (steering.latest_consumed) return `steering consumed: ${steering.consumed_count} latest ${truncate(steering.latest_consumed.ref || "consumed", 24)}`;
-  return null;
-}
-
-function costLine(cost) {
-  if (!cost || typeof cost !== "object") return null;
-  return typeof cost.label === "string" && cost.label.length > 0 ? cost.label : null;
 }
 
 function scanRuns(api) {
@@ -139,59 +110,54 @@ function View(props) {
             <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
               <For each={visibleRuns()}>
                 {(run) => {
-                  const slices = sliceLine(run.slices);
-                  const steering = steeringLine(run.steering);
-                  const cost = costLine(run.cost);
+                  const rendered = renderRunTextFields(run);
                   return (
                     <box paddingTop={1}>
                       <box flexDirection="row" gap={1}>
                         <text fg={statusColor(theme(), run.status)}>*</text>
                         <text fg={theme().text} wrapMode="none">
-                          {truncate(run.run_id, 31)}
+                          {rendered.run_id}
                         </text>
                       </box>
-                      <text fg={theme().textMuted}>
-                        {run.status}
-                        <Show when={run.mode}> | {run.mode}</Show>
-                      </text>
+                      <text fg={theme().textMuted}>{rendered.status_line}</text>
                       <Show when={run.gate}>
-                        <text fg={theme().warning}>gate: {run.gate}</text>
+                        <text fg={theme().warning}>{rendered.gate_line}</text>
                       </Show>
                       <Show when={run.current}>
-                        <text fg={theme().textMuted}>current: {truncate(run.current, 34)}</text>
+                        <text fg={theme().textMuted}>{rendered.current_line}</text>
                       </Show>
-                      <Show when={steering}>
-                        <text fg={theme().warning}>{steering}</text>
+                      <Show when={rendered.steering_line}>
+                        <text fg={theme().warning}>{rendered.steering_line}</text>
                       </Show>
-                      <Show when={slices}>
-                        <text fg={theme().textMuted}>{slices}</text>
+                      <Show when={rendered.slices_line}>
+                        <text fg={theme().textMuted}>{rendered.slices_line}</text>
                       </Show>
-                      <Show when={cost}>
-                        <text fg={theme().textMuted}>{truncate(cost, 42)}</text>
+                      <Show when={rendered.cost_line}>
+                        <text fg={theme().textMuted}>{rendered.cost_line}</text>
                       </Show>
                       <Show when={run.panel}>
-                        <text fg={theme().textMuted}>panel: {run.panel}</text>
+                        <text fg={theme().textMuted}>{rendered.panel_line}</text>
                       </Show>
                       <Show when={run.pr_url}>
-                        <text fg={theme().success}>PR: {truncate(run.pr_url, 34)}</text>
+                        <text fg={theme().success}>{rendered.pr_line}</text>
                       </Show>
                       <Show when={run.terminal_reason}>
-                        <text fg={theme().warning}>reason: {truncate(run.terminal_reason, 30)}</text>
+                        <text fg={theme().warning}>{rendered.terminal_reason_line}</text>
                       </Show>
                       <Show when={hasNonOkDiagnostic(run)}>
                         <text fg={diagnosticColor(theme(), run.diagnostic_status)}>
-                          diagnostic: {truncate(diagnosticLine(run), 42)}
+                          {rendered.diagnostic_line}
                         </text>
                       </Show>
                       <Show when={run.branch}>
-                        <text fg={theme().textMuted}>branch: {truncate(run.branch, 30)}</text>
+                        <text fg={theme().textMuted}>{rendered.branch_line}</text>
                       </Show>
                     </box>
                   );
                 }}
               </For>
               <Show when={hiddenCount() > 0}>
-                <text fg={theme().textMuted}>+ {hiddenCount()} more runs</text>
+                <text fg={theme().textMuted}>{renderHiddenRunsLine(hiddenCount())}</text>
               </Show>
             </box>
           )}
