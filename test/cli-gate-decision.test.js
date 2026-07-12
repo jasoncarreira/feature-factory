@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from "node:fs";
 import { spawnSync as runSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,7 +85,7 @@ describe("cli gate-decision", () => {
     });
   }
 
-  it("returns the exact started envelope after interactive approval readiness", () => {
+  it("returns the exact started envelope after interactive approval readiness", async () => {
     const fixture = createFixture("cli-interactive-handoff", { interactive: true });
     const bin = installFakeOpencode(fixture.repo);
     let pid;
@@ -117,7 +117,7 @@ describe("cli gate-decision", () => {
       assert.equal(output.gate_accepted, true);
       assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false);
     } finally {
-      if (pid) try { process.kill(pid, "SIGTERM"); } catch { /* already exited */ }
+      if (pid) await terminateDetachedFixture(fixture.runDir, pid);
       cleanup(fixture.repo);
     }
   });
@@ -489,7 +489,7 @@ function installFakeOpencode(repo) {
   const bin = join(repo, "bin");
   mkdirSync(bin, { recursive: true });
   const script = join(bin, "opencode");
-  writeFileSync(script, "#!/usr/bin/env node\nsetTimeout(() => {}, 30000);\n", "utf8");
+  writeFileSync(script, "#!/usr/bin/env node\nprocess.once(\"SIGTERM\", () => process.exit(0));\n", "utf8");
   chmodSync(script, 0o755);
   return bin;
 }
@@ -504,4 +504,30 @@ function writeJson(file, value) {
 
 function cleanup(repo) {
   rmSync(repo, { recursive: true, force: true });
+}
+
+async function terminateDetachedFixture(runDir, pid) {
+  const processFile = join(runDir, "process.json");
+  await new Promise((resolve, reject) => {
+    const watcher = watch(runDir, (event, filename) => {
+      if (event !== "rename" || filename !== "process.json") return;
+      try {
+        const evidence = readJson(processFile);
+        assert.equal(evidence.pid, pid, "the terminal sidecar must belong to the started child");
+        assert.equal(evidence.state, "exited", "the supervisor must finish log publication before cleanup");
+        watcher.close();
+        resolve();
+      } catch (error) {
+        watcher.close();
+        reject(error);
+      }
+    });
+    watcher.once("error", reject);
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch (error) {
+      watcher.close();
+      reject(error);
+    }
+  });
 }
