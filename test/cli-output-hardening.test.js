@@ -123,6 +123,23 @@ describe("centralized CLI output", () => {
     assert.doesNotMatch(output, ACTIVE_CONTROLS);
   });
 
+  it("rejects separator-spanning credentials from every contractual path identity", () => {
+    const credentials = [
+      "/tmp/Authorization: Basic /abc/worktree",
+      "https://user:pass@example.test/repo.git",
+    ];
+    const keys = ["worktree", "path", "artifact_path"];
+
+    for (const credential of credentials) {
+      for (const key of keys) {
+        const output = renderCliResultLines({ [key]: credential }, { json: true })[0];
+        assert.equal(JSON.parse(output)[key], "[redacted]", `${key}: ${credential}`);
+        assert.doesNotMatch(output, new RegExp(escapeRegExp(credential), "u"));
+        assert.doesNotMatch(output, /Authorization: Basic \/abc|user:pass/iu);
+      }
+    }
+  });
+
   it("keeps controls escaped and credentials absent in non-identity freeform fields", () => {
     const output = renderCliResultLines({ summary: HOSTILE, detail: `token ${PAT}` }, { json: true })[0];
     assert.doesNotMatch(output, new RegExp(SECRET, "u"));
@@ -136,4 +153,8 @@ function assertSafe(output) {
   assert.doesNotMatch(output, new RegExp(SECRET, "u"));
   assert.doesNotMatch(output, ACTIVE_CONTROLS);
   assert.match(output, /\\u001B/iu);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

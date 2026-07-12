@@ -189,6 +189,12 @@ function safeContractRef(value, { allowRunRoot = false } = {}) {
 
 function safeContractPath(value) {
   if (!value || hasUnsafeTerminalCodePoint(value)) return false;
+  // Evaluate the complete value so credentials spanning path separators remain
+  // visible to the centralized policy. The marker prevents its generic
+  // single-token entropy heuristic from treating an ordinary long absolute
+  // path as opaque secret material; credential/header/URL recognizers still
+  // match the unchanged value before the marker.
+  if (isSensitiveValue(`${value}#`, { mode: "baseline" })) return false;
   return value.split(/[\\/]/u).every((segment) => !centrallySensitiveStructuredSegment(segment));
 }
 
