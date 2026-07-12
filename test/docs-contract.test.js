@@ -33,6 +33,8 @@ const SPEC_WRITER_PROMPT = readDoc("../assets/agent/spec-writer.md");
 const WORK_DECOMPOSER_PROMPT = readDoc("../assets/agent/work-decomposer.md");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
 const TEST_VERIFIER_PROMPT = readDoc("../assets/agent/test-verifier.md");
+const BACKEND_BUILDER_PROMPT = readDoc("../assets/agent/backend-builder.md");
+const FRONTEND_BUILDER_PROMPT = readDoc("../assets/agent/frontend-builder.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
 const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
@@ -538,6 +540,35 @@ describe("decomposition depth contract", () => {
       /Existing durable runs with older, deeper seeded plans remain readable and resumable/i,
       "SCHEMA must state grandfathered seeded plans remain runnable",
     );
+  });
+});
+
+describe("producer self-check contract", () => {
+  it("gives both builders a pre-submit self-check mirroring the reviewer bar", () => {
+    // Alignment, not accretion: surface the reviewer's build-slice bar to the
+    // producer as a pre-return self-check (same pattern as the spec-writer
+    // acceptance-bar alignment), so builders stop paying a guaranteed rejection
+    // round. Each concept below is enforced by work-reviewer AND self-checked by
+    // both builders — the pair must not drift apart.
+    for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
+      assert.match(prompt, /## Pre-submit self-check/i, `${name}-builder must carry the pre-submit self-check`);
+      assert.match(prompt, /Imports resolve to real exports[\s\S]*do not invent a similar name or a guessed path/i, `${name}-builder must self-check import resolution`);
+      assert.match(prompt, /No vaporware[\s\S]*TODO[\s\S]*STUB[\s\S]*stub bodies/i, `${name}-builder must self-check vaporware`);
+      assert.match(prompt, /Mechanically complete[\s\S]*unused imports[\s\S]*unreachable\/dead code/i, `${name}-builder must self-check mechanical completeness`);
+      assert.match(prompt, /In lane[\s\S]*within the slice `paths`/i, `${name}-builder must self-check lane discipline`);
+      assert.match(prompt, /Every AC is implemented and tested[\s\S]*exact-value assertion/i, `${name}-builder must self-check AC test coverage`);
+      assert.match(prompt, /Verified, not masked[\s\S]*never worked around by weakening an assertion/i, `${name}-builder must self-check honest verification`);
+    }
+    // Reviewer still owns the enforcing bar these self-checks mirror.
+    assert.match(WORK_REVIEWER_PROMPT, /out-of-lane edits outside slice `paths`/i, "work-reviewer must enforce lane discipline");
+  });
+
+  it("gives test-verifier a self-review with an exact-value assertion floor", () => {
+    assert.match(TEST_VERIFIER_PROMPT, /## Self-review before reporting/i);
+    assert.match(TEST_VERIFIER_PROMPT, /every acceptance criterion maps to at least one real assertion/i);
+    assert.match(TEST_VERIFIER_PROMPT, /No presence-only checks \(`toBeTruthy`\/`toBeDefined`[\s\S]*test theater/i);
+    assert.match(TEST_VERIFIER_PROMPT, /a real source bug is reported as a `fail`[\s\S]*never silenced/i);
+    assert.match(TEST_VERIFIER_PROMPT, /Never weaken to pass[\s\S]*A `fail` is a valid, correct result/i);
   });
 });
 
