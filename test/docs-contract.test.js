@@ -32,6 +32,7 @@ const CODEBASE_RESEARCHER_PROMPT = readDoc("../assets/agent/codebase-researcher.
 const SPEC_WRITER_PROMPT = readDoc("../assets/agent/spec-writer.md");
 const WORK_DECOMPOSER_PROMPT = readDoc("../assets/agent/work-decomposer.md");
 const WORK_REVIEWER_PROMPT = readDoc("../assets/agent/work-reviewer.md");
+const TEST_VERIFIER_PROMPT = readDoc("../assets/agent/test-verifier.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
 const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
@@ -537,6 +538,25 @@ describe("decomposition depth contract", () => {
       /Existing durable runs with older, deeper seeded plans remain readable and resumable/i,
       "SCHEMA must state grandfathered seeded plans remain runnable",
     );
+  });
+});
+
+describe("test-verifier integration gate contract", () => {
+  it("keeps repository-wide checks out of implementation slices", () => {
+    assert.match(SPEC_WRITER_PROMPT, /Repository integration gate[\s\S]*test-verifier after all slices merge/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /Do not assign the repository-wide full-suite\/build\/package command to any implementation slice[\s\S]*test-verifier integration gate/i);
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT[\s\S]*repository-wide full-suite\/build\/package command assigned to an implementation slice[\s\S]*test-verifier/i);
+    assert.match(SKILL, /never make the final slice an accidental integration gate/i);
+  });
+
+  it("runs one bounded post-merge gate through durable test-verifier attempts", () => {
+    assert.match(TEST_VERIFIER_PROMPT, /after every implementation slice is merged[\s\S]*canonical repository-wide integration command exactly/i);
+    assert.match(TEST_VERIFIER_PROMPT, /red repository-wide command is a valid `fail` result[\s\S]*do not repair production code/i);
+    assert.match(SKILL, /Verify every durable slice is `merged`[\s\S]*test-verifier running --attempts N[\s\S]*never exceeds `run\.json\.max_retries`/i);
+    assert.match(SKILL, /evidence\/test-verifier\.attempt-N\.json[\s\S]*record the step `rejected`[\s\S]*only pre-panel integration-remediation loop/i);
+    assert.match(SKILL, /without creating a standalone integration-remediation review subject/i);
+    assert.match(SCHEMA, /test-verifier.*post-merge integration gate[\s\S]*attempts <= run\.max_retries[\s\S]*Integration remediation has no separate free-form review subject/i);
+    assert.match(COMMAND, /repository-wide check only through the bounded `test-verifier` integration gate[\s\S]*never leave the final slice running or create an uncounted integration-remediation loop/i);
   });
 });
 
