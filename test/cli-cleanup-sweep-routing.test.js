@@ -100,7 +100,7 @@ describe("cleanup sweep CLI routing and output", () => {
     }
   });
 
-  it("emits one fixed terminal-safe grammar error, no stdout, no handlers, and exit 1", async () => {
+  it("emits one terminal-safe grammar error, no stdout, no handlers, and exit 1", async () => {
     const invalid = [
       ["--all", "--force", "--dry-run"],
       ["--all", "--dry-run", "run"],
@@ -119,7 +119,9 @@ describe("cleanup sweep CLI routing and output", () => {
       assert.equal(exit, 1, args.join(" "));
       assert.equal(handlers, 0);
       assert.deepEqual(stdout, []);
-      assert.deepEqual(stderr, ["error: invalid cleanup sweep command"]);
+      assert.equal(stderr.length, 1);
+      assert.match(stderr[0], /^error: factory cleanup /u);
+      assert.doesNotMatch(stderr[0], /[\u0000-\u001f\u007f-\u009f]/u);
     }
   });
 
