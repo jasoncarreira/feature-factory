@@ -374,7 +374,9 @@ function normalizeCleanup(value) {
   }).sort((left, right) => utf8Collator(left.name, right.name));
   const runDir = exactRecord(cleanup.run_dir, ["path", "outcome", "reason_code"], "candidate.cleanup.run_dir");
   assertNonEmptyString(runDir.path, "cleanup run_dir path"); enumValue(runDir.outcome, ["removed", "failed", "retained"], "cleanup run_dir outcome"); validateOutcomeReason(runDir.outcome, runDir.reason_code, "cleanup run_dir");
-  return { worktrees, branches, run_dir: { ...runDir } };
+  const normalized = { worktrees, branches, run_dir: { ...runDir } };
+  assertCleanupSequenceCoherence(normalized);
+  return normalized;
 }
 
 function normalizeAuthorization(value) {
@@ -408,6 +410,7 @@ function assertCandidateMutationState({ classification, failureStage, attemptedC
   }
   if (classification === "failed" && failureStage === "cleanup") {
     if (!attemptedCleanup || cleanup === null) throw new TypeError("a cleanup-failed candidate must be attempted with cleanup details");
+    if (cleanupWhollySuccessful(cleanup)) throw new TypeError("wholly successful cleanup details require deleted classification");
     return;
   }
   if (classification === "failed") throw new TypeError("a failed candidate requires inspection or cleanup failure_stage");
@@ -467,6 +470,44 @@ function cleanupWhollySuccessful(cleanup) {
     && cleanup.branches.every((item) => item.outcome === "deleted" && item.reason_code === null)
     && cleanup.run_dir.outcome === "removed"
     && cleanup.run_dir.reason_code === null;
+}
+
+function assertCleanupSequenceCoherence(cleanup) {
+  for (const worktree of cleanup.worktrees) {
+    if (worktree.outcome === "failed" && worktree.reason_code !== "FAILED_CLEANUP_WORKTREE") {
+      throw new TypeError("a failed worktree requires FAILED_CLEANUP_WORKTREE detail");
+    }
+    if (worktree.outcome === "failed" && worktree.branch !== null) {
+      const recordedBranch = cleanup.branches.find((branch) => branch.name === worktree.branch);
+      if (recordedBranch && recordedBranch.outcome !== "not-attempted") {
+        throw new TypeError("a branch with a failed recorded worktree must be not-attempted");
+      }
+    }
+  }
+  for (const branch of cleanup.branches) {
+    if (branch.outcome === "failed" && branch.reason_code !== "FAILED_CLEANUP_BRANCH") {
+      throw new TypeError("a failed branch requires FAILED_CLEANUP_BRANCH detail");
+    }
+    if (branch.outcome === "not-attempted") {
+      if (branch.reason_code !== "RETAINED_AFTER_PARTIAL_FAILURE") throw new TypeError("a not-attempted branch requires retained-after-partial-failure detail");
+      const failedRecordedWorktree = cleanup.worktrees.some((worktree) => worktree.outcome === "failed" && worktree.branch === branch.name);
+      if (!failedRecordedWorktree) throw new TypeError("a branch may be not-attempted only after its recorded worktree failed");
+    }
+  }
+  const targetFailed = cleanup.worktrees.some((item) => item.outcome === "failed")
+    || cleanup.branches.some((item) => item.outcome === "failed" || item.outcome === "not-attempted");
+  if (targetFailed) {
+    if (cleanup.run_dir.outcome !== "retained" || cleanup.run_dir.reason_code !== "RETAINED_AFTER_PARTIAL_FAILURE") {
+      throw new TypeError("a target failure requires the run directory to be retained after partial failure");
+    }
+    return;
+  }
+  if (cleanup.run_dir.outcome === "failed" && cleanup.run_dir.reason_code !== "FAILED_CLEANUP_RUN_DIR") {
+    throw new TypeError("a failed run directory removal requires FAILED_CLEANUP_RUN_DIR detail");
+  }
+  if (cleanup.run_dir.outcome === "retained" && cleanup.run_dir.reason_code !== "FAILED_CLEANUP_UNEXPECTED") {
+    throw new TypeError("a run directory retained without target failure requires FAILED_CLEANUP_UNEXPECTED detail");
+  }
 }
 
 function validateOutcomeReason(outcome, reasonCode, path) {

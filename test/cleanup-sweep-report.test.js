@@ -151,9 +151,9 @@ describe("cleanup sweep report and digest", () => {
       ["deleted with details but no attempt", { classification: "deleted", failure_stage: null, attempted_cleanup: false, cleanup: successfulCleanup }, /deleted candidate must be attempted with cleanup details/u],
       ["deleted attempt without details", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: null }, /deleted candidate must be attempted with cleanup details/u],
       ["deleted with failure stage", { classification: "deleted", failure_stage: "cleanup", attempted_cleanup: true, cleanup: successfulCleanup }, /only a failed candidate may have failure_stage/u],
-      ["deleted with failed worktree", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, worktrees: [{ recorded_path: "/r", physical_path: "/p", branch: "b", outcome: "failed", reason_code: "FAILED_CLEANUP_WORKTREE" }] } }, /deleted candidate requires wholly successful cleanup outcomes/u],
-      ["deleted with unattempted branch", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, branches: [{ name: "b", expected_head: "oid", outcome: "not-attempted", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" }] } }, /deleted candidate requires wholly successful cleanup outcomes/u],
-      ["deleted with retained run directory", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, run_dir: { path: "/run", outcome: "retained", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" } } }, /deleted candidate requires wholly successful cleanup outcomes/u],
+      ["deleted with failed worktree", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, worktrees: [{ recorded_path: "/r", physical_path: "/p", branch: "b", outcome: "failed", reason_code: "FAILED_CLEANUP_WORKTREE" }], run_dir: { path: "/run", outcome: "retained", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" } } }, /deleted candidate requires wholly successful cleanup outcomes/u],
+      ["deleted with unattempted branch", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, worktrees: [{ recorded_path: "/r", physical_path: "/p", branch: "b", outcome: "failed", reason_code: "FAILED_CLEANUP_WORKTREE" }], branches: [{ name: "b", expected_head: "oid", outcome: "not-attempted", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" }], run_dir: { path: "/run", outcome: "retained", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" } } }, /deleted candidate requires wholly successful cleanup outcomes/u],
+      ["deleted with retained run directory", { classification: "deleted", failure_stage: null, attempted_cleanup: true, cleanup: { ...successfulCleanup, run_dir: { path: "/run", outcome: "retained", reason_code: "FAILED_CLEANUP_UNEXPECTED" } } }, /deleted candidate requires wholly successful cleanup outcomes/u],
     ];
     for (const [label, overrides, expected] of invalid) {
       assert.throws(() => createCandidate(candidateInput("run", overrides)), expected, label);
@@ -166,6 +166,47 @@ describe("cleanup sweep report and digest", () => {
       () => createCandidate(candidateInput("run", { classification: "deleted", attempted_cleanup: true, cleanup: { ...successfulCleanup, run_dir: { path: "/run", outcome: "removed", reason_code: "DELETED" } } })),
       /successful outcome requires null reason_code/u,
     );
+  });
+
+  it("rejects wholly successful failed candidates and every order-inconsistent cleanup outcome", () => {
+    const successful = cleanupResult("run");
+    const failedWorktree = { recorded_path: "/recorded/run", physical_path: "/physical/run", branch: "run-branch", outcome: "failed", reason_code: "FAILED_CLEANUP_WORKTREE" };
+    const failedBranch = { name: "run-branch", expected_head: "oid", outcome: "failed", reason_code: "FAILED_CLEANUP_BRANCH" };
+    const notAttemptedBranch = { name: "run-branch", expected_head: "oid", outcome: "not-attempted", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" };
+    const retained = { path: "/repo/.opencode/factory/run", outcome: "retained", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" };
+    const invalid = [
+      ["failed classification with wholly successful details", successful, /wholly successful cleanup details require deleted classification/u],
+      ["failed worktree followed by run-directory removal", { worktrees: [failedWorktree], branches: [], run_dir: successful.run_dir }, /target failure requires the run directory to be retained/u],
+      ["failed worktree followed by run-directory removal failure", { worktrees: [failedWorktree], branches: [], run_dir: { path: "/run", outcome: "failed", reason_code: "FAILED_CLEANUP_RUN_DIR" } }, /target failure requires the run directory to be retained/u],
+      ["failed branch followed by run-directory removal", { worktrees: [], branches: [failedBranch], run_dir: successful.run_dir }, /target failure requires the run directory to be retained/u],
+      ["not-attempted branch followed by run-directory removal", { worktrees: [failedWorktree], branches: [notAttemptedBranch], run_dir: successful.run_dir }, /target failure requires the run directory to be retained/u],
+      ["target failure with wrong retained detail", { worktrees: [failedWorktree], branches: [], run_dir: { ...retained, reason_code: "FAILED_CLEANUP_UNEXPECTED" } }, /target failure requires the run directory to be retained after partial failure/u],
+      ["not-attempted branch without failed recorded worktree", { worktrees: [], branches: [notAttemptedBranch], run_dir: retained }, /only after its recorded worktree failed/u],
+      ["not-attempted branch with wrong detail", { worktrees: [failedWorktree], branches: [{ ...notAttemptedBranch, reason_code: "FAILED_CLEANUP_BRANCH" }], run_dir: retained }, /not-attempted branch requires retained-after-partial-failure detail/u],
+      ["branch deletion after its recorded worktree failed", { worktrees: [failedWorktree], branches: [{ name: "run-branch", expected_head: "oid", outcome: "deleted", reason_code: null }], run_dir: retained }, /branch with a failed recorded worktree must be not-attempted/u],
+      ["branch failure after its recorded worktree failed", { worktrees: [failedWorktree], branches: [failedBranch], run_dir: retained }, /branch with a failed recorded worktree must be not-attempted/u],
+      ["failed worktree with branch-failure detail", { worktrees: [{ ...failedWorktree, reason_code: "FAILED_CLEANUP_BRANCH" }], branches: [], run_dir: retained }, /failed worktree requires FAILED_CLEANUP_WORKTREE detail/u],
+      ["failed branch with worktree-failure detail", { worktrees: [], branches: [{ ...failedBranch, reason_code: "FAILED_CLEANUP_WORKTREE" }], run_dir: retained }, /failed branch requires FAILED_CLEANUP_BRANCH detail/u],
+      ["retained run directory without target failure or unexpected detail", { worktrees: [], branches: [], run_dir: retained }, /retained without target failure requires FAILED_CLEANUP_UNEXPECTED detail/u],
+      ["failed run-directory removal with wrong detail", { worktrees: [], branches: [], run_dir: { path: "/run", outcome: "failed", reason_code: "FAILED_CLEANUP_UNEXPECTED" } }, /failed run directory removal requires FAILED_CLEANUP_RUN_DIR detail/u],
+    ];
+    for (const [label, cleanup, expected] of invalid) {
+      assert.throws(
+        () => createCandidate(candidateInput("run", { classification: "failed", reason_codes: ["FAILED_CLEANUP_UNEXPECTED"], failure_stage: "cleanup", attempted_cleanup: true, cleanup })),
+        expected,
+        label,
+      );
+    }
+
+    const coherent = [
+      { worktrees: [failedWorktree], branches: [notAttemptedBranch], run_dir: retained },
+      { worktrees: [], branches: [failedBranch], run_dir: retained },
+      { worktrees: [], branches: [], run_dir: { path: "/run", outcome: "failed", reason_code: "FAILED_CLEANUP_RUN_DIR" } },
+      { worktrees: [], branches: [], run_dir: { path: "/run", outcome: "retained", reason_code: "FAILED_CLEANUP_UNEXPECTED" } },
+    ];
+    for (const [index, cleanup] of coherent.entries()) {
+      assert.doesNotThrow(() => createCandidate(candidateInput(`coherent-${index}`, { classification: "failed", reason_codes: ["FAILED_CLEANUP_UNEXPECTED"], failure_stage: "cleanup", attempted_cleanup: true, cleanup })));
+    }
   });
 
   it("rejects every invalid previewed report authorization, exit, confirmation, and candidate state", () => {
@@ -264,7 +305,7 @@ describe("cleanup sweep report and digest", () => {
       ["FAILED_CLEANUP_UNEXPECTED", "failed", "cleanup", true],
     ];
     for (const [code, classification, failureStage, attempted] of cases) {
-      const item = failedCleanup(code, code, emptyFailedCleanup(code));
+      const item = failedCleanup(code, code, cleanupFailureResult(code));
       assert.equal(item.classification, classification);
       assert.equal(item.failure_stage, failureStage);
       assert.equal(item.attempted_cleanup, attempted);
@@ -328,6 +369,23 @@ function failedCleanup(entryName, reasonCode, cleanup) {
 
 function emptyFailedCleanup(reasonCode) {
   return { worktrees: [], branches: [], run_dir: { path: "/repo/.opencode/factory/run", outcome: "failed", reason_code: reasonCode } };
+}
+
+function cleanupFailureResult(reasonCode) {
+  if (reasonCode === "FAILED_CLEANUP_WORKTREE") return {
+    worktrees: [{ recorded_path: "/recorded/run", physical_path: "/physical/run", branch: "run", outcome: "failed", reason_code: "FAILED_CLEANUP_WORKTREE" }],
+    branches: [{ name: "run", expected_head: "oid", outcome: "not-attempted", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" }],
+    run_dir: { path: "/repo/.opencode/factory/run", outcome: "retained", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" },
+  };
+  if (reasonCode === "FAILED_CLEANUP_BRANCH") return {
+    worktrees: [],
+    branches: [{ name: "run", expected_head: "oid", outcome: "failed", reason_code: "FAILED_CLEANUP_BRANCH" }],
+    run_dir: { path: "/repo/.opencode/factory/run", outcome: "retained", reason_code: "RETAINED_AFTER_PARTIAL_FAILURE" },
+  };
+  if (reasonCode === "FAILED_CLEANUP_UNEXPECTED") return {
+    worktrees: [], branches: [], run_dir: { path: "/repo/.opencode/factory/run", outcome: "retained", reason_code: "FAILED_CLEANUP_UNEXPECTED" },
+  };
+  return emptyFailedCleanup(reasonCode);
 }
 
 function deletedCandidate(entryName) {
