@@ -541,6 +541,27 @@ When a compatible opencode host loads the separate TUI export on a session route
 
 For autonomous runs, external adapters should read `run.json.terminal_result` or `factory status <run-id> --json` after the run exits. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`; successful PR creation records `pr_url` only through the `pr-created` transition.
 
+### Repository-wide conservative cleanup
+
+Preview eligible completed runs in the selected repository without modifying cleanup targets:
+
+```sh
+feature-factory factory cleanup --all --dry-run --repo /path/to/repo
+feature-factory factory cleanup --all --dry-run --repo /path/to/repo --json
+```
+
+The preview reports every immediate entry under that repository's physical `.opencode/factory/` root as `eligible`, `protected`, `skipped`, or `failed`, with stable reason codes and aggregate eligible, protected, skipped, deleted, and failed counts. It emits a repository-and-candidate-set digest and an exact confirmation command. Execute only by supplying that digest:
+
+```sh
+feature-factory factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> --repo /path/to/repo
+```
+
+Sweep cleanup is deliberately stricter than single-run cleanup. A run is eligible only when its status is exactly `completed`, its canonical recorded GitHub PR is currently merged or closed, every recorded branch is proven contained in a freshly fetched PR base, every worktree and branch passes containment and identity checks, and no active ownership, fresh heartbeat, live identity-matching process, run lock, shared target, or contradictory evidence remains. Missing, malformed, inaccessible, stale, foreign, or otherwise unprovable evidence skips deletion; `--force` is not supported with `--all`.
+
+Execution first recomputes the complete digest. A digest from another repository is refused as `DIGEST_FOREIGN`; changed candidate evidence is refused as `DIGEST_STALE`. After a matching digest, each eligible candidate is locked without lock takeover and fully revalidated immediately before mutation. Changed or contested candidates are skipped. Deletion delegates to the existing identity-checked single-run target semantics, uses no branch force deletion, retains the run directory after a partial target failure, and continues processing independent candidates.
+
+Human and JSON execution reports distinguish deleted, protected, skipped, inspection-failed, and attempted-cleanup-failed outcomes. Ordinary protected and fail-closed skipped outcomes do not make execution fail. Any attempted-cleanup failure makes the final command exit nonzero after independent candidates finish. Runs in `blocked`, `partial`, or `needs-human` are protected recoverable work and are never automatically deleted: inspect their report reasons, recover or preserve any needed artifacts manually, then use the existing single-run cleanup command only when an operator intentionally decides how to handle that work.
+
 ### Environment snapshots and PR recording
 
 The factory records diagnostic environment snapshots explicitly:
