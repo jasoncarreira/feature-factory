@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { describe, it } from "node:test";
+import { spawnSync } from "./helpers/git-fixture.js";
 import { runCleanupSweepCli } from "../src/cli.js";
 import { executeCleanupSweep, previewCleanupSweep } from "../src/cleanup-sweep.js";
 import { renderCleanupSweepReport } from "../src/cleanup-sweep-output.js";
