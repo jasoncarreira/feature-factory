@@ -676,7 +676,7 @@ async function coordinateExistingRunLaunch(runDir, run, opts) {
       executionId,
       launchKind: opts.launchKind,
       phase: detached ? "spawning" : "foreground-live",
-      cwd: opts.repo,
+      cwd: process.cwd(),
       pid: process.pid,
       approval: null,
       now: opts.now,

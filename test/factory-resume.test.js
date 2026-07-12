@@ -91,7 +91,7 @@ describe("factory resume", () => {
       let payload;
       let launches = 0;
       const runBytesBefore = readFileSync(join(fixture.runDir, "run.json"));
-      const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: fixture.repo });
+      const inspectorFn = (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "node", cwd: pid === process.pid ? process.cwd() : fixture.repo });
       const capture = async (_repo, args, launchOpts) => {
         launches += 1;
         payload = decodeFeatureCommandPayload(args.at(-1)).payload;
