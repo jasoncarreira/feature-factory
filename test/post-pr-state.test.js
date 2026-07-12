@@ -39,8 +39,10 @@ describe("post-PR schema-v1 state", () => {
   });
 
   it("enforces closed terminal phase/reason combinations", () => {
+    const factBoundReasons = new Set(["post-pr-account-switch-failed", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged"]);
     for (const [status, reasons] of Object.entries(POST_PR_TERMINAL_REASONS)) {
       for (const reason of reasons) {
+        if (factBoundReasons.has(reason)) continue;
         const run = activeRun();
         run.status = status;
         run.post_pr.phase = status === "completed" ? "succeeded" : status;
@@ -308,6 +310,70 @@ describe("checked post-PR transitions", () => {
       assert.deepEqual(result.run.post_pr.continuation_review, binding);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
+
+  it("requires and persists the exact account-switch failure fact", async () => {
+    const fixture = createActiveFixture("account-switch-fact");
+    try {
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.github_account = "octocat";
+      run.post_pr.observation.last_error = { class: "command", exit_code: 1, occurred_at: NOW, next_retry_at: null };
+      writeJson(join(fixture.runDir, "run.json"), run);
+      const input = { status: "needs-human", reason: "post-pr-account-switch-failed" };
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, input), /requires persisted account-switch-failed trigger fact/u);
+      const fact = { schema_version: 1, kind: "account-switch-failed", observed_at: NOW, operation: "gh-auth-switch", github_account: "octocat", error_class: "command", exit_code: 1 };
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: { ...fact, github_account: "other" } }), /must match run.github_account/u);
+      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact });
+      assert.deepEqual(result.run.post_pr.terminal_fact, fact);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("requires and persists the exact unknown-dispatch fact", async () => {
+    const fixture = createActiveFixture("dispatch-unknown-fact");
+    try {
+      const run = await prepareTerminalRemediation(fixture, "remediation-running", "running");
+      run.post_pr.remediation.dispatch.status = "running";
+      run.post_pr.remediation.dispatch.started_at = NOW;
+      writeJson(join(fixture.runDir, "run.json"), run);
+      const input = { status: "needs-human", reason: "post-pr-dispatch-start-unknown" };
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, input), /requires persisted dispatch-start-unknown trigger fact/u);
+      const fact = { schema_version: 1, kind: "dispatch-start-unknown", observed_at: "2026-07-12T12:05:00.000Z", attempt: 1, dispatch_id: run.post_pr.remediation.dispatch.id, dispatch_started_at: NOW, outcome: "return-unknown" };
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: { ...fact, dispatch_id: "other" } }), /bind the running dispatch identity exactly/u);
+      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact });
+      assert.deepEqual(result.run.post_pr.terminal_fact, fact);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("requires and persists the exact path-lane violation fact", async () => {
+    const fixture = createActiveFixture("path-lane-fact");
+    try {
+      const run = await prepareTerminalRemediation(fixture, "changes-observed", "changes-observed");
+      run.post_pr.remediation.dispatch.status = "returned";
+      run.post_pr.remediation.dispatch.started_at = NOW;
+      run.post_pr.remediation.dispatch.returned_at = "2026-07-12T12:01:00.000Z";
+      run.post_pr.remediation.changes = { paths: ["package.json"], tree_hash: null };
+      writeJson(join(fixture.runDir, "run.json"), run);
+      const input = { status: "needs-human", reason: "post-pr-path-lane-violation" };
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, input), /requires persisted path-lane-violation trigger fact/u);
+      const fact = { schema_version: 1, kind: "path-lane-violation", observed_at: "2026-07-12T12:02:00.000Z", attempt: 1, lane: "slice", source: "remediation-diff", violation: "outside-lane", path_b64url: Buffer.from("package.json").toString("base64url"), changes_hash: hashValue(run.post_pr.remediation.changes) };
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: { ...fact, path_b64url: Buffer.from("other.json").toString("base64url") } }), /identify a persisted changed path/u);
+      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact });
+      assert.deepEqual(result.run.post_pr.terminal_fact, fact);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("requires and persists exact remote divergence heads", async () => {
+    const fixture = createActiveFixture("remote-diverged-fact");
+    try {
+      const run = await preparePushPendingState(fixture);
+      writeJson(join(fixture.runDir, "run.json"), run);
+      const input = { status: "needs-human", reason: "post-pr-remote-head-diverged" };
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, input), /requires persisted remote-head-diverged trigger fact/u);
+      const fact = { schema_version: 1, kind: "remote-head-diverged", observed_at: "2026-07-12T12:03:00.000Z", attempt: 1, expected_remote_sha: "c".repeat(40), candidate_head_sha: "b".repeat(40), observed_remote_sha: "d".repeat(40) };
+      await assert.rejects(transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: { ...fact, observed_remote_sha: fact.expected_remote_sha } }), /must differ from both expected remote and candidate heads/u);
+      const result = await transitionPostPrTerminal(fixture.runDir, { ...input, trigger_fact: fact });
+      assert.deepEqual(result.run.post_pr.terminal_fact, fact);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
 });
 
 function policy(enabled) {
@@ -381,6 +447,36 @@ function prepareCheckRedFailure(fixture, attempt) {
 
 function failureEvidence(runId, value) {
   return { schema_version: 1, kind: "post-pr-ci", run_id: runId, attempt: value.attempt, source: value.reason_code, verdict: "red", failed_head_sha: value.failed_head_sha, failure_fingerprint: value.failure_fingerprint };
+}
+
+async function prepareTerminalRemediation(fixture, phase, stage) {
+  const failure = prepareCheckRedFailure(fixture, 1);
+  const reserved = await transitionPostPrFailure(fixture.runDir, { remediation: failure });
+  const run = structuredClone(reserved.run);
+  run.post_pr.phase = phase;
+  run.post_pr.remediation.stage = stage;
+  return run;
+}
+
+async function preparePushPendingState(fixture) {
+  const run = await prepareTerminalRemediation(fixture, "push-pending", "push-pending");
+  for (const dir of ["evidence", "reviews"]) mkdirSync(join(fixture.runDir, dir), { recursive: true });
+  const refs = {
+    canonical: "evidence/post-pr-canonical.attempt-1.json",
+    validator: "reviews/post-pr-validator.attempt-1.json",
+    security: "reviews/post-pr-security.attempt-1.json",
+  };
+  writeJson(join(fixture.runDir, refs.canonical), { verdict: "pass" });
+  writeJson(join(fixture.runDir, refs.validator), { verdict: "GO" });
+  writeJson(join(fixture.runDir, refs.security), { verdict: "PASS" });
+  run.post_pr.remediation.candidate_head_sha = "b".repeat(40);
+  run.post_pr.remediation.revalidation = {
+    canonical_evidence_ref: refs.canonical, canonical_evidence_hash: hashFile(join(fixture.runDir, refs.canonical)), canonical_verdict: "pass",
+    validator_review_ref: refs.validator, validator_review_hash: hashFile(join(fixture.runDir, refs.validator)), validator_verdict: "GO",
+    security_review_ref: refs.security, security_review_hash: hashFile(join(fixture.runDir, refs.security)), security_verdict: "PASS",
+  };
+  run.post_pr.remediation.push = { status: "pending", remote_before_sha: "c".repeat(40), local_head_sha: "b".repeat(40), remote_after_sha: null, consecutive_transient_errors: 0, next_retry_at: null, pushed_at: null };
+  return run;
 }
 
 function mutate(value, fn) { const copy = structuredClone(value); fn(copy); return copy; }

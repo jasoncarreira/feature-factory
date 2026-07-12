@@ -3,7 +3,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency, sanitizePublicCostText } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
 import { PROCESS_EVIDENCE_FILE, processEvidenceProcessesDir, validateProcessEvidence } from "./process-evidence.js";
-import { hashFile, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
+import { hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -507,7 +507,7 @@ function validatePostPr(errors, run, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  allowedKeys(errors, value, new Set(["schema_version", "policy", "phase", "attempt", "observation", "remediation", "evidence_refs", "continuation_review"]), path);
+  allowedKeys(errors, value, new Set(["schema_version", "policy", "phase", "attempt", "observation", "remediation", "evidence_refs", "continuation_review", "terminal_fact"]), path);
   requiredInteger(errors, value, "schema_version", `${path}.schema_version`);
   if (value.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
   validatePostPrPolicy(errors, value.policy, `${path}.policy`);
@@ -519,6 +519,7 @@ function validatePostPr(errors, run, path) {
   validatePostPrRemediation(errors, value.remediation, `${path}.remediation`);
   validatePostPrRefHashArray(errors, value.evidence_refs, `${path}.evidence_refs`);
   validatePostPrRefHash(errors, value.continuation_review, `${path}.continuation_review`, { optional: true });
+  validatePostPrTerminalFact(errors, run, value, `${path}.terminal_fact`);
 
   const enabled = value.policy?.enabled === true;
   if (!enabled && value.phase !== "disabled") errors.push({ path: `${path}.phase`, message: "disabled policy requires disabled phase" });
@@ -543,6 +544,76 @@ function validatePostPr(errors, run, path) {
   }
   if (isRecord(value.continuation_review) && !(value.phase === "blocked" && run.terminal_result?.reason === "post-pr-retry-exhausted")) errors.push({ path: `${path}.continuation_review`, message: "is allowed only for retry exhaustion" });
   validatePostPrTerminalConsistency(errors, run, value, path);
+}
+
+function validatePostPrTerminalFact(errors, run, postPr, path) {
+  const fact = postPr.terminal_fact;
+  const reason = run.terminal_result?.reason;
+  const expectedKinds = new Map([
+    ["post-pr-account-switch-failed", "account-switch-failed"],
+    ["post-pr-dispatch-start-unknown", "dispatch-start-unknown"],
+    ["post-pr-path-lane-violation", "path-lane-violation"],
+    ["post-pr-remote-head-diverged", "remote-head-diverged"],
+  ]);
+  const expectedKind = expectedKinds.get(reason);
+  if (fact === undefined || fact === null) {
+    if (expectedKind) errors.push({ path, message: `is required for ${reason}` });
+    return;
+  }
+  if (!isRecord(fact)) { errors.push({ path, message: "must be an object or null" }); return; }
+  if (!expectedKind) { errors.push({ path, message: "is allowed only for fact-bound post-PR terminal reasons" }); return; }
+  requiredInteger(errors, fact, "schema_version", `${path}.schema_version`);
+  if (fact.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredEnum(errors, fact, "kind", new Set([expectedKind]), `${path}.kind`);
+  requiredString(errors, fact, "observed_at", `${path}.observed_at`);
+  if (!Number.isFinite(Date.parse(fact.observed_at || ""))) errors.push({ path: `${path}.observed_at`, message: "must be an ISO timestamp" });
+  const remediation = postPr.remediation;
+  if (expectedKind === "account-switch-failed") {
+    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "operation", "github_account", "error_class", "exit_code"]), path);
+    requiredEnum(errors, fact, "operation", new Set(["gh-auth-switch"]), `${path}.operation`);
+    requiredString(errors, fact, "github_account", `${path}.github_account`);
+    requiredEnum(errors, fact, "error_class", new Set(["account-auth", "permission", "not-found", "protocol", "command"]), `${path}.error_class`);
+    if (fact.exit_code !== null) boundedInteger(errors, fact, "exit_code", 0, 255, `${path}.exit_code`);
+    if (fact.github_account !== run.github_account) errors.push({ path: `${path}.github_account`, message: "must match run.github_account" });
+    if (fact.error_class !== postPr.observation?.last_error?.class || fact.exit_code !== (postPr.observation?.last_error?.exit_code ?? null) || fact.observed_at !== postPr.observation?.last_error?.occurred_at) errors.push({ path, message: "must bind the persisted account-switch error exactly" });
+  } else if (expectedKind === "dispatch-start-unknown") {
+    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "dispatch_id", "dispatch_started_at", "outcome"]), path);
+    boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+    requiredString(errors, fact, "dispatch_id", `${path}.dispatch_id`);
+    requiredString(errors, fact, "dispatch_started_at", `${path}.dispatch_started_at`);
+    requiredEnum(errors, fact, "outcome", new Set(["return-unknown"]), `${path}.outcome`);
+    if (fact.attempt !== postPr.attempt || fact.dispatch_id !== remediation?.dispatch?.id || fact.dispatch_started_at !== remediation?.dispatch?.started_at || remediation?.dispatch?.status !== "running") errors.push({ path, message: "must bind the running dispatch identity exactly" });
+  } else if (expectedKind === "path-lane-violation") {
+    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "lane", "source", "violation", "path_b64url", "changes_hash"]), path);
+    boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+    requiredEnum(errors, fact, "lane", new Set(["slice", "test"]), `${path}.lane`);
+    requiredEnum(errors, fact, "source", new Set(["remediation-diff"]), `${path}.source`);
+    requiredEnum(errors, fact, "violation", new Set(["outside-lane", "unsafe-change-kind", "symlink-escape"]), `${path}.violation`);
+    requiredString(errors, fact, "path_b64url", `${path}.path_b64url`);
+    if (stringValue(fact.path_b64url) && !/^[A-Za-z0-9_-]+$/u.test(fact.path_b64url)) errors.push({ path: `${path}.path_b64url`, message: "must be canonical base64url" });
+    const decodedPath = decodeCanonicalBase64url(fact.path_b64url);
+    if (stringValue(fact.path_b64url) && decodedPath === null) errors.push({ path: `${path}.path_b64url`, message: "must encode valid UTF-8 path bytes canonically" });
+    requiredHash(errors, fact, "changes_hash", `${path}.changes_hash`);
+    if (fact.attempt !== postPr.attempt || fact.lane !== remediation?.lane || fact.changes_hash !== hashValueForValidation(remediation?.changes)) errors.push({ path, message: "must bind the remediation lane and changed paths exactly" });
+    if (decodedPath !== null && !remediation?.changes?.paths?.includes(decodedPath)) errors.push({ path: `${path}.path_b64url`, message: "must identify a persisted changed path" });
+  } else if (expectedKind === "remote-head-diverged") {
+    allowedKeys(errors, fact, new Set(["schema_version", "kind", "observed_at", "attempt", "expected_remote_sha", "candidate_head_sha", "observed_remote_sha"]), path);
+    boundedInteger(errors, fact, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+    for (const key of ["expected_remote_sha", "candidate_head_sha", "observed_remote_sha"]) requiredFullGitSha(errors, fact, key, `${path}.${key}`);
+    if (fact.attempt !== postPr.attempt || fact.expected_remote_sha !== remediation?.push?.remote_before_sha || fact.candidate_head_sha !== remediation?.candidate_head_sha) errors.push({ path, message: "must bind the push-pending remote and candidate heads exactly" });
+    if (fact.observed_remote_sha === fact.expected_remote_sha || fact.observed_remote_sha === fact.candidate_head_sha) errors.push({ path: `${path}.observed_remote_sha`, message: "must differ from both expected remote and candidate heads" });
+  }
+}
+
+function hashValueForValidation(value) {
+  return value === undefined ? null : hashValue(value);
+}
+
+function decodeCanonicalBase64url(value) {
+  if (!stringValue(value) || !/^[A-Za-z0-9_-]+$/u.test(value)) return null;
+  const bytes = Buffer.from(value, "base64url");
+  const decoded = bytes.toString("utf8");
+  return Buffer.from(decoded, "utf8").toString("base64url") === value ? decoded : null;
 }
 
 function validatePostPrPolicy(errors, policy, path) {

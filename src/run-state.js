@@ -407,7 +407,7 @@ export function hashRunState(run) {
 }
 
 export function createPostPrState(policy) {
-  const postPr = { schema_version: 1, policy: cloneJson(policy), phase: policy?.enabled === true ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null };
+  const postPr = { schema_version: 1, policy: cloneJson(policy), phase: policy?.enabled === true ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null };
   validateRun({ schema_version: 1, run_id: "post-pr-policy-check", status: "running", max_retries: 3, gates: {}, post_pr: postPr });
   return postPr;
 }
@@ -903,7 +903,7 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
     assertPostPrTerminalPreconditions(current, status, reason, input, options);
     assertPostPrPhaseTransition(current.post_pr, { ...current.post_pr, phase });
     draft.status = status;
-    draft.post_pr = { ...cloneJson(current.post_pr), phase };
+    draft.post_pr = { ...cloneJson(current.post_pr), phase, terminal_fact: normalizedPostPrTerminalFact(reason, input.trigger_fact) };
     if (reason === "post-pr-retry-exhausted") draft.post_pr.continuation_review = bindPostPrContinuationReview(runDir, current, input.continuation_review);
     draft.terminal_result = {
       status,
@@ -1625,6 +1625,7 @@ function initializePostPrObservation(postPr, request, now) {
     remediation: null,
     evidence_refs: Array.isArray(postPr.evidence_refs) ? cloneJson(postPr.evidence_refs) : [],
     continuation_review: null,
+    terminal_fact: null,
   };
 }
 
@@ -1798,7 +1799,8 @@ function assertPostPrTerminalPreconditions(run, status, reason, input, options) 
     return;
   }
   if (reason === "post-pr-account-switch-failed") {
-    if (postPr.phase !== "observing" || observation?.last_error?.class !== "account-auth") throw new Error(`${reason} requires observing account-auth error`);
+    if (postPr.phase !== "observing") throw new Error(`${reason} requires observing phase`);
+    requirePostPrTerminalFact(reason, input.trigger_fact, "account-switch-failed");
     return;
   }
   if (reason === "post-pr-owner-ambiguous" || reason === "post-pr-metadata-unsafe") {
@@ -1807,14 +1809,17 @@ function assertPostPrTerminalPreconditions(run, status, reason, input, options) 
   }
   if (reason === "post-pr-dispatch-start-unknown") {
     if (postPr.phase !== "remediation-running" || remediation?.dispatch?.status !== "running") throw new Error(`${reason} requires running remediation dispatch`);
+    requirePostPrTerminalFact(reason, input.trigger_fact, "dispatch-start-unknown");
     return;
   }
   if (reason === "post-pr-path-lane-violation") {
     if (!["remediation-running", "changes-observed", "committed"].includes(postPr.phase)) throw new Error(`${reason} requires active remediation changes`);
+    requirePostPrTerminalFact(reason, input.trigger_fact, "path-lane-violation");
     return;
   }
   if (reason === "post-pr-remote-head-diverged") {
     if (postPr.phase !== "push-pending" || remediation?.stage !== "push-pending") throw new Error(`${reason} requires push-pending remediation`);
+    requirePostPrTerminalFact(reason, input.trigger_fact, "remote-head-diverged");
     return;
   }
   if (reason === "post-pr-retry-exhausted") {
@@ -1827,6 +1832,20 @@ function assertPostPrTerminalPreconditions(run, status, reason, input, options) 
     if (postPr.phase === "failure-recording" && remediation.reason_code === "local-red" && remediation.failed_head_sha !== remediation.baseline_head_sha) throw new Error(`${reason} local exhaustion requires the failed candidate head`);
     if (!input.continuation_review) throw new Error(`${reason} requires a continuation review binding`);
   }
+}
+
+function requirePostPrTerminalFact(reason, fact, kind) {
+  if (!isRecord(fact) || fact.kind !== kind) throw new Error(`${reason} requires persisted ${kind} trigger fact`);
+}
+
+function normalizedPostPrTerminalFact(reason, fact) {
+  const factReasons = new Set(["post-pr-account-switch-failed", "post-pr-dispatch-start-unknown", "post-pr-path-lane-violation", "post-pr-remote-head-diverged"]);
+  if (!factReasons.has(reason)) {
+    if (fact !== undefined && fact !== null) throw new Error(`${reason} does not accept a terminal trigger fact`);
+    return null;
+  }
+  if (!isRecord(fact)) throw new Error(`${reason} requires a terminal trigger fact`);
+  return cloneJson(fact);
 }
 
 function bindPostPrContinuationReview(runDir, run, binding) {
