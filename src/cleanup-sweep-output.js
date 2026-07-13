@@ -6,10 +6,12 @@ import {
 import {
   freeformSegment,
   identitySegment,
+  isDisplaySafeRunId,
   projectFreeformData,
   renderTerminalSegments,
   TRUSTED_SEGMENTS,
 } from "./hardening/output-policy.js";
+import { REDACTED_VALUE } from "./hardening/sensitive-data.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
 const CONFIRMATION_PREFIX = Object.freeze(["feature-factory", "factory", "cleanup", "--all", "--digest"]);
@@ -100,9 +102,12 @@ function exactReportConfirmation(report) {
 }
 
 function candidateLine(candidate) {
+  const entrySegment = candidate.entry_name === candidate.run_id && isDisplaySafeRunId(candidate.run_id)
+    ? identitySegment(candidate.run_id)
+    : freeformSegment(REDACTED_VALUE);
   return renderTerminalSegments([
     identitySegment(candidate.classification), TRUSTED_SEGMENTS.TAB,
-    freeformSegment(candidate.entry_name), TRUSTED_SEGMENTS.TAB,
+    entrySegment, TRUSTED_SEGMENTS.TAB,
     identitySegment(candidate.reason_codes.join(",")), TRUSTED_SEGMENTS.TAB,
     freeformSegment(candidate.reasons.map((reason) => reason.message).join(" | ")),
   ]);

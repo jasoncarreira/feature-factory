@@ -482,7 +482,7 @@ function inspectWorktree(repo, target, registered, branches, worktreeRoot, optio
 function verifyFetchedBase(repo, pr, temporaryRef, gitRunner) {
   if (!validBranch(repo, pr.base_ref, gitRunner) || !oid(pr.base_sha)) return false;
   if (gitRunner(repo, ["check-ref-format", temporaryRef])?.ok !== true) return false;
-  const fetch = gitRunner(repo, ["fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--force", `https://github.com/${pr.repository}.git`, `+refs/heads/${pr.base_ref}:${temporaryRef}`]);
+  const fetch = gitRunner(repo, ["fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--force", `https://github.com/${pr.repository}.git`, `+${pr.base_sha}:${temporaryRef}`]);
   if (!fetch?.ok) return false;
   const resolved = gitRunner(repo, ["rev-parse", "--verify", `${temporaryRef}^{commit}`]);
   return Boolean(resolved?.ok && resolved.stdout.trim() === pr.base_sha);

@@ -1,6 +1,7 @@
 import {
   freeformSegment,
   identitySegment,
+  isDisplaySafeRunId,
   projectFreeformData,
   renderTerminalSegments,
   TRUSTED_SEGMENTS,
@@ -14,7 +15,6 @@ const VALIDATED_STATUS_VALUES = new Set([
   "ok", "partial", "pending", "ready", "rejected", "review", "running", "stopped",
   "unavailable", "warn", "warning",
 ]);
-const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_UUID_PATTERN = /^[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}$/u;
 const SAFE_HASH_PATTERN = /^(?:sha256:)?[A-Fa-f0-9]{32,128}$/u;
 const SAFE_REF_CHARACTERS = /^[A-Za-z0-9._/-]+$/u;
@@ -141,7 +141,7 @@ function projectedValueSegment(key, value) {
 function validatedIdentity(key, value) {
   if (typeof value !== "string") return false;
   if (key === "status" || key === "level") return VALIDATED_STATUS_VALUES.has(value);
-  if (key === "run_id") return !isSensitiveValue(value, { mode: "baseline" }) && SAFE_RUN_ID_PATTERN.test(value);
+  if (key === "run_id") return isDisplaySafeRunId(value);
   if (key === "token" || key === "boundary_token" || key === "action_token" || key === "fence_token") {
     // Factory-issued tokens have exactly one shape: the UUID minted at
     // boundary/action/fence creation (run-state.js randomUUID()); operators only

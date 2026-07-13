@@ -461,6 +461,35 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("preserves a validated descriptive run ID that the freeform policy classifies as high entropy", () => {
+    const repo = tempDir();
+    const runId = "cleanup-sweep-integration-continuation";
+    writeRun(repo, runId, { status: "running", updated_at: "2026-07-05T00:00:00Z", gates: {} });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(run.run_id, runId);
+    cleanup(repo);
+  });
+
+  it("redacts recognized credentials and embedded UUIDs even when they are matching run IDs", () => {
+    const repo = tempDir();
+    const ids = [
+      "run-sk-abcdefghijklmnopqrstuvwx",
+      "a-ask-abcdefghijklmnopqrst",
+      "run-abcdef12-1234-5678-9012-abcdefabcdef",
+      "eabcdef12-1234-5678-9012-abcdefabcdef",
+      "run-abcdef0123456789abcdef0123456789",
+    ];
+    for (const runId of ids) writeRun(repo, runId, { status: "running", gates: {} });
+
+    const runs = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(runs.length, ids.length);
+    assert.equal(runs.every((run) => run.run_id === "[redacted]"), true);
+    cleanup(repo);
+  });
+
   it("keeps invalid JSON visible as a fail-closed fallback row", () => {
     const repo = tempDir();
     writeRawRun(repo, "bad-json", "{\n");

@@ -280,6 +280,24 @@ test("R24-R28 require exact closed PR metadata and a freshly fetched exact base"
   });
 });
 
+test("R28 fetches the immutable authorized base SHA rather than the moving base branch", () => {
+  const fixture = createCleanupSweepFixture("exact-base-fetch-source");
+  const fetches = [];
+  try {
+    fixture.addRun("run");
+    const gitRunner = (cwd, args, options) => {
+      if (args[0] === "fetch") fetches.push([...args]);
+      return fixture.gitRunner(cwd, args, options);
+    };
+    const candidate = inspect(fixture, { gitRunner }).candidates[0];
+
+    assert.equal(candidate.classification, "eligible");
+    assert.equal(fetches.length, 1);
+    assert.equal(fetches[0].at(-1).startsWith(`+${fixture.baseSha}:refs/feature-factory/cleanup-sweep/`), true);
+    assert.equal(fetches[0].at(-1).includes("refs/heads/main"), false);
+  } finally { fixture.cleanup(); }
+});
+
 test("R27 exact closed-unmerged pull requests continue through base verification", () => {
   const fixture = createCleanupSweepFixture("closed-unmerged-pr");
   try {

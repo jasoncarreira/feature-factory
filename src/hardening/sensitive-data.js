@@ -16,6 +16,19 @@ const TOKEN_SHAPED_VALUE_PATTERNS = Object.freeze([
   /(?:^|[^A-Za-z0-9-])(?:[A-Fa-f0-9]{32,})(?=$|[^A-Za-z0-9-])/u,
   /(?:https?|ssh|git|ftp):\/\/[^/\s:@]+:[^/\s@]+@/iu,
 ]);
+const TOKEN_SHAPED_FRAGMENT_PATTERNS = Object.freeze([
+  /gh[pousr]_[A-Za-z0-9_]{20,}/iu,
+  /github_pat_[A-Za-z0-9_]{20,}/iu,
+  /hc_[A-Za-z0-9][A-Za-z0-9_-]{10,}/iu,
+  /sk-proj[-_][A-Za-z0-9_-]{20,}/iu,
+  /sk-[A-Za-z0-9_-]{20,}/iu,
+  /xox[abp][_-][A-Za-z0-9-]{10,}(?:-[A-Za-z0-9-]{10,})*/iu,
+  /glpat-[A-Za-z0-9_-]{20,}/iu,
+  /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/iu,
+  /eyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/iu,
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/u,
+  /[A-Fa-f0-9]{32,}/u,
+]);
 const ENDPOINT_PROVIDER_PREFIX_PATTERN = /(?:hc[a-z0-9_-]*|gh[pousr]|github_pat|sk(?:-proj)?|xox[abp]|glpat)[_-][A-Za-z0-9_-]{10,}/iu;
 const ENDPOINT_BARE_HEX_PATTERN = /^[A-Fa-f0-9]{32,}$/u;
 const ENDPOINT_SECRET_ASSIGNMENT_PATTERN = /(?:(?:key|token|secret|password|authorization|credential|access|team|api[_-]?key)\s*[=:]|[=:]\s*(?:key|token|secret|password|authorization|credential|access|team|api[_-]?key))/iu;
@@ -53,6 +66,10 @@ export function isSecretShapedKey(value, { mode = "baseline" } = {}) {
 }
 
 export function isSensitiveValue(value, { mode = "baseline" } = {}) {
+  return isRecognizedSensitiveValue(value, { mode }) || highEntropyValue(value);
+}
+
+export function isRecognizedSensitiveValue(value, { mode = "baseline" } = {}) {
   assertMode(mode);
   if (typeof value !== "string") return false;
   const trimmed = value.trim();
@@ -61,8 +78,18 @@ export function isSensitiveValue(value, { mode = "baseline" } = {}) {
     || BASELINE_SENSITIVE_VALUE_PATTERN.test(trimmed)
     || tokenShapedValue(trimmed)
     || credentialBearingUrl(trimmed)
-    || highEntropySingleToken(trimmed)
     || (mode === "endpoint" && endpointValueLooksSensitive(trimmed));
+}
+
+export function containsRecognizedSensitiveFragment(value) {
+  if (typeof value !== "string") return false;
+  return TOKEN_SHAPED_FRAGMENT_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function highEntropyValue(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return Boolean(trimmed && highEntropySingleToken(trimmed));
 }
 
 export function scrubSensitiveString(value, { mode = "baseline" } = {}) {

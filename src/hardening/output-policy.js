@@ -1,7 +1,10 @@
 import {
   REDACTED_VALUE,
   SCRUB_MARKERS,
+  containsRecognizedSensitiveFragment,
   isSensitiveKey,
+  isRecognizedSensitiveValue,
+  isSensitiveValue,
   scrubSensitiveData,
   scrubSensitiveString,
 } from "./sensitive-data.js";
@@ -14,6 +17,9 @@ export const DIAGNOSTIC_FREEFORM_FIELDS = Object.freeze([
 ]);
 
 const OUTPUT_POLICY_ERROR_CODE = "ERR_OUTPUT_POLICY";
+const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
+const DESCRIPTIVE_RUN_ID_PATTERN = /^[a-z][a-z0-9]{0,31}(?:-(?:[a-z][a-z0-9]{0,31}|[0-9]{1,6}))+$/u;
+const UUID_PATTERN = /[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}/u;
 const segmentBrand = new WeakSet();
 const structuredErrorBrand = new WeakSet();
 const structuredErrorSegments = new WeakMap();
@@ -90,6 +96,13 @@ export function renderTerminalSegmentsOrFallback(segments) {
 
 export function projectFreeformData(value) {
   try { return scrubSensitiveData(value, { mode: "baseline" }); } catch { fail("projection"); }
+}
+
+export function isDisplaySafeRunId(value) {
+  if (typeof value !== "string" || !SAFE_RUN_ID_PATTERN.test(value) || value.includes("..") || value.endsWith(".lock") || UUID_PATTERN.test(value)) return false;
+  if (isRecognizedSensitiveValue(value, { mode: "baseline" }) || containsRecognizedSensitiveFragment(value)) return false;
+  if (!isSensitiveValue(value, { mode: "baseline" })) return true;
+  return DESCRIPTIVE_RUN_ID_PATTERN.test(value);
 }
 
 export function projectDiagnosticData(value, options = undefined) {

@@ -78,11 +78,38 @@ describe("cleanup sweep output", () => {
     assert.equal(lines[1], "status: previewed");
     assert.equal(lines[2], "repository: /repo with 'quote'");
     assert.equal(lines[3], `digest: ${report.authorization.digest}`);
-    assert.equal(lines[4], "protected\trun\\u000Aname\tPROTECTED_STATUS_BLOCKED\tThe run contains blocked recoverable work.");
+    assert.equal(lines[4], "protected\t[redacted]\tPROTECTED_STATUS_BLOCKED\tThe run contains blocked recoverable work.");
     assert.equal(lines[5], "counts: eligible=0 protected=1 skipped=0 deleted=0 failed=0");
     assert.equal(lines[6], "attempted-cleanup-failures: 0");
     assert.equal(lines[7], `confirmation: ${report.confirmation.shell_command}`);
     assert.equal(lines.every((line) => !line.includes("\n") && !line.includes("\r") && !line.includes("\u001b")), true);
+  });
+
+  it("shows validated descriptive run IDs without exposing untrusted or credential-shaped names", () => {
+    const descriptive = makeCandidate("protected", "cleanup-sweep-integration-continuation");
+    const numbered = makeCandidate("protected", "post-pr-ci-remediation-continuation-2");
+    const credential = makeCandidate("protected", "github_pat_AAAAAAAAAAAAAAAAAAAAAAAA");
+    const skCredential = makeCandidate("protected", "run-sk-abcdefghijklmnopqrstuvwx");
+    const adjacentCredential = makeCandidate("protected", "a-ask-abcdefghijklmnopqrst");
+    const embeddedUuid = makeCandidate("protected", "run-abcdef12-1234-5678-9012-abcdefabcdef");
+    const embeddedHex = makeCandidate("protected", "run-abcdef0123456789abcdef0123456789");
+    const mismatched = createCandidate({
+      entry_name: "untrusted-entry-name",
+      run_id: "trusted-run-name",
+      classification: "skipped",
+      reason_codes: ["SKIPPED_RUN_ID_MISMATCH"],
+      evidence: createEmptyEvidence("trusted-run-name"),
+    });
+    const human = renderCleanupSweepReport(previewReport(repository("/repo"), [descriptive, numbered, credential, skCredential, adjacentCredential, embeddedUuid, embeddedHex, mismatched]));
+
+    assert.match(human, /cleanup-sweep-integration-continuation/u);
+    assert.match(human, /post-pr-ci-remediation-continuation-2/u);
+    assert.doesNotMatch(human, /github_pat_A+/u);
+    assert.doesNotMatch(human, /sk-abcdefghijkl/u);
+    assert.doesNotMatch(human, /abcdef12-1234/u);
+    assert.doesNotMatch(human, /abcdef0123456789/u);
+    assert.match(human, /\[redacted\]/u);
+    assert.doesNotMatch(human, /untrusted-entry-name/u);
   });
 
   it("covers both R43 refusals in human and JSON with recomputed candidates and null confirmation", () => {
