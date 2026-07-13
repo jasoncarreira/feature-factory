@@ -4,7 +4,7 @@
 
 ## Publish trigger and sequence
 
-Publishing starts only when a tag matching `v*` is pushed. The tag must exactly equal `v<version>`, where `<version>` is the `version` in `package.json` (for package version `0.2.0`, the matching tag is `v0.2.0`). A non-matching `v*` tag starts the workflow but fails the exact tag/version guard before checks or publication.
+Publishing starts only when a tag matching `v*` is pushed. The tag must exactly equal `v<version>`, where `<version>` is the `version` in `package.json` (for package version `0.2.1`, the matching tag is `v0.2.1`). A non-matching `v*` tag starts the workflow but fails the exact tag/version guard before checks or publication.
 
 The publish job then performs this sequence:
 

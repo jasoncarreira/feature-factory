@@ -1522,7 +1522,7 @@ describe("TUI sidebar live refresh docs contract", () => {
   });
 });
 
-describe("0.2.0 public documentation contract", () => {
+describe("public documentation contract", () => {
   const documentationStatus = markdownSection(README, "Documentation Status");
   const install = `${markdownSection(README, "Install")}\n${markdownSection(README, "Install Locally")}`;
   const packageSurface = markdownSection(README, "Package Surface");
@@ -1688,12 +1688,18 @@ describe("0.2.0 public documentation contract", () => {
   });
 
   it("keeps the changelog minimal, verified, and undated", () => {
-    assert.equal((CHANGELOG.match(/^## /gmu) || []).length, 1);
-    assert.match(CHANGELOG, new RegExp(`^## ${escapeRegExp(PACKAGE.version)}$`, "mu"));
-    assert.equal((CHANGELOG.match(/^- /gmu) || []).length, 3);
-    assert.match(CHANGELOG, /`\/feature`[\s\S]*one primary `feature-factory` agent[\s\S]*12 specialized subagents[\s\S]*packaged feature skill/i);
-    assert.match(CHANGELOG, /package root and `\/server`[\s\S]*`src\/plugin\.js`[\s\S]*`\/tui`[\s\S]*generated `dist\/tui\.js`[\s\S]*`\/cli`[\s\S]*`src\/cli\.js`[\s\S]*`feature-factory` bin/i);
-    assert.match(CHANGELOG, /install, doctor, and factory CLI surfaces[\s\S]*separately importable TUI registration object/i);
+    const headings = [...CHANGELOG.matchAll(/^## (.+)$/gmu)].map((match) => match[1]);
+    const current = markdownSection(CHANGELOG, PACKAGE.version);
+    const initial = markdownSection(CHANGELOG, "0.2.0");
+    assert.equal(headings[0], PACKAGE.version);
+    assert.deepEqual(headings, [PACKAGE.version, "0.2.0"]);
+    assert.equal((current.match(/^- /gmu) || []).length, 2);
+    assert.match(current, /cleanup[\s\S]*current canonical base head[\s\S]*mutation boundary/i);
+    assert.match(current, /descriptive run names[\s\S]*credentials[\s\S]*opaque tokens[\s\S]*identity mismatches/i);
+    assert.equal((initial.match(/^- /gmu) || []).length, 3);
+    assert.match(initial, /`\/feature`[\s\S]*one primary `feature-factory` agent[\s\S]*12 specialized subagents[\s\S]*packaged feature skill/i);
+    assert.match(initial, /package root and `\/server`[\s\S]*`src\/plugin\.js`[\s\S]*`\/tui`[\s\S]*generated `dist\/tui\.js`[\s\S]*`\/cli`[\s\S]*`src\/cli\.js`[\s\S]*`feature-factory` bin/i);
+    assert.match(initial, /install, doctor, and factory CLI surfaces[\s\S]*separately importable TUI registration object/i);
     assert.doesNotMatch(CHANGELOG, /\b(?:19|20)\d{2}-\d{2}-\d{2}\b|migration|published|released on|guarantee/i);
   });
 

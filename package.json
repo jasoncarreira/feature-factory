@@ -1,6 +1,6 @@
 {
   "name": "opencode-feature-factory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Hybrid opencode plugin and scriptable feature factory workflow.",
   "type": "module",
   "main": "src/plugin.js",

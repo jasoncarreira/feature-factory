@@ -98,9 +98,9 @@ The published package supports Node `>=20`. Repository tooling selects Node `24.
 
 ### Release workflow
 
-Publication is tag-driven only. Pushing `v<package.json version>` (for package version `0.2.0`, `v0.2.0`) triggers the workflow, which checks out that pushed tag, selects Node 24, runs `npm ci`, enforces exact equality between the tag and `v${package.json.version}`, runs `npm run check`, and then runs `npm publish`. The publish job uses the `npm` environment and `id-token: write` for trusted publication.
+Publication is tag-driven only. Pushing `v<package.json version>` (for package version `0.2.1`, `v0.2.1`) triggers the workflow, which checks out that pushed tag, selects Node 24, runs `npm ci`, enforces exact equality between the tag and `v${package.json.version}`, runs `npm run check`, and then runs `npm publish`. The publish job uses the `npm` environment and `id-token: write` for trusted publication.
 
-The workflow does not publish from a branch or manual dispatch, and it does not bump the version, create or push the tag, generate a changelog, push commits, or create a GitHub Release. Operators own those preparatory actions. See [RELEASING.md](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/RELEASING.md) for the repository release guide and [CHANGELOG.md](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CHANGELOG.md) for the verified 0.2.0 surface record.
+The workflow does not publish from a branch or manual dispatch, and it does not bump the version, create or push the tag, generate a changelog, push commits, or create a GitHub Release. Operators own those preparatory actions. See [RELEASING.md](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/RELEASING.md) for the repository release guide and [CHANGELOG.md](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CHANGELOG.md) for the verified release records.
 
 ## Local Diagnostics
 
