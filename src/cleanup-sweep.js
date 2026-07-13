@@ -484,6 +484,7 @@ function sidecarAuthorizationRecord(candidate) {
     factory_lock: candidate.evidence.factory_lock,
     heartbeat: candidate.evidence.heartbeat,
     process: candidate.evidence.process,
+    launch_claim: candidate.evidence.launch_claim,
   });
 }
 

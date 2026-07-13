@@ -161,6 +161,12 @@ test("R12-R22 classify lock, heartbeat, process, and run-lock evidence fail clos
     ["mismatched process", () => {}, "skipped", "SKIPPED_PROCESS_UNCERTAIN", { inspectProcess: () => ({ state: "mismatched" }) }],
     ["invalid process", () => {}, "skipped", "SKIPPED_PROCESS_UNCERTAIN", { inspectProcess: () => ({ state: "invalid" }) }],
     ["indeterminate process", () => {}, "skipped", "SKIPPED_PROCESS_UNCERTAIN", { inspectProcess: () => ({ state: "indeterminate" }) }],
+    ["live launch claim", () => {}, "protected", "PROTECTED_LIVE_LAUNCH_CLAIM", { inspectLaunchClaim: () => launchClaim("live") }],
+    ["dead launch claim", () => {}, "skipped", "SKIPPED_LAUNCH_CLAIM_UNCERTAIN", { inspectLaunchClaim: () => launchClaim("dead") }],
+    ["mismatched launch claim", () => {}, "skipped", "SKIPPED_LAUNCH_CLAIM_UNCERTAIN", { inspectLaunchClaim: () => launchClaim("mismatched") }],
+    ["indeterminate launch claim", () => {}, "skipped", "SKIPPED_LAUNCH_CLAIM_UNCERTAIN", { inspectLaunchClaim: () => launchClaim("indeterminate") }],
+    ["invalid launch claim", () => {}, "skipped", "SKIPPED_LAUNCH_CLAIM_UNCERTAIN", { inspectLaunchClaim: () => ({ ok: false, missing: false, owner_status: "invalid", hash: `sha256:${"b".repeat(64)}`, identity: { dir: { dev: 1, ino: 2 }, file: null } }) }],
+    ["launch claim inspection failure", () => {}, "skipped", "SKIPPED_LAUNCH_CLAIM_UNCERTAIN", { inspectLaunchClaim: () => { throw new Error("injected"); } }],
     ["preview lock", ({ runDir }) => mkdirSync(join(runDir, "run-json.lock")), "skipped", "SKIPPED_RUN_LOCK_PRESENT_PREVIEW", {}],
     ["contended execution lock", ({ runDir }) => mkdirSync(join(runDir, "run-json.lock")), "skipped", "SKIPPED_RUN_LOCK_CONTENDED", { runLockContended: true }],
     ["unsafe lock", ({ runDir }) => writeFileSync(join(runDir, "run-json.lock"), "bad"), "skipped", "SKIPPED_RUN_LOCK_INVALID", {}],
@@ -175,6 +181,16 @@ test("R12-R22 classify lock, heartbeat, process, and run-lock evidence fail clos
     } finally { fixture.cleanup(); }
   });
 });
+
+function launchClaim(ownerStatus) {
+  return {
+    ok: true,
+    missing: false,
+    owner_status: ownerStatus,
+    hash: `sha256:${"a".repeat(64)}`,
+    identity: { dir: { dev: 1, ino: 2 }, file: { dev: 1, ino: 3 } },
+  };
+}
 
 test("R07-R23 retain all ordered protected and uncertain local evidence", () => {
   const fixture = createCleanupSweepFixture("coexisting-reasons");

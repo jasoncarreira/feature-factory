@@ -4,7 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { collectCleanupTargets } from "./factory.js";
 import { git } from "./git.js";
 import { lookupPullRequest } from "./github.js";
-import { inspectProcessEvidenceForCleanup } from "./process-evidence.js";
+import { inspectLaunchClaim, inspectProcessEvidenceForCleanup } from "./process-evidence.js";
 import { createCandidate, createEmptyEvidence } from "./cleanup-sweep-report.js";
 import { validateFactoryLock, validateHeartbeatState, validateRun } from "./validate.js";
 import { parseWorktreeListPorcelain } from "./worktrees.js";
@@ -214,6 +214,13 @@ function inspectSidecars(runDir, run, evidence, options) {
   if (evidence.process.state === "live-matching") protectedReasons.push("PROTECTED_LIVE_PROCESS");
   else if (!["missing", "absent"].includes(evidence.process.state)) skipped.push("SKIPPED_PROCESS_UNCERTAIN");
 
+  const launchClaimInspector = options.inspectLaunchClaim ?? inspectLaunchClaim;
+  let launchClaim;
+  try { launchClaim = launchClaimInspector(runDir, { ...options.processOptions, runId: run.run_id }); } catch { launchClaim = { state: "indeterminate" }; }
+  evidence.launch_claim = launchClaimEvidence(launchClaim);
+  if (evidence.launch_claim.state === "live-matching") protectedReasons.push("PROTECTED_LIVE_LAUNCH_CLAIM");
+  else if (evidence.launch_claim.state !== "missing") skipped.push("SKIPPED_LAUNCH_CLAIM_UNCERTAIN");
+
   if (factoryLock.state === "valid-matching" && (heartbeat.evidence.state === "valid-fresh" || evidence.process.state === "live-matching")) {
     evidence.factory_lock.active_owner = true;
     protectedReasons.unshift("PROTECTED_ACTIVE_FACTORY_OWNER");
@@ -226,6 +233,27 @@ function inspectSidecars(runDir, run, evidence, options) {
     skipped.push(options.runLockContended ? "SKIPPED_RUN_LOCK_CONTENDED" : "SKIPPED_RUN_LOCK_PRESENT_PREVIEW");
   }
   return { protected: dedupe(protectedReasons), skipped: dedupe(skipped) };
+}
+
+function launchClaimEvidence(result) {
+  const ownerState = ["missing", "live-matching", "dead", "mismatched", "invalid", "indeterminate"].includes(result?.state) ? result.state
+    : result?.missing ? "missing"
+    : result?.ok && result.owner_status === "live" ? "live-matching"
+      : result?.ok && ["dead", "mismatched", "indeterminate"].includes(result.owner_status) ? result.owner_status
+        : "invalid";
+  return {
+    state: ownerState,
+    hash: typeof result?.hash === "string" ? result.hash : null,
+    dir_device: identityPart(result?.identity?.dir?.dev),
+    dir_inode: identityPart(result?.identity?.dir?.ino),
+    file_device: identityPart(result?.identity?.file?.dev),
+    file_inode: identityPart(result?.identity?.file?.ino),
+  };
+}
+
+function identityPart(value) {
+  if (typeof value === "string" && /^\d+$/u.test(value)) return value;
+  return typeof value === "bigint" || Number.isSafeInteger(value) ? String(value) : null;
 }
 
 function inspectHeartbeat(runDir, runId, options) {

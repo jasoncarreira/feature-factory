@@ -52,7 +52,12 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
       assert.equal(releaseLaunchClaim(fixture.runDir, "wrong-token", opts), false);
       const released = transitionLaunchClaimPhase(fixture.runDir, acquired.token, "predecessor-active", {}, { ...opts, expectedPhase: "foreground-live" });
       assert.equal(released.claim.phase, "predecessor-active");
-      assert.equal(inspectLaunchClaim(fixture.runDir, { ...opts, runId: fixture.runId }).claim.execution_id, "exec-claim");
+      const observed = inspectLaunchClaim(fixture.runDir, { ...opts, runId: fixture.runId });
+      const ownerBytes = readFileSync(join(fixture.runDir, "process-launch.lock", "owner.json"));
+      assert.equal(observed.claim.execution_id, "exec-claim");
+      assert.equal(observed.hash, `sha256:${createHash("sha256").update(ownerBytes).digest("hex")}`);
+      assert.equal(Number.isInteger(observed.identity.dir.ino), true);
+      assert.equal(Number.isInteger(observed.identity.file.ino), true);
       assert.equal(releaseLaunchClaim(fixture.runDir, acquired.token, { ...opts, expectedPhase: "predecessor-active" }), true);
       assert.equal(inspectLaunchClaim(fixture.runDir, opts).missing, true);
     } finally {

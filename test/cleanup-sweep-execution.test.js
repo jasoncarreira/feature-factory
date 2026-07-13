@@ -120,6 +120,29 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
     }
   });
 
+  it("fails closed when a launch claim appears after preview or lock-held revalidation", async () => {
+    for (const hook of ["after-digest-recompute", "after-candidate-lock", "after-candidate-revalidation"]) {
+      const fixture = createCleanupSweepFixture(`execution-launch-claim-${hook}`);
+      try {
+        fixture.addRun("run", { branch: null });
+        const authorization = await preview(fixture);
+        let created = false;
+        const report = await execute(fixture, authorization.authorization.digest, {
+          phaseHook(name) {
+            if (name !== hook || created) return;
+            created = true;
+            const claimDir = join(fixture.factoryRoot, "run", "process-launch.lock");
+            mkdirSync(claimDir);
+            writeFileSync(join(claimDir, "owner.json"), "{}\n", "utf8");
+          },
+        });
+        assert.deepEqual(report.candidates[0].reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"], hook);
+        assert.equal(report.candidates[0].attempted_cleanup, false, hook);
+        assert.equal(existsSync(join(fixture.factoryRoot, "run", "process-launch.lock", "owner.json")), true, hook);
+      } finally { fixture.cleanup(); }
+    }
+  });
+
   it("requires the final temporary ref to resolve to the authorized base OID", async () => {
     const fixture = createCleanupSweepFixture("execution-base-race");
     try {
@@ -284,14 +307,18 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
   });
 
   it("binds every activity sidecar through the first mutation", async () => {
-    for (const sidecar of ["factory.lock", "heartbeat.json", "process.json"]) {
-      const fixture = createCleanupSweepFixture(`execution-sidecar-${sidecar.replace(".", "-")}`);
+    for (const sidecar of ["factory.lock", "heartbeat.json", "process.json", "process-launch.lock/owner.json"]) {
+      const fixture = createCleanupSweepFixture(`execution-sidecar-${sidecar.replaceAll(/[^A-Za-z0-9_-]/gu, "-")}`);
       try {
         fixture.addRun("run", { branch: null });
         const authorization = await preview(fixture);
         const report = await execute(fixture, authorization.authorization.digest, {
           phaseHook(name) {
-            if (name === "after-run-dir-final-validation") writeFileSync(join(fixture.factoryRoot, "run", sidecar), "{}\n", "utf8");
+            if (name === "after-run-dir-final-validation") {
+              const path = join(fixture.factoryRoot, "run", sidecar);
+              if (sidecar.includes("/")) mkdirSync(join(fixture.factoryRoot, "run", "process-launch.lock"));
+              writeFileSync(path, "{}\n", "utf8");
+            }
           },
         });
         assert.deepEqual(report.candidates[0].reason_codes, ["SKIPPED_CHANGED_DURING_EXECUTION"], sidecar);
