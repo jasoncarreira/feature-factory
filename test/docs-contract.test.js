@@ -15,7 +15,6 @@ const SCHEMA = readDoc("../assets/skills/feature/SCHEMA.md");
 const COMMAND = readDoc("../assets/command/feature.md");
 const README = readDoc("../README.md");
 const SPEC = readDoc("../SPEC.md");
-const TODO = readDoc("../TODO.md");
 const CONTRIBUTING = readDoc("../CONTRIBUTING.md");
 const RELEASING = readDoc("../RELEASING.md");
 const CHANGELOG = readDoc("../CHANGELOG.md");
@@ -724,12 +723,11 @@ describe("heartbeat docs contract", () => {
     }
   });
 
-  it("keeps protected gates heartbeat-free and resolves the heartbeat TODO", () => {
+  it("keeps protected gates heartbeat-free", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
       assert.match(text, /Protected gates?[\s\S]*`story`[\s\S]*`brief`[\s\S]*`pre_pr`[\s\S]*(?:heartbeat-free|stay off|intentionally absent)/i, `${name} must keep protected gates heartbeat-free`);
       assert.match(text, /liveness-only[\s\S]*(?:not authority|not.*authority)|not authority[\s\S]*liveness-only/i, `${name} must keep heartbeat liveness-only and non-authoritative`);
     }
-    assert.doesNotMatch(TODO, /Enforce heartbeat around long factory subagent waits/i, "TODO must not leave the resolved heartbeat enforcement item open");
   });
 
   it("documents heartbeat as liveness-only around long waits", () => {
@@ -974,9 +972,6 @@ describe("blocked-run continuation docs contract", () => {
     }
   });
 
-  it("does not leave the resolved blocked-run continuation item open in TODO", () => {
-    assert.doesNotMatch(TODO, /Automated blocked-run continuation/i, "TODO must not leave the resolved blocked-run continuation item open");
-  });
 });
 
 describe("blocked-work restart pattern docs contract", () => {
@@ -1052,9 +1047,6 @@ describe("non-destructive disrupted-worktree recovery docs contract", () => {
     }
   });
 
-  it("does not leave disrupted recovery as open future TODO work", () => {
-    assert.doesNotMatch(TODO, /Non-destructive disrupted-worktree recovery/i, "TODO must not leave disrupted recovery open");
-  });
 });
 
 describe("remediation context reuse docs contract", () => {
@@ -1111,9 +1103,6 @@ describe("remediation context reuse docs contract", () => {
     assert.match(SECURITY_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*introduced regressions/i, "security-reviewer prompt must preserve delta rule");
   });
 
-  it("does not leave remediation context reuse as an open TODO", () => {
-    assert.doesNotMatch(TODO, /Remediation context reuse/i, "TODO must not leave the resolved remediation context reuse item open");
-  });
 });
 
 describe("interrupt steer resume docs contract", () => {
@@ -1190,10 +1179,6 @@ describe("interrupt steer resume docs contract", () => {
     }
   });
 
-  it("does not leave cancellation rollback as an open TODO", () => {
-    assert.doesNotMatch(TODO, /Future work: live cancellation\/kill/i, "TODO must not leave live cancellation as future work");
-    assert.doesNotMatch(TODO, /semantic rollback when steering conflicts/i, "TODO must not leave steering rollback as future work");
-  });
 });
 
 describe("live-run steering drain docs contract", () => {
@@ -1297,10 +1282,8 @@ describe("live-run steering drain docs contract", () => {
     }
   });
 
-  it("preserves explicit resume semantics without completed TODO residue", () => {
+  it("preserves explicit resume semantics", () => {
     assert.match(markdownSection(SCHEMA, "`/feature resume` Contract"), /Preserve existing resume semantics[\s\S]*calls `record-resume` before any other mutating resume work whether or not steering is pending/i, "SCHEMA must preserve explicit resume semantics");
-    assert.doesNotMatch(TODO, /Future work: drain and consume pending steering/i, "TODO must not leave live-run drain as future work");
-    assert.doesNotMatch(TODO, /Live-run draining is implemented|Interrupt, steer, resume, and cancellation rollback \(implemented\)/i, "TODO must not retain completed steering/drain status");
   });
 });
 
@@ -1348,11 +1331,6 @@ describe("cost attribution docs contract", () => {
     }
   });
 
-  it("does not leave baseline cost attribution as an open TODO", () => {
-    assert.doesNotMatch(TODO, /Record per-agent and per-slice token\/cost usage/i, "TODO must not leave baseline cost recording open");
-    assert.doesNotMatch(TODO, /Persist cost data in durable run artifacts/i, "TODO must not leave baseline cost persistence open");
-    assert.doesNotMatch(TODO, /Surface cost summaries in CLI\/status and eventually TUI/i, "TODO must not leave baseline cost surfacing open");
-  });
 });
 
 describe("cost report docs contract", () => {
@@ -1432,13 +1410,6 @@ describe("cost report docs contract", () => {
     }
   });
 
-  it("closes richer report/export TODO while retaining genuine follow-ups", () => {
-    assert.doesNotMatch(TODO, /richer reporting\/export views/i, "TODO must not leave cost reporting/export as future work");
-    assert.match(TODO, /provider-specific metadata normalization/i, "TODO must retain provider normalization follow-up");
-    assert.match(TODO, /span taxonomy\/correlation/i, "TODO must retain genuine telemetry span follow-up");
-    assert.match(TODO, /SDK\/export/i, "TODO must retain exporter validation follow-up");
-    assert.match(TODO, /not entry-to-span proof/i, "TODO must distinguish invocation correlation from entry/span proof");
-  });
 });
 
 describe("telemetry readiness docs contract", () => {
@@ -1497,12 +1468,6 @@ describe("telemetry readiness docs contract", () => {
     }
   });
 
-  it("narrows Honeycomb TODO to future span instrumentation and validation", () => {
-    assert.match(TODO, /Completed readiness\/propagation baseline/i, "TODO must acknowledge completed telemetry readiness/propagation baseline");
-    assert.match(TODO, /Future work:[\s\S]*span taxonomy\/correlation spans/i, "TODO must leave future feature-factory span instrumentation");
-    assert.match(TODO, /Honeycomb Agent Timeline/i, "TODO must leave Honeycomb validation follow-up");
-    assert.doesNotMatch(TODO, /Include `doctor --telemetry` readiness checks/i, "TODO must not leave doctor --telemetry readiness as future work");
-  });
 });
 
 describe("TUI sidebar live refresh docs contract", () => {
@@ -1516,10 +1481,6 @@ describe("TUI sidebar live refresh docs contract", () => {
     assert.match(README, /30s root-cache TTL|30-second root-cache TTL|30 second root-cache TTL|caches root discovery for 30 seconds/i, "README must document the root-cache TTL behind sidebar refreshes");
   });
 
-  it("does not retain completed TUI refresh work in TODO", () => {
-    assert.doesNotMatch(TODO, /TUI active-session refresh hardening/i, "TODO must not leave the resolved TUI refresh hardening item open");
-    assert.doesNotMatch(TODO, /sidebar v\d|plugin changes need TUI restart/i, "TODO must not retain removed sidebar metadata");
-  });
 });
 
 describe("public documentation contract", () => {
@@ -1546,7 +1507,8 @@ describe("public documentation contract", () => {
       assert.match(text.slice(0, 500), /Status — historical retrospective[\s\S]*not[\s\S]*(?:current behavior|current[\s\S]*contract)[\s\S]*README\.md/i, `${name} must be historical, not current`);
     }
     assert.match(SIMPLIFICATION.slice(0, 500), /Status — historical implementation plan[\s\S]*not the active specification[\s\S]*README\.md/i);
-    assert.match(documentationStatus, /TODO\.md[\s\S]*EXTRACTION-SPEC\.md[\s\S]*non-authoritative/i);
+    assert.match(documentationStatus, /Future work is tracked in[\s\S]*GitHub issues/i);
+    assert.match(documentationStatus, /EXTRACTION-SPEC\.md[\s\S]*CONTINUATION-SCOPE-DESIGN\.md[\s\S]*non-authoritative/i);
     for (const [name, text] of documentEntries({ CONTRIBUTING, RELEASING, CHANGELOG })) {
       assert.match(text.slice(0, 300), /Status:[\s\S]*current repository-only/i, `${name} must identify itself as a current repository-only guide`);
     }
@@ -1608,7 +1570,7 @@ describe("public documentation contract", () => {
       ["implementation-validator", "openai/gpt-5.6-sol", "xhigh"],
       ["security-reviewer", "openai/gpt-5.6-sol", "xhigh"],
       ["spec-writer", "openai/gpt-5.6-sol", "xhigh"],
-      ["story-reader", "openai/gpt-5.6-luna", "medium"],
+      ["story-reader", "openai/gpt-5.6-terra", "low"],
       ["story-writer", "openai/gpt-5.6-sol", "high"],
       ["test-verifier", "openai/gpt-5.6-terra", "high"],
       ["work-decomposer", "openai/gpt-5.6-sol", "xhigh"],
@@ -1620,6 +1582,7 @@ describe("public documentation contract", () => {
     const sourceAgentNames = [...PLUGIN.matchAll(/^\s{2}"([a-z-]+)": "(?:planning|story|research|design|builder|test|reviewer|security)",$/gmu)].map((match) => match[1]).sort();
     assert.deepEqual(expected.map(([agent]) => agent).sort(), sourceAgentNames);
     assert.match(recommendedProfile, /opt-in exact-agent mapping[\s\S]*package supplies no model or variant defaults/i);
+    assert.match(recommendedProfile, /Temporary OpenCode OAuth compatibility note[\s\S]*anomalyco\/opencode\/issues\/36140/i);
     assert.doesNotMatch(recommendedProfile, /openai\/gpt-5\.[45]/i);
     assert.match(profiles, /Profile precedence is exact agent, then role, then `profiles\.default`, then top-level `profile`, then opencode default/i);
     for (const role of ["story", "research", "design", "planning", "builder", "test", "reviewer", "security"]) assert.match(profiles, literalPattern(`\`${role}\``));

@@ -207,7 +207,7 @@ how several findings should be read.
   executed. Net: the cost feature is effectively unexercised end-to-end.
 - **The undrained-directive gap is a missing guard, not lost data.** `tui-active-session-refresh`
   terminalized with its still-visible pending directive because drain/refuse/warn-at-boundary
-  is the still-unbuilt `steering-drain-boundaries` work (TODO "future work"). The queue and
+  was the still-unbuilt `steering-drain-boundaries` future work. The queue and
   its visibility shipped; the pre-terminalization guard did not.
 - **The newest security-hardening features are essentially unvalidated by dogfooding.**
   interrupt-cancel #33 and honeycomb #34 have only 3 light subsequent runs; optional-telemetry

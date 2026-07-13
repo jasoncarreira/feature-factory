@@ -371,7 +371,7 @@ Suggested shape:
     "opencode_version": "1.17.13",
     "plugin_spec": "opencode-feature-factory",
     "resolved_models": {
-      "story-reader": "openai/gpt-5.6-luna",
+      "story-reader": "openai/gpt-5.6-terra",
       "backend-builder": "openai/gpt-5.6-sol"
     },
       "driver": {

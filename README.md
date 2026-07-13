@@ -12,7 +12,7 @@ It ships:
 
 ## Documentation Status
 
-This README is the current packaged operator contract. The repository-only [contributor](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CONTRIBUTING.md), [release](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/RELEASING.md), and [change](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CHANGELOG.md) guides are current companion documentation but are not included in the published package. `SPEC.md` is proposed/internal planning, not implemented operator guidance. `DOGFOOD-LEARNINGS.md`, `RUN-LATENCY-FINDINGS.md`, and `SIMPLIFICATION.md` are historical or retrospective records, not the current contract. Protected backlog and extraction notes such as `TODO.md`, `EXTRACTION-SPEC.md`, and `CONTINUATION-SCOPE-DESIGN.md` are also non-authoritative for current behavior.
+This README is the current packaged operator contract. The repository-only [contributor](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CONTRIBUTING.md), [release](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/RELEASING.md), and [change](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/CHANGELOG.md) guides are current companion documentation but are not included in the published package. `SPEC.md` is proposed/internal planning, not implemented operator guidance. `DOGFOOD-LEARNINGS.md`, `RUN-LATENCY-FINDINGS.md`, and `SIMPLIFICATION.md` are historical or retrospective records, not the current contract. Future work is tracked in [GitHub issues](https://github.com/jasoncarreira/opencode-feature-factory/issues). Extraction notes such as `EXTRACTION-SPEC.md` and `CONTINUATION-SCOPE-DESIGN.md` are also non-authoritative for current behavior.
 
 ## Trust Model
 
@@ -230,6 +230,8 @@ For serious feature-factory runs, use the strongest model/effort where architect
 
 Recommended opt-in exact-agent mapping. The package supplies no model or variant defaults, and external model availability is not guaranteed. If your provider exposes different IDs, keep the same agent/variant shape and adjust only the model strings.
 
+Temporary OpenCode OAuth compatibility note: use Terra for `story-reader`. OpenCode currently advertises Luna, but Luna requests can fail with `Model not found gpt-5.6-luna` and retry indefinitely because the production SSE path is misconfigured. Track [anomalyco/opencode#36140](https://github.com/anomalyco/opencode/issues/36140) and reconsider Luna after the built-in OpenAI OAuth integration is fixed.
+
 ```jsonc
 {
   "plugin": [
@@ -245,7 +247,7 @@ Recommended opt-in exact-agent mapping. The package supplies no model or variant
           "implementation-validator": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
           "security-reviewer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
           "spec-writer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
-          "story-reader": { "model": "openai/gpt-5.6-luna", "variant": "medium" },
+          "story-reader": { "model": "openai/gpt-5.6-terra", "variant": "low" },
           "story-writer": { "model": "openai/gpt-5.6-sol", "variant": "high" },
           "test-verifier": { "model": "openai/gpt-5.6-terra", "variant": "high" },
           "work-decomposer": { "model": "openai/gpt-5.6-sol", "variant": "xhigh" },
@@ -269,7 +271,7 @@ Canonical resolved recommendation (the package does not apply these as defaults)
 | `implementation-validator` | `openai/gpt-5.6-sol` | `xhigh` |
 | `security-reviewer` | `openai/gpt-5.6-sol` | `xhigh` |
 | `spec-writer` | `openai/gpt-5.6-sol` | `xhigh` |
-| `story-reader` | `openai/gpt-5.6-luna` | `medium` |
+| `story-reader` | `openai/gpt-5.6-terra` | `low` |
 | `story-writer` | `openai/gpt-5.6-sol` | `high` |
 | `test-verifier` | `openai/gpt-5.6-terra` | `high` |
 | `work-decomposer` | `openai/gpt-5.6-sol` | `xhigh` |
@@ -281,7 +283,7 @@ Rationale:
 - Review/validation also needs the highest budget because it catches cross-slice correctness gaps before PR creation.
 - Security review is isolated as its own profile so teams can tune adversarial review cost separately; the canonical recommendation uses `xhigh`.
 - Builders benefit from high effort but can usually use a slightly cheaper model because the brief and slice spec constrain the work.
-- Story reading is narrower and uses Luna/medium; story writing uses Sol/high, while test verification uses Terra/high. Exact overrides are required because a role-only `story` profile cannot reproduce the two story-agent recommendations.
+- Story reading is narrower and temporarily uses Terra/low because of the Luna OAuth compatibility issue; story writing uses Sol/high, while test verification uses Terra/high. Exact overrides are required because a role-only `story` profile cannot reproduce the two story-agent recommendations.
 
 ### Anthropic Profile
 
