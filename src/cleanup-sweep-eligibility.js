@@ -44,7 +44,10 @@ export function discoverCleanupSweepCandidates(repo, options = {}) {
     try {
       const result = classifyEntry(repositoryRoot, entry, collisions.get(entry.entryName) ?? false, {
         ...options,
-        registerTemporaryRef: (temporaryRef) => temporaryRefs.push(temporaryRef),
+        registerTemporaryRef: (temporaryRef, expectedOid) => {
+          temporaryRefs.push(temporaryRef);
+          options.registerTemporaryRef?.(temporaryRef, expectedOid);
+        },
       });
       return result.candidate;
     } catch {
@@ -136,6 +139,7 @@ function worktreeClaimKeys(logical, options) {
 
 function classifyEntry(repo, entry, sharedClaim, options) {
   const evidence = createEmptyEvidence(entry.entryName, entry.logicalPath);
+  let fetchedBaseOid = null;
   evidence.entry = {
     kind: entry.kind,
     logical_path: entry.logicalPath,
@@ -149,6 +153,7 @@ function classifyEntry(repo, entry, sharedClaim, options) {
   const finish = (classification, reasonCodes, runId = evidence.run.run_id, temporaryRef = null) => ({
     candidate: createCandidate({ entry_name: entry.entryName, run_id: runId, classification, reason_codes: sharedClaim ? [...reasonCodes, "SHARED_TARGET_CLAIM"] : reasonCodes, evidence }),
     temporary_ref: temporaryRef,
+    base_oid: fetchedBaseOid,
   });
 
   if (entry.kind !== "directory" || entry.physicalPath !== entry.logicalPath || !SAFE_ENTRY.test(entry.entryName)) return finish("skipped", ["SKIPPED_UNSAFE_ENTRY"], null);
@@ -187,9 +192,9 @@ function classifyEntry(repo, entry, sharedClaim, options) {
   if (pr.state === "OPEN") return finish("skipped", ["SKIPPED_PR_OPEN"]);
 
   const temporaryRef = temporaryRefFor(entry.entryName, options.invocationId ?? randomUUID());
-  options.registerTemporaryRef?.(temporaryRef);
-  if (!verifyFetchedBase(repo, pr, temporaryRef, options.gitRunner ?? git)) return finish("skipped", ["SKIPPED_BASE_UNPROVABLE"], run.run_id, temporaryRef);
-  const targetResult = inspectTargets(repo, run, temporaryRef, pr.base_sha, evidence, options.gitRunner ?? git, options);
+  fetchedBaseOid = fetchVerifiedBase(repo, pr, temporaryRef, options.gitRunner ?? git, options.registerTemporaryRef);
+  if (!fetchedBaseOid) return finish("skipped", ["SKIPPED_BASE_UNPROVABLE"], run.run_id, temporaryRef);
+  const targetResult = inspectTargets(repo, run, temporaryRef, fetchedBaseOid, evidence, options.gitRunner ?? git, options);
   if (targetResult.reason) return finish("skipped", [targetResult.reason], run.run_id, temporaryRef);
   return finish("eligible", ["ELIGIBLE"], run.run_id, temporaryRef);
 }
@@ -479,13 +484,27 @@ function inspectWorktree(repo, target, registered, branches, worktreeRoot, optio
   return { record, reason: null };
 }
 
-function verifyFetchedBase(repo, pr, temporaryRef, gitRunner) {
-  if (!validBranch(repo, pr.base_ref, gitRunner) || !oid(pr.base_sha)) return false;
-  if (gitRunner(repo, ["check-ref-format", temporaryRef])?.ok !== true) return false;
-  const fetch = gitRunner(repo, ["fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--force", `https://github.com/${pr.repository}.git`, `+${pr.base_sha}:${temporaryRef}`]);
-  if (!fetch?.ok) return false;
+function fetchVerifiedBase(repo, pr, temporaryRef, gitRunner, registerTemporaryRef) {
+  if (!validBranch(repo, pr.base_ref, gitRunner)) return null;
+  const remoteUrl = `https://github.com/${pr.repository}.git`;
+  const remoteRef = `refs/heads/${pr.base_ref}`;
+  const advertised = gitRunner(repo, ["ls-remote", "--exit-code", "--refs", remoteUrl, remoteRef]);
+  const baseOid = advertised?.ok ? exactRemoteOid(advertised.stdout, remoteRef) : null;
+  if (!baseOid) return null;
+  registerTemporaryRef?.(temporaryRef, baseOid);
+  if (gitRunner(repo, ["check-ref-format", temporaryRef])?.ok !== true) return null;
+  const fetch = gitRunner(repo, ["fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--force", remoteUrl, `+${baseOid}:${temporaryRef}`]);
+  if (!fetch?.ok) return null;
   const resolved = gitRunner(repo, ["rev-parse", "--verify", `${temporaryRef}^{commit}`]);
-  return Boolean(resolved?.ok && resolved.stdout.trim() === pr.base_sha);
+  return resolved?.ok && resolved.stdout.trim() === baseOid ? baseOid : null;
+}
+
+function exactRemoteOid(stdout, expectedRef) {
+  if (typeof stdout !== "string") return null;
+  const lines = stdout.trimEnd().split("\n");
+  if (lines.length !== 1) return null;
+  const match = /^([0-9a-f]{40}|[0-9a-f]{64})\t([^\t\r\n]+)$/u.exec(lines[0]);
+  return match?.[2] === expectedRef && oid(match[1]) ? match[1] : null;
 }
 
 function validBranch(repo, branch, gitRunner) {

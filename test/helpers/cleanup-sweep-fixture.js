@@ -69,9 +69,13 @@ export function createCleanupSweepFixture(name = "eligibility") {
   }
 
   function gitRunner(cwd, args) {
+    if (args[0] === "ls-remote") {
+      const remoteRef = args.at(-1);
+      return { ok: true, status: 0, stdout: `${baseSha}\t${remoteRef}\n`, stderr: "", command: null, signal: null };
+    }
     if (args[0] === "fetch") {
-      const destination = args.at(-1).split(":").at(-1);
-      const proc = runFixtureGit(cwd, ["update-ref", destination, baseSha]);
+      const [source, destination] = args.at(-1).split(":");
+      const proc = runFixtureGit(cwd, ["update-ref", destination, source.replace(/^\+/u, "")]);
       return commandResult(proc);
     }
     return commandResult(runFixtureGit(cwd, args));
