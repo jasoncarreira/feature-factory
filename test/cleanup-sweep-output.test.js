@@ -93,6 +93,7 @@ describe("cleanup sweep output", () => {
     const adjacentCredential = makeCandidate("protected", "a-ask-abcdefghijklmnopqrst");
     const embeddedUuid = makeCandidate("protected", "run-abcdef12-1234-5678-9012-abcdefabcdef");
     const embeddedHex = makeCandidate("protected", "run-abcdef0123456789abcdef0123456789");
+    const opaqueSuffix = makeCandidate("protected", "run-abcdefghijklmnopqrstuvwxyz123456");
     const mismatched = createCandidate({
       entry_name: "untrusted-entry-name",
       run_id: "trusted-run-name",
@@ -100,7 +101,7 @@ describe("cleanup sweep output", () => {
       reason_codes: ["SKIPPED_RUN_ID_MISMATCH"],
       evidence: createEmptyEvidence("trusted-run-name"),
     });
-    const human = renderCleanupSweepReport(previewReport(repository("/repo"), [descriptive, numbered, credential, skCredential, adjacentCredential, embeddedUuid, embeddedHex, mismatched]));
+    const human = renderCleanupSweepReport(previewReport(repository("/repo"), [descriptive, numbered, credential, skCredential, adjacentCredential, embeddedUuid, embeddedHex, opaqueSuffix, mismatched]));
 
     assert.match(human, /cleanup-sweep-integration-continuation/u);
     assert.match(human, /post-pr-ci-remediation-continuation-2/u);
@@ -108,6 +109,7 @@ describe("cleanup sweep output", () => {
     assert.doesNotMatch(human, /sk-abcdefghijkl/u);
     assert.doesNotMatch(human, /abcdef12-1234/u);
     assert.doesNotMatch(human, /abcdef0123456789/u);
+    assert.doesNotMatch(human, /abcdefghijklmnopqrstuvwxyz123456/u);
     assert.match(human, /\[redacted\]/u);
     assert.doesNotMatch(human, /untrusted-entry-name/u);
   });

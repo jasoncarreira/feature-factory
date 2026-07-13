@@ -42,6 +42,9 @@ describe("typed output segments", () => {
       "run-abcdef12-1234-5678-9012-abcdefabcdef",
       "eabcdef12-1234-5678-9012-abcdefabcdef",
       "run-abcdef0123456789abcdef0123456789",
+      "run-abcdefghijklmnopqrstuvwxyz123456",
+      "job-qwertyuiopasdfghjklzxcvbnm123456",
+      "run-abcdefghijklmnopqrstuvwxyzabcdef",
     ]) {
       assert.equal(isDisplaySafeRunId(value), false, value);
     }
