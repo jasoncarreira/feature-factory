@@ -265,6 +265,9 @@ test("R24-R28 require exact closed PR metadata and a freshly fetched exact base"
     ["open", () => {}, "SKIPPED_PR_OPEN", { github: { state: "open", merged: false } }],
     ["missing response field", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { github: { base: { repo: null } } }],
     ["invalid base ref", () => {}, "SKIPPED_BASE_UNPROVABLE", { github: { base: { ref: "bad ref" } } }],
+    ["base lookup failure", () => {}, "SKIPPED_BASE_UNPROVABLE", { gitRunner: (_cwd, args) => args[0] === "ls-remote" ? { ok: false, status: 2, stdout: "" } : null }],
+    ["malformed base lookup", () => {}, "SKIPPED_BASE_UNPROVABLE", { gitRunner: (_cwd, args) => args[0] === "ls-remote" ? { ok: true, status: 0, stdout: "malformed\n" } : null }],
+    ["mismatched base lookup", () => {}, "SKIPPED_BASE_UNPROVABLE", { gitRunner: (_cwd, args) => args[0] === "ls-remote" ? { ok: true, status: 0, stdout: `${"f".repeat(40)}\trefs/heads/other\n` } : null }],
     ["base fetch failure", () => {}, "SKIPPED_BASE_UNPROVABLE", { gitRunner: (_cwd, args) => args[0] === "fetch" ? { ok: false, status: 1, stdout: "" } : null }],
     ["base oid mismatch", () => {}, "SKIPPED_BASE_UNPROVABLE", { gitRunner: (_cwd, args) => args[0] === "rev-parse" && String(args[2]).startsWith("refs/feature-factory/") ? { ok: true, status: 0, stdout: `${"f".repeat(40)}\n` } : null }],
   ];
@@ -278,6 +281,48 @@ test("R24-R28 require exact closed PR metadata and a freshly fetched exact base"
       assert.equal(candidate.reason_codes.includes(reason), true);
     } finally { fixture.cleanup(); }
   });
+});
+
+test("R28 resolves the current canonical base ref and fetches its advertised immutable SHA", () => {
+  const fixture = createCleanupSweepFixture("exact-base-fetch-source");
+  const lookups = [];
+  const fetches = [];
+  try {
+    fixture.addRun("run");
+    const gitRunner = (cwd, args, options) => {
+      if (args[0] === "ls-remote") lookups.push([...args]);
+      if (args[0] === "fetch") fetches.push([...args]);
+      return fixture.gitRunner(cwd, args, options);
+    };
+    const candidate = inspect(fixture, { gitRunner }).candidates[0];
+
+    assert.equal(candidate.classification, "eligible");
+    assert.deepEqual(lookups[0].slice(0, 3), ["ls-remote", "--exit-code", "--refs"]);
+    assert.equal(lookups[0].at(-1), "refs/heads/main");
+    assert.equal(fetches.length, 1);
+    assert.equal(fetches[0].at(-1).startsWith(`+${fixture.baseSha}:refs/feature-factory/cleanup-sweep/`), true);
+    assert.equal(fetches[0].at(-1).includes("refs/heads/main"), false);
+  } finally { fixture.cleanup(); }
+});
+
+test("R28 proves merged branches against the current base head rather than the historical PR base SHA", () => {
+  const fixture = createCleanupSweepFixture("advanced-base-head");
+  try {
+    fixture.addRun("run");
+    const branchHead = fixture.gitRunner(fixture.repo, ["commit-tree", `${fixture.baseSha}^{tree}`, "-p", fixture.baseSha, "-m", "merged branch"]).stdout.trim();
+    const currentBase = fixture.gitRunner(fixture.repo, ["commit-tree", `${fixture.baseSha}^{tree}`, "-p", branchHead, "-m", "current base"]).stdout.trim();
+    fixture.gitRunner(fixture.repo, ["update-ref", "refs/heads/run", branchHead, fixture.baseSha]);
+    const gitRunner = fallbackRunner((_cwd, args) => args[0] === "ls-remote"
+      ? { ok: true, status: 0, stdout: `${currentBase}\trefs/heads/main\n`, stderr: "" }
+      : null, fixture.gitRunner);
+
+    const candidate = inspect(fixture, { gitRunner }).candidates[0];
+
+    assert.equal(candidate.evidence.pr.base_sha, fixture.baseSha);
+    assert.equal(candidate.evidence.branches[0].base_oid, currentBase);
+    assert.equal(candidate.evidence.branches[0].state, "verified-ancestor");
+    assert.equal(candidate.classification, "eligible");
+  } finally { fixture.cleanup(); }
 });
 
 test("R27 exact closed-unmerged pull requests continue through base verification", () => {
@@ -542,12 +587,14 @@ test("R52 returns a registered temporary ref when inspection throws after fetch"
 });
 
 test("R28 returns a generated temporary ref when fetch or post-fetch verification throws", async (t) => {
-  for (const operation of ["fetch", "rev-parse"]) await t.test(operation, () => {
+  for (const operation of ["check-ref-format", "fetch", "rev-parse"]) await t.test(operation, () => {
     const fixture = createCleanupSweepFixture(`temp-ref-${operation}`);
     try {
       fixture.addRun("run");
       const runner = fallbackRunner((_cwd, args) => {
-        if (args[0] === operation && (operation !== "rev-parse" || String(args[2]).startsWith("refs/feature-factory/"))) throw new Error("injected");
+        if (args[0] === operation
+          && (operation !== "check-ref-format" || String(args[1]).startsWith("refs/feature-factory/"))
+          && (operation !== "rev-parse" || String(args[2]).startsWith("refs/feature-factory/"))) throw new Error("injected");
         return null;
       }, fixture.gitRunner);
       const result = inspect(fixture, { gitRunner: runner });

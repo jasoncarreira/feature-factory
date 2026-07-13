@@ -164,6 +164,90 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
     } finally { fixture.cleanup(); }
   });
 
+  it("fails closed when the PR reopens at any final mutation boundary", async () => {
+    for (const boundary of ["after-worktree-final-validation", "after-branch-final-validation", "after-run-dir-final-validation"]) {
+      const fixture = createCleanupSweepFixture(`execution-pr-reopened-${boundary}`);
+      try {
+        fixture.addRun("run");
+        if (boundary === "after-worktree-final-validation") fixture.addRecordedWorktree("run");
+        const authorization = await preview(fixture);
+        let reopened = false;
+        const githubRunner = (...args) => {
+          const result = fixture.githubRunner(...args);
+          if (!reopened) return result;
+          const body = JSON.parse(result.stdout);
+          return { ...result, stdout: JSON.stringify({ ...body, state: "open", merged: false }) };
+        };
+        const report = await execute(fixture, authorization.authorization.digest, {
+          githubRunner,
+          phaseHook(name) { if (name === boundary) reopened = true; },
+        });
+
+        assert.notEqual(report.candidates[0].classification, "deleted", boundary);
+        assert.equal(existsSync(join(fixture.factoryRoot, "run")), true, boundary);
+        assert.equal(branchExists(fixture.repo, "run"), boundary !== "after-run-dir-final-validation", boundary);
+      } finally { fixture.cleanup(); }
+    }
+  });
+
+  it("fails closed when the canonical base head moves at any final mutation boundary", async () => {
+    for (const boundary of ["after-worktree-final-validation", "after-branch-final-validation", "after-run-dir-final-validation"]) {
+      const fixture = createCleanupSweepFixture(`execution-base-moved-${boundary}`);
+      try {
+        fixture.addRun("run");
+        if (boundary === "after-worktree-final-validation") fixture.addRecordedWorktree("run");
+        const authorization = await preview(fixture);
+        const changedBase = gitOutput(fixture.repo, ["commit-tree", `${fixture.baseSha}^{tree}`, "-p", fixture.baseSha, "-m", "changed base"]);
+        let moved = false;
+        const gitRunner = fallbackRunner((_cwd, args) => args[0] === "ls-remote" && moved
+          ? { ok: true, status: 0, stdout: `${changedBase}\trefs/heads/main\n`, stderr: "" }
+          : null, fixture.gitRunner);
+        const report = await execute(fixture, authorization.authorization.digest, {
+          gitRunner,
+          phaseHook(name) { if (name === boundary) moved = true; },
+        });
+
+        assert.notEqual(report.candidates[0].classification, "deleted", boundary);
+        assert.equal(existsSync(join(fixture.factoryRoot, "run")), true, boundary);
+        assert.equal(branchExists(fixture.repo, "run"), boundary !== "after-run-dir-final-validation", boundary);
+      } finally { fixture.cleanup(); }
+    }
+  });
+
+  it("restores a quarantined worktree when remote authorization changes before removal", async () => {
+    for (const change of ["pr", "base"]) {
+      const fixture = createCleanupSweepFixture(`execution-worktree-quarantine-${change}`);
+      try {
+        fixture.addRun("run");
+        const worktree = fixture.addRecordedWorktree("run");
+        const authorization = await preview(fixture);
+        const changedBase = gitOutput(fixture.repo, ["commit-tree", `${fixture.baseSha}^{tree}`, "-p", fixture.baseSha, "-m", "changed base"]);
+        let changed = false;
+        const githubRunner = (...args) => {
+          const result = fixture.githubRunner(...args);
+          if (!changed || change !== "pr") return result;
+          const body = JSON.parse(result.stdout);
+          return { ...result, stdout: JSON.stringify({ ...body, state: "open", merged: false }) };
+        };
+        const gitRunner = (cwd, args, options) => {
+          if (args[0] === "ls-remote" && changed && change === "base") {
+            return { ok: true, status: 0, stdout: `${changedBase}\trefs/heads/main\n`, stderr: "" };
+          }
+          const result = fixture.gitRunner(cwd, args, options);
+          if (args[0] === "worktree" && args[1] === "move" && result.ok) changed = true;
+          return result;
+        };
+
+        const report = await execute(fixture, authorization.authorization.digest, { githubRunner, gitRunner });
+
+        assert.notEqual(report.candidates[0].classification, "deleted", change);
+        assert.equal(existsSync(worktree), true, change);
+        assert.equal(existsSync(join(fixture.factoryRoot, "run")), true, change);
+        assert.equal(branchExists(fixture.repo, "run"), true, change);
+      } finally { fixture.cleanup(); }
+    }
+  });
+
   it("R45/R48 delegates exact expected evidence and deletes branches by CAS in canonical order", async () => {
     const fixture = createCleanupSweepFixture("execution-success");
     try {
@@ -760,6 +844,7 @@ function gitOutput(cwd, args) {
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
   return result.stdout.trim();
 }
+function branchExists(cwd, branch) { return runFixtureGit(cwd, ["show-ref", "--verify", `refs/heads/${branch}`]).status === 0; }
 function listInvocationRefs(fixture) {
   const result = runFixtureGit(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/feature-factory/cleanup-sweep/v1/"]);
   return result.stdout.trim() ? result.stdout.trim().split("\n") : [];

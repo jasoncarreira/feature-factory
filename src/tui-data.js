@@ -13,10 +13,12 @@ import {
 } from "./factory-diagnostics.js";
 import {
   freeformSegment,
+  isDisplaySafeRunId,
   projectDiagnosticData,
   projectFreeformData,
   renderTerminalSegmentsOrFallback,
 } from "./hardening/output-policy.js";
+import { REDACTED_VALUE } from "./hardening/sensitive-data.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".cache", ".next"]);
 const MAX_SCAN_DIRS = 2000;
@@ -177,7 +179,7 @@ function parseErrorDiagnostics(file, error) {
 
 function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
   return {
-    run_id: projectFreeformText(run.run_id || fallbackID),
+    run_id: run.run_id === fallbackID && isDisplaySafeRunId(run.run_id) ? run.run_id : REDACTED_VALUE,
     status: projectFreeformText(run.status || "unknown"),
     mode: projectOptionalFreeformText(run.mode),
     gate: projectOptionalFreeformText(pendingGate(run)),
@@ -200,7 +202,7 @@ function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
 
 function fallbackRun(fallbackID, file, diagnostics) {
   return {
-    run_id: projectFreeformText(fallbackID),
+    run_id: isDisplaySafeRunId(fallbackID) ? fallbackID : REDACTED_VALUE,
     status: "invalid",
     mode: null,
     gate: null,

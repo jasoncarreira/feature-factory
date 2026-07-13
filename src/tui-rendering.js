@@ -5,9 +5,11 @@ import {
 import {
   freeformSegment,
   identitySegment,
+  isDisplaySafeRunId,
   renderTerminalSegmentsOrFallback,
   TRUSTED_SEGMENTS,
 } from "./hardening/output-policy.js";
+import { REDACTED_VALUE } from "./hardening/sensitive-data.js";
 
 const RUN_STATUSES = new Set(["running", "completed", "blocked", "partial", "needs-human", "invalid"]);
 const RUN_MODES = new Set(["interactive", "headless", "autonomous"]);
@@ -49,7 +51,7 @@ export function renderRunTextFields(run) {
   const slices = renderSliceLine(run?.slices);
   const diagnostic = renderDiagnosticLine(run);
   return {
-    run_id: renderFreeformText(run?.run_id, 31),
+    run_id: renderRunId(run?.run_id),
     status_line: mode ? `${status} | ${mode}` : status,
     gate_line: run?.gate ? `gate: ${renderFreeformText(run.gate)}` : null,
     current_line: run?.current ? `current: ${renderFreeformText(run.current, 34)}` : null,
@@ -62,6 +64,11 @@ export function renderRunTextFields(run) {
     diagnostic_line: `diagnostic: ${diagnostic}`,
     branch_line: run?.branch ? `branch: ${renderFreeformText(run.branch, 30)}` : null,
   };
+}
+
+function renderRunId(value) {
+  const segment = isDisplaySafeRunId(value) ? identitySegment(value) : freeformSegment(REDACTED_VALUE);
+  return truncate(renderTerminalSegmentsOrFallback([segment]), 31);
 }
 
 export function renderHiddenRunsLine(value) {

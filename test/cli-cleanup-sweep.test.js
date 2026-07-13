@@ -125,7 +125,7 @@ describe("cleanup sweep confirmation and rendering", () => {
     assert.match(lines[2], /^repository: /u);
     assert.match(lines[3], /^digest: ff-cleanup-v1\./u);
     assert.match(lines[4], /^eligible\ta\tELIGIBLE\t/u);
-    assert.match(lines[5], /^skipped\tz\\u001B\[31m\tSKIPPED_PR_OPEN\t/u);
+    assert.match(lines[5], /^skipped\t\[redacted\]\tSKIPPED_PR_OPEN\t/u);
     assert.match(lines[6], /^counts: eligible=1 protected=0 skipped=1 deleted=0 failed=0$/u);
     assert.equal(lines[7], "attempted-cleanup-failures: 0");
     assert.match(lines[8], /^confirmation: /u);

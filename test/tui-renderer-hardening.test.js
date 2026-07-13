@@ -46,6 +46,12 @@ describe("TUI renderer hardening seam", () => {
       branch_line: "branch: diagnostics-tui",
     });
     assert.equal(renderHiddenRunsLine(4), "+ 4 more runs");
+    assert.equal(renderRunTextFields({ run_id: "cleanup-sweep-integration-continuation", status: "running" }).run_id, "cleanup-sweep-integration-co...");
+    assert.equal(renderRunTextFields({ run_id: "run-sk-abcdefghijklmnopqrstuvwx", status: "running" }).run_id, "[redacted]");
+    assert.equal(renderRunTextFields({ run_id: "a-ask-abcdefghijklmnopqrst", status: "running" }).run_id, "[redacted]");
+    assert.equal(renderRunTextFields({ run_id: "run-abcdef12-1234-5678-9012-abcdefabcdef", status: "running" }).run_id, "[redacted]");
+    assert.equal(renderRunTextFields({ run_id: "eabcdef12-1234-5678-9012-abcdefabcdef", status: "running" }).run_id, "[redacted]");
+    assert.equal(renderRunTextFields({ run_id: "run-abcdef0123456789abcdef0123456789", status: "running" }).run_id, "[redacted]");
   });
 
   it("reprojects every dynamic child, validates identity enums, and truncates after encoding", () => {

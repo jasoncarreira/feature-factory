@@ -9,6 +9,7 @@ import {
   errorOutputSegments,
   freeformSegment,
   identitySegment,
+  isDisplaySafeRunId,
   isOutputSegment,
   projectDiagnosticData,
   projectFreeformData,
@@ -23,6 +24,32 @@ import { serializeTerminalJson } from "../src/hardening/terminal-encoding.js";
 const SECRET = "github_pat_123456789012345678901234567890";
 
 describe("typed output segments", () => {
+  it("recognizes descriptive run identities without admitting credential or opaque token shapes", () => {
+    assert.equal(isDisplaySafeRunId("cleanup-sweep-integration-continuation"), true);
+    assert.equal(isDisplaySafeRunId("post-pr-ci-remediation-continuation-2"), true);
+    for (const value of [
+      SECRET,
+      "run-sk-abcdefghijklmnopqrstuvwx",
+      "a-ask-abcdefghijklmnopqrst",
+      "run-glpat-abcdefghijklmnopqrstuvwx",
+      "a-aglpat-abcdefghijklmnopqrstuvwx",
+      "run-xoxb-abcdefghijkl-mnopqrstuvwx",
+      "a-axoxb-abcdefghijkl-mnopqrstuvwx",
+      "cleanup-secret-token",
+      "run.lock",
+      "run..name",
+      "abcdef12-1234-5678-9012-abcdefabcdef",
+      "run-abcdef12-1234-5678-9012-abcdefabcdef",
+      "eabcdef12-1234-5678-9012-abcdefabcdef",
+      "run-abcdef0123456789abcdef0123456789",
+      "run-abcdefghijklmnopqrstuvwxyz123456",
+      "job-qwertyuiopasdfghjklzxcvbnm123456",
+      "run-abcdefghijklmnopqrstuvwxyzabcdef",
+    ]) {
+      assert.equal(isDisplaySafeRunId(value), false, value);
+    }
+  });
+
   it("creates frozen branded segments with the documented public shape", () => {
     const trusted = trustedSegment("ERROR_PREFIX");
     const identity = identitySegment("run-id");
