@@ -23,6 +23,7 @@ import {
   writeGateAnswer,
   writeSteering,
 } from "../src/factory.js";
+import { acquireLaunchFence, releaseLaunchFence } from "../src/process-evidence.js";
 import { checkWorktreeIdentity } from "../src/worktrees.js";
 
 describe("factory public state operations", { concurrency: false }, () => {
@@ -522,6 +523,26 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
+  it("refuses direct cleanup while launch coordination holds the external fence", async () => {
+    const fixture = createFixture("cleanup-launch-fence", { terminal: true });
+    const aliasRepo = `${fixture.repo}-alias`;
+    symlinkSync(fixture.repo, aliasRepo, "dir");
+    const aliasRunDir = join(aliasRepo, ".opencode", "factory", fixture.runId);
+    const fence = acquireLaunchFence(aliasRunDir, "launch");
+    try {
+      assert.equal(fence.acquired, true);
+      await assert.rejects(
+        cleanupRun(fixture.runId, { cwd: fixture.repo, force: true }),
+        /active launch coordination/u,
+      );
+      assert.equal(existsSync(join(fixture.runDir, "run.json")), true);
+    } finally {
+      assert.equal(releaseLaunchFence(fence), true);
+      rmSync(aliasRepo, { recursive: true, force: true });
+      cleanup(fixture.repo);
+    }
+  });
+
   it("collects the same deduplicated run and slice targets used by single-run cleanup", () => {
     const run = {
       branch: "run-branch",
@@ -574,13 +595,16 @@ describe("factory public state operations", { concurrency: false }, () => {
       ]);
       assert.equal(events[0].startsWith("before-worktree-remove:"), true);
       assert.equal(events[1].startsWith("after-worktree-final-validation:"), true);
-      assert.deepEqual(events.slice(2, 5), [
+      assert.deepEqual(events.slice(2, 8), [
         "before-branch-delete:alpha",
+        "after-branch-final-validation:alpha",
         `before-branch-delete:${fixture.runId}`,
+        `after-branch-final-validation:${fixture.runId}`,
         "before-branch-delete:zeta",
+        "after-branch-final-validation:zeta",
       ]);
-      assert.equal(events[5], `before-run-dir-remove:${fixture.runDir}`);
-      assert.equal(events[6], `after-run-dir-final-validation:${fixture.runDir}`);
+      assert.equal(events[8], `before-run-dir-remove:${fixture.runDir}`);
+      assert.equal(events[9], `after-run-dir-final-validation:${fixture.runDir}`);
     } finally {
       cleanup(fixture.repo);
     }

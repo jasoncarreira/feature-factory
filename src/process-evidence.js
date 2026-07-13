@@ -1,4 +1,4 @@
-import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
@@ -21,6 +21,7 @@ export const LAUNCH_CLAIM_FILE = "owner.json";
 export const LAUNCH_CLAIM_REF = `${LAUNCH_CLAIM_DIR}/${LAUNCH_CLAIM_FILE}`;
 export const LAUNCH_CLAIM_KIND = "opencode-launch-claim";
 export const LAUNCH_CLAIM_SCHEMA_VERSION = 1;
+export const LAUNCH_FENCE_KIND = "opencode-launch-fence";
 export const LAUNCH_CLAIM_PHASES = Object.freeze(["foreground-live", "predecessor-active", "predecessor-released", "spawning"]);
 export const LAUNCH_KINDS = Object.freeze(["approval-handoff", "resume-foreground", "resume-detached", "start-resume-foreground", "start-resume-detached"]);
 
@@ -52,9 +53,10 @@ export function inspectLaunchClaim(runDir, opts = {}) {
   const root = resolve(runDir);
   const dir = join(root, LAUNCH_CLAIM_DIR);
   const file = join(dir, LAUNCH_CLAIM_FILE);
+  let rootStat;
   let dirStat;
   try {
-    const rootStat = lstatSync(root);
+    rootStat = lstatSync(root);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return invalidLaunchClaim(file, "run directory must be a non-symlink directory");
     dirStat = lstatSync(dir);
   } catch (error) {
@@ -62,6 +64,7 @@ export function inspectLaunchClaim(runDir, opts = {}) {
     return invalidLaunchClaim(file, `launch claim directory is inaccessible: ${error.message}`);
   }
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return invalidLaunchClaim(file, "launch claim directory must be a non-symlink directory", claimIdentity(dirStat));
+  opts.onLaunchClaimDirectoryInspected?.({ root, dir, file, identity: claimIdentity(dirStat) });
 
   let fd;
   let fileStat;
@@ -72,10 +75,12 @@ export function inspectLaunchClaim(runDir, opts = {}) {
     if (!fileStat.isFile()) return invalidLaunchClaim(file, "launch claim owner must be a regular file", claimIdentity(dirStat, fileStat));
     const bytes = readFileSync(fd);
     hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    assertStableClaimPath(root, dir, file, rootStat, dirStat, fileStat);
     const claim = JSON.parse(bytes.toString("utf8"));
     const validation = validateLaunchClaim(claim, { ...opts, runDir: root });
     if (!validation.ok) return { ...validation, missing: false, path: file, owner_status: "invalid", identity: claimIdentity(dirStat, fileStat), hash };
     const ownerStatus = inspectClaimOwner(validation.claim, opts);
+    assertStableClaimPath(root, dir, file, rootStat, dirStat, fileStat);
     return {
       ok: true,
       missing: false,
@@ -87,6 +92,7 @@ export function inspectLaunchClaim(runDir, opts = {}) {
       hash,
     };
   } catch (error) {
+    if (error?.code === "LAUNCH_CLAIM_CHANGED") return invalidLaunchClaim(file, "launch claim identity changed during inspection");
     if (error?.code === "ENOENT") return invalidLaunchClaim(file, "launch claim directory is ownerless", claimIdentity(dirStat));
     return invalidLaunchClaim(file, `invalid launch claim: ${error.message}`, claimIdentity(dirStat, fileStat), hash);
   } finally {
@@ -120,6 +126,18 @@ export function validateLaunchClaim(claim, opts = {}) {
 
 export function acquireLaunchClaim(runDir, input = {}, opts = {}) {
   const root = resolve(runDir);
+  const fence = acquireLaunchFence(root, "launch", opts);
+  if (!fence.acquired) {
+    return { acquired: false, ok: false, missing: false, reason: "launch fence is held", path: launchClaimPath(root), claim: null, owner_status: "indeterminate", identity: null, hash: null, launch_fence_ref: fence.path };
+  }
+  try {
+    return acquireLaunchClaimFenced(root, input, opts);
+  } finally {
+    if (!releaseLaunchFence(fence)) throw new Error("launch fence release failed");
+  }
+}
+
+function acquireLaunchClaimFenced(root, input = {}, opts = {}) {
   const dir = join(root, LAUNCH_CLAIM_DIR);
   const file = join(dir, LAUNCH_CLAIM_FILE);
   assertContainedLaunchPath(root, dir);
@@ -165,6 +183,81 @@ export function acquireLaunchClaim(runDir, input = {}, opts = {}) {
   const observed = inspectLaunchClaim(root, { ...opts, runId: input.runId });
   if (!observed.ok || observed.claim.nonce !== claim.nonce) throw new Error("launch claim publication could not be verified");
   return { acquired: true, ...observed, token: claim.nonce };
+}
+
+export function acquireLaunchFence(runDir, ownerKind, opts = {}) {
+  if (!["launch", "cleanup"].includes(ownerKind)) throw new Error("launch fence owner kind is invalid");
+  const requestedRoot = resolve(runDir);
+  const runStat = lstatSync(requestedRoot);
+  if (!runStat.isDirectory() || runStat.isSymbolicLink()) throw new Error("run directory must be a non-symlink directory");
+  const root = realpathSync(requestedRoot);
+  const physicalRunStat = lstatSync(root);
+  if (!sameIdentity(physicalRunStat, runStat) || !physicalRunStat.isDirectory() || physicalRunStat.isSymbolicLink()) {
+    throw new Error("launch fence run directory identity changed");
+  }
+  const fenceRoot = resolveLaunchFenceRoot(root, opts);
+  ensureLaunchFenceRoot(requestedRoot, root, runStat, fenceRoot);
+  const key = createHash("sha256").update(root, "utf8").digest("hex");
+  const path = join(fenceRoot, key);
+  const ownerPath = join(path, "owner.json");
+  const nonce = opts.launchFenceNonce || randomUUID();
+  opts.onLaunchFenceReadyToAcquire?.({ requestedRoot, root, path, identity: claimIdentity(runStat) });
+  try {
+    mkdirSync(path, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code === "EEXIST") return { acquired: false, path, owner_kind: ownerKind };
+    throw error;
+  }
+  const dirStat = lstatSync(path);
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw new Error("launch fence directory identity is invalid");
+  try {
+    assertLaunchFenceRunIdentity(requestedRoot, root, runStat);
+  } catch (error) {
+    removeUnpublishedLaunchFence(path, dirStat);
+    throw error;
+  }
+  const owner = {
+    schema_version: 1,
+    kind: LAUNCH_FENCE_KIND,
+    run_path_hash: `sha256:${key}`,
+    owner_kind: ownerKind,
+    nonce,
+    pid: process.pid,
+    hostname: opts.hostname || hostname(),
+    acquired_at: timestamp(opts.now),
+  };
+  writeFileSync(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  const ownerStat = lstatSync(ownerPath);
+  if (!ownerStat.isFile() || ownerStat.isSymbolicLink()) throw new Error("launch fence owner identity is invalid");
+  return { acquired: true, path, owner_path: ownerPath, owner_kind: ownerKind, nonce, identity: claimIdentity(dirStat, ownerStat) };
+}
+
+export function releaseLaunchFence(fence) {
+  if (!fence?.acquired || !fence.identity || !nonEmptyString(fence.nonce)) return false;
+  const path = resolve(fence.path);
+  const ownerPath = join(path, "owner.json");
+  let fd;
+  try {
+    const dirStat = lstatSync(path);
+    if (!sameIdentity(dirStat, fence.identity.dir) || dirStat.isSymbolicLink() || !dirStat.isDirectory()) return false;
+    fd = openSync(ownerPath, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
+    const ownerStat = fstatSync(fd);
+    if (!sameIdentity(ownerStat, fence.identity.file) || !ownerStat.isFile()) return false;
+    const owner = JSON.parse(readFileSync(fd, "utf8"));
+    const pathnameStat = lstatSync(ownerPath);
+    if (!sameIdentity(pathnameStat, ownerStat) || pathnameStat.isSymbolicLink() || owner?.kind !== LAUNCH_FENCE_KIND || owner?.nonce !== fence.nonce) return false;
+    const quarantine = join(dirnameForClaimDir(path), `.${basename(path)}.quarantine-${randomUUID()}`);
+    renameSync(path, quarantine);
+    const movedDir = lstatSync(quarantine);
+    const movedOwner = lstatSync(join(quarantine, "owner.json"));
+    if (!sameIdentity(movedDir, fence.identity.dir) || !sameIdentity(movedOwner, fence.identity.file)) throw new Error("launch fence identity changed during release");
+    rmSync(quarantine, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export function transitionLaunchClaimPhase(runDir, nonce, phase, updates = {}, opts = {}) {
@@ -768,6 +861,84 @@ function claimIdentity(dirStat, fileStat = null) {
   };
 }
 
+function assertStableClaimPath(root, dir, file, rootStat, dirStat, fileStat) {
+  try {
+    const currentRoot = lstatSync(root);
+    const currentDir = lstatSync(dir);
+    const currentFile = lstatSync(file);
+    if (!sameIdentity(currentRoot, rootStat) || currentRoot.isSymbolicLink() || !currentRoot.isDirectory()
+      || !sameIdentity(currentDir, dirStat) || currentDir.isSymbolicLink() || !currentDir.isDirectory()
+      || !sameIdentity(currentFile, fileStat) || currentFile.isSymbolicLink() || !currentFile.isFile()) {
+      throw launchClaimChangedError();
+    }
+  } catch (error) {
+    if (error?.code === "LAUNCH_CLAIM_CHANGED") throw error;
+    throw launchClaimChangedError();
+  }
+}
+
+function launchClaimChangedError() {
+  const error = new Error("launch claim identity changed during inspection");
+  error.code = "LAUNCH_CLAIM_CHANGED";
+  return error;
+}
+
+function sameIdentity(actual, expected) {
+  return Boolean(actual && expected) && actual.dev === expected.dev && actual.ino === expected.ino;
+}
+
+function resolveLaunchFenceRoot(runDir, opts = {}) {
+  let requested;
+  if (nonEmptyString(opts.launchFenceRoot)) requested = resolve(opts.launchFenceRoot);
+  else {
+    const factoryRoot = dirnameForClaimDir(runDir);
+    const parent = basename(factoryRoot) === "factory" ? dirnameForClaimDir(factoryRoot) : factoryRoot;
+    requested = join(parent, ".factory-launch-fences");
+  }
+  return join(realpathSync(dirnameForClaimDir(requested)), basename(requested));
+}
+
+function ensureLaunchFenceRoot(requestedRunDir, physicalRunDir, expectedRunStat, fenceRoot) {
+  const parent = dirnameForClaimDir(fenceRoot);
+  const parentStat = lstatSync(parent);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw new Error("launch fence parent must be a non-symlink directory");
+  try {
+    mkdirSync(fenceRoot, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+  const fenceRootStat = lstatSync(fenceRoot);
+  if (!fenceRootStat.isDirectory() || fenceRootStat.isSymbolicLink()) throw new Error("launch fence root must be a non-symlink directory");
+  assertLaunchFenceRunIdentity(requestedRunDir, physicalRunDir, expectedRunStat);
+}
+
+function assertLaunchFenceRunIdentity(requestedRunDir, physicalRunDir, expectedRunStat) {
+  try {
+    const runStat = lstatSync(requestedRunDir);
+    const physicalRunStat = lstatSync(physicalRunDir);
+    if (!sameIdentity(runStat, expectedRunStat) || !sameIdentity(physicalRunStat, expectedRunStat)
+      || runStat.isSymbolicLink() || !runStat.isDirectory()
+      || physicalRunStat.isSymbolicLink() || !physicalRunStat.isDirectory()
+      || realpathSync(requestedRunDir) !== physicalRunDir) {
+      throw new Error("launch fence run directory identity changed");
+    }
+  } catch (error) {
+    if (error?.message === "launch fence run directory identity changed") throw error;
+    throw new Error("launch fence run directory identity changed");
+  }
+}
+
+function removeUnpublishedLaunchFence(path, expectedStat) {
+  try {
+    const current = lstatSync(path);
+    if (!sameIdentity(current, expectedStat) || current.isSymbolicLink() || !current.isDirectory()) return;
+    if (existsSync(join(path, "owner.json"))) return;
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    // Preserve uncertain fence evidence fail closed.
+  }
+}
+
 function inspectClaimOwner(claim, opts = {}) {
   if (claim.hostname !== (opts.hostname || hostname())) return "indeterminate";
   const expected = {
@@ -825,12 +996,14 @@ function inspectLaunchClaimAt(dir, opts = {}) {
   const file = join(dir, LAUNCH_CLAIM_FILE);
   let fd;
   try {
+    const rootStat = lstatSync(runDir);
     const dirStat = lstatSync(dir);
     if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return invalidLaunchClaim(file, "launch claim quarantine is invalid");
     fd = openSync(file, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
     const fileStat = fstatSync(fd);
     if (!fileStat.isFile()) return invalidLaunchClaim(file, "launch claim owner must be regular");
     const claim = JSON.parse(readFileSync(fd, "utf8"));
+    assertStableClaimPath(runDir, dir, file, rootStat, dirStat, fileStat);
     const validation = validateLaunchClaim(claim, opts);
     if (!validation.ok) return invalidLaunchClaim(file, validation.reason);
     return { ok: true, claim, identity: claimIdentity(dirStat, fileStat) };

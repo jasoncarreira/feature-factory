@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathS
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { executeCleanupSweep, previewCleanupSweep } from "../src/cleanup-sweep.js";
+import { acquireLaunchClaim } from "../src/process-evidence.js";
 import { RunJsonLockContendedError } from "../src/run-state.js";
 import { createCleanupSweepFixture } from "./helpers/cleanup-sweep-fixture.js";
 import { runFixtureGit } from "./helpers/git-fixture.js";
@@ -325,6 +326,41 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
         assert.equal(report.candidates[0].attempted_cleanup, false, sidecar);
         assert.equal(existsSync(join(fixture.factoryRoot, "run")), true, sidecar);
       } finally { fixture.cleanup(); }
+    }
+  });
+
+  it("holds the launch fence continuously across every destructive mutation", async () => {
+    const fixture = createCleanupSweepFixture("execution-launch-fence");
+    const aliasRepo = `${fixture.repo}-alias`;
+    try {
+      const { runDir } = fixture.addRun("run");
+      symlinkSync(fixture.repo, aliasRepo, "dir");
+      const aliasRunDir = join(aliasRepo, ".opencode", "factory", "run");
+      fixture.addRecordedWorktree("run");
+      const authorization = await preview(fixture);
+      const attempts = [];
+      const report = await execute(fixture, authorization.authorization.digest, {
+        phaseHook(name) {
+          if (!["after-worktree-final-validation", "after-branch-final-validation", "after-run-dir-final-validation"].includes(name)) return;
+          const result = acquireLaunchClaim(aliasRunDir, {
+            runId: "run",
+            executionId: `race-${name}`,
+            launchKind: "resume-foreground",
+            pid: process.pid,
+            cwd: fixture.repo,
+          });
+          attempts.push({ name, acquired: result.acquired, reason: result.reason });
+        },
+      });
+      assert.equal(report.candidates[0].classification, "deleted");
+      assert.equal(attempts.some((item) => item.name === "after-worktree-final-validation"), true);
+      assert.equal(attempts.some((item) => item.name === "after-branch-final-validation"), true);
+      assert.equal(attempts.some((item) => item.name === "after-run-dir-final-validation"), true);
+      assert.equal(attempts.every((item) => item.acquired === false && item.reason === "launch fence is held"), true);
+      assert.equal(existsSync(runDir), false);
+    } finally {
+      rmSync(aliasRepo, { recursive: true, force: true });
+      fixture.cleanup();
     }
   });
 
