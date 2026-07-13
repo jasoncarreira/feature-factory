@@ -19,7 +19,10 @@ export const DIAGNOSTIC_FREEFORM_FIELDS = Object.freeze([
 const OUTPUT_POLICY_ERROR_CODE = "ERR_OUTPUT_POLICY";
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const DESCRIPTIVE_RUN_ID_PATTERN = /^[a-z]{1,32}(?:-[a-z]{1,32})+(?:-[0-9]{1,6})?$/u;
+const SAFE_BRANCH_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$/u;
+const DESCRIPTIVE_BRANCH_PATTERN = /^(?:[a-z]{1,32}|[0-9]{1,6})(?:[-/](?:[a-z]{1,32}|[0-9]{1,6}))+$/u;
 const UUID_PATTERN = /[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}/u;
+const DISPLAY_STEERING_REF_PATTERN = /^steering\/(?:pending|consumed)-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}(?:-[0-9]{1,9})?Z-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?:-[0-9]{1,3})?\.json$/u;
 const segmentBrand = new WeakSet();
 const structuredErrorBrand = new WeakSet();
 const structuredErrorSegments = new WeakMap();
@@ -104,6 +107,20 @@ export function isDisplaySafeRunId(value) {
   if (!isSensitiveValue(value, { mode: "baseline" })) return true;
   return DESCRIPTIVE_RUN_ID_PATTERN.test(value)
     && value.split("-").every((segment) => /^\d+$/u.test(segment) || !isSensitiveValue(segment, { mode: "baseline" }));
+}
+
+export function isDisplaySafeBranch(value) {
+  if (typeof value !== "string" || !SAFE_BRANCH_PATTERN.test(value) || value.includes("..") || value.includes("//")
+    || value.endsWith(".lock") || UUID_PATTERN.test(value)) return false;
+  if (isRecognizedSensitiveValue(value, { mode: "baseline" }) || containsRecognizedSensitiveFragment(value)) return false;
+  if (!isSensitiveValue(value, { mode: "baseline" })) return true;
+  return DESCRIPTIVE_BRANCH_PATTERN.test(value)
+    && value.split(/[-/]/u).every((segment) => /^\d{1,6}$/u.test(segment) || !isSensitiveValue(segment, { mode: "baseline" }));
+}
+
+export function isDisplaySafeSteeringRef(value) {
+  if (typeof value !== "string" || !DISPLAY_STEERING_REF_PATTERN.test(value)) return false;
+  return !isRecognizedSensitiveValue(value, { mode: "baseline" }) && !containsRecognizedSensitiveFragment(value);
 }
 
 export function projectDiagnosticData(value, options = undefined) {

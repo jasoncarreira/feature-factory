@@ -9,7 +9,9 @@ import {
   errorOutputSegments,
   freeformSegment,
   identitySegment,
+  isDisplaySafeBranch,
   isDisplaySafeRunId,
+  isDisplaySafeSteeringRef,
   isOutputSegment,
   projectDiagnosticData,
   projectFreeformData,
@@ -47,6 +49,37 @@ describe("typed output segments", () => {
       "run-abcdefghijklmnopqrstuvwxyzabcdef",
     ]) {
       assert.equal(isDisplaySafeRunId(value), false, value);
+    }
+  });
+
+  it("recognizes descriptive branches without admitting credential or opaque token shapes", () => {
+    assert.equal(isDisplaySafeBranch("issue-69-single-slice-acceptance"), true);
+    assert.equal(isDisplaySafeBranch("feature/single-slice-69"), true);
+    for (const value of [
+      SECRET,
+      "feature/run-sk-abcdefghijklmnopqrstuvwx",
+      "cleanup-secret-token",
+      "run.lock",
+      "run..name",
+      "feature//double",
+      "run-abcdef12-1234-5678-9012-abcdefabcdef",
+      "branch-abcdefghijklmnopqrstuvwxyzabcdef",
+    ]) {
+      assert.equal(isDisplaySafeBranch(value), false, value);
+    }
+  });
+
+  it("recognizes only factory-owned steering refs for identity display", () => {
+    assert.equal(isDisplaySafeSteeringRef("steering/pending-2026-07-13T20-55-19-210Z-a21cdd76-6c04-41c6-a890-7403236e8313.json"), true);
+    assert.equal(isDisplaySafeSteeringRef("steering/consumed-2026-07-13T20-55-19-210Z-a21cdd76-6c04-41c6-a890-7403236e8313-2.json"), true);
+    for (const value of [
+      "steering/pending.json",
+      "steering/pending-2026-07-13T20-55-19Z-not-a-uuid.json",
+      "steering/../pending-2026-07-13T20-55-19Z-a21cdd76-6c04-41c6-a890-7403236e8313.json",
+      "steering/pending-2026-07-13T20-55-19Z-github_pat_123456789012345678901234567890.json",
+      "other/pending-2026-07-13T20-55-19Z-a21cdd76-6c04-41c6-a890-7403236e8313.json",
+    ]) {
+      assert.equal(isDisplaySafeSteeringRef(value), false, value);
     }
   });
 

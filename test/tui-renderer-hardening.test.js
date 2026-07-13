@@ -52,6 +52,18 @@ describe("TUI renderer hardening seam", () => {
     assert.equal(renderRunTextFields({ run_id: "run-abcdef12-1234-5678-9012-abcdefabcdef", status: "running" }).run_id, "[redacted]");
     assert.equal(renderRunTextFields({ run_id: "eabcdef12-1234-5678-9012-abcdefabcdef", status: "running" }).run_id, "[redacted]");
     assert.equal(renderRunTextFields({ run_id: "run-abcdef0123456789abcdef0123456789", status: "running" }).run_id, "[redacted]");
+    assert.equal(
+      renderRunTextFields({ run_id: "issue-69", status: "running", branch: "issue-69-single-slice-acceptance" }).branch_line,
+      "branch: issue-69-single-slice-accep...",
+    );
+    assert.equal(
+      renderRunTextFields({
+        run_id: "issue-69",
+        status: "running",
+        steering: { pending: { ref: "steering/pending-2026-07-13T20-55-19-210Z-a21cdd76-6c04-41c6-a890-7403236e8313.json" } },
+      }).steering_line,
+      "steering pending: steering/pending-2026-07-13T20-...",
+    );
   });
 
   it("reprojects every dynamic child, validates identity enums, and truncates after encoding", () => {

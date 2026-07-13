@@ -5,7 +5,9 @@ import {
 import {
   freeformSegment,
   identitySegment,
+  isDisplaySafeBranch,
   isDisplaySafeRunId,
+  isDisplaySafeSteeringRef,
   renderTerminalSegmentsOrFallback,
   TRUSTED_SEGMENTS,
 } from "./hardening/output-policy.js";
@@ -62,13 +64,18 @@ export function renderRunTextFields(run) {
     pr_line: run?.pr_url ? `PR: ${renderFreeformText(run.pr_url, 34)}` : null,
     terminal_reason_line: run?.terminal_reason ? `reason: ${renderFreeformText(run.terminal_reason, 30)}` : null,
     diagnostic_line: `diagnostic: ${diagnostic}`,
-    branch_line: run?.branch ? `branch: ${renderFreeformText(run.branch, 30)}` : null,
+    branch_line: run?.branch ? `branch: ${renderBranch(run.branch)}` : null,
   };
 }
 
 function renderRunId(value) {
   const segment = isDisplaySafeRunId(value) ? identitySegment(value) : freeformSegment(REDACTED_VALUE);
   return truncate(renderTerminalSegmentsOrFallback([segment]), 31);
+}
+
+function renderBranch(value) {
+  const segment = isDisplaySafeBranch(value) ? identitySegment(value) : freeformSegment(value);
+  return truncate(renderTerminalSegmentsOrFallback([segment]), 30);
 }
 
 export function renderHiddenRunsLine(value) {
@@ -79,17 +86,22 @@ export function renderHiddenRunsLine(value) {
 function renderSteeringLine(steering) {
   if (!steering || typeof steering !== "object") return null;
   if (steering.pending) {
-    return `steering pending: ${renderFreeformText(steering.pending.ref || "pending", 34)}`;
+    return `steering pending: ${renderSteeringRef(steering.pending.ref || "pending", 34)}`;
   }
   if (steering.latest_consumed) {
     const count = Number.isSafeInteger(steering.consumed_count) && steering.consumed_count >= 0
       ? steering.consumed_count
       : 0;
     const renderedCount = renderTerminalSegmentsOrFallback([identitySegment(count)]);
-    const ref = renderFreeformText(steering.latest_consumed.ref || "consumed", 24);
+    const ref = renderSteeringRef(steering.latest_consumed.ref || "consumed", 24);
     return `steering consumed: ${renderedCount} latest ${ref}`;
   }
   return null;
+}
+
+function renderSteeringRef(value, max) {
+  const segment = isDisplaySafeSteeringRef(value) ? identitySegment(value) : freeformSegment(value);
+  return truncate(renderTerminalSegmentsOrFallback([segment]), max);
 }
 
 function renderSliceLine(slices) {

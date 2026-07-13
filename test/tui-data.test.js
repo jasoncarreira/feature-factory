@@ -472,6 +472,17 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("preserves a validated descriptive branch that the freeform policy classifies as high entropy", () => {
+    const repo = tempDir();
+    const branch = "issue-69-single-slice-acceptance";
+    writeRun(repo, "issue-69", { status: "running", updated_at: "2026-07-05T00:00:00Z", gates: {}, branch });
+
+    const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });
+
+    assert.equal(run.branch, branch);
+    cleanup(repo);
+  });
+
   it("redacts recognized credentials and embedded UUIDs even when they are matching run IDs", () => {
     const repo = tempDir();
     const ids = [

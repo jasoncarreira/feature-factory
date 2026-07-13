@@ -13,7 +13,10 @@ import {
 } from "./factory-diagnostics.js";
 import {
   freeformSegment,
+  identitySegment,
+  isDisplaySafeBranch,
   isDisplaySafeRunId,
+  isDisplaySafeSteeringRef,
   projectDiagnosticData,
   projectFreeformData,
   renderTerminalSegmentsOrFallback,
@@ -183,7 +186,7 @@ function summarize(run, fallbackID, file, diagnostics = healthyDiagnostics()) {
     status: projectFreeformText(run.status || "unknown"),
     mode: projectOptionalFreeformText(run.mode),
     gate: projectOptionalFreeformText(pendingGate(run)),
-    branch: projectOptionalFreeformText(run.branch),
+    branch: projectOptionalBranch(run.branch),
     pr_url: projectOptionalFreeformText(run.pr_url),
     review_tier: projectOptionalFreeformText(stringOrNull(run.review_tier)),
     review_tier_source: null,
@@ -323,7 +326,7 @@ function steeringSummary(run) {
   const pending = steering.pending && typeof steering.pending === "object" && !Array.isArray(steering.pending)
     ? {
       id: projectOptionalFreeformText(stringOrNull(steering.pending.id)),
-      ref: projectOptionalFreeformText(stringOrNull(steering.pending.ref)),
+      ref: projectOptionalSteeringRef(stringOrNull(steering.pending.ref)),
       hash: projectOptionalFreeformText(stringOrNull(steering.pending.hash)),
       message_chars: Number.isInteger(steering.pending.message_chars) ? steering.pending.message_chars : null,
       created_at: projectOptionalFreeformText(stringOrNull(steering.pending.created_at)),
@@ -334,7 +337,7 @@ function steeringSummary(run) {
   const uncheckpointed = steering.uncheckpointed && typeof steering.uncheckpointed === "object" && !Array.isArray(steering.uncheckpointed)
     ? {
       id: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.id)),
-      ref: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.ref)),
+      ref: projectOptionalSteeringRef(stringOrNull(steering.uncheckpointed.ref)),
       hash: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.hash)),
       message_chars: Number.isInteger(steering.uncheckpointed.message_chars) ? steering.uncheckpointed.message_chars : null,
       created_at: projectOptionalFreeformText(stringOrNull(steering.uncheckpointed.created_at)),
@@ -346,7 +349,7 @@ function steeringSummary(run) {
     uncheckpointed,
     consumed_count: consumed.length,
     latest_consumed: latest ? {
-      ref: projectOptionalFreeformText(stringOrNull(latest.ref)),
+      ref: projectOptionalSteeringRef(stringOrNull(latest.ref)),
       consumed_at: projectOptionalFreeformText(stringOrNull(latest.consumed_at)),
     } : null,
     boundary: steering.boundary && typeof steering.boundary === "object" ? {
@@ -470,6 +473,20 @@ function projectFreeformText(value) {
 
 function projectOptionalFreeformText(value) {
   return value === null || value === undefined ? null : projectFreeformText(value);
+}
+
+function projectOptionalBranch(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  if (!isDisplaySafeBranch(text)) return projectFreeformText(text);
+  return renderTerminalSegmentsOrFallback([identitySegment(text)]);
+}
+
+function projectOptionalSteeringRef(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  if (!isDisplaySafeSteeringRef(text)) return projectFreeformText(text);
+  return renderTerminalSegmentsOrFallback([identitySegment(text)]);
 }
 
 function projectOptionalFreeformData(value) {
