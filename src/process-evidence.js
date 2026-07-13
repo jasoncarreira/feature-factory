@@ -195,13 +195,13 @@ export function acquireLaunchFence(runDir, ownerKind, opts = {}) {
   if (!sameIdentity(physicalRunStat, runStat) || !physicalRunStat.isDirectory() || physicalRunStat.isSymbolicLink()) {
     throw new Error("launch fence run directory identity changed");
   }
-  const fenceRoot = resolveLaunchFenceRoot(root, opts);
-  ensureLaunchFenceRoot(requestedRoot, root, runStat, fenceRoot);
+  const namespace = resolveLaunchFenceNamespace(root, opts);
+  const fenceRoot = ensureLaunchFenceRoot(requestedRoot, root, runStat, namespace);
   const key = createHash("sha256").update(root, "utf8").digest("hex");
-  const path = join(fenceRoot, key);
+  const path = join(fenceRoot.path, key);
   const ownerPath = join(path, "owner.json");
   const nonce = opts.launchFenceNonce || randomUUID();
-  opts.onLaunchFenceReadyToAcquire?.({ requestedRoot, root, path, identity: claimIdentity(runStat) });
+  opts.onLaunchFenceReadyToAcquire?.({ requestedRoot, root, fenceRoot: fenceRoot.path, path, identity: claimIdentity(runStat) });
   try {
     mkdirSync(path, { mode: 0o700 });
   } catch (error) {
@@ -210,12 +210,6 @@ export function acquireLaunchFence(runDir, ownerKind, opts = {}) {
   }
   const dirStat = lstatSync(path);
   if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw new Error("launch fence directory identity is invalid");
-  try {
-    assertLaunchFenceRunIdentity(requestedRoot, root, runStat);
-  } catch (error) {
-    removeUnpublishedLaunchFence(path, dirStat);
-    throw error;
-  }
   const owner = {
     schema_version: 1,
     kind: LAUNCH_FENCE_KIND,
@@ -226,9 +220,20 @@ export function acquireLaunchFence(runDir, ownerKind, opts = {}) {
     hostname: opts.hostname || hostname(),
     acquired_at: timestamp(opts.now),
   };
-  writeFileSync(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  const ownerStat = lstatSync(ownerPath);
-  if (!ownerStat.isFile() || ownerStat.isSymbolicLink()) throw new Error("launch fence owner identity is invalid");
+  let ownerStat;
+  try {
+    assertLaunchFenceRunIdentity(requestedRoot, root, runStat);
+    assertLaunchFenceNamespace(fenceRoot);
+    const writeOwner = opts.writeLaunchFenceOwner || writeFileSync;
+    writeOwner(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const inspectOwner = opts.inspectLaunchFenceOwner || lstatSync;
+    ownerStat = inspectOwner(ownerPath);
+    if (!ownerStat.isFile() || ownerStat.isSymbolicLink()) throw new Error("launch fence owner identity is invalid");
+    assertLaunchFenceNamespace(fenceRoot);
+  } catch (error) {
+    removeFailedLaunchFence(path, dirStat, nonce);
+    throw error;
+  }
   return { acquired: true, path, owner_path: ownerPath, owner_kind: ownerKind, nonce, identity: claimIdentity(dirStat, ownerStat) };
 }
 
@@ -887,7 +892,7 @@ function sameIdentity(actual, expected) {
   return Boolean(actual && expected) && actual.dev === expected.dev && actual.ino === expected.ino;
 }
 
-function resolveLaunchFenceRoot(runDir, opts = {}) {
+function resolveLaunchFenceNamespace(runDir, opts = {}) {
   let requested;
   if (nonEmptyString(opts.launchFenceRoot)) requested = resolve(opts.launchFenceRoot);
   else {
@@ -895,21 +900,48 @@ function resolveLaunchFenceRoot(runDir, opts = {}) {
     const parent = basename(factoryRoot) === "factory" ? dirnameForClaimDir(factoryRoot) : factoryRoot;
     requested = join(parent, ".factory-launch-fences");
   }
-  return join(realpathSync(dirnameForClaimDir(requested)), basename(requested));
-}
-
-function ensureLaunchFenceRoot(requestedRunDir, physicalRunDir, expectedRunStat, fenceRoot) {
-  const parent = dirnameForClaimDir(fenceRoot);
+  const parent = realpathSync(dirnameForClaimDir(requested));
   const parentStat = lstatSync(parent);
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw new Error("launch fence parent must be a non-symlink directory");
+  return { parent, parent_identity: claimIdentity(parentStat).dir, path: join(parent, basename(requested)) };
+}
+
+function ensureLaunchFenceRoot(requestedRunDir, physicalRunDir, expectedRunStat, namespace) {
+  assertLaunchFenceParent(namespace);
   try {
-    mkdirSync(fenceRoot, { mode: 0o700 });
+    mkdirSync(namespace.path, { mode: 0o700 });
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
   }
-  const fenceRootStat = lstatSync(fenceRoot);
+  const fenceRootStat = lstatSync(namespace.path);
   if (!fenceRootStat.isDirectory() || fenceRootStat.isSymbolicLink()) throw new Error("launch fence root must be a non-symlink directory");
+  const fenceRoot = { ...namespace, root_identity: claimIdentity(fenceRootStat).dir };
+  assertLaunchFenceNamespace(fenceRoot);
   assertLaunchFenceRunIdentity(requestedRunDir, physicalRunDir, expectedRunStat);
+  return fenceRoot;
+}
+
+function assertLaunchFenceParent(namespace) {
+  try {
+    const parentStat = lstatSync(namespace.parent);
+    if (!sameIdentity(parentStat, namespace.parent_identity) || parentStat.isSymbolicLink() || !parentStat.isDirectory()
+      || realpathSync(namespace.parent) !== namespace.parent) throw new Error("launch fence namespace identity changed");
+  } catch (error) {
+    if (error?.message === "launch fence namespace identity changed") throw error;
+    throw new Error("launch fence namespace identity changed");
+  }
+}
+
+function assertLaunchFenceNamespace(namespace) {
+  assertLaunchFenceParent(namespace);
+  try {
+    const rootStat = lstatSync(namespace.path);
+    if (!sameIdentity(rootStat, namespace.root_identity) || rootStat.isSymbolicLink() || !rootStat.isDirectory()
+      || realpathSync(namespace.path) !== namespace.path) throw new Error("launch fence namespace identity changed");
+  } catch (error) {
+    if (error?.message === "launch fence namespace identity changed") throw error;
+    throw new Error("launch fence namespace identity changed");
+  }
 }
 
 function assertLaunchFenceRunIdentity(requestedRunDir, physicalRunDir, expectedRunStat) {
@@ -928,14 +960,37 @@ function assertLaunchFenceRunIdentity(requestedRunDir, physicalRunDir, expectedR
   }
 }
 
-function removeUnpublishedLaunchFence(path, expectedStat) {
+function removeFailedLaunchFence(path, expectedStat, nonce) {
+  let fd;
   try {
     const current = lstatSync(path);
     if (!sameIdentity(current, expectedStat) || current.isSymbolicLink() || !current.isDirectory()) return;
-    if (existsSync(join(path, "owner.json"))) return;
-    rmSync(path, { recursive: true, force: true });
+    const ownerPath = join(path, "owner.json");
+    let ownerStat = null;
+    try {
+      fd = openSync(ownerPath, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
+      ownerStat = fstatSync(fd);
+      if (!ownerStat.isFile()) return;
+      const owner = JSON.parse(readFileSync(fd, "utf8"));
+      const pathnameStat = lstatSync(ownerPath);
+      if (!sameIdentity(pathnameStat, ownerStat) || pathnameStat.isSymbolicLink()
+        || owner?.kind !== LAUNCH_FENCE_KIND || owner?.nonce !== nonce) return;
+    } catch (error) {
+      if (error?.code !== "ENOENT") return;
+    }
+    const quarantine = join(dirnameForClaimDir(path), `.${basename(path)}.failed-${randomUUID()}`);
+    renameSync(path, quarantine);
+    const movedDir = lstatSync(quarantine);
+    if (!sameIdentity(movedDir, expectedStat)) return;
+    if (ownerStat) {
+      const movedOwner = lstatSync(join(quarantine, "owner.json"));
+      if (!sameIdentity(movedOwner, ownerStat)) return;
+    }
+    rmSync(quarantine, { recursive: true, force: true });
   } catch {
     // Preserve uncertain fence evidence fail closed.
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 

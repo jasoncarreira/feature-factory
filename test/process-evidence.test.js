@@ -212,6 +212,67 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
     }
   });
 
+  it("removes its exact fence after owner publication or verification fails", () => {
+    for (const failure of ["write", "verify"]) {
+      const fixture = createFixture(`launch-fence-owner-${failure}`);
+      try {
+        const injected = failure === "write"
+          ? { writeLaunchFenceOwner() { throw new Error("injected owner write failure"); } }
+          : { inspectLaunchFenceOwner() { throw new Error("injected owner verification failure"); } };
+        assert.throws(() => acquireLaunchFence(fixture.runDir, "launch", injected), new RegExp(`owner ${failure === "write" ? "write" : "verification"} failure`, "u"));
+
+        const recovered = acquireLaunchFence(fixture.runDir, "cleanup");
+        assert.equal(recovered.acquired, true, failure);
+        assert.equal(releaseLaunchFence(recovered), true, failure);
+      } finally {
+        cleanup(fixture.root);
+      }
+    }
+  });
+
+  it("rejects acquisition when the bound fence root is replaced", () => {
+    const fixture = createFixture("launch-fence-root-replacement");
+    const displaced = join(fixture.root, "displaced-fence-root");
+    try {
+      assert.throws(() => acquireLaunchFence(fixture.runDir, "launch", {
+        onLaunchFenceReadyToAcquire({ fenceRoot }) {
+          renameSync(fenceRoot, displaced);
+          mkdirSync(fenceRoot);
+        },
+      }), /namespace identity changed/u);
+
+      const recovered = acquireLaunchFence(fixture.runDir, "cleanup");
+      assert.equal(recovered.acquired, true);
+      assert.equal(releaseLaunchFence(recovered), true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("rejects acquisition when the bound fence parent is replaced", () => {
+    const fixture = createFixture("launch-fence-parent-replacement");
+    const parent = join(fixture.root, "fence-parent");
+    const displaced = join(fixture.root, "displaced-fence-parent");
+    const launchFenceRoot = join(parent, "fences");
+    mkdirSync(parent);
+    try {
+      assert.throws(() => acquireLaunchFence(fixture.runDir, "launch", {
+        launchFenceRoot,
+        onLaunchFenceReadyToAcquire() {
+          renameSync(parent, displaced);
+          mkdirSync(parent);
+          mkdirSync(launchFenceRoot);
+        },
+      }), /namespace identity changed/u);
+
+      const recovered = acquireLaunchFence(fixture.runDir, "cleanup", { launchFenceRoot });
+      assert.equal(recovered.acquired, true);
+      assert.equal(releaseLaunchFence(recovered), true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
   it("rejects symlinked run roots and symlinked process-log ancestors without following them", () => {
     const fixture = createFixture("ancestor-symlinks");
     const alias = join(fixture.root, "run-alias");
