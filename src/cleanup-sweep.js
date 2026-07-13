@@ -18,6 +18,7 @@ import {
   parseCleanupSweepDigest,
 } from "./cleanup-sweep-report.js";
 import { RunJsonLockContendedError, withRunJsonLock } from "./run-state.js";
+import { acquireLaunchFence, releaseLaunchFence } from "./process-evidence.js";
 import { canonicalizeGithubPrUrl } from "./refs.js";
 import { validateRun } from "./validate.js";
 
@@ -165,65 +166,78 @@ async function executeCandidate(repository, authorized, options, invocationId, t
       if (authorizationRecord(normalized) !== authorizationRecord(authorized)) return changedCandidate(normalized);
       await phase(options, "after-candidate-revalidation", { entry_name: authorized.entry_name, candidate: normalized });
 
-      // The phase hook deliberately opens the last deterministic mutation
-      // window. Recompute every authorization field after it, then bind all
-      // ancestry checks to the authorized base object rather than a movable ref.
+      let launchFence;
       try {
-        reclassified = reclassifyHeldCandidate(repository, authorized, guardedOptions, invocationId, temporaryRefs);
+        const acquireFence = options.acquireLaunchFence ?? acquireLaunchFence;
+        launchFence = acquireFence(runDir, "cleanup", options.processOptions || options);
       } catch {
         return inspectionFailureCandidate(normalized);
       }
-      normalized = normalizeHeldLockEvidence(reclassified.candidate);
-      if (authorizationRecord(normalized) !== authorizationRecord(authorized)) return changedCandidate(normalized);
-
-      const baseRef = reclassified.temporary_ref;
-      const baseOid = authorized.evidence.pr.base_sha;
-      const baseState = inspectAuthorizedTemporaryRef(repository.root_path, baseRef, baseOid, mutationGitRunner);
-      if (baseState === "changed") return changedCandidate(normalized);
-      if (baseState !== "matching") return inspectionFailureCandidate(normalized);
-
-      let run;
+      if (!launchFence?.acquired) return changedCandidate(normalized);
       try {
-        run = validateRun(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
-      } catch {
-        return changedCandidate(normalized);
-      }
-      const branches = normalized.evidence.branches.filter((item) => item.state === "verified-ancestor");
-      let cleanup;
-      try {
-        cleanup = cleanupRunLocked(runDir, run, {
-          mode: "cleanup-sweep",
-          repo: repository.root_path,
-          force: false,
-          dryRun: false,
-          expectedRunHash: normalized.evidence.run.hash,
-          expectedBranchHeads: branches,
-          expectedRunDirectory: normalized.evidence.entry,
-          expectedWorktreeRoot: normalized.evidence.worktree_root,
-          expectedWorktrees: normalized.evidence.worktrees,
-          fetchedBaseRef: baseOid,
-          fetchedBase: { ref: baseRef, oid: baseOid },
-          gitRunner: guardedCleanupGitRunner(repository.root_path, baseRef, baseOid, mutationGitRunner),
-          assertMutationAuthorized: () => assertCandidateMutationAuthorized(repository, authorized, guardedOptions, invocationId, temporaryRefs),
-          removeRunDir: options.removeRunDir,
-          checkWorktreeIdentity: options.checkWorktreeIdentity,
-          physicalPath: options.physicalPath,
-          phaseHook: options.phaseHook,
-        });
-      } catch (error) {
-        if (error instanceof CleanupRunChangedError || error?.code === "CLEANUP_EVIDENCE_CHANGED") return changedCandidate(normalized);
-        if (error instanceof CleanupRunUnexpectedError || error?.code === "FAILED_CLEANUP_UNEXPECTED") {
-          completedCandidate = unexpectedCleanupCandidate(normalized, error.cleanup, runDir);
-          return completedCandidate;
+        // Fence acquisition closes the launch race. Recompute every
+        // authorization field while holding it, then retain it through all
+        // destructive cleanup and restoration work.
+        try {
+          reclassified = reclassifyHeldCandidate(repository, authorized, guardedOptions, invocationId, temporaryRefs);
+        } catch {
+          return inspectionFailureCandidate(normalized);
         }
-        return inspectionFailureCandidate(normalized);
+        normalized = normalizeHeldLockEvidence(reclassified.candidate);
+        if (authorizationRecord(normalized) !== authorizationRecord(authorized)) return changedCandidate(normalized);
+
+        const baseRef = reclassified.temporary_ref;
+        const baseOid = authorized.evidence.pr.base_sha;
+        const baseState = inspectAuthorizedTemporaryRef(repository.root_path, baseRef, baseOid, mutationGitRunner);
+        if (baseState === "changed") return changedCandidate(normalized);
+        if (baseState !== "matching") return inspectionFailureCandidate(normalized);
+
+        let run;
+        try {
+          run = validateRun(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
+        } catch {
+          return changedCandidate(normalized);
+        }
+        const branches = normalized.evidence.branches.filter((item) => item.state === "verified-ancestor");
+        let cleanup;
+        try {
+          cleanup = cleanupRunLocked(runDir, run, {
+            mode: "cleanup-sweep",
+            repo: repository.root_path,
+            force: false,
+            dryRun: false,
+            expectedRunHash: normalized.evidence.run.hash,
+            expectedBranchHeads: branches,
+            expectedRunDirectory: normalized.evidence.entry,
+            expectedWorktreeRoot: normalized.evidence.worktree_root,
+            expectedWorktrees: normalized.evidence.worktrees,
+            fetchedBaseRef: baseOid,
+            fetchedBase: { ref: baseRef, oid: baseOid },
+            gitRunner: guardedCleanupGitRunner(repository.root_path, baseRef, baseOid, mutationGitRunner),
+            assertMutationAuthorized: () => assertCandidateMutationAuthorized(repository, authorized, guardedOptions, invocationId, temporaryRefs),
+            removeRunDir: options.removeRunDir,
+            checkWorktreeIdentity: options.checkWorktreeIdentity,
+            physicalPath: options.physicalPath,
+            phaseHook: options.phaseHook,
+          });
+        } catch (error) {
+          if (error instanceof CleanupRunChangedError || error?.code === "CLEANUP_EVIDENCE_CHANGED") return changedCandidate(normalized);
+          if (error instanceof CleanupRunUnexpectedError || error?.code === "FAILED_CLEANUP_UNEXPECTED") {
+            completedCandidate = unexpectedCleanupCandidate(normalized, error.cleanup, runDir);
+            return completedCandidate;
+          }
+          return inspectionFailureCandidate(normalized);
+        }
+        try {
+          completedCandidate = candidateFromCleanup(normalized, cleanup);
+        } catch {
+          completedCandidate = unexpectedCleanupCandidate(normalized, cleanup, runDir);
+        }
+        return completedCandidate;
+      } finally {
+        const releaseFenceFn = options.releaseLaunchFence ?? releaseLaunchFence;
+        if (!releaseFenceFn(launchFence)) throw new Error("cleanup launch fence release failed");
       }
-      try {
-        completedCandidate = candidateFromCleanup(normalized, cleanup);
-      } catch {
-        completedCandidate = unexpectedCleanupCandidate(normalized, cleanup, runDir);
-      }
-      return completedCandidate;
     }, { reclaimMode: "never" });
   } catch (error) {
     if (completedCandidate) {

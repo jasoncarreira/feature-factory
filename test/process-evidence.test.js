@@ -2,10 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -18,6 +20,7 @@ import {
   PROCESS_EVIDENCE_SCHEMA_VERSION,
   PROCESS_EVIDENCE_SIGNAL,
   acquireLaunchClaim,
+  acquireLaunchFence,
   cancelProcessFromEvidence,
   inspectLaunchClaim,
   inspectProcessEvidence,
@@ -26,6 +29,7 @@ import {
   readProcessEvidence,
   recordDetachedProcessEvidence,
   releaseLaunchClaim,
+  releaseLaunchFence,
   transitionLaunchClaimPhase,
   writeProcessEvidence,
 } from "../src/process-evidence.js";
@@ -60,6 +64,210 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
       assert.equal(Number.isInteger(observed.identity.file.ino), true);
       assert.equal(releaseLaunchClaim(fixture.runDir, acquired.token, { ...opts, expectedPhase: "predecessor-active" }), true);
       assert.equal(inspectLaunchClaim(fixture.runDir, opts).missing, true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("rejects a claim directory replaced between directory inspection and owner open", () => {
+    const fixture = createFixture("launch-claim-snapshot-race");
+    const displaced = join(fixture.root, "displaced-claim");
+    try {
+      const opts = processOptions(fixture.runDir);
+      const acquired = acquireLaunchClaim(fixture.runDir, {
+        runId: fixture.runId,
+        executionId: "exec-race",
+        launchKind: "resume-foreground",
+        phase: "foreground-live",
+        pid: PID,
+        cwd: fixture.runDir,
+        hostname: "test-host",
+        now: NOW,
+      }, opts);
+      const owner = readFileSync(join(fixture.runDir, "process-launch.lock", "owner.json"));
+      let replaced = false;
+      const inspected = inspectLaunchClaim(fixture.runDir, {
+        ...opts,
+        runId: fixture.runId,
+        onLaunchClaimDirectoryInspected({ dir }) {
+          if (replaced) return;
+          replaced = true;
+          renameSync(dir, displaced);
+          mkdirSync(dir);
+          writeFileSync(join(dir, "owner.json"), owner);
+        },
+      });
+      assert.equal(acquired.acquired, true);
+      assert.equal(inspected.ok, false);
+      assert.equal(inspected.owner_status, "invalid");
+      assert.equal(inspected.identity, null);
+      assert.equal(inspected.hash, null);
+      assert.match(inspected.reason, /identity changed/u);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("rejects an owner pathname replaced after reading its opened descriptor", () => {
+    const fixture = createFixture("launch-claim-owner-race");
+    const displaced = join(fixture.root, "displaced-owner.json");
+    try {
+      const opts = processOptions(fixture.runDir);
+      const acquired = acquireLaunchClaim(fixture.runDir, {
+        runId: fixture.runId,
+        executionId: "exec-owner-race",
+        launchKind: "resume-foreground",
+        phase: "foreground-live",
+        pid: PID,
+        cwd: fixture.runDir,
+        hostname: "test-host",
+        now: NOW,
+      }, opts);
+      const ownerPath = join(fixture.runDir, "process-launch.lock", "owner.json");
+      const owner = readFileSync(ownerPath);
+      let replaced = false;
+      const inspected = inspectLaunchClaim(fixture.runDir, {
+        ...processOptions(fixture.runDir, {
+          livenessProbe() {
+            if (!replaced) {
+              replaced = true;
+              renameSync(ownerPath, displaced);
+              writeFileSync(ownerPath, owner);
+            }
+            return { status: "live" };
+          },
+        }),
+        runId: fixture.runId,
+      });
+      assert.equal(acquired.acquired, true);
+      assert.equal(inspected.ok, false);
+      assert.equal(inspected.owner_status, "invalid");
+      assert.equal(inspected.identity, null);
+      assert.equal(inspected.hash, null);
+      assert.match(inspected.reason, /identity changed/u);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("serializes launch publication against an exact-token external fence", () => {
+    const fixture = createFixture("launch-fence");
+    try {
+      const opts = processOptions(fixture.runDir);
+      const fence = acquireLaunchFence(fixture.runDir, "cleanup", opts);
+      assert.equal(fence.acquired, true);
+      assert.equal(acquireLaunchFence(fixture.runDir, "launch", opts).acquired, false);
+      const blocked = acquireLaunchClaim(fixture.runDir, {
+        runId: fixture.runId, executionId: "blocked", launchKind: "resume-foreground", pid: PID, cwd: fixture.runDir, hostname: "test-host", now: NOW,
+      }, opts);
+      assert.equal(blocked.acquired, false);
+      assert.equal(blocked.owner_status, "indeterminate");
+      assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false);
+      assert.equal(releaseLaunchFence({ ...fence, nonce: "wrong-token-123456" }), false);
+      assert.equal(releaseLaunchFence(fence), true);
+      const acquired = acquireLaunchClaim(fixture.runDir, {
+        runId: fixture.runId, executionId: "allowed", launchKind: "resume-foreground", pid: PID, cwd: fixture.runDir, hostname: "test-host", now: NOW,
+      }, opts);
+      assert.equal(acquired.acquired, true);
+      assert.equal(releaseLaunchClaim(fixture.runDir, acquired.token, opts), true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("uses one fence for lexical aliases of the same physical run directory", () => {
+    const fixture = createFixture("launch-fence-alias");
+    const aliasRoot = `${fixture.root}-alias`;
+    try {
+      symlinkSync(fixture.root, aliasRoot, "dir");
+      const aliasRunDir = join(aliasRoot, fixture.runId);
+      const fence = acquireLaunchFence(fixture.runDir, "cleanup");
+      assert.equal(fence.acquired, true);
+      const contended = acquireLaunchFence(aliasRunDir, "launch");
+      assert.equal(contended.acquired, false);
+      assert.equal(contended.path, fence.path);
+      assert.equal(releaseLaunchFence(fence), true);
+    } finally {
+      rmSync(aliasRoot, { recursive: true, force: true });
+      cleanup(fixture.root);
+    }
+  });
+
+  it("rejects stale fence acquisition after the run directory is recreated", () => {
+    const fixture = createFixture("launch-fence-generation");
+    const displaced = join(fixture.root, "old-run");
+    try {
+      assert.throws(() => acquireLaunchFence(fixture.runDir, "launch", {
+        onLaunchFenceReadyToAcquire() {
+          renameSync(fixture.runDir, displaced);
+          mkdirSync(fixture.runDir);
+        },
+      }), /run directory identity changed/u);
+
+      const replacementFence = acquireLaunchFence(fixture.runDir, "cleanup");
+      assert.equal(replacementFence.acquired, true);
+      assert.equal(releaseLaunchFence(replacementFence), true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("removes its exact fence after owner publication or verification fails", () => {
+    for (const failure of ["write", "verify"]) {
+      const fixture = createFixture(`launch-fence-owner-${failure}`);
+      try {
+        const injected = failure === "write"
+          ? { writeLaunchFenceOwner() { throw new Error("injected owner write failure"); } }
+          : { inspectLaunchFenceOwner() { throw new Error("injected owner verification failure"); } };
+        assert.throws(() => acquireLaunchFence(fixture.runDir, "launch", injected), new RegExp(`owner ${failure === "write" ? "write" : "verification"} failure`, "u"));
+
+        const recovered = acquireLaunchFence(fixture.runDir, "cleanup");
+        assert.equal(recovered.acquired, true, failure);
+        assert.equal(releaseLaunchFence(recovered), true, failure);
+      } finally {
+        cleanup(fixture.root);
+      }
+    }
+  });
+
+  it("rejects acquisition when the bound fence root is replaced", () => {
+    const fixture = createFixture("launch-fence-root-replacement");
+    const displaced = join(fixture.root, "displaced-fence-root");
+    try {
+      assert.throws(() => acquireLaunchFence(fixture.runDir, "launch", {
+        onLaunchFenceReadyToAcquire({ fenceRoot }) {
+          renameSync(fenceRoot, displaced);
+          mkdirSync(fenceRoot);
+        },
+      }), /namespace identity changed/u);
+
+      const recovered = acquireLaunchFence(fixture.runDir, "cleanup");
+      assert.equal(recovered.acquired, true);
+      assert.equal(releaseLaunchFence(recovered), true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("rejects acquisition when the bound fence parent is replaced", () => {
+    const fixture = createFixture("launch-fence-parent-replacement");
+    const parent = join(fixture.root, "fence-parent");
+    const displaced = join(fixture.root, "displaced-fence-parent");
+    const launchFenceRoot = join(parent, "fences");
+    mkdirSync(parent);
+    try {
+      assert.throws(() => acquireLaunchFence(fixture.runDir, "launch", {
+        launchFenceRoot,
+        onLaunchFenceReadyToAcquire() {
+          renameSync(parent, displaced);
+          mkdirSync(parent);
+          mkdirSync(launchFenceRoot);
+        },
+      }), /namespace identity changed/u);
+
+      const recovered = acquireLaunchFence(fixture.runDir, "cleanup", { launchFenceRoot });
+      assert.equal(recovered.acquired, true);
+      assert.equal(releaseLaunchFence(recovered), true);
     } finally {
       cleanup(fixture.root);
     }

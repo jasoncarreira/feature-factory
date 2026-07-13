@@ -13,7 +13,7 @@ import { checkWorktreeIdentity, deriveExpectedWorktreePath, parseWorktreeListPor
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv } from "./telemetry.js";
-import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, readProcessEvidence, releaseLaunchClaim, transitionLaunchClaimPhase } from "./process-evidence.js";
+import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
 import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
@@ -1844,9 +1844,19 @@ export async function cleanupRun(runId, opts = {}) {
     if (heartbeat.value && heartbeatBlocksReplacement(heartbeat.value, timestamp(opts.now), opts) && !opts.force) {
       throw new Error(`run '${run.run_id}' has a fresh heartbeat; cleanup requires --force`);
     }
-    if (heartbeat.value && opts.force && !opts.dryRun) stopHeartbeatForCleanup(runDir, heartbeat.value, opts);
-
-    return cleanupRunLocked(runDir, run, { ...opts, repo, mode: "single-run" });
+    if (opts.dryRun) return cleanupRunLocked(runDir, run, { ...opts, repo, mode: "single-run" });
+    const acquireFence = opts.acquireLaunchFence || acquireLaunchFence;
+    const fence = acquireFence(runDir, "cleanup", opts);
+    if (!fence?.acquired) throw new Error(`run '${run.run_id}' has active launch coordination; cleanup refused`);
+    try {
+      const claim = (opts.inspectLaunchClaimFn || inspectLaunchClaim)(runDir, { ...opts, runId: run.run_id });
+      if (!claim.missing) throw new Error(`run '${run.run_id}' has launch ownership evidence; cleanup refused`);
+      if (heartbeat.value && opts.force) stopHeartbeatForCleanup(runDir, heartbeat.value, opts);
+      return cleanupRunLocked(runDir, run, { ...opts, repo, mode: "single-run" });
+    } finally {
+      const releaseFenceFn = opts.releaseLaunchFence || releaseLaunchFence;
+      if (!releaseFenceFn(fence)) throw new Error("cleanup launch fence release failed");
+    }
   }, opts);
 }
 
@@ -2043,6 +2053,7 @@ function cleanupSweepTargetsLocked(repo, runDir, targets, opts) {
       if (!ancestry.ok) { changed(); continue; }
       phaseHook("before-branch-delete", { branch, expected_head: expectedHead, base_ref: baseRef });
       if (!revalidateSweepBranch(repo, branch, expectedHead, baseRef, gitRunner)) { changed(); continue; }
+      phaseHook("after-branch-final-validation", { branch, expected_head: expectedHead, base_ref: baseRef });
       assertMutationAuthorized();
       let proc;
       const mutationWasStarted = mutationStarted;
