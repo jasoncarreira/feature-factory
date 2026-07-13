@@ -12,6 +12,8 @@ The feature factory persists a per-run control plane so runs are durable, resuma
   process.json
   factory.lock
   heartbeat.json
+  process-launch.lock/
+    owner.json
   run-json.lock/
     owner.json
   gates/
@@ -820,6 +822,57 @@ Protected gates are `story`, `brief`, and `pre_pr`.
 Before an approved, changes_requested, or stopped gate decision consumes an external answer, the factory re-hashes the current pending question, artifact, and answer material. Missing files, escaped refs, stale hashes, question/answer overlap, or mismatched `pending_snapshot` fields fail closed.
 
 `question_ref` must be rooted under `gates/`. `answer_ref`, when present, must be rooted under `gates/`. `artifact_ref` remains rooted under `artifacts/`; gate questions and answers are never laundered through `artifacts/`.
+
+### Interactive approval handoff receipt
+
+An approved interactive gate carries `handoff_receipt` under `run.json.gates.<gate>`. The receipt binds the exact approved decision to its pending snapshot, answer bytes, and steering generation before ownership may pass to another process:
+
+```json
+"handoff_receipt": {
+  "schema_version": 1,
+  "kind": "interactive-approval-handoff",
+  "gate": "story",
+  "approval_fingerprint": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "pending_snapshot_hash": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "answer_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "steering_generation": 0,
+  "accepted_at": "2026-07-12T12:00:00.000Z"
+}
+```
+
+All three hash fields are required `sha256:<64 lowercase hex>` values, `gate` must match the containing gate key, `steering_generation` is a non-negative integer, and `accepted_at` is an ISO timestamp. `approval_fingerprint` covers the approved gate fields plus the snapshot hash, answer hash, steering generation, and acceptance time. The receipt is created only for an interactive approval; it must be preserved unchanged by readers and writers. Handoff fails closed when the receipt is missing or malformed, the current immutable question/artifact material no longer matches `pending_snapshot`, the answer or approval fingerprint differs, the steering generation changed, or steering has pending, uncheckpointed, boundary, action-claim, or PR-fence state.
+
+## process-launch.lock/owner.json Launch Claim
+
+`$RUN/process-launch.lock/owner.json` is a transient, exclusive ownership claim used to serialize approval handoff and foreground/detached resume launches. It is factory-owned state; external drivers must not create, edit, reclaim, or delete it.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "opencode-launch-claim",
+  "run_id": "app-123",
+  "execution_id": "uuid",
+  "launch_kind": "approval-handoff",
+  "phase": "spawning",
+  "pid": 4242,
+  "hostname": "host.example",
+  "acquired_at": "2026-07-12T12:00:00.000Z",
+  "identity": {
+    "inspector": "node-process",
+    "start_marker": "linux-procfs:123456",
+    "command_name": "opencode",
+    "cwd": "/absolute/repo/path"
+  },
+  "approval": null,
+  "nonce": "opaque_safe_token_1234"
+}
+```
+
+`launch_kind` is one of `approval-handoff`, `resume-foreground`, `resume-detached`, `start-resume-foreground`, or `start-resume-detached`. `phase` is one of `foreground-live`, `predecessor-active`, `predecessor-released`, or `spawning`. `pid` is a positive integer; `hostname`, `execution_id`, and every `identity` field are non-empty; `identity.cwd` is absolute; `acquired_at` is an ISO timestamp; `approval` is either `null` or an object; and `nonce` is a 16-128 character opaque token containing only ASCII letters, digits, `_`, or `-`.
+
+Acquisition verifies the claimant's process identity before atomically creating the directory and owner file. Phase transitions and release require the exact nonce, expected prior phase, matching directory/file identity, matching run id, and revalidated live owner identity. Successful release renames the exact owned directory to a run-local quarantine, verifies that the moved claim still has the same identity and nonce, then removes it.
+
+A missing claim means ownership is absent. A valid claim with a verified live owner remains authoritative and blocks competing launch. Ownerless, malformed, inaccessible, symlinked, stale, mismatched, dead-owner, or indeterminate-owner evidence is never permission to reclaim or relaunch: preserve it and fail closed with manual ownership reconciliation. Resume may reconcile only an exact valid claim/process pairing defined by the launch phase; ambiguous claims remain on disk. Never infer ownership from PID liveness alone, remove a claim by pathname without exact-token and identity checks, or silently discard a claim while recovery is uncertain.
 
 ## PR-Created Transition
 

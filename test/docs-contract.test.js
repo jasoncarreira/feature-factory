@@ -8,6 +8,7 @@ import {
   DIAGNOSTIC_STATUSES,
 } from "../src/factory-diagnostics.js";
 import { HEARTBEAT_PHASES, TERMINAL_RUN_STATUSES } from "../src/validate.js";
+import { LAUNCH_CLAIM_PHASES, LAUNCH_KINDS } from "../src/process-evidence.js";
 
 const SKILL = readDoc("../assets/skills/feature/SKILL.md");
 const SCHEMA = readDoc("../assets/skills/feature/SCHEMA.md");
@@ -588,6 +589,55 @@ describe("test-verifier integration gate contract", () => {
     assert.match(SKILL, /without creating a standalone integration-remediation review subject/i);
     assert.match(SCHEMA, /test-verifier.*post-merge integration gate[\s\S]*attempts <= run\.max_retries[\s\S]*Integration remediation has no separate free-form review subject/i);
     assert.match(COMMAND, /repository-wide check only through the bounded `test-verifier` integration gate[\s\S]*never leave the final slice running or create an uncounted integration-remediation loop/i);
+  });
+});
+
+describe("interactive handoff durable schema docs", () => {
+  it("keeps approval receipt fields and launch claim enums aligned with implementation", () => {
+    const receipt = markdownSection(SCHEMA, "Interactive approval handoff receipt");
+    for (const field of [
+      "schema_version",
+      "interactive-approval-handoff",
+      "gate",
+      "approval_fingerprint",
+      "pending_snapshot_hash",
+      "answer_hash",
+      "steering_generation",
+      "accepted_at",
+    ]) {
+      assert.match(receipt, literalPattern(field), `approval handoff receipt docs missing ${field}`);
+    }
+    assert.match(receipt, /preserved unchanged/i);
+    assert.match(receipt, /fails closed/i);
+
+    const claim = markdownSection(SCHEMA, "process-launch.lock/owner.json Launch Claim");
+    for (const field of [
+      "schema_version",
+      "opencode-launch-claim",
+      "run_id",
+      "execution_id",
+      "launch_kind",
+      "phase",
+      "pid",
+      "hostname",
+      "acquired_at",
+      "identity",
+      "inspector",
+      "start_marker",
+      "command_name",
+      "cwd",
+      "approval",
+      "nonce",
+    ]) {
+      assert.match(claim, literalPattern(field), `launch claim docs missing ${field}`);
+    }
+    for (const value of [...LAUNCH_KINDS, ...LAUNCH_CLAIM_PHASES]) {
+      assert.match(claim, literalPattern(value), `launch claim docs missing implementation enum ${value}`);
+    }
+    assert.match(claim, /exact nonce/i);
+    assert.match(claim, /matching directory\/file identity/i);
+    assert.match(claim, /preserve it and fail closed with manual ownership reconciliation/i);
+    assert.match(SCHEMA, /process-launch\.lock\/[\s\S]*owner\.json/i);
   });
 });
 

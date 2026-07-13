@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
 import { canonicalizeGithubPrUrl } from "./refs.js";
-import { normalizePrNumber as normalizeTransitionPrNumber, transitionGateDecision, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { normalizePrNumber as normalizeTransitionPrNumber, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
-import { printCliResult, projectCostReport, renderCliPath } from "./cli-output.js";
+import { printCliResult, projectCliData, projectCostReport, renderCliPath } from "./cli-output.js";
 import { freeformSegment, identitySegment, renderErrorForTerminal, renderTerminalSegments, StructuredOutputError, TRUSTED_SEGMENTS } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 
@@ -96,12 +96,12 @@ Commands:
 `);
 }
 
-async function main(argv) {
+export async function runCliCommand(argv, dependencies = {}) {
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === "--help" || cmd === "-h") return usage();
   if (cmd === "install") return install(rest);
   if (cmd === "doctor") return doctor(rest);
-  if (cmd === "factory") return factory(rest);
+  if (cmd === "factory") return factory(rest, dependencies);
   throw new Error(`unknown command: ${cmd}`);
 }
 
@@ -179,11 +179,11 @@ async function doctor(args) {
   process.exitCode = ok ? 0 : 1;
 }
 
-async function factory(args) {
+async function factory(args, dependencies = {}) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
   if (sub === "cost-report") return costReport(rest);
-  const opts = options(rest);
+  const opts = { ...options(rest), ...(dependencies.factoryOptions || {}) };
   const positional = positionals(rest);
   if (sub === "start") {
     if (opts.dryRun) throw new Error("factory start --dry-run is unsupported");
@@ -218,7 +218,7 @@ async function factory(args) {
   if (sub === "action-abort") return actionAbort(rest);
   if (sub === "pr-fence") return prFence(rest);
   if (sub === "cost-record") return costRecord(rest);
-  if (sub === "resume") return resume(rest);
+  if (sub === "resume") return resume(rest, dependencies);
   if (sub === "list") return print(listRuns(opts), opts);
   if (sub === "status") return print(status(positional[0], opts), opts);
   if (sub === "heartbeat") return heartbeat(rest);
@@ -231,7 +231,7 @@ async function factory(args) {
     return;
   }
   if (sub === "env" || sub === "provenance") return env(rest);
-  if (sub === "gate-decision") return gateDecision(rest);
+  if (sub === "gate-decision") return gateDecision(rest, dependencies);
   if (sub === "slices-seed") return slicesSeed(rest);
   if (sub === "slice-status") return sliceStatus(rest);
   if (sub === "step") return step(rest);
@@ -399,8 +399,8 @@ function structuredCostReportError(error) {
   return error;
 }
 
-async function resume(args) {
-  const opts = options(args);
+async function resume(args, dependencies = {}) {
+  const opts = { ...options(args), ...(dependencies.factoryOptions || {}) };
   const positional = positionals(args);
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory resume requires exactly one <run-id>");
@@ -648,8 +648,8 @@ async function recover(args) {
   return print(await transitionRecoverOrphan(resolveRunDir(runId, opts), opts.reason || "recovered orphaned factory run", opts), opts);
 }
 
-async function gateDecision(args) {
-  const opts = options(args);
+async function gateDecision(args, dependencies = {}) {
+  const opts = { ...options(args), ...(dependencies.gateDecisionOptions || {}) };
   const positional = positionals(args);
   const [runId, gate, statusValue] = positional;
   if (!stringValue(runId) || !stringValue(gate) || !stringValue(statusValue)) {
@@ -665,7 +665,16 @@ async function gateDecision(args) {
   if (stringValue(opts.decisionNote)) decision.decision_note = opts.decisionNote;
   if (stringValue(opts.answeredAt)) decision.answered_at = opts.answeredAt;
 
-  return print(await transitionGateDecision(resolveRunDir(runId, opts), gate, decision, opts), opts);
+  const result = await transitionGateDecisionAndHandoff(resolveRunDir(runId, opts), gate, decision, opts);
+  if (opts.json && result.handoff) {
+    const projected = projectCliData(result);
+    if (typeof result.handoff.log === "string" && /^processes\/[A-Za-z0-9._-]+\.log$/u.test(result.handoff.log)) projected.handoff.log = result.handoff.log;
+    if (result.handoff.launch_claim_ref === "process-launch.lock/owner.json") projected.handoff.launch_claim_ref = result.handoff.launch_claim_ref;
+    console.log(serializeTerminalJson(projected, { space: 2 }));
+  } else {
+    print(result, opts);
+  }
+  if (result.handoff?.status === "recovery-required") process.exitCode = 2;
 }
 
 async function slicesSeed(args) {
@@ -1100,7 +1109,9 @@ function pluginEntrySpec(entry) {
   return Array.isArray(entry) ? entry[0] : entry;
 }
 
-main(process.argv.slice(2)).catch((error) => {
-  console.error(`error: ${renderErrorForTerminal(error)}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && realpathSync(process.argv[1]) === cliPath) {
+  runCliCommand(process.argv.slice(2)).catch((error) => {
+    console.error(`error: ${renderErrorForTerminal(error)}`);
+    process.exitCode = 1;
+  });
+}

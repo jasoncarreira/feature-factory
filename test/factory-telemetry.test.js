@@ -87,8 +87,9 @@ describe("factory trace-context propagation", () => {
 
   it("propagates validated trace context into detached continue without putting it in the continuation payload", async () => {
     const fixture = createContinueLaunchFixture("continue-traceparent");
+    let detachedPid;
     try {
-      await withLaunchEnv(fixture, {}, async () => {
+      await withLaunchEnv(fixture, { OPENCODE_KEEPALIVE: "1" }, async () => {
         const result = await continueFactory(fixture.runId, {
           cwd: fixture.repo,
           review: "reviewer.json",
@@ -97,6 +98,7 @@ describe("factory trace-context propagation", () => {
           traceparent,
         });
         assert.equal(result.status, "started");
+        detachedPid = result.pid;
         await waitForFile(fixture.captureFile);
       });
 
@@ -110,6 +112,8 @@ describe("factory trace-context propagation", () => {
       const payload = decoded.payload;
       assert.equal(JSON.stringify(payload).includes("TRACEPARENT"), false);
       assert.equal(JSON.stringify(payload).includes("4bf92f3577b34da6a3ce929d0e0e4736"), false);
+      process.kill(detachedPid, "SIGTERM");
+      await waitForProcessExit(detachedPid);
     } finally {
       cleanup(fixture.root);
     }
@@ -198,6 +202,7 @@ const keys = [
 ];
 const env = Object.fromEntries(keys.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]))
 writeFileSync(process.env.OPENCODE_CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(2), env }, null, 2) + "\\n", "utf8");
+if (process.env.OPENCODE_KEEPALIVE === "1") setInterval(() => {}, 1000);
 `, "utf8");
   chmodSync(script, 0o755);
   return bin;
@@ -239,6 +244,20 @@ async function waitForFile(file) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`timed out waiting for ${file}`);
+}
+
+async function waitForProcessExit(pid) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() <= deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for detached process ${pid}`);
 }
 
 function initGitRepo(repo) {
