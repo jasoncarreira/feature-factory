@@ -35,8 +35,8 @@ describe("cleanup sweep report and digest", () => {
       { name: "a", expected_head: "a-head", state: "verified-ancestor", base_oid: "base" },
     ];
     evidence.worktrees = [
-      { recorded_path: "/recorded/z", physical_path: "/physical/z", branch: "z", head: "z-head", state: "verified" },
-      { recorded_path: "/recorded/a", physical_path: "/physical/a", branch: "a", head: "a-head", state: "verified" },
+      { recorded_path: "/recorded/z", physical_path: "/physical/z", device: "17", inode: "42", branch: "z", head: "z-head", state: "verified" },
+      { recorded_path: "/recorded/a", physical_path: "/physical/a", device: "17", inode: "41", branch: "a", head: "a-head", state: "verified" },
     ];
     const candidate = createCandidate({ entry_name: "run", run_id: "run", classification: "protected", reason_codes: ["SHARED_TARGET_CLAIM", "PROTECTED_STATUS_BLOCKED", "SHARED_TARGET_CLAIM"], evidence });
 
@@ -82,6 +82,20 @@ describe("cleanup sweep report and digest", () => {
     assert.deepEqual({ matched: foreign.matched, refusal_code: foreign.refusal_code }, { matched: false, refusal_code: "DIGEST_FOREIGN" });
     const stale = compareCleanupSweepDigest(digest, REPOSITORY, [candidate("a")]);
     assert.deepEqual({ matched: stale.matched, refusal_code: stale.refusal_code }, { matched: false, refusal_code: "DIGEST_STALE" });
+    const identityEvidence = eligibleEvidence("a");
+    identityEvidence.worktrees = [{ recorded_path: "/recorded/a", physical_path: "/physical/a", device: "17", inode: "41", branch: "a", head: "a-head", state: "verified" }];
+    const changedIdentityEvidence = structuredClone(identityEvidence);
+    changedIdentityEvidence.worktrees[0].inode = "42";
+    const identityCandidate = createCandidate({ entry_name: "a", run_id: "a", classification: "eligible", reason_codes: ["ELIGIBLE"], evidence: identityEvidence });
+    const changedIdentityCandidate = createCandidate({ entry_name: "a", run_id: "a", classification: "eligible", reason_codes: ["ELIGIBLE"], evidence: changedIdentityEvidence });
+    assert.notEqual(createCleanupSweepDigest(REPOSITORY, [identityCandidate]), createCleanupSweepDigest(REPOSITORY, [changedIdentityCandidate]));
+    const launchClaimEvidence = eligibleEvidence("claim");
+    launchClaimEvidence.launch_claim = { state: "live-matching", hash: `sha256:${"a".repeat(64)}`, dir_device: "17", dir_inode: "50", file_device: "17", file_inode: "51" };
+    const changedLaunchClaimEvidence = structuredClone(launchClaimEvidence);
+    changedLaunchClaimEvidence.launch_claim.file_inode = "52";
+    const launchClaimCandidate = createCandidate({ entry_name: "claim", run_id: "claim", classification: "protected", reason_codes: ["PROTECTED_LIVE_LAUNCH_CLAIM"], evidence: launchClaimEvidence });
+    const changedLaunchClaimCandidate = createCandidate({ entry_name: "claim", run_id: "claim", classification: "protected", reason_codes: ["PROTECTED_LIVE_LAUNCH_CLAIM"], evidence: changedLaunchClaimEvidence });
+    assert.notEqual(createCleanupSweepDigest(REPOSITORY, [launchClaimCandidate]), createCleanupSweepDigest(REPOSITORY, [changedLaunchClaimCandidate]));
     assert.equal(compareCleanupSweepDigest(digest, REPOSITORY, candidates).matched, true);
     for (const invalid of ["", "ff-cleanup-v1.A.b", `${digest}x`, `ff-cleanup-v1.${"0".repeat(64)}.${"A".repeat(64)}`]) assert.throws(() => parseCleanupSweepDigest(invalid), /malformed/u);
   });

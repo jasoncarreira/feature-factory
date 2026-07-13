@@ -1,11 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
+  CleanupRunChangedError,
   CleanupRunUnexpectedError,
   cleanupRunLocked,
   cleanupRun,
@@ -22,6 +23,7 @@ import {
   writeGateAnswer,
   writeSteering,
 } from "../src/factory.js";
+import { checkWorktreeIdentity } from "../src/worktrees.js";
 
 describe("factory public state operations", { concurrency: false }, () => {
   it("lists and reads runs without authority proofs", () => {
@@ -553,6 +555,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
         mode: "sweep",
         repo: fixture.repo,
+        ...sweepPathEvidence(fixture),
         expectedRunHash: hashFile(runFile),
         expectedBranchHeads: expectedHeads,
         fetchedBaseRef: "main",
@@ -570,18 +573,20 @@ describe("factory public state operations", { concurrency: false }, () => {
         ["update-ref", "-d", "refs/heads/zeta", expectedHeads.zeta],
       ]);
       assert.equal(events[0].startsWith("before-worktree-remove:"), true);
-      assert.deepEqual(events.slice(1, 4), [
+      assert.equal(events[1].startsWith("after-worktree-final-validation:"), true);
+      assert.deepEqual(events.slice(2, 5), [
         "before-branch-delete:alpha",
         `before-branch-delete:${fixture.runId}`,
         "before-branch-delete:zeta",
       ]);
-      assert.equal(events[4], `before-run-dir-remove:${fixture.runDir}`);
+      assert.equal(events[5], `before-run-dir-remove:${fixture.runDir}`);
+      assert.equal(events[6], `after-run-dir-final-validation:${fixture.runDir}`);
     } finally {
       cleanup(fixture.repo);
     }
   });
 
-  it("revalidates the registered worktree branch and exact HEAD after an intervening mutation", () => {
+  it("reports changed evidence when registered worktree identity changes before mutation", () => {
     const fixture = createFixture("cleanup-sweep-mutated-worktree", { terminal: true, git: true });
     try {
       const runFile = join(fixture.runDir, "run.json");
@@ -589,9 +594,10 @@ describe("factory public state operations", { concurrency: false }, () => {
       const expectedHeads = { [fixture.runId]: branchHead(fixture.repo, fixture.runId) };
       const commands = [];
 
-      const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
+      assert.throws(() => cleanupRunLocked(fixture.runDir, run, {
         mode: "sweep",
         repo: fixture.repo,
+        ...sweepPathEvidence(fixture),
         expectedRunHash: hashFile(runFile),
         expectedBranchHeads: expectedHeads,
         fetchedBaseRef: "main",
@@ -601,11 +607,8 @@ describe("factory public state operations", { concurrency: false }, () => {
             commitInWorktree(run.worktree, "changed-after-authorization.txt", "changed\n");
           }
         },
-      });
+      }), CleanupRunChangedError);
 
-      assert.equal(cleanupResult.worktrees[0].outcome, "failed");
-      assert.equal(cleanupResult.branches[0].outcome, "not-attempted");
-      assert.equal(cleanupResult.run_dir.outcome, "retained");
       assert.equal(existsSync(run.worktree), true);
       assert.equal(commands.some((args) => args[0] === "worktree" && args[1] === "remove"), false);
     } finally {
@@ -626,6 +629,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
         mode: "sweep",
         repo: fixture.repo,
+        ...sweepPathEvidence(fixture),
         expectedRunHash: hashFile(runFile),
         expectedBranchHeads: expectedHeads,
         fetchedBaseRef: "main",
@@ -659,6 +663,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
         mode: "sweep",
         repo: fixture.repo,
+        ...sweepPathEvidence(fixture),
         expectedRunHash: hashFile(runFile),
         expectedBranchHeads: expectedHeads,
         fetchedBaseRef: "main",
@@ -666,6 +671,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       });
 
       assert.equal(cleanupResult.worktrees[0].outcome, "failed");
+      assert.equal(cleanupResult.worktrees[0].physical_path, realpathSync(run.worktree));
       assert.deepEqual(cleanupResult.branches.map(({ name, outcome }) => ({ name, outcome })), [
         { name: fixture.runId, outcome: "not-attempted" },
         { name: "independent", outcome: "deleted" },
@@ -676,6 +682,8 @@ describe("factory public state operations", { concurrency: false }, () => {
         reason_code: "RETAINED_AFTER_PARTIAL_FAILURE",
       });
       assert.equal(existsSync(runFile), true);
+      assert.equal(existsSync(run.worktree), true);
+      assert.deepEqual(readdirSync(join(fixture.repo, ".opencode", "worktrees")).filter((entry) => entry.includes("cleanup-worktree")), []);
     } finally {
       cleanup(fixture.repo);
     }
@@ -695,6 +703,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       const cleanupResult = cleanupRunLocked(fixture.runDir, run, {
         mode: "sweep",
         repo: fixture.repo,
+        ...sweepPathEvidence(fixture),
         expectedRunHash: hashFile(runFile),
         expectedBranchHeads: expectedHeads,
         fetchedBaseRef: "main",
@@ -720,6 +729,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       const cleanupResult = cleanupRunLocked(fixture.runDir, readJson(runFile), {
         mode: "sweep",
         repo: fixture.repo,
+        ...sweepPathEvidence(fixture),
         expectedRunHash: hashFile(runFile),
         expectedBranchHeads: {},
         fetchedBaseRef: "main",
@@ -737,6 +747,78 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
+  it("reports the quarantine path when run-directory restoration is blocked", () => {
+    const fixture = createFixture("cleanup-sweep-run-dir-restore-failure", { terminal: true });
+    const quarantine = join(realpathSync(dirname(fixture.runDir)), ".retained-run-quarantine");
+    try {
+      const runFile = join(fixture.runDir, "run.json");
+      const cleanupResult = cleanupRunLocked(fixture.runDir, readJson(runFile), {
+        mode: "sweep",
+        repo: fixture.repo,
+        ...sweepPathEvidence(fixture),
+        expectedRunHash: hashFile(runFile),
+        expectedBranchHeads: {},
+        fetchedBaseRef: "main",
+        quarantinePath: (_path, kind) => kind === "run" ? quarantine : _path,
+        removeRunDir() {
+          mkdirSync(fixture.runDir);
+          writeFileSync(join(fixture.runDir, "replacement"), "replacement\n");
+          assert.equal(existsSync(fixture.runDir), true);
+          throw new Error("injected failure after replacement");
+        },
+      });
+
+      assert.equal(cleanupResult.run_dir.path, quarantine);
+      assert.equal(cleanupResult.run_dir.outcome, "failed");
+      assert.equal(existsSync(join(quarantine, "run.json")), true);
+      assert.equal(existsSync(join(fixture.runDir, "run.json")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("restores quarantined worktrees after each post-move failure boundary", () => {
+    for (const boundary of ["moved-validation", "authorization", "removal"]) {
+      const fixture = createFixture(`cleanup-sweep-worktree-restore-${boundary}`, { terminal: true, git: true });
+      try {
+        const runFile = join(fixture.runDir, "run.json");
+        const run = readJson(runFile);
+        const expectedHeads = Object.fromEntries(collectCleanupTargets(run).branches.map((branch) => [branch, branchHead(fixture.repo, branch)]));
+        let authorizationChecks = 0;
+        const options = {
+          mode: "sweep",
+          repo: fixture.repo,
+          ...sweepPathEvidence(fixture),
+          expectedRunHash: hashFile(runFile),
+          expectedBranchHeads: expectedHeads,
+          fetchedBaseRef: "main",
+          gitRunner: recordingGitRunner([], (args) => boundary === "removal" && args[0] === "worktree" && args[1] === "remove"),
+          checkWorktreeIdentity: (repo, path, expected) => boundary === "moved-validation" && path.includes(".cleanup-worktree-")
+            ? { ok: false, reason: "injected moved validation failure" }
+            : checkWorktreeIdentity(repo, path, expected),
+          assertMutationAuthorized() {
+            authorizationChecks += 1;
+            if (boundary === "authorization" && authorizationChecks === 2) throw new Error("injected authorization failure");
+          },
+        };
+
+        let result;
+        try {
+          result = cleanupRunLocked(fixture.runDir, run, options);
+        } catch (error) {
+          assert.equal(boundary, "authorization");
+          assert.ok(error instanceof CleanupRunUnexpectedError);
+          result = error.cleanup;
+        }
+        assert.equal(result.worktrees[0].physical_path, realpathSync(run.worktree), boundary);
+        assert.equal(existsSync(run.worktree), true, boundary);
+        assert.deepEqual(readdirSync(join(fixture.repo, ".opencode", "worktrees")).filter((entry) => entry.includes(".cleanup-worktree-")), [], boundary);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
   it("preserves R51 partial evidence when an unexpected failure follows mutation", () => {
     const fixture = createFixture("cleanup-sweep-unexpected", { terminal: true, git: false });
     try {
@@ -750,6 +832,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       const error = captureThrown(() => cleanupRunLocked(fixture.runDir, run, {
         mode: "sweep",
         repo: fixture.repo,
+        ...sweepPathEvidence(fixture),
         expectedRunHash: hashFile(runFile),
         expectedBranchHeads: expectedHeads,
         fetchedBaseRef: "main",
@@ -904,6 +987,47 @@ function assertPendingSteeringUnchanged(fixture, before) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function sweepPathEvidence(fixture) {
+  const worktreeRoot = join(fixture.repo, ".opencode", "worktrees");
+  const runDirStat = lstatSync(fixture.runDir);
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const expectedWorktrees = [];
+  let expectedWorktreeRoot = { state: "missing", logical_path: worktreeRoot, physical_path: null, device: null, inode: null };
+  if (existsSync(worktreeRoot)) {
+    const worktreeRootStat = lstatSync(worktreeRoot);
+    expectedWorktreeRoot = {
+      state: "valid",
+      logical_path: worktreeRoot,
+      physical_path: realpathSync(worktreeRoot),
+      device: String(worktreeRootStat.dev),
+      inode: String(worktreeRootStat.ino),
+    };
+  }
+  if (run.worktree && existsSync(run.worktree)) {
+    const worktreeStat = lstatSync(run.worktree);
+    expectedWorktrees.push({
+      recorded_path: run.worktree,
+      physical_path: realpathSync(run.worktree),
+      device: String(worktreeStat.dev),
+      inode: String(worktreeStat.ino),
+      branch: run.branch,
+      head: branchHead(fixture.repo, run.branch),
+      state: "verified",
+    });
+  }
+  return {
+    expectedWorktreeRoot,
+    expectedWorktrees,
+    expectedRunDirectory: {
+      kind: "directory",
+      logical_path: fixture.runDir,
+      physical_path: realpathSync(fixture.runDir),
+      device: String(runDirStat.dev),
+      inode: String(runDirStat.ino),
+    },
+  };
 }
 
 function sha256(value) {

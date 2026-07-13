@@ -25,6 +25,8 @@ const REASON_ENTRIES = [
   ["SKIPPED_HEARTBEAT_UNCERTAIN", "Heartbeat evidence is invalid, mismatched, or indeterminate."],
   ["PROTECTED_LIVE_PROCESS", "A live identity-matching factory process references the run."],
   ["SKIPPED_PROCESS_UNCERTAIN", "Process evidence is invalid, mismatched, or indeterminate."],
+  ["PROTECTED_LIVE_LAUNCH_CLAIM", "A live identity-matching launch claimant owns the run."],
+  ["SKIPPED_LAUNCH_CLAIM_UNCERTAIN", "Launch ownership evidence is present but invalid, mismatched, dead, ownerless, or indeterminate."],
   ["SKIPPED_RUN_LOCK_PRESENT_PREVIEW", "A run-state lock is present during preview."],
   ["SKIPPED_RUN_LOCK_INVALID", "Run-state lock evidence is unsafe or indeterminate."],
   ["SKIPPED_RUN_LOCK_CONTENDED", "The run-state lock became contended before cleanup."],
@@ -68,7 +70,7 @@ export const CLEANUP_SWEEP_REFUSAL_REGISTRY = Object.freeze({
 });
 
 const REPOSITORY_KEYS = ["schema_version", "root_path", "root_device", "root_inode", "git_common_dir_path", "git_common_dir_device", "git_common_dir_inode", "object_format"];
-const EVIDENCE_KEYS = ["entry", "claims", "run", "factory_lock", "heartbeat", "process", "run_lock", "pr", "branches", "worktrees"];
+const EVIDENCE_KEYS = ["entry", "claims", "run", "factory_lock", "heartbeat", "process", "launch_claim", "run_lock", "pr", "worktree_root", "branches", "worktrees"];
 const HASH = /^sha256:[0-9a-f]{64}$/u;
 const DIGEST = /^ff-cleanup-v1\.([0-9a-f]{64})\.([0-9a-f]{64})$/u;
 const REASON_ORDER = new Map(REASON_ENTRIES.map(([code], index) => [code, index]));
@@ -128,8 +130,10 @@ export function createEmptyEvidence(entryName, logicalPath = entryName) {
     factory_lock: { state: "missing", hash: null, active_owner: null },
     heartbeat: { state: "missing", hash: null, fresh: null },
     process: { state: "missing", hash: null },
+    launch_claim: { state: "missing", hash: null, dir_device: null, dir_inode: null, file_device: null, file_inode: null },
     run_lock: { observed_before_acquire: "missing", held_by_sweep: false },
     pr: { state: "not-checked", url: null, repository: null, number: null, base_ref: null, base_sha: null },
+    worktree_root: { state: "missing", logical_path: null, physical_path: null, device: null, inode: null },
     branches: [],
     worktrees: [],
   };
@@ -318,6 +322,10 @@ function normalizeEvidence(input) {
   hashOrNull(heartbeat.hash, "candidate.evidence.heartbeat.hash"); nullableBoolean(heartbeat.fresh, "candidate.evidence.heartbeat.fresh");
   const process = exactRecord(input.process, ["state", "hash"], "candidate.evidence.process");
   enumValue(process.state, ["missing", "live-matching", "absent", "mismatched", "invalid", "indeterminate"], "candidate.evidence.process.state"); hashOrNull(process.hash, "candidate.evidence.process.hash");
+  const launchClaim = exactRecord(input.launch_claim, ["state", "hash", "dir_device", "dir_inode", "file_device", "file_inode"], "candidate.evidence.launch_claim");
+  enumValue(launchClaim.state, ["missing", "live-matching", "dead", "mismatched", "invalid", "indeterminate"], "candidate.evidence.launch_claim.state");
+  hashOrNull(launchClaim.hash, "candidate.evidence.launch_claim.hash");
+  for (const key of ["dir_device", "dir_inode", "file_device", "file_inode"]) decimalStringOrNull(launchClaim[key], `candidate.evidence.launch_claim.${key}`);
   const runLock = exactRecord(input.run_lock, ["observed_before_acquire", "held_by_sweep"], "candidate.evidence.run_lock");
   enumValue(runLock.observed_before_acquire, ["missing", "present", "invalid"], "candidate.evidence.run_lock.observed_before_acquire");
   if (typeof runLock.held_by_sweep !== "boolean") throw new TypeError("candidate.evidence.run_lock.held_by_sweep must be boolean");
@@ -325,12 +333,15 @@ function normalizeEvidence(input) {
   enumValue(pr.state, ["not-checked", "merged", "closed", "open", "missing-metadata", "mismatch", "not-found", "inaccessible", "invalid-response"], "candidate.evidence.pr.state");
   for (const key of ["url", "repository", "base_ref", "base_sha"]) nullableString(pr[key], `candidate.evidence.pr.${key}`);
   if (pr.number !== null && (!Number.isSafeInteger(pr.number) || pr.number <= 0)) throw new TypeError("candidate.evidence.pr.number must be a positive integer or null");
+  const worktreeRoot = exactRecord(input.worktree_root, ["state", "logical_path", "physical_path", "device", "inode"], "candidate.evidence.worktree_root");
+  enumValue(worktreeRoot.state, ["missing", "valid", "unsafe"], "candidate.evidence.worktree_root.state");
+  for (const key of ["logical_path", "physical_path", "device", "inode"]) nullableString(worktreeRoot[key], `candidate.evidence.worktree_root.${key}`);
   const branches = normalizeBranches(input.branches);
   const worktrees = normalizeWorktrees(input.worktrees);
   return {
     entry: { ...entry },
     claims: { branches: stringArray(claims.branches, "candidate.evidence.claims.branches").sort(utf8Collator), worktrees: stringArray(claims.worktrees, "candidate.evidence.claims.worktrees").sort(utf8Collator) },
-    run: { ...run }, factory_lock: { ...factoryLock }, heartbeat: { ...heartbeat }, process: { ...process }, run_lock: { ...runLock }, pr: { ...pr }, branches, worktrees,
+    run: { ...run }, factory_lock: { ...factoryLock }, heartbeat: { ...heartbeat }, process: { ...process }, launch_claim: { ...launchClaim }, run_lock: { ...runLock }, pr: { ...pr }, worktree_root: { ...worktreeRoot }, branches, worktrees,
   };
 }
 
@@ -349,9 +360,10 @@ function normalizeWorktrees(value) {
   if (!Array.isArray(value)) throw new TypeError("candidate.evidence.worktrees must be an array");
   return value.map((item, index) => {
     const path = `candidate.evidence.worktrees[${index}]`;
-    const worktree = exactRecord(item, ["recorded_path", "physical_path", "branch", "head", "state"], path);
-    assertNonEmptyString(worktree.recorded_path, `${path}.recorded_path`); nullableString(worktree.physical_path, `${path}.physical_path`); nullableString(worktree.branch, `${path}.branch`); nullableString(worktree.head, `${path}.head`);
+    const worktree = exactRecord(item, ["recorded_path", "physical_path", "device", "inode", "branch", "head", "state"], path);
+    assertNonEmptyString(worktree.recorded_path, `${path}.recorded_path`); nullableString(worktree.physical_path, `${path}.physical_path`); decimalStringOrNull(worktree.device, `${path}.device`); decimalStringOrNull(worktree.inode, `${path}.inode`); nullableString(worktree.branch, `${path}.branch`); nullableString(worktree.head, `${path}.head`);
     enumValue(worktree.state, ["verified", "outside-root", "missing", "symlink", "unregistered", "branch-mismatch", "head-mismatch", "unprovable"], `${path}.state`);
+    if (worktree.state === "verified" && (worktree.device === null || worktree.inode === null)) throw new TypeError(`${path} verified identity requires device and inode`);
     return { ...worktree };
   }).sort((left, right) => utf8Collator(left.physical_path ?? left.recorded_path, right.physical_path ?? right.recorded_path));
 }
@@ -519,6 +531,7 @@ function validateOutcomeReason(outcome, reasonCode, path) {
   createReason(reasonCode);
 }
 function hashOrNull(value, path) { if (value !== null && (typeof value !== "string" || !HASH.test(value))) throw new TypeError(`${path} must be a sha256 hash or null`); }
+function decimalStringOrNull(value, path) { if (value !== null && (typeof value !== "string" || !/^\d+$/u.test(value))) throw new TypeError(`${path} must be a decimal string or null`); return value; }
 function nullableString(value, path) { if (value !== null && typeof value !== "string") throw new TypeError(`${path} must be a string or null`); return value; }
 function nullableBoolean(value, path) { if (value !== null && typeof value !== "boolean") throw new TypeError(`${path} must be a boolean or null`); return value; }
 function requiredString(value, path) { assertNonEmptyString(value, path); return value; }

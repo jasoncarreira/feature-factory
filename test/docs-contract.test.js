@@ -39,6 +39,40 @@ const FRONTEND_BUILDER_PROMPT = readDoc("../assets/agent/frontend-builder.md");
 const IMPLEMENTATION_VALIDATOR_PROMPT = readDoc("../assets/agent/implementation-validator.md");
 const SECURITY_REVIEWER_PROMPT = readDoc("../assets/agent/security-reviewer.md");
 const BLOCKED_CONTINUE_COMMAND = "feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id>";
+
+describe("cleanup sweep operator contract", () => {
+  it("documents preview, digest-bound execution, and the closed no-force grammar", () => {
+    assert.match(README, /cleanup --all --dry-run \[--repo PATH\] \[--json\]/i);
+    assert.match(README, /cleanup --all --digest ff-cleanup-v1\.<repository-sha256>\.<envelope-sha256>/i);
+    assert.match(README, /never accepts a positional run id, `--force`, or unrelated options/i);
+    assert.match(README, /repository- and evidence-bound digest/i);
+  });
+
+  it("documents positive eligibility, lock-held revalidation, and fail-closed uncertainty", () => {
+    for (const contract of [
+      /status is exactly `completed`/i,
+      /exact merged or closed PR/i,
+      /freshly fetched trustworthy PR base/i,
+      /safe containment and exact identity/i,
+      /acquires each candidate's run-state lock without reclaiming/i,
+      /repeats the complete eligibility check while holding that lock/i,
+      /uncertainty are skipped rather than deleted/i,
+    ]) assert.match(README, contract);
+  });
+
+  it("documents reports, exits, partial retention, and manual protected-run handling", () => {
+    for (const contract of [
+      /aggregate `eligible`, `protected`, `skipped`, `deleted`, and `failed` counts/i,
+      /Preview exits 0/i,
+      /Refused digests and report-level failures exit 1/i,
+      /continues with independent candidates after a cleanup failure/i,
+      /exits 1 if any candidate's cleanup was actually attempted and failed/i,
+      /run directory is retained whenever an earlier worktree or branch operation fails/i,
+      /`blocked`, `partial`, or `needs-human` status are protected recoverable work/i,
+      /handle them manually/i,
+    ]) assert.match(README, contract);
+  });
+});
 const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-created <run-id> --json",
   "factory env record-resume <run-id> --json",

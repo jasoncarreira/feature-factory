@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 describe("cli detached process evidence", () => {
-  it("does not write run-scoped process evidence for generic detached starts without an explicit run id", () => {
+  it("does not write run-scoped process evidence for generic detached starts without an explicit run id", async () => {
     const repo = tempRepo("generic-detached-start");
     try {
       const proc = runDeterministicCli(repo, ["factory", "start", "--detached", "--json", "test generic detached prompt"]);
@@ -49,7 +49,7 @@ describe("cli detached process evidence", () => {
     }
   });
 
-  it("writes run-scoped process evidence for detached resume with an explicit run id", () => {
+  it("writes run-scoped process evidence for detached resume with an explicit run id", async () => {
     const repo = tempRepo("detached-resume");
     const runId = "resume-detached-run";
     const runDir = join(repo, ".opencode", "factory", runId);

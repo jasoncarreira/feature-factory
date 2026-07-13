@@ -19,6 +19,9 @@ import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js
 import { printCliResult, projectCliData, projectCostReport, renderCliPath } from "./cli-output.js";
 import { freeformSegment, identitySegment, renderErrorForTerminal, renderTerminalSegments, StructuredOutputError, TRUSTED_SEGMENTS } from "./hardening/output-policy.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
+import { runCleanupSweepCommand } from "./cleanup-sweep-command.js";
+import { renderCleanupSweepReport } from "./cleanup-sweep-output.js";
+import { executeCleanupSweep, previewCleanupSweep } from "./cleanup-sweep.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
@@ -75,7 +78,9 @@ Commands:
   factory heartbeat <run-id> --status [--json]
   factory validate [run-id]     Validate run.json and plan/slices.json
   factory recover <run-id> [--reason TEXT]  Mark orphaned/stale running run as needs-human
-  factory cleanup <run-id>      Remove terminal run state, worktrees, and branches
+  factory cleanup <run-id> [--dry-run] [--force] [--repo PATH] [--json]
+  factory cleanup --all --dry-run [--repo PATH] [--json]
+  factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> [--repo PATH] [--json]
   factory answer [--repo PATH] [--json] <run> <gate> <approve|stop|changes: ...>
   factory gate-decision <run> <gate> <pending|approved|changes_requested|stopped> [--artifact REF] [--question-ref REF] [--answer-ref REF|--answer TEXT] [--approval-source SOURCE] [--boundary-token TOKEN]
   factory slices-seed <run-id> --from plan/slices.json
@@ -183,6 +188,7 @@ async function factory(args, dependencies = {}) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
   if (sub === "cost-report") return costReport(rest);
+  if (sub === "cleanup" && rest.some((argument) => argument === "--all" || argument === "--digest" || argument.startsWith("--all=") || argument.startsWith("--digest="))) return cleanupSweep(rest);
   const opts = { ...options(rest), ...(dependencies.factoryOptions || {}) };
   const positional = positionals(rest);
   if (sub === "start") {
@@ -258,6 +264,29 @@ async function factory(args, dependencies = {}) {
   ]).trim());
   usage(console.error);
   process.exitCode = 1;
+}
+
+async function cleanupSweep(args) {
+  process.exitCode = await runCleanupSweepCli(args);
+}
+
+export async function runCleanupSweepCli(args, dependencies = {}) {
+  const runCommand = dependencies.runCommand ?? runCleanupSweepCommand;
+  const render = dependencies.render ?? renderCleanupSweepReport;
+  const stdout = dependencies.stdout ?? console.log;
+  const stderr = dependencies.stderr ?? console.error;
+  try {
+    const result = await runCommand(args, {
+      preview: dependencies.preview ?? previewCleanupSweep,
+      execute: dependencies.execute ?? executeCleanupSweep,
+    });
+    stdout(render(result.report, { json: args.includes("--json") }));
+    return result.exitCode;
+  } catch (error) {
+    if (!(error instanceof StructuredOutputError)) throw error;
+    stderr(`error: ${renderErrorForTerminal(error)}`);
+    return 1;
+  }
 }
 
 function answer(args) {
@@ -1109,9 +1138,15 @@ function pluginEntrySpec(entry) {
   return Array.isArray(entry) ? entry[0] : entry;
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === cliPath) {
+if (isDirectCliExecution()) {
   runCliCommand(process.argv.slice(2)).catch((error) => {
     console.error(`error: ${renderErrorForTerminal(error)}`);
     process.exitCode = 1;
   });
+}
+
+function isDirectCliExecution() {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(cliPath); }
+  catch { return resolve(process.argv[1]) === cliPath; }
 }

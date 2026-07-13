@@ -1,6 +1,6 @@
 import { closeSync, constants as FS_CONSTANTS, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, normalize, resolve, sep } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { timestamp } from "./utils.js";
 import { writeProtectedJsonAtomicSync } from "./hardening/atomic-write.js";
@@ -58,19 +58,23 @@ export function inspectLaunchClaim(runDir, opts = {}) {
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return invalidLaunchClaim(file, "run directory must be a non-symlink directory");
     dirStat = lstatSync(dir);
   } catch (error) {
-    if (error?.code === "ENOENT") return { ok: false, missing: true, reason: "missing launch claim", path: file, claim: null, owner_status: "absent" };
+    if (error?.code === "ENOENT") return { ok: false, missing: true, reason: "missing launch claim", path: file, claim: null, owner_status: "absent", identity: null, hash: null };
     return invalidLaunchClaim(file, `launch claim directory is inaccessible: ${error.message}`);
   }
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return invalidLaunchClaim(file, "launch claim directory must be a non-symlink directory");
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return invalidLaunchClaim(file, "launch claim directory must be a non-symlink directory", claimIdentity(dirStat));
 
   let fd;
+  let fileStat;
+  let hash = null;
   try {
     fd = openSync(file, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
-    const fileStat = fstatSync(fd);
-    if (!fileStat.isFile()) return invalidLaunchClaim(file, "launch claim owner must be a regular file");
-    const claim = JSON.parse(readFileSync(fd, "utf8"));
+    fileStat = fstatSync(fd);
+    if (!fileStat.isFile()) return invalidLaunchClaim(file, "launch claim owner must be a regular file", claimIdentity(dirStat, fileStat));
+    const bytes = readFileSync(fd);
+    hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const claim = JSON.parse(bytes.toString("utf8"));
     const validation = validateLaunchClaim(claim, { ...opts, runDir: root });
-    if (!validation.ok) return { ...validation, missing: false, path: file, owner_status: "invalid", identity: claimIdentity(dirStat, fileStat) };
+    if (!validation.ok) return { ...validation, missing: false, path: file, owner_status: "invalid", identity: claimIdentity(dirStat, fileStat), hash };
     const ownerStatus = inspectClaimOwner(validation.claim, opts);
     return {
       ok: true,
@@ -80,10 +84,11 @@ export function inspectLaunchClaim(runDir, opts = {}) {
       claim: validation.claim,
       owner_status: ownerStatus,
       identity: claimIdentity(dirStat, fileStat),
+      hash,
     };
   } catch (error) {
-    if (error?.code === "ENOENT") return invalidLaunchClaim(file, "launch claim directory is ownerless");
-    return invalidLaunchClaim(file, `invalid launch claim: ${error.message}`);
+    if (error?.code === "ENOENT") return invalidLaunchClaim(file, "launch claim directory is ownerless", claimIdentity(dirStat));
+    return invalidLaunchClaim(file, `invalid launch claim: ${error.message}`, claimIdentity(dirStat, fileStat), hash);
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -225,43 +230,46 @@ export function readProcessEvidence(runDir, opts = {}) {
 
 export function inspectProcessEvidenceForCleanup(runDir, opts = {}) {
   const read = readProcessEvidenceForCleanup(runDir);
-  if (read.missing) return cleanupProcessInspection("missing", null, read.reason);
-  if (!read.ok) return cleanupProcessInspection("invalid", read.evidence, read.reason);
+  if (read.missing) return cleanupProcessInspection("missing", null, read.reason, null);
+  if (!read.ok) return cleanupProcessInspection("invalid", read.evidence, read.reason, read.hash);
 
   const evidence = read.evidence;
   if (nonEmptyString(opts.runId) && evidence.run_id !== opts.runId) {
-    return cleanupProcessInspection("mismatched", evidence, "process evidence run_id does not match requested run");
+    return cleanupProcessInspection("mismatched", evidence, "process evidence run_id does not match requested run", read.hash);
   }
   if (evidence.state !== "running") {
-    return cleanupProcessInspection("absent", evidence, `process evidence state is ${evidence.state}`);
+    return cleanupProcessInspection("absent", evidence, `process evidence state is ${evidence.state}`, read.hash);
   }
 
   const verification = verifyEvidenceProcess(evidence, opts);
-  if (verification.status === "live-and-matching") return cleanupProcessInspection("live-matching", evidence, null);
-  if (verification.status === "absent") return cleanupProcessInspection("absent", evidence, verification.reason);
-  if (verification.status === "mismatched") return cleanupProcessInspection("mismatched", evidence, verification.reason);
-  return cleanupProcessInspection("indeterminate", evidence, verification.reason);
+  if (verification.status === "live-and-matching") return cleanupProcessInspection("live-matching", evidence, null, read.hash);
+  if (verification.status === "absent") return cleanupProcessInspection("absent", evidence, verification.reason, read.hash);
+  if (verification.status === "mismatched") return cleanupProcessInspection("mismatched", evidence, verification.reason, read.hash);
+  return cleanupProcessInspection("indeterminate", evidence, verification.reason, read.hash);
 }
 
-function cleanupProcessInspection(state, evidence, reason) {
-  return { state, evidence, reason: reason || null };
+function cleanupProcessInspection(state, evidence, reason, hash) {
+  return { state, evidence, reason: reason || null, hash: hash || null };
 }
 
 function readProcessEvidenceForCleanup(runDir) {
   const file = processEvidencePath(runDir);
   let descriptor;
+  let hash = null;
   try {
     descriptor = openSync(file, FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW || 0));
     if (!fstatSync(descriptor).isFile()) {
       return { ok: false, missing: false, reason: "process evidence must be a regular file", evidence: null };
     }
-    const evidence = JSON.parse(readFileSync(descriptor, "utf8"));
+    const bytes = readFileSync(descriptor);
+    hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const evidence = JSON.parse(bytes.toString("utf8"));
     const validation = validateProcessEvidence(evidence, { runDir });
-    if (!validation.ok) return { ok: false, missing: false, reason: validation.reason, evidence };
-    return { ok: true, missing: false, reason: null, evidence: validation.evidence };
+    if (!validation.ok) return { ok: false, missing: false, reason: validation.reason, evidence, hash };
+    return { ok: true, missing: false, reason: null, evidence: validation.evidence, hash };
   } catch (error) {
     if (error?.code === "ENOENT") return { ok: false, missing: true, reason: "missing process evidence", evidence: null };
-    return { ok: false, missing: false, reason: `invalid process evidence: ${error.message}`, evidence: null };
+    return { ok: false, missing: false, reason: `invalid process evidence: ${error.message}`, evidence: null, hash };
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
@@ -745,18 +753,18 @@ function failClosed(runId, reason, processRef, pid = null) {
   };
 }
 
-function invalidLaunchClaim(path, reason) {
-  return { ok: false, missing: false, reason, path, claim: null, owner_status: "invalid", identity: null };
+function invalidLaunchClaim(path, reason, identity = null, hash = null) {
+  return { ok: false, missing: false, reason, path, claim: null, owner_status: "invalid", identity, hash };
 }
 
 function invalidClaim(reason) {
   return { ok: false, reason, claim: null };
 }
 
-function claimIdentity(dirStat, fileStat) {
+function claimIdentity(dirStat, fileStat = null) {
   return {
     dir: { dev: dirStat.dev, ino: dirStat.ino },
-    file: { dev: fileStat.dev, ino: fileStat.ino },
+    file: fileStat ? { dev: fileStat.dev, ino: fileStat.ino } : null,
   };
 }
 
