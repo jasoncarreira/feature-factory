@@ -105,6 +105,35 @@ describe("cli resume-check and resume preflight", () => {
       cleanup(fixture.repo);
     }
   });
+
+  it("reports unsafe ownership while preserving claim, process, and heartbeat sidecars byte-for-byte", () => {
+    const fixture = createCliRecoveryFixture("resume-check-ownership", { recordWorktree: false });
+    const claimDir = join(fixture.runDir, "process-launch.lock");
+    mkdirSync(claimDir, { recursive: true });
+    const paths = {
+      claim: join(claimDir, "owner.json"),
+      process: join(fixture.runDir, "process.json"),
+      heartbeat: join(fixture.runDir, "heartbeat.json"),
+    };
+    writeFileSync(paths.claim, "{\"kind\":\"malformed-preserve-me\"}\n", "utf8");
+    writeFileSync(paths.process, "{\"kind\":\"malformed-process-preserve-me\"}\n", "utf8");
+    writeJson(paths.heartbeat, heartbeat(fixture.runId));
+    const before = Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, readFileSync(path, "utf8")]));
+    try {
+      const proc = runCli(fixture.repo, ["factory", "resume-check", fixture.runId, "--json"]);
+      assert.notEqual(proc.status, 0);
+      const output = JSON.parse(proc.stdout);
+      assert.equal(output.updated, false);
+      assert.equal(output.recovered, false);
+      assert.equal(output.recovery_required, true);
+      assert.equal(output.ownership.condition, "unsafe-ownership");
+      assert.equal(output.ownership.reason_code, "launch-claim-invalid");
+      for (const [key, path] of Object.entries(paths)) assert.equal(readFileSync(path, "utf8"), before[key]);
+      assert.equal(existsSync(fixture.worktree), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
 });
 
 function createCliRecoveryFixture(runId, options = {}) {
