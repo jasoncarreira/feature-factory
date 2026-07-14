@@ -317,6 +317,30 @@ describe("cli write surface", () => {
     }
   });
 
+  it("seeds a four-wave slice plan (the raised depth cap) through the CLI", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-slice-fourwave-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      initGitRepo(repo);
+      seedRun(runDir);
+      writeJson(join(runDir, "plan", "slices.json"), {
+        slices: [
+          plannedSlice("root"),
+          plannedSlice("second", ["root"]),
+          plannedSlice("third", ["second"]),
+          plannedSlice("fourth", ["third"]),
+        ],
+      });
+
+      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+
+      assert.deepEqual(readJson(join(runDir, "run.json")).slices.map((slice) => slice.id), ["root", "second", "third", "fourth"]);
+      validateFactory(repo);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("resolves state commands from a managed git worktree cwd without --repo", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-worktree-cwd-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);

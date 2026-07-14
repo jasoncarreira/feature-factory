@@ -129,7 +129,7 @@ describe("class-wide planning prompt contract", () => {
       ["every under-specification dimension", /every unresolved contract, policy, state-transition table[\s\S]{0,80}compatibility decision, and test seam/i, /every dimension of under-specification/i],
       ["story-authorized deferral", /only when the approved story or scope authorizes it/i, /only when the approved story or scope authorizes it/i],
       ["feasible envelope", /implementable within the brief's allowed mechanisms, dependencies, compatibility constraints, and non-goals/i, /cannot be implemented within its allowed mechanisms, dependencies, compatibility constraints, or explicit non-goals/i],
-      ["spec altitude defers mechanical artifacts", /Do not hand-author byte-exact canonical vectors, literal digests\/hashes, or exhaustive per-field example fixtures/i, /Do \*\*not\*\* require the brief to carry hand-computed byte-exact canonical vectors, literal digests\/hashes, or exhaustive per-field example fixtures/i],
+      ["spec altitude defers mechanical enumeration", /do not hand-author byte-exact vectors, literal digests, or exhaustive per-field fixtures in prose/i, /do \*\*not\*\* require the brief to carry hand-computed byte-exact vectors, literal digests, or exhaustive per-field fixtures/i],
     ];
     for (const [name, writerPattern, reviewerPattern] of sharedBar) {
       assert.match(SPEC_WRITER_PROMPT, writerPattern, `spec-writer must self-check shared invariant: ${name}`);
@@ -557,23 +557,39 @@ describe("decomposition depth contract", () => {
     assert.match(SKILL, /keep every slice within the per-slice width budget \(one dominant hard concern/i);
   });
 
-  it("escalates to REDESIGN-REQUIRED when width and depth cannot both be satisfied", () => {
+  it("escalates to REDESIGN-REQUIRED via the canonical durable terminal sequence", () => {
     assert.match(WORK_DECOMPOSER_PROMPT, /Redesign escalation \(width and depth both bounded\)/i);
     assert.match(WORK_DECOMPOSER_PROMPT, /REDESIGN-REQUIRED/);
     assert.match(WORK_REVIEWER_PROMPT, /the correct decomposition output is `REDESIGN-REQUIRED`, not a god-slice/i);
-    assert.match(SKILL, /If `work-decomposer` returns `REDESIGN-REQUIRED`[\s\S]*set `status: needs-human`/i);
+    // needs-human must go through the durable terminal writer (heartbeat stop, steering
+    // checkpoint, terminal boundary), not an ad-hoc status write.
+    assert.match(SKILL, /If `work-decomposer` returns `REDESIGN-REQUIRED`[\s\S]*factory terminal <run-id> needs-human --reason TEXT --boundary-token/i);
   });
 
   it("defers implementation-grade artifacts out of the spec stage (altitude)", () => {
-    assert.match(SPEC_WRITER_PROMPT, /Spec altitude — pin contracts, defer mechanical artifacts/i);
-    assert.match(WORK_REVIEWER_PROMPT, /Spec altitude — pin contracts, defer mechanical artifacts/i);
+    assert.match(SPEC_WRITER_PROMPT, /Spec altitude — pin contracts, defer mechanical enumeration/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Spec altitude — pin contracts, defer mechanical enumeration/i);
     assert.match(WORK_REVIEWER_PROMPT, /an LLM cannot compute a real digest/i);
-    assert.match(SKILL, /Spec altitude:[\s\S]*mechanical residuals generated and verified by build-time tests, not spec-acceptance gates/i);
+    assert.match(SKILL, /Spec altitude:[\s\S]*defer those to build-time tests whose golden values are independently generated or source-cited, never produced by the serializer under test/i);
   });
 
-  it("scopes the class-wide sweep bar away from bounded new capabilities", () => {
+  it("requires golden vectors to be independent, and pins story/protocol-required vectors", () => {
+    // Guard against the two failure modes GPT-5.6 surfaced: circular self-generated fixtures,
+    // and blanket-forbidding vectors an approved story or external protocol genuinely requires.
+    for (const prompt of [SPEC_WRITER_PROMPT, WORK_REVIEWER_PROMPT]) {
+      assert.match(prompt, /independently[- ]generated or source-cited/i, "vectors must be independent, not self-generated");
+      assert.match(prompt, /never .*produced by the same serializer under test/i, "self-validated fixtures prove nothing");
+      assert.match(prompt, /(?:approved )?story or (?:an )?external (?:wire )?protocol requires specific interop vectors/i, "required interop vectors are contract");
+    }
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT a fixture that validates the serializer against a value the serializer itself produced/i);
+  });
+
+  it("scopes the class-wide sweep bar away from bounded new capabilities without dropping security sinks", () => {
     assert.match(WORK_REVIEWER_PROMPT, /Scope guard:\*\* a single bounded new capability does not become a sweep merely because its own contract uses universal quantifiers/i);
     assert.match(SKILL, /a class-wide sweep bar likewise targets genuine repository-wide class changes, not a single bounded capability/i);
+    // The scope guard must not exempt reachable security-sensitive sinks from spec coverage.
+    assert.match(WORK_REVIEWER_PROMPT, /never exempts reachable authority, publication\/side-effect, or vulnerability-class sinks \*within\* the capability/i);
+    assert.match(SKILL, /never exempts reachable authority, publication, or vulnerability-class sinks within the capability/i);
   });
 
   it("documents derived depth separately from concurrency", () => {
