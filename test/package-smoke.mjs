@@ -59,6 +59,7 @@ test("packed package installs and exposes release surfaces", () => {
 
     verifyImportSurfaces(consumer, home);
     verifyExportMap(consumer);
+    verifyModuleIdentity(consumer, home);
     verifyCliInstallIdempotence(consumer, home);
     verifyInstalledPlugin(consumer, home);
   } finally {
@@ -97,6 +98,8 @@ function verifyImportSurfaces(consumer, home) {
       if (typeof root.default !== "function") throw new Error("root export should be plugin function");
       if (root.default !== server.default) throw new Error("server export should match root plugin");
       if (tui.default?.id !== "opencode-feature-factory") throw new Error("tui export should expose plugin id");
+      if (typeof tui.default?.tui !== "function") throw new Error("the ./tui export must default-export an object with tui(); hosts detect the sidebar entry from exports['./tui']");
+      if (typeof root.default.tui === "function") throw new Error("the root export is the server plugin and must not expose tui()");
       if (typeof telemetry.withSpan !== "function") throw new Error("telemetry helper should import from installed package");
     `,
     { cwd: consumer, env: isolatedEnv(home) },
@@ -106,6 +109,32 @@ function verifyImportSurfaces(consumer, home) {
 function verifyExportMap(consumer) {
   const pkg = JSON.parse(readFileSync(join(consumer, "node_modules", "opencode-feature-factory", "package.json"), "utf8"));
   assert.equal(pkg.exports["./tui"], "./dist/tui.js");
+}
+
+// Duplicate module identity is the root cause the peer-dependency contract
+// exists to prevent: if the installed package resolved its own solid/opentui
+// copies, the sidebar's reactive graph would run on a foreign instance and
+// never repaint. A probe module placed INSIDE the installed package imports
+// the same specifiers dist/tui.js uses; ESM guarantees one namespace object
+// per resolved module, so identity equality proves both contexts share one
+// copy.
+function verifyModuleIdentity(consumer, home) {
+  const probe = join(consumer, "node_modules", "opencode-feature-factory", "module-identity-probe.mjs");
+  writeFileSync(probe, 'export * as solid from "solid-js";\nexport * as jsx from "@opentui/solid/jsx-runtime";\n');
+  try {
+    nodeModule(
+      `
+        const probe = await import(${JSON.stringify(pathToFileURL(probe).href)});
+        const solid = await import("solid-js");
+        const jsx = await import("@opentui/solid/jsx-runtime");
+        if (probe.solid !== solid) throw new Error("solid-js must resolve to one shared copy from the consumer and the installed package");
+        if (probe.jsx !== jsx) throw new Error("@opentui/solid must resolve to one shared copy from the consumer and the installed package");
+      `,
+      { cwd: consumer, env: isolatedEnv(home) },
+    );
+  } finally {
+    rmSync(probe, { force: true });
+  }
 }
 
 function verifyCliInstallIdempotence(consumer, home) {

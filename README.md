@@ -124,7 +124,16 @@ The server plugin registers `/feature`, one primary `feature-factory` agent, 12 
 
 The sidebar polls durable run state every few seconds, so runs created, updated, or cleaned up after the TUI starts appear without a restart. A restart is only needed to pick up a new plugin bundle: hosts load the sidebar from the built `dist/tui.js` at startup, so after changing TUI source rebuild it (`npm run build:tui`, also run by `prepack` during `npm run check`'s package smoke) and restart the TUI.
 
-The TUI bundle deliberately does not bundle `solid-js` or `@opentui/solid` — they are `peerDependencies` that must resolve to the host's own copies, exactly like other opencode TUI plugins. Install the package where the host's modules resolve (for example `npm install <package>` inside `~/.config/opencode/` and reference the package name in `tui.json`), not via a `file://` path into a development checkout: a checkout carries its own `node_modules`, so the sidebar's reactive graph runs on a second solid/opentui instance — it renders once and never repaints, no matter how often the poll updates its signals.
+The TUI bundle deliberately does not bundle `solid-js` or `@opentui/solid`. They are `peerDependencies` declared as compatible ranges — the contract is module identity, not exact version equality: the sidebar must load the single copies provided by the host installation. Install the package where those modules resolve (for example `npm install <package>` inside `~/.config/opencode/`), then reference the bare package name:
+
+```jsonc
+// ~/.config/opencode/tui.json
+{
+  "plugin": ["opencode-feature-factory"]
+}
+```
+
+The host detects the sidebar entry from `exports["./tui"]` in the package manifest; the root export is the server plugin and has no `tui()` hook, so it is never the sidebar entry. Do not reference a `file://` path into a development checkout: a checkout carries its own `node_modules`, so the sidebar's reactive graph runs on a second solid/opentui instance — it renders once and never repaints, no matter how often the poll updates its signals.
 
 ### Workflow Depth
 

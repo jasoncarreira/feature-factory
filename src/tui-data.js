@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
+import { directFactoryRoot } from "./factory-paths.js";
 import {
   DIAGNOSTIC_CLASSIFICATIONS,
   DIAGNOSTIC_CONDITIONS,
@@ -38,12 +39,16 @@ const rootCache = new Map();
 
 export function factoryRoots(api, options = {}) {
   const starts = tuiStartPaths(api);
-  // The session's own `.opencode/factory` candidates are always part of the
-  // result — even when they do not exist yet and even on a cache hit that
+  // The canonical factory root for each session start is always part of the
+  // result — even when it does not exist yet and even on a cache hit that
   // holds other discovered roots. A run created in the active project must
   // become visible on the next poll tick, never after a cache TTL expiry.
-  // readRootRuns tolerates roots that do not exist.
-  const candidates = starts.map((start) => join(resolve(start), ".opencode", "factory"));
+  // directFactoryRoot carries the same semantics factory writes use: the
+  // start's local .opencode/factory when it exists, otherwise the Git
+  // repository root's — so a session opened in a repo subdirectory still
+  // sees runs written at the repo root. readRootRuns tolerates roots that
+  // do not exist.
+  const candidates = starts.map((start) => directFactoryRoot(start));
   const cacheKey = starts.map((start) => resolve(start)).join("\0");
   const now = Date.now();
   const cached = rootCache.get(cacheKey);
