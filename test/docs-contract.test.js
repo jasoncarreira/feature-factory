@@ -155,17 +155,28 @@ describe("class-wide planning prompt contract", () => {
       assert.match(text, /distinguish work (?:that is )?already handed/i);
       assert.match(text, /how (?:every|each) identified gap was resolved[\s\S]*repository evidence used/i);
     }
-    assert.match(writerAssessment, /If a behavioral or technical decision remains unresolved, or required repository evidence is still missing, stop and return the exact decision or targeted research needed instead of emitting a technical brief/i);
-    assert.match(stepTwo, /If a behavioral\/technical decision or required evidence remains unresolved, stop and request the exact decision or targeted research instead of emitting a technical brief/i);
+    assert.match(writerAssessment, /Use repository evidence and your delegated technical judgment to resolve ordinary implementation decisions/i);
+    assert.match(writerAssessment, /Stop instead of emitting a technical brief only when required repository evidence is still missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the spec writer's authority/i);
+    assert.match(WORK_REVIEWER_PROMPT, /writer must resolve ordinary implementation decisions using repository evidence and delegated technical judgment/i);
+    assert.match(WORK_REVIEWER_PROMPT, /reject and request the exact decision or targeted research only when required evidence is missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the writer's authority/i);
+    assert.match(stepTwo, /writer resolves ordinary implementation decisions with repository evidence and delegated technical judgment/i);
+    assert.match(stepTwo, /Stop instead of emitting a brief only when required evidence remains missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the writer's authority/i);
 
     for (const text of [writerArchitecture, WORK_REVIEWER_PROMPT, stepTwo]) {
       assert.match(text, /prefer (?:extending|extension) or (?:extracting|extraction)|prefer existing seams and extraction/i);
       assert.match(text, /(?:new|add a) service, sidecar, plugin, daemon, durable root, protocol, state machine, compatibility layer/i);
       assert.match(text, /approved story[\s\S]*specific acceptance criterion[\s\S]*binding repository requirement/i);
     }
+    for (const column of ["Addition", "Required by", "Existing seam considered", "Why insufficient", "Smallest viable extension"]) {
+      assert.match(SPEC_WRITER_PROMPT, literalPattern(column), `architectural-additions table missing ${column}`);
+    }
     assert.match(writerArchitecture, /For every unavoidable new architectural element, including one named by the story, identify its story\/acceptance-criterion\/repository driver, the existing seam considered, why that seam is insufficient, and the smallest viable extension/i);
-    assert.match(WORK_REVIEWER_PROMPT, /Every such addition, including one named by the story, must identify that driver, the existing seam considered, why it is insufficient, and the smallest viable extension/i);
-    assert.match(stepTwo, /Every unavoidable addition, including one named by the story, must identify that driver, the existing seam considered, why it is insufficient, and the smallest viable extension/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Require one row in the architectural-additions table for every such addition, including one named by the story, with that driver, the existing seam considered, why it is insufficient, and the smallest viable extension/i);
+    assert.match(stepTwo, /Require one architectural-additions table row for every unavoidable addition, including one named by the story, with that driver, the existing seam considered, why it is insufficient, and the smallest viable extension/i);
+
+    for (const text of [writerArchitecture, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /new file or module used only (?:to organize code|for code organization)[\s\S]*no new process, service, durable state, protocol, lifecycle, compatibility, authority, or security boundary/i);
+    }
 
     assert.match(writerAssessment, /technical brief adds repository mapping and closes genuine decision gaps/i);
     assert.match(WORK_REVIEWER_PROMPT, /Reject unnecessary restatement, reinterpretation, or strengthening of story decisions/i);

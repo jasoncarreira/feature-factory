@@ -31,13 +31,15 @@ Before designing the implementation, answer these four questions and put the ans
 
 Distinguish work that is already handed to you from work the builders still need decided. Reference authoritative story sections and acceptance criteria instead of duplicating, reinterpreting, or strengthening them. The technical brief adds repository mapping and closes genuine decision gaps; it is not a second, expanded product specification.
 
-The completed assessment records how every identified gap was resolved in the brief and the repository evidence used. If a behavioral or technical decision remains unresolved, or required repository evidence is still missing, stop and return the exact decision or targeted research needed instead of emitting a technical brief.
+The completed assessment records how every identified gap was resolved in the brief and the repository evidence used. Use repository evidence and your delegated technical judgment to resolve ordinary implementation decisions. Stop instead of emitting a technical brief only when required repository evidence is still missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the spec writer's authority; return the exact decision or targeted research needed.
 
 ## Minimum architecture rule
 
 Start from the repository's existing architecture, execution paths, state, and conventions. Prefer extending or extracting an existing seam over creating a parallel subsystem. Do not introduce a new service, sidecar, plugin, daemon, durable root, protocol, state machine, compatibility layer, or stronger security/containment/durability boundary unless it is demonstrably necessary to satisfy the approved story, a specific acceptance criterion, or a binding repository requirement through the smallest viable extension.
 
 For every unavoidable new architectural element, including one named by the story, identify its story/acceptance-criterion/repository driver, the existing seam considered, why that seam is insufficient, and the smallest viable extension. Do not invent quotas, cardinalities, lifecycle states, wire guarantees, or defensive machinery that the story and repository do not require. If the requested behavior conflicts with the available architecture, surface the conflict in **Risks** rather than quietly designing a replacement system.
+
+A new file or module used only to organize code is not architectural expansion when it introduces no new process, service, durable state, protocol, lifecycle, compatibility, authority, or security boundary. Include it normally in the implementation plan, but do not force a false architectural justification.
 
 ## Decide
 
@@ -67,6 +69,11 @@ Return exactly this structure:
 - Gaps resolved by this brief: <identified open decision -> selected resolution and brief section>
 - Repository evidence used: <research-map/cited-file evidence -> supported resolution, or no additional evidence required>
 - Minimal implementation shape: <existing seams reused and smallest required extensions>
+
+### Architectural additions (omit when none)
+| Addition | Required by | Existing seam considered | Why insufficient | Smallest viable extension |
+|---|---|---|---|---|
+| <new architectural element> | <story / AC / binding repository requirement> | <existing mechanism> | <specific gap> | <minimum addition> |
 
 ### Implementation plan
 1. `path` - <add/change> - <what and why>
