@@ -1651,6 +1651,25 @@ describe("public documentation contract", () => {
     }
   });
 
+  it("documents the exact TUI plugin entry and the host-shared module contract", () => {
+    // The sidebar entry is detected by the host from exports["./tui"]; the
+    // root export is the server plugin and must never be documented as the
+    // sidebar. The compatibility contract is module identity with the host's
+    // solid/opentui copies, not exact version equality — a file:// reference
+    // into a checkout loads a second instance that renders once and never
+    // repaints.
+    assert.match(useInOpencode, /"plugin": \["opencode-feature-factory"\]/, "README must show the exact tui.json entry (bare package name)");
+    assert.match(useInOpencode, /detects the sidebar entry from `exports\["\.\/tui"\]`/i);
+    assert.match(useInOpencode, /root export is the server plugin and has no `tui\(\)` hook/i);
+    assert.match(useInOpencode, /module identity, not exact version equality/i);
+    assert.match(useInOpencode, /renders once and never repaints/i);
+    assert.equal(PACKAGE.exports["./tui"], "./dist/tui.js");
+    assert.ok(PACKAGE.peerDependencies["solid-js"], "solid-js must be a peerDependency resolved from the host installation");
+    assert.ok(PACKAGE.peerDependencies["@opentui/solid"], "@opentui/solid must be a peerDependency resolved from the host installation");
+    assert.equal(PACKAGE.dependencies["solid-js"], undefined, "solid-js must not be a regular dependency — it would create a second module instance");
+    assert.equal(PACKAGE.dependencies["@opentui/solid"], undefined, "@opentui/solid must not be a regular dependency — it would create a second module instance");
+  });
+
   it("publishes exactly the approved 13-agent GPT-5.6 recommendation and routing rules", () => {
     const expected = [
       ["feature-factory", "openai/gpt-5.6-sol", "xhigh"],

@@ -122,6 +122,19 @@ npm run doctor:local
 
 The server plugin registers `/feature`, one primary `feature-factory` agent, 12 specialized subagents, and the packaged feature skill at `assets/skills/feature/SKILL.md`. The separately importable TUI module default-exports an object with ID `opencode-feature-factory` and one `sidebar_content` slot at order `450`; importing or installing that export is not a promise that an opencode host automatically discovers or activates it.
 
+The sidebar polls durable run state every few seconds, so runs created, updated, or cleaned up after the TUI starts appear without a restart. A restart is only needed to pick up a new plugin bundle: hosts load the sidebar from the built `dist/tui.js` at startup, so after changing TUI source rebuild it (`npm run build:tui`, also run by `prepack` during `npm run check`'s package smoke) and restart the TUI.
+
+The TUI bundle deliberately does not bundle `solid-js` or `@opentui/solid`. They are `peerDependencies` declared as compatible ranges — the contract is module identity, not exact version equality: the sidebar must load the single copies provided by the host installation. Install the package where those modules resolve (for example `npm install <package>` inside `~/.config/opencode/`), then reference the bare package name:
+
+```jsonc
+// ~/.config/opencode/tui.json
+{
+  "plugin": ["opencode-feature-factory"]
+}
+```
+
+The host detects the sidebar entry from `exports["./tui"]` in the package manifest; the root export is the server plugin and has no `tui()` hook, so it is never the sidebar entry. Do not reference a `file://` path into a development checkout: a checkout carries its own `node_modules`, so the sidebar's reactive graph runs on a second solid/opentui instance — it renders once and never repaints, no matter how often the poll updates its signals.
+
 ### Workflow Depth
 
 The primary `feature-factory` agent is the only agent allowed to dispatch tasks. Specialized subagents cannot recursively delegate, which keeps the orchestration tree one level deep.

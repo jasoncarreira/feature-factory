@@ -34,8 +34,15 @@ function diagnosticColor(theme, status) {
   return theme.textMuted;
 }
 
+// Returns null on a transient scan failure (e.g. a cleanup deleting state
+// mid-tick) so callers keep the previous rows; a poll tick or slot mount must
+// never throw into the host render loop.
 function scanRuns(api) {
-  return readRuns(factoryRoots(api));
+  try {
+    return readRuns(factoryRoots(api));
+  } catch {
+    return null;
+  }
 }
 
 function runSnapshot(runs) {
@@ -61,7 +68,7 @@ function runSnapshot(runs) {
 
 function sharedRunStore(api) {
   if (!runStore) {
-    const initialRuns = scanRuns(api);
+    const initialRuns = scanRuns(api) ?? [];
     const [runs, setRuns] = createSignal(initialRuns, { equals: false });
     const [version, setVersion] = createSignal(1);
     runStore = { api, runs, setRuns, version, setVersion, snapshot: runSnapshot(initialRuns), refreshing: false };
@@ -80,11 +87,11 @@ function refreshRunStore() {
   let nextSnapshot;
   try {
     nextRuns = scanRuns(runStore.api);
-    nextSnapshot = runSnapshot(nextRuns);
+    nextSnapshot = nextRuns ? runSnapshot(nextRuns) : null;
   } finally {
     runStore.refreshing = false;
   }
-  if (nextSnapshot === runStore.snapshot) return;
+  if (!nextRuns || nextSnapshot === runStore.snapshot) return;
   runStore.snapshot = nextSnapshot;
   runStore.setRuns(nextRuns);
   runStore.setVersion((value) => value + 1);

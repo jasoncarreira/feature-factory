@@ -47,13 +47,17 @@
   ],
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
-    "@opentui/solid": "^0.4.3",
-    "jsonc-parser": "^3.3.1",
+    "jsonc-parser": "^3.3.1"
+  },
+  "peerDependencies": {
+    "@opentui/solid": "^0.4.1",
     "solid-js": "^1.9.10"
   },
   "devDependencies": {
     "@babel/parser": "^7.29.7",
-    "esbuild": "^0.25.0"
+    "@opentui/solid": "^0.4.3",
+    "esbuild": "^0.25.0",
+    "solid-js": "^1.9.10"
   },
   "engines": {
     "node": ">=20"

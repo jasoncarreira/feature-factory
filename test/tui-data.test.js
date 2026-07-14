@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "./helpers/git-fixture.js";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -82,6 +83,57 @@ describe("TUI factory scanner", () => {
 
     assert.ok(roots.includes(join(nested, ".opencode", "factory")));
     assert.equal(readRuns(roots)[0].run_id, "started-later");
+    cleanup(workspace);
+  });
+
+  it("shows a new session-root run on the next poll even when the cache holds another existing root", () => {
+    const workspace = tempDir();
+    const api = { state: { path: { worktree: workspace, directory: workspace } } };
+    const nested = join(workspace, "nested-repo");
+    writeRun(nested, "existing", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
+
+    // Warm the root cache with the existing nested root only.
+    const warm = factoryRoots(api);
+    assert.ok(warm.includes(join(nested, ".opencode", "factory")));
+
+    // A run created at the session root must be visible on the immediately
+    // following poll tick — not after the root-cache TTL expires.
+    writeRun(workspace, "brand-new", { status: "running", updated_at: "2026-07-06T00:00:00Z" });
+    const runs = readRuns(factoryRoots(api));
+
+    assert.ok(runs.some((run) => run.run_id === "brand-new"));
+    cleanup(workspace);
+  });
+
+  it("shows a new canonical git-root run when the session path is a repo subdirectory and the cache is warm", () => {
+    const repo = tempDir();
+    execFileSync("git", ["init", "--quiet"], { cwd: repo });
+    const sessionDir = join(repo, "subdir");
+    mkdirSync(sessionDir, { recursive: true });
+    const api = { state: { path: { directory: sessionDir } } };
+
+    // Warm the root cache with an existing nested root so the cache stays valid.
+    writeRun(join(sessionDir, "nested-repo"), "existing", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
+    const warm = factoryRoots(api);
+    assert.ok(warm.includes(join(sessionDir, "nested-repo", ".opencode", "factory")));
+
+    // Factory writes anchor at the Git repository root when the session
+    // directory has no local .opencode/factory; the sidebar must see that
+    // run on the immediately following poll, not after the cache TTL.
+    writeRun(repo, "canonical-new", { status: "running", updated_at: "2026-07-06T00:00:00Z" });
+    const runs = readRuns(factoryRoots(api));
+
+    assert.ok(runs.some((run) => run.run_id === "canonical-new"));
+    cleanup(repo);
+  });
+
+  it("does not throw when a scanned root is not a directory", () => {
+    const workspace = tempDir();
+    mkdirSync(join(workspace, ".opencode"), { recursive: true });
+    const rootAsFile = join(workspace, ".opencode", "factory");
+    writeFileSync(rootAsFile, "not a directory\n");
+
+    assert.deepEqual(readRuns([rootAsFile]), []);
     cleanup(workspace);
   });
 
