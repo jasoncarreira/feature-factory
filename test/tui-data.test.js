@@ -463,7 +463,7 @@ describe("TUI factory scanner", () => {
 
   it("preserves a validated descriptive run ID that the freeform policy classifies as high entropy", () => {
     const repo = tempDir();
-    const runId = "cleanup-sweep-integration-continuation";
+    const runId = "issue-69-planning-seeded-recovery";
     writeRun(repo, runId, { status: "running", updated_at: "2026-07-05T00:00:00Z", gates: {} });
 
     const [run] = readRuns(findFactoryRoots(repo), { diagnostics: false });

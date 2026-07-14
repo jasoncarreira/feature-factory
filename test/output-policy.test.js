@@ -29,6 +29,7 @@ describe("typed output segments", () => {
   it("recognizes descriptive run identities without admitting credential or opaque token shapes", () => {
     assert.equal(isDisplaySafeRunId("cleanup-sweep-integration-continuation"), true);
     assert.equal(isDisplaySafeRunId("post-pr-ci-remediation-continuation-2"), true);
+    assert.equal(isDisplaySafeRunId("issue-69-planning-seeded-recovery"), true);
     for (const value of [
       SECRET,
       "run-sk-abcdefghijklmnopqrstuvwx",

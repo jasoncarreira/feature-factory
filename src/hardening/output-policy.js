@@ -18,7 +18,7 @@ export const DIAGNOSTIC_FREEFORM_FIELDS = Object.freeze([
 
 const OUTPUT_POLICY_ERROR_CODE = "ERR_OUTPUT_POLICY";
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const DESCRIPTIVE_RUN_ID_PATTERN = /^[a-z]{1,32}(?:-[a-z]{1,32})+(?:-[0-9]{1,6})?$/u;
+const DESCRIPTIVE_RUN_ID_PATTERN = /^[a-z]{1,32}(?:-(?:[a-z]{1,32}|[0-9]{1,6}))+$/u;
 const SAFE_BRANCH_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$/u;
 const DESCRIPTIVE_BRANCH_PATTERN = /^(?:[a-z]{1,32}|[0-9]{1,6})(?:[-/](?:[a-z]{1,32}|[0-9]{1,6}))+$/u;
 const UUID_PATTERN = /[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}/u;
@@ -106,7 +106,7 @@ export function isDisplaySafeRunId(value) {
   if (isRecognizedSensitiveValue(value, { mode: "baseline" }) || containsRecognizedSensitiveFragment(value)) return false;
   if (!isSensitiveValue(value, { mode: "baseline" })) return true;
   return DESCRIPTIVE_RUN_ID_PATTERN.test(value)
-    && value.split("-").every((segment) => /^\d+$/u.test(segment) || !isSensitiveValue(segment, { mode: "baseline" }));
+    && value.split("-").every((segment) => /^\d{1,6}$/u.test(segment) || !isSensitiveValue(segment, { mode: "baseline" }));
 }
 
 export function isDisplaySafeBranch(value) {
