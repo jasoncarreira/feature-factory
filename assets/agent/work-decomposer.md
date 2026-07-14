@@ -30,10 +30,12 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 - Keep each slice `test_plan` limited to focused and directly impacted checks that can attribute failure to that slice. Do not assign the repository-wide full-suite/build/package command to any implementation slice, including the final slice; preserve it as the post-merge `test-verifier` integration gate.
 - Shared hotspots must be serialized into different waves.
 - Generated files have one owning slice.
-- Prefer fewer coherent slices over many tiny slices.
-- The longest dependency path may span at most three waves; a root slice is wave 1.
-- Combine tightly serialized work into one coherent slice instead of creating a fourth wave. `max_parallel_slices` limits concurrency within a wave and does not relax the depth cap.
+- **Per-slice width budget (primary constraint).** Each slice owns one dominant hard concern — a single locus of crash-recovery, concurrency, security-boundary, canonicalization/serialization, migration, or protocol-contract reasoning — plus its focused tests. Do not bundle multiple independent hard concerns into one slice. A large, heterogeneous acceptance list (a rough smell above ~6-8 criteria, not a hard line) is a signal to split along the concern seams, not to grow the slice. Width is the primary limit; prefer splitting over widening.
+- Prefer fewer coherent slices over many tiny slices — but never merge independent hard concerns to achieve that. When "fewer slices" and the width budget conflict, the width budget wins.
+- The longest dependency path may span at most four waves; a root slice is wave 1. Prefer three or fewer waves for a shorter critical path, but use a fourth wave when it is needed to keep each slice within the width budget.
+- Prefer combining tightly serialized work into fewer coherent slices for a shorter critical path, but never at the cost of the width budget: do not bundle independent hard concerns into one slice merely to avoid a wave. `max_parallel_slices` limits concurrency within a wave and does not relax the depth cap.
 - If the feature is indivisible, emit one slice and explain why.
+- **Redesign escalation (width and depth both bounded).** If the feature cannot be decomposed so that every slice stays within the width budget without exceeding four waves, do not emit a slice plan. Return a `REDESIGN-REQUIRED` result instead: name the concern seams that overflow and explain why they cannot be separated within four waves. Width and depth are both bounded — when they collide, the feature is too large for one run. Stop and ask for a smaller story or brief; never ship a god-slice and never exceed four waves.
 
 ## Hotspot Examples
 
@@ -100,3 +102,17 @@ Return exactly this structure:
 ```
 
 The JSON must be valid and directly usable as `plan/slices.json`.
+
+If the redesign escalation applies, emit no slice plan. Instead return exactly:
+
+```markdown
+## Decomposition result: REDESIGN-REQUIRED
+
+**Reason:** width-and-depth-conflict
+**Overflowing concern seams:**
+- <concern> — cannot separate within four waves because <specific dependency chain / shared file / ordering constraint>
+
+**Suggested resize:** <the smaller story or brief scope that would fit>
+```
+
+The orchestrator treats `REDESIGN-REQUIRED` as a Gate 2 failure and terminalizes `needs-human`.

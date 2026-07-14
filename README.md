@@ -845,10 +845,11 @@ Each slice records `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test
 The orchestrator computes waves from `depends_on`:
 
 - A slice can run when all dependencies are `merged`.
-- A root slice is wave 1, and the longest dependency path may span at most three waves.
+- A root slice is wave 1, and the longest dependency path may span at most four waves (prefer three or fewer for a shorter critical path).
 - Same-wave slices must be file-disjoint.
 - Shared hotspots are serialized into later waves.
 - Up to `max_parallel_slices` run concurrently within a wave; this does not relax the depth cap.
+- Each slice carries one dominant hard concern (per-slice width budget); a fourth wave is used to keep slices within that budget, not to grow the critical path arbitrarily. When the width budget cannot be met within four waves, decomposition returns `REDESIGN-REQUIRED` and the run stops for a smaller story rather than shipping an oversized slice.
 - Each slice builds in its own `.opencode/worktrees/<feature-branch>--<slice-id>` worktree.
 - The orchestrator observes diff/tests, runs `work-reviewer`, then merges approved slices serially into the feature worktree.
 
