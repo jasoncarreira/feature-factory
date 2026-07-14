@@ -129,6 +129,7 @@ describe("class-wide planning prompt contract", () => {
       ["every under-specification dimension", /every unresolved contract, policy, state-transition table[\s\S]{0,80}compatibility decision, and test seam/i, /every dimension of under-specification/i],
       ["story-authorized deferral", /only when the approved story or scope authorizes it/i, /only when the approved story or scope authorizes it/i],
       ["feasible envelope", /implementable within the brief's allowed mechanisms, dependencies, compatibility constraints, and non-goals/i, /cannot be implemented within its allowed mechanisms, dependencies, compatibility constraints, or explicit non-goals/i],
+      ["spec altitude defers mechanical enumeration", /do not hand-author byte-exact vectors, literal digests, or exhaustive per-field fixtures in prose/i, /do \*\*not\*\* require the brief to carry hand-computed byte-exact vectors, literal digests, or exhaustive per-field fixtures/i],
     ];
     for (const [name, writerPattern, reviewerPattern] of sharedBar) {
       assert.match(SPEC_WRITER_PROMPT, writerPattern, `spec-writer must self-check shared invariant: ${name}`);
@@ -414,7 +415,7 @@ describe("consolidated reviewer decision procedure contract", () => {
 
     assert.match(WORK_REVIEWER_PROMPT, /REJECT[\s\S]*out-of-lane edits outside slice `paths`[\s\S]*acceptance criterion that is unimplemented or untested/i);
     assert.match(WORK_REVIEWER_PROMPT, /REJECT serious correctness, repository-convention, migration, generated-code, or compatibility risk/i);
-    for (const decompositionFailure of ["orphan acceptance criteria", "cyclic dependencies", "same-wave path overlap", "un-serialized hotspots", "dependency path deeper than three waves"]) {
+    for (const decompositionFailure of ["orphan acceptance criteria", "cyclic dependencies", "same-wave path overlap", "un-serialized hotspots", "dependency path deeper than four waves"]) {
       assert.match(WORK_REVIEWER_PROMPT, new RegExp(`For decomposition, REJECT[^\\n]*${escapeRegExp(decompositionFailure)}`, "i"), `work reviewer must reject ${decompositionFailure}`);
     }
 
@@ -539,16 +540,62 @@ describe("bounded agent depth contract", () => {
 });
 
 describe("decomposition depth contract", () => {
-  it("requires the decomposer and reviewer to enforce a three-wave maximum", () => {
-    assert.match(WORK_DECOMPOSER_PROMPT, /longest dependency path may span at most three waves; a root slice is wave 1/i);
-    assert.match(WORK_DECOMPOSER_PROMPT, /combine tightly serialized work into one coherent slice instead of creating a fourth wave/i);
-    assert.match(WORK_REVIEWER_PROMPT, /dependency path deeper than three waves \(root is wave 1\)/i);
+  it("requires the decomposer and reviewer to enforce a four-wave maximum with depth secondary to width", () => {
+    assert.match(WORK_DECOMPOSER_PROMPT, /longest dependency path may span at most four waves; a root slice is wave 1/i);
+    // The old "combine into one coherent slice rather than a fourth wave" collapse rule that
+    // produced god-slices must be gone; a fourth wave is now allowed to keep width bounded.
+    assert.doesNotMatch(WORK_DECOMPOSER_PROMPT, /combine tightly serialized work into one coherent slice instead of creating a fourth wave/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /use a fourth wave when it is needed to keep each slice within the width budget/i);
+    assert.match(WORK_REVIEWER_PROMPT, /dependency path deeper than four waves \(root is wave 1\)/i);
+  });
+
+  it("makes per-slice width the primary decomposition limit", () => {
+    assert.match(WORK_DECOMPOSER_PROMPT, /Per-slice width budget \(primary constraint\)/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /one dominant hard concern/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /When "fewer slices" and the width budget conflict, the width budget wins/i);
+    assert.match(WORK_REVIEWER_PROMPT, /overflows the per-slice width budget by bundling multiple independent hard concerns/i);
+    assert.match(SKILL, /keep every slice within the per-slice width budget \(one dominant hard concern/i);
+  });
+
+  it("escalates to REDESIGN-REQUIRED via the canonical durable terminal sequence", () => {
+    assert.match(WORK_DECOMPOSER_PROMPT, /Redesign escalation \(width and depth both bounded\)/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /REDESIGN-REQUIRED/);
+    assert.match(WORK_REVIEWER_PROMPT, /the correct decomposition output is `REDESIGN-REQUIRED`, not a god-slice/i);
+    // needs-human must go through the durable terminal writer (heartbeat stop, steering
+    // checkpoint, terminal boundary), not an ad-hoc status write.
+    assert.match(SKILL, /If `work-decomposer` returns `REDESIGN-REQUIRED`[\s\S]*factory terminal <run-id> needs-human --reason TEXT --boundary-token/i);
+  });
+
+  it("defers implementation-grade artifacts out of the spec stage (altitude)", () => {
+    assert.match(SPEC_WRITER_PROMPT, /Spec altitude — pin contracts, defer mechanical enumeration/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Spec altitude — pin contracts, defer mechanical enumeration/i);
+    assert.match(WORK_REVIEWER_PROMPT, /an LLM cannot compute a real digest/i);
+    assert.match(SKILL, /Spec altitude:[\s\S]*defer those to build-time tests whose golden values are independently generated or source-cited, never produced by the serializer under test/i);
+  });
+
+  it("requires golden vectors to be independent, and pins story/protocol-required vectors", () => {
+    // Guard against the two failure modes GPT-5.6 surfaced: circular self-generated fixtures,
+    // and blanket-forbidding vectors an approved story or external protocol genuinely requires.
+    for (const prompt of [SPEC_WRITER_PROMPT, WORK_REVIEWER_PROMPT]) {
+      assert.match(prompt, /independently[- ]generated or source-cited/i, "vectors must be independent, not self-generated");
+      assert.match(prompt, /never .*produced by the same serializer under test/i, "self-validated fixtures prove nothing");
+      assert.match(prompt, /(?:approved )?story or (?:an )?external (?:wire )?protocol requires specific interop vectors/i, "required interop vectors are contract");
+    }
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT a fixture that validates the serializer against a value the serializer itself produced/i);
+  });
+
+  it("scopes the class-wide sweep bar away from bounded new capabilities without dropping security sinks", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /Scope guard:\*\* a single bounded new capability does not become a sweep merely because its own contract uses universal quantifiers/i);
+    assert.match(SKILL, /a class-wide sweep bar likewise targets genuine repository-wide class changes, not a single bounded capability/i);
+    // The scope guard must not exempt reachable security-sensitive sinks from spec coverage.
+    assert.match(WORK_REVIEWER_PROMPT, /never exempts reachable authority, publication\/side-effect, or vulnerability-class sinks \*within\* the capability/i);
+    assert.match(SKILL, /never exempts reachable authority, publication, or vulnerability-class sinks within the capability/i);
   });
 
   it("documents derived depth separately from concurrency", () => {
     for (const [name, text] of Object.entries({ SKILL, SCHEMA, README })) {
       assert.match(text, /root(?: slice)? is wave 1/i, `${name} must define root depth`);
-      assert.match(text, /(?:at most|capped at) three waves/i, `${name} must document the depth cap`);
+      assert.match(text, /(?:at most|capped at|within) four waves/i, `${name} must document the depth cap`);
       assert.match(text, /max_parallel_slices[\s\S]{0,120}(?:concurrency|concurrently)[\s\S]{0,120}(?:does not|not)[\s\S]{0,80}(?:depth cap|cap)/i, `${name} must distinguish concurrency from depth`);
     }
   });

@@ -22,7 +22,7 @@ export const HEARTBEAT_PHASES = Object.freeze([
   "post-pr-revalidation",
 ]);
 export const HEARTBEAT_PROTECTED_GATES = Object.freeze(["story", "brief", "pre_pr"]);
-export const MAX_SLICE_DEPENDENCY_WAVES = 3;
+export const MAX_SLICE_DEPENDENCY_WAVES = 4;
 
 const RUN_STATUSES = new Set(["running", ...TERMINAL_RUN_STATUSES]);
 const TERMINAL_STATUSES = new Set(TERMINAL_RUN_STATUSES);

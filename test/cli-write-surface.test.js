@@ -302,15 +302,40 @@ describe("cli write surface", () => {
           plannedSlice("second", ["root"]),
           plannedSlice("third", ["second"]),
           plannedSlice("fourth", ["third"]),
+          plannedSlice("fifth", ["fourth"]),
         ],
       });
       const runBefore = readFileSync(join(runDir, "run.json"), "utf8");
 
       const result = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
 
-      assert.match(result.stderr, /dependency depth 4 exceeds maximum 3 waves: root -> second -> third -> fourth/u);
+      assert.match(result.stderr, /dependency depth 5 exceeds maximum 4 waves: root -> second -> third -> fourth -> fifth/u);
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), runBefore);
       assert.deepEqual(readJson(join(runDir, "run.json")).slices, []);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("seeds a four-wave slice plan (the raised depth cap) through the CLI", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-slice-fourwave-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      initGitRepo(repo);
+      seedRun(runDir);
+      writeJson(join(runDir, "plan", "slices.json"), {
+        slices: [
+          plannedSlice("root"),
+          plannedSlice("second", ["root"]),
+          plannedSlice("third", ["second"]),
+          plannedSlice("fourth", ["third"]),
+        ],
+      });
+
+      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+
+      assert.deepEqual(readJson(join(runDir, "run.json")).slices.map((slice) => slice.id), ["root", "second", "third", "fourth"]);
+      validateFactory(repo);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

@@ -225,8 +225,8 @@ describe("run schema and consistency", () => {
     }
   });
 
-  it("caps planned slice dependency paths at three waves", () => {
-    assert.equal(MAX_SLICE_DEPENDENCY_WAVES, 3);
+  it("caps planned slice dependency paths at four waves", () => {
+    assert.equal(MAX_SLICE_DEPENDENCY_WAVES, 4);
     const threeWaves = slicesPlan([
       plannedSlice("root"),
       plannedSlice("middle", ["root"]),
@@ -242,15 +242,25 @@ describe("run schema and consistency", () => {
     ]);
     assert.equal(validateSlicesPlan(diamond), diamond);
 
+    // A four-wave chain is now accepted (width-primary decomposition may use a fourth wave).
+    const fourWaves = slicesPlan([
+      plannedSlice("root"),
+      plannedSlice("second", ["root"]),
+      plannedSlice("third", ["second"]),
+      plannedSlice("fourth", ["third"]),
+    ]);
+    assert.equal(validateSlicesPlan(fourWaves), fourWaves);
+
     assert.throws(
       () => validateSlicesPlan(slicesPlan([
         plannedSlice("root"),
         plannedSlice("second", ["root"]),
         plannedSlice("third", ["second"]),
         plannedSlice("fourth", ["third"]),
+        plannedSlice("fifth", ["fourth"]),
       ])),
       (error) => error instanceof ValidationError
-        && error.message.includes("plan.slices[3].depends_on: dependency depth 4 exceeds maximum 3 waves: root -> second -> third -> fourth"),
+        && error.message.includes("plan.slices[4].depends_on: dependency depth 5 exceeds maximum 4 waves: root -> second -> third -> fourth -> fifth"),
     );
 
     const legacyPlan = slicesPlan([
@@ -258,6 +268,7 @@ describe("run schema and consistency", () => {
       plannedSlice("second", ["root"]),
       plannedSlice("third", ["second"]),
       plannedSlice("fourth", ["third"]),
+      plannedSlice("fifth", ["fourth"]),
     ]);
     assert.equal(validateSlicesPlan(legacyPlan, { enforceDependencyDepth: false }), legacyPlan);
   });
@@ -452,6 +463,7 @@ describe("run schema and consistency", () => {
       plannedSlice("second", ["root"]),
       plannedSlice("third", ["second"]),
       plannedSlice("fourth", ["third"]),
+      plannedSlice("fifth", ["fourth"]),
     ]);
     mkdirSync(join(runDir, "plan"), { recursive: true });
     writeJson(join(runDir, "plan", "slices.json"), plan);
@@ -478,6 +490,7 @@ describe("run schema and consistency", () => {
       plannedSlice("second", ["root"]),
       plannedSlice("third", ["second"]),
       plannedSlice("fourth", ["third"]),
+      plannedSlice("fifth", ["fourth"]),
     ]);
     mkdirSync(join(runDir, "plan"), { recursive: true });
     writeJson(join(runDir, "plan", "slices.json"), plan);
@@ -494,6 +507,7 @@ describe("run schema and consistency", () => {
         { id: "x-b", stack: "backend", depends_on: ["x-a"], status: "pending", attempts: 0 },
         { id: "x-c", stack: "backend", depends_on: ["x-b"], status: "pending", attempts: 0 },
         { id: "x-d", stack: "backend", depends_on: ["x-c"], status: "pending", attempts: 0 },
+        { id: "x-e", stack: "backend", depends_on: ["x-d"], status: "pending", attempts: 0 },
       ]));
       assert.equal(validateRunDir(runDir).ok, false, "an unrelated run.slices must not grandfather the plan");
 
