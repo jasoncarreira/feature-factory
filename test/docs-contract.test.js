@@ -140,6 +140,39 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SPEC_WRITER_PROMPT, /call out shared or contested paths explicitly/i);
   });
 
+  it("requires source assessment and minimum architecture before specification", () => {
+    const writerAssessment = markdownSection(SPEC_WRITER_PROMPT, "Source and work assessment");
+    const writerArchitecture = markdownSection(SPEC_WRITER_PROMPT, "Minimum architecture rule");
+    const stepTwo = markdownSection(SKILL, "Step 2 - Spec And Decomposition");
+    assert.ok(SPEC_WRITER_PROMPT.indexOf("## Source and work assessment") < SPEC_WRITER_PROMPT.indexOf("## Decide"), "source assessment must precede implementation design");
+    assert.ok(SPEC_WRITER_PROMPT.indexOf("### Source and work assessment") < SPEC_WRITER_PROMPT.indexOf("### Implementation plan"), "source assessment must precede the implementation plan in the output template");
+
+    for (const text of [writerAssessment, stepTwo]) {
+      assert.match(text, /what (?:story )?decisions(?: and contracts|\/contracts)? are already authoritative/i);
+      assert.match(text, /what (?:behavioral or technical )?decisions (?:actually )?remain unresolved/i);
+      assert.match(text, /what repository mapping or evidence is still required/i);
+      assert.match(text, /what is the simplest repository-native design/i);
+      assert.match(text, /distinguish work (?:that is )?already handed/i);
+      assert.match(text, /how (?:every|each) identified gap was resolved[\s\S]*repository evidence used/i);
+    }
+    assert.match(writerAssessment, /If a behavioral or technical decision remains unresolved, or required repository evidence is still missing, stop and return the exact decision or targeted research needed instead of emitting a technical brief/i);
+    assert.match(stepTwo, /If a behavioral\/technical decision or required evidence remains unresolved, stop and request the exact decision or targeted research instead of emitting a technical brief/i);
+
+    for (const text of [writerArchitecture, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /prefer (?:extending|extension) or (?:extracting|extraction)|prefer existing seams and extraction/i);
+      assert.match(text, /(?:new|add a) service, sidecar, plugin, daemon, durable root, protocol, state machine, compatibility layer/i);
+      assert.match(text, /approved story[\s\S]*specific acceptance criterion[\s\S]*binding repository requirement/i);
+    }
+    assert.match(writerArchitecture, /For every unavoidable new architectural element, including one named by the story, identify its story\/acceptance-criterion\/repository driver, the existing seam considered, why that seam is insufficient, and the smallest viable extension/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Every such addition, including one named by the story, must identify that driver, the existing seam considered, why it is insufficient, and the smallest viable extension/i);
+    assert.match(stepTwo, /Every unavoidable addition, including one named by the story, must identify that driver, the existing seam considered, why it is insufficient, and the smallest viable extension/i);
+
+    assert.match(writerAssessment, /technical brief adds repository mapping and closes genuine decision gaps/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Reject unnecessary restatement, reinterpretation, or strengthening of story decisions/i);
+    assert.match(WORK_REVIEWER_PROMPT, /removing or simplifying it still satisfies the story/i);
+    assert.match(stepTwo, /remove or simplify the mechanism rather than expanding the specification around it/i);
+  });
+
   it("requires the decomposer to derive dependencies from each test command's validated outputs", () => {
     // Producer invariant from the observed remediation-exposed rejection: adding
     // focused test commands to a slice without depending on the sibling whose
