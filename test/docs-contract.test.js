@@ -140,6 +140,50 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SPEC_WRITER_PROMPT, /call out shared or contested paths explicitly/i);
   });
 
+  it("requires source assessment and minimum architecture before specification", () => {
+    const writerAssessment = markdownSection(SPEC_WRITER_PROMPT, "Source and work assessment");
+    const writerArchitecture = markdownSection(SPEC_WRITER_PROMPT, "Minimum architecture rule");
+    const stepTwo = markdownSection(SKILL, "Step 2 - Spec And Decomposition");
+    assert.ok(SPEC_WRITER_PROMPT.indexOf("## Source and work assessment") < SPEC_WRITER_PROMPT.indexOf("## Decide"), "source assessment must precede implementation design");
+    assert.ok(SPEC_WRITER_PROMPT.indexOf("### Source and work assessment") < SPEC_WRITER_PROMPT.indexOf("### Implementation plan"), "source assessment must precede the implementation plan in the output template");
+
+    for (const text of [writerAssessment, stepTwo]) {
+      assert.match(text, /what (?:story )?decisions(?: and contracts|\/contracts)? are already authoritative/i);
+      assert.match(text, /what (?:behavioral or technical )?decisions (?:actually )?remain unresolved/i);
+      assert.match(text, /what repository mapping or evidence is still required/i);
+      assert.match(text, /what is the simplest repository-native design/i);
+      assert.match(text, /distinguish work (?:that is )?already handed/i);
+      assert.match(text, /how (?:every|each) identified gap was resolved[\s\S]*repository evidence used/i);
+    }
+    assert.match(writerAssessment, /Use repository evidence and your delegated technical judgment to resolve ordinary implementation decisions/i);
+    assert.match(writerAssessment, /Stop instead of emitting a technical brief only when required repository evidence is still missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the spec writer's authority/i);
+    assert.match(WORK_REVIEWER_PROMPT, /writer must resolve ordinary implementation decisions using repository evidence and delegated technical judgment/i);
+    assert.match(WORK_REVIEWER_PROMPT, /reject and request the exact decision or targeted research only when required evidence is missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the writer's authority/i);
+    assert.match(stepTwo, /writer resolves ordinary implementation decisions with repository evidence and delegated technical judgment/i);
+    assert.match(stepTwo, /Stop instead of emitting a brief only when required evidence remains missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the writer's authority/i);
+
+    for (const text of [writerArchitecture, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /prefer (?:extending|extension) or (?:extracting|extraction)|prefer existing seams and extraction/i);
+      assert.match(text, /(?:new|add a) service, sidecar, plugin, daemon, durable root, protocol, state machine, compatibility layer/i);
+      assert.match(text, /approved story[\s\S]*specific acceptance criterion[\s\S]*binding repository requirement/i);
+    }
+    for (const column of ["Addition", "Required by", "Existing seam considered", "Why insufficient", "Smallest viable extension"]) {
+      assert.match(SPEC_WRITER_PROMPT, literalPattern(column), `architectural-additions table missing ${column}`);
+    }
+    assert.match(writerArchitecture, /For every unavoidable new architectural element, including one named by the story, identify its story\/acceptance-criterion\/repository driver, the existing seam considered, why that seam is insufficient, and the smallest viable extension/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Require one row in the architectural-additions table for every such addition, including one named by the story, with that driver, the existing seam considered, why it is insufficient, and the smallest viable extension/i);
+    assert.match(stepTwo, /Require one architectural-additions table row for every unavoidable addition, including one named by the story, with that driver, the existing seam considered, why it is insufficient, and the smallest viable extension/i);
+
+    for (const text of [writerArchitecture, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /new file or module used only (?:to organize code|for code organization)[\s\S]*no new process, service, durable state, protocol, lifecycle, compatibility, authority, or security boundary/i);
+    }
+
+    assert.match(writerAssessment, /technical brief adds repository mapping and closes genuine decision gaps/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Reject unnecessary restatement, reinterpretation, or strengthening of story decisions/i);
+    assert.match(WORK_REVIEWER_PROMPT, /removing or simplifying it still satisfies the story/i);
+    assert.match(stepTwo, /remove or simplify the mechanism rather than expanding the specification around it/i);
+  });
+
   it("requires the decomposer to derive dependencies from each test command's validated outputs", () => {
     // Producer invariant from the observed remediation-exposed rejection: adding
     // focused test commands to a slice without depending on the sibling whose
