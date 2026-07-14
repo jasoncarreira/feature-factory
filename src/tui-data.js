@@ -38,10 +38,18 @@ const rootCache = new Map();
 
 export function factoryRoots(api, options = {}) {
   const starts = tuiStartPaths(api);
+  // The session's own `.opencode/factory` candidates are always part of the
+  // result — even when they do not exist yet and even on a cache hit that
+  // holds other discovered roots. A run created in the active project must
+  // become visible on the next poll tick, never after a cache TTL expiry.
+  // readRootRuns tolerates roots that do not exist.
+  const candidates = starts.map((start) => join(resolve(start), ".opencode", "factory"));
   const cacheKey = starts.map((start) => resolve(start)).join("\0");
   const now = Date.now();
   const cached = rootCache.get(cacheKey);
-  if (!options.noCache && !options.notes && cached && cached.expiresAt > now && cached.roots.some((root) => existsSync(root))) return cached.roots;
+  if (!options.noCache && !options.notes && cached && cached.expiresAt > now && cached.roots.some((root) => existsSync(root))) {
+    return mergeRoots(cached.roots, candidates);
+  }
 
   const roots = new Set();
   for (const start of starts) {
@@ -49,7 +57,11 @@ export function factoryRoots(api, options = {}) {
   }
   const sorted = [...roots].sort();
   if (!options.noCache) rootCache.set(cacheKey, { expiresAt: now + ROOT_CACHE_TTL_MS, roots: sorted });
-  return sorted;
+  return mergeRoots(sorted, candidates);
+}
+
+function mergeRoots(roots, candidates) {
+  return [...new Set([...roots, ...candidates])].sort();
 }
 
 function tuiStartPaths(api) {
@@ -149,23 +161,45 @@ function safeReadDir(dir) {
   }
 }
 
+// A `factory cleanup` (or any operator deletion) can remove roots, run
+// directories, or run.json between the individual fs calls of a poll tick.
+// Every step therefore tolerates disappearance instead of throwing: a scan
+// tick must never propagate an exception into the TUI render loop, and a
+// vanished run is simply absent — not an invalid row.
 function readRootRuns(root, options = {}) {
-  if (!root || !existsSync(root)) return [];
+  if (!root) return [];
   const repoRoot = dirname(dirname(root));
-  return readdirSync(root)
+  return safeReadDirNames(root)
     .flatMap((runID) => {
       const file = join(root, runID, "run.json");
-      if (!existsSync(file) || !statSync(file).isFile()) return [];
+      if (!safeIsFile(file)) return [];
       try {
         const run = JSON.parse(readFileSync(file, "utf8"));
         const diagnostics = options.diagnostics === false ? healthyDiagnostics() : safeDiagnoseRunObject(run, file, { repoRoot });
         if (shouldUseFallbackRow(diagnostics)) return [fallbackRun(runID, file, diagnostics)];
         return [summarize(run, runID, file, diagnostics)];
       } catch (error) {
+        if (error?.code === "ENOENT") return [];
         const diagnostics = options.diagnostics === false ? parseErrorDiagnostics(file, error) : safeDiagnoseRunFile(file, { repoRoot });
         return [fallbackRun(runID, file, diagnostics)];
       }
     });
+}
+
+function safeReadDirNames(dir) {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+function safeIsFile(file) {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function parseErrorDiagnostics(file, error) {

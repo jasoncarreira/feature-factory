@@ -122,6 +122,8 @@ npm run doctor:local
 
 The server plugin registers `/feature`, one primary `feature-factory` agent, 12 specialized subagents, and the packaged feature skill at `assets/skills/feature/SKILL.md`. The separately importable TUI module default-exports an object with ID `opencode-feature-factory` and one `sidebar_content` slot at order `450`; importing or installing that export is not a promise that an opencode host automatically discovers or activates it.
 
+The sidebar polls durable run state every few seconds, so runs created, updated, or cleaned up after the TUI starts appear without a restart. A restart is only needed to pick up a new plugin bundle: hosts load the sidebar from the built `dist/tui.js` at startup, so after changing TUI source rebuild it (`npm run build:tui`, also run by `prepack` during `npm run check`'s package smoke) and restart the TUI.
+
 ### Workflow Depth
 
 The primary `feature-factory` agent is the only agent allowed to dispatch tasks. Specialized subagents cannot recursively delegate, which keeps the orchestration tree one level deep.

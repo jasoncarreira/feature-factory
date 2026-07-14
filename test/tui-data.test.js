@@ -85,6 +85,35 @@ describe("TUI factory scanner", () => {
     cleanup(workspace);
   });
 
+  it("shows a new session-root run on the next poll even when the cache holds another existing root", () => {
+    const workspace = tempDir();
+    const api = { state: { path: { worktree: workspace, directory: workspace } } };
+    const nested = join(workspace, "nested-repo");
+    writeRun(nested, "existing", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
+
+    // Warm the root cache with the existing nested root only.
+    const warm = factoryRoots(api);
+    assert.ok(warm.includes(join(nested, ".opencode", "factory")));
+
+    // A run created at the session root must be visible on the immediately
+    // following poll tick — not after the root-cache TTL expires.
+    writeRun(workspace, "brand-new", { status: "running", updated_at: "2026-07-06T00:00:00Z" });
+    const runs = readRuns(factoryRoots(api));
+
+    assert.ok(runs.some((run) => run.run_id === "brand-new"));
+    cleanup(workspace);
+  });
+
+  it("does not throw when a scanned root is not a directory", () => {
+    const workspace = tempDir();
+    mkdirSync(join(workspace, ".opencode"), { recursive: true });
+    const rootAsFile = join(workspace, ".opencode", "factory");
+    writeFileSync(rootAsFile, "not a directory\n");
+
+    assert.deepEqual(readRuns([rootAsFile]), []);
+    cleanup(workspace);
+  });
+
   it("tolerates missing TUI startup path state", () => {
     for (const api of [null, {}, { state: null }, { state: { path: null } }, { state: { path: {} } }]) {
       assert.doesNotThrow(() => factoryRoots(api));
