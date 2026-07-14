@@ -24,6 +24,7 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 
 - Every slice has `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
 - Every acceptance criterion maps to at least one slice.
+- Every deferred mechanical completeness obligation in the brief maps to exactly one owning slice. Preserve its declared dimensions in that slice's acceptance, assign an owned path lane for the builder-selected executable schema or state model, and include its table-driven or model-based verification in the slice test plan; require an exact artifact path only when it is existing, public, generated, shared, contested, or source-fixed. Do not let completeness disappear merely because it is not a story acceptance criterion.
 - Same-wave slices must be file-disjoint.
 - Dependencies must be real consumption dependencies, not blanket backend-before-frontend ordering.
 - For each test command, identify the changed slice outputs it validates. Add dependencies on every sibling slice whose changed output must exist before that command runs. Broad regression commands do not imply dependencies on unaffected code.
@@ -93,6 +94,7 @@ Return exactly this structure:
 - AC1 -> <slice id>
 - AC2 -> <slice id>
 - Unmapped ACs: <none | list, blocker>
+- Deferred mechanical completeness -> <brief obligation -> owning slice -> executable schema or state model -> table-driven or model-based test, or none>
 
 ### Test-verifier integration gate
 - `<exact canonical repository-wide command from the accepted brief>` - runs after every slice is merged

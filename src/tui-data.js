@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { directFactoryRoot } from "./factory-paths.js";
+import { repoRoot } from "./git.js";
 import {
   DIAGNOSTIC_CLASSIFICATIONS,
   DIAGNOSTIC_CONDITIONS,
@@ -48,7 +49,10 @@ export function factoryRoots(api, options = {}) {
   // repository root's — so a session opened in a repo subdirectory still
   // sees runs written at the repo root. readRootRuns tolerates roots that
   // do not exist.
-  const candidates = starts.map((start) => directFactoryRoot(start));
+  const candidates = starts.flatMap((start) => [
+    directFactoryRoot(start),
+    join(repoRoot(start), ".opencode", "factory"),
+  ]);
   const cacheKey = starts.map((start) => resolve(start)).join("\0");
   const now = Date.now();
   const cached = rootCache.get(cacheKey);
@@ -352,11 +356,18 @@ function currentSummary(run) {
   if (activeStep) return summarizeWorkItem(activeStep.agent, activeStep.status, activeStep.attempts);
   const blockedSlice = firstByStatus(run.slices, ["blocked"]);
   if (blockedSlice) return summarizeWorkItem(blockedSlice.id, blockedSlice.status, blockedSlice.attempts);
-  const step = firstByStatus(run.steps, ["blocked", "pending"]);
+  const displayableSteps = Array.isArray(run.steps) ? run.steps.filter(isDisplayableFallbackStep) : [];
+  const step = firstByStatus(displayableSteps, ["blocked", "pending"]);
   if (step) return summarizeWorkItem(step.agent, step.status, step.attempts);
   const panel = inferredPrePrPanelSummary(run);
   if (panel) return panel;
   return null;
+}
+
+function isDisplayableFallbackStep(step) {
+  if (step?.status !== "blocked") return true;
+  if (Number.isInteger(step.attempts) && step.attempts > 0) return true;
+  return Boolean(step.reason || step.review_ref || step.evidence_ref || step.artifact_ref);
 }
 
 function steeringSummary(run) {

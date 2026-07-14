@@ -124,12 +124,12 @@ describe("class-wide planning prompt contract", () => {
     const sharedBar = [
       ["decided per-sink policy", /decided policy/i, /decided policy/i],
       ["mandatory test mapping", /every AC maps to a mandatory, named test or command/i, /every row maps to a test/i],
-      ["no unresolved behavioral/design decision", /No behavioral or design choice is left to builders/i, /unresolved behavioral or design decision is not a residual/i],
-      ["mechanical-only residual", /mechanical residual is acceptable only when its behavior, compatibility, security, and state policy are already decided/i, /mechanical implementation detail whose behavior, backward-compatibility, security, and state-transition policy are already decided/i],
-      ["every under-specification dimension", /every unresolved contract, policy, state-transition table[\s\S]{0,80}compatibility decision, and test seam/i, /every dimension of under-specification/i],
+      ["no unresolved consequential decision", /No unresolved consequential decision/i, /missing consequential decision/i],
+      ["implementation mechanics remain build-time choices", /Implementation mechanics are acceptable build-time choices/i, /Builders may choose private helper signatures/i],
+      ["every consequential under-specification dimension", /Every consequential dimension specified/i, /every consequential dimension of under-specification/i],
       ["story-authorized deferral", /only when the approved story or scope authorizes it/i, /only when the approved story or scope authorizes it/i],
       ["feasible envelope", /implementable within the brief's allowed mechanisms, dependencies, compatibility constraints, and non-goals/i, /cannot be implemented within its allowed mechanisms, dependencies, compatibility constraints, or explicit non-goals/i],
-      ["spec altitude defers mechanical enumeration", /do not hand-author byte-exact vectors, literal digests, or exhaustive per-field fixtures in prose/i, /do \*\*not\*\* require the brief to carry hand-computed byte-exact vectors, literal digests, or exhaustive per-field fixtures/i],
+      ["spec altitude defers mechanical cross-products", /defer exhaustive field-nullability, outcome\/code, state\/field, and crash-point cross-products/i, /Do \*\*not\*\* require private helper signatures[\s\S]*exhaustive field-nullability, outcome\/code, state\/field, or crash-point cross-product matrices/i],
     ];
     for (const [name, writerPattern, reviewerPattern] of sharedBar) {
       assert.match(SPEC_WRITER_PROMPT, writerPattern, `spec-writer must self-check shared invariant: ${name}`);
@@ -137,7 +137,8 @@ describe("class-wide planning prompt contract", () => {
     }
     // Producer-only self-checks (observed first-review rejection causes).
     assert.match(SPEC_WRITER_PROMPT, /hunting for contradictions/i);
-    assert.match(SPEC_WRITER_PROMPT, /call out shared or contested paths explicitly/i);
+    assert.match(SPEC_WRITER_PROMPT, /Every in-scope existing, public, generated, shared, or contested path and every fixed source-mandated artifact has an exact path and clear owner/i);
+    assert.match(SPEC_WRITER_PROMPT, /every builder-chosen private file must remain inside a declared path lane/i);
   });
 
   it("requires source assessment and minimum architecture before specification", () => {
@@ -155,12 +156,15 @@ describe("class-wide planning prompt contract", () => {
       assert.match(text, /distinguish work (?:that is )?already handed/i);
       assert.match(text, /how (?:every|each) identified gap was resolved[\s\S]*repository evidence used/i);
     }
-    assert.match(writerAssessment, /Use repository evidence and your delegated technical judgment to resolve ordinary implementation decisions/i);
+    assert.match(writerAssessment, /Use repository evidence and your delegated technical judgment to resolve the remaining consequential decisions within the specification-altitude boundary/i);
     assert.match(writerAssessment, /Stop instead of emitting a technical brief only when required repository evidence is still missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the spec writer's authority/i);
-    assert.match(WORK_REVIEWER_PROMPT, /writer must resolve ordinary implementation decisions using repository evidence and delegated technical judgment/i);
+    assert.match(WORK_REVIEWER_PROMPT, /writer must resolve the remaining consequential decisions within the specification-altitude boundary using repository evidence and delegated technical judgment/i);
     assert.match(WORK_REVIEWER_PROMPT, /reject and request the exact decision or targeted research only when required evidence is missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the writer's authority/i);
-    assert.match(stepTwo, /writer resolves ordinary implementation decisions with repository evidence and delegated technical judgment/i);
+    assert.match(stepTwo, /writer resolves the remaining consequential decisions within the specification-altitude boundary using repository evidence and delegated technical judgment/i);
     assert.match(stepTwo, /Stop instead of emitting a brief only when required evidence remains missing or a remaining decision needs product, UX, security, external-policy, or other owner input outside the writer's authority/i);
+    for (const text of [SPEC_WRITER_PROMPT, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.doesNotMatch(text, /ordinary implementation decisions/i);
+    }
 
     for (const text of [writerArchitecture, WORK_REVIEWER_PROMPT, stepTwo]) {
       assert.match(text, /prefer (?:extending|extension) or (?:extracting|extraction)|prefer existing seams and extraction/i);
@@ -182,6 +186,51 @@ describe("class-wide planning prompt contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /Reject unnecessary restatement, reinterpretation, or strengthening of story decisions/i);
     assert.match(WORK_REVIEWER_PROMPT, /removing or simplifying it still satisfies the story/i);
     assert.match(stepTwo, /remove or simplify the mechanism rather than expanding the specification around it/i);
+  });
+
+  it("keeps implementation mechanics at build-and-test altitude", () => {
+    const writerAltitude = markdownSection(SPEC_WRITER_PROMPT, "Specification altitude boundary");
+    const stepTwo = markdownSection(SKILL, "Step 2 - Spec And Decomposition");
+
+    for (const text of [writerAltitude, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /externally observable behavior/i);
+      assert.match(text, /public(?:\/| or )wire contract/i);
+      assert.match(text, /persisted compatibility\/migration\/recovery/i);
+      assert.match(text, /security(?:\/| or )authority/i);
+      assert.match(text, /failure policy/i);
+      assert.match(text, /semantic state transitions/i);
+      assert.match(text, /acceptance tests/i);
+      assert.match(text, /ownership seams\/path lanes/i);
+      assert.match(text, /private helper signatures/i);
+      assert.match(text, /exhaustive field-nullability, outcome\/code, state\/field, (?:or|and) crash-point cross-product matrices/i);
+      assert.match(text, /executable schema or state model plus table-driven or model-based(?: build)? tests/i);
+      assert.match(text, /closed schema[\s\S]*fields[\s\S]*variants[\s\S]*bounds/i);
+      assert.match(text, /(?:pin an )?(?:individual|specific) combination (?:is blocking )?only when (?:the )?(?:approved )?source makes it normative/i);
+    }
+
+    assert.match(writerAltitude, /A builder choosing among mechanically equivalent implementations is not an unresolved design decision/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Mechanical implementation detail and absent prose cross-product enumeration are not required omissions/i);
+    assert.match(stepTwo, /implementation mechanics are nonblocking/i);
+
+    const writerDecide = markdownSection(SPEC_WRITER_PROMPT, "Decide");
+    assert.doesNotMatch(writerDecide, /Files to add\/change by path/i);
+    assert.match(writerDecide, /Ownership seams and path lanes/i);
+    assert.match(writerDecide, /Name exact paths and owners for every in-scope existing, public, generated, shared, or contested path and every fixed source-mandated artifact/i);
+    assert.match(writerDecide, /let builders choose new private files and module layout within the declared lane/i);
+    assert.match(SPEC_WRITER_PROMPT, /<existing path \| path lane>/i);
+    assert.match(SPEC_WRITER_PROMPT, /Do not enumerate private files merely to choose module layout before implementation/i);
+    assert.doesNotMatch(SPEC_WRITER_PROMPT, /Include it normally in the implementation plan/i);
+    for (const text of [SPEC_WRITER_PROMPT, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /every (?:in-scope )?existing, public, generated, shared, or contested path/i);
+      assert.match(text, /every fixed source-mandated artifact/i);
+      assert.match(text, /builder-chosen private files?[^.]*(?:inside a declared path lane|within an owned path lane|inside an owned lane)/i);
+    }
+
+    assert.match(stepTwo, /The specification-altitude rule applies to every brief, including a bounded capability/i);
+    assert.ok(
+      stepTwo.indexOf("The specification-altitude rule applies to every brief") < stepTwo.indexOf("For class-wide work"),
+      "general altitude policy must precede the separately scoped class-wide matrix rule",
+    );
   });
 
   it("requires the decomposer to derive dependencies from each test command's validated outputs", () => {
@@ -207,6 +256,8 @@ describe("class-wide planning prompt contract", () => {
   });
 
   it("requires specs to close class-wide scope before builders run", () => {
+    const stepTwo = markdownSection(SKILL, "Step 2 - Spec And Decomposition");
+
     assert.match(SPEC_WRITER_PROMPT, /research map must contain a finite surface inventory/i);
     assert.match(SPEC_WRITER_PROMPT, /Class-wide implementation matrix \(required when applicable\)/i);
     for (const column of ["Source", "Sink / call site", "Required primitive / policy", "Compatibility / exclusion", "Test"]) {
@@ -214,21 +265,41 @@ describe("class-wide planning prompt contract", () => {
     }
     assert.match(SPEC_WRITER_PROMPT, /stop and request targeted research/i);
     assert.match(SPEC_WRITER_PROMPT, /Do not use open-ended phrases such as "apply everywhere"/i);
+    assert.match(SPEC_WRITER_PROMPT, /<existing test `path:line` \\\| owned test lane \+ named command\/assertion>/i);
+    assert.doesNotMatch(
+      SPEC_WRITER_PROMPT,
+      /\| <input\/source> \| `path:line` \| <exact behavior> \| <preserve, migrate, or exclude with reason> \| `path:line` \|/i,
+    );
+    for (const text of [SPEC_WRITER_PROMPT, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /Builder-chosen private tests map by owned test lane plus named command\/assertion/i);
+      assert.match(text, /exact test artifact path only when it is existing, public, generated, shared, contested, or source-fixed/i);
+    }
   });
 
-  it("requires first review to consolidate same-class findings across every dimension", () => {
-    assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule:[\s\S]*`attempt: 1`[\s\S]*every dimension of under-specification/i);
+  it("requires first review to consolidate same-class findings across every consequential dimension", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule:[\s\S]*`attempt: 1`[\s\S]*every consequential dimension of under-specification/i);
     assert.match(WORK_REVIEWER_PROMPT, /do not surface one example, or one category, while withholding equivalent findings for later rounds/i);
     assert.match(WORK_REVIEWER_PROMPT, /new category that was discoverable at `attempt: 1`[\s\S]*first-pass miss/i);
     assert.match(WORK_REVIEWER_PROMPT, /class-wide requirements[\s\S]*finite source-to-sink implementation matrix/i);
     assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`/i);
   });
 
+  it("requires rejecting reviews to enumerate explicit finite fixes", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /Explicit required-fix rule:[\s\S]*each `required_fixes` item finite and directly actionable/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Name every exact missing record, alias, sink\/call site, state transition, policy, test, path, or artifact/i);
+    assert.match(WORK_REVIEWER_PROMPT, /cite the source requirement and the artifact location/i);
+    assert.match(WORK_REVIEWER_PROMPT, /equivalent omissions share one fix[\s\S]*complete closed list/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Never use an umbrella instruction[\s\S]*without the exhaustive names/i);
+    assert.match(WORK_REVIEWER_PROMPT, /later reviews must not serialize a broad category into one newly named omission per attempt/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Every rejecting finding and `required_fixes` item follows the explicit required-fix rule/i);
+  });
+
   it("gives the spec review an acceptance bar so it converges", () => {
     assert.match(WORK_REVIEWER_PROMPT, /Spec acceptance bar/i);
     assert.match(WORK_REVIEWER_PROMPT, /every in-scope sink carries a decided policy[\s\S]*maps to a test/i);
-    assert.match(WORK_REVIEWER_PROMPT, /Reject only for a genuinely missing sink, policy, compatibility decision, or test — not for achievable-but-absent depth/i);
-    assert.match(SKILL, /Accept the brief once the inventory is finite[\s\S]*decided per-sink policy[\s\S]*mechanical residual detail/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Reject only for a genuinely missing consequential decision, sink, policy, compatibility decision, security boundary, ownership assignment, or test — not for achievable depth or implementation mechanics/i);
+    assert.match(SKILL, /Accept the brief once the inventory is finite[\s\S]*decided per-sink policy/i);
+    assert.match(SKILL, /Builders own private helper signatures/i);
   });
 
   it("bounds deferral so an in-scope sink cannot be waived without story/scope authorization", () => {
@@ -247,20 +318,48 @@ describe("class-wide planning prompt contract", () => {
     );
   });
 
-  it("forbids leaving an unresolved behavioral/design decision as a bounded residual", () => {
-    // A residual must be mechanical detail whose behavior/compat/security/state policy is already
-    // decided; an undecided behavioral/design decision is not a residual and cannot be shipped to
-    // builders as an open choice — otherwise the bar passes the unsafe "approve an undecided row".
+  it("requires consequential decisions while leaving implementation mechanics to builders", () => {
     assert.match(
       WORK_REVIEWER_PROMPT,
-      /bounded residual\*\* may be left to build-time remediation only when it is mechanical implementation detail whose behavior, backward-compatibility, security, and state-transition policy are already decided[\s\S]*unresolved behavioral or design decision is not a residual and must be decided here/i,
-      "work-reviewer must exclude unresolved behavioral/design decisions from bounded residuals",
+      /implementation residual is acceptable when the brief fixes externally observable behavior[\s\S]*Builders may choose private helper signatures, internal code organization, and mechanically equivalent representations/i,
+      "work-reviewer must distinguish consequential decisions from implementation mechanics",
     );
     assert.match(
       SKILL,
-      /only mechanical residual detail whose behavior, compatibility, security, and state-transition policy are already decided, never an unresolved behavioral or design decision/i,
-      "SKILL must mirror the mechanical-only residual boundary",
+      /The brief must decide externally observable behavior[\s\S]*Builders own private helper signatures, new private file\/module layout inside those lanes, mechanically equivalent representations/i,
+      "SKILL must mirror the implementation-altitude boundary",
     );
+  });
+
+  it("lands every deferred mechanical completeness obligation in an owned build slice", () => {
+    const stepTwo = markdownSection(SKILL, "Step 2 - Spec And Decomposition");
+
+    assert.match(
+      SPEC_WRITER_PROMPT,
+      /Deferred mechanical completeness \(omit when none\) -> <declared dimensions> -> <executable schema or state model> \+ <table-driven or model-based test file\/command\/assertion>/i,
+    );
+    assert.match(SPEC_WRITER_PROMPT, /Record each deferred completeness obligation in the test plan so decomposition must assign it/i);
+    assert.match(
+      WORK_DECOMPOSER_PROMPT,
+      /Every deferred mechanical completeness obligation in the brief maps to exactly one owning slice[\s\S]*declared dimensions[\s\S]*owned path lane for the builder-selected executable schema or state model[\s\S]*table-driven or model-based verification/i,
+    );
+    assert.match(WORK_DECOMPOSER_PROMPT, /Deferred mechanical completeness -> <brief obligation -> owning slice -> executable schema or state model -> table-driven or model-based test, or none>/i);
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /For build\/test subjects[\s\S]*When the brief defers a mechanical cross-product[\s\S]*observed evidence[\s\S]*executable schema or state model[\s\S]*cover every declared dimension/i,
+    );
+    assert.match(
+      WORK_REVIEWER_PROMPT,
+      /For decomposition, REJECT[\s\S]*deferred mechanical completeness obligation not assigned to exactly one slice with its declared dimensions, an owned lane for the builder-selected executable schema or state model, and a table-driven or model-based test plan/i,
+    );
+    assert.match(
+      stepTwo,
+      /assign every deferred mechanical completeness obligation to exactly one slice with its declared dimensions, an owned lane for the builder-selected executable schema or state model, and a table-driven or model-based test plan/i,
+    );
+    for (const text of [WORK_DECOMPOSER_PROMPT, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /exact (?:schema\/model )?artifact path only when it is existing, public, generated, shared, contested, or source-fixed/i);
+      assert.doesNotMatch(text, /executable schema or state model path/i);
+    }
   });
 
   it("keeps a required late-discovered omission blocking until fixed despite the delta rule", () => {
@@ -274,7 +373,7 @@ describe("class-wide planning prompt contract", () => {
     );
     assert.match(
       WORK_REVIEWER_PROMPT,
-      /Record it once in `required_fixes`, carry it into every later review, and REJECT until observed evidence proves it landed/i,
+      /Record (?:it|a required omission) once in `required_fixes`, carry it into every later review, and REJECT until observed evidence proves it landed/i,
       "work-reviewer must carry a required omission forward and reject until it lands",
     );
     assert.match(
@@ -611,10 +710,10 @@ describe("decomposition depth contract", () => {
   });
 
   it("defers implementation-grade artifacts out of the spec stage (altitude)", () => {
-    assert.match(SPEC_WRITER_PROMPT, /Spec altitude — pin contracts, defer mechanical enumeration/i);
-    assert.match(WORK_REVIEWER_PROMPT, /Spec altitude — pin contracts, defer mechanical enumeration/i);
-    assert.match(WORK_REVIEWER_PROMPT, /an LLM cannot compute a real digest/i);
-    assert.match(SKILL, /Spec altitude:[\s\S]*defer those to build-time tests whose golden values are independently generated or source-cited, never produced by the serializer under test/i);
+    assert.match(SPEC_WRITER_PROMPT, /Spec altitude — pin consequences, defer implementation mechanics/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Spec altitude — pin consequences, defer implementation mechanics/i);
+    assert.match(WORK_REVIEWER_PROMPT, /exhaustive field-nullability, outcome\/code, state\/field, or crash-point cross-product matrices[\s\S]*executable schema or state model plus table-driven or model-based build tests/i);
+    assert.match(SKILL, /Builders own private helper signatures[\s\S]*exhaustive field-nullability, outcome\/code, state\/field, and crash-point cross-product matrices[\s\S]*executable schema or state model plus table-driven or model-based build tests/i);
   });
 
   it("requires golden vectors to be independent, and pins story/protocol-required vectors", () => {
@@ -630,7 +729,7 @@ describe("decomposition depth contract", () => {
 
   it("scopes the class-wide sweep bar away from bounded new capabilities without dropping security sinks", () => {
     assert.match(WORK_REVIEWER_PROMPT, /Scope guard:\*\* a single bounded new capability does not become a sweep merely because its own contract uses universal quantifiers/i);
-    assert.match(SKILL, /a class-wide sweep bar likewise targets genuine repository-wide class changes, not a single bounded capability/i);
+    assert.match(SKILL, /A class-wide sweep bar targets genuine repository-wide class changes, not a single bounded capability/i);
     // The scope guard must not exempt reachable security-sensitive sinks from spec coverage.
     assert.match(WORK_REVIEWER_PROMPT, /never exempts reachable authority, publication\/side-effect, or vulnerability-class sinks \*within\* the capability/i);
     assert.match(SKILL, /never exempts reachable authority, publication, or vulnerability-class sinks within the capability/i);
@@ -1567,6 +1666,12 @@ describe("TUI sidebar live refresh docs contract", () => {
     assert.doesNotMatch(TUI, /sidebar v|plugin changes need TUI restart|refreshMetadata/, "TUI must not render internal refresh metadata");
   });
 
+  it("keeps polling signals in the host-tracked plugin lifecycle", () => {
+    assert.match(TUI, /async tui\(api\)[\s\S]*createSignal\(initialRuns[\s\S]*sidebar_content\(ctx, props\)[\s\S]*runs=\{runs\(\)\}[\s\S]*version=\{version\(\)\}/, "the registered slot must directly consume plugin-lifecycle signals so host tracking observes poll updates");
+    assert.match(TUI, /scheduleRefresh\(\)[\s\S]*api\.lifecycle\?\.onDispose\?\.\([\s\S]*clearTimeout\(timer\)/, "the plugin lifecycle must own and dispose the refresh timer");
+    assert.doesNotMatch(TUI, /let runStore|sharedRunStore|setInterval\(/, "component-local or module-global polling can escape host reactivity and lifecycle disposal");
+  });
+
   it("documents empty-start polling and the root discovery cache", () => {
     assert.match(README, /No factory runs yet[\s\S]*keeps the panel mounted[\s\S]*runs start/i, "README must document live refresh after an empty startup");
     assert.match(README, /30s root-cache TTL|30-second root-cache TTL|30 second root-cache TTL|caches root discovery for 30 seconds/i, "README must document the root-cache TTL behind sidebar refreshes");
@@ -1639,7 +1744,7 @@ describe("public documentation contract", () => {
     const sourceAgents = [...PLUGIN.matchAll(/^\s{2}"([a-z-]+)": "(?:planning|story|research|design|builder|test|reviewer|security)",$/gmu)].map((match) => match[1]);
     const tuiId = /id: "([^"]+)"/.exec(TUI)?.[1];
     const tuiOrder = /order: (\d+)/.exec(TUI)?.[1];
-    const tuiSlots = [...TUI.matchAll(/^\s{8}([a-z_]+)\(/gmu)].map((match) => match[1]);
+    const tuiSlots = [...TUI.matchAll(/^\s{8}([a-z_]+)\([^)]*\) \{$/gmu)].map((match) => match[1]);
     assert.equal(sourceAgents.length, 13);
     assert.match(useInOpencode, /registers `\/feature`, one primary `feature-factory` agent, 12 specialized subagents/i);
     assert.match(useInOpencode, /assets\/skills\/feature\/SKILL\.md/i);

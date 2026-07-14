@@ -13,10 +13,7 @@ const DEFAULT_THEME = {
   warning: "yellow",
   info: "cyan",
 };
-let runStore = null;
-
-function currentTheme(api) {
-  const theme = api?.theme?.current;
+function currentTheme(theme) {
   return theme && typeof theme === "object" ? { ...DEFAULT_THEME, ...theme } : DEFAULT_THEME;
 }
 
@@ -66,53 +63,19 @@ function runSnapshot(runs) {
   })));
 }
 
-function sharedRunStore(api) {
-  if (!runStore) {
-    const initialRuns = scanRuns(api) ?? [];
-    const [runs, setRuns] = createSignal(initialRuns, { equals: false });
-    const [version, setVersion] = createSignal(1);
-    runStore = { api, runs, setRuns, version, setVersion, snapshot: runSnapshot(initialRuns), refreshing: false };
-    setInterval(() => refreshRunStore(), REFRESH_INTERVAL_MS);
-    return runStore;
-  }
-  runStore.api = api;
-  refreshRunStore();
-  return runStore;
-}
-
-function refreshRunStore() {
-  if (!runStore || runStore.refreshing) return;
-  runStore.refreshing = true;
-  let nextRuns;
-  let nextSnapshot;
-  try {
-    nextRuns = scanRuns(runStore.api);
-    nextSnapshot = nextRuns ? runSnapshot(nextRuns) : null;
-  } finally {
-    runStore.refreshing = false;
-  }
-  if (!nextRuns || nextSnapshot === runStore.snapshot) return;
-  runStore.snapshot = nextSnapshot;
-  runStore.setRuns(nextRuns);
-  runStore.setVersion((value) => value + 1);
-}
-
 function View(props) {
-  const store = sharedRunStore(props.api);
-  const runs = store.runs;
-  const version = store.version;
-  const theme = () => currentTheme(props.api);
-  const visible = createMemo(() => runs().length > 0);
-  const shown = createMemo(() => selectVisibleRuns(runs()));
+  const theme = () => currentTheme(props.theme);
+  const visible = createMemo(() => props.runs.length > 0);
+  const shown = createMemo(() => selectVisibleRuns(props.runs));
   const visibleRuns = createMemo(() => shown().slice(0, MAX_VISIBLE_RUNS));
-  const hiddenCount = createMemo(() => Math.max(0, runs().length - visibleRuns().length));
+  const hiddenCount = createMemo(() => Math.max(0, props.runs.length - visibleRuns().length));
   return (
     <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
       <text fg={theme().text}>
         <b>Feature Factory</b>
       </text>
       <Show when={visible()} fallback={<text fg={theme().textMuted}>No factory runs yet</text>}>
-        <Show keyed when={version()}>
+        <Show keyed when={props.version}>
           {() => (
             <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
               <For each={visibleRuns()}>
@@ -178,11 +141,49 @@ const plugin = {
   id: "opencode-feature-factory",
   async tui(api) {
     if (typeof api?.slots?.register !== "function") return;
+    const initialRuns = scanRuns(api) ?? [];
+    const [runs, setRuns] = createSignal(initialRuns, { equals: false });
+    const [version, setVersion] = createSignal(1);
+    let snapshot = runSnapshot(initialRuns);
+    let refreshing = false;
+    let disposed = false;
+    let timer = null;
+
+    const refresh = () => {
+      if (refreshing) return;
+      refreshing = true;
+      let nextRuns;
+      let nextSnapshot;
+      try {
+        nextRuns = scanRuns(api);
+        nextSnapshot = nextRuns ? runSnapshot(nextRuns) : null;
+      } finally {
+        refreshing = false;
+      }
+      if (!nextRuns || nextSnapshot === snapshot) return;
+      snapshot = nextSnapshot;
+      setRuns(nextRuns);
+      setVersion((value) => value + 1);
+    };
+
+    const scheduleRefresh = () => {
+      timer = setTimeout(() => {
+        refresh();
+        if (!disposed) scheduleRefresh();
+      }, REFRESH_INTERVAL_MS);
+    };
+
+    scheduleRefresh();
+    api.lifecycle?.onDispose?.(() => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    });
+
     api.slots.register({
       order: 450,
       slots: {
-        sidebar_content(_ctx, props) {
-          return <View api={api} session_id={props?.session_id} />;
+        sidebar_content(ctx, props) {
+          return <View runs={runs()} version={version()} theme={ctx?.theme?.current} session_id={props?.session_id} />;
         },
       },
     });

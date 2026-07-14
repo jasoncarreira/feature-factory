@@ -175,13 +175,21 @@ function verifyInstalledPlugin(consumer, home) {
       );
 
       const registrations = [];
+      const disposers = [];
       await tui.tui({
         slots: { register(registration) { registrations.push(registration); } },
         theme: { current: {} },
+        lifecycle: {
+          onDispose(dispose) {
+            disposers.push(dispose);
+            return () => {};
+          },
+        },
       });
       assert.default.equal(registrations.length, 1);
       assert.default.equal(registrations[0].order, 450);
       assert.default.equal(typeof registrations[0].slots.sidebar_content, "function");
+      for (const dispose of disposers.reverse()) await dispose();
     `,
     { cwd: consumer, env: isolatedEnv(home) },
   );
