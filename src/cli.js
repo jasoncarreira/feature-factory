@@ -12,7 +12,7 @@ import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
 import { canonicalizeGithubPrUrl } from "./refs.js";
-import { normalizePrNumber as normalizeTransitionPrNumber, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { normalizePrNumber as normalizeTransitionPrNumber, transitionPrCreated, transitionRecoverOrphan, mergedSliceRepairFence, transitionMergedSliceRepair, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
@@ -829,6 +829,7 @@ async function verdicts(args) {
   const report = assertRefUnder(requiredOption(opts.report, "--report", "factory verdicts"), "artifacts/", "--report");
   const reviewRef = assertRefUnder(requiredOption(opts.reviewRef, "--review-ref", "factory verdicts"), "reviews/", "--review-ref");
   return print(await transitionRunJson(resolveRunDir(runId, opts), (run) => {
+    if (mergedSliceRepairFence(run)) throw new Error("panel verdicts are fenced while a merged-slice repair is unresolved");
     run.validator = { verdict: validator, report, review_ref: "reviews/implementation-validator.json" };
     run.security_review = { verdict: security, review_ref: reviewRef };
   }, opts), opts);
@@ -1135,6 +1136,7 @@ function hasInFlightHeartbeatWork(run) {
   if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) {
     return true;
   }
+  if (["repairing", "review"].includes(run?.merged_slice_repair?.status)) return true;
   return false;
 }
 

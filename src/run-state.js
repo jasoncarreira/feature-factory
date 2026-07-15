@@ -911,6 +911,7 @@ export async function transitionPrCreated(runDir, input, options = {}) {
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(
     runDir,
     (draft) => {
+      if (mergedSliceRepairFence(draft)) throw new Error("pr-created is fenced while a merged-slice repair is unresolved");
       assertSteeringBoundaryClear(draft, "pr-created");
       assertPrFence(draft, options.fenceToken);
       assertPrCreatedPreconditions(draft, request);
@@ -1079,6 +1080,9 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
     if (!update.changed) return;
     if (!hadSteps) draft.steps = steps;
     if (stepIndex >= 0) {
+      if (["running", "accepted"].includes(steps[stepIndex]?.status) && mergedSliceRepairFence(draft)) {
+        throw new Error(`step '${steps[stepIndex].agent || formatSelector(stepSelector)}' cannot advance while a merged-slice repair is unresolved`);
+      }
       assertTestVerifierIntegrationGate(draft, steps[stepIndex], priorStep);
       assertDraftSpecReuseAttempt(draft, steps[stepIndex], priorStep);
       bindStepAcceptance(runDir, steps[stepIndex]);
@@ -1193,8 +1197,8 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     if (sliceIndex >= 0 && slices[sliceIndex].status === "merged") {
       throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' merges must use transitionSliceMerged`);
     }
-    if (sliceIndex >= 0 && slices[sliceIndex].status === "running" && activeMergedSliceRepair(draft)) {
-      throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' cannot start while a merged-slice repair is active`);
+    if (sliceIndex >= 0 && slices[sliceIndex].status === "running" && mergedSliceRepairFence(draft)) {
+      throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' cannot start while a merged-slice repair is unresolved`);
     }
     if (sliceIndex >= 0) assertSliceReviewPreconditions(runDir, slices[sliceIndex].id || sliceId, slices[sliceIndex]);
   }, options);
@@ -1211,7 +1215,7 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
     if (sliceIndex < 0) throw new Error(`slice '${sliceId}' not found`);
     const currentSlice = slices[sliceIndex];
     if (currentSlice.status === "merged") throw new Error(`slice '${sliceId}' is already merged`);
-    if (activeMergedSliceRepair(draft)) throw new Error(`slice '${sliceId}' cannot merge while a merged-slice repair is active`);
+    if (mergedSliceRepairFence(draft)) throw new Error(`slice '${sliceId}' cannot merge while a merged-slice repair is unresolved`);
     const updatedAt = timestamp(options.now);
     const nextSlice = { ...currentSlice, merge_commit: request.merge_commit };
     assertSliceMergedPreconditions(runDir, sliceId, nextSlice, options);
@@ -1257,6 +1261,7 @@ export async function heartbeatOnce(runDir, { now } = {}, options = {}) {
 export function hasInFlightHeartbeatWork(run) {
   if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) return true;
   if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) return true;
+  if (["repairing", "review"].includes(run?.merged_slice_repair?.status)) return true;
   if (run?.status === "running" && run?.post_pr?.policy?.enabled === true && POST_PR_HEARTBEAT_PHASES.has(run.post_pr.phase)) return true;
   return false;
 }
@@ -2272,6 +2277,17 @@ export function activeMergedSliceRepair(run) {
   return ["reported", "repairing", "review"].includes(repair.status) ? repair : null;
 }
 
+// An unresolved repair fences ALL downstream authority: slice starts and
+// merges, step starts and acceptances, panel verdicts, and PR creation. Only
+// a merged repair releases the fence; a blocked repair keeps it until the run
+// is terminalized through the checked terminal transition, so a failed repair
+// can never be bypassed by simply continuing the run.
+export function mergedSliceRepairFence(run) {
+  const repair = run?.merged_slice_repair;
+  if (!repair || typeof repair !== "object" || Array.isArray(repair)) return null;
+  return repair.status !== "merged" ? repair : null;
+}
+
 function normalizeMergedSliceRepairInput(input) {
   const status = String(input?.status || "").trim();
   if (!MERGED_SLICE_REPAIR_STATUSES.has(status)) {
@@ -2330,12 +2346,16 @@ function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
 
 function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
   if (current) throw new Error("only one merged-slice repair incident is allowed per run");
+  assertRepairAdmissionWindow(run);
   const slices = Array.isArray(run.slices) ? run.slices : [];
   const owner = slices.find((slice) => slice?.id === request.owner_slice_id);
   if (!owner) throw new Error(`repair owner slice '${request.owner_slice_id}' not found`);
   if (owner.status !== "merged") throw new Error(`repair owner slice '${request.owner_slice_id}' must be merged; it is '${owner.status}'`);
   const consumer = slices.find((slice) => slice?.id === request.consumer_slice_id);
   if (!consumer) throw new Error(`repair consumer slice '${request.consumer_slice_id}' not found`);
+  if (consumer.status === "merged") {
+    throw new Error(`repair consumer slice '${consumer.id}' is already merged; a post-merge defect belongs to the integration gate, not a repair`);
+  }
   if (consumer.id === owner.id) throw new Error("repair consumer and owner must be different slices");
   const consumerDeps = Array.isArray(consumer.depends_on) ? consumer.depends_on : [];
   if (!consumerDeps.includes(owner.id)) {
@@ -2487,6 +2507,21 @@ function readBoundRepairReview(runDir, current) {
     throw new Error("repair review no longer matches its hash-bound record");
   }
   return parseJsonObjectFile(review.path, "repair review_ref");
+}
+
+// A repair is admissible only in the documented pre-integration window: once
+// any downstream authority exists (integration gate started or decided, panel
+// verdicts, Gate 3, a created PR, or post-PR state), stale acceptance could be
+// silently reused after the repair, so reporting fails closed instead.
+function assertRepairAdmissionWindow(run) {
+  if (run?.status !== "running") throw new Error(`repair can be reported only on a running run; it is '${run?.status}'`);
+  const testVerifier = (Array.isArray(run.steps) ? run.steps : []).find((step) => step?.agent === "test-verifier");
+  const verifierStarted = testVerifier && (["running", "accepted"].includes(testVerifier.status) || (Number.isInteger(testVerifier.attempts) && testVerifier.attempts > 0));
+  if (verifierStarted) throw new Error("repair cannot be reported after the test-verifier integration gate has started; its authority would go stale");
+  if (run.validator || run.security_review) throw new Error("repair cannot be reported after panel verdicts exist; their authority would go stale");
+  if (run.gates && typeof run.gates === "object" && run.gates.pre_pr) throw new Error("repair cannot be reported after Gate 3 state exists; its authority would go stale");
+  if (stringValue(run.pr_url)) throw new Error("repair cannot be reported after a PR exists");
+  if (run.post_pr) throw new Error("repair cannot be reported after post-PR state exists");
 }
 
 function assertRepairQuiescence(run, action) {

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
-import { transitionMergedSliceRepair, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
+import { hasInFlightHeartbeatWork, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged } from "../src/run-state.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
 
 const RUN_ID = "repair-run";
@@ -164,12 +164,67 @@ describe("merged-sibling repair", () => {
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
       await assert.rejects(
         transitionRunSlice(fixture.runDir, "other", { status: "running", attempts: 1 }, { mustExist: true }),
-        /cannot start while a merged-slice repair is active/u,
+        /cannot start while a merged-slice repair is unresolved/u,
       );
       await assert.rejects(
         transitionSliceMerged(fixture.runDir, "other", { merge_commit: "abc1234" }),
-        /cannot merge while a merged-slice repair is active/u,
+        /cannot merge while a merged-slice repair is unresolved/u,
       );
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("fences steps and keeps the fence after a blocked repair until terminalization", async () => {
+    const fixture = createFixture();
+    try {
+      await report(fixture);
+      // The reproduced incident: test-verifier must not start while the repair is unresolved.
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }),
+        /cannot advance while a merged-slice repair is unresolved/u,
+      );
+      const { merged_slice_repair: blocked } = await transitionMergedSliceRepair(fixture.runDir, { status: "blocked", reason: "attempt budget exhausted" });
+      assert.equal(blocked.status, "blocked");
+      // A blocked repair keeps the run-wide fence: nothing progresses except terminalization.
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "other", { status: "running", attempts: 1 }, { mustExist: true }),
+        /cannot start while a merged-slice repair is unresolved/u,
+      );
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }),
+        /cannot advance while a merged-slice repair is unresolved/u,
+      );
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("admits a report only in the pre-integration window", async () => {
+    const fixture = createFixture();
+    try {
+      await assert.rejects(report(fixture, { consumer_slice_id: "merged-consumer" }), /already merged; a post-merge defect belongs to the integration gate/u);
+      mutateRun(fixture, (run) => { run.steps = [{ agent: "test-verifier", status: "rejected", attempts: 1 }]; });
+      await assert.rejects(report(fixture), /after the test-verifier integration gate has started/u);
+      mutateRun(fixture, (run) => { run.steps = []; run.validator = { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" }; });
+      await assert.rejects(report(fixture), /after panel verdicts exist/u);
+      mutateRun(fixture, (run) => { run.validator = null; run.pr_url = "https://github.com/o/r/pull/1"; });
+      await assert.rejects(report(fixture), /after a PR exists/u);
+      mutateRun(fixture, (run) => { run.pr_url = null; });
+      const { merged_slice_repair: repair } = await report(fixture);
+      assert.equal(repair.status, "reported");
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("counts an executing repair as in-flight heartbeat work", async () => {
+    const fixture = createFixture();
+    try {
+      await report(fixture);
+      assert.equal(hasInFlightHeartbeatWork(readRun(fixture)), false, "a reported repair is not yet executing");
+      await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
+      assert.equal(hasInFlightHeartbeatWork(readRun(fixture)), true, "a repairing repair holds heartbeat eligibility");
     } finally {
       cleanup(fixture);
     }
@@ -227,6 +282,7 @@ function createFixture() {
     slices: [
       { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 2, merge_commit: "1111111", review_ref: "reviews/owner.json" },
       { id: "consumer", stack: "backend", depends_on: ["owner"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
+      { id: "merged-consumer", stack: "backend", depends_on: ["owner"], status: "merged", attempts: 1, merge_commit: "2222222", review_ref: "reviews/owner.json" },
       { id: "unrelated", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
       { id: "other", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
     ],
@@ -281,6 +337,12 @@ function merge(fixture, overrides = {}) {
 
 function recordReview(fixture, name, review) {
   writeJson(join(fixture.runDir, "reviews", `${name}.json`), { subject: "repair:owner", ...review });
+}
+
+function mutateRun(fixture, mutate) {
+  const run = readRun(fixture);
+  mutate(run);
+  writeJson(join(fixture.runDir, "run.json"), run);
 }
 
 function writeRunSliceStatus(fixture, sliceId, status, attempts) {
