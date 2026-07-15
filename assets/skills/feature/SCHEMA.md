@@ -137,6 +137,8 @@ feature-factory factory step <run-id> <known-agent> rejected --review-ref review
 feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json
 feature-factory factory terminal <run-id> blocked --reason TEXT --boundary-token TOKEN --json
 feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json
+feature-factory factory repair <run-id> reported --owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref evidence/<file> --json
+feature-factory factory repair <run-id> <repairing|review|merged|blocked> [--attempts N] [--review-ref reviews/<file>] [--merge-commit SHA] [--reason TEXT] --json
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN --json
 ```
 
@@ -942,6 +944,39 @@ Rules:
 - Waves are derived from `depends_on`: a root slice is wave 1, and the longest dependency path may span at most four waves (prefer three or fewer for a shorter critical path).
 - `max_parallel_slices` limits concurrency within a wave; it does not override the four-wave depth cap.
 - `factory slices-seed` and pre-seed validation enforce the cap for new plans. Existing durable runs with older, deeper seeded plans remain readable and resumable; the cap does not rewrite persisted plan state.
+
+## merged_slice_repair Bounded Repair State
+
+Optional top-level `run.json.merged_slice_repair` is the singleton record for one bounded merged-sibling repair per run:
+
+```json
+{
+  "schema_version": 1,
+  "owner_slice_id": "schema-model",
+  "consumer_slice_id": "critic-acceptance",
+  "defect_path": "src/single-slice/schema-model/records.js",
+  "evidence_ref": "evidence/critic-acceptance.attempt-1.json",
+  "evidence_hash": "sha256:...",
+  "status": "reported",
+  "attempts": 0,
+  "max_attempts": 2,
+  "review_ref": "reviews/repair-attempt-1.json",
+  "review_hash": "sha256:...",
+  "merge_commit": "abc1234",
+  "reason": "why the repair blocked",
+  "created_at": "2026-07-15T00:00:00.000Z",
+  "updated_at": "2026-07-15T00:00:00.000Z"
+}
+```
+
+Rules:
+
+- `reported` is the only creation transition and requires a merged owner slice, a consumer that directly depends on it, a defect path inside the owner's plan lane, and hash-bound reproduction evidence whose subject matches the consumer.
+- Only one repair incident is allowed per run; `merged` and `blocked` are terminal, and a further defect requires a recovery run.
+- `attempts` advances exactly by one to a hard `max_attempts: 2`: attempt 1 is the initial correction, attempt 2 the single remediation after a finite rejecting review. The budget is separate durable state — it is never charged to the merged slice's immutable `max_attempts` history and never drawn from `run.max_retries`.
+- Repair reviews use subject `repair:<owner-slice-id>` and are hash-bound at recording; merge requires re-verifying an APPROVE verdict against the bound bytes.
+- Quiescence is enforced both directions while a repair is active (`reported`/`repairing`/`review`): no slice may enter `running` or merge, and no repair attempt may start while any slice is `running` or in `review`.
+- The final `test-verifier` integration gate and the pre-PR panel run unchanged after a merged repair.
 
 ## Steering And Resume
 

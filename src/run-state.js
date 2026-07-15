@@ -1193,6 +1193,9 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     if (sliceIndex >= 0 && slices[sliceIndex].status === "merged") {
       throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' merges must use transitionSliceMerged`);
     }
+    if (sliceIndex >= 0 && slices[sliceIndex].status === "running" && activeMergedSliceRepair(draft)) {
+      throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' cannot start while a merged-slice repair is active`);
+    }
     if (sliceIndex >= 0) assertSliceReviewPreconditions(runDir, slices[sliceIndex].id || sliceId, slices[sliceIndex]);
   }, options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
@@ -1208,6 +1211,7 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
     if (sliceIndex < 0) throw new Error(`slice '${sliceId}' not found`);
     const currentSlice = slices[sliceIndex];
     if (currentSlice.status === "merged") throw new Error(`slice '${sliceId}' is already merged`);
+    if (activeMergedSliceRepair(draft)) throw new Error(`slice '${sliceId}' cannot merge while a merged-slice repair is active`);
     const updatedAt = timestamp(options.now);
     const nextSlice = { ...currentSlice, merge_commit: request.merge_commit };
     assertSliceMergedPreconditions(runDir, sliceId, nextSlice, options);
@@ -2240,6 +2244,206 @@ function assertSliceReviewPreconditions(runDir, sliceId, slice) {
   const evidence = resolveEvidenceRef(runDir, requireNonEmptyString(slice.evidence_ref, "evidence_ref"));
   const evidenceJson = parseJsonObjectFile(evidence.path, `slice '${sliceId}' evidence_ref`);
   if (stringValue(evidenceJson.subject) && evidenceJson.subject !== sliceId) throw new Error(`slice '${sliceId}' evidence subject must match slice id`);
+}
+
+// ---------------------------------------------------------------------------
+// Merged-sibling repair: a bounded, first-class owner route for an integration
+// defect that a consumer slice exposes in an ALREADY MERGED dependency before
+// the post-merge integration gate. The merged slice's durable history stays
+// immutable — the repair is its own singleton record with its own two-attempt
+// budget, so it can never become a backdoor around an exhausted slice review.
+// ---------------------------------------------------------------------------
+
+const MERGED_SLICE_REPAIR_STATUSES = new Set(["reported", "repairing", "review", "merged", "blocked"]);
+const MERGED_SLICE_REPAIR_MAX_ATTEMPTS = 2;
+const MERGED_SLICE_REPAIR_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/u;
+
+export async function transitionMergedSliceRepair(runDir, input = {}, options = {}) {
+  const request = normalizeMergedSliceRepairInput(input);
+  const result = await transitionRunJson(runDir, (draft) => {
+    draft.merged_slice_repair = nextMergedSliceRepair(runDir, draft, draft.merged_slice_repair, request, options);
+  }, options);
+  return { ...result, merged_slice_repair: result.run.merged_slice_repair ?? null };
+}
+
+export function activeMergedSliceRepair(run) {
+  const repair = run?.merged_slice_repair;
+  if (!repair || typeof repair !== "object" || Array.isArray(repair)) return null;
+  return ["reported", "repairing", "review"].includes(repair.status) ? repair : null;
+}
+
+function normalizeMergedSliceRepairInput(input) {
+  const status = String(input?.status || "").trim();
+  if (!MERGED_SLICE_REPAIR_STATUSES.has(status)) {
+    throw new Error(`merged-slice repair status must be one of ${[...MERGED_SLICE_REPAIR_STATUSES].join(", ")}`);
+  }
+  const request = { status };
+  if (status === "reported") {
+    request.owner_slice_id = requireNonEmptyString(input.owner_slice_id, "repair owner slice id");
+    request.consumer_slice_id = requireNonEmptyString(input.consumer_slice_id, "repair consumer slice id");
+    request.defect_path = normalizeRepairDefectPath(input.defect_path);
+    request.evidence_ref = requireNonEmptyString(input.evidence_ref, "repair evidence ref");
+  }
+  if (status === "repairing") {
+    if (!Number.isInteger(input.attempts) || input.attempts < 1) throw new Error("repair repairing requires a positive --attempts value");
+    request.attempts = input.attempts;
+    if (stringValue(input.branch)) request.branch = String(input.branch).trim();
+    if (stringValue(input.worktree)) request.worktree = String(input.worktree).trim();
+  }
+  if (status === "review") request.review_ref = requireNonEmptyString(input.review_ref, "repair review ref");
+  if (status === "merged") {
+    const commit = String(input.merge_commit || "").trim().toLowerCase();
+    if (!MERGED_SLICE_REPAIR_COMMIT_PATTERN.test(commit)) throw new Error("repair merged requires --merge-commit with a git commit sha");
+    request.merge_commit = commit;
+  }
+  if (status === "blocked") request.reason = requireNonEmptyString(input.reason, "repair blocked reason");
+  return request;
+}
+
+function normalizeRepairDefectPath(value) {
+  const path = requireNonEmptyString(value, "repair defect path");
+  if (path.startsWith("/") || path.includes("\\") || path.split("/").some((part) => part === "" || part === "." || part === "..")) {
+    throw new Error("repair defect path must be a safe repository-relative path");
+  }
+  return path;
+}
+
+function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
+  if (current && !["reported", "repairing", "review", "merged", "blocked"].includes(current.status)) {
+    throw new Error("existing merged-slice repair record is invalid");
+  }
+  if (current && ["merged", "blocked"].includes(current.status)) {
+    throw new Error(`merged-slice repair is terminal ('${current.status}'); a further defect requires a recovery run`);
+  }
+  const stampedAt = timestamp(options.now);
+  if (request.status === "reported") return reportedMergedSliceRepair(runDir, run, current, request, stampedAt);
+  if (!current) throw new Error("merged-slice repair must be reported before any other transition");
+  if (request.status === "repairing") return repairingMergedSliceRepair(runDir, run, current, request, stampedAt);
+  if (request.status === "review") return reviewMergedSliceRepair(runDir, current, request, stampedAt);
+  if (request.status === "merged") return mergedMergedSliceRepair(runDir, run, current, request, stampedAt);
+  return { ...current, status: "blocked", reason: request.reason, updated_at: stampedAt };
+}
+
+function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
+  if (current) throw new Error("only one merged-slice repair incident is allowed per run");
+  const slices = Array.isArray(run.slices) ? run.slices : [];
+  const owner = slices.find((slice) => slice?.id === request.owner_slice_id);
+  if (!owner) throw new Error(`repair owner slice '${request.owner_slice_id}' not found`);
+  if (owner.status !== "merged") throw new Error(`repair owner slice '${request.owner_slice_id}' must be merged; it is '${owner.status}'`);
+  const consumer = slices.find((slice) => slice?.id === request.consumer_slice_id);
+  if (!consumer) throw new Error(`repair consumer slice '${request.consumer_slice_id}' not found`);
+  if (consumer.id === owner.id) throw new Error("repair consumer and owner must be different slices");
+  const consumerDeps = Array.isArray(consumer.depends_on) ? consumer.depends_on : [];
+  if (!consumerDeps.includes(owner.id)) {
+    throw new Error(`repair consumer '${consumer.id}' must directly depend on owner '${owner.id}'`);
+  }
+  assertRepairPathInOwnerLane(runDir, owner.id, request.defect_path);
+  const evidence = resolveEvidenceRef(runDir, request.evidence_ref);
+  const evidenceJson = parseJsonObjectFile(evidence.path, "repair evidence_ref");
+  if (stringValue(evidenceJson.subject) && evidenceJson.subject !== consumer.id) {
+    throw new Error("repair evidence subject must match the consumer slice id");
+  }
+  return {
+    schema_version: 1,
+    owner_slice_id: owner.id,
+    consumer_slice_id: consumer.id,
+    defect_path: request.defect_path,
+    evidence_ref: request.evidence_ref,
+    evidence_hash: hashFile(evidence.path),
+    status: "reported",
+    attempts: 0,
+    max_attempts: MERGED_SLICE_REPAIR_MAX_ATTEMPTS,
+    created_at: stampedAt,
+    updated_at: stampedAt,
+  };
+}
+
+function repairingMergedSliceRepair(runDir, run, current, request, stampedAt) {
+  if (!["reported", "review"].includes(current.status)) {
+    throw new Error(`repair cannot start an attempt from status '${current.status}'`);
+  }
+  assertRepairQuiescence(run, "start a repair attempt");
+  if (request.attempts !== current.attempts + 1) {
+    throw new Error(`repair attempt must advance from ${current.attempts} to ${current.attempts + 1}`);
+  }
+  if (request.attempts > MERGED_SLICE_REPAIR_MAX_ATTEMPTS) {
+    throw new Error(`repair attempt ${request.attempts} exceeds max_attempts ${MERGED_SLICE_REPAIR_MAX_ATTEMPTS}; block and require a recovery run`);
+  }
+  if (current.status === "review") {
+    const review = readBoundRepairReview(runDir, current);
+    if (review.verdict !== "REJECT") throw new Error("a further repair attempt requires a REJECT verdict on the prior repair review");
+  }
+  const evidence = resolveEvidenceRef(runDir, current.evidence_ref);
+  if (hashFile(evidence.path) !== current.evidence_hash) {
+    throw new Error("repair reproduction evidence no longer matches its hash-bound record");
+  }
+  const next = { ...current, status: "repairing", attempts: request.attempts, updated_at: stampedAt };
+  if (request.branch) next.branch = request.branch;
+  if (request.worktree) next.worktree = request.worktree;
+  return next;
+}
+
+function reviewMergedSliceRepair(runDir, current, request, stampedAt) {
+  // Re-recording a review from `review` is allowed (idempotent re-bind after a
+  // crash or a corrected review file); reaching review from any other state is not.
+  if (!["repairing", "review"].includes(current.status)) throw new Error(`repair review requires status 'repairing'; it is '${current.status}'`);
+  const review = resolveReviewRef(runDir, request.review_ref);
+  const reviewJson = parseJsonObjectFile(review.path, "repair review_ref");
+  if (reviewJson.subject !== `repair:${current.owner_slice_id}`) {
+    throw new Error(`repair review subject must be 'repair:${current.owner_slice_id}'`);
+  }
+  if (!["APPROVE", "REJECT"].includes(reviewJson.verdict)) throw new Error("repair review verdict must be APPROVE or REJECT");
+  if (reviewJson.verdict === "REJECT") {
+    const fixes = Array.isArray(reviewJson.required_fixes) ? reviewJson.required_fixes.filter(stringValue) : [];
+    if (fixes.length < 1) throw new Error("a rejecting repair review must enumerate finite required_fixes");
+  }
+  return { ...current, status: "review", review_ref: request.review_ref, review_hash: hashFile(review.path), updated_at: stampedAt };
+}
+
+function mergedMergedSliceRepair(runDir, run, current, request, stampedAt) {
+  if (current.status !== "review") throw new Error(`repair merge requires status 'review'; it is '${current.status}'`);
+  assertRepairQuiescence(run, "merge a repair");
+  const review = readBoundRepairReview(runDir, current);
+  if (review.verdict !== "APPROVE") throw new Error("repair merge requires an APPROVE verdict on the bound repair review");
+  return { ...current, status: "merged", merge_commit: request.merge_commit, updated_at: stampedAt };
+}
+
+function readBoundRepairReview(runDir, current) {
+  const review = resolveReviewRef(runDir, requireNonEmptyString(current.review_ref, "repair review_ref"));
+  if (hashFile(review.path) !== current.review_hash) {
+    throw new Error("repair review no longer matches its hash-bound record");
+  }
+  return parseJsonObjectFile(review.path, "repair review_ref");
+}
+
+function assertRepairQuiescence(run, action) {
+  const busy = (Array.isArray(run.slices) ? run.slices : []).find((slice) => ["running", "review"].includes(slice?.status));
+  if (busy) throw new Error(`cannot ${action} while slice '${busy.id}' is ${busy.status}; quiesce slice work first`);
+}
+
+function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath) {
+  const planPath = join(runDir, "plan", "slices.json");
+  const plan = parseJsonObjectFile(planPath, "plan/slices.json");
+  const planned = (Array.isArray(plan.slices) ? plan.slices : []).find((slice) => slice?.id === ownerSliceId);
+  if (!planned) throw new Error(`repair owner slice '${ownerSliceId}' is missing from plan/slices.json`);
+  const lanes = Array.isArray(planned.paths) ? planned.paths.filter(stringValue) : [];
+  if (!lanes.some((lane) => repairPathWithinLane(defectPath, lane))) {
+    throw new Error(`repair defect path '${defectPath}' is outside owner slice '${ownerSliceId}' lanes`);
+  }
+}
+
+function repairPathWithinLane(path, lane) {
+  const normalized = String(lane).trim();
+  if (normalized.endsWith("/**")) {
+    const base = normalized.slice(0, -3);
+    return path === base || path.startsWith(`${base}/`);
+  }
+  if (normalized.endsWith("/*")) {
+    const base = normalized.slice(0, -1);
+    return path.startsWith(base) && !path.slice(base.length).includes("/");
+  }
+  if (normalized.endsWith("/")) return path.startsWith(normalized);
+  return path === normalized || path.startsWith(`${normalized}/`);
 }
 
 function normalizePrCreatedTerminalResult(run, request) {

@@ -94,6 +94,7 @@ export function validateRun(run) {
   optionalNonEmptyString(errors, run, "review_tier", "run.review_tier");
   validateDebugSnapshot(errors, run.debug_snapshot, "run.debug_snapshot");
   validateProvenance(errors, run.provenance, "run.provenance");
+  validateMergedSliceRepair(errors, run, "run.merged_slice_repair");
   validateContinuation(errors, run, "run.continuation");
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
@@ -259,6 +260,21 @@ export function checkRunConsistency(runDir, run) {
     if (stringValue(step?.artifact_ref)) checks.push(refCheck(`run.steps[${index}].artifact_ref`, () => resolveArtifactRef(runDir, step.artifact_ref)));
   }
 
+  const repair = validRun.merged_slice_repair;
+  if (repair && typeof repair === "object" && !Array.isArray(repair)) {
+    checks.push(runCheck("run.merged_slice_repair.evidence_ref", () => {
+      const resolved = resolveEvidenceRef(runDir, repair.evidence_ref);
+      if (hashFile(resolved.path) !== repair.evidence_hash) fail([{ path: "run.merged_slice_repair.evidence_hash", message: "must match evidence_ref bytes" }]);
+      return { ref: repair.evidence_ref };
+    }));
+    if (stringValue(repair.review_ref)) {
+      checks.push(runCheck("run.merged_slice_repair.review_ref", () => {
+        const resolved = resolveReviewRef(runDir, repair.review_ref);
+        if (hashFile(resolved.path) !== repair.review_hash) fail([{ path: "run.merged_slice_repair.review_hash", message: "must match review_ref bytes" }]);
+        return { ref: repair.review_ref };
+      }));
+    }
+  }
   for (const [index, slice] of (Array.isArray(validRun.slices) ? validRun.slices : []).entries()) {
     if (stringValue(slice?.evidence_ref)) checks.push(refCheck(`run.slices[${index}].evidence_ref`, () => resolveEvidenceRef(runDir, slice.evidence_ref)));
     if (stringValue(slice?.review_ref)) checks.push(refCheck(`run.slices[${index}].review_ref`, () => resolveReviewRef(runDir, slice.review_ref)));
@@ -455,6 +471,56 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
     return;
   }
   validateRedactedEnv(errors, payload, `${path}.env`);
+}
+
+const MERGED_SLICE_REPAIR_KEYS = new Set(["schema_version", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "branch", "worktree", "review_ref", "review_hash", "merge_commit", "reason", "created_at", "updated_at"]);
+const MERGED_SLICE_REPAIR_STATUS_SET = new Set(["reported", "repairing", "review", "merged", "blocked"]);
+
+function validateMergedSliceRepair(errors, run, path) {
+  const repair = run.merged_slice_repair;
+  if (repair === undefined || repair === null) return;
+  if (!isRecord(repair)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, repair, MERGED_SLICE_REPAIR_KEYS, path);
+  requiredInteger(errors, repair, "schema_version", `${path}.schema_version`);
+  if (repair.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredString(errors, repair, "owner_slice_id", `${path}.owner_slice_id`);
+  requiredString(errors, repair, "consumer_slice_id", `${path}.consumer_slice_id`);
+  requiredString(errors, repair, "defect_path", `${path}.defect_path`);
+  requiredString(errors, repair, "evidence_ref", `${path}.evidence_ref`);
+  requiredHash(errors, repair, "evidence_hash", `${path}.evidence_hash`);
+  requiredEnum(errors, repair, "status", MERGED_SLICE_REPAIR_STATUS_SET, `${path}.status`);
+  boundedInteger(errors, repair, "attempts", 0, 2, `${path}.attempts`);
+  requiredInteger(errors, repair, "max_attempts", `${path}.max_attempts`);
+  if (repair.max_attempts !== 2) errors.push({ path: `${path}.max_attempts`, message: "must equal 2" });
+  optionalNonEmptyString(errors, repair, "branch", `${path}.branch`);
+  optionalNonEmptyString(errors, repair, "worktree", `${path}.worktree`);
+  optionalNonEmptyString(errors, repair, "reason", `${path}.reason`);
+  if (repair.review_ref !== undefined || ["review", "merged"].includes(repair.status)) {
+    requiredString(errors, repair, "review_ref", `${path}.review_ref`);
+    requiredHash(errors, repair, "review_hash", `${path}.review_hash`);
+  }
+  if (["repairing", "review", "merged"].includes(repair.status) && (!Number.isInteger(repair.attempts) || repair.attempts < 1)) {
+    errors.push({ path: `${path}.attempts`, message: "must be at least 1 once an attempt starts" });
+  }
+  if (repair.status === "merged" && !stringValue(repair.merge_commit)) {
+    errors.push({ path: `${path}.merge_commit`, message: "merged repair requires merge_commit" });
+  }
+  if (repair.status !== "merged" && repair.merge_commit !== undefined) {
+    errors.push({ path: `${path}.merge_commit`, message: "is allowed only when the repair is merged" });
+  }
+  if (repair.status === "blocked" && !stringValue(repair.reason)) {
+    errors.push({ path: `${path}.reason`, message: "blocked repair requires a reason" });
+  }
+  if (stringValue(repair.owner_slice_id) && stringValue(repair.consumer_slice_id) && repair.owner_slice_id === repair.consumer_slice_id) {
+    errors.push({ path: `${path}.consumer_slice_id`, message: "must differ from owner_slice_id" });
+  }
+  const slices = Array.isArray(run.slices) ? run.slices : [];
+  if (stringValue(repair.owner_slice_id) && slices.length > 0 && !slices.some((slice) => slice?.id === repair.owner_slice_id)) {
+    errors.push({ path: `${path}.owner_slice_id`, message: "must reference a known slice" });
+  }
+  if (stringValue(repair.consumer_slice_id) && slices.length > 0 && !slices.some((slice) => slice?.id === repair.consumer_slice_id)) {
+    errors.push({ path: `${path}.consumer_slice_id`, message: "must reference a known slice" });
+  }
 }
 
 function validateProvenance(errors, provenance, path) {

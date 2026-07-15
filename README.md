@@ -866,6 +866,7 @@ The orchestrator computes waves from `depends_on`:
 - Each slice carries one dominant hard concern (per-slice width budget); a fourth wave is used to keep slices within that budget, not to grow the critical path arbitrarily. When the width budget cannot be met within four waves, decomposition returns `REDESIGN-REQUIRED` and the run stops for a smaller story rather than shipping an oversized slice.
 - Each slice builds in its own `.opencode/worktrees/<feature-branch>--<slice-id>` worktree.
 - The orchestrator observes diff/tests, runs `work-reviewer`, then merges approved slices serially into the feature worktree.
+- A newly exposed integration defect in an already-merged dependency gets one bounded merged-sibling repair per run: the consumer reports it (never edits out of lane), the owner-role builder fixes it in the owner's lane under a separate two-attempt budget with a fresh review, and slice work is quiesced while the repair is active. A known unresolved owner finding stays subject to the original slice budget.
 
 This matches the original software-factory pattern while keeping the package tracker-agnostic.
 

@@ -538,6 +538,25 @@ Run `work-reviewer` on each slice, with the slice worktree read-only. Start hear
 
 Merge approved slices into the feature worktree one at a time with a normal no-ff merge or the repo's expected merge command. After the merge commit exists, record it through `feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json`; do not mark slices merged by editing `run.json` directly. Then refresh heartbeat and clean up successful slice worktrees/branches. If a merge conflict occurs, mark the slice `blocked`, leave the worktree for inspection, and surface it as a decomposition/coordination bug.
 
+### Merged-Sibling Repair (bounded)
+
+A consumer slice can expose a defect in an already approved and merged dependency before the post-merge integration gate. That defect has a first-class owner route — never an out-of-lane consumer edit, and never a reopened merged slice. Eligibility is strict: an observed consumer failure identifies an exact defective path; that path belongs to a direct, already-merged dependency; the defect was not an unresolved item from the owner's prior reviews; and the repair fits entirely within the owner's existing lane and accepted contract. Only one repair incident is allowed per run. This is not a backdoor around exhausted slice reviews: it is eligible only for a newly exposed integration defect in a previously APPROVED slice, and a known unresolved owner finding remains subject to the original slice budget.
+
+Lifecycle:
+
+1. The consumer's builder reports the cross-slice defect without editing it; the orchestrator reproduces the failure and captures it as observed evidence under `evidence/`.
+2. Record the incident with `feature-factory factory repair <run-id> reported --owner-slice <owner> --consumer-slice <consumer> --defect-path <path> --evidence-ref evidence/<file> --json`. The transition verifies the owner is merged, the consumer directly depends on it, the path is inside the owner's plan lane, and hash-binds the reproduction evidence.
+3. Quiesce slice work: let in-flight slices finish review or mark them blocked; while the repair is active no slice may start or merge (`factory slice-status ... running` and `factory slice-merged` fail closed).
+4. Create a repair branch/worktree from current feature HEAD, then record `feature-factory factory repair <run-id> repairing --attempts 1 --branch <ref> --worktree <path> --json`.
+5. Dispatch the owner-role builder with the exact hash-bound reproduction, scoped to the owner's lane. Run focused owner and consumer tests.
+6. Obtain a fresh `work-reviewer` verdict with subject `repair:<owner-slice-id>`, write it to `reviews/`, and record `feature-factory factory repair <run-id> review --review-ref reviews/<file> --json`. The reviewer REJECTs a repair whose defect matches an unresolved item from the owner's prior reviews.
+7. On APPROVE, merge the repair into the feature branch and record `feature-factory factory repair <run-id> merged --merge-commit SHA --json`. On a finite REJECT, one remediation attempt is allowed: `factory repair <run-id> repairing --attempts 2` — the durable budget is exactly 2 and is separate state; it is never charged to the merged slice's immutable history and never drawn from `run.max_retries`.
+8. Recreate or rebase affected pending consumer worktrees from the new feature HEAD.
+9. Rerun the original consumer reproduction, then continue normal slice work.
+10. The final `test-verifier` integration gate and the full pre-PR panel still run unchanged.
+
+If attempt 2 fails, or the fix needs new scope, a different lane, or a contract amendment, record `factory repair <run-id> blocked --reason TEXT --json` and terminalize the run for a recovery continuation.
+
 ## Step 5 - Integrate And Validate
 
 Apply the Live-Run Steering Drain Protocol before each standalone or grouped parallel agent dispatch, after every heartbeat-bracketed wait, and before choosing, routing, or locally applying every remediation attempt.

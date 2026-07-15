@@ -93,6 +93,7 @@ const STATE_WRITE_COMMANDS = Object.freeze([
   "factory verdicts <run-id> --validator GO",
   "factory terminal <run-id> blocked --reason TEXT",
   "factory slice-merged <run-id> <slice-id> --merge-commit SHA",
+  "factory repair <run-id> reported --owner-slice",
   "factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO",
 ]);
 const PROCESS_SIDECAR_COMMANDS = Object.freeze([
@@ -309,6 +310,31 @@ describe("class-wide planning prompt contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /newly raised implementation mechanic or optional hardening detail is NONBLOCKING and never creates a required fix or retry/i);
     assert.match(WORK_REVIEWER_PROMPT, /first-pass miss[\s\S]*mark the review `nonconvergent`[\s\S]*stop autonomous spec retries/i);
     assert.match(stepTwo, /terminalize through the normal blocked\/needs-human boundary/i);
+  });
+
+  it("routes merged-sibling defects through the bounded owner repair, never out-of-lane edits", () => {
+    // The observed critic-acceptance incident: a consumer exposed a defect in a
+    // merged dependency, edited the sibling's test file, and burned its final
+    // attempt on the lane rejection. The repair route gives the defect a legal
+    // owner without reopening the merged slice's immutable history.
+    for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
+      assert.match(prompt, /Cross-slice defects are reported, never edited/i, `${name} builder must report cross-slice defects`);
+      assert.match(prompt, /Regression tests for consumed sibling behavior belong in your own test files, never in the sibling's/i, `${name} builder must keep sibling regressions in its own lane`);
+    }
+    assert.match(WORK_REVIEWER_PROMPT, /merged-sibling repair \(subject `repair:<owner-slice-id>`\)/i);
+    assert.match(WORK_REVIEWER_PROMPT, /REJECT the entire repair route when it matches an unresolved item from those reviews/i);
+    assert.match(WORK_REVIEWER_PROMPT, /never become a backdoor around an exhausted review/i);
+    assert.match(WORK_REVIEWER_PROMPT, /must fail before the repair and pass after it, on observed evidence/i);
+    assert.match(SKILL, /### Merged-Sibling Repair \(bounded\)/);
+    assert.match(SKILL, /Only one repair incident is allowed per run/i);
+    assert.match(SKILL, /never charged to the merged slice's immutable history and never drawn from `run\.max_retries`/i);
+    assert.match(SKILL, /factory repair <run-id> reported --owner-slice/);
+    assert.match(SKILL, /no slice may start or merge/i);
+    assert.match(SKILL, /final `test-verifier` integration gate and the full pre-PR panel still run unchanged/i);
+    assert.match(SCHEMA, /merged_slice_repair/);
+    assert.match(SCHEMA, /`merged` and `blocked` are terminal, and a further defect requires a recovery run/i);
+    assert.match(SCHEMA, /attempt 1 is the initial correction, attempt 2 the single remediation after a finite rejecting review/i);
+    assert.match(README, /one bounded merged-sibling repair per run/i);
   });
 
   it("requires rejecting reviews to enumerate explicit finite fixes", () => {
