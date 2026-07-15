@@ -39,6 +39,42 @@ describe("factory cancellation process evidence", { concurrency: false }, () => 
     }
   });
 
+  it("stops the run heartbeat after confirmed process cancellation", async () => {
+    const fixture = createFixture("cancel-with-heartbeat");
+    const signals = [];
+    try {
+      writeProcessEvidence(fixture, { pid: 4242 });
+      writeJson(join(fixture.runDir, "heartbeat.json"), {
+        schema_version: 1,
+        run_id: fixture.runId,
+        phase: "builder-wave",
+        pid: 9876,
+        interval_ms: 30000,
+        last_tick_at: NOW,
+        identity: { inspector: "test-heartbeat", start_marker: "heartbeat-start", command_name: "node", cwd: fixture.repo },
+      });
+      const live = matchingInspector(fixture, 4242);
+
+      const result = await cancelFactoryRun(fixture.runId, {
+        cwd: fixture.repo,
+        now: NOW,
+        cancelWaitMs: 500,
+        inspectorFn: (pid) => (signals.some((item) => item.pid === 4242) ? { ok: false, inspector: "test-inspector", reason: "ESRCH: no such process" } : live(pid)),
+        processAliveFn: (pid) => pid === 9876,
+        heartbeatInspectorFn: (pid) => ({ ok: true, inspector: "test-heartbeat", pid, start_marker: "heartbeat-start", command_name: "node", cwd: fixture.repo }),
+        signalFn: (pid, signal) => signals.push({ pid, signal }),
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.status, "cancelled");
+      assert.equal(result.heartbeat_stopped, true);
+      assert.deepEqual(signals, [{ pid: 4242, signal: "SIGTERM" }, { pid: 9876, signal: "SIGTERM" }]);
+      assert.equal(readJson(join(fixture.runDir, "heartbeat.json")).pid, null);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("keeps state running and reports cancel-pending while the process ignores SIGTERM", async () => {
     const fixture = createFixture("cancel-hung");
     const signals = [];

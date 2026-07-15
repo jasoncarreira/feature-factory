@@ -43,6 +43,8 @@ const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const HANDOFF_RECEIPT_KIND = "interactive-approval-handoff";
 const DEBUG_SNAPSHOT_KEYS = new Set(["created_with", "last_resumed_with", "resume_count"]);
 const DEBUG_SNAPSHOT_EVENT_KEYS = new Set(["collected_at", "event", "diagnostic_only", "env"]);
+const PROVENANCE_KEYS = new Set(["schema_version", "created", "last_resumed", "resume_count", "review_dispatches"]);
+const PROVENANCE_EVENT_KEYS = new Set(["schema_version", "event", "captured_at", "dispatch", "content", "runtime"]);
 const COST_ATTRIBUTION_STATUS_SET = new Set(COST_ATTRIBUTION_STATUSES);
 const COST_ATTRIBUTION_ENTRY_OPTIONAL_STRINGS = new Set(["step", "slice_id", "source", "operation", "provider", "model", "request_id", "cost_currency"]);
 const COST_ATTRIBUTION_NUMERIC_FIELDS = new Set([...USAGE_NUMERIC_FIELDS, ...COST_NUMERIC_FIELDS]);
@@ -91,6 +93,7 @@ export function validateRun(run) {
   optionalInteger(errors, run, "max_retries", "run.max_retries");
   optionalNonEmptyString(errors, run, "review_tier", "run.review_tier");
   validateDebugSnapshot(errors, run.debug_snapshot, "run.debug_snapshot");
+  validateProvenance(errors, run.provenance, "run.provenance");
   validateContinuation(errors, run, "run.continuation");
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
@@ -170,6 +173,12 @@ export function validateHeartbeatState(heartbeat) {
   requiredString(errors, heartbeat, "run_id", "heartbeat.run_id");
   requiredString(errors, heartbeat, "phase", "heartbeat.phase");
   optionalNullableInteger(errors, heartbeat, "pid", "heartbeat.pid");
+  if (heartbeat.identity !== undefined && heartbeat.identity !== null) {
+    if (!isRecord(heartbeat.identity)) errors.push({ path: "heartbeat.identity", message: "must be an object" });
+    else {
+      for (const key of ["inspector", "start_marker", "command_name", "cwd"]) requiredString(errors, heartbeat.identity, key, `heartbeat.identity.${key}`);
+    }
+  }
   requiredInteger(errors, heartbeat, "interval_ms", "heartbeat.interval_ms");
   requiredString(errors, heartbeat, "last_tick_at", "heartbeat.last_tick_at");
   if (errors.length) fail(errors);
@@ -448,6 +457,89 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
   validateRedactedEnv(errors, payload, `${path}.env`);
 }
 
+function validateProvenance(errors, provenance, path) {
+  if (provenance === undefined || provenance === null) return;
+  if (!isRecord(provenance)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, provenance, PROVENANCE_KEYS, path);
+  requiredInteger(errors, provenance, "schema_version", `${path}.schema_version`);
+  if (provenance.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  if (provenance.created !== null) validateProvenanceEvent(errors, provenance.created, `${path}.created`, "created");
+  if (provenance.last_resumed !== null) validateProvenanceEvent(errors, provenance.last_resumed, `${path}.last_resumed`, "resumed");
+  boundedInteger(errors, provenance, "resume_count", 0, Number.MAX_SAFE_INTEGER, `${path}.resume_count`);
+  if (!Array.isArray(provenance.review_dispatches)) errors.push({ path: `${path}.review_dispatches`, message: "must be an array" });
+  else for (const [index, event] of provenance.review_dispatches.entries()) validateProvenanceEvent(errors, event, `${path}.review_dispatches[${index}]`, "review-dispatch");
+}
+
+function validateProvenanceEvent(errors, event, path, expectedEvent) {
+  if (!isRecord(event)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, event, PROVENANCE_EVENT_KEYS, path);
+  requiredInteger(errors, event, "schema_version", `${path}.schema_version`);
+  if (event.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredString(errors, event, "event", `${path}.event`);
+  if (event.event !== expectedEvent) errors.push({ path: `${path}.event`, message: `must equal ${expectedEvent}` });
+  requiredString(errors, event, "captured_at", `${path}.captured_at`);
+  validateProvenanceContent(errors, event.content, `${path}.content`);
+  validateProvenanceRuntime(errors, event.runtime, `${path}.runtime`);
+  if (expectedEvent === "review-dispatch") validateProvenanceDispatch(errors, event.dispatch, `${path}.dispatch`);
+  else if (event.dispatch !== undefined) errors.push({ path: `${path}.dispatch`, message: "is not allowed for this event" });
+}
+
+function validateProvenanceContent(errors, content, path) {
+  if (!isRecord(content)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, content, new Set(["command_hash", "agent_prompt_hashes", "skill_hashes"]), path);
+  requiredHash(errors, content, "command_hash", `${path}.command_hash`);
+  for (const key of ["agent_prompt_hashes", "skill_hashes"]) {
+    const hashes = content[key];
+    if (!isRecord(hashes)) { errors.push({ path: `${path}.${key}`, message: "must be an object" }); continue; }
+    for (const [name, hash] of Object.entries(hashes)) if (!HASH_PATTERN.test(hash)) errors.push({ path: `${path}.${key}.${name}`, message: "must be a sha256 hash" });
+  }
+}
+
+function validateProvenanceRuntime(errors, runtime, path) {
+  if (!isRecord(runtime)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, runtime, new Set(["plugin", "opencode_version", "configured_models", "configured_variants", "model", "git"]), path);
+  const plugin = runtime.plugin;
+  if (!isRecord(plugin)) errors.push({ path: `${path}.plugin`, message: "must be an object" });
+  else {
+    allowedKeys(errors, plugin, new Set(["source", "source_hash", "package_version"]), `${path}.plugin`);
+    requiredString(errors, plugin, "source", `${path}.plugin.source`);
+    requiredHash(errors, plugin, "source_hash", `${path}.plugin.source_hash`);
+    requiredString(errors, plugin, "package_version", `${path}.plugin.package_version`);
+  }
+  if (runtime.opencode_version !== null) optionalString(errors, runtime, "opencode_version", `${path}.opencode_version`);
+  for (const key of ["configured_models", "configured_variants"]) {
+    const values = runtime[key];
+    if (!isRecord(values)) { errors.push({ path: `${path}.${key}`, message: "must be an object" }); continue; }
+    for (const [name, value] of Object.entries(values)) if (value !== null && !stringValue(value)) errors.push({ path: `${path}.${key}.${name}`, message: "must be a string or null" });
+  }
+  if (runtime.model !== null) {
+    const model = runtime.model;
+    if (!isRecord(model)) errors.push({ path: `${path}.model`, message: "must be an object or null" });
+    else {
+      allowedKeys(errors, model, new Set(["configured", "variant", "actual", "actual_source"]), `${path}.model`);
+      for (const key of ["configured", "variant", "actual"]) if (model[key] !== null) optionalString(errors, model, key, `${path}.model.${key}`);
+      requiredEnum(errors, model, "actual_source", new Set(["unavailable", "opencode-runtime"]), `${path}.model.actual_source`);
+    }
+  }
+  const gitState = runtime.git;
+  if (!isRecord(gitState)) errors.push({ path: `${path}.git`, message: "must be an object" });
+  else {
+    allowedKeys(errors, gitState, new Set(["head", "dirty"]), `${path}.git`);
+    if (gitState.head !== null) optionalString(errors, gitState, "head", `${path}.git.head`);
+    if (gitState.dirty !== null && typeof gitState.dirty !== "boolean") errors.push({ path: `${path}.git.dirty`, message: "must be a boolean or null" });
+  }
+}
+
+function validateProvenanceDispatch(errors, dispatch, path) {
+  if (!isRecord(dispatch)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, dispatch, new Set(["agent", "subject", "attempt", "prompt_hash", "prompt_bytes"]), path);
+  requiredEnum(errors, dispatch, "agent", new Set(["work-reviewer", "implementation-validator", "security-reviewer"]), `${path}.agent`);
+  requiredString(errors, dispatch, "subject", `${path}.subject`);
+  boundedInteger(errors, dispatch, "attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.attempt`);
+  requiredHash(errors, dispatch, "prompt_hash", `${path}.prompt_hash`);
+  boundedInteger(errors, dispatch, "prompt_bytes", 0, Number.MAX_SAFE_INTEGER, `${path}.prompt_bytes`);
+}
+
 function validateContinuation(errors, run, path) {
   const continuation = run.continuation;
   if (continuation === undefined || continuation === null) return;
@@ -469,6 +561,10 @@ function validateContinuation(errors, run, path) {
   validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
   validateContinuationSelectedReview(errors, continuation, path);
   validateContinuationPlanningReuse(errors, continuation.planning_reuse, `${path}.planning_reuse`);
+  validateContinuationDraftSpecReuse(errors, run, continuation.draft_spec_reuse, `${path}.draft_spec_reuse`);
+  if (continuation.planning_reuse?.eligible === true && continuation.draft_spec_reuse !== undefined) {
+    errors.push({ path, message: "cannot combine accepted planning reuse with draft spec reuse" });
+  }
   validateContinuationPostPr(errors, continuation.post_pr, `${path}.post_pr`);
 }
 
@@ -485,6 +581,26 @@ function validateContinuationPlanningReuse(errors, reuse, path) {
     requiredString(errors, reuse, "spec_artifact_ref", `${path}.spec_artifact_ref`);
     requiredHash(errors, reuse, "spec_artifact_hash", `${path}.spec_artifact_hash`);
   }
+}
+
+function validateContinuationDraftSpecReuse(errors, run, draft, path) {
+  if (draft === undefined || draft === null) return;
+  if (!isRecord(draft)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  requiredString(errors, draft, "artifact_ref", `${path}.artifact_ref`);
+  if (draft.artifact_ref !== "artifacts/technical-brief.md") errors.push({ path: `${path}.artifact_ref`, message: "must equal artifacts/technical-brief.md" });
+  requiredHash(errors, draft, "artifact_hash", `${path}.artifact_hash`);
+  requiredEnum(errors, draft, "parent_step_status", new Set(["rejected", "blocked"]), `${path}.parent_step_status`);
+  boundedInteger(errors, draft, "parent_step_attempts", 0, Number.MAX_SAFE_INTEGER, `${path}.parent_step_attempts`);
+  boundedInteger(errors, draft, "max_retries", 1, Number.MAX_SAFE_INTEGER, `${path}.max_retries`);
+  boundedInteger(errors, draft, "remaining_attempts", 1, Number.MAX_SAFE_INTEGER, `${path}.remaining_attempts`);
+  if (Number.isInteger(draft.max_retries) && Number.isInteger(draft.parent_step_attempts)
+    && draft.remaining_attempts !== draft.max_retries - draft.parent_step_attempts) {
+    errors.push({ path: `${path}.remaining_attempts`, message: "must equal max_retries - parent_step_attempts" });
+  }
+  if (run.max_retries !== draft.max_retries) errors.push({ path: "run.max_retries", message: "must inherit continuation draft_spec_reuse.max_retries" });
 }
 
 function validateContinuationPostPr(errors, value, path) {

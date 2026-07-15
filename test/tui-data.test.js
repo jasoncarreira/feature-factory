@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "./helpers/git-fixture.js";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { factoryRoots, findFactoryRoots, projectTuiDiagnosticData, readRuns, selectVisibleRuns } from "../src/tui-data.js";
@@ -127,6 +127,28 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
+  it("shows a new git-root run when a session-subdirectory factory shadows the direct root", () => {
+    const repo = tempDir();
+    execFileSync("git", ["init", "--quiet"], { cwd: repo });
+    const sessionDir = join(repo, "subdir");
+    mkdirSync(join(sessionDir, ".opencode", "factory"), { recursive: true });
+    const api = { state: { path: { worktree: sessionDir, directory: sessionDir } } };
+    const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: sessionDir, encoding: "utf8" }).trim();
+
+    // Warm the cache while directFactoryRoot resolves to the session-local
+    // factory. Factory commands still anchor durable runs at the Git root.
+    assert.deepEqual(factoryRoots(api), [
+      join(gitRoot, ".opencode", "factory"),
+      join(sessionDir, ".opencode", "factory"),
+    ]);
+
+    writeRun(repo, "repo-root-run", { status: "running", updated_at: "2026-07-06T00:00:00Z" });
+    const runs = readRuns(factoryRoots(api));
+
+    assert.ok(runs.some((run) => run.run_id === "repo-root-run"));
+    cleanup(repo);
+  });
+
   it("does not throw when a scanned root is not a directory", () => {
     const workspace = tempDir();
     mkdirSync(join(workspace, ".opencode"), { recursive: true });
@@ -135,6 +157,19 @@ describe("TUI factory scanner", () => {
 
     assert.deepEqual(readRuns([rootAsFile]), []);
     cleanup(workspace);
+  });
+
+  it("skips symlinked factory roots instead of following them", () => {
+    const workspace = tempDir();
+    const outside = tempDir();
+    writeRun(outside, "outside-run", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
+    symlinkSync(join(outside, ".opencode"), join(workspace, ".opencode"), "dir");
+
+    const roots = factoryRoots({ state: { path: { directory: workspace } } }, { noCache: true });
+    assert.deepEqual(roots, []);
+    assert.deepEqual(readRuns(roots), []);
+    cleanup(workspace);
+    cleanup(outside);
   });
 
   it("tolerates missing TUI startup path state", () => {
@@ -360,17 +395,35 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
-  it("keeps a blocked step as the fallback when no slice is blocked", () => {
+  it("keeps a genuinely attempted blocked step as the fallback when no slice is blocked", () => {
     const repo = tempDir();
     writeRun(repo, "blocked-step-run", {
       status: "running",
       updated_at: "2026-07-04T00:00:00Z",
-      steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }],
+      steps: [{ agent: "work-decomposer", status: "blocked", attempts: 1 }],
     });
 
     const [run] = readRuns(findFactoryRoots(repo));
 
-    assert.equal(run.current, "work-decomposer blocked");
+    assert.equal(run.current, "work-decomposer blocked a1");
+    cleanup(repo);
+  });
+
+  it("does not present zero-attempt bootstrap placeholders as blocked work", () => {
+    const repo = tempDir();
+    writeRun(repo, "bootstrap-run", {
+      status: "running",
+      updated_at: "2026-07-04T00:00:00Z",
+      steps: [
+        { agent: "spec-writer", status: "blocked", attempts: 0 },
+        { agent: "work-decomposer", status: "blocked", attempts: 0 },
+        { agent: "test-verifier", status: "blocked", attempts: 0 },
+      ],
+    });
+
+    const [run] = readRuns(findFactoryRoots(repo));
+
+    assert.equal(run.current, null);
     cleanup(repo);
   });
 

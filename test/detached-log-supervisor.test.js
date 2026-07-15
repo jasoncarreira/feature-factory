@@ -48,6 +48,32 @@ describe("detached log supervisor", () => {
       rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+
+  it("cleans up the scoped run heartbeat before recording supervisor exit", async () => {
+    const fixture = createFixture("heartbeat-cleanup");
+    const runDir = join(fixture.root, ".opencode", "factory", "scoped-run");
+    const calls = [];
+    mkdirSync(join(runDir, "processes"), { recursive: true });
+    try {
+      await superviseDetachedLaunch({
+        ...init(fixture),
+        runDir,
+        runId: "scoped-run",
+        executionId: "execution-1",
+        logRef: "processes/child.log",
+        recordEvidence: true,
+      }, {
+        send() {},
+        inspectorFn: (pid) => ({ ok: true, inspector: "test", pid, start_marker: "start-1", command_name: "opencode", cwd: fixture.root }),
+        stopHeartbeatFn: async (scopedRunDir) => calls.push(scopedRunDir),
+      });
+
+      assert.deepEqual(calls, [runDir]);
+      assert.equal(JSON.parse(readFileSync(join(runDir, "process.json"), "utf8")).state, "exited");
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
 });
 
 function createFixture(name) {

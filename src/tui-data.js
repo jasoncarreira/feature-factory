@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
-import { directFactoryRoot } from "./factory-paths.js";
+import { directFactoryRootForLookup, safeFactoryRootForLookup } from "./factory-paths.js";
+import { repoRoot } from "./git.js";
 import {
   DIAGNOSTIC_CLASSIFICATIONS,
   DIAGNOSTIC_CONDITIONS,
@@ -43,12 +44,14 @@ export function factoryRoots(api, options = {}) {
   // result — even when it does not exist yet and even on a cache hit that
   // holds other discovered roots. A run created in the active project must
   // become visible on the next poll tick, never after a cache TTL expiry.
-  // directFactoryRoot carries the same semantics factory writes use: the
-  // start's local .opencode/factory when it exists, otherwise the Git
-  // repository root's — so a session opened in a repo subdirectory still
-  // sees runs written at the repo root. readRootRuns tolerates roots that
-  // do not exist.
-  const candidates = starts.map((start) => directFactoryRoot(start));
+  // directFactoryRootForLookup mirrors factory root selection but skips unsafe
+  // symlink candidates instead of weakening the write path's strict rejection.
+  // A session opened in a repo subdirectory still sees runs written at the Git
+  // root. readRootRuns tolerates roots that do not exist.
+  const candidates = starts.flatMap((start) => [
+    directFactoryRootForLookup(start),
+    safeFactoryRootForLookup(join(repoRoot(start), ".opencode", "factory")),
+  ]).filter(Boolean);
   const cacheKey = starts.map((start) => resolve(start)).join("\0");
   const now = Date.now();
   const cached = rootCache.get(cacheKey);
@@ -113,7 +116,10 @@ export function findFactoryRoots(start, options = {}) {
   const nearest = findNearestFactoryRoot(dir);
   if (nearest) roots.add(nearest);
   for (const root of findNestedFactoryRoots(dir, options)) roots.add(root);
-  if (!roots.size) roots.add(join(dir, ".opencode", "factory"));
+  if (!roots.size) {
+    const fallback = safeFactoryRootForLookup(join(dir, ".opencode", "factory"));
+    if (fallback) roots.add(fallback);
+  }
   return [...roots];
 }
 
@@ -121,7 +127,10 @@ function findNearestFactoryRoot(start) {
   let dir = resolve(start);
   while (true) {
     const candidate = join(dir, ".opencode", "factory");
-    if (existsSync(candidate)) return candidate;
+    if (existsSync(candidate)) {
+      const safeCandidate = safeFactoryRootForLookup(candidate);
+      if (safeCandidate) return safeCandidate;
+    }
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -137,7 +146,10 @@ function findNestedFactoryRoots(start, options = {}) {
     const dir = queue.shift();
     scanned += 1;
     const candidate = join(dir, ".opencode", "factory");
-    if (existsSync(candidate)) roots.push(candidate);
+    if (existsSync(candidate)) {
+      const safeCandidate = safeFactoryRootForLookup(candidate);
+      if (safeCandidate) roots.push(safeCandidate);
+    }
     for (const child of safeReadDir(dir)) {
       if (SKIP_DIRS.has(child.name)) continue;
       const path = join(dir, child.name);
@@ -352,11 +364,18 @@ function currentSummary(run) {
   if (activeStep) return summarizeWorkItem(activeStep.agent, activeStep.status, activeStep.attempts);
   const blockedSlice = firstByStatus(run.slices, ["blocked"]);
   if (blockedSlice) return summarizeWorkItem(blockedSlice.id, blockedSlice.status, blockedSlice.attempts);
-  const step = firstByStatus(run.steps, ["blocked", "pending"]);
+  const displayableSteps = Array.isArray(run.steps) ? run.steps.filter(isDisplayableFallbackStep) : [];
+  const step = firstByStatus(displayableSteps, ["blocked", "pending"]);
   if (step) return summarizeWorkItem(step.agent, step.status, step.attempts);
   const panel = inferredPrePrPanelSummary(run);
   if (panel) return panel;
   return null;
+}
+
+function isDisplayableFallbackStep(step) {
+  if (step?.status !== "blocked") return true;
+  if (Number.isInteger(step.attempts) && step.attempts > 0) return true;
+  return Boolean(step.reason || step.review_ref || step.evidence_ref || step.artifact_ref);
 }
 
 function steeringSummary(run) {

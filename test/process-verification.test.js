@@ -509,11 +509,9 @@ describe("final verified targeted signaling", () => {
   });
 });
 
-it("real supported-platform identity smoke", {
-  skip: process.env.RUN_PROCESS_VERIFICATION_SMOKE !== "1",
-}, (t) => {
-  if (process.platform !== "linux" && process.platform !== "darwin") t.skip("unsupported host platform");
-  if (process.platform === "linux" && !existsSync(`/proc/${process.pid}/stat`)) t.skip("procfs unavailable");
+it("real supported-platform identity smoke", (t) => {
+  if (process.platform !== "linux" && process.platform !== "darwin") return t.skip("unsupported host platform");
+  if (process.platform === "linux" && !existsSync(`/proc/${process.pid}/stat`)) return t.skip("procfs unavailable");
   const inspected = inspectProcessIdentity(process.pid);
   assert.equal(inspected.status, "live", `${inspected.code}: ${inspected.reason}`);
   assert.equal(inspected.identity.pid, process.pid);

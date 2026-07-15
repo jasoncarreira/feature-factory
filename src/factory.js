@@ -6,14 +6,14 @@ import { spawn } from "node:child_process";
 import { assertRunJsonWriterAllowed, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, resolveGateAnswerTarget, transitionCostUsage, transitionGateDecision, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
-import { collectRunDebugSnapshot } from "./env-snapshot.js";
+import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath, parseWorktreeListPorcelain } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv } from "./telemetry.js";
-import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
+import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, inspectProcessIdentity, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
 import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
@@ -138,6 +138,9 @@ export async function startFactory(args, opts = {}) {
   assertPostPrCliOptions(opts, { command: "factory start" });
   if (resumeRunId && requestedRunId) throw new Error("factory start --run-id is only for new runs; use resume <run-id> to resume existing runs");
   if (requestedRunId) assertStartRunIdAvailable(repo, requestedRunId);
+  const detachedRunId = opts.detached && !resumeRunId
+    ? requestedRunId || allocateDetachedStartRunId(repo, opts)
+    : null;
   let resumedRun = null;
   let resumedRunDir = null;
   if (resumeRunId) {
@@ -163,7 +166,7 @@ export async function startFactory(args, opts = {}) {
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
-  commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo, requestedRunId }));
+  commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo, requestedRunId: detachedRunId || requestedRunId }));
   if (resumedRun) {
     return coordinateExistingRunLaunch(resumedRunDir, resumedRun, {
       ...opts,
@@ -174,7 +177,10 @@ export async function startFactory(args, opts = {}) {
         : (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env }),
     });
   }
-  if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, opts), env: launchEnv });
+  if (opts.detached) {
+    const runDir = join(factoryRoot(repo), detachedRunId);
+    return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: detachedRunId, runDir }), env: launchEnv });
+  }
   return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
 }
 
@@ -306,6 +312,22 @@ function assertStartRunIdAvailable(repo, runId) {
   if (branchExists(repo, runId)) throw new Error(`factory start --run-id '${runId}' collides with existing branch '${runId}'`);
   const worktree = resolve(repo, ".opencode", "worktrees", runId);
   if (existsSync(worktree)) throw new Error(`factory start --run-id '${runId}' collides with existing worktree ${worktree}`);
+}
+
+function allocateDetachedStartRunId(repo, opts = {}) {
+  const createRunId = typeof opts.createRunId === "function"
+    ? opts.createRunId
+    : () => `run-${new Date().toISOString().replace(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z").toLowerCase()}-${randomUUID().slice(0, 8)}`;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const runId = normalizeRequestedStartRunId(createRunId());
+    try {
+      assertStartRunIdAvailable(repo, runId);
+      return runId;
+    } catch (error) {
+      if (attempt === 7) throw error;
+    }
+  }
+  throw new Error("unable to allocate a detached factory run id");
 }
 
 function startResumeEligibility(preflight, opts = {}) {
@@ -1459,7 +1481,20 @@ export async function recordSteeringConflict(runId, input, opts = {}) {
 export async function cancelFactoryRun(runId, opts = {}) {
   if (!stringValue(runId)) throw new Error("factory cancel requires exactly one <run-id>");
   const target = resolveCancelRunDir(runId, opts);
-  return cancelProcessFromEvidence(target.runDir, { ...opts, runId: target.runId });
+  const result = await cancelProcessFromEvidence(target.runDir, { ...opts, runId: target.runId });
+  if (result.status !== "cancelled") return result;
+  try {
+    const heartbeat = await stopHeartbeatInRunDir(target.runDir, opts);
+    return { ...result, heartbeat_stopped: heartbeat?.pid === null };
+  } catch (error) {
+    return {
+      ...result,
+      ok: false,
+      status: "failed-closed",
+      reason: `main process is cancelled but heartbeat cleanup failed: ${renderErrorForTerminal(error)}`,
+      heartbeat_stopped: false,
+    };
+  }
 }
 
 // A detached launch records process.json before the agent writes run.json, so
@@ -1596,6 +1631,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
       run_id: run.run_id,
       phase,
       pid: process.pid,
+      identity: captureHeartbeatIdentity(process.pid, opts),
       last_tick_at: startedAt,
       interval_ms: intervalMs,
     });
@@ -1616,7 +1652,12 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 
 export async function stopHeartbeat(runId, config = {}, opts = {}) {
   const runDir = resolveHeartbeatRunDir(runId, opts);
+  return stopHeartbeatInRunDir(runDir, opts);
+}
+
+export async function stopHeartbeatInRunDir(runDir, opts = {}) {
   const heartbeatFile = heartbeatPath(runDir);
+  if (!existsSync(heartbeatFile)) return null;
   const stoppedAt = timestamp(opts.now);
   let stopped = null;
 
@@ -1631,11 +1672,11 @@ export async function stopHeartbeat(runId, config = {}, opts = {}) {
     const heartbeat = current.value;
     stopActiveHeartbeatLoop(runDir);
     if (heartbeat.pid && heartbeat.pid !== process.pid) {
-      const liveness = heartbeatProcessLiveness(heartbeat.pid, opts);
-      if (liveness === "indeterminate") {
-        throw new Error(`heartbeat ownership is ${liveness}; refusing to clear foreign pid ${heartbeat.pid}`);
+      const ownership = heartbeatProcessOwnership(heartbeat, opts);
+      if (ownership !== "live" && ownership !== "absent") {
+        throw new Error(`heartbeat ownership is ${ownership}; refusing to clear foreign pid ${heartbeat.pid}`);
       }
-      if (liveness === "live") process.kill(heartbeat.pid, "SIGTERM");
+      if (ownership === "live") (opts.signalFn || process.kill)(heartbeat.pid, "SIGTERM");
     }
     stopped = validateHeartbeatState({ ...heartbeat, pid: null, last_tick_at: stoppedAt });
     writeHeartbeatFile(heartbeatFile, stopped);
@@ -1665,6 +1706,51 @@ export async function persistFactoryRunCreatedEnv(runId, opts = {}) {
 
 export async function persistFactoryRunResumeEnv(runId, opts = {}) {
   return persistFactoryRunEnv(runId, "resume", opts);
+}
+
+export async function recordReviewDispatchProvenance(runId, input, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  const agent = String(input?.agent || "").trim();
+  const subject = String(input?.subject || "").trim();
+  const attempt = Number(input?.attempt);
+  const promptHash = String(input?.promptHash || "").trim();
+  const promptBytes = Number(input?.promptBytes);
+  if (!new Set(["work-reviewer", "implementation-validator", "security-reviewer"]).has(agent)) throw new Error("review provenance requires a known review agent");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(subject) || subject.includes("..")) throw new Error("review provenance requires a bounded safe --subject");
+  if (!Number.isInteger(attempt) || attempt < 1) throw new Error("review provenance requires a positive --attempts value");
+  if (!/^sha256:[a-f0-9]{64}$/u.test(promptHash)) throw new Error("review provenance requires --hash sha256:<64-lowercase-hex>");
+  if (!Number.isInteger(promptBytes) || promptBytes < 0) throw new Error("review provenance requires non-negative --prompt-bytes");
+  return withRunJsonLock(runDir, async () => {
+    const runPath = join(runDir, "run.json");
+    const current = readRunFile(runPath);
+    assertRunJsonWriterAllowed(current, "provenance review-dispatch");
+    const event = await collectEffectiveProvenance({
+      repo: factoryRepoFromRunDir(runDir),
+      gitCwd: provenanceGitCwd(factoryRepoFromRunDir(runDir), current.worktree),
+      pluginOptions: opts.pluginOptions,
+      event: "review-dispatch",
+      agent,
+      subject,
+      attempt,
+      promptHash,
+      promptBytes,
+      now: opts.now,
+    });
+    const existing = current.provenance && typeof current.provenance === "object" ? current.provenance : {};
+    const reviewDispatches = Array.isArray(existing.review_dispatches) ? existing.review_dispatches : [];
+    const next = validateRun({
+      ...current,
+      provenance: {
+        schema_version: 1,
+        created: existing.created || null,
+        last_resumed: existing.last_resumed || null,
+        resume_count: nonNegativeInteger(existing.resume_count),
+        review_dispatches: [...reviewDispatches, event],
+      },
+    });
+    writeJsonAtomic(runPath, next);
+    return event;
+  }, opts);
 }
 
 export function latestRunId(opts = {}) {
@@ -2496,6 +2582,8 @@ function buildContinuation(parentRunId, opts = {}) {
     parent_reviews: collectContinuationParentReviews(parentRunDir, parentRun),
     planning_reuse: continuationPlanningReuse(parentRun, parentRunDir),
   };
+  const draftSpecReuse = continuationDraftSpecReuse(parentRun, parentRunDir);
+  if (draftSpecReuse) continuation.draft_spec_reuse = draftSpecReuse;
   if (postPrParent) continuation.post_pr = continuationPostPrBinding(parentRun, parentRunDir);
   return continuation;
 }
@@ -2718,16 +2806,45 @@ function continuationPlanningReuse(parentRun, parentRunDir) {
   };
 }
 
+function continuationDraftSpecReuse(parentRun, parentRunDir) {
+  const step = (Array.isArray(parentRun.steps) ? parentRun.steps : [])
+    .find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
+  if (!step || !["rejected", "blocked"].includes(step.status)) return null;
+  if (!Number.isInteger(step.attempts) || step.attempts < 0) return null;
+  if (step.acceptance || step.inherited_acceptance) return null;
+  if (String(step.artifact_ref || "").trim() !== "artifacts/technical-brief.md") return null;
+  const maxRetries = Number.isInteger(parentRun.max_retries) ? parentRun.max_retries : 3;
+  if (maxRetries < 1 || step.attempts >= maxRetries) {
+    throw new Error(`parent spec-writer retry budget is exhausted (${step.attempts}/${maxRetries}); refusing to reset it in a continuation`);
+  }
+  const parentRoot = resolve(parentRunDir);
+  const artifactPath = resolve(parentRoot, "artifacts/technical-brief.md");
+  const entry = lstatOptionalNoSymlinks(parentRoot, artifactPath, "spec-writer draft 'artifacts/technical-brief.md'", "spec-writer draft must not contain symlinks");
+  if (!entry || !entry.isFile()) return null;
+  return {
+    artifact_ref: "artifacts/technical-brief.md",
+    artifact_hash: sha256File(artifactPath),
+    parent_step_status: String(step.status),
+    parent_step_attempts: step.attempts,
+    max_retries: maxRetries,
+    remaining_attempts: maxRetries - step.attempts,
+  };
+}
+
 function continuationSeedPlan(continuation) {
   const reuse = continuation?.planning_reuse;
   if (!reuse || reuse.eligible !== true) {
-    return { eligible: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
+    const draft = continuation?.draft_spec_reuse;
+    if (draft) {
+      return { eligible: true, draft: true, reason: null, artifacts: [draft.artifact_ref], spec_review_ref: null };
+    }
+    return { eligible: false, draft: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
   }
   const artifacts = (Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : [])
     .filter((entry) => CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind))
     .map((entry) => entry.ref)
     .sort((a, b) => a.localeCompare(b));
-  return { eligible: true, reason: null, artifacts, spec_review_ref: reuse.child_spec_review_ref || CHILD_SPEC_REVIEW_REF };
+  return { eligible: true, draft: false, reason: null, artifacts, spec_review_ref: reuse.child_spec_review_ref || CHILD_SPEC_REVIEW_REF };
 }
 
 // Adopt the parent's DURABLY ACCEPTED planning output into the child run so a
@@ -2740,8 +2857,9 @@ function continuationSeedPlan(continuation) {
 // aborts the whole seed with no partial child run directory left behind.
 export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuation, options = {}) {
   const reuse = continuation?.planning_reuse;
-  if (!reuse || reuse.eligible !== true) {
-    return { eligible: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
+  const draft = continuation?.draft_spec_reuse;
+  if ((!reuse || reuse.eligible !== true) && !draft) {
+    return { eligible: false, draft: false, reason: reuse?.reason || "no reusable parent planning acceptance", artifacts: [], spec_review_ref: null };
   }
   const parentRoot = resolve(parentRunDir);
   const parentArtifactsDir = join(parentRoot, "artifacts");
@@ -2750,12 +2868,16 @@ export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuati
   const targetArtifactsDir = join(targetRunDir, "artifacts");
   const targetReviewsDir = join(targetRunDir, "reviews");
 
-  const plan = (Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : [])
-    .filter((entry) => CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind))
-    .map((entry) => ({ label: `parent artifact '${entry.ref}'`, srcRef: entry.ref, srcRoot: parentArtifactsDir, hash: entry.hash, destRef: entry.ref, destRoot: targetArtifactsDir, isArtifact: true }));
-  // Carry the approving spec review into the child under a canonical ref so the
-  // adopted spec-writer step's review_ref resolves in child state.
-  plan.push({ label: `spec review '${reuse.spec_review_ref}'`, srcRef: reuse.spec_review_ref, srcRoot: parentReviewsDir, hash: reuse.spec_review_hash, destRef: CHILD_SPEC_REVIEW_REF, destRoot: targetReviewsDir, isArtifact: false });
+  const plan = reuse?.eligible === true
+    ? (Array.isArray(continuation.parent_artifacts) ? continuation.parent_artifacts : [])
+      .filter((entry) => CONTINUATION_SEED_ARTIFACT_KINDS.has(entry.kind))
+      .map((entry) => ({ label: `parent artifact '${entry.ref}'`, srcRef: entry.ref, srcRoot: parentArtifactsDir, hash: entry.hash, destRef: entry.ref, destRoot: targetArtifactsDir, isArtifact: true }))
+    : [{ label: `parent draft '${draft.artifact_ref}'`, srcRef: draft.artifact_ref, srcRoot: parentArtifactsDir, hash: draft.artifact_hash, destRef: draft.artifact_ref, destRoot: targetArtifactsDir, isArtifact: true }];
+  if (reuse?.eligible === true) {
+    // Carry the approving spec review into the child under a canonical ref so the
+    // adopted spec-writer step's review_ref resolves in child state.
+    plan.push({ label: `spec review '${reuse.spec_review_ref}'`, srcRef: reuse.spec_review_ref, srcRoot: parentReviewsDir, hash: reuse.spec_review_hash, destRef: CHILD_SPEC_REVIEW_REF, destRoot: targetReviewsDir, isArtifact: false });
+  }
 
   // Phase 1 — validate and stage every entry before writing anything.
   const staged = [];
@@ -2806,10 +2928,11 @@ export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuati
   }
   return {
     eligible: true,
+    draft: reuse?.eligible !== true,
     reason: null,
     artifacts: staged.filter((item) => item.isArtifact).map((item) => item.destRef).sort((a, b) => a.localeCompare(b)),
-    spec_review_ref: CHILD_SPEC_REVIEW_REF,
-    spec_artifact_ref: reuse.spec_artifact_ref || "artifacts/technical-brief.md",
+    spec_review_ref: reuse?.eligible === true ? CHILD_SPEC_REVIEW_REF : null,
+    spec_artifact_ref: reuse?.spec_artifact_ref || draft?.artifact_ref || "artifacts/technical-brief.md",
   };
 }
 
@@ -3161,7 +3284,7 @@ function awaitDetachedReadiness(supervisor, init) {
       clearTimeout(timer);
       supervisor.unref?.();
       supervisor.disconnect?.();
-      resolveReady({ status: "started", pid: message.pid, repo: init.repo, log: init.log, command: ["opencode", ...init.commandArgs].join(" ") });
+      resolveReady({ status: "started", run_id: init.runId, pid: message.pid, repo: init.repo, log: init.log });
     });
     supervisor.send({
       type: "init",
@@ -4661,13 +4784,46 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
     const current = readRunFile(runPath);
     assertRunJsonWriterAllowed(current, `env ${eventKind}`, { allowUncheckpointed: eventKind === "resume" });
     if (eventKind === "resume") assertResumeMutationAllowed(runDir, current, opts);
+    const provenance = await collectEffectiveProvenance({
+      repo: factoryRepoFromRunDir(runDir),
+      gitCwd: provenanceGitCwd(factoryRepoFromRunDir(runDir), current.worktree),
+      pluginOptions: opts.pluginOptions,
+      event: eventKind === "resume" ? "resumed" : "created",
+      now: opts.now,
+    });
     const next = validateRun({
       ...current,
       debug_snapshot: nextDebugSnapshot(current.debug_snapshot, snapshot, eventKind),
+      provenance: nextProvenance(current.provenance, provenance, eventKind),
     });
     writeJsonAtomic(runPath, next);
     return next.debug_snapshot;
   }, opts);
+}
+
+function nextProvenance(current, event, eventKind) {
+  const existing = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+  if (eventKind === "resume") {
+    return {
+      schema_version: 1,
+      created: existing.created || null,
+      last_resumed: event,
+      resume_count: nonNegativeInteger(existing.resume_count) + 1,
+      review_dispatches: Array.isArray(existing.review_dispatches) ? existing.review_dispatches : [],
+    };
+  }
+  return {
+    schema_version: 1,
+    created: existing.created || event,
+    last_resumed: existing.last_resumed || null,
+    resume_count: nonNegativeInteger(existing.resume_count),
+    review_dispatches: Array.isArray(existing.review_dispatches) ? existing.review_dispatches : [],
+  };
+}
+
+function provenanceGitCwd(repo, worktree) {
+  if (!stringValue(worktree)) return repo;
+  return isAbsolute(worktree) ? worktree : resolve(repo, worktree);
 }
 
 function nextDebugSnapshot(current, snapshot, eventKind) {
@@ -4716,6 +4872,36 @@ function heartbeatProcessLiveness(pid, opts = {}) {
   if (pid === null) return "absent";
   if (typeof opts.processAliveFn === "function") return probeLegacyBooleanLiveness(opts.processAliveFn, pid);
   return probeProcessLiveness(pid, opts).status;
+}
+
+function captureHeartbeatIdentity(pid, opts = {}) {
+  const inspect = typeof opts.heartbeatInspectorFn === "function" ? opts.heartbeatInspectorFn : inspectProcessIdentity;
+  const observed = inspect(pid, opts);
+  if (observed?.ok !== true || !stringValue(observed.inspector) || !stringValue(observed.start_marker)
+    || !stringValue(observed.command_name) || !stringValue(observed.cwd)) {
+    throw new Error("heartbeat requires verifiable process identity");
+  }
+  return {
+    inspector: observed.inspector,
+    start_marker: observed.start_marker,
+    command_name: basename(observed.command_name),
+    cwd: resolve(observed.cwd),
+  };
+}
+
+function heartbeatProcessOwnership(heartbeat, opts = {}) {
+  const liveness = heartbeatProcessLiveness(heartbeat.pid, opts);
+  if (liveness !== "live") return liveness;
+  const expected = heartbeat.identity;
+  if (!expected || typeof expected !== "object") return "indeterminate";
+  const inspect = typeof opts.heartbeatInspectorFn === "function" ? opts.heartbeatInspectorFn : inspectProcessIdentity;
+  const observed = inspect(heartbeat.pid, opts);
+  if (observed?.ok !== true) return "indeterminate";
+  if (observed.inspector !== expected.inspector
+    || observed.start_marker !== expected.start_marker
+    || basename(String(observed.command_name || "")) !== basename(expected.command_name)
+    || resolve(String(observed.cwd || "")) !== resolve(expected.cwd)) return "mismatched";
+  return "live";
 }
 
 function projectFactoryWatchValue(value, path = []) {

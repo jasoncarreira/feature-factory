@@ -151,10 +151,14 @@ describe("factory heartbeat lifecycle", () => {
       const signals = [];
       const originalKill = process.kill;
       writeJson(join(runDir, "run.json"), runningRun());
-      writeJson(join(runDir, "heartbeat.json"), heartbeatRecord(424242));
+      writeJson(join(runDir, "heartbeat.json"), heartbeatRecord(424242, repo));
       try {
         process.kill = (pid, signal) => { signals.push({ pid, signal }); return true; };
-        const action = stopHeartbeat(RUN_ID, {}, { cwd: repo, processAliveFn: () => value });
+        const action = stopHeartbeat(RUN_ID, {}, {
+          cwd: repo,
+          processAliveFn: () => value,
+          heartbeatInspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "heartbeat-start", command_name: "node", cwd: repo }),
+        });
         if (clears) assert.equal((await action).pid, null, name);
         else await assert.rejects(action, /refusing to clear foreign pid/i, name);
         assert.equal(signals.length, signalCount, name);
@@ -163,6 +167,29 @@ describe("factory heartbeat lifecycle", () => {
         process.kill = originalKill;
         cleanup(repo);
       }
+    }
+  });
+
+  it("refuses to signal a live pid whose heartbeat start identity no longer matches", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    const signals = [];
+    writeJson(join(runDir, "run.json"), runningRun());
+    writeJson(join(runDir, "heartbeat.json"), heartbeatRecord(424242, repo));
+    try {
+      await assert.rejects(
+        stopHeartbeat(RUN_ID, {}, {
+          cwd: repo,
+          processAliveFn: () => true,
+          heartbeatInspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "reused-pid", command_name: "node", cwd: repo }),
+          signalFn: (pid, signal) => signals.push({ pid, signal }),
+        }),
+        /ownership is mismatched/u,
+      );
+      assert.deepEqual(signals, []);
+      assert.equal(readJson(join(runDir, "heartbeat.json")).pid, 424242);
+    } finally {
+      cleanup(repo);
     }
   });
 
@@ -246,7 +273,7 @@ function protectedGates(pending) {
   };
 }
 
-function heartbeatRecord(pid) {
+function heartbeatRecord(pid, cwd) {
   return {
     schema_version: 1,
     run_id: RUN_ID,
@@ -254,6 +281,7 @@ function heartbeatRecord(pid) {
     pid,
     last_tick_at: "2026-07-06T11:05:00.000Z",
     interval_ms: 1000,
+    ...(cwd ? { identity: { inspector: "test-inspector", start_marker: "heartbeat-start", command_name: "node", cwd } } : {}),
   };
 }
 

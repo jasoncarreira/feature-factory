@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,10 +31,12 @@ describe("factory trace-context propagation", () => {
 
   it("propagates validated traceparent and tracestate into detached start", async () => {
     const fixture = createLaunchFixture("start-detached-traceparent");
+    let detachedPid;
     try {
-      await withLaunchEnv(fixture, {}, async () => {
+      await withLaunchEnv(fixture, { OPENCODE_KEEPALIVE: "1" }, async () => {
         const result = await startFactory(["build detached telemetry"], { cwd: fixture.repo, detached: true, traceparent, tracestate: "vendor=value" });
         assert.equal(result.status, "started");
+        detachedPid = result.pid;
         await waitForFile(fixture.captureFile);
       });
 
@@ -44,7 +46,14 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_TRACESTATE, "vendor=value");
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      process.kill(detachedPid, "SIGTERM");
+      await waitForProcessExit(detachedPid);
+      detachedPid = null;
     } finally {
+      if (detachedPid) {
+        try { process.kill(detachedPid, "SIGTERM"); } catch { /* already exited */ }
+        try { await waitForProcessExit(detachedPid); } catch { /* best-effort cleanup */ }
+      }
       cleanup(fixture.root);
     }
   });
@@ -138,7 +147,7 @@ describe("factory trace-context propagation", () => {
 });
 
 function createLaunchFixture(name) {
-  const root = mkdtempSync(join(tmpdir(), `factory-telemetry-${name}-`));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `factory-telemetry-${name}-`)));
   const repo = join(root, "repo");
   mkdirSync(repo);
   const captureFile = join(root, "launch.json");
