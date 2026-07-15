@@ -1,9 +1,12 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import { git } from "./git.js";
 import plugin from "./plugin.js";
+import { readJsoncConfig } from "./config.js";
 import { timestamp } from "./utils.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -29,7 +32,8 @@ const SAFE_HIGH_ENTROPY_ENV_KEY_PATTERN = /^(?:OTEL_EXPORTER_OTLP(?:_(?:TRACES|M
 export const REDACTED_ENV_VALUE = "[redacted]";
 
 export async function collectEnv(options = {}) {
-  const resolvedConfig = await resolvePluginConfig(options.pluginOptions || {});
+  const pluginOptions = options.pluginOptions ?? installedPluginOptions();
+  const resolvedConfig = await resolvePluginConfig(pluginOptions);
   return {
     feature_factory_version: packageVersion(),
     opencode_version: commandOutput("opencode", ["--version"]),
@@ -54,11 +58,64 @@ export async function collectRunDebugSnapshot({ cwd, driverKind, pluginSpec, plu
   };
 }
 
+export async function collectEffectiveProvenance({ repo, gitCwd, pluginOptions, event, agent, subject, attempt, promptHash, promptBytes, now } = {}) {
+  const repository = repo || process.cwd();
+  const resolvedConfig = await resolvePluginConfig(pluginOptions ?? installedPluginOptions());
+  const selectedAgents = agent
+    ? Object.fromEntries([[agent, resolvedConfig.agent?.[agent]?.prompt || ""]])
+    : Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, value]) => [name, value.prompt || ""]));
+  const skillFiles = effectiveSkillFiles(repository);
+  const gitRoot = gitCwd && existsSync(gitCwd) ? gitCwd : repository;
+  const head = commandOutput("git", ["rev-parse", "HEAD"], gitRoot);
+  const status = commandOutput("git", ["status", "--porcelain=v1", "--untracked-files=all"], gitRoot);
+  const configuredAgent = agent ? resolvedConfig.agent?.[agent] : null;
+  const pluginSource = realpathSync(join(root, "src", "plugin.js"));
+  return {
+    schema_version: 1,
+    event: stringValue(event) ? event.trim() : "created",
+    captured_at: timestamp(now, "provenance timestamp"),
+    ...(agent ? { dispatch: { agent, subject, attempt, prompt_hash: promptHash, prompt_bytes: promptBytes } } : {}),
+    content: {
+      command_hash: hashText(resolvedConfig.command?.feature?.template || ""),
+      agent_prompt_hashes: Object.fromEntries(Object.entries(selectedAgents).map(([name, prompt]) => [name, hashText(prompt)])),
+      skill_hashes: Object.fromEntries(skillFiles.map(({ name, path }) => [name, hashFile(path)])),
+    },
+    runtime: {
+      plugin: { source: pluginSource, source_hash: hashFile(pluginSource), package_version: packageVersion() },
+      opencode_version: commandOutput("opencode", ["--version"]),
+      configured_models: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, value]) => [name, value.model || null])),
+      configured_variants: Object.fromEntries(Object.entries(resolvedConfig.agent || {}).map(([name, value]) => [name, value.variant || null])),
+      model: agent ? {
+        configured: configuredAgent?.model || null,
+        variant: configuredAgent?.variant || null,
+        actual: null,
+        actual_source: "unavailable",
+      } : null,
+      git: { head, dirty: status === null ? null : status.length > 0 },
+    },
+  };
+}
+
 export async function resolvePluginConfig(pluginOptions = {}) {
   const hooks = await plugin({}, pluginOptions);
   const cfg = {};
   hooks.config(cfg);
   return cfg;
+}
+
+export function installedPluginOptions(configPath = join(homedir(), ".config", "opencode", "opencode.jsonc")) {
+  try {
+    const config = readJsoncConfig(configPath, { label: "opencode.jsonc" });
+    const entries = Array.isArray(config.plugin) ? config.plugin : [];
+    for (const entry of entries) {
+      const spec = Array.isArray(entry) ? entry[0] : entry;
+      if (typeof spec !== "string" || !spec.includes("opencode-feature-factory")) continue;
+      return Array.isArray(entry) && entry[1] && typeof entry[1] === "object" && !Array.isArray(entry[1]) ? entry[1] : {};
+    }
+  } catch {
+    // Missing or invalid global config falls back to packaged defaults.
+  }
+  return {};
 }
 
 export function detectCapabilities(cwd = process.cwd()) {
@@ -113,6 +170,43 @@ export function isSecretShapedEnvKey(key) {
 function packageVersion() {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   return pkg.version || "unknown";
+}
+
+function effectiveSkillFiles(repo) {
+  const packaged = join(root, "assets", "skills", "feature");
+  return ["SKILL.md", "SCHEMA.md"].map((name) => {
+    const candidate = realRepoSkillFile(repo, name);
+    if (candidate) return { name: `feature/${name}`, path: candidate };
+    return { name: `feature/${name}`, path: join(packaged, name) };
+  });
+}
+
+function realRepoSkillFile(repo, name) {
+  const segments = [".opencode", "skills", "feature", name];
+  let candidate = repo;
+  for (const [index, segment] of segments.entries()) {
+    candidate = join(candidate, segment);
+    let entry;
+    try {
+      entry = lstatSync(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+    const isFile = index === segments.length - 1;
+    if (entry.isSymbolicLink() || (isFile ? !entry.isFile() : !entry.isDirectory())) {
+      throw new Error(`repo-seeded feature skill must use a real path: ${name}`);
+    }
+  }
+  return realpathSync(candidate);
+}
+
+function hashFile(path) {
+  return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+}
+
+function hashText(value) {
+  return `sha256:${createHash("sha256").update(String(value), "utf8").digest("hex")}`;
 }
 
 function commandOk(command, args, cwd = process.cwd()) {

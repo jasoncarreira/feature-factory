@@ -14,6 +14,7 @@ Produce a decision-complete technical brief at contract altitude. Builders shoul
 - Approved story and acceptance criteria.
 - Research map with real file paths and existing patterns.
 - Design brief if UI is involved.
+- On remediation, the complete current canonical technical brief, `attempt: <n>`, the prior review ref and complete prior `required_fixes`, and the orchestrator-observed remediation delta.
 
 If the research map is missing or too vague, stop and say what research is required. Do not plan against imagined structure.
 For a class-wide requirement, the research map must contain a finite surface inventory. If sources, sinks, call sites, compatibility policies, exclusions, or tests remain unenumerated, stop and request targeted research rather than passing `all` or `every` to builders as an unresolved instruction.
@@ -37,9 +38,19 @@ The completed assessment records how every identified gap was resolved in the br
 
 Close decisions in the brief when they determine externally observable behavior, a public or wire contract, persisted compatibility/migration/recovery semantics, security/authority boundaries, failure policy, semantic state transitions, acceptance tests, or repository ownership seams/path lanes. For stateful behavior, define the semantic states, allowed transitions, preconditions, observable outcomes, and recovery invariants builders must preserve.
 
+Persisted does not automatically mean implementation-prescriptive. Pin durable fields, encodings, migration behavior, and recovery invariants when existing readers, compatibility promises, external tooling, or the approved story make them consequential. When a private persisted record has no such constraint, decide its observable durability and recovery semantics but leave its mechanically equivalent internal field layout to the builder.
+
+For security, decide the applicable trust model, protected asset, actor capability, authority rule, deny/allow behavior, failure posture, and externally meaningful audit or disclosure policy. Leave the exact guard helper, validation plumbing, token/storage representation, and equivalent hardening mechanism to builders unless a source requirement or interoperability boundary makes that mechanism contractual. Do not turn optional defense-in-depth outside the declared trust model into a blocking specification requirement.
+
 Leave implementation mechanics to builders when multiple choices satisfy those decisions. This includes private helper signatures, internal module layout, mechanically equivalent private record representation, and exhaustive field-nullability, outcome/code, state/field, or crash-point cross-product matrices. For every cross-product deferred from prose, require an executable schema or state model plus table-driven or model-based tests to derive and verify the combinations during implementation rather than expanding the brief into an implementation artifact.
 
 When the approved story requires a closed schema, list its fields, variants, bounds, compatibility rules, and externally meaningful invariants. Do not require prose to enumerate every mechanically derivable combination once those constraints are fixed; pin an individual combination only when the approved source makes it normative or it changes compatibility, recovery, security, or an observable result. A builder choosing among mechanically equivalent implementations is not an unresolved design decision.
+
+## Remediation protocol
+
+On `attempt > 1`, amend the complete canonical `artifacts/technical-brief.md` in place. Return one coherent full brief, not an appended amendment, patch-only response, or replacement artifact at another path. Apply every prior required fix, reconcile the changed sections with the rest of the brief, and remove superseded language so the canonical brief has one current answer.
+
+Use the prior review and observed delta as the remediation boundary, but self-check the resulting full brief for contradictions and regressions. Report how each prior required fix was resolved and identify the sections changed. Do not reset the attempt number, discard unresolved prior fixes, or treat prior acceptance as applying to amended bytes.
 
 ## Minimum architecture rule
 

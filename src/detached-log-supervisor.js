@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { renderErrorForTerminal } from "./hardening/output-policy.js";
 import { inspectProcessIdentity, readProcessEvidence, recordDetachedProcessEvidence, writeProcessEvidence } from "./process-evidence.js";
+import { stopHeartbeatInRunDir } from "./factory.js";
 import { timestamp } from "./utils.js";
 
 const ABORT_GRACE_MS = 1000;
@@ -18,11 +19,20 @@ export async function superviseDetachedLaunch(init, options = {}) {
   let child;
   let writer;
   let failedClosed = false;
+  let heartbeatCleanupAttempted = false;
+
+  const cleanupHeartbeat = async () => {
+    if (!init.recordEvidence || heartbeatCleanupAttempted) return;
+    heartbeatCleanupAttempted = true;
+    const stopHeartbeat = typeof options.stopHeartbeatFn === "function" ? options.stopHeartbeatFn : stopHeartbeatInRunDir;
+    await stopHeartbeat(init.runDir, options);
+  };
 
   const failClosed = async (error) => {
     if (failedClosed) return;
     failedClosed = true;
     terminateChild(child);
+    try { await cleanupHeartbeat(); } catch { /* the failed-closed evidence preserves ambiguous ownership */ }
     await markMatchingEvidence(init, child?.pid, "failed-closed", options);
     throw new Error(renderErrorForTerminal(error));
   };
@@ -70,6 +80,7 @@ export async function superviseDetachedLaunch(init, options = {}) {
     } catch (error) {
       await failClosed(error);
     }
+    await cleanupHeartbeat();
     await markMatchingEvidence(init, child.pid, "exited", options);
     activeChild = null;
     return { pid: child.pid, status: "exited" };

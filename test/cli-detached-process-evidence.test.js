@@ -1,12 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 describe("cli detached process evidence", () => {
-  it("does not write run-scoped process evidence for generic detached starts without an explicit run id", async () => {
+  it("allocates a run id and writes cancellable process evidence for generic detached starts", async () => {
     const repo = tempRepo("generic-detached-start");
     try {
       const proc = runDeterministicCli(repo, ["factory", "start", "--detached", "--json", "test generic detached prompt"]);
@@ -14,9 +14,16 @@ describe("cli detached process evidence", () => {
       assert.equal(proc.status, 0, proc.stderr);
       const output = JSON.parse(proc.stdout);
       assert.equal(output.status, "started", proc.stdout);
-      assert.equal(existsSync(join(repo, ".opencode", "factory", "process.json")), false);
-      assert.equal(existsSync(join(repo, ".opencode", "factory", "processes")), true);
-      assert.deepEqual(readLifecycle(repo), ["supervisor-created", "init", "spawned", "ready", "unref", "disconnect"]);
+      assert.match(output.run_id, /^run-[a-z0-9-]+$/u);
+      assert.equal(output.command, undefined);
+      assert.equal(proc.stdout.includes("test generic detached prompt"), false);
+      assert.equal(proc.stdout.includes("ffpayload-v1:"), false);
+      const runDir = join(repo, ".opencode", "factory", output.run_id);
+      const processEvidence = JSON.parse(readFileSync(join(runDir, "process.json"), "utf8"));
+      assert.equal(processEvidence.run_id, output.run_id);
+      assert.equal(processEvidence.state, "running");
+      assert.equal(existsSync(join(runDir, "processes")), true);
+      assert.deepEqual(readLifecycle(repo), ["supervisor-created", "init", "evidence-published", "spawned", "ready", "unref", "disconnect"]);
     } finally {
       cleanup(repo);
     }
@@ -83,6 +90,22 @@ describe("cli detached process evidence", () => {
       assert.deepEqual(readLifecycle(repo), ["supervisor-created", "init", "evidence-published", "spawned", "ready", "unref", "disconnect"]);
     } finally {
       cleanup(repo);
+    }
+  });
+
+  it("rejects a symlinked factory root before creating detached run state", () => {
+    const repo = tempRepo("symlinked-factory-root");
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "factory-detached-outside-")));
+    try {
+      symlinkSync(outside, join(repo, ".opencode"));
+      const proc = runDeterministicCli(repo, ["factory", "start", "--detached", "--json", "must not escape"]);
+      assert.notEqual(proc.status, 0);
+      assert.match(proc.stderr, /\.opencode.*(?:real directory|must not contain symlinks)/u);
+      assert.equal(existsSync(join(outside, "factory")), false);
+      assert.equal(existsSync(join(repo, "detached-lifecycle.json")), false);
+    } finally {
+      cleanup(repo);
+      cleanup(outside);
     }
   });
 });

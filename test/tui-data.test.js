@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "./helpers/git-fixture.js";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { factoryRoots, findFactoryRoots, projectTuiDiagnosticData, readRuns, selectVisibleRuns } from "../src/tui-data.js";
@@ -157,6 +157,19 @@ describe("TUI factory scanner", () => {
 
     assert.deepEqual(readRuns([rootAsFile]), []);
     cleanup(workspace);
+  });
+
+  it("skips symlinked factory roots instead of following them", () => {
+    const workspace = tempDir();
+    const outside = tempDir();
+    writeRun(outside, "outside-run", { status: "running", updated_at: "2026-07-05T00:00:00Z" });
+    symlinkSync(join(outside, ".opencode"), join(workspace, ".opencode"), "dir");
+
+    const roots = factoryRoots({ state: { path: { directory: workspace } } }, { noCache: true });
+    assert.deepEqual(roots, []);
+    assert.deepEqual(readRuns(roots), []);
+    cleanup(workspace);
+    cleanup(outside);
   });
 
   it("tolerates missing TUI startup path state", () => {

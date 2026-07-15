@@ -7,8 +7,9 @@ const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
 const DRIVER_KEYS = new Set(["mode", "ready", "pr_mode", "reviewer", "github_account", "run_id", "post_pr_ci"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "post_pr"]);
+const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr"]);
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CONTINUATION_DRAFT_SPEC_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
@@ -212,6 +213,24 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       return { ok: false, reason: "invalid-continuation-planning-reuse" };
     }
   }
+  const draftSpecReuse = continuation.draft_spec_reuse;
+  if (draftSpecReuse !== undefined) {
+    if (!plainObject(draftSpecReuse)
+      || !hasOnlyKeys(draftSpecReuse, CONTINUATION_DRAFT_SPEC_REUSE_KEYS)
+      || draftSpecReuse.artifact_ref !== "artifacts/technical-brief.md"
+      || !SHA256_PATTERN.test(draftSpecReuse.artifact_hash || "")
+      || !["rejected", "blocked"].includes(draftSpecReuse.parent_step_status)
+      || !Number.isInteger(draftSpecReuse.parent_step_attempts)
+      || draftSpecReuse.parent_step_attempts < 0
+      || !Number.isInteger(draftSpecReuse.max_retries)
+      || draftSpecReuse.max_retries < 1
+      || !Number.isInteger(draftSpecReuse.remaining_attempts)
+      || draftSpecReuse.remaining_attempts !== draftSpecReuse.max_retries - draftSpecReuse.parent_step_attempts
+      || draftSpecReuse.remaining_attempts < 1
+      || planningReuse?.eligible === true) {
+      return { ok: false, reason: "invalid-continuation-draft-spec-reuse" };
+    }
+  }
 
   try {
     validateRun({
@@ -220,6 +239,7 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       branch: target.branch,
       worktree: target.worktree,
       status: "running",
+      ...(draftSpecReuse === undefined ? {} : { max_retries: draftSpecReuse.max_retries }),
       gates: {},
       continuation,
     });
@@ -293,6 +313,7 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       parent_evidence: continuation.parent_evidence.map(normalizedRefHash),
       parent_reviews: continuation.parent_reviews.map(normalizedRefHash),
       ...(planningReuse === undefined ? {} : { planning_reuse: normalizedPlanningReuse(planningReuse) }),
+      ...(draftSpecReuse === undefined ? {} : { draft_spec_reuse: cloneJson(draftSpecReuse) }),
       ...(continuation.post_pr === undefined ? {} : { post_pr: cloneJson(continuation.post_pr) }),
     },
   };

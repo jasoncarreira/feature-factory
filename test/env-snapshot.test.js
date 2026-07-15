@@ -1,10 +1,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   REDACTED_ENV_VALUE,
+  collectEffectiveProvenance,
   collectRunDebugSnapshot,
   isSensitiveEnvKey,
   isSensitiveEnvValue,
+  installedPluginOptions,
   scrubSecretEnv,
 } from "../src/env-snapshot.js";
 
@@ -61,5 +66,42 @@ describe("environment snapshot redaction", () => {
     assert.equal(snapshot.diagnostic_only, true);
     assert.equal(typeof snapshot.env, "object");
     assert.equal(snapshot.provenance, undefined);
+  });
+
+  it("hashes effective prompts, skills, plugin bytes, and git state without raw prompt content", async () => {
+    const secretPrompt = "review prompt containing sensitive operator text";
+    const promptHash = `sha256:${(await import("node:crypto")).createHash("sha256").update(secretPrompt).digest("hex")}`;
+    const provenance = await collectEffectiveProvenance({
+      repo: process.cwd(),
+      gitCwd: process.cwd(),
+      event: "review-dispatch",
+      agent: "work-reviewer",
+      subject: "spec-writer",
+      attempt: 2,
+      promptHash,
+      promptBytes: Buffer.byteLength(secretPrompt),
+      now: "2026-07-08T12:00:00.000Z",
+      pluginOptions: {},
+    });
+
+    assert.equal(provenance.dispatch.prompt_hash, promptHash);
+    assert.match(provenance.content.command_hash, /^sha256:[a-f0-9]{64}$/u);
+    assert.match(provenance.content.agent_prompt_hashes["work-reviewer"], /^sha256:[a-f0-9]{64}$/u);
+    assert.match(provenance.content.skill_hashes["feature/SKILL.md"], /^sha256:[a-f0-9]{64}$/u);
+    assert.match(provenance.runtime.plugin.source_hash, /^sha256:[a-f0-9]{64}$/u);
+    assert.equal(provenance.runtime.model.actual, null);
+    assert.equal(provenance.runtime.model.actual_source, "unavailable");
+    assert.equal(JSON.stringify(provenance).includes(secretPrompt), false);
+  });
+
+  it("loads the configured feature-factory tuple options used by OpenCode", () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-opencode-config-"));
+    const file = join(dir, "opencode.jsonc");
+    try {
+      writeFileSync(file, JSON.stringify({ plugin: [["file:///tmp/opencode-feature-factory", { prMode: "draft", profiles: { "work-reviewer": { model: "test/reviewer" } } }]] }), "utf8");
+      assert.deepEqual(installedPluginOptions(file), { prMode: "draft", profiles: { "work-reviewer": { model: "test/reviewer" } } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

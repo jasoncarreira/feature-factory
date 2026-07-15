@@ -1080,10 +1080,35 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
     if (!hadSteps) draft.steps = steps;
     if (stepIndex >= 0) {
       assertTestVerifierIntegrationGate(draft, steps[stepIndex], priorStep);
+      assertDraftSpecReuseAttempt(draft, steps[stepIndex], priorStep);
       bindStepAcceptance(runDir, steps[stepIndex]);
     }
   }, options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
+}
+
+function assertDraftSpecReuseAttempt(run, step, priorStep) {
+  const draftReuse = run.continuation?.draft_spec_reuse;
+  if (!draftReuse || step?.agent !== "spec-writer" || step.status !== "running") return;
+  if (run.max_retries !== draftReuse.max_retries) {
+    throw new Error(`draft spec continuation must inherit max_retries ${draftReuse.max_retries}`);
+  }
+  if (!Number.isInteger(step.attempts) || step.attempts < 1) {
+    throw new Error("draft spec continuation requires a positive spec-writer attempt number");
+  }
+  if (step.attempts > draftReuse.max_retries) {
+    throw new Error(`draft spec continuation attempt ${step.attempts} exceeds inherited max_retries ${draftReuse.max_retries}`);
+  }
+  const inheritedAttempts = draftReuse.parent_step_attempts;
+  const priorAttempts = Number.isInteger(priorStep?.attempts) && priorStep.attempts > inheritedAttempts
+    ? priorStep.attempts
+    : inheritedAttempts;
+  const expectedAttempts = priorStep?.status === "running" && priorAttempts > inheritedAttempts
+    ? priorAttempts
+    : priorAttempts + 1;
+  if (step.attempts !== expectedAttempts) {
+    throw new Error(`draft spec continuation must advance from inherited attempt ${priorAttempts} to ${expectedAttempts}`);
+  }
 }
 
 function assertTestVerifierIntegrationGate(run, step, priorStep) {

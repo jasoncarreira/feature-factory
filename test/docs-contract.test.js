@@ -75,6 +75,7 @@ describe("cleanup sweep operator contract", () => {
 const STATE_WRITE_COMMANDS = Object.freeze([
   "factory env record-created <run-id> --json",
   "factory env record-resume <run-id> --json",
+  "factory provenance review-dispatch <run-id> --agent AGENT --subject SUBJECT --attempts N --hash sha256:<hash> --prompt-bytes N --json",
   "factory steer <run-id> --message TEXT --json",
   "factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json",
   "factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json",
@@ -233,6 +234,19 @@ describe("class-wide planning prompt contract", () => {
     );
   });
 
+  it("separates consequential persisted and security policy from builder-owned mechanisms", () => {
+    const writerAltitude = markdownSection(SPEC_WRITER_PROMPT, "Specification altitude boundary");
+    const stepTwo = markdownSection(SKILL, "Step 2 - Spec And Decomposition");
+    for (const text of [writerAltitude, WORK_REVIEWER_PROMPT, stepTwo]) {
+      assert.match(text, /existing readers, compatibility promises, external tooling, or the approved story/i);
+      assert.match(text, /private persisted record/i);
+      assert.match(text, /internal field layout/i);
+      assert.match(text, /trust model, protected asset, actor capability, authority rule/i);
+      assert.match(text, /exact guard helpers?, validation plumbing/i);
+      assert.match(text, /outside the declared trust model|outside the trust model/i);
+    }
+  });
+
   it("requires the decomposer to derive dependencies from each test command's validated outputs", () => {
     // Producer invariant from the observed remediation-exposed rejection: adding
     // focused test commands to a slice without depending on the sibling whose
@@ -282,6 +296,19 @@ describe("class-wide planning prompt contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /new category that was discoverable at `attempt: 1`[\s\S]*first-pass miss/i);
     assert.match(WORK_REVIEWER_PROMPT, /class-wide requirements[\s\S]*finite source-to-sink implementation matrix/i);
     assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`/i);
+  });
+
+  it("uses one canonical full brief and stops nonconvergent spec retries", () => {
+    const remediation = markdownSection(SPEC_WRITER_PROMPT, "Remediation protocol");
+    const stepTwo = markdownSection(SKILL, "Step 2 - Spec And Decomposition");
+    assert.match(remediation, /complete canonical `artifacts\/technical-brief\.md` in place/i);
+    assert.match(remediation, /not an appended amendment, patch-only response, or replacement artifact/i);
+    assert.match(stepTwo, /pass `attempt: N`, the prior attempt-suffixed review ref, the complete prior `required_fixes`, and the orchestrator-observed remediation delta/i);
+    assert.match(stepTwo, /fresh `work-reviewer` Task on the complete canonical brief/i);
+    assert.match(stepTwo, /reviews\/spec-writer\.attempt-N\.json/i);
+    assert.match(WORK_REVIEWER_PROMPT, /newly raised implementation mechanic or optional hardening detail is NONBLOCKING and never creates a required fix or retry/i);
+    assert.match(WORK_REVIEWER_PROMPT, /first-pass miss[\s\S]*mark the review `nonconvergent`[\s\S]*stop autonomous spec retries/i);
+    assert.match(stepTwo, /terminalize through the normal blocked\/needs-human boundary/i);
   });
 
   it("requires rejecting reviews to enumerate explicit finite fixes", () => {
@@ -362,7 +389,7 @@ describe("class-wide planning prompt contract", () => {
     }
   });
 
-  it("keeps a required late-discovered omission blocking until fixed despite the delta rule", () => {
+  it("keeps a required late-discovered omission blocking without another autonomous retry", () => {
     // Precedence: a genuinely required sink/policy/compat/test omission is blocking regardless of
     // attempt number; the delta rule's NONBLOCKING carve-out is only for unrelated new scope or
     // optional depth — otherwise an attempt-2 discovery could be approved as nonblocking.
@@ -371,16 +398,8 @@ describe("class-wide planning prompt contract", () => {
       /Precedence for late discoveries:[\s\S]*blocking regardless of attempt number[\s\S]*NONBLOCKING carve-out applies only to \*unrelated\* new scope or \*optional\* additional depth[\s\S]*never downgrades a required in-scope omission to optional/i,
       "work-reviewer must state that required omissions stay blocking regardless of attempt",
     );
-    assert.match(
-      WORK_REVIEWER_PROMPT,
-      /Record (?:it|a required omission) once in `required_fixes`, carry it into every later review, and REJECT until observed evidence proves it landed/i,
-      "work-reviewer must carry a required omission forward and reject until it lands",
-    );
-    assert.match(
-      SKILL,
-      /recorded once and carried in prior `required_fixes` until observed fixed[\s\S]*each review must REJECT until it lands/i,
-      "SKILL must carry a required omission forward and reject until it lands",
-    );
+    assert.match(WORK_REVIEWER_PROMPT, /newly introduced attempt-1-discoverable category[\s\S]*nonconvergent stop rule/i);
+    assert.match(SKILL, /attempt-1-discoverable consequential category[\s\S]*stop autonomous spec retries/i);
     assert.doesNotMatch(WORK_REVIEWER_PROMPT, /blocking-once|do not reopen it/i);
   });
 
@@ -1135,6 +1154,22 @@ describe("blocked-run continuation docs contract", () => {
     assert.match(SCHEMA, /inherited_acceptance/i, "SCHEMA must document the inherited-acceptance provenance record");
   });
 
+  it("continues an unaccepted draft without carrying acceptance or resetting retries", () => {
+    for (const [name, text] of documentEntries({ SKILL, COMMAND, SCHEMA, README })) {
+      assert.match(text, /draft_spec_reuse/i, `${name} must document draft spec reuse`);
+      assert.match(text, /hash-bound|artifact_hash/i, `${name} must bind draft bytes`);
+      assert.match(text, /max_retries/i, `${name} must inherit the retry ceiling`);
+      assert.match(text, /fresh (?:normal )?spec review|fresh review/i, `${name} must require a fresh review`);
+      assert.match(text, /(?:no|never|without)[\s\S]*(?:acceptance|adopt)/i, `${name} must not carry draft acceptance`);
+      assert.match(text, /exhausted[\s\S]*(?:reject|fail)[\s\S]*(?:reset|retry)|(?:reject|fail)[\s\S]*exhausted[\s\S]*(?:reset|retry)/i, `${name} must reject exhausted draft budgets`);
+    }
+    assert.match(SKILL, /parent_step_attempts \+ 1/i);
+    assert.match(SKILL, /spec-writer rejected --attempts N --artifact-ref artifacts\/technical-brief\.md --review-ref reviews\/spec-writer\.attempt-N\.json/i);
+    assert.match(SKILL, /spec-writer blocked --attempts N --artifact-ref artifacts\/technical-brief\.md --review-ref reviews\/spec-writer\.attempt-N\.json/i);
+    assert.match(SCHEMA, /draft_spec_reuse requires this durable `artifact_ref`|`draft_spec_reuse` requires this durable `artifact_ref`/i);
+    assert.match(SCHEMA, /parent_step_attempts/i);
+  });
+
   it("documents configurable PR mode for factory continue", () => {
     for (const [name, text] of documentEntries({ README, SPEC })) {
       assert.match(text, /factory continue[\s\S]*prMode|Continuation[\s\S]*effective PR mode/i, `${name} must document continuation PR mode`);
@@ -1301,9 +1336,9 @@ describe("interrupt steer resume docs contract", () => {
       assert.match(text, /process\.json/i, `${name} must document process.json`);
       assert.match(text, /processes\/<timestamp>\.log|processes\/\S+\.log/i, `${name} must document run-scoped process logs`);
       assert.match(text, /validated run-owned/i, `${name} must require validated run-owned launches for run-scoped process evidence`);
-      assert.match(text, /generic[\s\S]*detached[\s\S]*(?:not|must not|without)[\s\S]*(?:process\.json|run-scoped)/i, `${name} must not guarantee process.json for generic detached starts`);
-      assert.match(text, /--run-id <run-id>[\s\S]*(?:does not|do not|not)[\s\S]*(?:process-evidence authority|process evidence|process\.json)|(?:does not|do not|not)[\s\S]*(?:process-evidence authority|process evidence|process\.json)[\s\S]*--run-id <run-id>/i, `${name} must document that generic --run-id does not grant process-evidence authority`);
-      assert.doesNotMatch(text, /factory start --detached --run-id <run-id>[\s\S]{0,160}(?:writes|records|creates)[\s\S]{0,80}(?:process\.json|run-scoped process evidence)/i, `${name} must not document generic start --detached --run-id as process evidence authority`);
+      assert.match(text, /generic[\s\S]*detached[\s\S]*(?:allocates|validates)[\s\S]*(?:safe available )?run id/i, `${name} must bind a generic detached start to a durable run id before spawn`);
+      assert.match(text, /pre-manifest[\s\S]*(?:process\.json|run-scoped evidence)|(?:process\.json|run-scoped evidence)[\s\S]*pre-manifest/i, `${name} must document pre-manifest cancellation evidence`);
+      assert.match(text, /--run-id <run-id>[\s\S]*(?:does not|never|not)[\s\S]*(?:authority over an existing run|existing run)[\s\S]*(?:collision|rejected)|(?:collision|rejected)[\s\S]*--run-id <run-id>/i, `${name} must reject explicit run-id collisions before spawn`);
       assert.match(text, /factory cancel <run-id> --json/i, `${name} must document factory cancel`);
       assert.match(text, /SIGTERM/i, `${name} must document SIGTERM cancellation`);
       assert.match(text, /fail-closed|failed-closed/i, `${name} must document fail-closed cancellation`);
@@ -1600,6 +1635,27 @@ describe("cost report docs contract", () => {
     }
   });
 
+});
+
+describe("effective-content provenance docs contract", () => {
+  it("stamps creation, resume, and every review dispatch without persisting raw prompts", () => {
+    for (const [name, text] of documentEntries({ COMMAND, SKILL, SCHEMA, README })) {
+      assert.match(text, /effective-content provenance/i, `${name} must identify effective-content provenance`);
+      assert.match(text, /creation|created/i, `${name} must cover creation`);
+      assert.match(text, /resume/i, `${name} must cover resume`);
+      assert.match(text, /review(?: Task)? dispatch/i, `${name} must cover review dispatch`);
+      assert.match(text, /rendered (?:feature )?command/i, `${name} must hash the effective command`);
+      assert.match(text, /resolved agent prompts?/i, `${name} must hash resolved agent prompts`);
+      assert.match(text, /repo-seeded (?:feature )?skills?/i, `${name} must hash selected skills`);
+      assert.match(text, /loaded plugin source/i, `${name} must identify loaded plugin source`);
+      assert.match(text, /OpenCode version/i, `${name} must record OpenCode version`);
+      assert.match(text, /Git HEAD\/dirty state|Git HEAD plus only a dirty boolean/i, `${name} must record bounded git state`);
+      assert.match(text, /never raw (?:dynamic )?prompts?|Do not persist raw prompt text|without storing raw prompts/i, `${name} must exclude raw prompts`);
+      assert.match(text, /configured model[\s\S]*(?:not|distinct)[\s\S]*actual provider|actual provider[\s\S]*(?:not|distinct)[\s\S]*configured model/i, `${name} must distinguish configured and actual models`);
+    }
+    assert.match(SKILL, /factory provenance review-dispatch <run-id>[\s\S]*--hash sha256:<hash>[\s\S]*--prompt-bytes/i);
+    assert.match(SCHEMA, /prompt_hash[\s\S]*prompt_bytes/i);
+  });
 });
 
 describe("telemetry readiness docs contract", () => {

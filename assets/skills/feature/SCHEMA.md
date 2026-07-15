@@ -78,6 +78,12 @@ The launcher validates this metadata and maps it into child-process env for open
 
 No `run.json`, evidence, reviews, gates, artifacts, plans, or terminal-result schema has trace-context fields such as `traceparent`, `tracestate`, `parent_span_id`, or `parentSpanId`. Trace context is non-authoritative runtime config, not operator instructions, not a gate answer, not review evidence, and not persisted for resume/replay.
 
+## Effective-Content Provenance
+
+Optional top-level `run.json.provenance` has `schema_version: 1`, `created`, `last_resumed`, `resume_count`, and `review_dispatches`. Creation and resume events hash the effective rendered feature command, resolved agent prompts, and the actual repo-seeded feature skills `feature/SKILL.md` and `feature/SCHEMA.md`; runtime metadata records the loaded plugin source path/hash/package version, OpenCode version, configured model/variant when a review agent is selected, and execution-worktree Git HEAD plus only a dirty boolean. Review-dispatch events additionally contain `{agent, subject, attempt, prompt_hash, prompt_bytes}` for the exact dynamic Task prompt bytes.
+
+Provenance stores hashes and byte counts, never raw dynamic prompts, dirty path lists, credentials, or trace context. It is diagnostic and non-authoritative. Configured model/variant is distinct from the actual provider-selected model: `actual` is null and `actual_source` is `unavailable` unless trustworthy OpenCode runtime metadata supplies it. Creation and resume are recorded by `factory env record-created|record-resume`; every review dispatch is stamped immediately before Task with `factory provenance review-dispatch <run-id> --agent AGENT --subject SUBJECT --attempts N --hash sha256:<hash> --prompt-bytes N --json`.
+
 ## CLI State Write Surface
 
 After the initial manifest bootstrap, do not edit `run.json` directly. Every semantic state write uses the `feature-factory factory ...` CLI, which takes `run-json.lock/`, validates the next state, and commits atomically. The CLI invokes the checked transition helpers internally, including `transitionGateDecision` for protected gate decisions and `transitionPrCreated` for completed PR state.
@@ -105,6 +111,7 @@ Required semantic `run.json` write commands:
 ```sh
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
+feature-factory factory provenance review-dispatch <run-id> --agent AGENT --subject SUBJECT --attempts N --hash sha256:<hash> --prompt-bytes N --json
 feature-factory factory steer <run-id> --message TEXT --json
 feature-factory factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> --json
 feature-factory factory steer-ack <run-id> --ref steering/consumed-<file>.json --hash sha256:<hash> --json
@@ -153,6 +160,8 @@ External drivers write only `gates/<gate>.answer`; they may use `feature-factory
 
 `factory slice-status` updates only slices that already exist in `run.json.slices[]`; use `factory slices-seed` to create slices from `plan/slices.json`. `factory step` updates only step placeholders bootstrapped in the initial manifest.
 
+When a spec review rejects a produced canonical brief, record the unaccepted draft explicitly with `factory step <run-id> spec-writer rejected --attempts N --artifact-ref artifacts/technical-brief.md --review-ref reviews/spec-writer.attempt-N.json --json`. For a nonconvergent review that stops retries while preserving the draft, use the same bindings with status `blocked`. `draft_spec_reuse` requires this durable `artifact_ref`; file presence alone never proves that a rejected or blocked step produced the brief.
+
 Write `run.json` atomically: write a temp file, then rename. The current writer does not fsync the temp file or containing directory before rename; this is a conscious portability/speed tradeoff, so sudden power loss can still lose the most recent write even though readers never observe a partial JSON file.
 
 `$RUN/run-json.lock/` is the ephemeral lock directory used by both foreground manifest writes and heartbeat ticks. `owner.json` records the current lock holder for diagnostics. A lock directory that remains ownerless beyond `missingOwnerStealMs` may be reclaimed only through an exclusive claim bound to the same directory identity; fresh ownerless locks and malformed owner evidence remain fail-closed.
@@ -178,6 +187,12 @@ Write `run.json` atomically: write a temp file, then rename. The current writer 
   "run_id": "app-123",
   "phase": "slice-review",
   "pid": 4242,
+  "identity": {
+    "inspector": "darwin-ps-lsof",
+    "start_marker": "Thu Jul  9 15:00:00 2026",
+    "command_name": "node",
+    "cwd": "/absolute/repo/path"
+  },
   "interval_ms": 30000,
   "last_tick_at": "2026-07-06T12:00:05Z"
 }
@@ -208,7 +223,7 @@ Lifecycle rules:
 - Treat `heartbeat.json` as data, not authority. PID and sidecar contents alone never authorize freshness or workflow writes.
 - Start heartbeat only when the manifest already shows real in-flight factory work via a `running` step or a `running`/`review` slice.
 - Do not start heartbeat while the run is stopped at protected gates `story`, `brief`, or `pre_pr`. Pending gates are monitored through `run.json.gates`, not through heartbeat.
-- Stop heartbeat in a `finally`/after-return path with `feature-factory factory heartbeat <run-id> --stop --json`. Stop is best-effort: it sends SIGTERM to a live recorded PID and writes a liveness stamp with `pid: null`.
+- Stop heartbeat in a `finally`/after-return path with `feature-factory factory heartbeat <run-id> --stop --json`. A foreign live PID is signaled only when its inspector, start marker, command, and cwd still match the recorded heartbeat identity; missing, indeterminate, or mismatched identity fails closed without signaling. Confirmed-absent or matching owners are cleared with a liveness stamp containing `pid: null`.
 - Before writing terminal `completed`, `blocked`, `partial`, or `needs-human` status, or before writing `terminal_result`, stop heartbeat if it is active. The durable terminal write is still controlled by the run-json lock and transition preconditions, not heartbeat state.
 
 Long-wait heartbeat guard:
@@ -235,7 +250,7 @@ External monitoring semantics:
 
 ## process.json And Cancellation Evidence
 
-Validated run-owned detached launches write run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`; examples include `factory resume <run-id> --detached` and validated continuation launches. Evidence is written only after live process identity is verified; unsupported inspection fails the launch before `process.json` is written. Generic `factory start --detached "prompt"` launches, including those with `--run-id <run-id>`, may write only package-level logs: `--run-id` does not grant process-evidence authority over an existing run and must not be assumed to create `$RUN/process.json`. `process.json` is optional for old/non-detached/generic-detached runs, but when present it validates as:
+Validated run-owned detached launches write run-scoped process evidence to `$RUN/process.json` and process logs under `$RUN/processes/<timestamp>.log`; examples include `factory start --detached`, `factory resume <run-id> --detached`, and validated continuation launches. A generic new detached start allocates or validates a safe available run id before launch, includes it in the feature payload and command result, and publishes pre-manifest evidence under that run directory so cancellation remains possible before `run.json` exists. Explicit `--run-id <run-id>` does not grant authority over an existing run because run-directory, branch, and worktree collisions are rejected before spawn. Evidence is written only after live process identity is verified; unsupported inspection fails the launch before `process.json` is written. `process.json` is optional for old and non-detached runs, but when present it validates as:
 
 ```json
 {
@@ -721,6 +736,8 @@ Top-level `run.json.review_tier` is an optional opaque display string. It may co
 Top-level `run.json.pr_mode` is an optional durable PR creation mode with value `draft` or `ready`. Persist the effective start-time mode there after applying `driver.pr_mode`, legacy `driver.ready`, or the plugin configured default; resume payloads carry this value as `driver.pr_mode` so a run created with a per-run override does not fall back to a later plugin default. It does not change `schema_version`; it remains `1`.
 
 Top-level `run.json.continuation` is present only for child runs created by `factory continue`. Accepted continuation metadata has `schema_version: 1`, `kind: "blocked-run-continuation"`, `created_at`, `operator_summary`, nested `parent`, `review`, and `target` objects, and refs paired with hashes for the parent manifest, approved review evidence, target base commit, and every read-only parent context file. `parent.status` must be exactly `blocked`; `parent.worktree`, branch, and commit identify the source worktree. `review.ref` resolves under the parent run's `reviews/` directory, is paired with `review.hash`, must be referenced by parent run state, and must have a subject consistent with that source. `target.run_id`, `target.branch`, `target.worktree`, `target.base_ref`, and `target.base_commit` describe the fresh child run. `parent_artifacts` is an array of `{kind, ref, hash}` entries for source artifacts such as story and technical brief, and `parent_evidence` / `parent_reviews` arrays carry `{kind, ref, hash}` entries for additional source context; `parent_reviews` includes the selected review with the same hash as `review.hash`. Optional `planning_reuse` records whether the parent's planning output is reusable by durable acceptance rather than file presence: `eligible` is true only when the parent has an accepted `spec-writer` step carrying an **acceptance binding** (see below) whose bound bytes still match the current `artifacts/technical-brief.md` and its approving `spec-writer` review. `spec_review_ref`/`spec_review_hash` and `spec_artifact_ref`/`spec_artifact_hash` echo the bound review and brief hashes; `child_spec_review_ref` (`reviews/spec-writer.json`) is where `factory continue` carries the approving review into child state so the adopted step's review ref resolves. When `eligible` is false, no planning artifacts are seeded and the parent brief is amendment input only, never adopted as approved. The child records the adoption only through the checked `factory adopt-continuation <child-run-id>` transition, which re-verifies the seeded brief and review against `spec_artifact_hash`/`spec_review_hash` before writing an inherited-acceptance record — a generic `factory step ... accepted` does not perform this verification. The continuation object is persisted operator context, not authority: it does not approve gates, satisfy evidence, bypass validator/security review, mark a PR safe, or permit direct edits to the parent run. Admission validates approved review evidence and referenced files/commits/hashes; it must not rely on a special blocking verdict enum as the authorization mechanism.
+
+The no-seed behavior for ineligible accepted planning reuse has one explicit unaccepted-draft route. Optional `continuation.draft_spec_reuse` contains `artifact_ref`, `artifact_hash`, `parent_step_status`, `parent_step_attempts`, `max_retries`, and `remaining_attempts`. It is allowed only for a rejected/blocked parent spec step with known attempts, no acceptance, matching regular non-symlink brief bytes, and remaining budget. The child seeds only that hash-bound brief, copies `max_retries`, starts at `parent_step_attempts + 1`, requires a fresh spec review, and carries no review, `acceptance`, or `inherited_acceptance`; `factory adopt-continuation` remains forbidden. Missing evidence declines draft reuse, and exhausted budget rejects continuation rather than resetting attempts.
 
 Each `run.json.steps[]` entry may carry an optional `acceptance` binding, written by the accept transition (`factory step <run-id> <agent> accepted`) when the step references an artifact that exists: `{ artifact_ref, artifact_hash, review_ref?, review_hash? }` capture the exact bytes accepted. This binding is what a blocked-run continuation matches against — reuse is gated on the current files still hashing to the bound values, so bytes changed after acceptance are not silently treated as accepted, and a legacy accepted step with no binding fails closed. A child step written by `factory adopt-continuation` additionally carries `inherited_acceptance` `{ from_run_id, parent_spec_review_ref, artifact_hash, review_hash }` recording the parent run and bound hashes the adoption verified.
 
