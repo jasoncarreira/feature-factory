@@ -274,6 +274,20 @@ export function checkRunConsistency(runDir, run) {
         return { ref: repair.review_ref };
       }));
     }
+    if (stringValue(repair.repair_evidence_ref)) {
+      checks.push(runCheck("run.merged_slice_repair.repair_evidence_ref", () => {
+        const resolved = resolveEvidenceRef(runDir, repair.repair_evidence_ref);
+        if (hashFile(resolved.path) !== repair.repair_evidence_hash) fail([{ path: "run.merged_slice_repair.repair_evidence_hash", message: "must match repair_evidence_ref bytes" }]);
+        return { ref: repair.repair_evidence_ref };
+      }));
+    }
+    if (stringValue(repair.verification_ref)) {
+      checks.push(runCheck("run.merged_slice_repair.verification_ref", () => {
+        const resolved = resolveEvidenceRef(runDir, repair.verification_ref);
+        if (hashFile(resolved.path) !== repair.verification_hash) fail([{ path: "run.merged_slice_repair.verification_hash", message: "must match verification_ref bytes" }]);
+        return { ref: repair.verification_ref };
+      }));
+    }
   }
   for (const [index, slice] of (Array.isArray(validRun.slices) ? validRun.slices : []).entries()) {
     if (stringValue(slice?.evidence_ref)) checks.push(refCheck(`run.slices[${index}].evidence_ref`, () => resolveEvidenceRef(runDir, slice.evidence_ref)));
@@ -473,7 +487,7 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
   validateRedactedEnv(errors, payload, `${path}.env`);
 }
 
-const MERGED_SLICE_REPAIR_KEYS = new Set(["schema_version", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "branch", "worktree", "review_ref", "review_hash", "merge_commit", "reason", "created_at", "updated_at"]);
+const MERGED_SLICE_REPAIR_KEYS = new Set(["schema_version", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "branch", "worktree", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "verification_ref", "verification_hash", "merge_commit", "reason", "created_at", "updated_at"]);
 const MERGED_SLICE_REPAIR_STATUS_SET = new Set(["reported", "repairing", "review", "merged", "blocked"]);
 
 function validateMergedSliceRepair(errors, run, path) {
@@ -498,6 +512,16 @@ function validateMergedSliceRepair(errors, run, path) {
   if (repair.review_ref !== undefined || ["review", "merged"].includes(repair.status)) {
     requiredString(errors, repair, "review_ref", `${path}.review_ref`);
     requiredHash(errors, repair, "review_hash", `${path}.review_hash`);
+  }
+  if (repair.repair_evidence_ref !== undefined || ["review", "merged"].includes(repair.status)) {
+    requiredString(errors, repair, "repair_evidence_ref", `${path}.repair_evidence_ref`);
+    requiredHash(errors, repair, "repair_evidence_hash", `${path}.repair_evidence_hash`);
+  }
+  if (repair.status === "merged") {
+    requiredString(errors, repair, "verification_ref", `${path}.verification_ref`);
+    requiredHash(errors, repair, "verification_hash", `${path}.verification_hash`);
+  } else if (repair.verification_ref !== undefined || repair.verification_hash !== undefined) {
+    errors.push({ path: `${path}.verification_ref`, message: "is allowed only when the repair is merged" });
   }
   if (["repairing", "review", "merged"].includes(repair.status) && (!Number.isInteger(repair.attempts) || repair.attempts < 1)) {
     errors.push({ path: `${path}.attempts`, message: "must be at least 1 once an attempt starts" });
