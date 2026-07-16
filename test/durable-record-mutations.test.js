@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   DURABLE_AUTHORITY_CATALOG,
   DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST,
@@ -10,9 +12,11 @@ import {
   DURABLE_AUTHORITY_REQUIRED_RECORD_IDS,
   DURABLE_MUTATION_FAMILIES,
   assertDurableAuthorityCatalogComplete,
+  createPostPrCatalogBaseline,
   emitDurableRecordMutations,
 } from "./helpers/durable-record-mutations.js";
-import { validateRun } from "../src/validate.js";
+import { checkRunConsistency, validateRun } from "../src/validate.js";
+import { transitionPostPrState } from "../src/run-state.js";
 
 const AUTHORITY_CLASS_IDS = Object.freeze([
   "plan-slices-graph",
@@ -336,7 +340,7 @@ describe("finite durable-authority catalog", () => {
 
   it("binds canonical core source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
-    assert.equal(canonicalIds.length, 20);
+    assert.equal(canonicalIds.length, 80);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST\s*=\s*deepFreeze\([^\n]*\.map/u);
@@ -377,7 +381,7 @@ describe("finite durable-authority catalog", () => {
   });
 
   it("places every canonical core source in a valid run accepted by validateRun", () => {
-    for (const [id] of DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST) {
+    for (const [id] of DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.slice(0, 20)) {
       const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
       const run = runWithCanonicalSource(record);
       assert.equal(validateRun(run), run, `${id} must use an actual validateRun-compatible persisted shape`);
@@ -433,14 +437,31 @@ describe("finite durable-authority catalog", () => {
     assert.deepEqual(postPr.records.map(({ id }) => id), DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["post-pr-nested-records"]);
     const phases = ["disabled", "awaiting-pr", "observing", "failure-recording", "remediation-planned", "remediation-running", "changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed", "succeeded", "blocked", "needs-human"];
     assert.deepEqual(phases.map((phase) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-phase-${phase}`).source.phase), phases);
-    assert.deepEqual(phases.map((phase) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-phase-${phase}`).facts[0]), phases.map((phase) => `phase:${phase}`));
+    assert.deepEqual(phases.map((phase) => findFact(findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-phase-${phase}`), ["phase"])), phases);
+    for (const phase of phases) {
+      const source = findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-phase-${phase}`).source;
+      assert.deepEqual(Object.keys(source), ["schema_version", "policy", "phase", "attempt", "observation", "remediation", "evidence_refs", "continuation_review", "terminal_fact"]);
+      assert.equal(Object.hasOwn(source, "run_status"), false);
+    }
     assert.deepEqual(["planned", "running", "returned"].map((state) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-dispatch-${state}`).source.status), ["planned", "running", "returned"]);
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-policy-enabled").source), ["enabled", "wait_ms", "initial_poll_ms", "max_poll_ms", "check_start_grace_ms", "max_transient_errors", "review"]);
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-observation-active").source), ["epoch", "expected_head_sha", "started_at", "deadline_at", "next_poll_at", "poll_count", "unchanged_count", "current_interval_ms", "consecutive_transient_errors", "last_observed_at", "last_fingerprint", "last_check_verdict", "last_review_verdict", "last_verdict", "last_error", "review_request", "snapshot"]);
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-remediation-active").source), ["schema_version", "attempt", "reason_code", "failure_fingerprint", "failed_head_sha", "failure_evidence_ref", "failure_evidence_hash", "owner", "route", "lane", "stage", "baseline_head_sha", "dispatch", "changes", "candidate_head_sha", "remediation_evidence_ref", "remediation_evidence_hash", "revalidation", "push"]);
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-remediation-owner").source), ["kind", "slice_id", "stack", "path_b64url", "method"]);
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-remediation-changes").source), ["paths", "entries", "tree_hash"]);
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-remediation-change-entry").source), ["source", "status", "index_status", "worktree_status", "path", "previous_path", "old_mode", "new_mode"]);
+    assert.deepEqual(["planned", "running", "returned"].map((state) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-dispatch-${state}`).source.started_at), [null, "2026-07-16T12:00:00.000Z", "2026-07-16T12:00:00.000Z"]);
+    assert.deepEqual(["planned", "running", "returned"].map((state) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-dispatch-${state}`).source.returned_at), [null, null, "2026-07-16T12:05:00.000Z"]);
+    const emptyRevalidation = findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-revalidation-empty").source;
+    assert.deepEqual(emptyRevalidation, { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null, validator_review_ref: null, validator_review_hash: null, validator_verdict: null, security_review_ref: null, security_review_hash: null, security_verdict: null, jobs: {} });
     for (const activity of ["canonical", "validator", "security"]) {
       assert.deepEqual(["planned", "running", "retry-wait", "bound"].map((state) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-${activity}-job-${state}`).source.status), ["planned", "running", "retry-wait", "bound"]);
+      assert.deepEqual(["planned", "running", "retry-wait", "bound"].map((state) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-${activity}-job-${state}`).source.action_token), [null, `${activity}-action-1`, `${activity}-action-1`, `${activity}-action-1`]);
+      assert.deepEqual(["planned", "running", "retry-wait", "bound"].map((state) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-${activity}-job-${state}`).source.verdict), [null, null, null, activity === "canonical" ? "pass" : activity === "validator" ? "GO" : "PASS"]);
       const bound = findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-${activity}-job-bound`);
       assert.deepEqual(bound.sidecars.map(({ name }) => name), [`${activity}-result`]);
-      assert.equal(bound.source.result_ref, `${activity === "canonical" ? "evidence" : "reviews"}/post-pr-${activity}.json`);
-      assert.equal(bound.source.result_hash, `sha256:${"a".repeat(64)}`);
+      assert.equal(bound.source.result_ref, `${activity === "canonical" ? "evidence" : "reviews"}/post-pr-${activity}.attempt-1.json`);
+      assert.match(bound.source.result_hash, /^sha256:[0-9a-f]{64}$/u);
     }
     assert.deepEqual(
       ["post-pr-observation-last-error", "post-pr-observation-review-request", "post-pr-observation-snapshot", "post-pr-remediation-owner", "post-pr-remediation-changes", "post-pr-remediation-change-entry", "post-pr-push-last-error"].map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id).id),
@@ -462,8 +483,122 @@ describe("finite durable-authority catalog", () => {
     );
     assert.deepEqual(
       findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-push-confirmed").source,
-      { status: "confirmed", remote_before_sha: "a".repeat(40), local_head_sha: "a".repeat(40), remote_after_sha: "b".repeat(40), consecutive_transient_errors: 0, next_retry_at: null, pushed_at: "2026-07-16T12:00:00.000Z" },
+      { status: "confirmed", remote_before_sha: "a".repeat(40), local_head_sha: "b".repeat(40), remote_after_sha: "b".repeat(40), consecutive_transient_errors: 0, next_retry_at: null, pushed_at: "2026-07-16T12:00:00.000Z", last_error: null },
     );
+    assert.deepEqual(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-push-not-ready").source, { status: "not-ready", remote_before_sha: null, local_head_sha: null, remote_after_sha: null, consecutive_transient_errors: 0, next_retry_at: null, pushed_at: null, last_error: null });
+    assert.deepEqual(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-push-pending").source, { status: "pending", remote_before_sha: "a".repeat(40), local_head_sha: "b".repeat(40), remote_after_sha: null, consecutive_transient_errors: 0, next_retry_at: null, pushed_at: null, last_error: null });
+    assert.equal(typeof findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-push-last-error").source, "object");
+    assert.equal(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-remediation-changes").source.paths[0], "src/backend.js");
+    assert.equal(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-remediation-active").source.candidate_head_sha, null);
+    assert.equal(findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-remediation-changes").source.tree_hash, `sha256:${"a".repeat(64)}`);
+    const changedPhaseRemediation = findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-phase-changes-observed").source.remediation;
+    assert.equal(changedPhaseRemediation.candidate_head_sha, "b".repeat(40));
+    assert.equal(changedPhaseRemediation.remediation_evidence_ref, "evidence/post-pr-remediation.attempt-1.json");
+    assert.match(changedPhaseRemediation.remediation_evidence_hash, /^sha256:[0-9a-f]{64}$/u);
+  });
+
+  it("uses exact canonical post_pr records, external sidecars, and production validation baselines", () => {
+    const postPrIds = DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["post-pr-nested-records"];
+    assert.deepEqual(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.slice(20).map(([id]) => id), postPrIds);
+    const transitionOnly = [];
+    for (const id of postPrIds) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const baseline = createPostPrCatalogBaseline(record);
+      assert.equal(validateRun(baseline.run), baseline.run, `${id} must embed at ${record.canonicalPath.join(".")} in a validateRun-compatible run`);
+      assert.equal(containsOwnKey(record.source, "sidecar_bytes"), false, `${id} must keep bytes outside persisted state`);
+      assert.equal(containsOwnKey(record.source, "run_status"), false, `${id} must not persist synthetic run_status`);
+      if (baseline.transitionOnly) transitionOnly.push([id, baseline.transitionOnly]);
+    }
+    assert.deepEqual(transitionOnly.map(([id]) => id), [
+      "post-pr-canonical-job-retry-wait",
+      "post-pr-validator-job-retry-wait",
+      "post-pr-security-job-retry-wait",
+    ]);
+    assert.equal(transitionOnly.every(([, note]) => /checked transition consumer state/u.test(note)), true);
+  });
+
+  it("checks every canonical post_pr external ref/hash against independently stored fixture bytes", () => {
+    const root = mkdtempSync(join(tmpdir(), "post-pr-catalog-"));
+    try {
+      for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["post-pr-nested-records"]) {
+        const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+        const { run, externalSources } = createPostPrCatalogBaseline(record);
+        const runDir = join(root, id);
+        mkdirSync(runDir, { recursive: true });
+        for (const { ref, bytes } of Object.values(externalSources)) {
+          const file = join(runDir, ref);
+          mkdirSync(dirname(file), { recursive: true });
+          writeFileSync(file, bytes);
+        }
+        const result = checkRunConsistency(runDir, run);
+        assert.equal(result.ok, true, `${id}: ${result.checks.filter(({ ok }) => !ok).map(({ errors }) => errors.map(({ message }) => message).join(", ")).join("; ")}`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("routes every retry-wait job shape through the exported checked transition consumer", async () => {
+    const root = mkdtempSync(join(tmpdir(), "post-pr-transition-"));
+    try {
+      for (const activity of ["canonical", "validator", "security"]) {
+        const running = createPostPrCatalogBaseline(findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-${activity}-job-running`));
+        const waiting = createPostPrCatalogBaseline(findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-${activity}-job-retry-wait`));
+        for (const fixture of [running, waiting]) {
+          fixture.run.post_pr.remediation.candidate_head_sha = null;
+          fixture.run.post_pr.remediation.remediation_evidence_ref = null;
+          fixture.run.post_pr.remediation.remediation_evidence_hash = null;
+        }
+        const runDir = join(root, activity);
+        mkdirSync(runDir, { recursive: true });
+        for (const { ref, bytes } of Object.values(waiting.externalSources)) {
+          const file = join(runDir, ref);
+          mkdirSync(dirname(file), { recursive: true });
+          writeFileSync(file, bytes);
+        }
+        writeFileSync(join(runDir, "run.json"), `${JSON.stringify(running.run, null, 2)}\n`);
+        const result = await transitionPostPrState(runDir, waiting.run.post_pr, { now: "2026-07-16T12:06:00.000Z" });
+        assert.equal(result.run.post_pr.remediation.revalidation.jobs[activity].status, "retry-wait");
+        assert.equal(result.run.post_pr.remediation.revalidation.jobs[activity].transient_error_count, 1);
+        assert.equal(result.run.post_pr.remediation.revalidation.jobs[activity].next_retry_at, "2026-07-16T12:06:00.000Z");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("mutates post_pr refs, hashes, and external bytes independently without persisted byte wrappers", () => {
+    const record = findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-revalidation-bound");
+    const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+    const refCase = cases.find(({ family, name }) => family === "wrong-ref" && name.includes("canonical ref"));
+    const hashCase = cases.find(({ family, name }) => family === "wrong-hash" && name.includes("canonical hash"));
+    const bytesCase = cases.find(({ family, name }) => family === "wrong-bytes" && name.includes("canonical sidecar bytes"));
+    assert.equal(refCase.record.canonical_evidence_ref, "../outside.json");
+    assert.equal(refCase.externalSources.canonical.bytes, record.externalSources.canonical.bytes);
+    assert.equal(hashCase.record.canonical_evidence_hash, "sha256:short");
+    assert.equal(hashCase.externalSources.canonical.bytes, record.externalSources.canonical.bytes);
+    assert.equal(bytesCase.record.canonical_evidence_ref, record.source.canonical_evidence_ref);
+    assert.equal(bytesCase.record.canonical_evidence_hash, record.source.canonical_evidence_hash);
+    assert.equal(bytesCase.externalSources.canonical.bytes, "tampered-sidecar-bytes");
+  });
+
+  it("rejects post_pr source, placement, authority-fact, and external-byte relocation", () => {
+    for (const [label, mutate] of [
+      ["class", (record) => { record.authorityClassId = "validator-security-pr-result"; }],
+      ["id", (record) => { record.id = "post-pr-phase-other"; }],
+      ["source", (record) => { record.source.policy.wait_ms += 1; }],
+      ["record", (record) => { record.record = "run.json.post_pr.observation"; }],
+      ["variant", (record) => { record.variant = "other-phase"; }],
+      ["path", (record) => { record.canonicalPath = ["post_pr", "phase"]; }],
+      ["fact path", (record) => { record.facts[0].path = ["phase"]; }],
+      ["fact value", (record) => { record.facts.find(({ path }) => path.join(".") === "phase").expected = "blocked"; }],
+      ["external bytes", (record) => { record.externalSources[Object.keys(record.externalSources)[0]].bytes += "tampered"; }],
+    ]) {
+      const catalog = structuredClone(DURABLE_AUTHORITY_CATALOG);
+      const id = label === "external bytes" ? "post-pr-revalidation-bound" : "post-pr-phase-observing";
+      mutate(findRecord(catalog, id));
+      assert.throws(() => assertDurableAuthorityCatalogComplete(catalog), /canonical source|contradicts|metadata manifest|authorityClassId|every required per-record/u, label);
+    }
   });
 
   it("registers all eight post_pr terminal-fact forms including both account-switch forms", () => {
@@ -569,6 +704,18 @@ function runWithCanonicalSource(record) {
 
 function findRecord(catalog, id) {
   return catalog.flatMap(({ records }) => records).find((record) => record.id === id);
+}
+
+function findFact(record, path) {
+  const declaration = record.facts.find((fact) => fact.path.length === path.length && fact.path.every((segment, index) => segment === path[index]));
+  assert.ok(declaration, `${record.id} must bind ${path.join(".")}`);
+  return declaration.expected;
+}
+
+function containsOwnKey(value, key) {
+  if (Array.isArray(value)) return value.some((item) => containsOwnKey(item, key));
+  if (value === null || typeof value !== "object") return false;
+  return Object.hasOwn(value, key) || Object.values(value).some((item) => containsOwnKey(item, key));
 }
 
 function findRecordWithTarget(catalog, family) {

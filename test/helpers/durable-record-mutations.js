@@ -38,6 +38,14 @@ const AUTHORITY_CLASSES = Object.freeze([
 const POST_PR_PHASES = Object.freeze(["disabled", "awaiting-pr", "observing", "failure-recording", "remediation-planned", "remediation-running", "changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed", "succeeded", "blocked", "needs-human"]);
 const POST_PR_JOB_ACTIVITIES = Object.freeze(["canonical", "validator", "security"]);
 const POST_PR_JOB_STATES = Object.freeze(["planned", "running", "retry-wait", "bound"]);
+const POST_PR_EXTERNAL = Object.freeze({
+  failure: { ref: "evidence/post-pr-ci.attempt-1.json", bytes: "{\"kind\":\"post-pr-ci\",\"verdict\":\"red\"}\n" },
+  remediation: { ref: "evidence/post-pr-remediation.attempt-1.json", bytes: "{\"kind\":\"post-pr-remediation\",\"paths\":[\"src/backend.js\"]}\n" },
+  canonical: { ref: "evidence/post-pr-canonical.attempt-1.json", bytes: "{\"kind\":\"post-pr-canonical\",\"verdict\":\"pass\"}\n" },
+  validator: { ref: "reviews/post-pr-validator.attempt-1.json", bytes: "{\"kind\":\"post-pr-validator-review\",\"verdict\":\"GO\"}\n" },
+  security: { ref: "reviews/post-pr-security.attempt-1.json", bytes: "{\"kind\":\"post-pr-security-review\",\"verdict\":\"PASS\"}\n" },
+  continuation: { ref: "reviews/post-pr-continuation.attempt-1.json", bytes: "{\"kind\":\"post-pr-continuation\",\"verdict\":\"BLOCKED\"}\n" },
+});
 
 export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
   "plan-slices-graph": [
@@ -326,66 +334,66 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["continuation-planning-reuse-eligible", "af8d6bcd3123285a18e6e9419ed875e881ff9acd44e7b7dc7f49a15351eb5a75"],
   ["continuation-draft-reuse", "01133b62a8e20431276621521c7edfaf822ae2b4c24ef4396a26fbdd8b4b43f6"],
   ["continuation-post-pr-binding", "6fdddab0caf1953935819760fed3903213b7acc81277aa75a8ab03384287c7a1"],
-  ["post-pr-phase-disabled", "b16fbc00df805c5ca4635b0d8cf290c59569fbbf0ad0a7fff750e5bc81bbb847"],
-  ["post-pr-phase-awaiting-pr", "ed14b037923231393ce40a46f67004e9ee437e6ec2593880e6fd213a2e153429"],
-  ["post-pr-phase-observing", "56c6ca33125251c4d4ef2638b5c7d57b554ef5e7fa7e6568c6490da367ad3ebc"],
-  ["post-pr-phase-failure-recording", "a8d49363f8997eb2d172c5ce26ba3cbb992c6fa813ec636fb5bc51e0a36fefea"],
-  ["post-pr-phase-remediation-planned", "f6588d23f9a7cb6214c0a47fea2fca03b771b6eef53bec9e55dc871c0ce93a62"],
-  ["post-pr-phase-remediation-running", "1de7baee6ce3445cde132dabec943db5641b1e4f6a821d2d18e51feb1a255df7"],
-  ["post-pr-phase-changes-observed", "d416cb81e5961f21ecaba98b8311407dcbb7259d424f1de7f65bfc009c46cae4"],
-  ["post-pr-phase-committed", "7d84dd8addcbeed4c0d594bf74807f93f2c930a89e10b2ed37c30191447d58a6"],
-  ["post-pr-phase-revalidating", "69f90f2f5f93857b9568654f9dcd5e8f3c5ba1dfb4e1b48b7bba11ce84d3803e"],
-  ["post-pr-phase-validated", "fcda47917c7970b6095c727f2eb329b2b34cb0141b713f311ea7e52dce50728e"],
-  ["post-pr-phase-push-pending", "81bf6fca142302c86f33c697ff40400beba78bcbeedf9758b72165cbc2ce329a"],
-  ["post-pr-phase-remote-confirmed", "0819da6cb23aa6546ee43179489dd0553ea7d19e6afe9d651084d7120f987b53"],
-  ["post-pr-phase-succeeded", "6b0e865881668078426b6247564d51e234f305295c4eb54ea8ba73e3a5a55014"],
-  ["post-pr-phase-blocked", "cad681dcf9f032a1b0048ba33c6e91bc1f2570bd671e196308a3bf39238f704a"],
-  ["post-pr-phase-needs-human", "4ebe1d45a0b0ca95a640be9451ab60cccecc66c29b3fb42b01ed092dc7b8cd3d"],
-  ["post-pr-policy-disabled", "2b7d79a808aa640ca939bb29b269a0140e8d5536cfb18a8625afe82154a5336c"],
-  ["post-pr-policy-enabled", "4ac4998d9e25df16fb2051e2ca2fff574a9bb42c16be50aab4a343c9b4e98255"],
-  ["post-pr-observation-null", "4a64880749754846e9dbd25dd364077a16e63e797bdf672045788a94f8ee2eee"],
-  ["post-pr-observation-active", "a428023e22dbecb36888caabe2670f837e47be03d6860f9c1557076cf4374fec"],
-  ["post-pr-observation-last-error", "0300ce10365bf6416ad5a4795e0f85ca473d47f31e860df6c2e75122f586c290"],
-  ["post-pr-observation-review-request", "0f57f8bd3388619463e3617edc743ae25e274951436f300f20f2b320bbfe15d6"],
-  ["post-pr-observation-snapshot", "5ea14eaa996585e7b87953358ed4e900cc0648d904aa0dd5ae79e4e819ba3717"],
-  ["post-pr-remediation-null", "2e57e48cea1718cb66bcc84645a36c5c0ac434a89769a6cdd0881139a9591d41"],
-  ["post-pr-remediation-active", "edee803893ff9c6a84ecb55e93a97904e006fd2906cc7cadbbd5a205a5c9b4c5"],
-  ["post-pr-remediation-owner", "083bdf973654b3e3ac6ce9e28ab9a8f4ebcde5504d86f4d74e36a1772dfbabea"],
-  ["post-pr-remediation-changes", "9f02cd689a53293587dbd8713d86a7a1646117fa1e1b88b8b789a1a597535359"],
-  ["post-pr-remediation-change-entry", "4dcb86d68738bb32eac18343ac747360919b6da5b0e0c33f6dec14474a17d835"],
-  ["post-pr-dispatch-planned", "9fec33f6c315408e379ddff815af800acf5b17cbf7532280efcccaf17e887475"],
-  ["post-pr-dispatch-running", "263f039b758e0deeea8b0a191ca7bed4b2a37687ec8c6f633601032e2616be27"],
-  ["post-pr-dispatch-returned", "c7e3ffab6f3101d017182f43816a845a025410c07c8042d81b3b174ad618eb12"],
-  ["post-pr-revalidation-empty", "cbc418ba8b6421145ad14b92875f8c755fc990b16edecde7e0d583aeb757e905"],
-  ["post-pr-revalidation-bound", "4316c8e248b43d35ae47972e85a8c46be5940324de6117ab417631895a06cf39"],
-  ["post-pr-canonical-job-planned", "a5d93bf3a86fd6b714276f721af3f21d39f968acf701bb362b813e3529372dc1"],
-  ["post-pr-canonical-job-running", "c302c0bc6a51dc96a670f87c567a007571c991916acd8f4b7c4d19ef889401ef"],
-  ["post-pr-canonical-job-retry-wait", "4229c893873da3bee1572fa405e370ddbce4cecac3b8fad9c9d31a9accda7370"],
-  ["post-pr-canonical-job-bound", "7ba64bb5c623df49962bc27eb7c924b7e15633afa04aeb6e93b1ee7d27e76fd5"],
-  ["post-pr-validator-job-planned", "159907355b65bd54ce6f5e08b65ac476d1531b7b36413fba05d8d753e3b10f71"],
-  ["post-pr-validator-job-running", "021b0acd39a7b2822970312b9cc2ef801f7a5758322f2d908f3d942e0c7aca4e"],
-  ["post-pr-validator-job-retry-wait", "1dbfc6c9bfd18df469ac5a58c55eb99ba26ecd86e4919f934d0794f100f3d9a4"],
-  ["post-pr-validator-job-bound", "c91fddd9e61765c9d780023647f06998d8da60dcd91fe3d26fe3bac2aa5e8b10"],
-  ["post-pr-security-job-planned", "8353d324c3bc009c790b2025e5940f8a5bfa90a45a6d0ac2eea28b31463016db"],
-  ["post-pr-security-job-running", "ed4f530287b3baa56e317cc52bea24a441ff433afc2c9ecb8847ba8ded53937a"],
-  ["post-pr-security-job-retry-wait", "56dd1d8a46e99cbb79d4181409d6389675315775e95ea0d4c307451fdb313a28"],
-  ["post-pr-security-job-bound", "0708f5e4f3000c8d1bcdd9c53d7e566e442b990d29788ca41ddc9e10a84d4372"],
-  ["post-pr-push-not-ready", "6103d7692f657076d741591b68fb38806315cfea86cfb0b2a0999ed18aa6cf11"],
-  ["post-pr-push-pending", "960edb4390d8d376acdf76c4745f47612ebc621788183e84141aeeb8182c6258"],
-  ["post-pr-push-confirmed", "7ba74a5117095fa97f02ce217d61144c5f5b91fedd6023ef14b17af30553ca50"],
-  ["post-pr-push-last-error", "de7fc99c2a07562e3df950e22211f7c9bd2d1994f1641ece63d0f6f838713746"],
-  ["post-pr-evidence-sidecar", "264cc8df6fbc0f6eea6b70310658c4073ef6ebabeede27234be812c716ca43f4"],
-  ["post-pr-continuation-review-null", "a96115021becb9a77860cd6307e602d4d241fa3270b198f5028c9a226671870b"],
-  ["post-pr-continuation-review-bound", "c5b6408579cbddc5b4a36705e30ff0a1719af9d28a724b8eadd479dbcaf8be27"],
-  ["post-pr-terminal-fact-null", "ffae2e38b283ea1c9d4de3dbbc32d96afbfe1fc704ee6a06ed89ab087c027ec3"],
-  ["post-pr-terminal-fact-account-switch-failed-github-auth", "bbdf6524cd57743055f3dcfd730def1266d8e73955c1f440ed799ac8561c5a04"],
-  ["post-pr-terminal-fact-account-switch-failed-push", "3f87bfdee2d5155c62c6eaf42f5a257e800ca6e98ecdd357680dd2c57caabb99"],
-  ["post-pr-terminal-fact-dispatch-start-unknown", "937eb5e5640580e0c0dccccf7970313cab9caa8962f5c19b7603b39b434b2b1a"],
-  ["post-pr-terminal-fact-path-lane-violation", "2c9875537b58329cb73be50d0ef6a19bd46b06fbb52380878af109ae52f1c39c"],
-  ["post-pr-terminal-fact-remote-head-diverged", "f7d7a9cda505468df3b863222e697bd2e00963561eb3c9398a35df5066571657"],
-  ["post-pr-terminal-fact-panel-runner-result-malformed", "952369d5cd11ed0dd849c52dd512c4d7d0aac31493868824b40f0877fb4e6bea"],
-  ["post-pr-terminal-fact-push-failed", "3f8b49186d704817065b798bf9e13145492eb44dc16471ce37cb7bc7a766af1e"],
-  ["post-pr-terminal-fact-panel-attribution-unsafe", "3d728e9f632ddbb845ec377682a6dad6fe2a330790ecb4d0a7d009dfed28120a"],
+  ["post-pr-phase-disabled", "3759b74ccea805c737ff3e1ed51e0aac37ed8a41ef91046e98b455f3ef53381c"],
+  ["post-pr-phase-awaiting-pr", "940393c6d7cef5b19f8c3d8c8915ab3d42962bec7bb1dc270fb9436d4f9ec139"],
+  ["post-pr-phase-observing", "46ad44282906d504922581ea07d169dfbf409f4f5a4043a221480bad8c31a6da"],
+  ["post-pr-phase-failure-recording", "ce62fb142d27f61c0bd5349c34d6cb6ce296631042d723c5016f348ec07e8a77"],
+  ["post-pr-phase-remediation-planned", "41420ec34d679574ec8030d475af2558382e2299c7a21f03ca08e871f112aa06"],
+  ["post-pr-phase-remediation-running", "f82004b088fd60e59ada70c53916299a8de31c2903f78002319df7c7ef282d74"],
+  ["post-pr-phase-changes-observed", "f419962e6728b2da3a9b1f97591bb2f624fa72f778b3ac4a67bdd723311aea79"],
+  ["post-pr-phase-committed", "28454b20f7cb7dc046d3050626d40719ed2515c7a10060498aaf99760f98766b"],
+  ["post-pr-phase-revalidating", "2a13efd14497ba1ff1d9f6f9ea7fa2607d73dda729db296cb76e1e4aa17df83c"],
+  ["post-pr-phase-validated", "3bd891bd1a77c41bf13835a95a251cb035bcf081f9e41089e208ca21fdb0b82f"],
+  ["post-pr-phase-push-pending", "d6371b9abbe893d2d2465b5e6ad628286f0a3df4875386f59b8f7a04679e9db1"],
+  ["post-pr-phase-remote-confirmed", "7f34ed27ad0a518b4cbe6696a5f51ae23cd2ccea5f0b5f7ea3ad3d8a4fe58ee0"],
+  ["post-pr-phase-succeeded", "e0b6e19b620fe59a3a92cd909b83a52a2887e6978909d1b1e14f623488052339"],
+  ["post-pr-phase-blocked", "6810ba0d65030de06f23373e0d547b351039c679cb10d131f497176254c78e6d"],
+  ["post-pr-phase-needs-human", "6f70fa6e0c6edf2cc9837b5539f168581f0cee03ca043fac6774c7f1f471467d"],
+  ["post-pr-policy-disabled", "bdcf6c56ed3a43cf56fefa085896758b3e7a6ffbdc27a14f7b9672596620db4c"],
+  ["post-pr-policy-enabled", "b3524729fefa3c50664880b50b87702f4cf43a816750b0809b205e489796fe6d"],
+  ["post-pr-observation-null", "1525259ef60080fbace643023ffbf600773bb1bb8f0c71e064c05dd154fd547d"],
+  ["post-pr-observation-active", "d2b89469ea46432ca3f8bfcaabd7ccd89fd257995fbcb57bd307806fc285d024"],
+  ["post-pr-observation-last-error", "86a079822e80f5a1237e430a66678cb4d917a08f1010b9849df25afc7c864a30"],
+  ["post-pr-observation-review-request", "e29dbae9a8a7e7207fa41d2aa4e39b2360239800ce7744f8dd9951d30d80e919"],
+  ["post-pr-observation-snapshot", "cca0f8f2a92e680b1ab3744b0d96d61900c424c4b71c6a85a50aa001d8b37fff"],
+  ["post-pr-remediation-null", "94b4f5784f8cad86269dc0c40ca39db823f05d5dbb2eff6ef9369585fd16f273"],
+  ["post-pr-remediation-active", "a60e79b332c9d2f05477d7ec6b93063ebd63273898f97c4b04690ca7c9453363"],
+  ["post-pr-remediation-owner", "a88dc76de76b7c27e25cd4f85b1061953839efc60943779bdf5915409e37de78"],
+  ["post-pr-remediation-changes", "fec2603740f35975dbbac06c9515f8d41265cbb779a341c23d8ca82d7d39a184"],
+  ["post-pr-remediation-change-entry", "f5fa0ac940c8fcdedf9c3261a00707d5f3a176bfdcf04ddbb7e20e3af6edb788"],
+  ["post-pr-dispatch-planned", "a60bf0e1736dcb38631e9991137dd861aaf636ef8ef7795d82eb144caea0b812"],
+  ["post-pr-dispatch-running", "0dcd73fe68768f528f97bfed3063c16a7e64c757178add0318e49eca530c2b3a"],
+  ["post-pr-dispatch-returned", "5764a701307d326ba78c1ce8ecf821d08f10b67ad5345b57a0c84fa3246d1a6e"],
+  ["post-pr-revalidation-empty", "95ef3a3f7dcf0f15f72dede2b8e43316a43f7125cf3d21a91dab65eed83f0cab"],
+  ["post-pr-revalidation-bound", "8deaae1885a60a4a25dff5c8951837c9b391794f3ffbe29559f11d0e7169c571"],
+  ["post-pr-canonical-job-planned", "eece03f93b92bd884bf0e36d5c68c5c19be91d096eebfb94c1352eaf21291904"],
+  ["post-pr-canonical-job-running", "79bd5467e0f5f863cca753efedfa5ef47f5920368331e1dee2ba821b44199a56"],
+  ["post-pr-canonical-job-retry-wait", "df8f66a73013c6877941720d90e376099e430621bf9f04cb1c04da2aa64b7426"],
+  ["post-pr-canonical-job-bound", "f46c064f2dde5a0e8247d843b1296cc1891ce20a8b47bb4910c936ef2b1bf51a"],
+  ["post-pr-validator-job-planned", "eef1839ddcf0082bdee3e05f430cf123fa12de326b39806654df5fec91187895"],
+  ["post-pr-validator-job-running", "d907d99904e0586ed8d69d230cba2196e7ae2fbbb9c419e3bc0afc418d435dba"],
+  ["post-pr-validator-job-retry-wait", "45e34ad3caa6c7b3c00f35857a0050266c94697fa7637deb63c9c17707543140"],
+  ["post-pr-validator-job-bound", "bc75732a7057402cf4870f804eb666a6b203b4602e7f295e5e8f1d8604ab267e"],
+  ["post-pr-security-job-planned", "7d1f69a3df4a7575a80fe0e2c0e0fa9de3e2bb942323acd51b8b823a01ebbb40"],
+  ["post-pr-security-job-running", "be287a9850ac588000b9002967453e3ad0314b78f81caf679a2d6e4941a28ecc"],
+  ["post-pr-security-job-retry-wait", "6e9bb9c6c1a68b91dedb4d23c27327e183cf25ad37b7bc64283d8a0988ba7358"],
+  ["post-pr-security-job-bound", "d14c3ca9c828246aa6c6f7d06a61a8c38cb1069287af8cee99f704a97ae5f9e9"],
+  ["post-pr-push-not-ready", "df7d82c0cfa60daeb1fe4fc6ee8f2dd4073204e5ded8507435151f0cde1c9169"],
+  ["post-pr-push-pending", "709c0f2a85622da906467766984a9e2d9b7f536ad0ded82be7090e61ffc0d7b6"],
+  ["post-pr-push-confirmed", "be5d37302a22711c897139803ab92c438cae8b3b34c42e747081a5f4c512ffeb"],
+  ["post-pr-push-last-error", "b12b75072715f0bc9dc16ad0a0c0b4c373f97546f90ddec29ee312e8875860c2"],
+  ["post-pr-evidence-sidecar", "aeb6d9ae9ccb90b5a7205923656b2c4b54ea9b7d118f06b3a1f1fa0486945de1"],
+  ["post-pr-continuation-review-null", "d006ed909f83741e76c871d9e1582da32e7ebe02f4d9ee50b034041d8e3d1f16"],
+  ["post-pr-continuation-review-bound", "475465302fd2ea1ae169e8c257801db63bdb90dedd6456a4b44ae04d2ac72c37"],
+  ["post-pr-terminal-fact-null", "795a09fbe4b13712febede689a85fc8b0ca0bce2c538126466a9d2553372d3b6"],
+  ["post-pr-terminal-fact-account-switch-failed-github-auth", "2355ea6e114f1960bf030918b7689f466f0579c17c50307ef044fc8aa9a61851"],
+  ["post-pr-terminal-fact-account-switch-failed-push", "0fca102c6296957faea76853a7ec1b015c29cd6c0628b9777ecbfafc8f19823e"],
+  ["post-pr-terminal-fact-dispatch-start-unknown", "594a1346943fa4d30452ded1fd47f7260daf99172d2e7d40423c6dacc72061cd"],
+  ["post-pr-terminal-fact-path-lane-violation", "a3505d03a61d5069da362ae08e3fba5bc3d19fd456e0bd7639b86c0d735c5465"],
+  ["post-pr-terminal-fact-remote-head-diverged", "421baa6870c969cbf05dc76ffa13b7b108fdc9e1161a5f095dd10a4ed297f976"],
+  ["post-pr-terminal-fact-panel-runner-result-malformed", "1b13f36bec4e54b12aff5730cd564a6911d0a17dc935d38b588380215316ee17"],
+  ["post-pr-terminal-fact-push-failed", "ddc110607d329d5398fefba3120102128a3311a51788bfb4e7d8a9af04c2a19d"],
+  ["post-pr-terminal-fact-panel-attribution-unsafe", "cf177ac488305d7daccaefa5cd1051cce2cfb7163c233cb1611b14bddcad9b42"],
   ["repair-reported", "fe884da6edefe039e4099aece0469d76c4f55e7f131b37d22061bb6ab3463586"],
   ["repair-repairing", "4204db3dc8d663bb94aa59b634e35620d66447d1014560b0fcd4285807a94eb0"],
   ["repair-review-approve", "dd6c805718b046b99135bd02c5ab6a54bb2ea82d89e20697251d7a962358261b"],
@@ -443,7 +451,7 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["continuation-post-pr-binding", "959836a883a8a206939b5a68bca2b498118d13ddcb784aa3caf44edb5751f467"],
   ["post-pr-phase-disabled", "513971086c59d58641e60d94eafbcd2bf14874ba9c6ccfc647232b41b7b07e34"],
   ["post-pr-phase-awaiting-pr", "bf1c21e663f13eb7e6a1be999f3909712e1c40b510ec6116c98d0cd01dc8e130"],
-  ["post-pr-phase-observing", "278b11bb3583952da9b8ae74b828e57bff0896f3d03b8bd5b2b0dd780d6b4bdd"],
+  ["post-pr-phase-observing", "e6a25d74454166eb044c588a5a59a3a711c1232821b9a06d7cdf26e7f098c8ce"],
   ["post-pr-phase-failure-recording", "069fdc97c5857cb5f2db059b088a26c093745a7e57f97a2d205ff0bf602525f5"],
   ["post-pr-phase-remediation-planned", "e206193f01349bd009a9a3d0e7369fda199d609bafe325dea0db0290c6e9a401"],
   ["post-pr-phase-remediation-running", "754e04090cdda9c8cc099bc794c6154534fcfd616187e9633ac3cc739fbaac2c"],
@@ -456,15 +464,15 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["post-pr-phase-succeeded", "f85af2b48c0926e215e4e52aa8ffd21c73009f3b83e3b58fa35ed98a1355a3f8"],
   ["post-pr-phase-blocked", "cb252153402eb377af2749e935a7c2fa95c5e38d2caa5320c2c0d5399d8679e1"],
   ["post-pr-phase-needs-human", "7cbad4902c5adc539c29f71d39d45bf7544e5d7fb0d670e46b750599a11caf5e"],
-  ["post-pr-policy-disabled", "76f1b7264a0cb181f8b3884c890dff1e80662be726d05dff020e63d874a76bb0"],
-  ["post-pr-policy-enabled", "298024312242448d270702936af48830268f6a1b61178959ac1728e1fa2d5aaa"],
-  ["post-pr-observation-null", "6832f22ef92cdf429615e13b927440741ac4cfeca5e8fc353c6ea501d96a6252"],
+  ["post-pr-policy-disabled", "8a44a31fbc1cd4b8b51040c52bbdcd561d6e6012b84f8bea93f29cfc748a5384"],
+  ["post-pr-policy-enabled", "f2515d3cfb5915970b533c2196a3c701babd1c43ddbf1b639540b33c98f25d7d"],
+  ["post-pr-observation-null", "e228b8ad83fe3fc1b865ba26c489f923c30750b790ed386decdbbcdd0f7f5a7a"],
   ["post-pr-observation-active", "e0f334f36636f4c4cd7fdfeef2e7de13a92c714272ca227205df487810ad7c54"],
   ["post-pr-observation-last-error", "732e1bb8f0c5dc307f0415288bd6c599681043994a26fe3a152d870c413a9af9"],
   ["post-pr-observation-review-request", "56615c1ed43d8357ceefc407b96b3a3458743c480e5bd650919528f99c0e64ed"],
   ["post-pr-observation-snapshot", "4d184a362df7a52c9c49a94419ace41595b7c2272d403298ead7643e2f019186"],
-  ["post-pr-remediation-null", "a9699daf0f74cc82d9200448497a35f258e6bf1ff8c7abd6ccb45829f25e83e4"],
-  ["post-pr-remediation-active", "ada46ba3e5fe393173303af8b5e97541618190011adc27323f4d8c1f601d1c24"],
+  ["post-pr-remediation-null", "b11b44e67fedeadb2f7ecd4d591f05ce615eaea5b2622950ae35a82b29cadb5e"],
+  ["post-pr-remediation-active", "60633c036049135027b1c5946262942d9b312ccb81b8c150850c5355562b2d27"],
   ["post-pr-remediation-owner", "d0de8ce88fb6d4fd46f561423ec15cbbd9c0d9f673d978803d181cb48f4e62ca"],
   ["post-pr-remediation-changes", "6407f76902b6e3e966837049a7a5be36002dfc1e391cb75fcda8c7d91b050572"],
   ["post-pr-remediation-change-entry", "c696de34634555c76db0c6a4818cba73e5cff137a1dc784ec5df4c599b5fb76a"],
@@ -472,27 +480,27 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["post-pr-dispatch-running", "3eab951f904a67218716f18047cbe976ef336b7f6e6488a578a5e6e91f4fe147"],
   ["post-pr-dispatch-returned", "2ffb3a5e416345718902ea9e864391547b0797c16646efe4d161cc5f32f6f70d"],
   ["post-pr-revalidation-empty", "302761cb949ccc43da4f9a602a7ebd091df624097011bb7958cfdeab319a80bc"],
-  ["post-pr-revalidation-bound", "80abaaba81eedda77a8e7dae19a2a4d474bc85d5ccb5adb74437c0f7ad31417d"],
-  ["post-pr-canonical-job-planned", "815d94caec57b7afa24ea0b6b45a8b9a57858cf06015f7c24e2d2cd9fdd5fc7f"],
+  ["post-pr-revalidation-bound", "8662bcb5aa669ca8ff38a0165e337775ae88e9052421493c5c47c472db1e1ccf"],
+  ["post-pr-canonical-job-planned", "da66b9a24dce3d5f39dba7de43567244ce98a2e236700026c427a5a9db0a1354"],
   ["post-pr-canonical-job-running", "fc33c41aa3ce0fa4df42af7b33405415564d453763d5c9bc07654d90f4444c3e"],
   ["post-pr-canonical-job-retry-wait", "bd1c9e9194488a16122331b2f0342cf3d2fa1ba620e2cab0590f948d44247dd2"],
-  ["post-pr-canonical-job-bound", "600eb75c7073f358ef3b92b23f03ecae3bb72de60694ba0274d230ad4003e3e0"],
-  ["post-pr-validator-job-planned", "07fb026dbf33320ca36f905dc1755fe5752812c42379e250148b109809834884"],
+  ["post-pr-canonical-job-bound", "95b756b324cb9a5e5cd973b2bdf892300c5d5421e3d8e6cb314e15d313b78507"],
+  ["post-pr-validator-job-planned", "6aba7c2d5508fb1721e07710ffe5cdb7a586913be912fbb13ff605d0eac496ed"],
   ["post-pr-validator-job-running", "1ab84f8d6b675ccb12ec6f266acd8710da74d8a1d10d596b963fd73393798d77"],
   ["post-pr-validator-job-retry-wait", "d05820c27e6c8f10a25e8818264da10b325c744eecbbc8dbd9870310fcfc2929"],
-  ["post-pr-validator-job-bound", "b77581865f3c75ca0d682891570be23f9d2dea7150e36617400c3a719d0f0178"],
-  ["post-pr-security-job-planned", "585ead6e646fa65a2c5f7ebcfda1ffee031a75b0d55565b8c7fe502b8f8a8ca5"],
+  ["post-pr-validator-job-bound", "c35da42a019664f7a9a8390ab74f9e2b2b4a982499047222da4c1bc089c269d7"],
+  ["post-pr-security-job-planned", "0fcf0e6d48e81333d73cb908394382890af9bdd43120e5f9981d00450fee1b1e"],
   ["post-pr-security-job-running", "3a90f0cb1692ba8141b175585f345ac12406b1852de6aa1c35ce30ad1009beaa"],
   ["post-pr-security-job-retry-wait", "7d3734ebd954bbc2acad5a1ac1a7a50206586fca10f990fe6a13edd5f606c2f1"],
-  ["post-pr-security-job-bound", "cfa50cf2a4df1ba81a5e5077fd46956b44869c7672934b4fe6a845dc70a053a5"],
-  ["post-pr-push-not-ready", "395dc43d65cec206025ee43d80c11ac489507f58c5af5228eb6c6d6380d20815"],
+  ["post-pr-security-job-bound", "d03928ecc91d7303107c0e662687239d410d4b8dfc063c8c5b39eccd07160140"],
+  ["post-pr-push-not-ready", "75e6634266a30cf17b0cd021da9d1dc92ae1abb169b1a55a9df946bf4be56952"],
   ["post-pr-push-pending", "ac97e631f9618c582a1b55b07229967e2531d271c8516065435155dba49123f9"],
   ["post-pr-push-confirmed", "70a523f94e9711765f33721aaeeb93603f6cf3b600fd28a49a3edd4f841f7b7c"],
   ["post-pr-push-last-error", "2488926b85aac8d01c8efabf743d157b64c52d9f5f511885ba895352389c30c8"],
-  ["post-pr-evidence-sidecar", "7e1f2813cdbf989ddf2764bae919ecb9401fba296810cef54edcadc627f13ef0"],
-  ["post-pr-continuation-review-null", "92960267c0c4fb308202f0ef2f90cfc52dec35df19e7e6e4da3f30d6b3aed05c"],
-  ["post-pr-continuation-review-bound", "73f9ebd1ef1c52cd12bc8a4d381a85e780ee6f9ade46e7ea78a670e011342755"],
-  ["post-pr-terminal-fact-null", "5aec52113785aff02962da6c7569a939245627f87cab4c98ec20837346b70063"],
+  ["post-pr-evidence-sidecar", "57b33323e08a953c446796d9b2c471520802c5c43ee0de0d01e5b5d4f0132381"],
+  ["post-pr-continuation-review-null", "35902cbb67570dbe26041495dc70aaec1708cb379d9a4966dd792f94e14361cc"],
+  ["post-pr-continuation-review-bound", "97fcad71f3c5b448fe72f063b722aa99642f3ff47e773c3c6fba045367f57c10"],
+  ["post-pr-terminal-fact-null", "2e779339034eec52db0602b42534a7097eaa4e908313d3648f3c71ce7add196f"],
   ["post-pr-terminal-fact-account-switch-failed-github-auth", "89db42abf207f47db3f5f2dcc28cb1f61ade51b7679e3e5b0be805d6d7b94436"],
   ["post-pr-terminal-fact-account-switch-failed-push", "a8a67f1c8e774c621d92c8a4e69bdbcd3b9cacb06da840cd55d0593e956bfa1a"],
   ["post-pr-terminal-fact-dispatch-start-unknown", "7a2d731df3167d87dec0923f1316a9ab4b0b4a919d31bf5344e09a7fecb4dee4"],
@@ -534,7 +542,9 @@ const CANONICAL_CORE_RECORD_IDS = Object.freeze([
   "steering-action-claim",
   "steering-last-action",
 ]);
-const CANONICAL_CORE_RECORD_ID_SET = new Set(CANONICAL_CORE_RECORD_IDS);
+const CANONICAL_POST_PR_RECORD_IDS = Object.freeze(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["post-pr-nested-records"]);
+const CANONICAL_SOURCE_RECORD_IDS = Object.freeze([...CANONICAL_CORE_RECORD_IDS, ...CANONICAL_POST_PR_RECORD_IDS]);
+const CANONICAL_SOURCE_RECORD_ID_SET = new Set(CANONICAL_SOURCE_RECORD_IDS);
 
 // Independently authored exact-value commitments over class/id placement, persisted
 // record/variant labels, canonical run path, exact persisted source shape, authority
@@ -561,6 +571,66 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["steering-boundary", "b3477a6967254d04f869b97b8d15d00ddb952673f00807ebec41f05afdbdacfc"],
   ["steering-action-claim", "00866d18d439d808d2829e6d0967675629175bf8c1f00bec2130fa2728b30a21"],
   ["steering-last-action", "4fc3088a51000b12aed4ca3216c8e60b74c5206d8d9e75e4dea319cb31c62820"],
+  ["post-pr-phase-disabled", "4898a84d6f95e1a649122eadba90daab5786164dcbe11b6accbbe04b17b91a07"],
+  ["post-pr-phase-awaiting-pr", "cf30eab403b52bdaf1e3e54c2ce0ab4bc24e7bd70d6f07ad2372a57647497fed"],
+  ["post-pr-phase-observing", "5338e2ad9975937758224fdf86e9abe6ef7c7c5caf12fb2b59871fab4e6fd0b1"],
+  ["post-pr-phase-failure-recording", "ef5b03ce1abb67a02bd7493e7ad5e964da09a6b26326b6d27ec8a04bda5088e1"],
+  ["post-pr-phase-remediation-planned", "816bab2a078623e6a8d39fbb41176fbd11c357f46c5aac421636dd1d20d33d6f"],
+  ["post-pr-phase-remediation-running", "0cfb6a7260f9926803f4c3f3f9d96e9a6e5526dc4d6d7ea7b2c11f04b123847f"],
+  ["post-pr-phase-changes-observed", "1b7bcf42457346eb32da7c6b7545cc102e4ea45d902d6b14fc97234f2584a4dc"],
+  ["post-pr-phase-committed", "bc466d11d309732d3cb979d960335acad3e1f6b7d9a0776511c28e08985f3def"],
+  ["post-pr-phase-revalidating", "d8b055416763c9261bdecd322435b44d9a4aad475a6c50d5c5f83b5454eea09b"],
+  ["post-pr-phase-validated", "7cd547f3fbb088c7db8b97e588e512e6b7a1287b8e8edd1a09117e41acc8d64a"],
+  ["post-pr-phase-push-pending", "d7fd7fd0b1f98c7af6df04743983cbc6ed71cac4c745e140ad9593327c6f87bb"],
+  ["post-pr-phase-remote-confirmed", "7965e94274f632d5f60920e0af0438271a4fe9d0d5f6bf75514d8d5e52f0ebf5"],
+  ["post-pr-phase-succeeded", "a27c6ea8f6ad9b5b698a6e9247d8cfd3890eebd6d3ce967068e56242a7bd6ec9"],
+  ["post-pr-phase-blocked", "b2414b57f1b6b7b6b0d749f4df4649e0f15d56c421b07c260456ca4d3fd790d5"],
+  ["post-pr-phase-needs-human", "26a4bc9cd330e9462ddd6775b934c0b9ac246f85667d61e9ed4c89a35fae38a8"],
+  ["post-pr-policy-disabled", "fe6fa58804a25d10747ce503905d3a5de7663d11e8faee2e7b3e52de0a308148"],
+  ["post-pr-policy-enabled", "7bdebab5a364fd95834181922dedb2a6f4f178efd5b35abcd3524922d0354967"],
+  ["post-pr-observation-null", "2228fab1e0b7b5df83161bcf28eed483cace381e1e63788665a1fa6655f369b5"],
+  ["post-pr-observation-active", "21785edba15479cf549af033d0319101ebe4db20ab51990fe35eb70cc9e43e0d"],
+  ["post-pr-observation-last-error", "8bfe1a1d5755f1b90c01355781d501040a9b1c4b77b0bd9dbcf3a8e6a3e9f85b"],
+  ["post-pr-observation-review-request", "9566fd52bdcfd2827381ca03279711585eab7ecc3286e419e40420c72113d0bb"],
+  ["post-pr-observation-snapshot", "19ded9f482060bd5202c40e356b13a3bb0cab5eb11213f9856add41a2cdb7f6b"],
+  ["post-pr-remediation-null", "14d2db7f0f845f2efeab959de21c8b7f14e675358120358957e480c8138b427c"],
+  ["post-pr-remediation-active", "3c27545516acc8c47ee5ed9738d05c49fa015ab12db12b1027901c4191e642f2"],
+  ["post-pr-remediation-owner", "61efc1abafdc6517729de0b3b42049a296be26101cc4dcc65dc5fb09990e9e1c"],
+  ["post-pr-remediation-changes", "4c9443025aaee7943f100038014098e14ce736341300f7316c87493bb55584bf"],
+  ["post-pr-remediation-change-entry", "4a21102892d5722e04e8fed6a834e1a64ba27833589b05287f6dd5ed0d2672ce"],
+  ["post-pr-dispatch-planned", "f646f06d9d00613fdcc7b1b359d08e0f0de55bde936f9d3c7db749c9b7845502"],
+  ["post-pr-dispatch-running", "e671613ce2d2562fb92153f8f2a8c3e36306c3af8100a42e14329b682c8477cc"],
+  ["post-pr-dispatch-returned", "fe1c4b8b18b89b9df1b43b03fb6401889045e3f74295784c9d6b51538371953e"],
+  ["post-pr-revalidation-empty", "bc500dbc508342382ae34920b39e00812e7a62c76f0d577a4b4474bcd38f5817"],
+  ["post-pr-revalidation-bound", "8fba2f20a42a891e0d03a161aedd692275b05729a521ece01ff2f363eb8274c5"],
+  ["post-pr-canonical-job-planned", "4f74dbc8d01c7718a5b137d20faa96c2256ca7507f3ddc53f56d051da9804065"],
+  ["post-pr-canonical-job-running", "ec2b228514350f528c5a41e818747b7fd081755fd49ff0114f916aca9a5c1cda"],
+  ["post-pr-canonical-job-retry-wait", "3ad67692dc4e8801e58f5c23f892018ee49c38a39c7bf8df9831b5a9f8a7fa61"],
+  ["post-pr-canonical-job-bound", "499bc66f2304d9275eb6441f18a02132d9a4b739706339f6120f8d1c985c9d41"],
+  ["post-pr-validator-job-planned", "7cd517c8d1e501c03aca8cbfda5dab78269a073c798850b2c956cb25c3a5058d"],
+  ["post-pr-validator-job-running", "fe0318485017bde3aaa7ee933665ef5d13439bffe65ca0241d347b642f05ee75"],
+  ["post-pr-validator-job-retry-wait", "d819db74d03e86a4cf549b3d16517047e1d531697252d6d7509bfcdfebd344fd"],
+  ["post-pr-validator-job-bound", "45fa96cdd08ef039db8ad4600cda529a7aae3d9d4e9a070d97ed22f38479a256"],
+  ["post-pr-security-job-planned", "0c8897d0b264c4271e737b0cd42070933a7c1a9962965f20b807f72d0e940a31"],
+  ["post-pr-security-job-running", "5508c23e76fccbbb0f7e18942dc24cce8d98b304951ef6dfdb7e57863e2a5372"],
+  ["post-pr-security-job-retry-wait", "074069f4417cec250cb6330f97ac45ca8ecc3a485649a74295cc2cc7a6e29186"],
+  ["post-pr-security-job-bound", "d43241bac0d7fd6bf4acb89b7382896c2a2136cfa4555c4af92506c10ab943b7"],
+  ["post-pr-push-not-ready", "a056a15a3578b5393bc7e9f4d26075a435bfea0a0c0c8d3cc4617b2fa52f5f17"],
+  ["post-pr-push-pending", "4ce29f28ff843d4b3fc182ed02f186c884994991e2c48d7fb82024720b6a53e4"],
+  ["post-pr-push-confirmed", "542c9ecdbea6b4fddeee57b135dd6901c136282ed7298309a7854706555f940e"],
+  ["post-pr-push-last-error", "43faeff2318d79d1ea650ef80d99cf0987b0b4b837e414d51549b93038e25439"],
+  ["post-pr-evidence-sidecar", "bfe2d8f9d1353cba917aaaec7f6e8647fa64155cea4a07ecc92cdfaf963aa046"],
+  ["post-pr-continuation-review-null", "79ecc88e42f7a817bc23b208171ddb2bf6a54f01c8ca47b1b1db186ab28e1770"],
+  ["post-pr-continuation-review-bound", "5509a5ff084a310ecc8f4ef1f8a8c81c6b7ead265d26501ded237b9ef60adcd9"],
+  ["post-pr-terminal-fact-null", "d8fa57672d8e8ba41e80f3807bd66196959073876fcea0cf7182b1b3a7c3496c"],
+  ["post-pr-terminal-fact-account-switch-failed-github-auth", "02a0dcc9b2a1742ef49ccf5bd6417d84e53b99b50ae8febe06c38ca536adc97f"],
+  ["post-pr-terminal-fact-account-switch-failed-push", "d3b21f1e9e711265ca534f15f11a2af1b7f865b8ccd4e2f0af6bfb2c3d779482"],
+  ["post-pr-terminal-fact-dispatch-start-unknown", "03ac494ca561932a87426256a8d8207d2db69c7d89832da86d85459918af79d3"],
+  ["post-pr-terminal-fact-path-lane-violation", "bc7393b42afe9e00cc5aec7ee4c60673921722e844094889d60f2138828c4e3e"],
+  ["post-pr-terminal-fact-remote-head-diverged", "5d735cb843b6ecb62867b5cc5e13c435a4f8656da463af57d6d6805e5703dc04"],
+  ["post-pr-terminal-fact-panel-runner-result-malformed", "beed81bad84f5734e6da8fb9044685de9f4939e93fb061f241759305ea5d97df"],
+  ["post-pr-terminal-fact-push-failed", "83425c5f79198714cd764be913ac0deb3f93b87510e9aa66599d405eb0456f09"],
+  ["post-pr-terminal-fact-panel-attribution-unsafe", "f3a27a8a2f12f532be7a44e0521da95a309b8bda559a850a96dd21f5d9b38c38"],
 ]);
 const DURABLE_AUTHORITY_CANONICAL_SOURCE_BY_ID = new Map(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST);
 
@@ -633,7 +703,7 @@ export function assertDurableAuthorityCatalogComplete(catalog) {
   if (!sameList(DURABLE_AUTHORITY_METADATA_MANIFEST.map(([id]) => id), expectedManifestIds)) throw new TypeError("independent metadata manifest must contain every required record id exactly once in source order");
   if (!sameList(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), expectedManifestIds)) throw new TypeError("independent descriptor manifest must contain every required record id exactly once in source order");
   if (!sameList(Object.keys(EXPLICIT_EXCLUDED_FAMILY_CODES), expectedManifestIds)) throw new TypeError("explicit family disposition registry must contain every required record id exactly once in source order");
-  if (!sameList(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id), CANONICAL_CORE_RECORD_IDS)) throw new TypeError("independent canonical source manifest must contain every canonical core record id exactly once in source order");
+  if (!sameList(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id), CANONICAL_SOURCE_RECORD_IDS)) throw new TypeError("independent canonical source manifest must contain every canonical core and post-PR record id exactly once in source order");
 
   const seenRecordIds = new Set();
   for (const authorityClass of catalog) {
@@ -663,7 +733,7 @@ export function assertDurableAuthorityCatalogComplete(catalog) {
       const expectedDescriptorHash = DURABLE_AUTHORITY_DESCRIPTOR_BY_ID.get(record.id);
       const actualDescriptorHash = descriptorHash(record.descriptor);
       if (actualDescriptorHash !== expectedDescriptorHash) throw new TypeError(`${path} mutation target definitions and exclusions must exactly match the independent descriptor manifest`);
-      if (CANONICAL_CORE_RECORD_ID_SET.has(record.id)) validateCanonicalCoreRecord(record, path);
+      if (CANONICAL_SOURCE_RECORD_ID_SET.has(record.id)) validateCanonicalCoreRecord(record, path);
       else if (record.canonicalPath !== undefined || record.externalSources !== undefined) throw new TypeError(`${path} canonical source declarations are reserved for the registered core source manifest`);
       emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
       validateRecordSidecars(record, path);
@@ -801,7 +871,7 @@ const RECORDS = [
   postPrPushEntry("post-pr-push-pending", "pending", SHA_A, null),
   postPrPushEntry("post-pr-push-confirmed", "confirmed", SHA_A, SHA_B),
   postPrPushLastErrorEntry(),
-  sidecarRecord("post-pr-nested-records", "post-pr-evidence-sidecar", "post_pr.evidence_refs[]", "failure/remediation evidence", "transitionPostPrFailure or transitionPostPrState append", ["assertPostPrRefsConsistent", "bindPostPrContinuationReview", "transitionPostPrTerminal"], "evidence/post-pr-ci.attempt-1.json", "{\"verdict\":\"red\"}"),
+  postPrEvidenceEntry(),
   postPrNullEntry("post-pr-continuation-review-null", "post_pr.continuation_review", "continuation_review", "observing", "transitionPostPrTerminal binds only retry exhaustion", ["validatePostPr", "transitionPostPrTerminal retry-exhaustion checks", "factory continue post-PR admission"]),
   postPrContinuationReviewEntry(),
   postPrNullEntry("post-pr-terminal-fact-null", "post_pr.terminal_fact", "terminal_fact", "succeeded", "transitionPostPrTerminal writes null for non-fact terminal reasons", ["validatePostPrTerminalFact", "terminal status/readers"]),
@@ -1204,201 +1274,444 @@ function continuationContextEntry(id, record, kindValue, refValue) {
 }
 
 function postPrPhaseEntry(phase) {
-  const active = !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase);
+  const fixture = postPrCatalogFixture(`post-pr-phase-${phase}`);
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: `post-pr-phase-${phase}`, record: "run.json.post_pr.phase", variant: phase,
+    authorityClassId: "post-pr-nested-records", id: `post-pr-phase-${phase}`, record: "run.json.post_pr", variant: phase,
     writer: phase === "disabled" || phase === "awaiting-pr" ? "createPostPrState policy initialization" : phase === "observing" ? "transitionPrCreated or transitionPostPrState observation transition" : ["blocked", "needs-human", "succeeded"].includes(phase) ? "transitionPostPrTerminal checked terminal transition" : phase === "failure-recording" ? "transitionPostPrFailure checked failure admission" : "transitionPostPrState checked phase transition",
     readers: ["validatePostPr phase/state consistency", "assertPostPrPhaseTransition", "assertPostPrMonotonicState", "post-PR workflow dispatch decision", "transitionPostPrTerminal reason preconditions", "resume and heartbeat eligibility"],
-    source: { schema_version: 1, phase, attempt: active ? 1 : 0, run_status: ["blocked", "needs-human"].includes(phase) ? phase : phase === "succeeded" ? "completed" : "running" },
-    requiredPath: ["phase"], typePath: ["attempt"], facts: [`phase:${phase}`, `run-status:${["blocked", "needs-human"].includes(phase) ? phase : phase === "succeeded" ? "completed" : "running"}`, `attempt:${active ? 1 : 0}`], targets: [schema(["schema_version"]), stale(["attempt"], active ? 0 : 1), cross(["phase"], phase === "disabled" ? "observing" : "disabled")],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
+    requiredPath: ["phase"], typePath: ["attempt"], targets: [schema(["schema_version"]), stale(["attempt"], fixture.source.attempt === 0 ? 1 : 0), cross(["phase"], phase === "disabled" ? "observing" : "disabled")],
   });
 }
 
 function postPrPolicyEntry(id, enabled) {
+  const fixture = postPrCatalogFixture(id);
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id, record: "post_pr.policy", variant: enabled ? "enabled" : "disabled",
+    authorityClassId: "post-pr-nested-records", id, record: "run.json.post_pr.policy", variant: enabled ? "enabled" : "disabled",
     writer: "createPostPrState from effective start-time policy",
     readers: ["validatePostPrPolicy", "transitionPrCreated observation initialization", "all post-PR timing/retry/review decisions", "assertPostPrPhaseTransition immutable policy check"],
-    source: { enabled, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: enabled, reviewer_login: enabled ? "reviewer" : null, source: enabled ? "driver" : "none" } },
-    requiredPath: ["enabled"], typePath: ["wait_ms"], targets: [stale(["max_transient_errors"], 0), cross(["review", "required"], !enabled), drift(["review"], "reviewer_login", "login")],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source),
+    requiredPath: ["enabled"], typePath: ["wait_ms"], targets: [stale(["max_transient_errors"], 1), cross(["review", "required"], !enabled), drift(["review"], "reviewer_login", "login")],
   });
 }
 
 function postPrNullEntry(id, record, key, phase, writer, readers) {
+  const fixture = postPrCatalogFixture(id);
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id, record, variant: "null",
+    authorityClassId: "post-pr-nested-records", id, record: `run.json.${record}`, variant: "null",
     writer, readers,
-    source: { phase, [key]: null }, requiredPath: [key], typePath: [key], targets: [stale(["phase"], "stale-phase"), cross([key], { from_other_attempt: true })],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
+    requiredPath: [key], typePath: [key], targets: [stale(["phase"], fixture.source.phase === "observing" ? "awaiting-pr" : fixture.source.phase === "succeeded" ? "blocked" : "observing"), cross([key], { from_other_attempt: true })],
   });
 }
 
 function postPrObservationEntry() {
+  const fixture = postPrCatalogFixture("post-pr-observation-active");
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: "post-pr-observation-active", record: "post_pr.observation", variant: "active non-null epoch",
+    authorityClassId: "post-pr-nested-records", id: "post-pr-observation-active", record: "run.json.post_pr.observation", variant: "active non-null epoch",
     writer: "transitionPrCreated initialization and transitionPostPrState observations",
     readers: ["validatePostPrObservation", "assertPostPrMonotonicState", "transitionPostPrFailure source/replay checks", "transitionPostPrTerminal preconditions"],
-    source: { epoch: 1, expected_head_sha: SHA_A, started_at: NOW, deadline_at: "2026-07-16T13:00:00.000Z", next_poll_at: NOW, poll_count: 0, unchanged_count: 0, current_interval_ms: 30_000, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "pending", last_review_verdict: "pending", last_verdict: "pending", last_error: null },
+    canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source),
     requiredPath: ["epoch"], typePath: ["poll_count"], targets: [time(["started_at"]), stale(["epoch"], 0), cross(["expected_head_sha"], SHA_B), drift([], "expected_head_sha", "head_sha")],
   });
 }
 
 function postPrObservationNestedEntry(kindName) {
+  const id = `post-pr-observation-${kindName}`;
   const definitions = {
-    "last-error": {
-      record: "post_pr.observation.last_error",
-      writer: "transitionPostPrState observation error transition",
-      readers: ["validatePostPrLastError", "assertPostPrMonotonicState result identity", "transitionPostPrTerminal infrastructure/account preconditions", "post-PR retry scheduler"],
-      source: { class: "network", exit_code: 1, occurred_at: NOW, next_retry_at: "2026-07-16T12:01:00.000Z" },
-      requiredPath: ["class"], typePath: ["exit_code"], facts: ["error-class:network", "exit-code:1", "occurred-at", "next-retry-at"],
-      targets: [time(["occurred_at"]), stale(["next_retry_at"], NOW), cross(["class"], "account-auth")],
-    },
-    "review-request": {
-      record: "post_pr.observation.review_request",
-      writer: "transitionPostPrState reviewer-request transition",
-      readers: ["validatePostPrReviewRequest", "assertMonotonicReviewerRequest", "post-PR review observation scheduler", "transitionPostPrTerminal review preconditions"],
-      source: { status: "requested", attempts: 1, requested_at: NOW },
-      requiredPath: ["status"], typePath: ["attempts"], facts: ["request-status:requested", "attempts:1", "requested-at"],
-      targets: [time(["requested_at"]), stale(["attempts"], 0), cross(["status"], "pending")],
-    },
-    snapshot: {
-      record: "post_pr.observation.snapshot",
-      writer: "transitionPostPrState sanitized observation binding",
-      readers: ["validatePostPrSanitizedSnapshot", "observationResultIdentity", "post-PR fingerprint/backoff decision", "terminal metadata safety decision"],
-      source: { checks: [{ name: "ci", verdict: "red" }], reviews: [{ login: "reviewer", verdict: "pending" }] },
-      requiredPath: ["checks"], typePath: ["reviews"], facts: ["sanitized-check-snapshot", "sanitized-review-snapshot"],
-      targets: [drift([], "checks", "check_results"), stale(["checks", 0, "verdict"], "pending"), cross(["reviews", 0, "login"], "other-reviewer")],
-    },
+    "last-error": { record: "run.json.post_pr.observation.last_error", writer: "transitionPostPrState observation error transition", readers: ["validatePostPrLastError", "assertPostPrMonotonicState result identity", "transitionPostPrTerminal infrastructure/account preconditions", "post-PR retry scheduler"], requiredPath: ["class"], typePath: ["exit_code"], targets: [time(["occurred_at"]), stale(["next_retry_at"], NOW), cross(["class"], "account-auth")] },
+    "review-request": { record: "run.json.post_pr.observation.review_request", writer: "transitionPostPrState reviewer-request transition", readers: ["validatePostPrReviewRequest", "assertMonotonicReviewerRequest", "post-PR review observation scheduler", "transitionPostPrTerminal review preconditions"], requiredPath: ["status"], typePath: ["attempts"], targets: [time(["requested_at"]), stale(["attempts"], 0), cross(["status"], "pending")] },
+    snapshot: { record: "run.json.post_pr.observation.snapshot", writer: "transitionPostPrState sanitized observation binding", readers: ["validatePostPrSanitizedSnapshot", "observationResultIdentity", "post-PR fingerprint/backoff decision", "terminal metadata safety decision"], requiredPath: ["checks"], typePath: ["reviews"], targets: [drift([], "checks", "check_results"), stale(["checks", 0, "verdict"], "pending"), cross(["reviews", 0, "login"], "other-reviewer")] },
   };
   const definition = definitions[kindName];
+  const fixture = postPrCatalogFixture(id);
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: `post-pr-observation-${kindName}`, record: definition.record, variant: "non-null",
-    writer: definition.writer, readers: definition.readers, source: definition.source, requiredPath: definition.requiredPath, typePath: definition.typePath, facts: definition.facts, targets: definition.targets,
+    authorityClassId: "post-pr-nested-records", id, record: definition.record, variant: "non-null",
+    writer: definition.writer, readers: definition.readers, canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source), requiredPath: definition.requiredPath, typePath: definition.typePath, targets: definition.targets,
   });
 }
 
 function postPrRemediationEntry() {
+  const fixture = postPrCatalogFixture("post-pr-remediation-active");
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: "post-pr-remediation-active", record: "post_pr.remediation", variant: "active non-null attempt",
+    authorityClassId: "post-pr-nested-records", id: "post-pr-remediation-active", record: "run.json.post_pr.remediation", variant: "active non-null attempt",
     writer: "transitionPostPrFailure and transitionPostPrState",
     readers: ["validatePostPrRemediation", "assertPostPrAttemptTransition", "assertPostPrMonotonicState", "post-PR revalidation/push/terminal decisions"],
-    source: { schema_version: 1, attempt: 1, reason_code: "check-red", failure_fingerprint: HASH_A, failed_head_sha: SHA_A, failure_evidence_ref: "evidence/post-pr.json", failure_evidence_hash: HASH_B, owner: { kind: "slice", slice_id: "backend" }, route: "backend-builder", lane: "slice", stage: "planned", baseline_head_sha: SHA_A, sidecar_bytes: "failure evidence" },
-    requiredPath: ["attempt"], typePath: ["owner"], sidecars: [sidecar("failure-evidence", ["failure_evidence_ref"], ["failure_evidence_hash"], ["sidecar_bytes"])],
-    targets: [schema(["schema_version"]), ...sidecarTargets("failure-evidence", ["failure_evidence_ref"], ["failure_evidence_hash"], ["sidecar_bytes"]), kind(["owner", "kind"], "other-owner"), stale(["attempt"], 0), cross(["owner", "slice_id"], "frontend")],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
+    requiredPath: ["attempt"], typePath: ["owner"], sidecars: [externalSidecar("failure-evidence", ["failure_evidence_ref"], ["failure_evidence_hash"])],
+    targets: [schema(["schema_version"]), ...externalSidecarTargets("failure-evidence", ["failure_evidence_ref"], ["failure_evidence_hash"]), kind(["owner", "kind"], "other-owner"), stale(["attempt"], 0), cross(["owner", "slice_id"], "frontend")],
   });
 }
 
 function postPrRemediationNestedEntry(kindName) {
+  const id = `post-pr-remediation-${kindName}`;
   const definitions = {
-    owner: {
-      record: "post_pr.remediation.owner", writer: "transitionPostPrFailure owner attribution",
-      readers: ["validatePostPrOwner", "post-PR route/lane dispatch decision", "assertPostPrMonotonicState owner immutability", "panel attribution and terminal owner safety decisions"],
-      source: { kind: "slice", slice_id: "backend", stack: "backend", path_b64url: null, method: "check-slice-id" }, requiredPath: ["kind"], typePath: ["slice_id"], facts: ["owner-kind:slice", "slice-id:backend", "stack:backend", "method:check-slice-id"], targets: [kind(["kind"], "integration"), stale(["slice_id"], "stale-slice"), cross(["stack"], "frontend")],
-    },
-    changes: {
-      record: "post_pr.remediation.changes", writer: "transitionPostPrState observed changes transition",
-      readers: ["validatePostPrChanges", "assertPostPrMonotonicState changes immutability", "post-PR lane ownership decision", "assertPostPrCandidateGitState", "terminal path-lane fact validation"],
-      source: { paths: ["src/backend.js"], entries: [], tree_hash: HASH_A }, requiredPath: ["paths"], typePath: ["entries"], facts: ["paths:src/backend.js", "entries:empty", "tree-hash"], targets: [hash(["tree_hash"]), drift([], "paths", "changed_paths"), stale(["tree_hash"], HASH_B), cross(["paths", 0], "src/frontend.js")],
-    },
-    "change-entry": {
-      record: "post_pr.remediation.changes.entries[]", writer: "transitionPostPrState Git-observed change entry binding",
-      readers: ["validatePostPrChangeEntry", "post-PR safe change-kind decision", "owner lane/path validation", "candidate Git state and terminal path-lane fact readers"],
-      source: { source: "commit", status: "modified", index_status: null, worktree_status: null, path: "src/backend.js", previous_path: null, old_mode: "100644", new_mode: "100644" }, requiredPath: ["path"], typePath: ["status"], facts: ["source:commit", "status:modified", "path:src/backend.js", "mode:100644"], targets: [ref(["path"], undefined, "changed path"), drift([], "previous_path", "old_path"), stale(["old_mode"], "120000"), cross(["path"], "src/frontend.js")],
-    },
+    owner: { record: "run.json.post_pr.remediation.owner", writer: "transitionPostPrFailure owner attribution", readers: ["validatePostPrOwner", "post-PR route/lane dispatch decision", "assertPostPrMonotonicState owner immutability", "panel attribution and terminal owner safety decisions"], requiredPath: ["kind"], typePath: ["slice_id"], targets: [kind(["kind"], "integration"), stale(["slice_id"], "stale-slice"), cross(["stack"], "frontend")] },
+    changes: { record: "run.json.post_pr.remediation.changes", writer: "transitionPostPrState observed changes transition", readers: ["validatePostPrChanges", "assertPostPrMonotonicState changes immutability", "post-PR lane ownership decision", "assertPostPrCandidateGitState", "terminal path-lane fact validation"], requiredPath: ["paths"], typePath: ["entries"], targets: [hash(["tree_hash"]), drift([], "paths", "changed_paths"), stale(["tree_hash"], HASH_B), cross(["paths", 0], "src/frontend.js")] },
+    "change-entry": { record: "run.json.post_pr.remediation.changes.entries[]", writer: "transitionPostPrState Git-observed change entry binding", readers: ["validatePostPrChangeEntry", "post-PR safe change-kind decision", "owner lane/path validation", "candidate Git state and terminal path-lane fact readers"], requiredPath: ["path"], typePath: ["status"], targets: [ref(["path"], undefined, "changed path"), drift([], "previous_path", "old_path"), stale(["old_mode"], "120000"), cross(["path"], "src/frontend.js")] },
   };
   const definition = definitions[kindName];
+  const fixture = postPrCatalogFixture(id);
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: `post-pr-remediation-${kindName}`, record: definition.record, variant: "bound",
-    writer: definition.writer, readers: definition.readers, source: definition.source, requiredPath: definition.requiredPath, typePath: definition.typePath, facts: definition.facts, targets: definition.targets,
+    authorityClassId: "post-pr-nested-records", id, record: definition.record, variant: "bound",
+    writer: definition.writer, readers: definition.readers, canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source), requiredPath: definition.requiredPath, typePath: definition.typePath, targets: definition.targets,
   });
 }
 
-function postPrDispatchEntry(id, variant, startedAt, returnedAt) {
+function postPrDispatchEntry(id, variant) {
+  const fixture = postPrCatalogFixture(id);
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id, record: "post_pr.remediation.dispatch", variant,
+    authorityClassId: "post-pr-nested-records", id, record: "run.json.post_pr.remediation.dispatch", variant,
     writer: "transitionPostPrState dispatch phase transition",
     readers: ["validatePostPrDispatch", "assertPostPrMonotonicState", "transitionPostPrTerminal dispatch-start reconciliation"],
-    source: { id: "dispatch-1", status: variant, role: "backend-builder", subject: "backend", started_at: startedAt, returned_at: returnedAt },
-    requiredPath: ["id"], typePath: ["status"], facts: [`dispatch-status:${variant}`, "dispatch-id:dispatch-1", "role:backend-builder", "subject:backend", `started-at:${startedAt === null ? "null" : "bound"}`, `returned-at:${returnedAt === null ? "null" : "bound"}`], targets: [time([variant === "returned" ? "returned_at" : "started_at"], "not-started"), stale(["status"], variant === "planned" ? "running" : "planned"), cross(["subject"], "other-slice")],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source),
+    requiredPath: ["id"], typePath: ["status"], targets: [time([variant === "returned" ? "returned_at" : "started_at"], "not-started"), stale(["status"], variant === "planned" ? "running" : "planned"), cross(["subject"], "other-slice")],
   });
 }
 
 function postPrRevalidationEntry(id, bound) {
-  const source = bound
-    ? { canonical_evidence_ref: "evidence/canonical.json", canonical_evidence_hash: HASH_A, canonical_verdict: "pass", validator_review_ref: "reviews/validator.json", validator_review_hash: HASH_B, validator_verdict: "GO", security_review_ref: "reviews/security.json", security_review_hash: HASH_C, security_verdict: "PASS", sidecar_bytes: { canonical: "pass", validator: "go", security: "pass" } }
-    : { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null, validator_review_ref: null, validator_review_hash: null, validator_verdict: null, security_review_ref: null, security_review_hash: null, security_verdict: null };
-  const sidecars = bound ? [sidecar("canonical", ["canonical_evidence_ref"], ["canonical_evidence_hash"], ["sidecar_bytes", "canonical"]), sidecar("validator", ["validator_review_ref"], ["validator_review_hash"], ["sidecar_bytes", "validator"]), sidecar("security", ["security_review_ref"], ["security_review_hash"], ["sidecar_bytes", "security"])] : [];
-  const targets = bound ? [...sidecarTargets("canonical", ["canonical_evidence_ref"], ["canonical_evidence_hash"], ["sidecar_bytes", "canonical"]), ...sidecarTargets("validator", ["validator_review_ref"], ["validator_review_hash"], ["sidecar_bytes", "validator"]), ...sidecarTargets("security", ["security_review_ref"], ["security_review_hash"], ["sidecar_bytes", "security"]), stale(["canonical_verdict"], "fail"), cross(["security_verdict"], "BLOCK")] : [stale(["canonical_verdict"], "pass"), cross(["validator_verdict"], "GO")];
+  const fixture = postPrCatalogFixture(id);
+  const sidecars = bound ? [externalSidecar("canonical", ["canonical_evidence_ref"], ["canonical_evidence_hash"]), externalSidecar("validator", ["validator_review_ref"], ["validator_review_hash"]), externalSidecar("security", ["security_review_ref"], ["security_review_hash"])] : [];
+  const targets = bound ? [...externalSidecarTargets("canonical", ["canonical_evidence_ref"], ["canonical_evidence_hash"]), ...externalSidecarTargets("validator", ["validator_review_ref"], ["validator_review_hash"]), ...externalSidecarTargets("security", ["security_review_ref"], ["security_review_hash"]), stale(["canonical_verdict"], "fail"), cross(["security_verdict"], "BLOCK")] : [stale(["canonical_verdict"], "pass"), cross(["validator_verdict"], "GO")];
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id, record: "post_pr.remediation.revalidation", variant: bound ? "bound panel results" : "empty/unbound",
+    authorityClassId: "post-pr-nested-records", id, record: "run.json.post_pr.remediation.revalidation", variant: bound ? "bound panel results" : "empty/unbound",
     writer: "transitionPostPrState revalidation transition",
     readers: ["validatePostPrRevalidation", "assertPostPrMonotonicState once-bound checks", "post-PR validated/push admission", "transitionPostPrTerminal panel-failure decisions"],
-    source, requiredPath: ["canonical_verdict"], typePath: ["validator_verdict"], sidecars, targets,
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source), requiredPath: ["canonical_verdict"], typePath: ["validator_verdict"], sidecars, targets,
   });
 }
 
 function postPrJobEntry(activity, state) {
+  const id = `post-pr-${activity}-job-${state}`;
+  const fixture = postPrCatalogFixture(id);
   const bound = state === "bound";
-  const source = { dispatch_id: `${activity}-dispatch-1`, status: state, action_token: state === "planned" ? null : `${activity}-token`, steering_generation: 2, started_at: state === "planned" ? null : NOW, returned_at: bound ? "2026-07-16T12:05:00.000Z" : null, result_ref: bound ? `${activity === "canonical" ? "evidence" : "reviews"}/post-pr-${activity}.json` : null, result_hash: bound ? HASH_A : null, verdict: bound ? (activity === "canonical" ? "pass" : activity === "validator" ? "GO" : "PASS") : null, transient_error_count: state === "retry-wait" ? 1 : 0, next_retry_at: state === "retry-wait" ? "2026-07-16T12:06:00.000Z" : null, last_error: state === "retry-wait" ? "network" : null, sidecar_bytes: bound ? `${activity} result bytes` : null };
-  const resultSidecars = bound ? [sidecar(`${activity}-result`, ["result_ref"], ["result_hash"], ["sidecar_bytes"])] : [];
-  const targets = bound ? [...sidecarTargets(`${activity}-result`, ["result_ref"], ["result_hash"], ["sidecar_bytes"]), stale(["verdict"], activity === "canonical" ? "red" : activity === "validator" ? "NO-GO" : "BLOCK"), cross(["dispatch_id"], "other-dispatch")] : [time([state === "retry-wait" ? "next_retry_at" : "started_at"]), stale(["steering_generation"], 1), cross(["dispatch_id"], "other-dispatch")];
+  const resultSidecars = bound ? [externalSidecar(`${activity}-result`, ["result_ref"], ["result_hash"])] : [];
+  const targets = bound ? [...externalSidecarTargets(`${activity}-result`, ["result_ref"], ["result_hash"]), stale(["verdict"], activity === "canonical" ? "red" : activity === "validator" ? "NO-GO" : "BLOCK"), cross(["dispatch_id"], "other-dispatch")] : [time([state === "retry-wait" ? "next_retry_at" : "started_at"]), stale(["steering_generation"], state === "planned" ? 2 : 1), cross(["dispatch_id"], "other-dispatch")];
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: `post-pr-${activity}-job-${state}`, record: `post_pr.remediation.revalidation.jobs.${activity}`, variant: state,
+    authorityClassId: "post-pr-nested-records", id, record: `run.json.post_pr.remediation.revalidation.jobs.${activity}`, variant: state,
     writer: "transitionPostPrState revalidation job transition",
     readers: ["validatePostPrJob", "assertPostPrJobMonotonic", "post-PR revalidation dispatch/retry scheduler", "validated-state admission", "transitionPostPrTerminal dispatch/panel fact checks"],
-    source, requiredPath: ["dispatch_id"], typePath: ["status"], sidecars: resultSidecars, facts: [`activity:${activity}`, `job-status:${state}`, `dispatch-id:${activity}-dispatch-1`, `result:${bound ? "bound" : "null"}`, `retry-count:${state === "retry-wait" ? 1 : 0}`], targets,
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, requiredPath: ["dispatch_id"], typePath: ["status"], sidecars: resultSidecars, facts: exactFacts(fixture.source), targets,
   });
 }
 
-function postPrPushEntry(id, status, localHead, remoteAfter) {
+function postPrPushEntry(id, status) {
+  const fixture = postPrCatalogFixture(id);
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id, record: "post_pr.remediation.push", variant: status,
+    authorityClassId: "post-pr-nested-records", id, record: "run.json.post_pr.remediation.push", variant: status,
     writer: "transitionPostPrState checked push transition",
     readers: ["validatePostPrPush", "assertPostPrMonotonicState", "transitionPostPrTerminal push reconciliation", "remote-confirmed observation restart"],
-    source: { status, remote_before_sha: SHA_A, local_head_sha: localHead, remote_after_sha: remoteAfter, consecutive_transient_errors: 0, next_retry_at: null, pushed_at: status === "confirmed" ? NOW : null },
-    requiredPath: ["status"], typePath: ["consecutive_transient_errors"], targets: [time(["pushed_at"], "not-time"), stale(["remote_before_sha"], SHA_C), cross(["local_head_sha"], SHA_C)],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source),
+    requiredPath: ["status"], typePath: ["consecutive_transient_errors"], targets: [time(["pushed_at"], "not-time"), stale(["remote_before_sha"], status === "not-ready" ? SHA_A : SHA_C), cross(["local_head_sha"], SHA_C)],
   });
 }
 
 function postPrPushLastErrorEntry() {
+  const fixture = postPrCatalogFixture("post-pr-push-last-error");
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: "post-pr-push-last-error", record: "post_pr.remediation.push.last_error", variant: "retryable network failure",
+    authorityClassId: "post-pr-nested-records", id: "post-pr-push-last-error", record: "run.json.post_pr.remediation.push.last_error", variant: "retryable network failure",
     writer: "transitionPostPrState checked push error transition",
     readers: ["validatePostPrPush last_error validation", "assertPostPrMonotonicState push retry checks", "post-PR push retry scheduler", "transitionPostPrTerminal push/account failure fact checks"],
-    source: { operation: "fast-forward-push", observed_at: NOW, error_class: "network", exit_code: 1, classification: "transient", error_count: 1, error_limit: 12, expected_remote_sha: SHA_A, candidate_head_sha: SHA_B, next_retry_at: "2026-07-16T12:01:00.000Z" },
-    requiredPath: ["operation"], typePath: ["exit_code"], facts: ["operation:fast-forward-push", "error-class:network", "classification:transient", "exit-code:1", "error-count:1", "error-limit:12", "expected-remote", "candidate-head", "observed-at", "next-retry-at"], targets: [time(["observed_at"]), stale(["next_retry_at"], NOW), cross(["candidate_head_sha"], SHA_C)],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source),
+    requiredPath: ["operation"], typePath: ["exit_code"], targets: [time(["observed_at"]), stale(["next_retry_at"], NOW), cross(["candidate_head_sha"], SHA_C)],
+  });
+}
+
+function postPrEvidenceEntry() {
+  const fixture = postPrCatalogFixture("post-pr-evidence-sidecar");
+  return recordEntry({
+    authorityClassId: "post-pr-nested-records", id: "post-pr-evidence-sidecar", record: "run.json.post_pr.evidence_refs[]", variant: "failure evidence ref/hash binding",
+    writer: "transitionPostPrFailure or transitionPostPrState append",
+    readers: ["assertPostPrRefsConsistent", "bindPostPrContinuationReview", "transitionPostPrTerminal"],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
+    requiredPath: ["ref"], typePath: ["hash"], sidecars: [externalSidecar("sidecar", ["ref"], ["hash"])],
+    targets: [...externalSidecarTargets("sidecar", ["ref"], ["hash"]), stale(["hash"], HASH_B), cross(["ref"], "evidence/other-attempt.json")],
   });
 }
 
 function postPrContinuationReviewEntry() {
+  const fixture = postPrCatalogFixture("post-pr-continuation-review-bound");
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: "post-pr-continuation-review-bound", record: "post_pr.continuation_review", variant: "retry-exhaustion ref/hash bound",
+    authorityClassId: "post-pr-nested-records", id: "post-pr-continuation-review-bound", record: "run.json.post_pr.continuation_review", variant: "retry-exhaustion ref/hash bound",
     writer: "bindPostPrContinuationReview inside transitionPostPrTerminal",
     readers: ["validatePostPr retry-exhaustion consistency", "factory continue post-PR admission", "post-PR terminal audit readers"],
-    source: { ref: "reviews/post-pr-continuation.json", hash: HASH_A, sidecar_bytes: "blocked review" },
-    requiredPath: ["ref"], typePath: ["hash"], sidecars: [sidecar("continuation-review", ["ref"], ["hash"], ["sidecar_bytes"])],
-    targets: [...sidecarTargets("continuation-review", ["ref"], ["hash"], ["sidecar_bytes"]), stale(["hash"], HASH_B), cross(["ref"], "reviews/other-run.json")],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
+    requiredPath: ["ref"], typePath: ["hash"], sidecars: [externalSidecar("continuation-review", ["ref"], ["hash"])],
+    targets: [...externalSidecarTargets("continuation-review", ["ref"], ["hash"]), stale(["hash"], HASH_B), cross(["ref"], "reviews/other-run.json")],
   });
 }
 
 function postPrTerminalFactEntry(factVariant) {
-  const definitions = {
-    "account-switch-failed-github-auth": { kind: "account-switch-failed", source: { operation: "gh-auth-switch", github_account: "acme", error_class: "account-auth", exit_code: 1 }, facts: ["kind:account-switch-failed", "form:github-auth", "operation:gh-auth-switch", "github-account:acme", "error-class:account-auth", "exit-code:1"], crossPath: ["github_account"], crossValue: "other-account" },
-    "account-switch-failed-push": { kind: "account-switch-failed", source: { attempt: 1, operation: "fast-forward-push", error_class: "permission", exit_code: 1, classification: "permanent", error_count: 1, error_limit: 12, expected_remote_sha: SHA_A, candidate_head_sha: SHA_B, next_retry_at: null }, facts: ["kind:account-switch-failed", "form:push", "operation:fast-forward-push", "attempt:1", "expected-remote", "candidate-head", "classification:permanent"], crossPath: ["candidate_head_sha"], crossValue: SHA_C },
-    "dispatch-start-unknown": { kind: "dispatch-start-unknown", source: { attempt: 1, activity: "validator", dispatch_id: "validator-dispatch-1", dispatch_started_at: NOW, candidate_head_sha: SHA_B, outcome: "return-unknown" }, facts: ["kind:dispatch-start-unknown", "attempt:1", "activity:validator", "dispatch-id:validator-dispatch-1", "dispatch-started-at", "candidate-head", "outcome:return-unknown"], crossPath: ["dispatch_id"], crossValue: "other-dispatch" },
-    "path-lane-violation": { kind: "path-lane-violation", source: { attempt: 1, lane: "slice", source: "remediation-diff", violation: "outside-lane", path_b64url: "c3JjL290aGVyLmpz", changes_hash: HASH_A }, facts: ["kind:path-lane-violation", "attempt:1", "lane:slice", "violation:outside-lane", "path-b64url", "changes-hash"], crossPath: ["lane"], crossValue: "test" },
-    "remote-head-diverged": { kind: "remote-head-diverged", source: { attempt: 1, expected_remote_sha: SHA_A, candidate_head_sha: SHA_B, observed_remote_sha: SHA_C }, facts: ["kind:remote-head-diverged", "attempt:1", "expected-remote", "candidate-head", "observed-remote"], crossPath: ["candidate_head_sha"], crossValue: SHA_C },
-    "panel-runner-result-malformed": { kind: "panel-runner-result-malformed", source: { attempt: 1, activity: "security", dispatch_id: "security-dispatch-1", candidate_head_sha: SHA_B, issue: "missing-verdict" }, facts: ["kind:panel-runner-result-malformed", "attempt:1", "activity:security", "dispatch-id:security-dispatch-1", "issue:missing-verdict"], crossPath: ["dispatch_id"], crossValue: "other-dispatch" },
-    "push-failed": { kind: "push-failed", source: { attempt: 1, operation: "fast-forward-push", error_class: "network", exit_code: 1, classification: "exhausted", error_count: 12, error_limit: 12, expected_remote_sha: SHA_A, candidate_head_sha: SHA_B, next_retry_at: null }, facts: ["kind:push-failed", "attempt:1", "operation:fast-forward-push", "classification:exhausted", "error-count:12", "error-limit:12"], crossPath: ["candidate_head_sha"], crossValue: SHA_C },
-    "panel-attribution-unsafe": { kind: "panel-attribution-unsafe", source: { attempt: 1, candidate_head_sha: SHA_B, panel: "combined", category: "mixed-owner", affected_paths_hash: "a".repeat(64) }, facts: ["kind:panel-attribution-unsafe", "attempt:1", "candidate-head", "panel:combined", "category:mixed-owner", "affected-paths-hash"], crossPath: ["panel"], crossValue: "validator" },
+  const id = `post-pr-terminal-fact-${factVariant}`;
+  const fixture = postPrCatalogFixture(id);
+  const source = fixture.source;
+  const crossDefinitions = {
+    "account-switch-failed-github-auth": [["github_account"], "other-account"],
+    "account-switch-failed-push": [["candidate_head_sha"], SHA_C],
+    "dispatch-start-unknown": [["dispatch_id"], "other-dispatch"],
+    "path-lane-violation": [["lane"], "test"],
+    "remote-head-diverged": [["candidate_head_sha"], SHA_C],
+    "panel-runner-result-malformed": [["dispatch_id"], "other-dispatch"],
+    "push-failed": [["candidate_head_sha"], SHA_C],
+    "panel-attribution-unsafe": [["panel"], "validator"],
   };
-  const definition = definitions[factVariant];
   return recordEntry({
-    authorityClassId: "post-pr-nested-records", id: `post-pr-terminal-fact-${factVariant}`, record: "post_pr.terminal_fact", variant: factVariant,
+    authorityClassId: "post-pr-nested-records", id, record: "run.json.post_pr.terminal_fact", variant: factVariant,
     writer: "normalizedPostPrTerminalFact inside transitionPostPrTerminal",
     readers: ["validatePostPrTerminalFact kind-specific validation", "transitionPostPrTerminal fact/reason preconditions", "terminal idempotent replay", "terminal diagnostics/audit readers"],
-    source: { schema_version: 1, kind: definition.kind, observed_at: NOW, ...definition.source },
-    requiredPath: ["kind"], typePath: Object.hasOwn(definition.source, "attempt") ? ["attempt"] : ["exit_code"], facts: definition.facts, targets: [schema(["schema_version"]), kind(["kind"], "other-fact"), time(["observed_at"]), stale(Object.hasOwn(definition.source, "attempt") ? ["attempt"] : ["exit_code"], 0), cross(definition.crossPath, definition.crossValue)],
+    canonicalPath: fixture.canonicalPath, source, facts: exactFacts(source),
+    requiredPath: ["kind"], typePath: Object.hasOwn(source, "attempt") ? ["attempt"] : ["exit_code"], targets: [schema(["schema_version"]), kind(["kind"], "other-fact"), time(["observed_at"]), stale(Object.hasOwn(source, "attempt") ? ["attempt"] : ["exit_code"], 0), cross(...crossDefinitions[factVariant])],
   });
+}
+
+export function createPostPrCatalogBaseline(record) {
+  const fixture = postPrCatalogFixture(record?.id);
+  if (canonicalJson(record?.source) !== canonicalJson(fixture.source) || canonicalJson(record?.canonicalPath) !== canonicalJson(fixture.canonicalPath)) throw new TypeError(`${record?.id ?? "post-pr record"} does not match its canonical post-PR baseline fixture`);
+  return structuredClone({ run: fixture.run, externalSources: postPrExternalSourcesFor(fixture.run.post_pr, "post-pr-baseline"), transitionOnly: fixture.transitionOnly ?? null });
+}
+
+function postPrCatalogFixture(id) {
+  if (typeof id !== "string" || !id.startsWith("post-pr-")) throw new TypeError("post-PR fixture requires a registered post-pr record id");
+  let run;
+  let canonicalPath;
+  if (id.startsWith("post-pr-phase-")) {
+    const phase = id.slice("post-pr-phase-".length);
+    run = postPrRunForPhase(phase);
+    canonicalPath = ["post_pr"];
+  } else if (id === "post-pr-policy-disabled") {
+    run = postPrRunForPhase("disabled"); canonicalPath = ["post_pr", "policy"];
+  } else if (id === "post-pr-policy-enabled") {
+    run = postPrRunForPhase("awaiting-pr"); canonicalPath = ["post_pr", "policy"];
+  } else if (id === "post-pr-observation-null") {
+    run = postPrRunForPhase("awaiting-pr"); canonicalPath = ["post_pr"];
+  } else if (id === "post-pr-observation-active") {
+    run = postPrRunForPhase("observing"); canonicalPath = ["post_pr", "observation"];
+  } else if (id === "post-pr-observation-last-error") {
+    run = postPrRunForPhase("observing", { observation: postPrObservation({ consecutive_transient_errors: 1, last_error: postPrObservationError() }) }); canonicalPath = ["post_pr", "observation", "last_error"];
+  } else if (id === "post-pr-observation-review-request") {
+    run = postPrRunForPhase("observing", { observation: postPrObservation({ review_request: { status: "requested", attempts: 1, requested_at: NOW } }) }); canonicalPath = ["post_pr", "observation", "review_request"];
+  } else if (id === "post-pr-observation-snapshot") {
+    run = postPrRunForPhase("observing", { observation: postPrObservation({ poll_count: 1, last_observed_at: NOW, last_fingerprint: HASH_A, snapshot: postPrSnapshot() }) }); canonicalPath = ["post_pr", "observation", "snapshot"];
+  } else if (id === "post-pr-remediation-null") {
+    run = postPrRunForPhase("observing"); canonicalPath = ["post_pr"];
+  } else if (id === "post-pr-remediation-active") {
+    run = postPrRunForPhase("remediation-planned"); canonicalPath = ["post_pr", "remediation"];
+  } else if (id === "post-pr-remediation-owner") {
+    run = postPrRunForPhase("remediation-planned"); canonicalPath = ["post_pr", "remediation", "owner"];
+  } else if (id === "post-pr-remediation-changes") {
+    run = postPrRunForPhase("changes-observed"); canonicalPath = ["post_pr", "remediation", "changes"];
+  } else if (id === "post-pr-remediation-change-entry") {
+    run = postPrRunForPhase("changes-observed"); canonicalPath = ["post_pr", "remediation", "changes", "entries", 0];
+  } else if (id.startsWith("post-pr-dispatch-")) {
+    const status = id.slice("post-pr-dispatch-".length);
+    run = postPrRunForPhase(status === "planned" ? "remediation-planned" : status === "running" ? "remediation-running" : "changes-observed"); canonicalPath = ["post_pr", "remediation", "dispatch"];
+  } else if (id === "post-pr-revalidation-empty") {
+    run = postPrRunForPhase("revalidating"); canonicalPath = ["post_pr", "remediation", "revalidation"];
+  } else if (id === "post-pr-revalidation-bound") {
+    run = postPrRunForPhase("validated"); canonicalPath = ["post_pr", "remediation", "revalidation"];
+  } else if (/^post-pr-(canonical|validator|security)-job-(planned|running|retry-wait|bound)$/u.test(id)) {
+    const [, activity, state] = id.match(/^post-pr-(canonical|validator|security)-job-(planned|running|retry-wait|bound)$/u);
+    run = postPrRunWithJob(activity, state); canonicalPath = ["post_pr", "remediation", "revalidation", "jobs", activity];
+  } else if (id.startsWith("post-pr-push-") && id !== "post-pr-push-last-error") {
+    const status = id.slice("post-pr-push-".length);
+    run = postPrRunForPhase(status === "not-ready" ? "validated" : status === "pending" ? "push-pending" : "remote-confirmed"); canonicalPath = ["post_pr", "remediation", "push"];
+  } else if (id === "post-pr-push-last-error") {
+    run = postPrRunForPhase("push-pending", { pushError: true }); canonicalPath = ["post_pr", "remediation", "push", "last_error"];
+  } else if (id === "post-pr-evidence-sidecar") {
+    run = postPrRunForPhase("failure-recording"); canonicalPath = ["post_pr", "evidence_refs", 0];
+  } else if (id === "post-pr-continuation-review-null") {
+    run = postPrRunForPhase("succeeded"); canonicalPath = ["post_pr"];
+  } else if (id === "post-pr-continuation-review-bound") {
+    run = postPrRunForContinuationReview(); canonicalPath = ["post_pr", "continuation_review"];
+  } else if (id === "post-pr-terminal-fact-null") {
+    run = postPrRunForPhase("succeeded"); canonicalPath = ["post_pr"];
+  } else if (id.startsWith("post-pr-terminal-fact-")) {
+    run = postPrRunForTerminalFact(id.slice("post-pr-terminal-fact-".length)); canonicalPath = ["post_pr", "terminal_fact"];
+  } else throw new TypeError(`missing canonical post-PR fixture for ${id}`);
+  const source = valueAt(run, canonicalPath, id);
+  const externalSources = postPrExternalSourcesFor(source, id);
+  const transitionOnly = id.includes("job-retry-wait") ? "retry-wait is schema-valid only as the checked transition consumer state between a running job and its next running retry" : null;
+  return { run, canonicalPath, source: structuredClone(source), externalSources, transitionOnly };
+}
+
+function postPrPolicy(enabled = true) {
+  return { enabled, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: enabled, reviewer_login: enabled ? "reviewer" : null, source: enabled ? "driver" : "none" } };
+}
+
+function postPrObservation(overrides = {}) {
+  return { epoch: 1, expected_head_sha: SHA_A, started_at: NOW, deadline_at: "2026-07-16T13:00:00.000Z", next_poll_at: NOW, poll_count: 0, unchanged_count: 0, current_interval_ms: 30_000, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "not_started", last_review_verdict: "pending", last_verdict: "pending", last_error: null, review_request: { status: "pending", attempts: 0, requested_at: null }, snapshot: null, ...overrides };
+}
+
+function postPrObservationError() { return { class: "network", exit_code: 1, occurred_at: NOW, next_retry_at: "2026-07-16T12:01:00.000Z" }; }
+function postPrSnapshot() { return { checks: [{ name: "ci", verdict: "red" }], reviews: [{ login: "reviewer", verdict: "pending" }] }; }
+function postPrOwner() { return { kind: "slice", slice_id: "backend", stack: "backend", path_b64url: null, method: "check-slice-id" }; }
+function postPrChangeEntry(path = "src/backend.js") { return { source: "commit", status: "modified", index_status: null, worktree_status: null, path, previous_path: null, old_mode: "100644", new_mode: "100644" }; }
+function postPrChanges(bound = false, path = "src/backend.js") { return bound ? { paths: [path], entries: [postPrChangeEntry(path)], tree_hash: HASH_A } : { paths: [], entries: [], tree_hash: null }; }
+
+function postPrDispatch(status = "planned") {
+  return { id: "dispatch-1", status, role: "backend-builder", subject: "backend", started_at: status === "planned" ? null : NOW, returned_at: status === "returned" ? "2026-07-16T12:05:00.000Z" : null };
+}
+
+function postPrJob(activity, status) {
+  const bound = status === "bound";
+  const started = status !== "planned";
+  const external = POST_PR_EXTERNAL[activity];
+  return { dispatch_id: `${activity}-dispatch-1`, status, action_token: started ? `${activity}-action-1` : null, steering_generation: started ? 2 : null, started_at: started ? NOW : null, returned_at: bound ? "2026-07-16T12:05:00.000Z" : null, result_ref: bound ? external.ref : null, result_hash: bound ? hashBytes(external.bytes) : null, verdict: bound ? (activity === "canonical" ? "pass" : activity === "validator" ? "GO" : "PASS") : null, transient_error_count: status === "retry-wait" ? 1 : 0, next_retry_at: status === "retry-wait" ? "2026-07-16T12:06:00.000Z" : null, last_error: status === "retry-wait" ? "network" : null };
+}
+
+function postPrRevalidation(bound = false, jobs = {}) {
+  return { canonical_evidence_ref: bound ? POST_PR_EXTERNAL.canonical.ref : null, canonical_evidence_hash: bound ? hashBytes(POST_PR_EXTERNAL.canonical.bytes) : null, canonical_verdict: bound ? "pass" : null, validator_review_ref: bound ? POST_PR_EXTERNAL.validator.ref : null, validator_review_hash: bound ? hashBytes(POST_PR_EXTERNAL.validator.bytes) : null, validator_verdict: bound ? "GO" : null, security_review_ref: bound ? POST_PR_EXTERNAL.security.ref : null, security_review_hash: bound ? hashBytes(POST_PR_EXTERNAL.security.bytes) : null, security_verdict: bound ? "PASS" : null, jobs: structuredClone(jobs) };
+}
+
+function postPrPush(status = "not-ready", lastError = null) {
+  return { status, remote_before_sha: status === "not-ready" ? null : SHA_A, local_head_sha: status === "not-ready" ? null : SHA_B, remote_after_sha: status === "confirmed" ? SHA_B : null, consecutive_transient_errors: lastError ? lastError.error_count : 0, next_retry_at: lastError?.next_retry_at ?? null, pushed_at: status === "confirmed" ? NOW : null, last_error: lastError };
+}
+
+function postPrPushError({ classification = "transient", errorCount = 1, nextRetryAt = "2026-07-16T12:01:00.000Z", errorClass = "network" } = {}) {
+  return { operation: "fast-forward-push", observed_at: NOW, error_class: errorClass, exit_code: 1, classification, error_count: errorCount, error_limit: 12, expected_remote_sha: SHA_A, candidate_head_sha: SHA_B, next_retry_at: nextRetryAt };
+}
+
+function postPrRemediation(stage = "planned", options = {}) {
+  const changed = ["changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"].includes(stage);
+  const revalidationBound = ["validated", "push-pending", "remote-confirmed"].includes(stage);
+  const dispatchStatus = stage === "planned" ? "planned" : stage === "running" ? "running" : "returned";
+  const jobs = revalidationBound ? { canonical: postPrJob("canonical", "bound"), validator: postPrJob("validator", "bound"), security: postPrJob("security", "bound") } : {};
+  const pushStatus = stage === "push-pending" ? "pending" : stage === "remote-confirmed" ? "confirmed" : "not-ready";
+  const pushError = options.pushError ? postPrPushError() : null;
+  return { schema_version: 1, attempt: 1, reason_code: "check-red", failure_fingerprint: HASH_A, failed_head_sha: SHA_A, failure_evidence_ref: POST_PR_EXTERNAL.failure.ref, failure_evidence_hash: hashBytes(POST_PR_EXTERNAL.failure.bytes), owner: postPrOwner(), route: "backend-builder", lane: "slice", stage, baseline_head_sha: SHA_A, dispatch: postPrDispatch(dispatchStatus), changes: postPrChanges(changed), candidate_head_sha: changed ? SHA_B : null, remediation_evidence_ref: changed ? POST_PR_EXTERNAL.remediation.ref : null, remediation_evidence_hash: changed ? hashBytes(POST_PR_EXTERNAL.remediation.bytes) : null, revalidation: postPrRevalidation(revalidationBound, jobs), push: postPrPush(pushStatus, pushError), ...options.overrides };
+}
+
+function postPrRoot({ policy = postPrPolicy(true), phase = "awaiting-pr", attempt = 0, observation = null, remediation = null, evidenceRefs = [], continuationReview = null, terminalFact = null } = {}) {
+  return { schema_version: 1, policy, phase, attempt, observation, remediation, evidence_refs: evidenceRefs, continuation_review: continuationReview, terminal_fact: terminalFact };
+}
+
+function postPrRunForPhase(phase, options = {}) {
+  const disabled = phase === "disabled";
+  const terminal = ["succeeded", "blocked", "needs-human"].includes(phase);
+  const activeObservation = !["disabled", "awaiting-pr"].includes(phase);
+  let observation = options.observation ?? (activeObservation ? postPrObservation() : null);
+  let remediation = null;
+  let attempt = 0;
+  let evidenceRefs = [];
+  if (["failure-recording", "remediation-planned", "remediation-running", "changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"].includes(phase)) {
+    const stage = phase === "failure-recording" ? "planned" : phase.replace("remediation-", "");
+    remediation = postPrRemediation(stage, options);
+    attempt = 1;
+    evidenceRefs = [{ ref: remediation.failure_evidence_ref, hash: remediation.failure_evidence_hash }];
+    observation = options.observation ?? postPrObservation({ poll_count: 1, last_observed_at: NOW, last_fingerprint: HASH_A, last_check_verdict: "red", last_verdict: "red", snapshot: postPrSnapshot() });
+  }
+  if (phase === "succeeded") observation = postPrObservation({ poll_count: 1, last_observed_at: NOW, last_check_verdict: "pass", last_review_verdict: "pass", last_verdict: "green" });
+  if (phase === "blocked") observation = postPrObservation({ poll_count: 1, last_observed_at: NOW, last_verdict: "infrastructure" });
+  if (phase === "needs-human") observation = postPrObservation({ poll_count: 1, last_observed_at: NOW, last_review_verdict: "red", last_verdict: "red" });
+  const postPr = postPrRoot({ policy: postPrPolicy(!disabled), phase, attempt, observation, remediation, evidenceRefs });
+  const status = phase === "succeeded" ? "completed" : phase === "blocked" ? "blocked" : phase === "needs-human" ? "needs-human" : "running";
+  const reason = phase === "succeeded" ? "post-pr-ci-green" : phase === "blocked" ? "post-pr-observer-infrastructure" : phase === "needs-human" ? "post-pr-review-changes-requested" : null;
+  return postPrRun(postPr, { status, reason, terminal });
+}
+
+function postPrRunWithJob(activity, state) {
+  const remediation = postPrRemediation("revalidating");
+  const jobs = {};
+  if (activity !== "canonical") jobs.canonical = postPrJob("canonical", "bound");
+  if (activity === "security") jobs.validator = postPrJob("validator", "bound");
+  jobs[activity] = postPrJob(activity, state);
+  remediation.revalidation = postPrRevalidation(false, jobs);
+  for (const prior of ["canonical", "validator", "security"]) {
+    const job = jobs[prior];
+    if (job?.status !== "bound") continue;
+    const refPrefix = prior === "canonical" ? "canonical_evidence" : `${prior}_review`;
+    remediation.revalidation[`${refPrefix}_ref`] = job.result_ref;
+    remediation.revalidation[`${refPrefix}_hash`] = job.result_hash;
+    remediation.revalidation[`${prior}_verdict`] = job.verdict;
+  }
+  const observation = postPrObservation({ poll_count: 1, last_observed_at: NOW, last_check_verdict: "red", last_verdict: "red" });
+  const postPr = postPrRoot({ phase: "revalidating", attempt: 1, observation, remediation, evidenceRefs: [{ ref: remediation.failure_evidence_ref, hash: remediation.failure_evidence_hash }] });
+  return postPrRun(postPr);
+}
+
+function postPrRunForContinuationReview() {
+  const remediation = postPrRemediation("planned");
+  const binding = { ref: POST_PR_EXTERNAL.continuation.ref, hash: hashBytes(POST_PR_EXTERNAL.continuation.bytes) };
+  const postPr = postPrRoot({ phase: "blocked", attempt: 1, observation: postPrObservation({ poll_count: 1, last_observed_at: NOW, last_check_verdict: "red", last_verdict: "red" }), remediation, evidenceRefs: [{ ref: remediation.failure_evidence_ref, hash: remediation.failure_evidence_hash }], continuationReview: binding });
+  return postPrRun(postPr, { status: "blocked", reason: "post-pr-retry-exhausted", terminal: true, maxRetries: 1 });
+}
+
+function postPrRunForTerminalFact(variant) {
+  let remediation = null;
+  let observation = postPrObservation();
+  let reason;
+  let fact;
+  if (variant === "account-switch-failed-github-auth") {
+    reason = "post-pr-account-switch-failed";
+    observation = postPrObservation({ last_error: { class: "account-auth", exit_code: 1, occurred_at: NOW, next_retry_at: null } });
+    fact = { schema_version: 1, kind: "account-switch-failed", observed_at: NOW, operation: "gh-auth-switch", github_account: "acme", error_class: "account-auth", exit_code: 1 };
+  } else {
+    remediation = postPrRemediation("revalidating");
+    if (variant === "account-switch-failed-push") {
+      reason = "post-pr-account-switch-failed";
+      const error = postPrPushError({ classification: "permanent", nextRetryAt: null, errorClass: "permission" }); remediation = postPrRemediation("push-pending"); remediation.push = postPrPush("pending", error);
+      fact = { schema_version: 1, kind: "account-switch-failed", observed_at: NOW, attempt: 1, operation: error.operation, error_class: error.error_class, exit_code: error.exit_code, classification: "permanent", error_count: 1, error_limit: 12, expected_remote_sha: SHA_A, candidate_head_sha: SHA_B, next_retry_at: null };
+    } else if (variant === "dispatch-start-unknown") {
+      reason = "post-pr-dispatch-start-unknown"; remediation.revalidation.jobs = { validator: postPrJob("validator", "running") };
+      fact = { schema_version: 1, kind: "dispatch-start-unknown", observed_at: NOW, attempt: 1, activity: "validator", dispatch_id: "validator-dispatch-1", dispatch_started_at: NOW, candidate_head_sha: SHA_B, outcome: "return-unknown" };
+    } else if (variant === "path-lane-violation") {
+      reason = "post-pr-path-lane-violation"; remediation.stage = "changes-observed"; remediation.changes = postPrChanges(true, "src/other.js");
+      fact = { schema_version: 1, kind: "path-lane-violation", observed_at: NOW, attempt: 1, lane: "slice", source: "remediation-diff", violation: "outside-lane", path_b64url: Buffer.from("src/other.js").toString("base64url"), changes_hash: hashCanonical(remediation.changes) };
+    } else if (variant === "remote-head-diverged") {
+      reason = "post-pr-remote-head-diverged"; remediation = postPrRemediation("push-pending");
+      fact = { schema_version: 1, kind: "remote-head-diverged", observed_at: NOW, attempt: 1, expected_remote_sha: SHA_A, candidate_head_sha: SHA_B, observed_remote_sha: SHA_C };
+    } else if (variant === "panel-runner-result-malformed") {
+      reason = "post-pr-metadata-unsafe"; remediation.revalidation.jobs = { security: postPrJob("security", "running") };
+      fact = { schema_version: 1, kind: "panel-runner-result-malformed", observed_at: NOW, attempt: 1, activity: "security", dispatch_id: "security-dispatch-1", candidate_head_sha: SHA_B, issue: "missing-verdict" };
+    } else if (variant === "push-failed") {
+      reason = "post-pr-push-failed"; const error = postPrPushError({ classification: "exhausted", errorCount: 12, nextRetryAt: null }); remediation = postPrRemediation("push-pending"); remediation.push = postPrPush("pending", error);
+      fact = { schema_version: 1, kind: "push-failed", observed_at: NOW, attempt: 1, operation: error.operation, error_class: error.error_class, exit_code: error.exit_code, classification: "exhausted", error_count: 12, error_limit: 12, expected_remote_sha: SHA_A, candidate_head_sha: SHA_B, next_retry_at: null };
+    } else if (variant === "panel-attribution-unsafe") {
+      reason = "post-pr-panel-attribution-unsafe";
+      fact = { schema_version: 1, kind: "panel-attribution-unsafe", observed_at: NOW, attempt: 1, candidate_head_sha: SHA_B, panel: "combined", category: "mixed-owner", affected_paths_hash: "a".repeat(64) };
+    } else throw new TypeError(`unknown post-PR terminal fact ${variant}`);
+  }
+  const evidenceRefs = remediation ? [{ ref: remediation.failure_evidence_ref, hash: remediation.failure_evidence_hash }] : [];
+  const postPr = postPrRoot({ phase: "needs-human", attempt: remediation ? 1 : 0, observation, remediation, evidenceRefs, terminalFact: fact });
+  return postPrRun(postPr, { status: "needs-human", reason, terminal: true, githubAccount: "acme" });
+}
+
+function postPrRun(postPr, { status = "running", reason = null, terminal = false, maxRetries = 3, githubAccount = "acme" } = {}) {
+  const hasPr = postPr.phase !== "disabled" && postPr.phase !== "awaiting-pr";
+  return { schema_version: 1, run_id: "catalog-run", status, max_retries: maxRetries, gates: hasPr ? { pre_pr: { status: "approved", answer: "approve", answered_at: NOW } } : {}, pr_url: hasPr ? "https://github.com/acme/repo/pull/7" : null, github_account: githubAccount, post_pr: postPr, terminal_result: terminal ? { status, run_id: "catalog-run", pr_url: "https://github.com/acme/repo/pull/7", reason, summary: reason, artifacts: {} } : null };
+}
+
+function postPrExternalSourcesFor(source, id) {
+  const matches = {};
+  const definitions = id.match(/^post-pr-(canonical|validator|security)-job-bound$/u)
+    ? [[`${id.match(/^post-pr-(canonical|validator|security)/u)[1]}-result`, POST_PR_EXTERNAL[id.match(/^post-pr-(canonical|validator|security)/u)[1]]]]
+    : id === "post-pr-evidence-sidecar" ? [["sidecar", POST_PR_EXTERNAL.failure]]
+      : id === "post-pr-continuation-review-bound" ? [["continuation-review", POST_PR_EXTERNAL.continuation]]
+        : id === "post-pr-remediation-active" ? [["failure-evidence", POST_PR_EXTERNAL.failure]]
+          : id === "post-pr-revalidation-bound" ? [["canonical", POST_PR_EXTERNAL.canonical], ["validator", POST_PR_EXTERNAL.validator], ["security", POST_PR_EXTERNAL.security]]
+            : Object.entries(POST_PR_EXTERNAL);
+  for (const [name, external] of definitions) if (containsScalar(source, external.ref)) matches[name] = structuredClone(external);
+  return matches;
+}
+
+function containsScalar(value, expected) {
+  if (value === expected) return true;
+  if (Array.isArray(value)) return value.some((item) => containsScalar(item, expected));
+  if (value === null || typeof value !== "object") return false;
+  return Object.values(value).some((item) => containsScalar(item, expected));
+}
+
+function exactFacts(source) {
+  const facts = [];
+  const visit = (value, path) => {
+    if (value === null || typeof value !== "object" || (Array.isArray(value) && value.length === 0) || (!Array.isArray(value) && Object.keys(value).length === 0)) {
+      facts.push(fact(path, structuredClone(value))); return;
+    }
+    if (Array.isArray(value)) value.forEach((item, index) => visit(item, [...path, index]));
+    else for (const [key, item] of Object.entries(value)) visit(item, [...path, key]);
+  };
+  visit(source, []);
+  return facts;
 }
 
 function repairEntry(id, status, attempts, options) {
@@ -1526,6 +1839,7 @@ function validateCanonicalCoreRecord(record, path) {
 
 function rejectSyntheticCanonicalKeys(record, path) {
   const forbidden = new Set(["sidecar_bytes"]);
+  if (record.authorityClassId === "post-pr-nested-records") forbidden.add("run_status");
   if (record.authorityClassId === "slices-review-evidence-bindings") {
     for (const key of ["review_binding", "attempt_reviews", "reviewed_commit", "review_hash", "evidence_hash"]) forbidden.add(key);
   }
@@ -1535,7 +1849,17 @@ function rejectSyntheticCanonicalKeys(record, path) {
   if (record.authorityClassId === "gates-snapshot-handoff" && Object.hasOwn(record.source, "gate")) {
     throw new TypeError(`${path}.source.gate is synthetic; gate identity belongs to the gates map key`);
   }
+  if (record.authorityClassId === "post-pr-nested-records" && containsKeyBelow(record.source, "push", "action_token")) {
+    throw new TypeError(`${path}.source contains synthetic post-PR push action_token`);
+  }
   for (const key of forbidden) if (containsOwnKey(record.source, key)) throw new TypeError(`${path}.source contains synthetic key ${key}`);
+}
+
+function containsKeyBelow(value, ancestorKey, targetKey, belowAncestor = false) {
+  if (Array.isArray(value)) return value.some((item) => containsKeyBelow(item, ancestorKey, targetKey, belowAncestor));
+  if (value === null || typeof value !== "object") return false;
+  if (belowAncestor && Object.hasOwn(value, targetKey)) return true;
+  return Object.entries(value).some(([key, item]) => containsKeyBelow(item, ancestorKey, targetKey, belowAncestor || key === ancestorKey));
 }
 
 function containsOwnKey(value, targetKey) {

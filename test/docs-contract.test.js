@@ -314,9 +314,9 @@ describe("class-wide planning prompt contract", () => {
     assert.match(writerMatrix, /authority class, id, record, variant, canonical (?:persisted )?source path and exact shape/i);
     assert.match(writerMatrix, /path-plus-expected-value authority facts/i);
     assert.match(writerMatrix, /source deletion\/substitution[\s\S]*record(?: or |\/)variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /canonical-source manifest independently binds each core row's authority class, id, record, variant, real run path, exact persisted source shape, path-plus-expected-value authority facts, and separately modeled external bytes/i);
+    assert.match(schemaCatalog, /canonical-source manifest independently binds each core and post-PR row's authority class, id, record, variant, real run path, exact persisted source shape, path-plus-expected-value authority facts, and separately modeled external bytes/i);
     assert.match(schemaCatalog, /source deletion or substitution[\s\S]*record\/variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /inserted at its real path in a valid run accepted by exported `validateRun`/i);
+    assert.match(schemaCatalog, /inserted at its real path in an internally consistent run accepted by exported `validateRun`/i);
     for (const text of [writerMatrix, schemaCatalog]) {
       assert.match(text, /target-or-exclusion dispositions/i);
       assert.match(text, /complete target definition/i);
@@ -428,7 +428,19 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /No step variant joins `rejected` and `blocked`/i);
     assert.match(schemaCatalog, /no synthetic `review_binding`, `attempt_reviews`, or slice-level `reviewed_commit`/i);
     assert.match(schemaCatalog, /validator source is exactly `\{verdict, report, review_ref\}` and the security source exactly `\{verdict, review_ref\}`/i);
-    assert.match(schemaCatalog, /`post_pr` does not gain invented action-token fields/i);
+    assert.match(schemaCatalog, /no token is invented at the `post_pr` root, remediation container, dispatch, or push/i);
+    assert.match(schemaCatalog, /closed to exactly `schema_version`, `policy`, `phase`, `attempt`, `observation`, `remediation`, `evidence_refs`, `continuation_review`, and `terminal_fact`/i);
+    assert.match(schemaCatalog, /never persists synthetic `run_status` or `sidecar_bytes`/i);
+    assert.match(schemaCatalog, /All fifteen phase rows are complete enclosing records/i);
+    assert.match(schemaCatalog, /failure fingerprint\/head\/evidence ref-plus-hash/i);
+    assert.match(schemaCatalog, /candidate head, remediation evidence ref-plus-hash, revalidation, and push/i);
+    assert.match(schemaCatalog, /running requires `action_token` and `started_at`; bound requires `returned_at`, result ref\/hash, and an activity-valid verdict/i);
+    assert.match(schemaCatalog, /`retry-wait` is a schema-valid intermediate consumed only by the checked post-PR job transition\/retry path/i);
+    assert.match(schemaCatalog, /non-null push error is the closed structured[\s\S]*never a string/i);
+    assert.match(schemaCatalog, /Evidence refs and retry-exhaustion continuation review are exact `\{ref, hash\}` objects/i);
+    assert.match(schemaCatalog, /Terminal fact is null or one of the eight validator-accepted forms/i);
+    assert.match(schemaCatalog, /Mutation coverage changes each ref, each hash, and the actual external bytes independently/i);
+    assert.match(schemaCatalog, /checked by `checkRunConsistency`/i);
     assert.match(schemaCatalog, /defect path[\s\S]*owner\/consumer[\s\S]*plan\/owner snapshot[\s\S]*baseline[\s\S]*original evidence[\s\S]*repair evidence[\s\S]*reviewed commit and review bytes[\s\S]*review verdict[\s\S]*blocked reason[\s\S]*verification[\s\S]*merge commit and reviewed-tree equality[\s\S]*attempts[\s\S]*quiescence/i);
 
     for (const excluded of [
