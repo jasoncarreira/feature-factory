@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { execFileSync } from "./helpers/git-fixture.js";
+import { createReviewRecord } from "./helpers/review-record-fixture.js";
+import { createRunRecord } from "./helpers/run-record-fixture.js";
 import {
   DURABLE_AUTHORITY_CATALOG,
   DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST,
@@ -13,10 +16,11 @@ import {
   DURABLE_MUTATION_FAMILIES,
   assertDurableAuthorityCatalogComplete,
   createPostPrCatalogBaseline,
+  createRepairCatalogBaseline,
   emitDurableRecordMutations,
 } from "./helpers/durable-record-mutations.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
-import { transitionPostPrState } from "../src/run-state.js";
+import { transitionMergedSliceRepair, transitionPostPrState } from "../src/run-state.js";
 
 const AUTHORITY_CLASS_IDS = Object.freeze([
   "plan-slices-graph",
@@ -340,7 +344,7 @@ describe("finite durable-authority catalog", () => {
 
   it("binds canonical core source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
-    assert.equal(canonicalIds.length, 80);
+    assert.equal(canonicalIds.length, 88);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST\s*=\s*deepFreeze\([^\n]*\.map/u);
@@ -499,7 +503,7 @@ describe("finite durable-authority catalog", () => {
 
   it("uses exact canonical post_pr records, external sidecars, and production validation baselines", () => {
     const postPrIds = DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["post-pr-nested-records"];
-    assert.deepEqual(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.slice(20).map(([id]) => id), postPrIds);
+    assert.deepEqual(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.slice(20, 20 + postPrIds.length).map(([id]) => id), postPrIds);
     const transitionOnly = [];
     for (const id of postPrIds) {
       const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
@@ -612,31 +616,162 @@ describe("finite durable-authority catalog", () => {
     assert.equal(entries[1].source.classification, "permanent");
   });
 
-  it("registers all PR79 repair states and every required authority fact", () => {
+  it("registers all PR79 repair states as canonical persisted sources with external authority facts", () => {
     const repairClass = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "pr79-merged-slice-repair");
     assert.deepEqual(repairClass.records.map(({ id }) => id), ["repair-reported", "repair-repairing", "repair-review-approve", "repair-review-reject", "repair-merged", "repair-blocked-from-reported", "repair-blocked-from-repairing", "repair-blocked-from-review"]);
     assert.deepEqual(repairClass.records.map(({ variant }) => variant), ["reported", "repairing", "review:APPROVE", "review:REJECT", "merged", "blocked-from-reported", "blocked-from-repairing", "blocked-from-review"]);
-    const facts = new Set(repairClass.records.flatMap(({ facts: recordFacts }) => recordFacts));
-    assert.deepEqual([...facts].sort(), [
-      "attempts-quiescence",
-      "baseline",
-      "blocked-reason",
-      "defect-path",
-      "merge-commit-tree",
-      "original-evidence",
-      "owner-consumer",
-      "plan-owner-snapshot",
-      "repair-evidence",
-      "review-verdict-approve",
-      "review-verdict-reject",
-      "reviewed-commit-review-bytes",
-      "verification",
-    ]);
+    assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.slice(-8).every(([id], index) => id === repairClass.records[index].id), true);
+    assert.deepEqual(repairClass.records.map(({ canonicalPath }) => canonicalPath), Array.from({ length: 8 }, () => ["merged_slice_repair"]));
+    assert.deepEqual(repairClass.records.map(({ source }) => source.status), ["reported", "repairing", "review", "review", "merged", "blocked", "blocked", "blocked"]);
+    assert.deepEqual(repairClass.records.map(({ source }) => source.attempts), [0, 1, 1, 1, 1, 0, 1, 1]);
+    const requiredReportedKeys = ["schema_version", "plan_hash", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "created_at", "updated_at"];
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-reported").source), requiredReportedKeys);
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-repairing").source).sort(), [...requiredReportedKeys, "baseline_commit", "branch", "worktree"].sort());
+    for (const id of ["repair-review-approve", "repair-review-reject"]) {
+      assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, id).source).sort(), [...requiredReportedKeys, "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash"].sort());
+    }
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-merged").source).sort(), [...requiredReportedKeys, "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "verification_ref", "verification_hash", "merge_commit"].sort());
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-reported").source).sort(), [...requiredReportedKeys, "reason"].sort());
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-repairing").source).sort(), [...requiredReportedKeys, "baseline_commit", "branch", "worktree", "reason"].sort());
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-review").source).sort(), [...requiredReportedKeys, "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "reason"].sort());
+    for (const { source } of repairClass.records) {
+      assert.equal(source.schema_version, 1);
+      assert.equal(source.max_attempts, 2);
+      assert.equal(source.owner_slice_id, "owner");
+      assert.equal(source.consumer_slice_id, "consumer");
+      assert.equal(source.defect_path, "src/owner/records.js");
+      for (const synthetic of ["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"]) assert.equal(containsOwnKey(source, synthetic), false, `${synthetic} must never be persisted`);
+    }
+    const approve = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-review-approve");
+    const reject = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-review-reject");
+    assert.equal(JSON.parse(approve.externalSources.review.bytes).verdict, "APPROVE");
+    assert.equal(JSON.parse(reject.externalSources.review.bytes).verdict, "REJECT");
+    assert.equal(Object.hasOwn(approve.source, "review_verdict"), false);
+    assert.equal(Object.hasOwn(reject.source, "review_verdict"), false);
     const merged = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-merged");
-    assert.deepEqual(merged.sidecars.map(({ name }) => name), ["plan-owner", "original-evidence", "repair-evidence", "review", "verification"]);
-    assert.equal(merged.source.reviewed_tree, merged.source.merge_tree);
-    assert.equal(merged.descriptor.targets.some(({ family, path }) => family === "cross-bound-identity" && path.join(".") === "merge_tree"), true);
-    assert.equal(merged.descriptor.targets.some(({ family, path }) => family === "wrong-type" && path.join(".") === "quiescent"), true);
+    assert.deepEqual(merged.sidecars.map(({ name }) => name), ["plan", "original-evidence", "repair-evidence", "review", "verification"]);
+    assert.equal(Object.hasOwn(merged.source, "reviewed_tree"), false);
+    assert.equal(Object.hasOwn(merged.source, "merge_tree"), false);
+    assert.equal(merged.observations.some(({ name, source, expected, consumer }) => name === "reviewed-merge-tree-equality" && source === "re-observed" && expected === true && consumer.includes("transitionMergedSliceRepair merged")), true);
+    assert.equal(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-repairing").observations.some(({ name, expected }) => name === "quiescence" && expected === true), true);
+    assert.deepEqual(["repair-blocked-from-reported", "repair-blocked-from-repairing", "repair-blocked-from-review"].map((id) => inferBlockedRepairOrigin(findRecord(DURABLE_AUTHORITY_CATALOG, id).source)), ["reported", "repairing", "review"]);
+  });
+
+  it("places every canonical PR79 repair source in a validator- and consistency-accepted run with separate fixture files", () => {
+    const root = mkdtempSync(join(tmpdir(), "repair-catalog-"));
+    try {
+      for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"]) {
+        const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+        const fixture = createRepairCatalogBaseline(record);
+        assert.equal(validateRun(fixture.run), fixture.run, `${id} must use the production persisted schema`);
+        const runDir = join(root, id);
+        materializeCatalogSources(runDir, fixture.externalSources, fixture.supportSources);
+        const consistency = checkRunConsistency(runDir, fixture.run);
+        assert.equal(consistency.ok, true, `${id}: ${failedConsistencyMessages(consistency)}`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("mutates every PR79 plan/evidence/review/verification ref, hash, and file independently at the actual consistency seam", () => {
+    const root = mkdtempSync(join(tmpdir(), "repair-sidecar-mutations-"));
+    try {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-merged");
+      const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources)
+        .filter(({ family }) => ["wrong-ref", "wrong-hash", "wrong-bytes"].includes(family));
+      assert.equal(cases.length, 15, "five external bindings must each expose independent ref/hash/bytes drift");
+      for (const mutationCase of cases) {
+        const fixture = createRepairCatalogBaseline(record);
+        fixture.run.merged_slice_repair = mutationCase.record;
+        const runDir = join(root, mutationCase.name.replaceAll(/[^a-z0-9]+/giu, "-"));
+        materializeCatalogSources(runDir, mutationCase.externalSources, fixture.supportSources);
+        const consistency = checkRunConsistency(runDir, fixture.run);
+        assert.equal(consistency.ok, false, `${mutationCase.name} must fail a production consistency binding`);
+        assert.match(failedConsistencyMessages(consistency), /merged_slice_repair\.(?:plan(?:_hash)?|evidence_(?:ref|hash)|review_(?:ref|hash)|repair_evidence_(?:ref|hash)|verification_(?:ref|hash))/u, mutationCase.name);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects PR79 source deletion, relocation, contradiction, external-byte substitution, and every synthetic persisted field", () => {
+    const mutations = [
+      ["source deletion", (record) => { delete record.source.plan_hash; }],
+      ["record relocation", (record) => { record.record = "run.json.repair"; }],
+      ["variant relocation", (record) => { record.variant = `${record.variant}-relocated`; }],
+      ["canonical relocation", (record) => { record.canonicalPath = ["repair"]; }],
+      ["fact deletion", (record) => { record.facts.pop(); }],
+      ["fact relocation", (record) => { record.facts[0].path = ["attempts"]; }],
+      ["fact contradiction", (record) => { record.facts[0].expected = { contradiction: true }; }],
+      ["external deletion", (record) => { delete record.externalSources.plan; }],
+      ["external bytes", (record) => { record.externalSources["original-evidence"].bytes += "tampered"; }],
+      ...["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"].map((key) => [`synthetic ${key}`, (record) => { record.source[key] = true; }]),
+    ];
+    for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"]) {
+      for (const [label, mutate] of mutations) {
+        const catalog = structuredClone(DURABLE_AUTHORITY_CATALOG);
+        mutate(findRecord(catalog, id));
+        assert.throws(() => assertDurableAuthorityCatalogComplete(catalog), /canonical source|contradicts|synthetic|bound external source|does not resolve|metadata manifest/u, `${id}: ${label}`);
+      }
+    }
+  });
+
+  it("routes reported, repairing attempts 1 and 2, both review verdicts, merged, and all blocked origins through production consumers", async () => {
+    const fixtures = [];
+    try {
+      const reportedBlocked = createRepairTransitionFixture(); fixtures.push(reportedBlocked);
+      const reported = await transitionRepairReport(reportedBlocked);
+      assert.deepEqual(Object.keys(reported.merged_slice_repair), ["schema_version", "plan_hash", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "created_at", "updated_at"]);
+      const blockedReported = await transitionMergedSliceRepair(reportedBlocked.runDir, { status: "blocked", reason: "reported blocker" });
+      assert.equal(inferBlockedRepairOrigin(blockedReported.merged_slice_repair), "reported");
+
+      const repairingBlocked = createRepairTransitionFixture(); fixtures.push(repairingBlocked);
+      await transitionRepairReport(repairingBlocked);
+      const repairing = await transitionMergedSliceRepair(repairingBlocked.runDir, { status: "repairing", attempts: 1, branch: "repair-owner", worktree: "/tmp/repair-owner" }, { repoRoot: repairingBlocked.repo });
+      assert.equal(repairing.merged_slice_repair.attempts, 1);
+      assert.equal(repairing.merged_slice_repair.baseline_commit, repairingBlocked.baselineCommit);
+      const blockedRepairing = await transitionMergedSliceRepair(repairingBlocked.runDir, { status: "blocked", reason: "repairing blocker" });
+      assert.equal(inferBlockedRepairOrigin(blockedRepairing.merged_slice_repair), "repairing");
+
+      const rejected = createRepairTransitionFixture(); fixtures.push(rejected);
+      await transitionRepairReport(rejected);
+      await transitionMergedSliceRepair(rejected.runDir, { status: "repairing", attempts: 1 }, { repoRoot: rejected.repo });
+      const rejectedHead = commitTransitionRepair(rejected, "reject");
+      writeTransitionReview(rejected, "REJECT", rejectedHead);
+      const rejectedReview = await transitionRepairReview(rejected, rejectedHead);
+      assert.equal(JSON.parse(readFileSync(join(rejected.runDir, rejectedReview.merged_slice_repair.review_ref), "utf8")).verdict, "REJECT");
+      assert.equal(Object.hasOwn(rejectedReview.merged_slice_repair, "review_verdict"), false);
+      const secondAttempt = await transitionMergedSliceRepair(rejected.runDir, { status: "repairing", attempts: 2 }, { repoRoot: rejected.repo });
+      assert.equal(secondAttempt.merged_slice_repair.attempts, 2);
+
+      const reviewBlocked = createRepairTransitionFixture(); fixtures.push(reviewBlocked);
+      await transitionRepairReport(reviewBlocked);
+      await transitionMergedSliceRepair(reviewBlocked.runDir, { status: "repairing", attempts: 1 }, { repoRoot: reviewBlocked.repo });
+      const reviewBlockedHead = commitTransitionRepair(reviewBlocked, "blocked");
+      writeTransitionReview(reviewBlocked, "REJECT", reviewBlockedHead);
+      await transitionRepairReview(reviewBlocked, reviewBlockedHead);
+      const blockedReview = await transitionMergedSliceRepair(reviewBlocked.runDir, { status: "blocked", reason: "review blocker" });
+      assert.equal(inferBlockedRepairOrigin(blockedReview.merged_slice_repair), "review");
+
+      const approved = createRepairTransitionFixture(); fixtures.push(approved);
+      await transitionRepairReport(approved);
+      await transitionMergedSliceRepair(approved.runDir, { status: "repairing", attempts: 1 }, { repoRoot: approved.repo });
+      const approvedHead = commitTransitionRepair(approved, "approve");
+      writeTransitionReview(approved, "APPROVE", approvedHead);
+      const approvedReview = await transitionRepairReview(approved, approvedHead);
+      assert.equal(Object.hasOwn(approvedReview.merged_slice_repair, "review_verdict"), false);
+      writeJson(join(approved.runDir, "evidence", "verification.json"), { subject: "consumer", status: "pass" });
+      const merged = await transitionMergedSliceRepair(approved.runDir, { status: "merged", merge_commit: approvedHead, verification_ref: "evidence/verification.json" }, { repoRoot: approved.repo });
+      assert.equal(merged.merged_slice_repair.status, "merged");
+      assert.equal(merged.merged_slice_repair.reviewed_commit, approvedHead);
+      assert.equal(merged.merged_slice_repair.merge_commit, approvedHead);
+      assert.equal(Object.hasOwn(merged.merged_slice_repair, "reviewed_tree"), false);
+      assert.equal(Object.hasOwn(merged.merged_slice_repair, "merge_tree"), false);
+      assert.equal(checkRunConsistency(approved.runDir, merged.run).ok, true);
+    } finally {
+      for (const fixture of fixtures) rmSync(fixture.repo, { recursive: true, force: true });
+    }
   });
 
   it("explicitly excludes diagnostics and liveness, lock, and process records with reasons", () => {
@@ -676,6 +811,110 @@ describe("per-record durable authority mutation matrices", () => {
     }
   }
 });
+
+function materializeCatalogSources(runDir, ...sourceGroups) {
+  mkdirSync(runDir, { recursive: true });
+  for (const sources of sourceGroups) {
+    for (const { ref, bytes } of Object.values(sources ?? {})) {
+      if (ref.startsWith("../") || ref.includes("/../")) continue;
+      const file = join(runDir, ref);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, bytes);
+    }
+  }
+}
+
+function failedConsistencyMessages(result) {
+  return result.checks.filter(({ ok }) => !ok).flatMap(({ name, errors }) => errors.map(({ path, message }) => `${name} ${path}: ${message}`)).join("; ");
+}
+
+function inferBlockedRepairOrigin(source) {
+  assert.equal(source.status, "blocked");
+  if (source.review_ref !== undefined || source.repair_evidence_ref !== undefined) return "review";
+  if (source.baseline_commit !== undefined) return "repairing";
+  return "reported";
+}
+
+function createRepairTransitionFixture() {
+  const repo = mkdtempSync(join(tmpdir(), "repair-transition-catalog-"));
+  const runDir = join(repo, ".opencode", "factory", "repair-run");
+  for (const dir of ["evidence", "reviews", "plan"]) mkdirSync(join(runDir, dir), { recursive: true });
+  fixtureGit(repo, ["init", "-q", "-b", "repair-feature"]);
+  fixtureGit(repo, ["config", "user.email", "test@example.com"]);
+  fixtureGit(repo, ["config", "user.name", "Test"]);
+  writeFileSync(join(repo, "README.md"), "fixture\n");
+  fixtureGit(repo, ["add", "README.md"]);
+  fixtureGit(repo, ["commit", "-q", "-m", "baseline"]);
+  const baselineCommit = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  writeJson(join(runDir, "plan", "slices.json"), {
+    slices: [
+      { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["unit"] },
+      { id: "consumer", stack: "backend", paths: ["src/consumer/**"], depends_on: ["owner"], acceptance: ["AC2"], test_plan: ["unit"] },
+    ],
+  });
+  writeJson(join(runDir, "evidence", "consumer-failure.json"), { subject: "consumer", status: "fail" });
+  writeJson(join(runDir, "evidence", "owner.json"), { subject: "owner", status: "pass" });
+  writeJson(join(runDir, "reviews", "owner.json"), createReviewRecord({ subject: "owner" }));
+  writeJson(join(runDir, "run.json"), createRunRecord({
+    run_id: "repair-run",
+    branch: "repair-feature",
+    steps: [],
+    slices: [
+      { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 1, evidence_ref: "evidence/owner.json", review_ref: "reviews/owner.json", merge_commit: baselineCommit },
+      { id: "consumer", stack: "backend", depends_on: ["owner"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
+    ],
+  }));
+  return { repo, runDir, baselineCommit };
+}
+
+function transitionRepairReport(fixture) {
+  return transitionMergedSliceRepair(fixture.runDir, {
+    status: "reported",
+    owner_slice_id: "owner",
+    consumer_slice_id: "consumer",
+    defect_path: "src/owner/records.js",
+    evidence_ref: "evidence/consumer-failure.json",
+  }, { repoRoot: fixture.repo });
+}
+
+function commitTransitionRepair(fixture, label) {
+  const path = join(fixture.repo, "src", "owner", "records.js");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `repair ${label}\n`);
+  fixtureGit(fixture.repo, ["add", "src/owner/records.js"]);
+  fixtureGit(fixture.repo, ["commit", "-q", "-m", `repair ${label}`]);
+  const commit = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
+  writeJson(join(fixture.runDir, "evidence", "repair-attempt.json"), { subject: "repair:owner", changed_paths: ["src/owner/records.js"] });
+  return commit;
+}
+
+function writeTransitionReview(fixture, verdict, commit) {
+  writeJson(join(fixture.runDir, "reviews", "repair.json"), createReviewRecord({
+    subject: "repair:owner",
+    verdict,
+    required_fixes: verdict === "REJECT" ? ["correct owner record"] : [],
+    attempt: 1,
+    commit,
+  }));
+}
+
+function transitionRepairReview(fixture, commit) {
+  return transitionMergedSliceRepair(fixture.runDir, {
+    status: "review",
+    review_ref: "reviews/repair.json",
+    repair_evidence_ref: "evidence/repair-attempt.json",
+    reviewed_commit: commit,
+  }, { repoRoot: fixture.repo });
+}
+
+function fixtureGit(repo, args) {
+  return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+}
+
+function writeJson(file, value) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
 
 function runWithCanonicalSource(record) {
   const run = { schema_version: 1, run_id: "catalog-run", mode: record.id === "gate-approved-interactive" ? "interactive" : "autonomous", status: "running", gates: {} };

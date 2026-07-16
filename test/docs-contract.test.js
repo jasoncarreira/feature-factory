@@ -441,7 +441,16 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /Terminal fact is null or one of the eight validator-accepted forms/i);
     assert.match(schemaCatalog, /Mutation coverage changes each ref, each hash, and the actual external bytes independently/i);
     assert.match(schemaCatalog, /checked by `checkRunConsistency`/i);
-    assert.match(schemaCatalog, /defect path[\s\S]*owner\/consumer[\s\S]*plan\/owner snapshot[\s\S]*baseline[\s\S]*original evidence[\s\S]*repair evidence[\s\S]*reviewed commit and review bytes[\s\S]*review verdict[\s\S]*blocked reason[\s\S]*verification[\s\S]*merge commit and reviewed-tree equality[\s\S]*attempts[\s\S]*quiescence/i);
+    assert.match(schemaCatalog, /Reported persists exactly schema version, plan hash, owner\/consumer ids, defect path, original evidence ref\/hash[\s\S]*attempts zero[\s\S]*max_attempts: 2/i);
+    assert.match(schemaCatalog, /Repairing has `status: "repairing"`, attempts one or two, `baseline_commit`, and optional branch\/worktree/i);
+    assert.match(schemaCatalog, /review sources persist `status: "review"`[\s\S]*`APPROVE` or `REJECT` exists only in the separately bound review JSON/i);
+    assert.match(schemaCatalog, /Merged adds `status: "merged"`, `merge_commit`, and verification ref\/hash[\s\S]*Reviewed-tree\/merge-tree equality is re-observed[\s\S]*not a persisted field/i);
+    assert.match(schemaCatalog, /blocked source persists `status: "blocked"` and `reason`[\s\S]*origin is inferred from retained fields[\s\S]*never a `blocked_from` field/i);
+    assert.match(schemaCatalog, /Plan, original evidence, repair evidence, review, and verification are separate fixture files whose refs, hashes, and bytes mutate independently/i);
+    assert.match(schemaCatalog, /never gains synthetic `plan_ref`, `owner_snapshot`, `quiescent`, `review_verdict`, `reviewed_tree`, `merge_tree`, or `sidecar_bytes`/i);
+    assert.match(schemaCatalog, /exported `transitionMergedSliceRepair` consumer/i);
+    assert.match(SPEC_WRITER_PROMPT, /For PR #79 `merged_slice_repair`[\s\S]*eight canonical persisted variants separately/i);
+    assert.match(SPEC_WRITER_PROMPT, /verdict exists only in the bound external review JSON and catalog metadata tied to the checked consumer/i);
 
     for (const excluded of [
       "run.json.debug_snapshot",
@@ -480,6 +489,8 @@ describe("class-wide planning prompt contract", () => {
       assert.match(DURABLE_AUTHORITY_LEDGER, literalPattern(disposition), `ledger missing disposition ${disposition}`);
     }
     for (const doc of [SPEC, SCHEMA]) assert.match(doc, /DURABLE-AUTHORITY-LEDGER\.md/, "schema/spec must link the canonical ledger");
+    assert.match(SCHEMA, /https:\/\/github\.com\/jasoncarreira\/opencode-feature-factory\/blob\/main\/DURABLE-AUTHORITY-LEDGER\.md/);
+    assert.doesNotMatch(SCHEMA, /\]\(\.\.\/\.\.\/\.\.\/DURABLE-AUTHORITY-LEDGER\.md\)/u, "packaged schema must not use a repository-relative link that escapes the package");
   });
 
   it("requires each finite authority class to decide retention, re-observation, and duplicate consolidation", () => {
