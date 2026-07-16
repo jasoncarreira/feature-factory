@@ -4,7 +4,8 @@
 // (git fixtures, CLI subprocesses), so a full-width run oversubscribes the CPU:
 // on a 12-core host, capping file concurrency at half the cores measured ~30%
 // faster wall time and lowers the oversubscription flake class (spurious
-// ENOENT/timeout failures under load). Small hosts keep the default shape.
+// ENOENT/timeout failures under load). Small hosts keep near-full width
+// (cores - 1, matching node's default).
 //
 // --with-smoke additionally runs the packed-package smoke test inside the same
 // invocation so it overlaps with unit files instead of running as a serial
