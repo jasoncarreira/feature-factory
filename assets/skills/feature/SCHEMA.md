@@ -562,6 +562,33 @@ Mixed-currency rollups are `partial`, set `mixed_currency: true`, include `mixed
 
 Absent context adds no field. The IDs do not prove that an attribution entry, agent, step, slice, provider request, or aggregate originated from that trace/span. The command creates no span, initializes no SDK/exporter, exposes no full trace context/headers, persists no context, and makes no network call.
 
+## Durable Authority Integrity Catalog
+
+Integrity coverage for durable semantic workflow authority is closed-world inventory work. A durable authority record, nested binding, or new variant cannot claim integrity coverage until it is registered in the finite matrix below with its production writer/transition, every authority-consuming reader or decision sink, applicable adversarial mutation families, reasoned record-specific exclusions, and a named test. Adding a durable record to prose or a validator without registering it does not extend the coverage claim.
+
+The shared adversarial mutation families are: missing and unknown keys; wrong schema, kind, time, and type; wrong ref, hash, and bytes; descriptor key-shape drift; and stale and cross-bound identity. A family that cannot apply to a particular record must be excluded with a non-empty record-specific reason. The deterministic test catalog and mutation helper live in the owned `test/helpers/durable-record-mutations.js` and `test/durable-record-mutations.test.js` lane; they deep-clone source records and name every generated case.
+
+| Authority class | Included durable records and nested bindings | Integrity decision surface |
+|---|---|---|
+| Plan and slices graph | `plan/slices.json` and the `final.plan.json` descriptor | Graph identity, dependencies, path lanes, acceptance mapping, and descriptor bindings |
+| Run envelope and terminal result | `run.json` envelope and `run.json.terminal_result` | Run identity, lifecycle status, terminal outcome, and PR result consistency |
+| Gates, pending snapshot, and handoff receipt | `run.json.gates[]`, `pending_snapshot`, and `handoff_receipt` | Exact approved material, answer binding, steering generation, and ownership handoff |
+| Steps and acceptance inheritance | `run.json.steps[]`, `steps[].acceptance`, and `steps[].inherited_acceptance` | Accepted artifact/review bytes and parent-to-child acceptance identity |
+| Slices and review/evidence bindings | `run.json.slices[]`, `slices[].review_binding`, `slices[].attempt_reviews[]`, and evidence/review byte bindings | Attempt, subject, ref, hash, exact reviewed bytes, reviewed-commit, and evidence identity |
+| Validator, security, and PR-created result | `run.json.validator`, `run.json.security_review`, and the PR-created `terminal_result` | Passing panel verdicts and the exact completed PR outcome |
+| Continuation and planning/draft reuse | `run.json.continuation`, `continuation.planning_reuse`, and `continuation.draft_spec_reuse` | Parent/child identity, accepted planning reuse, and unaccepted draft byte/retry binding |
+| Post-PR nested records | `run.json.post_pr`, policy, observation, remediation, dispatch, revalidation, push, evidence refs, continuation review, and terminal fact | Observation epoch, remediation attempt, exact evidence/review bytes, push identity, and terminal disposition |
+| PR79 merged slice repair | `run.json.merged_slice_repair` | Plan lane, owner/consumer, attempt, evidence/review bytes, reviewed commit/tree, verification, and merge identity |
+
+Explicit catalog exclusions:
+
+- `run.json.debug_snapshot`, `run.json.provenance`, and `run.json.cost_attribution` are diagnostic records. They do not authorize semantic workflow decisions.
+- `heartbeat.json` and `run.json.heartbeat_at` are liveness-only records. They do not authorize semantic state transitions.
+- `factory.lock`, `run-json.lock/owner.json`, and `process-launch.lock/owner.json` are transient lock/coordination records, not members of this durable semantic-authority catalog.
+- `process.json` and `processes/*.log` are process sidecars and logs, not durable semantic workflow authority.
+
+This catalog is a test and documentation contract only. It does not create `src/single-slice/schema-model`, add a production validator, or change production behavior.
+
 ## run.json
 
 ```json

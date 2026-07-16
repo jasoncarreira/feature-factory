@@ -291,6 +291,45 @@ describe("class-wide planning prompt contract", () => {
     }
   });
 
+  it("requires finite registration before claiming durable-authority integrity coverage", () => {
+    const writerMatrix = markdownSection(SPEC_WRITER_PROMPT, "Durable authority integrity matrix (required when applicable)");
+    const schemaCatalog = markdownSection(SCHEMA, "Durable Authority Integrity Catalog");
+
+    for (const column of ["Authority record", "Writer / transition", "Authority reader / decision sink", "Required adversarial mutation families", "Exclusion reason", "Test"]) {
+      assert.match(writerMatrix, literalPattern(column), `durable authority matrix missing ${column}`);
+    }
+    assert.match(SPEC_WRITER_PROMPT, /newly introduced durable authority record has no integrity-coverage claim until it is registered/i);
+    assert.match(schemaCatalog, /cannot claim integrity coverage until it is registered in the finite matrix/i);
+    assert.match(schemaCatalog, /missing and unknown keys[\s\S]*wrong schema, kind, time, and type[\s\S]*wrong ref, hash, and bytes[\s\S]*descriptor key-shape drift[\s\S]*stale and cross-bound identity/i);
+    assert.match(schemaCatalog, /excluded with a non-empty record-specific reason/i);
+
+    for (const authorityClass of [
+      "Plan and slices graph",
+      "Run envelope and terminal result",
+      "Gates, pending snapshot, and handoff receipt",
+      "Steps and acceptance inheritance",
+      "Slices and review/evidence bindings",
+      "Validator, security, and PR-created result",
+      "Continuation and planning/draft reuse",
+      "Post-PR nested records",
+      "PR79 merged slice repair",
+    ]) {
+      assert.match(schemaCatalog, literalPattern(authorityClass), `durable authority catalog missing ${authorityClass}`);
+    }
+
+    for (const excluded of [
+      "run.json.debug_snapshot",
+      "run.json.provenance",
+      "run.json.cost_attribution",
+      "heartbeat.json",
+      "factory.lock",
+      "process.json",
+    ]) {
+      assert.match(schemaCatalog, literalPattern(`\`${excluded}\``), `durable authority catalog must explicitly exclude ${excluded}`);
+    }
+    assert.match(schemaCatalog, /does not create `src\/single-slice\/schema-model`, add a production validator, or change production behavior/i);
+  });
+
   it("requires first review to consolidate same-class findings across every consequential dimension", () => {
     assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule:[\s\S]*`attempt: 1`[\s\S]*every consequential dimension of under-specification/i);
     assert.match(WORK_REVIEWER_PROMPT, /do not surface one example, or one category, while withholding equivalent findings for later rounds/i);

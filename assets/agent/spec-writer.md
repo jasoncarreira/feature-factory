@@ -73,6 +73,7 @@ A new file or module used only to organize code is not architectural expansion w
 - For every mechanical cross-product deferred from prose, a completeness obligation naming the declared dimensions, executable schema or state model, and table-driven or model-based build tests.
 - Sequencing and parallelization hints.
 - For class-wide work, a closed implementation matrix that assigns every inventoried sink or call site a required primitive/policy, compatibility decision, and test.
+- For integrity work over durable workflow authority, a finite durable authority integrity matrix. Register every in-scope authority record and nested binding before claiming integrity coverage; a newly introduced durable authority record has no integrity-coverage claim until it is registered with its writer, authority-consuming reader or decision sink, required adversarial mutation families, reasoned exclusions, and named test.
 
 ## Output
 
@@ -103,6 +104,11 @@ Return exactly this structure:
 | Source | Sink / call site | Required primitive / policy | Compatibility / exclusion | Test |
 |---|---|---|---|---|
 | <input/source> | `path:line` | <exact behavior> | <preserve, migrate, or exclude with reason> | <existing test `path:line` \| owned test lane + named command/assertion> |
+
+### Durable authority integrity matrix (required when applicable)
+| Authority record | Writer / transition | Authority reader / decision sink | Required adversarial mutation families | Exclusion reason | Test |
+|---|---|---|---|---|---|
+| <durable record or nested binding> | `path:line` | `path:line` | <missing/unknown keys; wrong schema/kind/time/type; wrong ref/hash/bytes; descriptor key-shape drift; stale/cross-bound identity, as applicable> | <non-empty reason for each record-specific exclusion, or none> | <existing test `path:line` \| owned test lane + named command/assertion> |
 
 ### API / data / state
 - <endpoint/schema/model/store/migration/generated code details or none>
@@ -138,6 +144,7 @@ The reviewer's bar (shared invariants `work-reviewer` enforces):
 
 - **No unresolved consequential decision.** No product, architecture, externally observable behavior, public/wire contract, persisted compatibility/migration/recovery, security/authority, or acceptance-policy choice is left to builders, and no verification is conditional — every AC maps to a mandatory, named test or command, never "add tests if needed." Implementation mechanics are acceptable build-time choices when those consequential decisions and constraints are already fixed.
 - **Class-wide means closed.** The implementation matrix covers every inventoried sink/call site with a decided policy, an explicit compatibility or exclusion decision, and a mapped test. Defer or exclude a sink only when the approved story or scope authorizes it.
+- **Durable authority coverage is registered and finite.** When integrity coverage is in scope, every durable authority record and nested binding appears in the durable authority integrity matrix before the brief claims coverage. Each row names its production writer, authority-consuming reader or decision sink, applicable adversarial mutation families, a non-empty reason for every record-specific exclusion, and a named test. Diagnostic-only and liveness/lock/process records remain explicit exclusions when they do not authorize semantic workflow decisions.
 - **Every consequential dimension specified.** The reviewer checks unresolved observable contracts, policies, semantic state transitions, compatibility/migration/recovery decisions, security/authority boundaries, and test seams. Do not replace those decisions with implementation detail, and do not enumerate private representation cross-products that an executable schema or state model plus table-driven or model-based tests can close at build time.
 - **Feasible envelope.** The required behavior is implementable within the brief's allowed mechanisms, dependencies, compatibility constraints, and non-goals. If constraints conflict, surface the smallest dependency, scope, or design decision in **Risks** instead of writing an impossible or self-contradictory requirement.
 - **Source fidelity and minimum architecture.** Preserve authoritative story decisions by reference, decide only genuine gaps, and choose the simplest repository-native implementation. Every new subsystem or stronger guarantee is tied to a specific acceptance criterion and justified against an insufficient existing seam; otherwise remove it rather than specifying it more deeply.
