@@ -18,6 +18,7 @@ import {
   transitionRecoverOrphan,
   transitionRunJson,
   transitionRunSlice,
+  transitionRunStep,
   transitionSteeringConsumed,
   transitionSteeringBoundaryOpened,
   transitionSteeringQueued,
@@ -53,6 +54,85 @@ describe("simplified run-state transitions", () => {
 
       assert.equal(result.run.gates.story.status, "approved");
       assert.equal(result.run.gates.story.approval_source, "external-driver");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("requires exactly one of answer_ref or inline answer on a gate decision", async () => {
+    const fixture = createFixture("gate-answer-exclusivity");
+    try {
+      await transitionGateDecision(fixture.runDir, "story", {
+        status: "pending",
+        artifact: "artifacts/story.md",
+        question_ref: "gates/story.question.md",
+        answer_ref: "gates/story.answer",
+      });
+      writeFileSync(join(fixture.runDir, "gates", "story.answer"), "approve\n");
+
+      const base = { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md" };
+      await assert.rejects(
+        approveGateDecision(fixture.runDir, "story", { ...base, answer_ref: "gates/story.answer", answer: "approve" }, { now: NOW }),
+        /requires exactly one of answer_ref or answer/u,
+        "both an answer ref and an inline answer must be rejected",
+      );
+      await assert.rejects(
+        approveGateDecision(fixture.runDir, "story", { ...base }, { now: NOW }),
+        /requires exactly one of answer_ref or answer/u,
+        "a decision without any answer must be rejected",
+      );
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("gates the test-verifier integration step on merged slices and bounded advancing attempts", async () => {
+    const fixture = createFixture("test-verifier-gate");
+    try {
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId),
+        max_retries: 3,
+        slices: [
+          { id: "api", status: "merged", attempts: 1, merge_commit: "abc123" },
+          { id: "ui", status: "running", attempts: 1 },
+        ],
+      });
+
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }),
+        /test-verifier integration gate requires all slices merged: ui/u,
+        "an unmerged slice must block the integration gate",
+      );
+
+      await transitionRunJson(fixture.runDir, (run) => { run.slices[1].status = "merged"; run.slices[1].merge_commit = "def456"; });
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 0 }),
+        /requires a positive attempt number/u,
+      );
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 2 }),
+        /must advance from attempt 0 to 1/u,
+        "the first attempt must be exactly 1",
+      );
+
+      const started = await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 });
+      assert.equal(started.step.status, "running");
+      await transitionRunStep(fixture.runDir, "test-verifier", { status: "rejected", attempts: 1 }, { mustExist: true });
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 3 }, { mustExist: true }),
+        /must advance from attempt 1 to 2/u,
+        "attempts advance one at a time",
+      );
+
+      await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 2 }, { mustExist: true });
+      await transitionRunStep(fixture.runDir, "test-verifier", { status: "rejected", attempts: 2 }, { mustExist: true });
+      await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 3 }, { mustExist: true });
+      await transitionRunStep(fixture.runDir, "test-verifier", { status: "rejected", attempts: 3 }, { mustExist: true });
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 4 }, { mustExist: true }),
+        /integration gate attempt 4 exceeds max_retries 3/u,
+        "the bounded retry ceiling must hold",
+      );
     } finally {
       cleanup(fixture.repo);
     }
@@ -514,6 +594,46 @@ describe("simplified run-state transitions", () => {
 
       assert.equal(result.run.status, "completed");
       assert.equal(result.run.terminal_result.draft, true);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("allows explicit draft PR recording for ordinary runs with the draft summary", async () => {
+    const fixture = createFixture("pr-ordinary-draft");
+    try {
+      writeReadyPrRun(fixture);
+
+      const result = await createPrTransition(fixture.runDir, {
+        pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/105",
+        pr_number: 105,
+        repository: "jasoncarreira/opencode-feature-factory",
+        draft: true,
+      });
+
+      assert.equal(result.run.status, "completed");
+      assert.equal(result.run.terminal_result.draft, true);
+      assert.equal(result.run.terminal_result.summary, "Draft PR created.");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects PR creation without an approved pre_pr gate and mutates nothing", async () => {
+    const fixture = createFixture("pr-gate-missing");
+    try {
+      writeReadyPrRun(fixture, { gates: {} });
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        createPrTransition(fixture.runDir, {
+          pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/106",
+          pr_number: 106,
+          repository: "jasoncarreira/opencode-feature-factory",
+        }),
+        /pr-created requires approved pre_pr gate/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, "a rejected pr-created must not mutate run state");
     } finally {
       cleanup(fixture.repo);
     }

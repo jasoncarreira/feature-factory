@@ -165,6 +165,22 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
+  it("rejects malformed gate answers before writing anything", () => {
+    const fixture = createFixture("gate-answer-invalid", { gate: true });
+    try {
+      for (const [label, answer] of [["empty changes body", "changes:   "], ["bare changes", "changes:"], ["unknown verb", "maybe"], ["empty", "   "]]) {
+        assert.throws(
+          () => writeGateAnswer(fixture.runId, "story", answer, { cwd: fixture.repo }),
+          /answer must be exactly approve, stop, or start with changes:/u,
+          label,
+        );
+      }
+      assert.equal(existsSync(join(fixture.runDir, "gates", "story.answer")), false, "rejected answers must not write an answer file");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("validates schema and advisory consistency", () => {
     const fixture = createFixture("validate-run", { gate: true });
     try {
