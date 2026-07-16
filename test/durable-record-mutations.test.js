@@ -20,6 +20,7 @@ import {
   createPostPrCatalogBaseline,
   createRepairCatalogBaseline,
   emitDurableRecordMutations,
+  renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
 import { checkRunConsistency, validateRun, validateSlicesPlan } from "../src/validate.js";
 import { transitionMergedSliceRepair, transitionPostPrState } from "../src/run-state.js";
@@ -82,7 +83,7 @@ describe("durable record mutation helper", () => {
         { family: "wrong-time", path: ["created_at"], value: "not-time" },
         { family: "wrong-type", path: ["child", "enabled"], value: "true" },
         { family: "wrong-ref", path: ["descriptor", "ref"], value: "../a.md" },
-        { family: "wrong-hash", path: ["descriptor", "hash"], value: "sha256:short" },
+        { family: "wrong-hash", path: ["descriptor", "hash"] },
         { family: "wrong-bytes", path: ["descriptor", "bytes"], value: 11 },
         { family: "descriptor-key-shape-drift", path: ["descriptor"], from: "ref", to: "artifact_ref" },
         { family: "stale-identity", path: ["run_id"], value: "stale-run" },
@@ -106,7 +107,8 @@ describe("durable record mutation helper", () => {
     assert.equal(records["wrong-time"].created_at, "not-time");
     assert.equal(records["wrong-type"].child.enabled, "true");
     assert.equal(records["wrong-ref"].descriptor.ref, "../a.md");
-    assert.equal(records["wrong-hash"].descriptor.hash, "sha256:short");
+    assert.match(records["wrong-hash"].descriptor.hash, /^sha256:[0-9a-f]{64}$/u);
+    assert.notEqual(records["wrong-hash"].descriptor.hash, source.descriptor.hash);
     assert.equal(records["wrong-bytes"].descriptor.bytes, 11);
     assert.equal(Object.hasOwn(records["descriptor-key-shape-drift"].descriptor, "ref"), false);
     assert.equal(records["descriptor-key-shape-drift"].descriptor.artifact_ref, "artifacts/a.md");
@@ -228,6 +230,30 @@ describe("finite durable-authority catalog", () => {
     assert.doesNotMatch(helperSource, /DURABLE_AUTHORITY_CATALOG[\s\S]{0,200}DESCRIPTOR_MANIFEST/u, "descriptor expectations must not be produced from the catalog export");
   });
 
+  it("renders deterministic readable canonical JSON for independent oracle-manifest value review", () => {
+    const record = findRecord(DURABLE_AUTHORITY_CATALOG, "final-plan-descriptor");
+    const oldSnapshot = renderDurableAuthorityOracleReviewSnapshot(record);
+    assert.equal(oldSnapshot, renderDurableAuthorityOracleReviewSnapshot(record));
+    assert.equal(oldSnapshot.endsWith("\n"), true);
+    const oldReview = JSON.parse(oldSnapshot);
+    assert.deepEqual(Object.keys(oldReview), ["canonicalSource", "descriptor", "metadata"]);
+    assert.equal(oldReview.metadata.writer, record.writer);
+    assert.deepEqual(oldReview.descriptor.targets, record.descriptor.targets);
+    assert.deepEqual(oldReview.canonicalSource.source, record.source);
+
+    const changedRecord = structuredClone(record);
+    changedRecord.writer = "independently reviewed replacement writer";
+    changedRecord.descriptor.targets.find(({ family }) => family === "wrong-kind").value = "reviewed-kind";
+    changedRecord.source.descriptor.kind = "reviewed-source-kind";
+    const newReview = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(changedRecord));
+    assert.equal(newReview.metadata.writer, "independently reviewed replacement writer");
+    assert.equal(newReview.descriptor.targets.find(({ family }) => family === "wrong-kind").value, "reviewed-kind");
+    assert.equal(newReview.canonicalSource.source.descriptor.kind, "reviewed-source-kind");
+    assert.equal(oldReview.metadata.writer, record.writer, "old readable snapshot must remain independently reviewable");
+    assert.equal(oldReview.descriptor.targets.find(({ family }) => family === "wrong-kind").value, "unknown-graph");
+    assert.equal(oldReview.canonicalSource.source.descriptor.kind, "slices-graph");
+  });
+
   it("rejects both observed final.plan descriptor oracle bypasses", () => {
     const targetToExclusion = structuredClone(DURABLE_AUTHORITY_CATALOG);
     const excludedKind = findRecord(targetToExclusion, "final-plan-descriptor");
@@ -337,7 +363,8 @@ describe("finite durable-authority catalog", () => {
     const answerBytes = cases.find(({ family, name }) => family === "wrong-bytes" && name.includes("answer sidecar bytes"));
     assert.equal(answerRef.record.answer_ref, "../outside.json");
     assert.equal(answerRef.externalSources.answer.bytes, "approve\n");
-    assert.equal(answerHash.record.handoff_receipt.answer_hash, "sha256:short");
+    assert.match(answerHash.record.handoff_receipt.answer_hash, /^sha256:[0-9a-f]{64}$/u);
+    assert.notEqual(answerHash.record.handoff_receipt.answer_hash, approval.source.handoff_receipt.answer_hash);
     assert.equal(answerHash.externalSources.answer.bytes, "approve\n");
     assert.equal(answerBytes.record.answer_ref, "gates/story.answer.consumed-1");
     assert.match(answerBytes.record.handoff_receipt.answer_hash, /^sha256:[0-9a-f]{64}$/u);
@@ -657,7 +684,8 @@ describe("finite durable-authority catalog", () => {
     const bytesCase = cases.find(({ family, name }) => family === "wrong-bytes" && name.includes("canonical sidecar bytes"));
     assert.equal(refCase.record.canonical_evidence_ref, "../outside.json");
     assert.equal(refCase.externalSources.canonical.bytes, record.externalSources.canonical.bytes);
-    assert.equal(hashCase.record.canonical_evidence_hash, "sha256:short");
+    assert.match(hashCase.record.canonical_evidence_hash, /^sha256:[0-9a-f]{64}$/u);
+    assert.notEqual(hashCase.record.canonical_evidence_hash, record.source.canonical_evidence_hash);
     assert.equal(hashCase.externalSources.canonical.bytes, record.externalSources.canonical.bytes);
     assert.equal(bytesCase.record.canonical_evidence_ref, record.source.canonical_evidence_ref);
     assert.equal(bytesCase.record.canonical_evidence_hash, record.source.canonical_evidence_hash);
@@ -960,6 +988,23 @@ describe("finite durable-authority catalog", () => {
     const cataloged = new Set(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records.map(({ record }) => record)));
     for (const record of Object.keys(exclusions)) assert.equal(cataloged.has(record), false, `${record} must stay outside the authority catalog`);
   });
+
+  it("allows only the known adversarial traversal ref during fixture materialization", () => {
+    const root = mkdtempSync(join(tmpdir(), "catalog-traversal-policy-"));
+    try {
+      assert.doesNotThrow(() => materializeCatalogSources(join(root, "known"), {
+        adversarial: { ref: "../outside.json", bytes: "known adversarial traversal" },
+      }));
+      assert.throws(
+        () => materializeCatalogSources(join(root, "unexpected"), {
+          adversarial: { ref: "nested/../../future-traversal.json", bytes: "unexpected traversal" },
+        }),
+        /unexpected traversal ref must fail materialization: nested\/\.\.\/\.\.\/future-traversal\.json/u,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("per-record durable authority mutation matrices", () => {
@@ -981,7 +1026,10 @@ function materializeCatalogSources(runDir, ...sourceGroups) {
   mkdirSync(runDir, { recursive: true });
   for (const sources of sourceGroups) {
     for (const { ref, bytes } of Object.values(sources ?? {})) {
-      if (ref.startsWith("../") || ref.includes("/../")) continue;
+      if (ref.startsWith("../") || ref.includes("/../")) {
+        assert.equal(ref, "../outside.json", `unexpected traversal ref must fail materialization: ${ref}`);
+        continue;
+      }
       const file = join(runDir, ref);
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, bytes);

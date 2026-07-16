@@ -306,6 +306,10 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SPEC_WRITER_PROMPT, /One aggregate row or one mutation elsewhere in the authority class never covers a sibling record or variant/i);
     assert.match(schemaCatalog, /wrong ref does not count as wrong bytes/i);
     assert.match(schemaCatalog, /reject completeness unless every required per-record entry passes/i);
+    assert.match(schemaCatalog, /Registration, mutation emission, and catalog completeness are necessary but not sufficient for a production-integrity-coverage claim/i);
+    assert.match(schemaCatalog, /every applicable emitted mutation case for that row must also be asserted rejected through the row's named production validator, consistency checker, or checked transition/i);
+    assert.match(schemaCatalog, /https:\/\/github\.com\/jasoncarreira\/opencode-feature-factory\/issues\/82/i);
+    assert.match(schemaCatalog, /does not claim production integrity coverage merely because inventory, emission, or completeness checks pass/i);
     assert.match(writerMatrix, /independently authored closed completeness oracle/i);
     assert.match(writerMatrix, /exact writer, all readers, named tests, authority facts, sidecar byte bindings, all mutation-family target-or-exclusion dispositions/i);
     assert.match(schemaCatalog, /independently authored closed manifests are not generated from or derived from the catalog under test/i);
@@ -328,6 +332,19 @@ describe("class-wide planning prompt contract", () => {
       assert.match(text, /mutation of any bound target field|target-field mutation/i);
     }
     assert.match(schemaCatalog, /not generated from or derived from the catalog under test/i);
+
+    const manifestProcedure = markdownSection(schemaCatalog, "Oracle-manifest update procedure");
+    assert.match(manifestProcedure, /Edit the readable catalog values first/i);
+    assert.match(manifestProcedure, /Never start by replacing a digest/i);
+    assert.match(manifestProcedure, /never use a generated or blind bulk digest replacement as the review object/i);
+    assert.match(manifestProcedure, /For every row whose literal digest would change/i);
+    assert.match(manifestProcedure, /renderDurableAuthorityOracleReviewSnapshot/i);
+    assert.match(manifestProcedure, /retain both the old and new snapshots/i);
+    assert.match(manifestProcedure, /review their metadata, descriptor, and canonical-source value diff/i);
+    assert.match(manifestProcedure, /must never be generated from the catalog or from the snapshot/i);
+    assert.match(manifestProcedure, /readable old\/new value diff independently reviewed/i);
+    assert.match(manifestProcedure, /Only after the value diff is independently reviewed may the corresponding literal digest be deliberately updated/i);
+    assert.match(manifestProcedure, /Opaque hash churn alone is not review evidence/i);
 
     for (const authorityClass of [
       "Plan and slices graph",
@@ -472,6 +489,7 @@ describe("class-wide planning prompt contract", () => {
     }
     assert.match(schemaCatalog, /test\/docs-only, non-enforcing contracts/i);
     assert.match(schemaCatalog, /do not create `src\/single-slice\/schema-model`, add a production validator, authorize a runtime transition, or change production behavior/i);
+    assert.match(schemaCatalog, /Baseline acceptance by a production validator or consumer is not a substitute for asserting every applicable emitted mutation rejected at that production seam/i);
   });
 
   it("keeps the boundary-retention ledger finite and aligned with all nine authority classes", () => {

@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 const HASH_A = `sha256:${"a".repeat(64)}`;
 const HASH_B = `sha256:${"b".repeat(64)}`;
 const HASH_C = `sha256:${"c".repeat(64)}`;
+const WRONG_HASH_A = `sha256:${"0".repeat(64)}`;
+const WRONG_HASH_B = `sha256:${"1".repeat(64)}`;
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const SHA_C = "c".repeat(40);
@@ -439,23 +441,23 @@ const DURABLE_AUTHORITY_METADATA_BY_ID = new Map(DURABLE_AUTHORITY_METADATA_MANI
 // order and every family, path, value, from, to, key, sidecar, and label without reading RECORDS.
 export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["plan-slices-json", "af303fa79406e4a20cbe888a2ab4e6e9b1e66a0a6c6e9ca2f08bd81172ea7663"],
-  ["final-plan-descriptor", "2214eb46d69ff71c3f99f18528c9afa9c8cf97d0cec8664265507caac30c15b7"],
+  ["final-plan-descriptor", "b8ef8dbfe1f1e54cae98fb0960aa315fe4479e33533b63d0a9e0b88f0df959da"],
   ["run-envelope-running", "0dfdf9c52ba1ee909070da85617630bbb0cac990f109bdc3c7f25c4f686276dd"],
   ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
   ["terminal-result-completed", "3d17906cce62941bf26a4817e5b9ccb8c31d1804878280f1a18b7b69632a98a0"],
   ["terminal-result-blocked", "9e2aac2293e6a2aa0ff69725ec484565d1ba598e4f921be01c44267eaab6d231"],
   ["terminal-result-partial", "c7c56d99562df246e6e5219fb7ca002924103fea7be86bc2cab1b8c04eada6f6"],
   ["terminal-result-needs-human", "f10e0e1b566924c9b223e63b30426d6004b3210b0be12d884c63ec42310af5b9"],
-  ["gate-pending", "835e6fc742db694c150c376cda0fe966ac154aa42770291300c75c7313600fd5"],
-  ["gate-approved-without-receipt", "8fa56f284b7b92934a67321c413cd56060be8f06738de9ca3f6c8e0160e66996"],
-  ["gate-approved-interactive", "a80a37b5235571916e1d8c9f4090b21dacd9d486d5cbcef9162d5e2a4c0f7c50"],
-  ["gate-changes-requested", "ea2cd6dc2b3eac74a06c1dcc787c07261eb3ba5b6a0d738b03f70d7fc5766cf6"],
-  ["gate-stopped", "aefd971b43475ce72ebc774851877c8ee41fb9f1f4aaea2755204f9b95147ce1"],
+  ["gate-pending", "9af58fac48dd996f8f66431b251cae4ec56e5ed1bdd956a903beb70de3ab504e"],
+  ["gate-approved-without-receipt", "dbd4468f8168a3bb46d3bbf3d91e837410a494b40c5f477f3b16cc1e2494310b"],
+  ["gate-approved-interactive", "9997569b182ad0d650977ec8165e396ad6cc4ca061ff640377b1b25ee19482cf"],
+  ["gate-changes-requested", "369718efac910615a0bfabf7fcc9da2215c5a8975d7335e4f8c52f56302abaa3"],
+  ["gate-stopped", "769caedbc61f6e3f7ec161df1f00f05adf0988a4a4b2970a14697e4d8c6516e5"],
   ["step-running", "d81cad11e94cf0a75dea629f6fbccf0f50eba87aaea3ebe0c5fd69351f64a64c"],
   ["step-rejected", "a61fead311954856883b3876e50c14e41256951a84fb5550bd2184e3712753fa"],
   ["step-blocked", "68ee4697dcb1a92d8ba39e32d9091eeeb0e74c03818da5cf53ca8c2bf25c3f43"],
-  ["step-accepted", "97e66ed649228d838c04a83131ce246ad1472f0c746d011bee0a092ac6788e76"],
-  ["step-inherited-acceptance", "e7082238c899dd951eded88256c75543c4703350d8b8b46b7eca11d3db939771"],
+  ["step-accepted", "738ac9fd074c33be9c9aefa66abc6de1a4880b244d7625960f3e6febffaf0e94"],
+  ["step-inherited-acceptance", "1eb12c653d87652e1fd82b8bc0f7fa40810fb892616ee3327cbfeea3b32ca531"],
   ["slice-pending", "63b63efe898da669ae80a855536c52a7f00a0009a0465a2ec6cee66477b11f50"],
   ["slice-running", "e4d226476601e984b5b50f12ad36ce05f8a7e3ac3a49421218b72a94be54c962"],
   ["slice-review", "15a385a34305ad1bd2b1b54a8bc9da5ef5643577757b42534b03b57163516a01"],
@@ -463,33 +465,33 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["slice-blocked", "284ac69650ab3643fab2f8aece086a1a16c66f106449b29e3003848f9e53cd11"],
   ["validator-verdict-binding", "a8bf0eeca21686570472e43a2fa667e385c132bda80d7082b18aa9d7a7a313fd"],
   ["security-verdict-binding", "c3ae8bc0f5878b51663f5fe8ba71b67e393f01b03ac19ca9f3f36a6c44437d17"],
-  ["steering-boundary", "e019b4c2cc32e414dfeafd814b54aa4a73956d14924ef9c33837d187ec79a63f"],
+  ["steering-boundary", "7842e29ee7d10b4465db99127739e4b602479aff47b848a5c7bb9d2e30ecf732"],
   ["steering-action-claim", "0acedda0cd1d2cf887d58482c179d90183e43650546d3e919b5f5cee92627b4f"],
   ["steering-last-action", "8d42d520ec811dad436e84cdc48b7ae6d2f13a442fdef2ba6397b13bdea16e67"],
   ["pr-created-result", "e37d53a5fb2e8a6007aa845a0b6dd1d18534ef406cd66e899b9f6c5568b30dbb"],
   ["continuation-envelope", "6bf3fb70f927af981715950d3e2d264bd72902599c95e07f82b01897fc4e05c9"],
-  ["continuation-parent-binding", "47781828b6ccc2a6bf504d35c346e1094399fbeece8faff7004d6dfe2a39fc64"],
-  ["continuation-selected-review", "c04a4c48c3c9275566203da9f2e0569d784a109c79e850ef0c53cd5822de702b"],
+  ["continuation-parent-binding", "8ae2a68c7eb75a5a179f6aee86a9e9cd85dfff2ee660073af2538bc59aaf1396"],
+  ["continuation-selected-review", "c7cf99ee147100b49fab3bb71bf8457ec6eb0453d1e6810f98eb64968e3c4a14"],
   ["continuation-target-binding", "8a93c4d661ea231228107766a88c0455c78133c01cd302dfe7ee357a4b58cd78"],
-  ["continuation-parent-artifact-sidecar", "70d0510eee199d118e60ca9d0e47dc67769e6f5eafcb8fac6228ac97d2d9cc67"],
-  ["continuation-parent-evidence-sidecar", "90e04ebe00a5c339d0cfea128ab4c5c6ed3ca306f9b4845f36394b8591531ea9"],
-  ["continuation-parent-review-sidecar", "38b4a8446ede77cc997e9d4b7c94d1db69100310e850e5ceb50cdf05234ccca0"],
+  ["continuation-parent-artifact-sidecar", "49fa4ef22a921d623571722a2474807a5c421b8bca6b54a492ad316edc6548ad"],
+  ["continuation-parent-evidence-sidecar", "c4359206e53fcaa6ce2fdb71a259b683b20c1462022e75c347502c5450dd05d6"],
+  ["continuation-parent-review-sidecar", "a794e98cca26b7265e07f33edef3271de785044f9edd66140d36a00fa30dbc0f"],
   ["continuation-planning-reuse-ineligible", "299b7ff7f60229ffe0b23917aa491d84f23bbc7e71677a7b88049ebbade3b130"],
-  ["continuation-planning-reuse-eligible", "be5197eb05c9eb3c9dc725d33cb737bbcce7bba2c43a84dea4b60a4c1a7853e7"],
-  ["continuation-draft-reuse", "47ab4eb6c8446104fe631fb366eb7902743613c88f00b4ca91b614996fcf611d"],
-  ["continuation-post-pr-binding", "785865c1a1d5bea1b5010e82c1c55d4286b3cc8660b2fd57e1769d2b24c57f73"],
+  ["continuation-planning-reuse-eligible", "9d5170a36602547f044d1a2f68d3d711886447c96682da41d3318e0587bc7e08"],
+  ["continuation-draft-reuse", "1608dc8d7b077cb09ce453ec0c1273566bfc21cc5d2aebc18f40a85f240a8a08"],
+  ["continuation-post-pr-binding", "154913668a919fd892d6a12e8355a5aaac9ac7310ee791e3318d503b4c193514"],
   ["post-pr-phase-disabled", "513971086c59d58641e60d94eafbcd2bf14874ba9c6ccfc647232b41b7b07e34"],
   ["post-pr-phase-awaiting-pr", "bf1c21e663f13eb7e6a1be999f3909712e1c40b510ec6116c98d0cd01dc8e130"],
   ["post-pr-phase-observing", "e6a25d74454166eb044c588a5a59a3a711c1232821b9a06d7cdf26e7f098c8ce"],
   ["post-pr-phase-failure-recording", "069fdc97c5857cb5f2db059b088a26c093745a7e57f97a2d205ff0bf602525f5"],
   ["post-pr-phase-remediation-planned", "e206193f01349bd009a9a3d0e7369fda199d609bafe325dea0db0290c6e9a401"],
   ["post-pr-phase-remediation-running", "754e04090cdda9c8cc099bc794c6154534fcfd616187e9633ac3cc739fbaac2c"],
-  ["post-pr-phase-changes-observed", "24e18a7b03897a68e1532efd4aba27fa4b77c293a30f630507c3b3ee2546e0d7"],
-  ["post-pr-phase-committed", "44ead2082ff8b6b99f08dfe6ba60b394ebe210855d7f4341adb60d43bd316811"],
-  ["post-pr-phase-revalidating", "dd5f45b9484cf3bca4c1946781298214e506fd5e47ee4050b896854a83c84ca6"],
-  ["post-pr-phase-validated", "cbcb2aeb7e65eba27b28a8a8ee3bea711b6280c84e270cfbc93633603182c560"],
-  ["post-pr-phase-push-pending", "68f28e2276575167214f93f9b40b0a604bf61c4590900577275147c629ef31d8"],
-  ["post-pr-phase-remote-confirmed", "3ff56803108c6fbcc9ea58489f9602e4d34aacaa6b819f89611eeec515515594"],
+  ["post-pr-phase-changes-observed", "9d80b5b8b25d47dc7d46f2ac7983144c7711a747e272e2f1986f241bb1835f54"],
+  ["post-pr-phase-committed", "fc72621784b1f2eda40ce0342e22dced9e226ecb4b87020d726a82a58d3841d8"],
+  ["post-pr-phase-revalidating", "6962c268ba0df5134784df560b878ae815256daf256559857491e57b67bb9102"],
+  ["post-pr-phase-validated", "ac9e6baa4b46a5b5ae05160743536d16dde031abdca85798bdf406b00f8fd113"],
+  ["post-pr-phase-push-pending", "b26b83e2b19fa8c6ffd9c496a34856becb40f26e41c9cd50fc345a79a2a68ee9"],
+  ["post-pr-phase-remote-confirmed", "dc10ad2e1d72bac8d56e14f412700b307395787bb25f4e2e28215cccf66cf9eb"],
   ["post-pr-phase-succeeded", "f85af2b48c0926e215e4e52aa8ffd21c73009f3b83e3b58fa35ed98a1355a3f8"],
   ["post-pr-phase-blocked", "cb252153402eb377af2749e935a7c2fa95c5e38d2caa5320c2c0d5399d8679e1"],
   ["post-pr-phase-needs-human", "7cbad4902c5adc539c29f71d39d45bf7544e5d7fb0d670e46b750599a11caf5e"],
@@ -501,34 +503,34 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["post-pr-observation-review-request", "56615c1ed43d8357ceefc407b96b3a3458743c480e5bd650919528f99c0e64ed"],
   ["post-pr-observation-snapshot", "4d184a362df7a52c9c49a94419ace41595b7c2272d403298ead7643e2f019186"],
   ["post-pr-remediation-null", "b11b44e67fedeadb2f7ecd4d591f05ce615eaea5b2622950ae35a82b29cadb5e"],
-  ["post-pr-remediation-active", "65a3eacd1aeb8f18e952987841491bf7ec722b95b5333f21128f9436a23f59f2"],
+  ["post-pr-remediation-active", "87701ff8ce97e141b1ed1467941692a018b04659f607f3064dfa20f395e796ce"],
   ["post-pr-remediation-owner", "d0de8ce88fb6d4fd46f561423ec15cbbd9c0d9f673d978803d181cb48f4e62ca"],
-  ["post-pr-remediation-changes", "6407f76902b6e3e966837049a7a5be36002dfc1e391cb75fcda8c7d91b050572"],
+  ["post-pr-remediation-changes", "5a29d8918015f6e1684ff8081d320c440479fb9fd4f96b2f8799d3099de638d8"],
   ["post-pr-remediation-change-entry", "c696de34634555c76db0c6a4818cba73e5cff137a1dc784ec5df4c599b5fb76a"],
   ["post-pr-dispatch-planned", "a71360216563456d2dad79c83a7018800b98727041b342e48ad81d69c7fccea7"],
   ["post-pr-dispatch-running", "3eab951f904a67218716f18047cbe976ef336b7f6e6488a578a5e6e91f4fe147"],
   ["post-pr-dispatch-returned", "2ffb3a5e416345718902ea9e864391547b0797c16646efe4d161cc5f32f6f70d"],
   ["post-pr-revalidation-empty", "302761cb949ccc43da4f9a602a7ebd091df624097011bb7958cfdeab319a80bc"],
-  ["post-pr-revalidation-bound", "8662bcb5aa669ca8ff38a0165e337775ae88e9052421493c5c47c472db1e1ccf"],
+  ["post-pr-revalidation-bound", "672206703515df26227f80dccc394bfbb027bfca14447c098ed2e50e1ee488b8"],
   ["post-pr-canonical-job-planned", "da66b9a24dce3d5f39dba7de43567244ce98a2e236700026c427a5a9db0a1354"],
   ["post-pr-canonical-job-running", "fc33c41aa3ce0fa4df42af7b33405415564d453763d5c9bc07654d90f4444c3e"],
   ["post-pr-canonical-job-retry-wait", "bd1c9e9194488a16122331b2f0342cf3d2fa1ba620e2cab0590f948d44247dd2"],
-  ["post-pr-canonical-job-bound", "95b756b324cb9a5e5cd973b2bdf892300c5d5421e3d8e6cb314e15d313b78507"],
+  ["post-pr-canonical-job-bound", "48368ad3fd81ae80bf9b38a30ff472714e8cbd153c56172bf4857ceb025dc43a"],
   ["post-pr-validator-job-planned", "6aba7c2d5508fb1721e07710ffe5cdb7a586913be912fbb13ff605d0eac496ed"],
   ["post-pr-validator-job-running", "1ab84f8d6b675ccb12ec6f266acd8710da74d8a1d10d596b963fd73393798d77"],
   ["post-pr-validator-job-retry-wait", "d05820c27e6c8f10a25e8818264da10b325c744eecbbc8dbd9870310fcfc2929"],
-  ["post-pr-validator-job-bound", "c35da42a019664f7a9a8390ab74f9e2b2b4a982499047222da4c1bc089c269d7"],
+  ["post-pr-validator-job-bound", "2cba87b9d3d6febef3a1c7dbbd0a2b590dd8276c7e9ea320ac6f173cc5a0e727"],
   ["post-pr-security-job-planned", "0fcf0e6d48e81333d73cb908394382890af9bdd43120e5f9981d00450fee1b1e"],
   ["post-pr-security-job-running", "3a90f0cb1692ba8141b175585f345ac12406b1852de6aa1c35ce30ad1009beaa"],
   ["post-pr-security-job-retry-wait", "7d3734ebd954bbc2acad5a1ac1a7a50206586fca10f990fe6a13edd5f606c2f1"],
-  ["post-pr-security-job-bound", "d03928ecc91d7303107c0e662687239d410d4b8dfc063c8c5b39eccd07160140"],
+  ["post-pr-security-job-bound", "3fe923e72f62dd9e248d09f868192676e246b0d274d741010d19de1aa74a7b8e"],
   ["post-pr-push-not-ready", "75e6634266a30cf17b0cd021da9d1dc92ae1abb169b1a55a9df946bf4be56952"],
   ["post-pr-push-pending", "ac97e631f9618c582a1b55b07229967e2531d271c8516065435155dba49123f9"],
   ["post-pr-push-confirmed", "70a523f94e9711765f33721aaeeb93603f6cf3b600fd28a49a3edd4f841f7b7c"],
   ["post-pr-push-last-error", "2488926b85aac8d01c8efabf743d157b64c52d9f5f511885ba895352389c30c8"],
-  ["post-pr-evidence-sidecar", "57b33323e08a953c446796d9b2c471520802c5c43ee0de0d01e5b5d4f0132381"],
+  ["post-pr-evidence-sidecar", "18bc62ed278dde02fa8482b4b575a1618ceeec907fd2f3efe734efad99525491"],
   ["post-pr-continuation-review-null", "35902cbb67570dbe26041495dc70aaec1708cb379d9a4966dd792f94e14361cc"],
-  ["post-pr-continuation-review-bound", "97fcad71f3c5b448fe72f063b722aa99642f3ff47e773c3c6fba045367f57c10"],
+  ["post-pr-continuation-review-bound", "e5862dc1dc6c055b87640208c9cbf2634e28c705b0dd24a36ca4730349df64f4"],
   ["post-pr-terminal-fact-null", "2e779339034eec52db0602b42534a7097eaa4e908313d3648f3c71ce7add196f"],
   ["post-pr-terminal-fact-account-switch-failed-github-auth", "89db42abf207f47db3f5f2dcc28cb1f61ade51b7679e3e5b0be805d6d7b94436"],
   ["post-pr-terminal-fact-account-switch-failed-push", "a8a67f1c8e774c621d92c8a4e69bdbcd3b9cacb06da840cd55d0593e956bfa1a"],
@@ -538,14 +540,14 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["post-pr-terminal-fact-panel-runner-result-malformed", "78c5bc14d1c19f8bd3b449d2ba59160173d05698cbc61a6fab5f2b3e76e1ac2a"],
   ["post-pr-terminal-fact-push-failed", "2d49a423c4c8a2f70c1af4f3d598afdf6f22fad34df57b5cc323d4ac01c49511"],
   ["post-pr-terminal-fact-panel-attribution-unsafe", "7681ab4e932991797750ed39c61569748ed8690a291f27f6f0a4f91a5cd65844"],
-  ["repair-reported", "acac29fb63d4aca6d6754fffc8af6313b2b6e02135d24a267c4564239fb32fce"],
-  ["repair-repairing", "eaa5a1b4c8e2eb56cdb5729fdb6bd0a1a0557725e703cb7a701d1a4ac27eaa98"],
-  ["repair-review-approve", "5a15e9a12fca2eda1d078209e843970e6c01953e0be29b2e0d98d41eb590dd41"],
-  ["repair-review-reject", "9a228ea624ab607e914601be58dde673efc8d96df3140a3b66a09f22370f5453"],
-  ["repair-merged", "211f2daea17f93f38729c8f90aa658e7c52f9ef8b5b14698591b0e88fe1578f8"],
-  ["repair-blocked-from-reported", "0607cf807e326371edbbea3cbfd94ff88f43b269f3b6cacd1f5582a1a9efa45e"],
-  ["repair-blocked-from-repairing", "9733fc2a9ab6a94a1818f734dc6dc9aa3c1ae9d68b5dcc5910a1820af166bb22"],
-  ["repair-blocked-from-review", "4254ef755b5342df583cd9804d64dd6a54f279ceb8a65b626dfdc8edf4f49428"],
+  ["repair-reported", "729c932f001d44a8f896fbafea9b1daa1db6458b061c5111bec748abcdbfc33e"],
+  ["repair-repairing", "944bfd281e98e55853cc0062af34ebd255ec72d272721ee7b371bc23a863107d"],
+  ["repair-review-approve", "34d5bfaf3f1e27307bc05974b2e7ffbf0c0aeadc997c64f79190c5425068ab84"],
+  ["repair-review-reject", "1a220612b19cde72dbd20a39fbea5d53a5a3994de4bf2a13a3facb401a8cc7a7"],
+  ["repair-merged", "902b94618560fc3b8c3ec73af14cbd572205673ec09142ba88ff3ab050fefae1"],
+  ["repair-blocked-from-reported", "05835c182adf9d4372c39f6d0cc82cdac19b21017c928ded54047e7ea9eceea0"],
+  ["repair-blocked-from-repairing", "79ff873a4b30a77b303fc29658b2ec1dc1cd86ad35bed9092f087c6b572e44ee"],
+  ["repair-blocked-from-review", "ffacf779eacdf96ec9e9deaf94f350f386b02946f910a321ee7ce82eccad117b"],
 ]);
 const DURABLE_AUTHORITY_DESCRIPTOR_BY_ID = new Map(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST);
 
@@ -726,6 +728,36 @@ export function emitDurableRecordMutations(source, descriptor, externalSources =
   const names = cases.map(({ name }) => name);
   if (new Set(names).size !== names.length) throw new TypeError(`${recordName} mutation case names must be unique`);
   return cases;
+}
+
+export function renderDurableAuthorityOracleReviewSnapshot(record) {
+  requireRecord(record, "record");
+  const snapshot = {
+    metadata: {
+      writer: record.writer,
+      readers: record.readers,
+      tests: record.tests,
+      facts: record.facts,
+      sidecars: record.sidecars,
+      ...(record.observations === undefined ? {} : { observations: record.observations }),
+    },
+    descriptor: {
+      targets: record.descriptor?.targets,
+      exclusions: record.descriptor?.exclusions,
+    },
+    canonicalSource: {
+      authorityClassId: record.authorityClassId,
+      id: record.id,
+      record: record.record,
+      variant: record.variant,
+      canonicalPath: record.canonicalPath,
+      source: record.source,
+      facts: record.facts,
+      externalSources: record.externalSources ?? {},
+      ...(record.observations === undefined ? {} : { observations: record.observations }),
+    },
+  };
+  return `${JSON.stringify(JSON.parse(canonicalJson(snapshot)), null, 2)}\n`;
 }
 
 export function assertDurableAuthorityCatalogComplete(catalog) {
@@ -1142,8 +1174,8 @@ function stepEntry(id, variant) {
       review_hash: source.acceptance.review_hash,
     };
     targets.push(
-      target("wrong-hash", ["inherited_acceptance", "artifact_hash"], "inherited artifact hash", { value: "sha256:short", sidecar: "artifact" }),
-      target("wrong-hash", ["inherited_acceptance", "review_hash"], "inherited review hash", { value: "sha256:short", sidecar: "review" }),
+      target("wrong-hash", ["inherited_acceptance", "artifact_hash"], "inherited artifact hash", { value: WRONG_HASH_A, sidecar: "artifact" }),
+      target("wrong-hash", ["inherited_acceptance", "review_hash"], "inherited review hash", { value: WRONG_HASH_A, sidecar: "review" }),
       target("wrong-ref", ["inherited_acceptance", "parent_spec_review_ref"], "parent review ref", { value: "../outside.json", sidecar: "review" }),
       stale(["inherited_acceptance", "from_run_id"], "stale-parent"),
     );
@@ -2279,7 +2311,7 @@ function schema(path) { return target("wrong-schema", path, "schema version", { 
 function kind(path, value = "unknown-kind", label = "kind") { return target("wrong-kind", path, label, { value }); }
 function time(path, value = "not-an-iso-time") { return target("wrong-time", path, `timestamp ${renderPath(path)}`, { value }); }
 function ref(path, sidecarName, label = `ref ${renderPath(path)}`) { return target("wrong-ref", path, sidecarName ? `${sidecarName} ref` : label, { value: "../outside.json", ...(sidecarName ? { sidecar: sidecarName } : {}) }); }
-function hash(path, sidecarName) { return target("wrong-hash", path, sidecarName ? `${sidecarName} hash` : `hash ${renderPath(path)}`, { value: "sha256:short", ...(sidecarName ? { sidecar: sidecarName } : {}) }); }
+function hash(path, sidecarName) { return target("wrong-hash", path, sidecarName ? `${sidecarName} hash` : `hash ${renderPath(path)}`, { value: WRONG_HASH_A, ...(sidecarName ? { sidecar: sidecarName } : {}) }); }
 function bytes(path, sidecarName) { return target("wrong-bytes", path, `${sidecarName} sidecar bytes`, { value: "tampered-sidecar-bytes", sidecar: sidecarName }); }
 function drift(path, from, to) { return target("descriptor-key-shape-drift", path, `${from} renamed`, { from, to }); }
 function stale(path, value) { return target("stale-identity", path, `stale ${renderPath(path)}`, { value }); }
@@ -2329,7 +2361,7 @@ function defaultReplacement(family, current) {
   if (family === "wrong-kind") return "unknown-kind";
   if (family === "wrong-time") return "not-an-iso-time";
   if (family === "wrong-ref") return "../outside.json";
-  if (family === "wrong-hash") return "sha256:short";
+  if (family === "wrong-hash") return current === WRONG_HASH_A ? WRONG_HASH_B : WRONG_HASH_A;
   if (family === "wrong-bytes") return typeof current === "string" ? `${current}-tampered` : "tampered-bytes";
   if (family === "stale-identity") return typeof current === "number" ? current - 1 : `stale-${String(current)}`;
   if (family === "cross-bound-identity") return typeof current === "number" ? current + 1 : "other-boundary";
