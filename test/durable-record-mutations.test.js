@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DURABLE_AUTHORITY_CATALOG,
+  DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST,
   DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST,
   DURABLE_AUTHORITY_EXCLUSIONS,
   DURABLE_AUTHORITY_METADATA_MANIFEST,
@@ -11,6 +12,7 @@ import {
   assertDurableAuthorityCatalogComplete,
   emitDurableRecordMutations,
 } from "./helpers/durable-record-mutations.js";
+import { validateRun } from "../src/validate.js";
 
 const AUTHORITY_CLASS_IDS = Object.freeze([
   "plan-slices-graph",
@@ -144,7 +146,7 @@ describe("finite durable-authority catalog", () => {
         assert.ok(record.writer.trim().length > 0, `${record.id} must name its writer/checked transition`);
         assert.ok(record.readers.length > 0, `${record.id} must name every decision-making reader`);
         assert.ok(record.tests.length > 0, `${record.id} must name a test`);
-        const cases = emitDurableRecordMutations(record.source, record.descriptor);
+        const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
         assert.ok(cases.length > 0, `${record.id} must emit adversarial cases`);
         assert.equal(new Set(cases.map(({ name }) => name)).size, cases.length, `${record.id} case names must be unique`);
         for (const family of DURABLE_MUTATION_FAMILIES) {
@@ -155,7 +157,7 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 106);
+    assert.equal(recordCount, 108);
   });
 
   it("rejects aggregate, omitted, and substituted source-boundary entries", () => {
@@ -206,10 +208,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 106 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 108 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 106);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 108);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -303,9 +305,9 @@ describe("finite durable-authority catalog", () => {
     assert.throws(() => assertDurableAuthorityCatalogComplete(missingFamily), /wrong-kind target-or-exclusion disposition must exactly match the independent family disposition registry/u);
 
     const conflatedBytes = structuredClone(DURABLE_AUTHORITY_CATALOG);
-    const review = findRecord(conflatedBytes, "slice-review-sidecar");
-    review.descriptor.targets = review.descriptor.targets.filter(({ family }) => family !== "wrong-bytes");
-    review.descriptor.exclusions["wrong-bytes"] = "Ref text was already mutated.";
+    const approval = findRecord(conflatedBytes, "gate-approved-interactive");
+    approval.descriptor.targets = approval.descriptor.targets.filter(({ family }) => family !== "wrong-bytes");
+    approval.descriptor.exclusions["wrong-bytes"] = "Ref text was already mutated.";
     assert.throws(
       () => assertDurableAuthorityCatalogComplete(conflatedBytes),
       /wrong-bytes target-or-exclusion disposition must exactly match the independent family disposition registry/u,
@@ -317,16 +319,101 @@ describe("finite durable-authority catalog", () => {
     assert.throws(() => assertDurableAuthorityCatalogComplete(omittedSidecar), /must exactly match the independent metadata manifest/u);
   });
 
-  it("mutates sidecar ref, hash, and bytes as independent adversarial cases", () => {
-    const review = findRecord(DURABLE_AUTHORITY_CATALOG, "slice-review-sidecar");
-    const cases = Object.fromEntries(emitDurableRecordMutations(review.source, review.descriptor).map((mutationCase) => [mutationCase.family, mutationCase.record]));
-    assert.equal(cases["wrong-ref"].ref, "../outside.json");
-    assert.equal(cases["wrong-ref"].sidecar_bytes, "{\"verdict\":\"APPROVE\"}");
-    assert.equal(cases["wrong-hash"].hash, "sha256:short");
-    assert.equal(cases["wrong-hash"].sidecar_bytes, "{\"verdict\":\"APPROVE\"}");
-    assert.equal(cases["wrong-bytes"].ref, "reviews/backend.attempt-2.json");
-    assert.equal(cases["wrong-bytes"].hash, `sha256:${"a".repeat(64)}`);
-    assert.equal(cases["wrong-bytes"].sidecar_bytes, "tampered-sidecar-bytes");
+  it("mutates canonical refs, hashes, and separately modeled external bytes independently", () => {
+    const approval = findRecord(DURABLE_AUTHORITY_CATALOG, "gate-approved-interactive");
+    const cases = emitDurableRecordMutations(approval.source, approval.descriptor, approval.externalSources);
+    const answerRef = cases.find(({ family, name }) => family === "wrong-ref" && name.includes("answer ref"));
+    const answerHash = cases.find(({ family, name }) => family === "wrong-hash" && name.includes("answer hash"));
+    const answerBytes = cases.find(({ family, name }) => family === "wrong-bytes" && name.includes("answer sidecar bytes"));
+    assert.equal(answerRef.record.answer_ref, "../outside.json");
+    assert.equal(answerRef.externalSources.answer.bytes, "approve\n");
+    assert.equal(answerHash.record.handoff_receipt.answer_hash, "sha256:short");
+    assert.equal(answerHash.externalSources.answer.bytes, "approve\n");
+    assert.equal(answerBytes.record.answer_ref, "gates/story.answer.consumed-1");
+    assert.match(answerBytes.record.handoff_receipt.answer_hash, /^sha256:[0-9a-f]{64}$/u);
+    assert.equal(answerBytes.externalSources.answer.bytes, "tampered-sidecar-bytes");
+  });
+
+  it("binds canonical core source identity, placement, facts, and external bytes with an independent manifest", () => {
+    const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
+    assert.equal(canonicalIds.length, 20);
+    assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
+    const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
+    assert.doesNotMatch(helperSource, /DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST\s*=\s*deepFreeze\([^\n]*\.map/u);
+
+    for (const id of canonicalIds) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      assert.ok(record, `${id} must have a canonical source row`);
+      assert.ok(record.canonicalPath.length > 0, `${id} must bind its run.json path`);
+      assert.ok(record.facts.length > 0, `${id} must bind authority facts`);
+      for (const declaration of record.facts) {
+        assert.ok(Array.isArray(declaration.path) && declaration.path.length > 0, `${id} facts use path declarations`);
+        assert.equal(Object.hasOwn(declaration, "expected"), true, `${id} facts bind exact expected values`);
+      }
+    }
+  });
+
+  it("rejects canonical source deletion/substitution, placement drift, fact drift, and synthetic keys", () => {
+    const mutations = [
+      ["source deletion", (catalog) => { delete findRecord(catalog, "gate-pending").source.status; }],
+      ["source substitution", (catalog) => { findRecord(catalog, "gate-pending").source = structuredClone(findRecord(catalog, "gate-stopped").source); }],
+      ["external source deletion", (catalog) => { delete findRecord(catalog, "gate-approved-interactive").externalSources.answer; }],
+      ["external byte substitution", (catalog) => { findRecord(catalog, "gate-approved-interactive").externalSources.answer.bytes = "approve changed\n"; }],
+      ["record relocation", (catalog) => { findRecord(catalog, "gate-pending").record = "run.json.steps[]"; }],
+      ["variant relocation", (catalog) => { findRecord(catalog, "gate-pending").variant = "stopped"; }],
+      ["fact deletion", (catalog) => { findRecord(catalog, "slice-review").facts.pop(); }],
+      ["fact relocation", (catalog) => { findRecord(catalog, "slice-review").facts[0].path = ["status"]; }],
+      ["fact contradiction", (catalog) => { findRecord(catalog, "slice-review").facts[0].expected = "frontend"; }],
+      ["synthetic gate key", (catalog) => { findRecord(catalog, "gate-pending").source.gate = "story"; }],
+      ["synthetic slice review binding", (catalog) => { findRecord(catalog, "slice-review").source.review_binding = {}; }],
+      ["synthetic slice attempt history", (catalog) => { findRecord(catalog, "slice-review").source.attempt_reviews = []; }],
+      ["synthetic panel commit", (catalog) => { findRecord(catalog, "validator-verdict-binding").source.reviewed_commit = "a".repeat(40); }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const catalog = structuredClone(DURABLE_AUTHORITY_CATALOG);
+      mutate(catalog);
+      assert.throws(() => assertDurableAuthorityCatalogComplete(catalog), /canonical source|contradicts|synthetic|does not resolve|metadata manifest/u, label);
+    }
+  });
+
+  it("places every canonical core source in a valid run accepted by validateRun", () => {
+    for (const [id] of DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const run = runWithCanonicalSource(record);
+      assert.equal(validateRun(run), run, `${id} must use an actual validateRun-compatible persisted shape`);
+    }
+  });
+
+  it("uses exact persisted gate, step, slice, panel, and steering variants without synthetic wrappers", () => {
+    const gates = ["gate-pending", "gate-approved-without-receipt", "gate-approved-interactive", "gate-changes-requested", "gate-stopped"]
+      .map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id));
+    assert.deepEqual(gates.map(({ source }) => source.status), ["pending", "approved", "approved", "changes_requested", "stopped"]);
+    assert.equal(gates.every(({ source }) => !Object.hasOwn(source, "gate") && !Object.hasOwn(source, "sidecar_bytes")), true);
+    assert.equal(Object.hasOwn(gates[1].source, "handoff_receipt"), false);
+    assert.deepEqual(Object.keys(gates[2].source.handoff_receipt), ["schema_version", "kind", "gate", "approval_fingerprint", "pending_snapshot_hash", "answer_hash", "steering_generation", "accepted_at"]);
+    assert.deepEqual(gates.map(({ source }) => source.answer ?? null), [null, "approve", "approve", "changes: revise scope", "stop"]);
+    assert.deepEqual(Object.keys(gates[2].externalSources), ["artifact", "question", "answer"]);
+
+    const steps = ["step-running", "step-rejected", "step-blocked", "step-accepted", "step-inherited-acceptance"]
+      .map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id));
+    assert.deepEqual(steps.map(({ source }) => source.status), ["running", "rejected", "blocked", "accepted", "accepted"]);
+    assert.deepEqual(Object.keys(steps[3].source.acceptance), ["artifact_ref", "artifact_hash", "review_ref", "review_hash"]);
+    assert.deepEqual(Object.keys(steps[4].source.inherited_acceptance), ["from_run_id", "parent_spec_review_ref", "artifact_hash", "review_hash"]);
+
+    const slices = ["slice-pending", "slice-running", "slice-review", "slice-merged", "slice-blocked"]
+      .map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id));
+    assert.deepEqual(slices.map(({ source }) => source.status), ["pending", "running", "review", "merged", "blocked"]);
+    for (const { source } of slices) {
+      for (const key of ["review_binding", "attempt_reviews", "reviewed_commit", "sidecar_bytes", "review_hash", "evidence_hash"]) assert.equal(Object.hasOwn(source, key), false);
+    }
+    assert.deepEqual(Object.keys(slices[2].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "evidence_ref", "review_ref"]);
+    assert.deepEqual(Object.keys(slices[3].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "evidence_ref", "review_ref", "merge_commit", "updated_at"]);
+
+    assert.deepEqual(findRecord(DURABLE_AUTHORITY_CATALOG, "validator-verdict-binding").source, { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" });
+    assert.deepEqual(findRecord(DURABLE_AUTHORITY_CATALOG, "security-verdict-binding").source, { verdict: "PASS", review_ref: "reviews/security-reviewer.json" });
+    const steering = ["steering-boundary", "steering-action-claim", "steering-last-action"].map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id));
+    assert.deepEqual(steering.map(({ canonicalPath }) => canonicalPath.join(".")), ["steering.boundary", "steering.action_claim", "steering.last_action"]);
+    assert.deepEqual(steering.map(({ source }) => source.token), ["dispatch-token-1", "dispatch-token-1", "dispatch-token-1"]);
   });
 
   it("generates the required kind mutation for the final.plan.json descriptor", () => {
@@ -446,7 +533,7 @@ describe("per-record durable authority mutation matrices", () => {
       it(`${record.id} mutation matrix`, () => {
         assert.deepEqual(record.tests, [`test/durable-record-mutations.test.js: ${record.id} mutation matrix`]);
         const sourceBefore = structuredClone(record.source);
-        const cases = emitDurableRecordMutations(record.source, record.descriptor);
+        const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
         assert.equal(cases.length, record.descriptor.targets.length);
         assert.deepEqual(cases.map(({ family }) => family).sort(), record.descriptor.targets.map(({ family }) => family).sort());
         assert.deepEqual(record.source, sourceBefore);
@@ -454,6 +541,31 @@ describe("per-record durable authority mutation matrices", () => {
     }
   }
 });
+
+function runWithCanonicalSource(record) {
+  const run = { schema_version: 1, run_id: "catalog-run", mode: record.id === "gate-approved-interactive" ? "interactive" : "autonomous", status: "running", gates: {} };
+  if (record.canonicalPath[0] === "steering") {
+    run.steering = {
+      schema_version: 1,
+      generation: 2,
+      pending: null,
+      uncheckpointed: null,
+      boundary: null,
+      action_claim: null,
+      last_action: null,
+      pr_fence: null,
+      history: [],
+    };
+  }
+  let container = run;
+  for (let index = 0; index < record.canonicalPath.length - 1; index += 1) {
+    const segment = record.canonicalPath[index];
+    if (container[segment] === undefined) container[segment] = typeof record.canonicalPath[index + 1] === "number" ? [] : {};
+    container = container[segment];
+  }
+  container[record.canonicalPath.at(-1)] = structuredClone(record.source);
+  return run;
+}
 
 function findRecord(catalog, id) {
   return catalog.flatMap(({ records }) => records).find((record) => record.id === id);

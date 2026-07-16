@@ -311,6 +311,12 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /independently authored closed manifests are not generated from or derived from the catalog under test/i);
     assert.match(schemaCatalog, /omission or substitution at the source boundary fails completeness/i);
     assert.match(schemaCatalog, /absent targets never receive automatic exclusions/i);
+    assert.match(writerMatrix, /authority class, id, record, variant, canonical (?:persisted )?source path and exact shape/i);
+    assert.match(writerMatrix, /path-plus-expected-value authority facts/i);
+    assert.match(writerMatrix, /source deletion\/substitution[\s\S]*record(?: or |\/)variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
+    assert.match(schemaCatalog, /canonical-source manifest independently binds each core row's authority class, id, record, variant, real run path, exact persisted source shape, path-plus-expected-value authority facts, and separately modeled external bytes/i);
+    assert.match(schemaCatalog, /source deletion or substitution[\s\S]*record\/variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
+    assert.match(schemaCatalog, /inserted at its real path in a valid run accepted by exported `validateRun`/i);
     for (const text of [writerMatrix, schemaCatalog]) {
       assert.match(text, /target-or-exclusion dispositions/i);
       assert.match(text, /complete target definition/i);
@@ -335,6 +341,24 @@ describe("class-wide planning prompt contract", () => {
       assert.match(schemaCatalog, literalPattern(authorityClass), `durable authority catalog missing ${authorityClass}`);
     }
     for (const variant of [
+      "gate-pending",
+      "gate-approved-without-receipt",
+      "gate-approved-interactive",
+      "gate-changes-requested",
+      "gate-stopped",
+      "step-running",
+      "step-rejected",
+      "step-blocked",
+      "step-accepted",
+      "step-inherited-acceptance",
+      "slice-pending",
+      "slice-running",
+      "slice-review",
+      "slice-merged",
+      "slice-blocked",
+      "steering-boundary",
+      "steering-action-claim",
+      "steering-last-action",
       "post-pr-phase-disabled",
       "post-pr-phase-awaiting-pr",
       "post-pr-phase-observing",
@@ -398,6 +422,13 @@ describe("class-wide planning prompt contract", () => {
       "repair-blocked-from-repairing",
       "repair-blocked-from-review",
     ]) assert.match(schemaCatalog, literalPattern(`\`${variant}\``), `durable authority catalog missing variant ${variant}`);
+    assert.match(schemaCatalog, /does not persist a `gate` field; `story` is map-key metadata/i);
+    assert.match(schemaCatalog, /Only the interactive approved gate has the exact nested `handoff_receipt`/i);
+    assert.match(schemaCatalog, /separate external-source declarations rather than a `sidecar_bytes` member of the gate/i);
+    assert.match(schemaCatalog, /No step variant joins `rejected` and `blocked`/i);
+    assert.match(schemaCatalog, /no synthetic `review_binding`, `attempt_reviews`, or slice-level `reviewed_commit`/i);
+    assert.match(schemaCatalog, /validator source is exactly `\{verdict, report, review_ref\}` and the security source exactly `\{verdict, review_ref\}`/i);
+    assert.match(schemaCatalog, /`post_pr` does not gain invented action-token fields/i);
     assert.match(schemaCatalog, /defect path[\s\S]*owner\/consumer[\s\S]*plan\/owner snapshot[\s\S]*baseline[\s\S]*original evidence[\s\S]*repair evidence[\s\S]*reviewed commit and review bytes[\s\S]*review verdict[\s\S]*blocked reason[\s\S]*verification[\s\S]*merge commit and reviewed-tree equality[\s\S]*attempts[\s\S]*quiescence/i);
 
     for (const excluded of [

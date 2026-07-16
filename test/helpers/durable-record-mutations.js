@@ -54,29 +54,31 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
   ],
   "gates-snapshot-handoff": [
     "gate-pending",
-    "gate-decided",
-    "pending-snapshot",
-    "handoff-receipt",
+    "gate-approved-without-receipt",
+    "gate-approved-interactive",
+    "gate-changes-requested",
+    "gate-stopped",
   ],
   "steps-acceptance-inheritance": [
     "step-running",
-    "step-unaccepted",
+    "step-rejected",
+    "step-blocked",
     "step-accepted",
-    "step-acceptance-binding",
     "step-inherited-acceptance",
   ],
   "slices-review-evidence-bindings": [
-    "slice-pending-running",
+    "slice-pending",
+    "slice-running",
     "slice-review",
-    "slice-terminal",
-    "slice-review-binding",
-    "slice-attempt-review",
-    "slice-evidence-sidecar",
-    "slice-review-sidecar",
+    "slice-merged",
+    "slice-blocked",
   ],
   "validator-security-pr-result": [
     "validator-verdict-binding",
     "security-verdict-binding",
+    "steering-boundary",
+    "steering-action-claim",
+    "steering-last-action",
     "pr-created-result",
   ],
   "continuation-planning-draft-reuse": [
@@ -179,24 +181,26 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "terminal-result-blocked": "sktrhbd",
   "terminal-result-partial": "sktrhbd",
   "terminal-result-needs-human": "sktrhbd",
-  "gate-pending": "skthb",
-  "gate-decided": "skrhbd",
-  "pending-snapshot": "sk",
-  "handoff-receipt": "rd",
-  "step-running": "skthbd",
-  "step-unaccepted": "skthbd",
-  "step-accepted": "skthbd",
-  "step-acceptance-binding": "skt",
-  "step-inherited-acceptance": "sktd",
-  "slice-pending-running": "skthbd",
+  "gate-pending": "sk",
+  "gate-approved-without-receipt": "sk",
+  "gate-approved-interactive": "",
+  "gate-changes-requested": "sk",
+  "gate-stopped": "sk",
+  "step-running": "sktrhbd",
+  "step-rejected": "skthbd",
+  "step-blocked": "skthbd",
+  "step-accepted": "skt",
+  "step-inherited-acceptance": "skt",
+  "slice-pending": "sktrhbd",
+  "slice-running": "skthbd",
   "slice-review": "skthbd",
-  "slice-terminal": "skthbd",
-  "slice-review-binding": "skt",
-  "slice-attempt-review": "sktd",
-  "slice-evidence-sidecar": "sktd",
-  "slice-review-sidecar": "sktd",
-  "validator-verdict-binding": "sktd",
-  "security-verdict-binding": "sktd",
+  "slice-merged": "skhbd",
+  "slice-blocked": "skthbd",
+  "validator-verdict-binding": "skthbd",
+  "security-verdict-binding": "skthbd",
+  "steering-boundary": "srb",
+  "steering-action-claim": "srhb",
+  "steering-last-action": "srhb",
   "pr-created-result": "skthbd",
   "continuation-envelope": "rhbd",
   "continuation-parent-binding": "sktd",
@@ -290,24 +294,26 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["terminal-result-blocked", "cf62484459595b22423bfdaacca3954f445e39f508cbd62bbe67311ec78a2883"],
   ["terminal-result-partial", "b11084bfa5d9403d34f6a2751cc66a0a51fd98a6cc5156ce6c3644c4014e3398"],
   ["terminal-result-needs-human", "992f61185792a4b0ff618f95de3e98d8a44cfaa0ae1f6a36e407e68981f79a99"],
-  ["gate-pending", "b7b66cf36b8d08e52582b8be35c2ca7ea4767b7aaedaa5bf8aebe89d7529c129"],
-  ["gate-decided", "8c794a87320f6cd71f9cddd7b33f77401bdd7d72bd79788750b22f3754cc1d9e"],
-  ["pending-snapshot", "984557bdbe490de34a7dd2c818352c67ea364b87b6c0d7f02440919ed7213641"],
-  ["handoff-receipt", "a38eb0d4d1b94e600acde5925b66152b3928ed4731f38a2939a780b8e4e2c976"],
-  ["step-running", "7625f0de65b17ce30749be5aa29ec622fb0a8ba8416ee96fe86cac26c8331463"],
-  ["step-unaccepted", "ff4db10368f8fd5a31a52b241b6c5c6afa877c7ea0826f8fc71578ee377932ca"],
-  ["step-accepted", "5bf6680b3b0abe3862cf71b3045c12ed2eca9c9ee2ed03525a1bd16802a498d1"],
-  ["step-acceptance-binding", "757365cec128381ca272d8b74a360d8a71955868512556c63475dab609280279"],
-  ["step-inherited-acceptance", "aa9a362f77668d5995b13e4a2f293c41d3e43b81ec914042fa845180f1788a0d"],
-  ["slice-pending-running", "0c14ad7fd4bcda31653df9407abbf5965e77f96e25cb94254ccce4263f00004a"],
-  ["slice-review", "84178b8cd2cbb679addc6c0bd7645ed8827467ed7b92cbec572ea3e2ad7e981b"],
-  ["slice-terminal", "2307db507c40cb524e1949945974b9b1529cc5bdda8c8ccd0355dcb3e0fa2cb1"],
-  ["slice-review-binding", "a77ae12c990623809159cd97998991fe8b64ae604b7597399f8bb865b9a3fd95"],
-  ["slice-attempt-review", "adbcb782b4c8dc897cc041d65329c3a600f513562fcc9f0a3a627c7d63932ee8"],
-  ["slice-evidence-sidecar", "5f4e333a7c57fa236e792c3df5c332b49edb9fa9daff0abc8ceb8db9ea51542b"],
-  ["slice-review-sidecar", "053e2b04ec62f157e752725527b7442ef4d77d94e7d6d5fd75f43749561ad708"],
-  ["validator-verdict-binding", "8864cd3493cf3099c626370a12c7ad3e3696a4c8d178eaa44948ba2bb8e7c791"],
-  ["security-verdict-binding", "d38bbc76683bc50a6762d32a1b2e443d8dce6c6abfeefd46cd9d6d2974fdb932"],
+  ["gate-pending", "fed011780d644435b702f54dec1207d1b9d1a9990ce61c617c1a716c76ada680"],
+  ["gate-approved-without-receipt", "805e0dca68680ab259f17e6bb87d585114f4d9ae4c50bd9eeae23a329194bd32"],
+  ["gate-approved-interactive", "7eac2d735ca841d24003ff24c911b7efc1939fb7e16740f70da6b591189735e5"],
+  ["gate-changes-requested", "4a2085087fb628d88274a2a980c4835d2fbe6ca0ebc68a2b63574ac04e0baba9"],
+  ["gate-stopped", "b22015d0a2054d890e82b48fc7e4973cd76853327a2f973a1248f7e54d40e5dd"],
+  ["step-running", "71cca35dbbf733ff91d7b65c0a7fc79dc030e6d349f0df5482cebdd625a924eb"],
+  ["step-rejected", "d54549ecdbbda07370535e204db33722a56d1d958fa36af9e977fec2f2dc9f2b"],
+  ["step-blocked", "d3a8fc846c39704346d34938951062d884fb3e03eedb522bfd4e15161c26885a"],
+  ["step-accepted", "a10f57321f62fb099ae381316e62a2c089a83a89f160178400e7f3d994b1c699"],
+  ["step-inherited-acceptance", "c995fe9943a2898b6f9405e2a427f3de3b61d198f6d7b9d2edf46f177ff4f0f9"],
+  ["slice-pending", "27d978f06a5d77e19f3293902f5ef98a674bd920b35b39a0a56519f48b40b586"],
+  ["slice-running", "d5e779da2618570c2922ff58dc14927a60548dc770616322812912c6c4ada981"],
+  ["slice-review", "41720bafc18e26be8e3436847af90b7e5abebce5b03ca5ad586ddc99bb24882c"],
+  ["slice-merged", "701f657cad3c72f4b2b4294481e6c1d2d35131cf0ed5cff5b761cc4a218b37aa"],
+  ["slice-blocked", "bfb537c4489fa0d6512d0470e5a28ab6fabeea5dfb2f86fb53ae11a6057fe954"],
+  ["validator-verdict-binding", "7d3b598a5ef8e1a6561ecf770a8a8ff1ea58b98ee8eaa2edbb3cf82f1d0cdea8"],
+  ["security-verdict-binding", "991f75d168c8b232dd78e556444f0446e150a697359ab3dc6ce334bd864a0fd2"],
+  ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
+  ["steering-action-claim", "9a94c1f05fec7cad1d2930995c464530088b99175c8430f336fe4f00a76d7384"],
+  ["steering-last-action", "986caa05859db8fa98077f1d3e0b08340be3922854cb5cd33a95415fd5b250b4"],
   ["pr-created-result", "2f2e6d8928fcdfdcef9af2f8de587a77691ee293ab3493d305b0602b7ed5ab47"],
   ["continuation-envelope", "7823394893cbcbbba6eca035374d770a58d3ad9e58c4fefa6a9f8070cb094669"],
   ["continuation-parent-binding", "0b4ff0fed34cbc4ba986fca22f53b2125b7ac01e3edce8f1ac85babcee366076"],
@@ -403,24 +409,26 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["terminal-result-blocked", "9e2aac2293e6a2aa0ff69725ec484565d1ba598e4f921be01c44267eaab6d231"],
   ["terminal-result-partial", "c7c56d99562df246e6e5219fb7ca002924103fea7be86bc2cab1b8c04eada6f6"],
   ["terminal-result-needs-human", "f10e0e1b566924c9b223e63b30426d6004b3210b0be12d884c63ec42310af5b9"],
-  ["gate-pending", "d70533c9fc537f05cbde547e86f10c506e3f76d3d2afe7173122753ea333bfe6"],
-  ["gate-decided", "e8a5f0aa5c350559d9dedb3c26815837d375ffdf169e89ca7dd0c5a493dff49a"],
-  ["pending-snapshot", "78e4bb00d1b6b13bff01a2d917ce073f85eb27fa7f34aeede96ab839ceb49217"],
-  ["handoff-receipt", "58e23ebcd17030b2cfa4866b0019183eee886d33130309abae4239043a54bcb6"],
-  ["step-running", "c3c0602fa5bb98c69173989ce208f621a32f97d194ea33973954d5b49a4e6e7b"],
-  ["step-unaccepted", "5e848d9b66c052700f913cec70973f9540f8353116442f379a818b3885d95b91"],
-  ["step-accepted", "3410950dfd62131d5b0bb2af4b6edba1299a2a5ed9b966942c8702ec0efb3b6f"],
-  ["step-acceptance-binding", "2add010067f1fac89b2a813351a5b2bfdeac8249a950dc2c92bf63081f144e8d"],
-  ["step-inherited-acceptance", "89f696795438daef31ea897ff192d4290d8222917b908c819c674fa890aaf77e"],
-  ["slice-pending-running", "3acddfcce109c5a9eb9b4273ec7248d5775502bda046b9583216d2ae84648a3f"],
-  ["slice-review", "6bd682fac2d47133137131621f0e2257cbcda4426ff452e3151da2818b87c121"],
-  ["slice-terminal", "3099c5701e189d736b24bb8e0a5e680c128d189725082dceddf07d22edadc88b"],
-  ["slice-review-binding", "9760b016740fa49cb973b37306bc7063aa7d7ba0877b31fac495f5befc90b260"],
-  ["slice-attempt-review", "687aa6cd4f82f5dfe53a31edc61d99d169f0825879a2994f0f20ae8c404627c7"],
-  ["slice-evidence-sidecar", "dee23812ff8fab1766d3a97fbe23f81ecb9031fe6c324050567e30fc704e04e4"],
-  ["slice-review-sidecar", "8b384799deb03803bb75ee60c8cc714751728c1a329fa2f27f288bf1985be3f4"],
-  ["validator-verdict-binding", "e7cb4828eeb247f0bec58bce65cc8efd15e770602d9bb16787c9fea1e71ab018"],
-  ["security-verdict-binding", "788a30ee97790fb5f9ba09915a2a281fb58ac542d15fe5bbf906548ffe45d110"],
+  ["gate-pending", "835e6fc742db694c150c376cda0fe966ac154aa42770291300c75c7313600fd5"],
+  ["gate-approved-without-receipt", "8fa56f284b7b92934a67321c413cd56060be8f06738de9ca3f6c8e0160e66996"],
+  ["gate-approved-interactive", "a80a37b5235571916e1d8c9f4090b21dacd9d486d5cbcef9162d5e2a4c0f7c50"],
+  ["gate-changes-requested", "ea2cd6dc2b3eac74a06c1dcc787c07261eb3ba5b6a0d738b03f70d7fc5766cf6"],
+  ["gate-stopped", "aefd971b43475ce72ebc774851877c8ee41fb9f1f4aaea2755204f9b95147ce1"],
+  ["step-running", "d81cad11e94cf0a75dea629f6fbccf0f50eba87aaea3ebe0c5fd69351f64a64c"],
+  ["step-rejected", "a61fead311954856883b3876e50c14e41256951a84fb5550bd2184e3712753fa"],
+  ["step-blocked", "68ee4697dcb1a92d8ba39e32d9091eeeb0e74c03818da5cf53ca8c2bf25c3f43"],
+  ["step-accepted", "97e66ed649228d838c04a83131ce246ad1472f0c746d011bee0a092ac6788e76"],
+  ["step-inherited-acceptance", "e7082238c899dd951eded88256c75543c4703350d8b8b46b7eca11d3db939771"],
+  ["slice-pending", "63b63efe898da669ae80a855536c52a7f00a0009a0465a2ec6cee66477b11f50"],
+  ["slice-running", "e4d226476601e984b5b50f12ad36ce05f8a7e3ac3a49421218b72a94be54c962"],
+  ["slice-review", "15a385a34305ad1bd2b1b54a8bc9da5ef5643577757b42534b03b57163516a01"],
+  ["slice-merged", "69834bbeb702e60070896c61ef0389d5c4a3b8544fef1a82ce2b1548b2e78ace"],
+  ["slice-blocked", "284ac69650ab3643fab2f8aece086a1a16c66f106449b29e3003848f9e53cd11"],
+  ["validator-verdict-binding", "a8bf0eeca21686570472e43a2fa667e385c132bda80d7082b18aa9d7a7a313fd"],
+  ["security-verdict-binding", "c3ae8bc0f5878b51663f5fe8ba71b67e393f01b03ac19ca9f3f36a6c44437d17"],
+  ["steering-boundary", "e019b4c2cc32e414dfeafd814b54aa4a73956d14924ef9c33837d187ec79a63f"],
+  ["steering-action-claim", "0acedda0cd1d2cf887d58482c179d90183e43650546d3e919b5f5cee92627b4f"],
+  ["steering-last-action", "8d42d520ec811dad436e84cdc48b7ae6d2f13a442fdef2ba6397b13bdea16e67"],
   ["pr-created-result", "e37d53a5fb2e8a6007aa845a0b6dd1d18534ef406cd66e899b9f6c5568b30dbb"],
   ["continuation-envelope", "6bf3fb70f927af981715950d3e2d264bd72902599c95e07f82b01897fc4e05c9"],
   ["continuation-parent-binding", "2b011867bd950f95457ed8d4073d30911d3a9b85b579c20cb5b9301cae88220a"],
@@ -504,9 +512,62 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
 ]);
 const DURABLE_AUTHORITY_DESCRIPTOR_BY_ID = new Map(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST);
 
-export function emitDurableRecordMutations(source, descriptor) {
+const CANONICAL_CORE_RECORD_IDS = Object.freeze([
+  "gate-pending",
+  "gate-approved-without-receipt",
+  "gate-approved-interactive",
+  "gate-changes-requested",
+  "gate-stopped",
+  "step-running",
+  "step-rejected",
+  "step-blocked",
+  "step-accepted",
+  "step-inherited-acceptance",
+  "slice-pending",
+  "slice-running",
+  "slice-review",
+  "slice-merged",
+  "slice-blocked",
+  "validator-verdict-binding",
+  "security-verdict-binding",
+  "steering-boundary",
+  "steering-action-claim",
+  "steering-last-action",
+]);
+const CANONICAL_CORE_RECORD_ID_SET = new Set(CANONICAL_CORE_RECORD_IDS);
+
+// Independently authored exact-value commitments over class/id placement, persisted
+// record/variant labels, canonical run path, exact persisted source shape, authority
+// fact declarations, and separately modeled external source bytes. These digests are
+// literals rather than values derived from RECORDS or DURABLE_AUTHORITY_CATALOG.
+export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
+  ["gate-pending", "802c580efe10eaa5728775d05bb1f088c4831455b3763763b9daf3885c6442f4"],
+  ["gate-approved-without-receipt", "9df0792243e07d8ee3ce2efb420e688522e78d645350806a54399294f810113d"],
+  ["gate-approved-interactive", "d02715d4e0cf1db63f2cdbfae3770c0e959dfb48f6c14658bc9f43e6c99b5911"],
+  ["gate-changes-requested", "d96271b80dceff6d730fca729958c56189052861e62eea50b98cb975cad4de55"],
+  ["gate-stopped", "c48d58bed8be553eb2d48eac7ea40a38a002b98d2e62602721be8e6df5ba43a9"],
+  ["step-running", "f856e67b5458b8b653194fcc014513e748eccc868d2c9e7d815a905d0373d846"],
+  ["step-rejected", "4012aaf36e583d5636a126cdc40a36ddc3fabf32e1a150503dd6ee62d317fd87"],
+  ["step-blocked", "8d9ce53c44e2bccca8b3555f4906bedf95fc91de76ee37fd886d47ad64942ad6"],
+  ["step-accepted", "29ad392882b94a0bc78a5b0bac4df748cae19d80965e6a0c62cc758df8fd89c0"],
+  ["step-inherited-acceptance", "ba9a7a06a122aa68917e10675cf6b2ec97eab054ab7f40353904ef16ef226657"],
+  ["slice-pending", "ae8061ad556cf202f28c06dad1d8dfaf84168512be57e8dae034984926ad766b"],
+  ["slice-running", "c481d007f40269d98676cf2746db9a5ab4b15ffb1cafe92fc9d0569181cef758"],
+  ["slice-review", "31e86b5e7350fbd821b7b8610094a88c6466cf5f3118c764c93f91e106e9f45b"],
+  ["slice-merged", "9d7340108931879b7f6f6c9f4e17c3bdf02986512313cf1e4d2850ce50e79e7e"],
+  ["slice-blocked", "720be910a4201dab3958263b06f17510181df9c58c77f63eda5b9a91bb39da10"],
+  ["validator-verdict-binding", "020e2ed5ec2a49bc0842a0b066f249cd6a15d289a732d94fcb2d8aa84b59993c"],
+  ["security-verdict-binding", "f05baff5db20222f94b68cdfd6cdf8680af764c3497ea085d8631036b77eadba"],
+  ["steering-boundary", "b3477a6967254d04f869b97b8d15d00ddb952673f00807ebec41f05afdbdacfc"],
+  ["steering-action-claim", "00866d18d439d808d2829e6d0967675629175bf8c1f00bec2130fa2728b30a21"],
+  ["steering-last-action", "4fc3088a51000b12aed4ca3216c8e60b74c5206d8d9e75e4dea319cb31c62820"],
+]);
+const DURABLE_AUTHORITY_CANONICAL_SOURCE_BY_ID = new Map(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST);
+
+export function emitDurableRecordMutations(source, descriptor, externalSources = {}) {
   requireRecord(source, "source");
   requireRecord(descriptor, "descriptor");
+  requireRecord(externalSources, "externalSources");
   const recordName = requireText(descriptor.record, "descriptor.record");
   if (!Array.isArray(descriptor.targets)) throw new TypeError("descriptor.targets must be an array");
   requireRecord(descriptor.exclusions, "descriptor.exclusions");
@@ -537,8 +598,13 @@ export function emitDurableRecordMutations(source, descriptor) {
 
     for (const mutationTarget of targets) {
       const record = structuredClone(source);
+      const mutatedExternalSources = structuredClone(externalSources);
       try {
-        applyMutation(record, family, mutationTarget);
+        const targetRoot = mutationTarget.path[0] === "$external" ? mutatedExternalSources : record;
+        const targetDefinition = mutationTarget.path[0] === "$external"
+          ? { ...mutationTarget, path: mutationTarget.path.slice(1) }
+          : mutationTarget;
+        applyMutation(targetRoot, family, targetDefinition);
       } catch (error) {
         throw new TypeError(`${recordName}: ${error.message}`, { cause: error });
       }
@@ -548,6 +614,7 @@ export function emitDurableRecordMutations(source, descriptor) {
         family,
         recordName,
         record,
+        externalSources: mutatedExternalSources,
       });
     }
   }
@@ -566,6 +633,7 @@ export function assertDurableAuthorityCatalogComplete(catalog) {
   if (!sameList(DURABLE_AUTHORITY_METADATA_MANIFEST.map(([id]) => id), expectedManifestIds)) throw new TypeError("independent metadata manifest must contain every required record id exactly once in source order");
   if (!sameList(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), expectedManifestIds)) throw new TypeError("independent descriptor manifest must contain every required record id exactly once in source order");
   if (!sameList(Object.keys(EXPLICIT_EXCLUDED_FAMILY_CODES), expectedManifestIds)) throw new TypeError("explicit family disposition registry must contain every required record id exactly once in source order");
+  if (!sameList(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id), CANONICAL_CORE_RECORD_IDS)) throw new TypeError("independent canonical source manifest must contain every canonical core record id exactly once in source order");
 
   const seenRecordIds = new Set();
   for (const authorityClass of catalog) {
@@ -595,7 +663,9 @@ export function assertDurableAuthorityCatalogComplete(catalog) {
       const expectedDescriptorHash = DURABLE_AUTHORITY_DESCRIPTOR_BY_ID.get(record.id);
       const actualDescriptorHash = descriptorHash(record.descriptor);
       if (actualDescriptorHash !== expectedDescriptorHash) throw new TypeError(`${path} mutation target definitions and exclusions must exactly match the independent descriptor manifest`);
-      emitDurableRecordMutations(record.source, record.descriptor);
+      if (CANONICAL_CORE_RECORD_ID_SET.has(record.id)) validateCanonicalCoreRecord(record, path);
+      else if (record.canonicalPath !== undefined || record.externalSources !== undefined) throw new TypeError(`${path} canonical source declarations are reserved for the registered core source manifest`);
+      emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
       validateRecordSidecars(record, path);
     }
   }
@@ -639,81 +709,29 @@ const RECORDS = [
   terminalResultEntry("terminal-result-partial", "partial", { reason: "partial-completion", summary: "Some work completed." }),
   terminalResultEntry("terminal-result-needs-human", "needs-human", { reason: "operator-reconciliation", summary: "Operator action required." }),
 
-  recordEntry({
-    authorityClassId: "gates-snapshot-handoff", id: "gate-pending", record: "run.json.gates.<gate>", variant: "pending",
-    writer: "transitionGateDecision pending transition",
-    readers: ["validateRun gate validation", "transitionGateDecision decision admission", "approval handoff eligibility", "resume and protected-gate readers"],
-    source: { gate: "story", status: "pending", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer_ref: "gates/story.answer", pending_snapshot: {} },
-    requiredPath: ["status"], typePath: ["pending_snapshot"], targets: [ref(["artifact"]), stale(["status"], "approved"), cross(["gate"], "brief"), drift([], "question_ref", "question")],
-  }),
-  recordEntry({
-    authorityClassId: "gates-snapshot-handoff", id: "gate-decided", record: "run.json.gates.<gate>", variant: "approved/changes_requested/stopped",
-    writer: "transitionGateDecision checked decision transition",
-    readers: ["validateRun gate validation", "assertPrCreatedReadiness", "approval handoff eligibility", "step and terminal boundary guards"],
-    source: { gate: "story", status: "approved", answer: "approve", approval_source: "external-driver", answered_at: NOW, handoff_receipt: null },
-    requiredPath: ["status"], typePath: ["approval_source"], targets: [time(["answered_at"]), stale(["status"], "pending"), cross(["gate"], "pre_pr")],
-  }),
-  recordEntry({
-    authorityClassId: "gates-snapshot-handoff", id: "pending-snapshot", record: "pending_snapshot", variant: "question/artifact/answer bindings",
-    writer: "createPendingGateSnapshot inside transitionGateDecision",
-    readers: ["validatePendingSnapshot", "transitionGateDecision fresh byte recheck", "validateApprovalHandoffReceipt"],
-    source: { question_ref: "gates/story.question.md", question_hash: HASH_A, artifact_ref: "artifacts/story.md", artifact_hash: HASH_B, answer_ref: "gates/story.answer", answer_hash: HASH_C, created_at: NOW, sidecar_bytes: { question: "question", artifact: "story", answer: "approve\n" } },
-    requiredPath: ["question_ref"], typePath: ["answer_hash"], sidecars: [sidecar("question", ["question_ref"], ["question_hash"], ["sidecar_bytes", "question"]), sidecar("artifact", ["artifact_ref"], ["artifact_hash"], ["sidecar_bytes", "artifact"]), sidecar("answer", ["answer_ref"], ["answer_hash"], ["sidecar_bytes", "answer"])],
-    targets: [time(["created_at"]), ...sidecarTargets("question", ["question_ref"], ["question_hash"], ["sidecar_bytes", "question"]), ...sidecarTargets("artifact", ["artifact_ref"], ["artifact_hash"], ["sidecar_bytes", "artifact"]), ...sidecarTargets("answer", ["answer_ref"], ["answer_hash"], ["sidecar_bytes", "answer"]), drift([], "artifact_ref", "artifact"), stale(["answer_hash"], HASH_A), cross(["question_ref"], "gates/brief.question.md")],
-  }),
-  recordEntry({
-    authorityClassId: "gates-snapshot-handoff", id: "handoff-receipt", record: "handoff_receipt", variant: "interactive approval bound",
-    writer: "createApprovalHandoffReceipt inside transitionGateDecision",
-    readers: ["validateGateHandoffReceipt", "validateApprovalHandoffReceipt", "transitionGateDecisionAndHandoff launch admission"],
-    source: { schema_version: 1, kind: "interactive-approval-handoff", gate: "story", approval_fingerprint: HASH_A, pending_snapshot_hash: HASH_B, answer_hash: HASH_C, steering_generation: 0, accepted_at: NOW, sidecar_bytes: { pending_snapshot: "snapshot", answer: "approve\n" } },
-    requiredPath: ["kind"], typePath: ["steering_generation"], sidecars: [sidecar("pending-snapshot", null, ["pending_snapshot_hash"], ["sidecar_bytes", "pending_snapshot"]), sidecar("answer", null, ["answer_hash"], ["sidecar_bytes", "answer"])],
-    targets: [schema(["schema_version"]), kind(["kind"], "approval"), time(["accepted_at"]), hash(["pending_snapshot_hash"], "pending-snapshot"), bytes(["sidecar_bytes", "pending_snapshot"], "pending-snapshot"), hash(["answer_hash"], "answer"), bytes(["sidecar_bytes", "answer"], "answer"), stale(["steering_generation"], -1), cross(["gate"], "brief")],
-  }),
+  gateEntry("gate-pending", "pending"),
+  gateEntry("gate-approved-without-receipt", "approved-without-receipt"),
+  gateEntry("gate-approved-interactive", "approved-interactive"),
+  gateEntry("gate-changes-requested", "changes_requested"),
+  gateEntry("gate-stopped", "stopped"),
 
-  stepEntry("step-running", "running", null, null),
-  stepEntry("step-unaccepted", "rejected/blocked", null, null),
-  stepEntry("step-accepted", "accepted", { artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json" }, null),
-  recordEntry({
-    authorityClassId: "steps-acceptance-inheritance", id: "step-acceptance-binding", record: "steps[].acceptance", variant: "artifact and optional review bound",
-    writer: "transitionRunStep accepted transition",
-    readers: ["validateRun step acceptance validation", "continuationPlanningReuse", "adoptContinuationPlanning", "accepted planning consumers"],
-    source: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: HASH_A, review_ref: "reviews/spec-writer.json", review_hash: HASH_B, sidecar_bytes: { artifact: "brief", review: "approve" } },
-    requiredPath: ["artifact_ref"], typePath: ["artifact_hash"], sidecars: [sidecar("artifact", ["artifact_ref"], ["artifact_hash"], ["sidecar_bytes", "artifact"]), sidecar("review", ["review_ref"], ["review_hash"], ["sidecar_bytes", "review"])],
-    targets: [...sidecarTargets("artifact", ["artifact_ref"], ["artifact_hash"], ["sidecar_bytes", "artifact"]), ...sidecarTargets("review", ["review_ref"], ["review_hash"], ["sidecar_bytes", "review"]), drift([], "artifact_ref", "artifact"), stale(["artifact_hash"], HASH_C), cross(["review_ref"], "reviews/security-reviewer.json")],
-  }),
-  recordEntry({
-    authorityClassId: "steps-acceptance-inheritance", id: "step-inherited-acceptance", record: "steps[].inherited_acceptance", variant: "parent acceptance adopted",
-    writer: "adoptContinuationPlanning checked adoption transition",
-    readers: ["validateStepInheritedAcceptance", "continuation planning consumers", "blocked-run continuation audit readers"],
-    source: { from_run_id: "parent-run", parent_spec_review_ref: "reviews/spec-writer.json", artifact_hash: HASH_A, review_hash: HASH_B, sidecar_bytes: { artifact: "brief", review: "approve" } },
-    requiredPath: ["from_run_id"], typePath: ["artifact_hash"], sidecars: [sidecar("artifact", null, ["artifact_hash"], ["sidecar_bytes", "artifact"]), sidecar("review", ["parent_spec_review_ref"], ["review_hash"], ["sidecar_bytes", "review"])],
-    targets: [hash(["artifact_hash"], "artifact"), bytes(["sidecar_bytes", "artifact"], "artifact"), ...sidecarTargets("review", ["parent_spec_review_ref"], ["review_hash"], ["sidecar_bytes", "review"]), stale(["from_run_id"], "stale-parent"), cross(["parent_spec_review_ref"], "reviews/other-run.json")],
-  }),
+  stepEntry("step-running", "running"),
+  stepEntry("step-rejected", "rejected"),
+  stepEntry("step-blocked", "blocked"),
+  stepEntry("step-accepted", "accepted"),
+  stepEntry("step-inherited-acceptance", "inherited-acceptance"),
 
-  sliceEntry("slice-pending-running", "pending/running", { status: "running", attempts: 1 }),
-  sliceEntry("slice-review", "review", { status: "review", attempts: 1, evidence_ref: "evidence/backend.json", review_ref: "reviews/backend.json" }),
-  sliceEntry("slice-terminal", "merged/blocked", { status: "merged", attempts: 1, merge_commit: SHA_B }),
-  recordEntry({
-    authorityClassId: "slices-review-evidence-bindings", id: "slice-review-binding", record: "slices[].review_binding", variant: "current attempt review bound",
-    writer: "transitionRunSlice review transition",
-    readers: ["validateRun slice validation", "transitionSliceMerged", "slice remediation/review replay readers"],
-    source: { attempt: 2, subject: "backend", reviewed_commit: SHA_B, review_ref: "reviews/backend.attempt-2.json", review_hash: HASH_A, sidecar_bytes: "approve" },
-    requiredPath: ["attempt"], typePath: ["reviewed_commit"], sidecars: [sidecar("review", ["review_ref"], ["review_hash"], ["sidecar_bytes"])],
-    targets: [...sidecarTargets("review", ["review_ref"], ["review_hash"], ["sidecar_bytes"]), drift([], "review_ref", "ref"), stale(["attempt"], 1), cross(["subject"], "frontend")],
-  }),
-  recordEntry({
-    authorityClassId: "slices-review-evidence-bindings", id: "slice-attempt-review", record: "slices[].attempt_reviews[]", variant: "append-only prior attempt",
-    writer: "transitionRunSlice review/rejection transition",
-    readers: ["validateRun slice attempt history", "work-review remediation routing", "transitionSliceMerged current-attempt checks"],
-    source: { attempt: 1, subject: "backend", review_ref: "reviews/backend.attempt-1.json", review_hash: HASH_A, verdict: "REJECT", sidecar_bytes: "reject" },
-    requiredPath: ["attempt"], typePath: ["verdict"], sidecars: [sidecar("review", ["review_ref"], ["review_hash"], ["sidecar_bytes"])],
-    targets: [...sidecarTargets("review", ["review_ref"], ["review_hash"], ["sidecar_bytes"]), stale(["attempt"], 0), cross(["subject"], "other-slice")],
-  }),
-  sidecarRecord("slices-review-evidence-bindings", "slice-evidence-sidecar", "evidence/<slice>.json", "slice evidence", "transitionRunSlice review transition", ["transitionRunSlice review admission", "work-reviewer evidence truth checks", "transitionSliceMerged"], "evidence/backend.attempt-2.json", "{\"status\":\"pass\"}"),
-  sidecarRecord("slices-review-evidence-bindings", "slice-review-sidecar", "reviews/<slice>.json", "slice review", "transitionRunSlice review binding", ["transitionRunSlice review admission", "transitionSliceMerged", "remediation attempt routing"], "reviews/backend.attempt-2.json", "{\"verdict\":\"APPROVE\"}"),
+  sliceEntry("slice-pending", "pending"),
+  sliceEntry("slice-running", "running"),
+  sliceEntry("slice-review", "review"),
+  sliceEntry("slice-merged", "merged"),
+  sliceEntry("slice-blocked", "blocked"),
 
-  panelEntry("validator-verdict-binding", "run.json.validator", "implementation-validator", "GO", "artifacts/validation-report.md", "reviews/implementation-validator.json", "factory verdicts checked transition", ["assertPrCreatedReadiness", "post-PR revalidation", "terminal/panel remediation routing"]),
-  panelEntry("security-verdict-binding", "run.json.security_review", "security-reviewer", "PASS", null, "reviews/security-reviewer.json", "factory verdicts checked transition", ["assertPrCreatedReadiness", "post-PR revalidation", "terminal/panel remediation routing"]),
+  panelEntry("validator-verdict-binding", "run.json.validator", "validator", { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" }),
+  panelEntry("security-verdict-binding", "run.json.security_review", "security_review", { verdict: "PASS", review_ref: "reviews/security-reviewer.json" }),
+  steeringEntry("steering-boundary", "boundary"),
+  steeringEntry("steering-action-claim", "action_claim"),
+  steeringEntry("steering-last-action", "last_action"),
   recordEntry({
     authorityClassId: "validator-security-pr-result", id: "pr-created-result", record: "PR-created terminal_result", variant: "completed external PR",
     writer: "transitionPrCreated after fenced external PR creation/re-observation",
@@ -876,24 +894,203 @@ function terminalResultEntry(id, status, extras, targets = []) {
   });
 }
 
-function stepEntry(id, variant, acceptance, inheritedAcceptance) {
-  const status = id === "step-running" ? "running" : id === "step-accepted" ? "accepted" : "rejected";
+function gateEntry(id, variant) {
+  const artifactRef = "artifacts/story.md";
+  const questionRef = "gates/story.question.md";
+  const pendingAnswerRef = "gates/story.answer";
+  const artifactBytes = "Approved story bytes.\n";
+  const questionBytes = "Approve this story?\n";
+  const snapshot = {
+    question_ref: questionRef,
+    question_hash: hashBytes(questionBytes),
+    artifact_ref: artifactRef,
+    artifact_hash: hashBytes(artifactBytes),
+    answer_ref: pendingAnswerRef,
+    created_at: NOW,
+  };
+  const pending = variant === "pending";
+  const interactive = variant === "approved-interactive";
+  const status = variant.startsWith("approved") ? "approved" : variant;
+  const answer = status === "approved" ? "approve" : status === "changes_requested" ? "changes: revise scope" : status === "stopped" ? "stop" : null;
+  const answerBytes = pending ? null : `${answer}\n`;
+  const answerRef = pending ? pendingAnswerRef : `${pendingAnswerRef}.consumed-1`;
+  const source = pending
+    ? { status, artifact: artifactRef, question_ref: questionRef, answer_ref: answerRef, pending_snapshot: snapshot }
+    : { status, artifact: artifactRef, question_ref: questionRef, answer_ref: answerRef, approval_source: "external-driver", answered_at: NOW, answer, pending_snapshot: snapshot };
+  if (interactive) {
+    const receipt = {
+      schema_version: 1,
+      kind: "interactive-approval-handoff",
+      gate: "story",
+      approval_fingerprint: "",
+      pending_snapshot_hash: hashCanonical(snapshot),
+      answer_hash: hashBytes(answerBytes),
+      steering_generation: 2,
+      accepted_at: NOW,
+    };
+    receipt.approval_fingerprint = hashCanonical({
+      gate: "story", status: source.status, artifact: source.artifact, question_ref: source.question_ref,
+      answer_ref: source.answer_ref, answer: source.answer, approval_source: source.approval_source,
+      decision_note: null, answered_at: source.answered_at, pending_snapshot_hash: receipt.pending_snapshot_hash,
+      answer_hash: receipt.answer_hash, steering_generation: receipt.steering_generation, accepted_at: receipt.accepted_at,
+    });
+    source.handoff_receipt = receipt;
+  }
+  const externalSources = {
+    artifact: { ref: artifactRef, bytes: artifactBytes },
+    question: { ref: questionRef, bytes: questionBytes },
+    answer: { ref: answerRef, bytes: answerBytes },
+  };
+  const sidecars = [
+    externalSidecar("artifact", ["pending_snapshot", "artifact_ref"], ["pending_snapshot", "artifact_hash"]),
+    externalSidecar("question", ["pending_snapshot", "question_ref"], ["pending_snapshot", "question_hash"]),
+  ];
+  const targets = [
+    time(["pending_snapshot", "created_at"]),
+    ...externalSidecarTargets("artifact", ["pending_snapshot", "artifact_ref"], ["pending_snapshot", "artifact_hash"]),
+    ...externalSidecarTargets("question", ["pending_snapshot", "question_ref"], ["pending_snapshot", "question_hash"]),
+    drift(["pending_snapshot"], "artifact_ref", "artifact"),
+    stale(["status"], pending ? "approved" : "pending"),
+    cross(["answer_ref"], "gates/brief.answer.consumed-1"),
+  ];
+  if (!pending) {
+    const answerHashPath = interactive ? ["handoff_receipt", "answer_hash"] : null;
+    sidecars.push(externalSidecar("answer", ["answer_ref"], answerHashPath));
+    targets.push(time(["answered_at"]), ...externalSidecarTargets("answer", ["answer_ref"], answerHashPath));
+  }
+  if (interactive) {
+    targets.push(
+      schema(["handoff_receipt", "schema_version"]),
+      kind(["handoff_receipt", "kind"], "approval"),
+      time(["handoff_receipt", "accepted_at"]),
+      hash(["handoff_receipt", "pending_snapshot_hash"], "pending-snapshot"),
+    );
+  }
   return recordEntry({
-    authorityClassId: "steps-acceptance-inheritance", id, record: "run.json.steps[]", variant,
-    writer: "transitionRunStep checked step transition",
-    readers: ["validateRun step validation", "workflow dispatch/acceptance routing", "test-verifier and continuation eligibility readers"],
-    source: { agent: "spec-writer", status, attempts: 1, artifact_ref: "artifacts/technical-brief.md", review_ref: status === "running" ? null : "reviews/spec-writer.json", acceptance, inherited_acceptance: inheritedAcceptance },
-    requiredPath: ["agent"], typePath: ["attempts"], targets: [ref(["artifact_ref"]), stale(["attempts"], 0), cross(["agent"], "security-reviewer")],
+    authorityClassId: "gates-snapshot-handoff", id, record: "run.json.gates.story", variant,
+    writer: pending ? "transitionGateDecision pending transition" : "transitionGateDecision checked decision transition",
+    readers: ["validateRun gate validation", "transitionGateDecision decision admission", "approval handoff eligibility", "resume and protected-gate readers"],
+    canonicalPath: ["gates", "story"], source, externalSources, sidecars,
+    facts: [
+      fact(["status"], status), fact(["artifact"], artifactRef), fact(["question_ref"], questionRef), fact(["answer_ref"], answerRef),
+      fact(["pending_snapshot", "question_ref"], questionRef), fact(["pending_snapshot", "question_hash"], snapshot.question_hash),
+      fact(["pending_snapshot", "artifact_ref"], artifactRef), fact(["pending_snapshot", "artifact_hash"], snapshot.artifact_hash),
+      fact(["pending_snapshot", "answer_ref"], pendingAnswerRef), fact(["pending_snapshot", "created_at"], NOW),
+      ...(!pending ? [fact(["answer"], answer), fact(["approval_source"], "external-driver"), fact(["answered_at"], NOW)] : []),
+      ...(interactive ? [
+        fact(["handoff_receipt", "kind"], "interactive-approval-handoff"), fact(["handoff_receipt", "gate"], "story"),
+        fact(["handoff_receipt", "pending_snapshot_hash"], source.handoff_receipt.pending_snapshot_hash),
+        fact(["handoff_receipt", "answer_hash"], source.handoff_receipt.answer_hash),
+        fact(["handoff_receipt", "steering_generation"], 2), fact(["handoff_receipt", "accepted_at"], NOW),
+      ] : []),
+    ],
+    requiredPath: ["status"], typePath: pending ? ["pending_snapshot"] : ["approval_source"], targets,
   });
 }
 
-function sliceEntry(id, variant, extras) {
+function stepEntry(id, variant) {
+  const status = variant === "inherited-acceptance" ? "accepted" : variant;
+  const source = { agent: "spec-writer", status, attempts: 1 };
+  const targets = [stale(["attempts"], 0), cross(["agent"], "security-reviewer")];
+  let sidecars = [];
+  let externalSources = {};
+  if (["rejected", "blocked", "accepted", "inherited-acceptance"].includes(variant)) {
+    source.artifact_ref = "artifacts/technical-brief.md";
+    source.review_ref = "reviews/spec-writer.json";
+    targets.push(ref(["artifact_ref"]), ref(["review_ref"]));
+  }
+  if (["accepted", "inherited-acceptance"].includes(variant)) {
+    const artifactBytes = "Canonical technical brief.\n";
+    const reviewBytes = "{\"verdict\":\"APPROVE\"}\n";
+    source.acceptance = {
+      artifact_ref: source.artifact_ref,
+      artifact_hash: hashBytes(artifactBytes),
+      review_ref: source.review_ref,
+      review_hash: hashBytes(reviewBytes),
+    };
+    externalSources = {
+      artifact: { ref: source.artifact_ref, bytes: artifactBytes },
+      review: { ref: source.review_ref, bytes: reviewBytes },
+    };
+    sidecars = [
+      externalSidecar("artifact", ["acceptance", "artifact_ref"], ["acceptance", "artifact_hash"]),
+      externalSidecar("review", ["acceptance", "review_ref"], ["acceptance", "review_hash"]),
+    ];
+    targets.push(
+      ...externalSidecarTargets("artifact", ["acceptance", "artifact_ref"], ["acceptance", "artifact_hash"]),
+      ...externalSidecarTargets("review", ["acceptance", "review_ref"], ["acceptance", "review_hash"]),
+      drift(["acceptance"], "artifact_ref", "artifact"),
+    );
+  }
+  if (variant === "inherited-acceptance") {
+    source.inherited_acceptance = {
+      from_run_id: "parent-run",
+      parent_spec_review_ref: "reviews/spec-writer.json",
+      artifact_hash: source.acceptance.artifact_hash,
+      review_hash: source.acceptance.review_hash,
+    };
+    targets.push(
+      target("wrong-hash", ["inherited_acceptance", "artifact_hash"], "inherited artifact hash", { value: "sha256:short", sidecar: "artifact" }),
+      target("wrong-hash", ["inherited_acceptance", "review_hash"], "inherited review hash", { value: "sha256:short", sidecar: "review" }),
+      target("wrong-ref", ["inherited_acceptance", "parent_spec_review_ref"], "parent review ref", { value: "../outside.json", sidecar: "review" }),
+      stale(["inherited_acceptance", "from_run_id"], "stale-parent"),
+    );
+  }
+  return recordEntry({
+    authorityClassId: "steps-acceptance-inheritance", id, record: "run.json.steps[]", variant,
+    writer: variant === "inherited-acceptance" ? "adoptContinuation checked adoption transition through transitionRunStep" : "transitionRunStep checked step transition",
+    readers: ["validateRun step validation", "workflow dispatch/acceptance routing", "test-verifier and continuation eligibility readers"],
+    canonicalPath: ["steps", 0], source, externalSources, sidecars,
+    facts: [
+      fact(["agent"], "spec-writer"), fact(["status"], status), fact(["attempts"], 1),
+      ...("artifact_ref" in source ? [fact(["artifact_ref"], source.artifact_ref), fact(["review_ref"], source.review_ref)] : []),
+      ...(source.acceptance ? [
+        fact(["acceptance", "artifact_ref"], source.acceptance.artifact_ref), fact(["acceptance", "artifact_hash"], source.acceptance.artifact_hash),
+        fact(["acceptance", "review_ref"], source.acceptance.review_ref), fact(["acceptance", "review_hash"], source.acceptance.review_hash),
+      ] : []),
+      ...(source.inherited_acceptance ? [
+        fact(["inherited_acceptance", "from_run_id"], "parent-run"),
+        fact(["inherited_acceptance", "parent_spec_review_ref"], "reviews/spec-writer.json"),
+        fact(["inherited_acceptance", "artifact_hash"], source.inherited_acceptance.artifact_hash),
+        fact(["inherited_acceptance", "review_hash"], source.inherited_acceptance.review_hash),
+      ] : []),
+    ],
+    requiredPath: ["agent"], typePath: ["attempts"], targets,
+  });
+}
+
+function sliceEntry(id, variant) {
+  const source = { id: "backend", stack: "backend", depends_on: [], status: variant, attempts: variant === "pending" ? 0 : 1 };
+  const targets = [stale(["attempts"], variant === "pending" ? 1 : 0), cross(["id"], "frontend")];
+  if (variant !== "pending") {
+    source.branch = "feature--backend";
+    source.worktree = "/tmp/backend";
+    targets.push(ref(["worktree"]));
+  }
+  if (["review", "merged"].includes(variant)) {
+    source.evidence_ref = "evidence/backend.json";
+    source.review_ref = "reviews/backend.json";
+    targets.push(ref(["evidence_ref"]), ref(["review_ref"]));
+  }
+  if (variant === "merged") {
+    source.merge_commit = SHA_B;
+    source.updated_at = NOW;
+    targets.push(time(["updated_at"]));
+  }
+  if (variant === "blocked") source.blocked_reason = "review rejected";
   return recordEntry({
     authorityClassId: "slices-review-evidence-bindings", id, record: "run.json.slices[]", variant,
-    writer: "transitionRunSlice and transitionSliceMerged checked transitions",
+    writer: variant === "merged" ? "transitionSliceMerged checked transition" : variant === "pending" ? "factory slices-seed checked transition" : "transitionRunSlice checked transition",
     readers: ["validateRun slice validation", "builder-wave dependency scheduler", "transitionSliceMerged", "PR readiness and repair admission readers"],
-    source: { id: "backend", stack: "backend", depends_on: ["schema"], branch: "feature--backend", worktree: "/tmp/backend", ...extras },
-    requiredPath: ["id"], typePath: ["attempts"], targets: [ref(["worktree"]), stale(["attempts"], 0), cross(["id"], "frontend")],
+    canonicalPath: ["slices", 0], source,
+    facts: [
+      fact(["id"], "backend"), fact(["stack"], "backend"), fact(["depends_on"], []), fact(["status"], variant), fact(["attempts"], source.attempts),
+      ...(source.branch ? [fact(["branch"], source.branch), fact(["worktree"], source.worktree)] : []),
+      ...(source.evidence_ref ? [fact(["evidence_ref"], source.evidence_ref), fact(["review_ref"], source.review_ref)] : []),
+      ...(source.merge_commit ? [fact(["merge_commit"], source.merge_commit), fact(["updated_at"], source.updated_at)] : []),
+      ...(source.blocked_reason ? [fact(["blocked_reason"], source.blocked_reason)] : []),
+    ],
+    requiredPath: ["id"], typePath: ["attempts"], targets,
   });
 }
 
@@ -906,16 +1103,51 @@ function sidecarRecord(authorityClassId, id, record, variant, writer, readers, r
   });
 }
 
-function panelEntry(id, record, subject, verdict, reportRef, reviewRef, writer, readers) {
-  const source = { subject, attempt: 1, verdict, report_ref: reportRef, review_ref: reviewRef, review_hash: HASH_A, reviewed_commit: SHA_B, sidecar_bytes: { review: `{\"verdict\":\"${verdict}\"}`, report: "panel report" } };
-  const sidecars = [sidecar("review", ["review_ref"], ["review_hash"], ["sidecar_bytes", "review"])];
-  const targets = [...sidecarTargets("review", ["review_ref"], ["review_hash"], ["sidecar_bytes", "review"]), stale(["attempt"], 0), cross(["subject"], "other-panel")];
-  if (reportRef) {
-    source.report_hash = HASH_B;
-    sidecars.push(sidecar("report", ["report_ref"], ["report_hash"], ["sidecar_bytes", "report"]));
-    targets.push(...sidecarTargets("report", ["report_ref"], ["report_hash"], ["sidecar_bytes", "report"]));
-  }
-  return recordEntry({ authorityClassId: "validator-security-pr-result", id, record, variant: `${verdict} bound`, writer, readers, source, requiredPath: ["verdict"], typePath: ["attempt"], sidecars, targets });
+function panelEntry(id, record, key, source) {
+  const targets = [
+    ref(["review_ref"]),
+    stale(["verdict"], key === "validator" ? "NO-GO" : "BLOCK"),
+    cross(["review_ref"], key === "validator" ? "reviews/security-reviewer.json" : "reviews/implementation-validator.json"),
+  ];
+  if (source.report) targets.push(ref(["report"]));
+  return recordEntry({
+    authorityClassId: "validator-security-pr-result", id, record, variant: `${source.verdict} persisted keys`,
+    writer: "factory verdicts checked transition",
+    readers: ["validateRun verdict validation", "assertPrCreatedReadiness", "post-PR revalidation", "terminal/panel remediation routing"],
+    canonicalPath: [key], source,
+    facts: [fact(["verdict"], source.verdict), ...(source.report ? [fact(["report"], source.report)] : []), fact(["review_ref"], source.review_ref)],
+    requiredPath: ["verdict"], typePath: ["verdict"], targets,
+  });
+}
+
+function steeringEntry(id, key) {
+  const token = "dispatch-token-1";
+  const source = key === "boundary"
+    ? { kind: "dispatch", token, generation: 2, state_hash: HASH_A, created_at: NOW }
+    : key === "action_claim"
+      ? { kind: "dispatch", token, generation: 2, claimed_at: NOW }
+      : { kind: "dispatch", token, generation: 2, outcome: "started", claimed_at: NOW, resolved_at: "2026-07-16T12:00:01.000Z" };
+  const targets = [
+    kind(["kind"], "unknown-action"),
+    time([key === "boundary" ? "created_at" : key === "action_claim" ? "claimed_at" : "resolved_at"]),
+    drift([], "token", "operation_token"),
+    stale(["generation"], 1),
+    cross(["token"], "other-operation-token"),
+  ];
+  if (key === "boundary") targets.push(hash(["state_hash"]));
+  return recordEntry({
+    authorityClassId: "validator-security-pr-result", id, record: `run.json.steering.${key}`, variant: key.replaceAll("_", "-"),
+    writer: key === "boundary" ? "transitionSteeringBoundaryOpened" : key === "action_claim" ? "transitionSteeringBoundaryCrossed" : "transitionSteeringActionStarted",
+    readers: ["validateSteering", "checked steering boundary/action transitions", "assertRunJsonWriterAllowed and external-effect admission"],
+    canonicalPath: ["steering", key], source,
+    facts: [
+      fact(["kind"], "dispatch"), fact(["token"], token), fact(["generation"], 2),
+      ...(source.state_hash ? [fact(["state_hash"], source.state_hash), fact(["created_at"], source.created_at)] : []),
+      ...(source.claimed_at ? [fact(["claimed_at"], source.claimed_at)] : []),
+      ...(source.outcome ? [fact(["outcome"], source.outcome), fact(["resolved_at"], source.resolved_at)] : []),
+    ],
+    requiredPath: ["token"], typePath: ["generation"], targets,
+  });
 }
 
 function continuationEnvelopeEntry() {
@@ -1215,7 +1447,7 @@ function repairEntry(id, status, attempts, options) {
   });
 }
 
-function recordEntry({ authorityClassId, id, record, variant, writer, readers, source, requiredPath, typePath, targets = [], sidecars = [], facts = [] }) {
+function recordEntry({ authorityClassId, id, record, variant, writer, readers, source, canonicalPath, externalSources = {}, requiredPath, typePath, targets = [], sidecars = [], facts = [] }) {
   const commonTargets = [
     target("missing-key", requiredPath, "required field"),
     target("unknown-key", [], "record root", { key: "unexpected_authority_key", value: true }),
@@ -1231,6 +1463,8 @@ function recordEntry({ authorityClassId, id, record, variant, writer, readers, s
     tests: [`test/durable-record-mutations.test.js: ${id} mutation matrix`],
     sidecars,
     facts,
+    ...(canonicalPath ? { canonicalPath } : {}),
+    ...(Object.keys(externalSources).length > 0 ? { externalSources } : {}),
     source,
     descriptor: completeDescriptor(id, [...commonTargets, ...targets], explicitExclusionsFor(id)),
   };
@@ -1268,6 +1502,62 @@ function metadataHash(record) {
   return createHash("sha256").update(JSON.stringify(exactMetadata)).digest("hex");
 }
 
+function validateCanonicalCoreRecord(record, path) {
+  if (!Array.isArray(record.canonicalPath) || record.canonicalPath.length === 0) throw new TypeError(`${path}.canonicalPath must identify the exact run.json source location`);
+  if (!Array.isArray(record.facts) || record.facts.length === 0) throw new TypeError(`${path}.facts must contain path and expected-value declarations`);
+  for (const [index, declaration] of record.facts.entries()) {
+    requireRecord(declaration, `${path}.facts[${index}]`);
+    requirePath(declaration.path, `${path}.facts[${index}].path`);
+    if (!Object.hasOwn(declaration, "expected")) throw new TypeError(`${path}.facts[${index}].expected is required`);
+    const actual = valueAt(record.source, declaration.path, `${path}.facts[${index}]`);
+    if (canonicalJson(actual) !== canonicalJson(declaration.expected)) throw new TypeError(`${path}.facts[${index}] contradicts the canonical source value`);
+  }
+  const externalSources = record.externalSources ?? {};
+  requireRecord(externalSources, `${path}.externalSources`);
+  for (const [name, external] of Object.entries(externalSources)) {
+    requireRecord(external, `${path}.externalSources.${name}`);
+    requireText(external.ref, `${path}.externalSources.${name}.ref`);
+    if (external.bytes !== null && typeof external.bytes !== "string") throw new TypeError(`${path}.externalSources.${name}.bytes must be exact string bytes or null`);
+  }
+  rejectSyntheticCanonicalKeys(record, path);
+  const expectedHash = DURABLE_AUTHORITY_CANONICAL_SOURCE_BY_ID.get(record.id);
+  if (canonicalSourceHash(record) !== expectedHash) throw new TypeError(`${path} class, id, record, variant, canonical path/source, facts, and external bytes must exactly match the independent canonical source manifest`);
+}
+
+function rejectSyntheticCanonicalKeys(record, path) {
+  const forbidden = new Set(["sidecar_bytes"]);
+  if (record.authorityClassId === "slices-review-evidence-bindings") {
+    for (const key of ["review_binding", "attempt_reviews", "reviewed_commit", "review_hash", "evidence_hash"]) forbidden.add(key);
+  }
+  if (["validator-verdict-binding", "security-verdict-binding"].includes(record.id)) {
+    for (const key of ["subject", "attempt", "report_ref", "review_hash", "reviewed_commit"]) forbidden.add(key);
+  }
+  if (record.authorityClassId === "gates-snapshot-handoff" && Object.hasOwn(record.source, "gate")) {
+    throw new TypeError(`${path}.source.gate is synthetic; gate identity belongs to the gates map key`);
+  }
+  for (const key of forbidden) if (containsOwnKey(record.source, key)) throw new TypeError(`${path}.source contains synthetic key ${key}`);
+}
+
+function containsOwnKey(value, targetKey) {
+  if (Array.isArray(value)) return value.some((item) => containsOwnKey(item, targetKey));
+  if (value === null || typeof value !== "object") return false;
+  if (Object.hasOwn(value, targetKey)) return true;
+  return Object.values(value).some((item) => containsOwnKey(item, targetKey));
+}
+
+function canonicalSourceHash(record) {
+  return createHash("sha256").update(canonicalJson({
+    authorityClassId: record.authorityClassId,
+    id: record.id,
+    record: record.record,
+    variant: record.variant,
+    canonicalPath: record.canonicalPath,
+    source: record.source,
+    facts: record.facts,
+    externalSources: record.externalSources ?? {},
+  })).digest("hex");
+}
+
 function validateExpectedDescriptorDispositions(record, path) {
   const expectedExcludedFamilies = new Set([...EXPLICIT_EXCLUDED_FAMILY_CODES[record.id]].map((code) => FAMILY_BY_CODE[code]));
   for (const family of DURABLE_MUTATION_FAMILIES) {
@@ -1292,6 +1582,18 @@ function canonicalJson(value) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function hashBytes(value) {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function hashCanonical(value) {
+  return `sha256:${createHash("sha256").update(canonicalJson(value), "utf8").digest("hex")}`;
+}
+
+function fact(path, expected) {
+  return { path, expected };
 }
 
 function validateRecordSidecars(record, path) {
@@ -1323,6 +1625,14 @@ function sidecarTargets(name, refPath, hashPath, bytesPath) {
     ...(hashPath === null ? [] : [hash(hashPath, name)]),
     bytes(bytesPath, name),
   ];
+}
+
+function externalSidecar(name, refPath, hashPath) {
+  return sidecar(name, refPath, hashPath, ["$external", name, "bytes"]);
+}
+
+function externalSidecarTargets(name, refPath, hashPath) {
+  return sidecarTargets(name, refPath, hashPath, ["$external", name, "bytes"]);
 }
 
 function target(family, path, label, options = {}) {
