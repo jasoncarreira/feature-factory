@@ -35,6 +35,30 @@ describe("run schema and consistency", () => {
     assert.deepEqual(review.required_fixes, []);
   });
 
+  it("preserves exact legacy semantic literals when fixtures are specialized", () => {
+    const runOverrides = {
+      run_id: "repair-run",
+      branch: "repair-feature",
+      steps: [],
+      slices: [{ id: "owner", status: "merged", attempts: 2, merge_commit: "1111111" }],
+    };
+    const reviewOverrides = {
+      subject: "repair:owner",
+      verdict: "REJECT",
+      required_fixes: ["tighten the sort key"],
+      attempt: 1,
+      commit: "a".repeat(40),
+    };
+
+    assert.deepEqual(createRunRecord(runOverrides), {
+      schema_version: 1,
+      status: "running",
+      gates: {},
+      ...runOverrides,
+    });
+    assert.deepEqual(createReviewRecord(reviewOverrides), reviewOverrides);
+  });
+
   it("accepts debug snapshots", () => {
     const run = validateRun({
       ...runningRun(),

@@ -356,6 +356,25 @@ describe("class-wide planning prompt contract", () => {
     for (const doc of [SPEC, SCHEMA]) assert.match(doc, /DURABLE-AUTHORITY-LEDGER\.md/, "schema/spec must link the canonical ledger");
   });
 
+  it("requires each finite authority class to decide retention, re-observation, and duplicate consolidation", () => {
+    for (const heading of [
+      "1. Authority class: Plan and slices graph",
+      "2. Authority class: Run envelope and terminal result",
+      "3. Authority class: Gates, pending snapshot, and handoff receipt",
+      "4. Authority class: Steps and acceptance inheritance",
+      "5. Authority class: Slices and review/evidence bindings",
+      "6. Authority class: Validator, security, and PR-created result",
+      "7. Authority class: Continuation and planning/draft reuse",
+      "8. Authority class: Post-PR nested records",
+      "9. Authority class: PR79 merged slice repair",
+    ]) {
+      const authorityClass = markdownSection(DURABLE_AUTHORITY_LEDGER, heading);
+      for (const disposition of ["`RETAIN`", "`REOBSERVE`", "`CONSOLIDATE/REMOVE`"]) {
+        assert.match(authorityClass, literalPattern(disposition), `${heading} must decide ${disposition}`);
+      }
+    }
+  });
+
   it("preserves observation, evidence, review, merge, continuation, handoff, and external-effect controls", () => {
     for (const control of [
       /model claim[\s\S]*mutable working-tree file[\s\S]*never a substitute for Git observation/i,
@@ -382,7 +401,9 @@ describe("class-wide planning prompt contract", () => {
       "`merge_commit` and the equality `merge_commit^{tree} = reviewed_commit^{tree}`",
     ]) assert.match(pr79, literalPattern(retained), `PR 79 ledger missing retained boundary ${retained}`);
     assert.match(pr79, /`plan_hash`[\s\S]*`CONSOLIDATE\/REMOVE`[\s\S]*canonical owner\/effective-path snapshot[\s\S]*re-observe that snapshot/i);
+    assert.match(pr79, /Owner slice, consumer slice, defect path, status, attempt, and fixed attempt ceiling[\s\S]*`RETAIN`/i);
     assert.match(pr79, /`repair_evidence_ref` and `repair_evidence_hash`[\s\S]*`CONSOLIDATE\/REMOVE` only when the repair facts exist exactly once in the canonical amendment manifest[\s\S]*Consumption must re-observe/i);
+    assert.match(pr79, /A local\/model statement that the repair was reviewed, merged, or verified[\s\S]*`CONSOLIDATE\/REMOVE`/i);
     assert.match(DURABLE_AUTHORITY_LEDGER, /Persisted legacy records keep their original schema/i);
     assert.match(DURABLE_AUTHORITY_LEDGER, /No two repair authorities may be active for one run/i);
     assert.match(DURABLE_AUTHORITY_LEDGER, /adds no production manifest,[\s\S]*schema field, or migration/i);
