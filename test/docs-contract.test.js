@@ -306,6 +306,11 @@ describe("class-wide planning prompt contract", () => {
     assert.match(SPEC_WRITER_PROMPT, /One aggregate row or one mutation elsewhere in the authority class never covers a sibling record or variant/i);
     assert.match(schemaCatalog, /wrong ref does not count as wrong bytes/i);
     assert.match(schemaCatalog, /reject completeness unless every required per-record entry passes/i);
+    assert.match(writerMatrix, /independently authored closed completeness oracle/i);
+    assert.match(writerMatrix, /exact writer, all readers, named tests, authority facts, sidecar byte bindings, and all mutation-family dispositions/i);
+    assert.match(schemaCatalog, /independently authored closed metadata manifest is not derived from the catalog under test/i);
+    assert.match(schemaCatalog, /omission or substitution at the source boundary fails completeness/i);
+    assert.match(schemaCatalog, /absent targets never receive automatic exclusions/i);
 
     for (const authorityClass of [
       "Plan and slices graph",
@@ -321,23 +326,70 @@ describe("class-wide planning prompt contract", () => {
       assert.match(schemaCatalog, literalPattern(authorityClass), `durable authority catalog missing ${authorityClass}`);
     }
     for (const variant of [
+      "post-pr-phase-disabled",
+      "post-pr-phase-awaiting-pr",
+      "post-pr-phase-observing",
+      "post-pr-phase-failure-recording",
+      "post-pr-phase-remediation-planned",
+      "post-pr-phase-remediation-running",
+      "post-pr-phase-changes-observed",
+      "post-pr-phase-committed",
+      "post-pr-phase-revalidating",
+      "post-pr-phase-validated",
+      "post-pr-phase-push-pending",
+      "post-pr-phase-remote-confirmed",
+      "post-pr-phase-succeeded",
+      "post-pr-phase-blocked",
+      "post-pr-phase-needs-human",
       "post-pr-observation-null",
       "post-pr-observation-active",
+      "post-pr-observation-last-error",
+      "post-pr-observation-review-request",
+      "post-pr-observation-snapshot",
       "post-pr-remediation-null",
       "post-pr-remediation-active",
+      "post-pr-remediation-owner",
+      "post-pr-remediation-changes",
+      "post-pr-remediation-change-entry",
+      "post-pr-dispatch-planned",
+      "post-pr-dispatch-running",
+      "post-pr-dispatch-returned",
       "post-pr-revalidation-empty",
       "post-pr-revalidation-bound",
+      "post-pr-canonical-job-planned",
+      "post-pr-canonical-job-running",
+      "post-pr-canonical-job-retry-wait",
+      "post-pr-canonical-job-bound",
+      "post-pr-validator-job-planned",
+      "post-pr-validator-job-running",
+      "post-pr-validator-job-retry-wait",
+      "post-pr-validator-job-bound",
+      "post-pr-security-job-planned",
+      "post-pr-security-job-running",
+      "post-pr-security-job-retry-wait",
+      "post-pr-security-job-bound",
+      "post-pr-push-last-error",
       "post-pr-continuation-review-null",
       "post-pr-continuation-review-bound",
       "post-pr-terminal-fact-null",
-      "post-pr-terminal-fact-bound",
+      "post-pr-terminal-fact-account-switch-failed-github-auth",
+      "post-pr-terminal-fact-account-switch-failed-push",
+      "post-pr-terminal-fact-dispatch-start-unknown",
+      "post-pr-terminal-fact-path-lane-violation",
+      "post-pr-terminal-fact-remote-head-diverged",
+      "post-pr-terminal-fact-panel-runner-result-malformed",
+      "post-pr-terminal-fact-push-failed",
+      "post-pr-terminal-fact-panel-attribution-unsafe",
       "repair-reported",
       "repair-repairing",
-      "repair-review",
+      "repair-review-approve",
+      "repair-review-reject",
       "repair-merged",
-      "repair-blocked",
+      "repair-blocked-from-reported",
+      "repair-blocked-from-repairing",
+      "repair-blocked-from-review",
     ]) assert.match(schemaCatalog, literalPattern(`\`${variant}\``), `durable authority catalog missing variant ${variant}`);
-    assert.match(schemaCatalog, /defect path[\s\S]*owner\/consumer[\s\S]*plan\/owner snapshot[\s\S]*baseline[\s\S]*original evidence[\s\S]*repair evidence[\s\S]*reviewed commit and review bytes[\s\S]*verification[\s\S]*merge commit and reviewed-tree equality[\s\S]*attempts[\s\S]*quiescence/i);
+    assert.match(schemaCatalog, /defect path[\s\S]*owner\/consumer[\s\S]*plan\/owner snapshot[\s\S]*baseline[\s\S]*original evidence[\s\S]*repair evidence[\s\S]*reviewed commit and review bytes[\s\S]*review verdict[\s\S]*blocked reason[\s\S]*verification[\s\S]*merge commit and reviewed-tree equality[\s\S]*attempts[\s\S]*quiescence/i);
 
     for (const excluded of [
       "run.json.debug_snapshot",

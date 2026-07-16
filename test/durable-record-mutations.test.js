@@ -1,8 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   DURABLE_AUTHORITY_CATALOG,
   DURABLE_AUTHORITY_EXCLUSIONS,
+  DURABLE_AUTHORITY_METADATA_MANIFEST,
   DURABLE_AUTHORITY_REQUIRED_RECORD_IDS,
   DURABLE_MUTATION_FAMILIES,
   assertDurableAuthorityCatalogComplete,
@@ -127,10 +129,10 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 65);
+    assert.equal(recordCount, 106);
   });
 
-  it("rejects the aggregate-class completeness bypass and omitted sibling records", () => {
+  it("rejects aggregate, omitted, and substituted source-boundary entries", () => {
     const aggregateOnly = structuredClone(DURABLE_AUTHORITY_CATALOG);
     delete aggregateOnly[0].records;
     aggregateOnly[0].source = { slices: [] };
@@ -148,20 +150,41 @@ describe("finite durable-authority catalog", () => {
       /must contain every required per-record and per-variant entry/u,
       "removing final.plan.json while retaining plan/slices.json must fail completeness",
     );
+
+    const substitutedSibling = structuredClone(DURABLE_AUTHORITY_CATALOG);
+    substitutedSibling[0].records[1].id = "plan-slices-json";
+    assert.throws(
+      () => assertDurableAuthorityCatalogComplete(substitutedSibling),
+      /must contain every required per-record and per-variant entry/u,
+      "substituting an aggregate or sibling entry must not satisfy the closed source boundary",
+    );
   });
 
-  it("rejects per-record family, metadata, and sidecar-byte omissions", () => {
+  it("uses an independent closed metadata oracle and rejects every metadata substitution", () => {
+    const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
+    assert.deepEqual(DURABLE_AUTHORITY_METADATA_MANIFEST.map(([id]) => id), requiredIds);
+    assert.equal(DURABLE_AUTHORITY_METADATA_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
+    const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
+    assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*writer/u, "the exact metadata oracle must not be produced from catalog records");
+    assert.doesNotMatch(helperSource, /for \(const family of DURABLE_MUTATION_FAMILIES\)[\s\S]{0,300}completeExclusions/u, "completeDescriptor must not synthesize missing exclusions");
+
+    for (const field of ["writer", "readers", "tests", "facts", "sidecars"]) {
+      const substitutedMetadata = structuredClone(DURABLE_AUTHORITY_CATALOG);
+      const plan = findRecord(substitutedMetadata, "plan-slices-json");
+      plan[field] = field === "writer" ? "different writer" : field === "sidecars" ? [{ name: "invented", requiredFamilies: [] }] : [...plan[field], `invented-${field}`];
+      assert.throws(
+        () => assertDurableAuthorityCatalogComplete(substitutedMetadata),
+        /must exactly match the independent metadata manifest/u,
+        `${field} substitution must fail independently of RECORDS`,
+      );
+    }
+  });
+
+  it("rejects per-record family and sidecar-byte omissions", () => {
     const missingFamily = structuredClone(DURABLE_AUTHORITY_CATALOG);
     const finalPlan = findRecord(missingFamily, "final-plan-descriptor");
     finalPlan.descriptor.targets = finalPlan.descriptor.targets.filter(({ family }) => family !== "wrong-kind");
     assert.throws(() => assertDurableAuthorityCatalogComplete(missingFamily), /wrong-kind must have a target or a record-specific exclusion/u);
-
-    for (const field of ["writer", "readers", "tests"]) {
-      const missingMetadata = structuredClone(DURABLE_AUTHORITY_CATALOG);
-      const plan = findRecord(missingMetadata, "plan-slices-json");
-      plan[field] = field === "writer" ? "" : field === "readers" ? plan.readers.slice(1) : [];
-      assert.throws(() => assertDurableAuthorityCatalogComplete(missingMetadata), new RegExp(`${field}.*(?:non-empty|string|array|every registered)`, "u"));
-    }
 
     const conflatedBytes = structuredClone(DURABLE_AUTHORITY_CATALOG);
     const review = findRecord(conflatedBytes, "slice-review-sidecar");
@@ -175,7 +198,7 @@ describe("finite durable-authority catalog", () => {
 
     const omittedSidecar = structuredClone(DURABLE_AUTHORITY_CATALOG);
     findRecord(omittedSidecar, "post-pr-revalidation-bound").sidecars.pop();
-    assert.throws(() => assertDurableAuthorityCatalogComplete(omittedSidecar), /sidecars must contain every registered byte binding/u);
+    assert.throws(() => assertDurableAuthorityCatalogComplete(omittedSidecar), /must exactly match the independent metadata manifest/u);
   });
 
   it("mutates sidecar ref, hash, and bytes as independent adversarial cases", () => {
@@ -202,15 +225,30 @@ describe("finite durable-authority catalog", () => {
     assert.deepEqual(planEntry.source, sourceBefore);
   });
 
-  it("registers post_pr null/non-null variants and independent bound bytes", () => {
+  it("registers every post_pr phase, dispatch state, nested authority, and bound job state exactly", () => {
     const postPr = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "post-pr-nested-records");
     assert.deepEqual(postPr.records.map(({ id }) => id), DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["post-pr-nested-records"]);
+    const phases = ["disabled", "awaiting-pr", "observing", "failure-recording", "remediation-planned", "remediation-running", "changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed", "succeeded", "blocked", "needs-human"];
+    assert.deepEqual(phases.map((phase) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-phase-${phase}`).source.phase), phases);
+    assert.deepEqual(phases.map((phase) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-phase-${phase}`).facts[0]), phases.map((phase) => `phase:${phase}`));
+    assert.deepEqual(["planned", "running", "returned"].map((state) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-dispatch-${state}`).source.status), ["planned", "running", "returned"]);
+    for (const activity of ["canonical", "validator", "security"]) {
+      assert.deepEqual(["planned", "running", "retry-wait", "bound"].map((state) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-${activity}-job-${state}`).source.status), ["planned", "running", "retry-wait", "bound"]);
+      const bound = findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-${activity}-job-bound`);
+      assert.deepEqual(bound.sidecars.map(({ name }) => name), [`${activity}-result`]);
+      assert.equal(bound.source.result_ref, `${activity === "canonical" ? "evidence" : "reviews"}/post-pr-${activity}.json`);
+      assert.equal(bound.source.result_hash, `sha256:${"a".repeat(64)}`);
+    }
+    assert.deepEqual(
+      ["post-pr-observation-last-error", "post-pr-observation-review-request", "post-pr-observation-snapshot", "post-pr-remediation-owner", "post-pr-remediation-changes", "post-pr-remediation-change-entry", "post-pr-push-last-error"].map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id).id),
+      ["post-pr-observation-last-error", "post-pr-observation-review-request", "post-pr-observation-snapshot", "post-pr-remediation-owner", "post-pr-remediation-changes", "post-pr-remediation-change-entry", "post-pr-push-last-error"],
+    );
     for (const [nullId, boundId] of [
       ["post-pr-observation-null", "post-pr-observation-active"],
       ["post-pr-remediation-null", "post-pr-remediation-active"],
       ["post-pr-revalidation-empty", "post-pr-revalidation-bound"],
       ["post-pr-continuation-review-null", "post-pr-continuation-review-bound"],
-      ["post-pr-terminal-fact-null", "post-pr-terminal-fact-bound"],
+      ["post-pr-terminal-fact-null", "post-pr-terminal-fact-remote-head-diverged"],
     ]) {
       assert.equal(findRecord(DURABLE_AUTHORITY_CATALOG, nullId).variant.includes("null") || nullId.endsWith("empty"), true);
       assert.notEqual(findRecord(DURABLE_AUTHORITY_CATALOG, boundId).variant, "null");
@@ -225,19 +263,34 @@ describe("finite durable-authority catalog", () => {
     );
   });
 
+  it("registers all eight post_pr terminal-fact forms including both account-switch forms", () => {
+    const variants = ["account-switch-failed-github-auth", "account-switch-failed-push", "dispatch-start-unknown", "path-lane-violation", "remote-head-diverged", "panel-runner-result-malformed", "push-failed", "panel-attribution-unsafe"];
+    const entries = variants.map((variant) => findRecord(DURABLE_AUTHORITY_CATALOG, `post-pr-terminal-fact-${variant}`));
+    assert.deepEqual(entries.map(({ variant }) => variant), variants);
+    assert.deepEqual(entries.map(({ source }) => source.kind), ["account-switch-failed", "account-switch-failed", "dispatch-start-unknown", "path-lane-violation", "remote-head-diverged", "panel-runner-result-malformed", "push-failed", "panel-attribution-unsafe"]);
+    assert.equal(entries[0].source.operation, "gh-auth-switch");
+    assert.equal(entries[0].source.github_account, "acme");
+    assert.equal(entries[1].source.operation, "fast-forward-push");
+    assert.equal(entries[1].source.classification, "permanent");
+  });
+
   it("registers all PR79 repair states and every required authority fact", () => {
     const repairClass = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "pr79-merged-slice-repair");
-    assert.deepEqual(repairClass.records.map(({ id }) => id), ["repair-reported", "repair-repairing", "repair-review", "repair-merged", "repair-blocked"]);
+    assert.deepEqual(repairClass.records.map(({ id }) => id), ["repair-reported", "repair-repairing", "repair-review-approve", "repair-review-reject", "repair-merged", "repair-blocked-from-reported", "repair-blocked-from-repairing", "repair-blocked-from-review"]);
+    assert.deepEqual(repairClass.records.map(({ variant }) => variant), ["reported", "repairing", "review:APPROVE", "review:REJECT", "merged", "blocked-from-reported", "blocked-from-repairing", "blocked-from-review"]);
     const facts = new Set(repairClass.records.flatMap(({ facts: recordFacts }) => recordFacts));
     assert.deepEqual([...facts].sort(), [
       "attempts-quiescence",
       "baseline",
+      "blocked-reason",
       "defect-path",
       "merge-commit-tree",
       "original-evidence",
       "owner-consumer",
       "plan-owner-snapshot",
       "repair-evidence",
+      "review-verdict-approve",
+      "review-verdict-reject",
       "reviewed-commit-review-bytes",
       "verification",
     ]);
