@@ -325,6 +325,9 @@ describe("class-wide planning prompt contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /REJECT the entire repair route when it matches an unresolved item from those reviews/i);
     assert.match(WORK_REVIEWER_PROMPT, /never become a backdoor around an exhausted review/i);
     assert.match(WORK_REVIEWER_PROMPT, /must fail before the repair and pass after it, on observed evidence/i);
+    assert.match(WORK_REVIEWER_PROMPT, /verdict JSON must record `attempt`[\s\S]*and `commit`/i, "reviewer must self-bind attempt and commit");
+    assert.match(SKILL, /a stale verdict can never be re-paired with code the reviewer did not see/i);
+    assert.match(SCHEMA, /a stale verdict can never be re-paired with a commit the reviewer did not see/i);
     assert.match(SKILL, /### Merged-Sibling Repair \(bounded\)/);
     assert.match(SKILL, /Only one repair incident is allowed per run/i);
     assert.match(SKILL, /never charged to the merged slice's immutable history and never drawn from `run\.max_retries`/i);

@@ -64,12 +64,13 @@ describe("merged-sibling repair", () => {
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
       const repairHead = commitRepairFix(fixture);
 
-      recordReview(fixture, "repair-attempt-1", { verdict: "REJECT", required_fixes: ["tighten the sort key"] });
+      recordReview(fixture, "repair-attempt-1", { verdict: "REJECT", required_fixes: ["tighten the sort key"], attempt: 1, commit: repairHead });
       await review(fixture, "repair-attempt-1", repairHead);
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 2 });
 
-      recordReview(fixture, "repair-attempt-2", { verdict: "REJECT", required_fixes: ["still wrong"] });
-      await review(fixture, "repair-attempt-2", commitRepairFix(fixture));
+      const secondHead = commitRepairFix(fixture);
+      recordReview(fixture, "repair-attempt-2", { verdict: "REJECT", required_fixes: ["still wrong"], attempt: 2, commit: secondHead });
+      await review(fixture, "repair-attempt-2", secondHead);
       await assert.rejects(
         transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 3 }),
         /exceeds max_attempts 2/u,
@@ -86,7 +87,7 @@ describe("merged-sibling repair", () => {
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
       const repairHead = commitRepairFix(fixture);
 
-      recordReview(fixture, "repair-good", { verdict: "APPROVE", required_fixes: [] });
+      recordReview(fixture, "repair-good", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
       writeJson(join(fixture.runDir, "evidence", "repair-out-of-lane.json"), {
         subject: "repair:owner",
         changed_paths: ["src/owner/records.js", "src/consumer/sneaky.js"],
@@ -106,7 +107,7 @@ describe("merged-sibling repair", () => {
 
       // Byte-identical re-record is allowed (crash recovery); replacement is not.
       await review(fixture, "repair-good", repairHead);
-      recordReview(fixture, "repair-replacement", { verdict: "APPROVE", required_fixes: [] });
+      recordReview(fixture, "repair-replacement", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
       await assert.rejects(
         transitionMergedSliceRepair(fixture.runDir, { status: "review", review_ref: "reviews/repair-replacement.json", repair_evidence_ref: "evidence/repair-attempt.json", reviewed_commit: repairHead }),
         /write-once per attempt/u,
@@ -130,7 +131,7 @@ describe("merged-sibling repair", () => {
       const { merged_slice_repair: attempt } = await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
       assert.equal(attempt.baseline_commit, fixture.featureCommit, "the attempt must observe the feature head as its baseline");
       const repairHead = commitRepairFix(fixture);
-      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [] });
+      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
       await review(fixture, "repair-approve", repairHead);
 
       writeJson(join(fixture.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
@@ -203,7 +204,7 @@ describe("merged-sibling repair", () => {
       await assertResumeRefusedWithoutLiveness("repairing");
 
       const repairHead = commitRepairFix(fixture);
-      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [] });
+      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
       await review(fixture, "repair-approve", repairHead);
       await assertResumeRefusedWithoutLiveness("review");
 
@@ -242,7 +243,7 @@ describe("merged-sibling repair", () => {
       await report(fixture);
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
       const repairHead = commitRepairFix(fixture);
-      recordReview(fixture, "repair-descendant", { verdict: "APPROVE", required_fixes: [] });
+      recordReview(fixture, "repair-descendant", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
       writeJson(join(fixture.runDir, "evidence", "repair-descendant.json"), {
         subject: "repair:owner",
         changed_paths: ["src/owner/records.js", "test/owner.test.js/undeclared.js"],
@@ -262,9 +263,8 @@ describe("merged-sibling repair", () => {
     try {
       await report(fixture);
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
-      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [] });
-
       const partialHead = commitRepairFix(fixture, "src/owner/records.js");
+      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: partialHead });
       await assert.rejects(
         review(fixture, "repair-approve", partialHead),
         /changed_paths must equal the git-observed diff/u,
@@ -288,7 +288,7 @@ describe("merged-sibling repair", () => {
       await report(fixture);
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
       const repairHead = commitRepairFix(fixture);
-      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [] });
+      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
       await review(fixture, "repair-approve", repairHead);
       writeJson(join(fixture.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
 
@@ -306,19 +306,51 @@ describe("merged-sibling repair", () => {
     }
   });
 
+  it("rejects re-pairing a stale verdict with a commit or attempt the reviewer never saw", async () => {
+    const fixture = createFixture();
+    try {
+      await report(fixture);
+      await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
+      const headA = commitRepairFix(fixture);
+      recordReview(fixture, "stale-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: headA });
+
+      const headB = commitRepairFix(fixture);
+      await assert.rejects(
+        review(fixture, "stale-approve", headB),
+        /must bind the exact reviewed commit/u,
+        "an APPROVE produced for commit A must not authorize commit B",
+      );
+
+      recordReview(fixture, "wrong-attempt", { verdict: "APPROVE", required_fixes: [], attempt: 2, commit: headB });
+      await assert.rejects(
+        review(fixture, "wrong-attempt", headB),
+        /must bind attempt 1/u,
+        "a verdict for another attempt must not authorize this one",
+      );
+
+      recordReview(fixture, "no-binding", { verdict: "APPROVE", required_fixes: [] });
+      await assert.rejects(
+        review(fixture, "no-binding", headB),
+        /must bind attempt 1/u,
+        "a verdict without bindings must not authorize anything",
+      );
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
   it("keeps a rename's out-of-lane source visible to lane confinement", async () => {
     const fixture = createFixture();
     try {
       await report(fixture);
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
-      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [] });
-
       git(fixture.repo, ["checkout", "-q", FEATURE_BRANCH]);
       mkdirSync(join(fixture.repo, "src", "owner"), { recursive: true });
       git(fixture.repo, ["mv", "src/consumer/legacy.js", "src/owner/moved.js"]);
       git(fixture.repo, ["commit", "-q", "-m", "rename into owner lane"]);
       const renameHead = git(fixture.repo, ["rev-parse", "HEAD"]).trim();
       git(fixture.repo, ["checkout", "-q", "main"]);
+      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: renameHead });
 
       await assert.rejects(
         review(fixture, "repair-approve", renameHead),
@@ -346,7 +378,7 @@ describe("merged-sibling repair", () => {
       assert.equal(consistency.checks.find((check) => check.name === "run.merged_slice_repair.plan").ok, false, "plan drift must be reported");
 
       const wideHead = commitRepairFix(fixture, ["src/owner/records.js", "test/owner.test.js", "src/consumer/sneaky.js"]);
-      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [] });
+      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: wideHead });
       await assert.rejects(
         review(fixture, "repair-approve", wideHead),
         /no longer matches the lane authority bound when the repair was reported/u,
@@ -365,7 +397,7 @@ describe("merged-sibling repair", () => {
       await report(fixture);
       await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
       const repairHead = commitRepairFix(fixture);
-      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [] });
+      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
 
       writeJson(evidencePath, { ...originalEvidence, status: "pass" });
       await assert.rejects(

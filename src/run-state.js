@@ -2477,6 +2477,10 @@ function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = 
     const fixes = Array.isArray(reviewJson.required_fixes) ? reviewJson.required_fixes.filter(stringValue) : [];
     if (fixes.length < 1) throw new Error("a rejecting repair review must enumerate finite required_fixes");
   }
+  // The independent review artifact must itself bind what was reviewed: a
+  // stale verdict written for another attempt or commit can never be
+  // re-paired with code the reviewer did not see.
+  assertRepairReviewBinding(reviewJson, current.attempts, reviewedSha);
   const repairEvidence = assertRepairChangedPathsInOwnerLane(runDir, current, request.repair_evidence_ref, observedPaths);
   return {
     ...current,
@@ -2488,6 +2492,15 @@ function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = 
     repair_evidence_hash: repairEvidence.hash,
     updated_at: stampedAt,
   };
+}
+
+function assertRepairReviewBinding(reviewJson, attempts, reviewedSha) {
+  if (reviewJson.attempt !== attempts) {
+    throw new Error(`repair review must bind attempt ${attempts}; it records ${Number.isInteger(reviewJson.attempt) ? reviewJson.attempt : "no attempt"}`);
+  }
+  if (String(reviewJson.commit || "").trim().toLowerCase() !== reviewedSha) {
+    throw new Error("repair review must bind the exact reviewed commit; the recorded commit does not match the observed repair");
+  }
 }
 
 // Diffs are observed with rename detection disabled so a rename's out-of-lane
@@ -2532,6 +2545,7 @@ function mergedMergedSliceRepair(runDir, run, current, request, stampedAt, optio
   assertRepairOriginalEvidenceIntact(runDir, current);
   const review = readBoundRepairReview(runDir, current);
   if (review.verdict !== "APPROVE") throw new Error("repair merge requires an APPROVE verdict on the bound repair review");
+  assertRepairReviewBinding(review, current.attempts, requireNonEmptyString(current.reviewed_commit, "repair reviewed_commit"));
   const repairEvidence = resolveEvidenceRef(runDir, requireNonEmptyString(current.repair_evidence_ref, "repair_evidence_ref"));
   if (hashFile(repairEvidence.path) !== current.repair_evidence_hash) {
     throw new Error("repair attempt evidence no longer matches its hash-bound record");
