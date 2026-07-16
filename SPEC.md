@@ -19,6 +19,15 @@ Ideas to implement after reviewing `oh-my-openagent`, adapted for this package's
 
 The proof layer removed in the simplified factory. The durable contract is local state plus transition-time checks, not a cryptographic or tamper-proof authority system.
 
+Threat boundary:
+
+- The local operator and host are trusted for integrity. This includes the OS and process account, local filesystem and Git repository, installed factory code, test commands and toolchain, and reviewer/verifier implementations. Operator text shown to a model is still data rather than privileged instructions at the prompt boundary.
+- Model and subagent claims and stale evidence are untrusted. Re-observe claims and reject stale or mismatched evidence before a checked transition. Crashes and concurrent retries are fallible operating conditions that can leave an outcome unknown.
+- The factory makes no protection claim against arbitrary modification of the local filesystem, Git history, factory code, test commands, or reviewer/verifier implementations by the operator, a host administrator, or other code with equivalent local access. Such modification is outside the threat model and can rewrite both state and the checks that read it.
+- Hashes, refs, locks, tokens, snapshots, and transition checks are local consistency and provenance checks, not cryptographic authentication or generic forgery resistance. They detect stale or mismatched state and coordinate crash/retry behavior only while the trusted local substrate remains intact.
+- Within that boundary, retain exact Git/test/review/merge provenance: full Git SHAs plus locally observed diffs, trees, and ancestry; exact test commands, results, attempts, and heads; review subjects, attempts, refs, hashes, and exact reviewed commits; and merge commits plus their reviewed-tree relation. A model claim never substitutes for those observations.
+- Retain idempotent external-effect controls: exclusive claims or fences and exact identity/token checks precede effects, unknown crash outcomes are re-observed before retry, and effects already recorded or observed are not repeated. In particular, after a PR exists, retain its fence and record that existing PR; do not create another.
+
 Current guarantees:
 
 - `run.json`, gate answers, `evidence/*`, `reviews/*`, and `terminal_result` are durable local workflow state.
@@ -34,6 +43,7 @@ Explicit limits:
 
 - Local-only, not cryptographic or tamper-proof.
 - A coherent rewrite of local files and Git history is outside the model.
+- Arbitrary local filesystem or reviewer/verifier modification is outside the model; local checks do not defend against a hostile host or operator.
 
 ## 1. Category-Based Model Routing
 

@@ -326,8 +326,8 @@ describe("class-wide planning prompt contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /never become a backdoor around an exhausted review/i);
     assert.match(WORK_REVIEWER_PROMPT, /must fail before the repair and pass after it, on observed evidence/i);
     assert.match(WORK_REVIEWER_PROMPT, /verdict JSON must record `attempt`[\s\S]*and `commit`/i, "reviewer must self-bind attempt and commit");
-    assert.match(SKILL, /a stale verdict can never be re-paired with code the reviewer did not see/i);
-    assert.match(SCHEMA, /a stale verdict can never be re-paired with a commit the reviewer did not see/i);
+    assert.match(SKILL, /rejects a stale local verdict\/commit pairing/i);
+    assert.match(SCHEMA, /rejects a stale local verdict\/commit pairing/i);
     assert.match(SKILL, /### Merged-Sibling Repair \(bounded\)/);
     assert.match(SKILL, /Only one repair incident is allowed per run/i);
     assert.match(SKILL, /never charged to the merged slice's immutable history and never drawn from `run\.max_retries`/i);
@@ -991,6 +991,39 @@ describe("heartbeat docs contract", () => {
 });
 
 describe("simplified state contract docs", () => {
+  it("pins the trusted-host threat boundary and fallible workflow inputs", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /local operator and host are trusted for integrity/i, `${name} must trust the local operator and host for integrity`);
+      assert.match(text, /Model and subagent claims and stale evidence are untrusted/i, `${name} must distrust model claims and stale evidence`);
+      assert.match(text, /reject stale or mismatched evidence/i, `${name} must reject stale or mismatched evidence`);
+      assert.match(text, /Crashes and concurrent retries are fallible operating conditions/i, `${name} must treat crashes and concurrent retries as fallible`);
+      assert.match(text, /Operator text shown to a model is still data rather than privileged instructions/i, `${name} must separate trusted operator integrity from prompt authority`);
+    }
+  });
+
+  it("denies hostile-local protection claims and scopes internal checks to local consistency", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /no protection claim against arbitrary modification of the local filesystem/i, `${name} must deny arbitrary local-filesystem protection`);
+      assert.match(text, /Git history[\s\S]*factory code[\s\S]*test commands[\s\S]*reviewer\/verifier implementations/i, `${name} must enumerate the hostile-local limit`);
+      assert.match(text, /outside the threat model[\s\S]*rewrite both state and the checks that read it/i, `${name} must explain why hostile-local modification is out of scope`);
+      assert.match(text, /local consistency and provenance checks, not cryptographic authentication or generic forgery resistance/i, `${name} must scope internal durable checks`);
+      assert.match(text, /trusted local substrate remains intact/i, `${name} must condition local checks on the trusted substrate`);
+    }
+  });
+
+  it("retains exact provenance and idempotent external-effect controls inside the boundary", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /exact Git\/test\/review\/merge provenance/i, `${name} must retain the four provenance classes`);
+      assert.match(text, /full Git SHAs[\s\S]*locally observed diffs, trees, and ancestry/i, `${name} must retain exact Git provenance`);
+      assert.match(text, /exact test commands, results, attempts, and heads/i, `${name} must retain exact test provenance`);
+      assert.match(text, /review subjects, attempts, refs, hashes, and exact reviewed commits/i, `${name} must retain exact review provenance`);
+      assert.match(text, /merge commits plus their reviewed-tree relation/i, `${name} must retain exact merge provenance`);
+      assert.match(text, /idempotent external-effect controls/i, `${name} must retain idempotent external-effect controls`);
+      assert.match(text, /unknown crash outcomes are re-observed before retry/i, `${name} must re-observe unknown external effects`);
+      assert.match(text, /after a PR exists[\s\S]*record that existing PR; do not create another/i, `${name} must not duplicate PR creation after a crash`);
+    }
+  });
+
   it("documents durable local state, transition helpers, and no proof layer", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
       assert.match(text, /run\.json/i, `${name} must document run.json`);
