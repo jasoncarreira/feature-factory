@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
+import { createReviewRecord } from "./helpers/review-record-fixture.js";
+import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { createPostPrState, hasInFlightHeartbeatWork, transitionGateDecision, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 import { resumeFactory } from "../src/factory.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
@@ -659,12 +661,9 @@ function createFixture() {
   git(repo, ["commit", "-q", "-m", "main only"]);
   const mainOnlyCommit = git(repo, ["rev-parse", "HEAD"]).trim();
 
-  writeJson(join(runDir, "run.json"), {
-    schema_version: 1,
+  writeJson(join(runDir, "run.json"), createRunRecord({
     run_id: RUN_ID,
-    status: "running",
     branch: FEATURE_BRANCH,
-    gates: {},
     steps: [],
     slices: [
       { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 2, merge_commit: "1111111", review_ref: "reviews/owner.json" },
@@ -673,7 +672,7 @@ function createFixture() {
       { id: "unrelated", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
       { id: "other", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
     ],
-  });
+  }));
   writeJson(join(runDir, "plan", "slices.json"), {
     slices: [
       { id: "owner", stack: "backend", paths: ["src/owner/**", "test/owner.test.js"], depends_on: [], acceptance: ["AC1"], test_plan: ["unit"] },
@@ -686,7 +685,7 @@ function createFixture() {
   writeJson(join(runDir, "evidence", "no-subject.json"), { status: "fail" });
   writeJson(join(runDir, "evidence", "passing.json"), { subject: "consumer", status: "pass" });
   writeJson(join(runDir, "evidence", "repair-attempt.json"), { subject: "repair:owner", changed_paths: ["src/owner/records.js", "test/owner.test.js"] });
-  writeJson(join(runDir, "reviews", "owner.json"), { subject: "owner", verdict: "APPROVE", required_fixes: [] });
+  writeJson(join(runDir, "reviews", "owner.json"), createReviewRecord({ subject: "owner", verdict: "APPROVE", required_fixes: [] }));
   return { repo, runDir, featureCommit, mainOnlyCommit };
 }
 
@@ -724,7 +723,7 @@ function merge(fixture, overrides = {}) {
 }
 
 function recordReview(fixture, name, review) {
-  writeJson(join(fixture.runDir, "reviews", `${name}.json`), { subject: "repair:owner", ...review });
+  writeJson(join(fixture.runDir, "reviews", `${name}.json`), createReviewRecord({ subject: "repair:owner", ...review }));
 }
 
 let repairCommitCounter = 0;

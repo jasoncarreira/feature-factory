@@ -21,6 +21,7 @@ const CHANGELOG = readDoc("../CHANGELOG.md");
 const DOGFOOD_LEARNINGS = readDoc("../DOGFOOD-LEARNINGS.md");
 const RUN_LATENCY_FINDINGS = readDoc("../RUN-LATENCY-FINDINGS.md");
 const SIMPLIFICATION = readDoc("../SIMPLIFICATION.md");
+const DURABLE_AUTHORITY_LEDGER = readDoc("../DURABLE-AUTHORITY-LEDGER.md");
 const PACKAGE = JSON.parse(readDoc("../package.json"));
 const TOOL_VERSIONS = readDoc("../.tool-versions");
 const CI_WORKFLOW = readDoc("../.github/workflows/ci.yml");
@@ -291,6 +292,286 @@ describe("class-wide planning prompt contract", () => {
     }
   });
 
+  it("requires finite registration before claiming durable-authority integrity coverage", () => {
+    const writerMatrix = markdownSection(SPEC_WRITER_PROMPT, "Durable authority integrity matrix (required when applicable)");
+    const schemaCatalog = markdownSection(SCHEMA, "Durable Authority Integrity Catalog");
+
+    for (const column of ["Authority record / state variant", "Writer / checked transition", "Every decision-making consumer / reader", "Required adversarial mutation families", "Exclusion reason", "Named test"]) {
+      assert.match(writerMatrix, literalPattern(column), `durable authority matrix missing ${column}`);
+    }
+    assert.match(SPEC_WRITER_PROMPT, /newly introduced durable authority record has no integrity-coverage claim until it is registered/i);
+    assert.match(schemaCatalog, /cannot claim integrity coverage until it is registered in the finite matrix/i);
+    assert.match(schemaCatalog, /missing and unknown keys[\s\S]*wrong schema, kind, time, and type[\s\S]*wrong ref, hash, and bytes[\s\S]*descriptor key-shape drift[\s\S]*stale and cross-bound identity/i);
+    assert.match(schemaCatalog, /excluded with a non-empty record-specific reason/i);
+    assert.match(SPEC_WRITER_PROMPT, /One aggregate row or one mutation elsewhere in the authority class never covers a sibling record or variant/i);
+    assert.match(schemaCatalog, /wrong ref does not count as wrong bytes/i);
+    assert.match(schemaCatalog, /reject completeness unless every required per-record entry passes/i);
+    assert.match(schemaCatalog, /Registration, mutation emission, and catalog completeness are necessary but not sufficient for a production-integrity-coverage claim/i);
+    assert.match(schemaCatalog, /every applicable emitted mutation case for that row must also be asserted rejected through the row's named production validator, consistency checker, or checked transition/i);
+    assert.match(schemaCatalog, /https:\/\/github\.com\/jasoncarreira\/opencode-feature-factory\/issues\/82/i);
+    assert.match(schemaCatalog, /does not claim production integrity coverage merely because inventory, emission, or completeness checks pass/i);
+    assert.match(writerMatrix, /independently authored closed completeness oracle/i);
+    assert.match(writerMatrix, /exact writer, all readers, named tests, authority facts, sidecar byte bindings, all mutation-family target-or-exclusion dispositions/i);
+    assert.match(schemaCatalog, /independently authored closed manifests are not generated from or derived from the catalog under test/i);
+    assert.match(schemaCatalog, /omission or substitution at the source boundary fails completeness/i);
+    assert.match(schemaCatalog, /absent targets never receive automatic exclusions/i);
+    assert.match(writerMatrix, /authority class, id, record, variant, canonical (?:persisted )?source path and exact shape/i);
+    assert.match(writerMatrix, /path-plus-expected-value authority facts/i);
+    assert.match(writerMatrix, /source deletion\/substitution[\s\S]*record(?: or |\/)variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
+    assert.match(schemaCatalog, /canonical-source manifest covers all 108 catalog rows/i);
+    assert.match(schemaCatalog, /plan\/slices[\s\S]*future-only `final\.plan` descriptor[\s\S]*run envelopes[\s\S]*PR-created result[\s\S]*all continuation rows[\s\S]*all post-PR rows[\s\S]*all PR79 repair rows/i);
+    assert.match(schemaCatalog, /source deletion or substitution[\s\S]*record\/variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
+    assert.match(schemaCatalog, /actual exported `validateRun`, `validateSlicesPlan`, `checkRunConsistency`, or named checked consumer/i);
+    assert.match(schemaCatalog, /`final\.plan` is explicitly a descriptor contract[\s\S]*without claiming that current `validateRun` consumes it/i);
+    for (const text of [writerMatrix, schemaCatalog]) {
+      assert.match(text, /target-or-exclusion dispositions/i);
+      assert.match(text, /complete target definition/i);
+      assert.match(text, /path[\s\S]*value[\s\S]*from[\s\S]*to[\s\S]*key[\s\S]*sidecar[\s\S]*label/i);
+      assert.match(text, /target deletion/i);
+      assert.match(text, /target-to-exclusion[\s\S]*exclusion-to-target/i);
+      assert.match(text, /mutation of any bound target field|target-field mutation/i);
+    }
+    assert.match(schemaCatalog, /not generated from or derived from the catalog under test/i);
+
+    const manifestProcedure = markdownSection(schemaCatalog, "Oracle-manifest update procedure");
+    assert.match(manifestProcedure, /Edit the readable catalog values first/i);
+    assert.match(manifestProcedure, /Never start by replacing a digest/i);
+    assert.match(manifestProcedure, /never use a generated or blind bulk digest replacement as the review object/i);
+    assert.match(manifestProcedure, /For every row whose literal digest would change/i);
+    assert.match(manifestProcedure, /renderDurableAuthorityOracleReviewSnapshot/i);
+    assert.match(manifestProcedure, /retain both the old and new snapshots/i);
+    assert.match(manifestProcedure, /review their metadata, descriptor, and canonical-source value diff/i);
+    assert.match(manifestProcedure, /must never be generated from the catalog or from the snapshot/i);
+    assert.match(manifestProcedure, /readable old\/new value diff independently reviewed/i);
+    assert.match(manifestProcedure, /Only after the value diff is independently reviewed may the corresponding literal digest be deliberately updated/i);
+    assert.match(manifestProcedure, /Opaque hash churn alone is not review evidence/i);
+
+    for (const authorityClass of [
+      "Plan and slices graph",
+      "Run envelope and terminal result",
+      "Gates, pending snapshot, and handoff receipt",
+      "Steps and acceptance inheritance",
+      "Slices and review/evidence bindings",
+      "Validator, security, and PR-created result",
+      "Continuation and planning/draft reuse",
+      "Post-PR nested records",
+      "PR79 merged slice repair",
+    ]) {
+      assert.match(schemaCatalog, literalPattern(authorityClass), `durable authority catalog missing ${authorityClass}`);
+    }
+    for (const variant of [
+      "gate-pending",
+      "gate-approved-without-receipt",
+      "gate-approved-interactive",
+      "gate-changes-requested",
+      "gate-stopped",
+      "step-running",
+      "step-rejected",
+      "step-blocked",
+      "step-accepted",
+      "step-inherited-acceptance",
+      "slice-pending",
+      "slice-running",
+      "slice-review",
+      "slice-merged",
+      "slice-blocked",
+      "steering-boundary",
+      "steering-action-claim",
+      "steering-last-action",
+      "post-pr-phase-disabled",
+      "post-pr-phase-awaiting-pr",
+      "post-pr-phase-observing",
+      "post-pr-phase-failure-recording",
+      "post-pr-phase-remediation-planned",
+      "post-pr-phase-remediation-running",
+      "post-pr-phase-changes-observed",
+      "post-pr-phase-committed",
+      "post-pr-phase-revalidating",
+      "post-pr-phase-validated",
+      "post-pr-phase-push-pending",
+      "post-pr-phase-remote-confirmed",
+      "post-pr-phase-succeeded",
+      "post-pr-phase-blocked",
+      "post-pr-phase-needs-human",
+      "post-pr-observation-null",
+      "post-pr-observation-active",
+      "post-pr-observation-last-error",
+      "post-pr-observation-review-request",
+      "post-pr-observation-snapshot",
+      "post-pr-remediation-null",
+      "post-pr-remediation-active",
+      "post-pr-remediation-owner",
+      "post-pr-remediation-changes",
+      "post-pr-remediation-change-entry",
+      "post-pr-dispatch-planned",
+      "post-pr-dispatch-running",
+      "post-pr-dispatch-returned",
+      "post-pr-revalidation-empty",
+      "post-pr-revalidation-bound",
+      "post-pr-canonical-job-planned",
+      "post-pr-canonical-job-running",
+      "post-pr-canonical-job-retry-wait",
+      "post-pr-canonical-job-bound",
+      "post-pr-validator-job-planned",
+      "post-pr-validator-job-running",
+      "post-pr-validator-job-retry-wait",
+      "post-pr-validator-job-bound",
+      "post-pr-security-job-planned",
+      "post-pr-security-job-running",
+      "post-pr-security-job-retry-wait",
+      "post-pr-security-job-bound",
+      "post-pr-push-last-error",
+      "post-pr-continuation-review-null",
+      "post-pr-continuation-review-bound",
+      "post-pr-terminal-fact-null",
+      "post-pr-terminal-fact-account-switch-failed-github-auth",
+      "post-pr-terminal-fact-account-switch-failed-push",
+      "post-pr-terminal-fact-dispatch-start-unknown",
+      "post-pr-terminal-fact-path-lane-violation",
+      "post-pr-terminal-fact-remote-head-diverged",
+      "post-pr-terminal-fact-panel-runner-result-malformed",
+      "post-pr-terminal-fact-push-failed",
+      "post-pr-terminal-fact-panel-attribution-unsafe",
+      "repair-reported",
+      "repair-repairing",
+      "repair-review-approve",
+      "repair-review-reject",
+      "repair-merged",
+      "repair-blocked-from-reported",
+      "repair-blocked-from-repairing",
+      "repair-blocked-from-review",
+    ]) assert.match(schemaCatalog, literalPattern(`\`${variant}\``), `durable authority catalog missing variant ${variant}`);
+    assert.match(schemaCatalog, /does not persist a `gate` field; `story` is map-key metadata/i);
+    assert.match(schemaCatalog, /Only the interactive approved gate has the exact nested `handoff_receipt`/i);
+    assert.match(schemaCatalog, /separate external-source declarations rather than a `sidecar_bytes` member of the gate/i);
+    assert.match(schemaCatalog, /No step variant joins `rejected` and `blocked`/i);
+    assert.match(schemaCatalog, /no synthetic `review_binding`, `attempt_reviews`, or slice-level `reviewed_commit`/i);
+    assert.match(schemaCatalog, /validator source is exactly `\{verdict, report, review_ref\}` and the security source exactly `\{verdict, review_ref\}`/i);
+    assert.match(schemaCatalog, /no token is invented at the `post_pr` root, remediation container, dispatch, or push/i);
+    assert.match(schemaCatalog, /closed to exactly `schema_version`, `policy`, `phase`, `attempt`, `observation`, `remediation`, `evidence_refs`, `continuation_review`, and `terminal_fact`/i);
+    assert.match(schemaCatalog, /never persists synthetic `run_status` or `sidecar_bytes`/i);
+    assert.match(schemaCatalog, /All fifteen phase rows are complete enclosing records/i);
+    assert.match(schemaCatalog, /failure fingerprint\/head\/evidence ref-plus-hash/i);
+    assert.match(schemaCatalog, /candidate head, remediation evidence ref-plus-hash, revalidation, and push/i);
+    assert.match(schemaCatalog, /running requires `action_token` and `started_at`; bound requires `returned_at`, result ref\/hash, and an activity-valid verdict/i);
+    assert.match(schemaCatalog, /`retry-wait` is a schema-valid intermediate consumed only by the checked post-PR job transition\/retry path/i);
+    assert.match(schemaCatalog, /non-null push error is the closed structured[\s\S]*never a string/i);
+    assert.match(schemaCatalog, /Evidence refs and retry-exhaustion continuation review are exact `\{ref, hash\}` objects/i);
+    assert.match(schemaCatalog, /Terminal fact is null or one of the eight validator-accepted forms/i);
+    assert.match(schemaCatalog, /Mutation coverage changes each ref, each hash, and the actual external bytes independently/i);
+    assert.match(schemaCatalog, /checked by `checkRunConsistency`/i);
+    assert.match(schemaCatalog, /`changes-observed`, `committed`, `revalidating`, `validated`, `push-pending`, and `remote-confirmed` phase rows each bind five independent authority targets/i);
+    assert.match(schemaCatalog, /remediation-evidence ref drift, hash drift, actual file-byte drift, stale candidate-head identity, and cross-bound candidate-head identity/i);
+    assert.match(schemaCatalog, /exported `transitionPostPrState` consumes the candidate identity and once-bound remediation bindings/i);
+    assert.match(SPEC_WRITER_PROMPT, /canonical-source oracle covers every catalog row/i);
+    assert.match(SPEC_WRITER_PROMPT, /future-only `final\.plan` descriptor/i);
+    assert.match(SPEC_WRITER_PROMPT, /post-PR phases `changes-observed`, `committed`, `revalidating`, `validated`, `push-pending`, and `remote-confirmed`/i);
+    assert.match(schemaCatalog, /Reported persists exactly schema version, plan hash, owner\/consumer ids, defect path, original evidence ref\/hash[\s\S]*attempts zero[\s\S]*max_attempts: 2/i);
+    assert.match(schemaCatalog, /Repairing has `status: "repairing"`, attempts one or two, `baseline_commit`, and optional branch\/worktree/i);
+    assert.match(schemaCatalog, /review sources persist `status: "review"`[\s\S]*`APPROVE` or `REJECT` exists only in the separately bound review JSON/i);
+    assert.match(schemaCatalog, /Merged adds `status: "merged"`, `merge_commit`, and verification ref\/hash[\s\S]*Reviewed-tree\/merge-tree equality is re-observed[\s\S]*not a persisted field/i);
+    assert.match(schemaCatalog, /blocked source persists `status: "blocked"` and `reason`[\s\S]*origin is inferred from retained fields[\s\S]*never a `blocked_from` field/i);
+    assert.match(schemaCatalog, /Plan, original evidence, repair evidence, review, and verification are separate fixture files whose refs, hashes, and bytes mutate independently/i);
+    assert.match(schemaCatalog, /never gains synthetic `plan_ref`, `owner_snapshot`, `quiescent`, `review_verdict`, `reviewed_tree`, `merge_tree`, or `sidecar_bytes`/i);
+    assert.match(schemaCatalog, /exported `transitionMergedSliceRepair` consumer/i);
+    assert.match(SPEC_WRITER_PROMPT, /For PR #79 `merged_slice_repair`[\s\S]*eight canonical persisted variants separately/i);
+    assert.match(SPEC_WRITER_PROMPT, /verdict exists only in the bound external review JSON and catalog metadata tied to the checked consumer/i);
+
+    for (const excluded of [
+      "run.json.debug_snapshot",
+      "run.json.provenance",
+      "run.json.cost_attribution",
+      "heartbeat.json",
+      "factory.lock",
+      "process.json",
+    ]) {
+      assert.match(schemaCatalog, literalPattern(`\`${excluded}\``), `durable authority catalog must explicitly exclude ${excluded}`);
+    }
+    assert.match(schemaCatalog, /test\/docs-only, non-enforcing contracts/i);
+    assert.match(schemaCatalog, /do not create `src\/single-slice\/schema-model`, add a production validator, authorize a runtime transition, or change production behavior/i);
+    assert.match(schemaCatalog, /Baseline acceptance by a production validator or consumer is not a substitute for asserting every applicable emitted mutation rejected at that production seam/i);
+  });
+
+  it("keeps the boundary-retention ledger finite and aligned with all nine authority classes", () => {
+    const authorityClasses = [
+      "Plan and slices graph",
+      "Run envelope and terminal result",
+      "Gates, pending snapshot, and handoff receipt",
+      "Steps and acceptance inheritance",
+      "Slices and review/evidence bindings",
+      "Validator, security, and PR-created result",
+      "Continuation and planning/draft reuse",
+      "Post-PR nested records",
+      "PR79 merged slice repair",
+    ];
+    const classHeadings = [...DURABLE_AUTHORITY_LEDGER.matchAll(/^## (\d+)\. Authority class: (.+)$/gmu)];
+    assert.equal(classHeadings.length, 9, "boundary-retention ledger must contain exactly nine authority-class sections");
+    assert.deepEqual(
+      classHeadings.map((match) => [Number(match[1]), match[2]]),
+      authorityClasses.map((authorityClass, index) => [index + 1, authorityClass]),
+      "boundary-retention ledger authority classes must exactly match the B0.3 catalog",
+    );
+    for (const disposition of ["`RETAIN`", "`REOBSERVE`", "`CONSOLIDATE/REMOVE`"]) {
+      assert.match(DURABLE_AUTHORITY_LEDGER, literalPattern(disposition), `ledger missing disposition ${disposition}`);
+    }
+    for (const doc of [SPEC, SCHEMA]) assert.match(doc, /DURABLE-AUTHORITY-LEDGER\.md/, "schema/spec must link the canonical ledger");
+    assert.match(SCHEMA, /https:\/\/github\.com\/jasoncarreira\/opencode-feature-factory\/blob\/main\/DURABLE-AUTHORITY-LEDGER\.md/);
+    assert.doesNotMatch(SCHEMA, /\]\(\.\.\/\.\.\/\.\.\/DURABLE-AUTHORITY-LEDGER\.md\)/u, "packaged schema must not use a repository-relative link that escapes the package");
+  });
+
+  it("requires each finite authority class to decide retention, re-observation, and duplicate consolidation", () => {
+    for (const heading of [
+      "1. Authority class: Plan and slices graph",
+      "2. Authority class: Run envelope and terminal result",
+      "3. Authority class: Gates, pending snapshot, and handoff receipt",
+      "4. Authority class: Steps and acceptance inheritance",
+      "5. Authority class: Slices and review/evidence bindings",
+      "6. Authority class: Validator, security, and PR-created result",
+      "7. Authority class: Continuation and planning/draft reuse",
+      "8. Authority class: Post-PR nested records",
+      "9. Authority class: PR79 merged slice repair",
+    ]) {
+      const authorityClass = markdownSection(DURABLE_AUTHORITY_LEDGER, heading);
+      for (const disposition of ["`RETAIN`", "`REOBSERVE`", "`CONSOLIDATE/REMOVE`"]) {
+        assert.match(authorityClass, literalPattern(disposition), `${heading} must decide ${disposition}`);
+      }
+    }
+  });
+
+  it("preserves observation, evidence, review, merge, continuation, handoff, and external-effect controls", () => {
+    for (const control of [
+      /model claim[\s\S]*mutable working-tree file[\s\S]*never a substitute for Git observation/i,
+      /Test\/reproduction evidence exact bytes[\s\S]*command bytes[\s\S]*exact result[\s\S]*observed head[\s\S]*changed_paths/i,
+      /Independent review exact bytes[\s\S]*review ref\/hash[\s\S]*exact reviewed commit/i,
+      /merge_commit\^\{tree\} = reviewed_commit\^\{tree\}/i,
+      /Parent and child continuation identity[\s\S]*exact parent\/child run ids, commits, hashes, and review bytes survive/i,
+      /handoff_receipt[\s\S]*approval fingerprint[\s\S]*steering generation/i,
+      /PR\/GitHub external identities[\s\S]*external creation operation identity/i,
+      /unknown external outcome[\s\S]*re-observed before retry/i,
+      /process-launch\.lock\/owner\.json[\s\S]*nonce/i,
+      /action-claim token[\s\S]*Unknown start outcome is reconciled, not repeated/i,
+      /PR fence token[\s\S]*Never clear after a PR exists/i,
+    ]) assert.match(DURABLE_AUTHORITY_LEDGER, control);
+  });
+
+  it("records the complete PR 79 disposition without weakening legacy or single-repair authority", () => {
+    const pr79 = markdownSection(DURABLE_AUTHORITY_LEDGER, "9. Authority class: PR79 merged slice repair");
+    for (const retained of [
+      "Original reproduction `evidence_ref` and `evidence_hash`",
+      "`baseline_commit`",
+      "`reviewed_commit`, `review_ref`, and `review_hash`",
+      "`verification_ref` and `verification_hash`",
+      "`merge_commit` and the equality `merge_commit^{tree} = reviewed_commit^{tree}`",
+    ]) assert.match(pr79, literalPattern(retained), `PR 79 ledger missing retained boundary ${retained}`);
+    assert.match(pr79, /`plan_hash`[\s\S]*`CONSOLIDATE\/REMOVE`[\s\S]*canonical owner\/effective-path snapshot[\s\S]*re-observe that snapshot/i);
+    assert.match(pr79, /Owner slice, consumer slice, defect path, status, attempt, and fixed attempt ceiling[\s\S]*`RETAIN`/i);
+    assert.match(pr79, /`repair_evidence_ref` and `repair_evidence_hash`[\s\S]*`CONSOLIDATE\/REMOVE` only when the repair facts exist exactly once in the canonical amendment manifest[\s\S]*Consumption must re-observe/i);
+    assert.match(pr79, /A local\/model statement that the repair was reviewed, merged, or verified[\s\S]*`CONSOLIDATE\/REMOVE`/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /Persisted legacy records keep their original schema/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /No two repair authorities may be active for one run/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /adds no production manifest,[\s\S]*schema field, or migration/i);
+  });
+
   it("requires first review to consolidate same-class findings across every consequential dimension", () => {
     assert.match(WORK_REVIEWER_PROMPT, /First-attempt completeness rule:[\s\S]*`attempt: 1`[\s\S]*every consequential dimension of under-specification/i);
     assert.match(WORK_REVIEWER_PROMPT, /do not surface one example, or one category, while withholding equivalent findings for later rounds/i);
@@ -326,8 +607,8 @@ describe("class-wide planning prompt contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /never become a backdoor around an exhausted review/i);
     assert.match(WORK_REVIEWER_PROMPT, /must fail before the repair and pass after it, on observed evidence/i);
     assert.match(WORK_REVIEWER_PROMPT, /verdict JSON must record `attempt`[\s\S]*and `commit`/i, "reviewer must self-bind attempt and commit");
-    assert.match(SKILL, /a stale verdict can never be re-paired with code the reviewer did not see/i);
-    assert.match(SCHEMA, /a stale verdict can never be re-paired with a commit the reviewer did not see/i);
+    assert.match(SKILL, /rejects a stale local verdict\/commit pairing/i);
+    assert.match(SCHEMA, /rejects a stale local verdict\/commit pairing/i);
     assert.match(SKILL, /### Merged-Sibling Repair \(bounded\)/);
     assert.match(SKILL, /Only one repair incident is allowed per run/i);
     assert.match(SKILL, /never charged to the merged slice's immutable history and never drawn from `run\.max_retries`/i);
@@ -991,6 +1272,39 @@ describe("heartbeat docs contract", () => {
 });
 
 describe("simplified state contract docs", () => {
+  it("pins the trusted-host threat boundary and fallible workflow inputs", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /local operator and host are trusted for integrity/i, `${name} must trust the local operator and host for integrity`);
+      assert.match(text, /Model and subagent claims and stale evidence are untrusted/i, `${name} must distrust model claims and stale evidence`);
+      assert.match(text, /reject stale or mismatched evidence/i, `${name} must reject stale or mismatched evidence`);
+      assert.match(text, /Crashes and concurrent retries are fallible operating conditions/i, `${name} must treat crashes and concurrent retries as fallible`);
+      assert.match(text, /Operator text shown to a model is still data rather than privileged instructions/i, `${name} must separate trusted operator integrity from prompt authority`);
+    }
+  });
+
+  it("denies hostile-local protection claims and scopes internal checks to local consistency", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /no protection claim against arbitrary modification of the local filesystem/i, `${name} must deny arbitrary local-filesystem protection`);
+      assert.match(text, /Git history[\s\S]*factory code[\s\S]*test commands[\s\S]*reviewer\/verifier implementations/i, `${name} must enumerate the hostile-local limit`);
+      assert.match(text, /outside the threat model[\s\S]*rewrite both state and the checks that read it/i, `${name} must explain why hostile-local modification is out of scope`);
+      assert.match(text, /local consistency and provenance checks, not cryptographic authentication or generic forgery resistance/i, `${name} must scope internal durable checks`);
+      assert.match(text, /trusted local substrate remains intact/i, `${name} must condition local checks on the trusted substrate`);
+    }
+  });
+
+  it("retains exact provenance and idempotent external-effect controls inside the boundary", () => {
+    for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
+      assert.match(text, /exact Git\/test\/review\/merge provenance/i, `${name} must retain the four provenance classes`);
+      assert.match(text, /full Git SHAs[\s\S]*locally observed diffs, trees, and ancestry/i, `${name} must retain exact Git provenance`);
+      assert.match(text, /exact test commands, results, attempts, and heads/i, `${name} must retain exact test provenance`);
+      assert.match(text, /review subjects, attempts, refs, hashes, and exact reviewed commits/i, `${name} must retain exact review provenance`);
+      assert.match(text, /merge commits plus their reviewed-tree relation/i, `${name} must retain exact merge provenance`);
+      assert.match(text, /idempotent external-effect controls/i, `${name} must retain idempotent external-effect controls`);
+      assert.match(text, /unknown crash outcomes are re-observed before retry/i, `${name} must re-observe unknown external effects`);
+      assert.match(text, /after a PR exists[\s\S]*record that existing PR; do not create another/i, `${name} must not duplicate PR creation after a crash`);
+    }
+  });
+
   it("documents durable local state, transition helpers, and no proof layer", () => {
     for (const [name, text] of documentEntries({ SKILL, SCHEMA, README, SPEC })) {
       assert.match(text, /run\.json/i, `${name} must document run.json`);

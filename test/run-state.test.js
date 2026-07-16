@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { createReviewRecord } from "./helpers/review-record-fixture.js";
+import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -337,7 +339,7 @@ describe("simplified run-state transitions", () => {
     try {
       initGitRepo(fixture.repo, ["slice-branch"]);
       prepareSliceMergeState(fixture, { verdict: "REJECT" });
-      writeJson(join(fixture.runDir, "reviews", "caller-approved.json"), { subject: "slice", verdict: "APPROVE", required_fixes: [] });
+      writeJson(join(fixture.runDir, "reviews", "caller-approved.json"), createReviewRecord({ subject: "slice", verdict: "APPROVE", required_fixes: [] }));
 
       await assert.rejects(
         transitionSliceMerged(fixture.runDir, "slice", { merge_commit: "abc123", review_ref: "reviews/caller-approved.json" }),
@@ -448,8 +450,8 @@ describe("simplified run-state transitions", () => {
         security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
       });
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
-      writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", verdict: "GO" });
-      writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", verdict: "PASS" });
+      writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createReviewRecord({ subject: "feature-branch", verdict: "GO", required_fixes: [] }));
+      writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), createReviewRecord({ subject: "feature-branch", verdict: "PASS", required_fixes: [] }));
 
       const result = await createPrTransition(fixture.runDir, {
         pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/99",
@@ -579,13 +581,13 @@ describe("simplified run-state transitions", () => {
       {
         runId: "pr-validator-no-go",
         overrides: { validator: { verdict: "NO-GO", report: "artifacts/story.md", review_ref: "reviews/implementation-validator.json" } },
-        review: { subject: "feature-branch", verdict: "NO-GO" },
+        review: createReviewRecord({ subject: "feature-branch", verdict: "NO-GO", required_fixes: [] }),
         message: /validator verdict GO or GO-WITH-NITS/u,
       },
       {
         runId: "pr-security-block",
         overrides: { security_review: { verdict: "BLOCK", review_ref: "reviews/security-reviewer.json" } },
-        review: { subject: "feature-branch", verdict: "BLOCK" },
+        review: createReviewRecord({ subject: "feature-branch", verdict: "BLOCK", required_fixes: [] }),
         message: /security_review verdict PASS/u,
       },
     ];
@@ -753,7 +755,7 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-1.json"), { subject: "slice", status: "pass", review_ready: true, head: attemptOneHead });
-      writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), { subject: "slice", verdict: "REJECT", required_fixes: ["adjust implementation"] });
+      writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), createReviewRecord({ subject: "slice", verdict: "REJECT", required_fixes: ["adjust implementation"] }));
       await transitionRunSlice(fixture.runDir, "slice", {
         status: "review",
         attempts: 1,
@@ -770,7 +772,7 @@ describe("simplified run-state transitions", () => {
       assert.notEqual(attemptTwoHead, attemptOneHead);
 
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-2.json"), { subject: "slice", status: "pass", review_ready: true, head: attemptTwoHead, previous_head: attemptOneHead });
-      writeJson(join(fixture.runDir, "reviews", "slice.attempt-2.json"), { subject: "slice", verdict: "APPROVE", required_fixes: [] });
+      writeJson(join(fixture.runDir, "reviews", "slice.attempt-2.json"), createReviewRecord({ subject: "slice", verdict: "APPROVE", required_fixes: [] }));
       await transitionRunSlice(fixture.runDir, "slice", {
         status: "review",
         attempts: 2,
@@ -784,8 +786,8 @@ describe("simplified run-state transitions", () => {
       assertConsistent(fixture);
 
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n");
-      writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "slice-branch", verdict: "GO" });
-      writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "slice-branch", verdict: "PASS" });
+      writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createReviewRecord({ subject: "slice-branch", verdict: "GO", required_fixes: [] }));
+      writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), createReviewRecord({ subject: "slice-branch", verdict: "PASS", required_fixes: [] }));
       await transitionRunJson(fixture.runDir, (run) => {
         run.validator = { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" };
         run.security_review = { verdict: "PASS", review_ref: "reviews/security-reviewer.json" };
@@ -1387,7 +1389,7 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
   mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
   mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
   writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true });
-  if (writeReview) writeJson(join(fixture.runDir, "reviews", "slice.json"), { subject, verdict, required_fixes: [] });
+  if (writeReview) writeJson(join(fixture.runDir, "reviews", "slice.json"), createReviewRecord({ subject, verdict, required_fixes: [] }));
   writeJson(join(fixture.runDir, "run.json"), {
     ...baseRun(fixture.runId),
     slices: [{ id: "slice", status: "review", attempts: 1, branch: "slice-branch", evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json", merge_commit: null }],
@@ -1444,8 +1446,8 @@ function assertConsistent(fixture) {
 
 function writeReadyPrRun(fixture, overrides = {}) {
   mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
-  writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", verdict: "GO" });
-  writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", verdict: "PASS" });
+  writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createReviewRecord({ subject: "feature-branch", verdict: "GO", required_fixes: [] }));
+  writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), createReviewRecord({ subject: "feature-branch", verdict: "PASS", required_fixes: [] }));
   writeJson(join(fixture.runDir, "run.json"), {
     ...baseRun(fixture.runId),
     gates: { pre_pr: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve", answered_at: NOW } },
@@ -1515,13 +1517,10 @@ function gitOutput(repo, args) {
 }
 
 function baseRun(runId) {
-  return {
-    schema_version: 1,
+  return createRunRecord({
     run_id: runId,
-    status: "running",
-    gates: {},
     slices: [{ id: "slice", status: "running", attempts: 1 }],
-  };
+  });
 }
 
 function heartbeat(runId) {
