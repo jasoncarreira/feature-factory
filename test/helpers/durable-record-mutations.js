@@ -46,6 +46,21 @@ const POST_PR_EXTERNAL = Object.freeze({
   security: { ref: "reviews/post-pr-security.attempt-1.json", bytes: "{\"kind\":\"post-pr-security-review\",\"verdict\":\"PASS\"}\n" },
   continuation: { ref: "reviews/post-pr-continuation.attempt-1.json", bytes: "{\"kind\":\"post-pr-continuation\",\"verdict\":\"BLOCKED\"}\n" },
 });
+const PLAN_EXTERNAL = Object.freeze({
+  plan: { ref: "plan/slices.json", bytes: "{\"slices\":[{\"id\":\"B0.2\",\"stack\":\"backend\",\"paths\":[\"src/**\"],\"depends_on\":[],\"acceptance\":[\"AC2\"],\"test_plan\":[\"node --test\"]},{\"id\":\"B0.3\",\"stack\":\"backend\",\"paths\":[\"test/**\"],\"depends_on\":[\"B0.2\"],\"acceptance\":[\"AC3\"],\"test_plan\":[\"node --test\"]}]}\n" },
+});
+const CONTINUATION_EXTERNAL = Object.freeze({
+  parentRun: { ref: ".opencode/factory/parent-run/run.json", bytes: "{\"schema_version\":1,\"run_id\":\"parent-run\",\"status\":\"blocked\",\"gates\":{},\"terminal_result\":{\"status\":\"blocked\",\"run_id\":\"parent-run\",\"reason\":\"review blocked\"}}\n" },
+  selectedReview: { ref: "reviews/remediation-review.json", bytes: "{\"kind\":\"validator\",\"subject\":\"parent\",\"verdict\":\"APPROVE\",\"required_fixes\":[\"fix\"]}\n" },
+  artifact: { ref: "artifacts/story.md", bytes: "Approved parent story.\n" },
+  evidence: { ref: "evidence/test-verifier.json", bytes: "{\"subject\":\"test-verifier\",\"status\":\"pass\"}\n" },
+  review: { ref: "reviews/implementation-validator.json", bytes: "{\"subject\":\"implementation\",\"verdict\":\"GO\"}\n" },
+  acceptedReview: { ref: "reviews/spec-writer.json", bytes: "{\"subject\":\"spec-writer\",\"verdict\":\"APPROVE\"}\n" },
+  acceptedArtifact: { ref: "artifacts/technical-brief.md", bytes: "Accepted technical brief.\n" },
+  draft: { ref: "artifacts/technical-brief.md", bytes: "Unaccepted technical brief draft.\n" },
+  postPrEvidence: { ref: "evidence/post-pr.json", bytes: "{\"kind\":\"post-pr-ci\",\"verdict\":\"red\"}\n" },
+  postPrReview: { ref: "reviews/post-pr.json", bytes: "{\"kind\":\"post-pr-continuation\",\"verdict\":\"BLOCKED\"}\n" },
+});
 const REPAIR_PLAN_BYTES = `${JSON.stringify({
   slices: [
     { id: "owner", stack: "backend", paths: ["src/owner/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["unit"] },
@@ -241,12 +256,12 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "post-pr-phase-failure-recording": "ktrhbd",
   "post-pr-phase-remediation-planned": "ktrhbd",
   "post-pr-phase-remediation-running": "ktrhbd",
-  "post-pr-phase-changes-observed": "ktrhbd",
-  "post-pr-phase-committed": "ktrhbd",
-  "post-pr-phase-revalidating": "ktrhbd",
-  "post-pr-phase-validated": "ktrhbd",
-  "post-pr-phase-push-pending": "ktrhbd",
-  "post-pr-phase-remote-confirmed": "ktrhbd",
+  "post-pr-phase-changes-observed": "ktd",
+  "post-pr-phase-committed": "ktd",
+  "post-pr-phase-revalidating": "ktd",
+  "post-pr-phase-validated": "ktd",
+  "post-pr-phase-push-pending": "ktd",
+  "post-pr-phase-remote-confirmed": "ktd",
   "post-pr-phase-succeeded": "ktrhbd",
   "post-pr-phase-blocked": "ktrhbd",
   "post-pr-phase-needs-human": "ktrhbd",
@@ -308,14 +323,14 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
 // Hashes are independent, immutable exact-value snapshots over writer, all readers, named tests,
 // authority facts, and complete sidecar descriptors, in that order. They are not derived from RECORDS.
 export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
-  ["plan-slices-json", "e5258dda3444db63ad094ba502fa54b13af0e91143f8461434d846b34e36cda7"],
-  ["final-plan-descriptor", "23f136c298514958f67b51e594a096d7ebdbc7c6394b9df280ad5d080465985d"],
-  ["run-envelope-running", "c6f4d9a441f2b8dbfa5b76f80809a8f1cb4dd26e980ede74b76e769f3f210361"],
-  ["run-envelope-terminal", "3e06bd95d786c368e8e7ffe044b8276fb40f5660f577c5e0dd1c240efaeabb44"],
-  ["terminal-result-completed", "8a3531e7938e59724fac9faaca4e9a87987ae5f7a507870b90f0e458bbce7da6"],
-  ["terminal-result-blocked", "cf62484459595b22423bfdaacca3954f445e39f508cbd62bbe67311ec78a2883"],
-  ["terminal-result-partial", "b11084bfa5d9403d34f6a2751cc66a0a51fd98a6cc5156ce6c3644c4014e3398"],
-  ["terminal-result-needs-human", "992f61185792a4b0ff618f95de3e98d8a44cfaa0ae1f6a36e407e68981f79a99"],
+  ["plan-slices-json", "989039b0b23d8bef1c9c50b80f4f80da94bb3c982834804154e688ae72e2790a"],
+  ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
+  ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
+  ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
+  ["terminal-result-completed", "c0a32a3d9fb33de14b0bee740202376bae2508e9b5a7e746331dda28f1ca190b"],
+  ["terminal-result-blocked", "681845bd946f1cb11d6f2d0a528946365756a79f2ce284179856360e3d9b631e"],
+  ["terminal-result-partial", "6726223fbe9f4850a9d6815d78ccf5b5fbbdfdebcd6bf5c7611ace16569b9705"],
+  ["terminal-result-needs-human", "8b7d4e6f6533c6072da2e83300c1f2503055905c0bcf5d69a54a91196f6c2eef"],
   ["gate-pending", "fed011780d644435b702f54dec1207d1b9d1a9990ce61c617c1a716c76ada680"],
   ["gate-approved-without-receipt", "805e0dca68680ab259f17e6bb87d585114f4d9ae4c50bd9eeae23a329194bd32"],
   ["gate-approved-interactive", "7eac2d735ca841d24003ff24c911b7efc1939fb7e16740f70da6b591189735e5"],
@@ -336,30 +351,30 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
   ["steering-action-claim", "9a94c1f05fec7cad1d2930995c464530088b99175c8430f336fe4f00a76d7384"],
   ["steering-last-action", "986caa05859db8fa98077f1d3e0b08340be3922854cb5cd33a95415fd5b250b4"],
-  ["pr-created-result", "2f2e6d8928fcdfdcef9af2f8de587a77691ee293ab3493d305b0602b7ed5ab47"],
-  ["continuation-envelope", "7823394893cbcbbba6eca035374d770a58d3ad9e58c4fefa6a9f8070cb094669"],
-  ["continuation-parent-binding", "0b4ff0fed34cbc4ba986fca22f53b2125b7ac01e3edce8f1ac85babcee366076"],
-  ["continuation-selected-review", "141d89285b7c5d8a9390dd5625d2fb7a5e417640ffc50e4a930f7d1ad117a684"],
-  ["continuation-target-binding", "02f21c706314106995917c5c160b162fc0185a98cf6913d1ea698bd630126aac"],
-  ["continuation-parent-artifact-sidecar", "9292d51ea695ac7574a281ed5c6138971e243a361699abd3d2eff8a23013763f"],
-  ["continuation-parent-evidence-sidecar", "20478b97668ecd24a9bc973d96d36bd4a2b6c4d90fcea1c43ccd38c6f42a0690"],
-  ["continuation-parent-review-sidecar", "b55ba9fae296d0bdec0319618a2a8406f9e5a4a9789421d4f005e96fc5c72b4f"],
-  ["continuation-planning-reuse-ineligible", "0cbe8013884a39466b2db0f901a8f9f3766e0ded60be0ca109d88f0ab9d8b57f"],
-  ["continuation-planning-reuse-eligible", "af8d6bcd3123285a18e6e9419ed875e881ff9acd44e7b7dc7f49a15351eb5a75"],
-  ["continuation-draft-reuse", "01133b62a8e20431276621521c7edfaf822ae2b4c24ef4396a26fbdd8b4b43f6"],
-  ["continuation-post-pr-binding", "6fdddab0caf1953935819760fed3903213b7acc81277aa75a8ab03384287c7a1"],
+  ["pr-created-result", "a349b22ed56c01c2b38203d74c65a8c9e65bae11108dcbf3407b02e1be842742"],
+  ["continuation-envelope", "81191ae4a3a84c496f99bad916dc229a68a107eff211ac9d4739783531208fcb"],
+  ["continuation-parent-binding", "be6e6abe6f58d7194d61d9527c40ce6424cf748cd0c38f2e446ac56066bb1380"],
+  ["continuation-selected-review", "9e9a6c756313a6ab1f7e363bcef864def294b4247df06c6135514f6138ae52f8"],
+  ["continuation-target-binding", "a68b7b138b6877761e903a7bef61fcb150b95d651a1937ea8c20dfc511a3c01a"],
+  ["continuation-parent-artifact-sidecar", "293b04332c448519c7ef645dbc219898296120b849fb9b038fab18fd0aabbb9c"],
+  ["continuation-parent-evidence-sidecar", "823bdb94a43dd3f5b64ac8f9027b1a74a64b12ff474d8927a6bb39bf7e9f5c21"],
+  ["continuation-parent-review-sidecar", "bb9f6cd0a5d12b9e7a1678b177655f80d89f3dd22f776dcf5215eb31579c4f45"],
+  ["continuation-planning-reuse-ineligible", "2652266c8d5c51fe8c0b7e1189d28a37b5780f270eedc5754ab715f092dcdf7f"],
+  ["continuation-planning-reuse-eligible", "e8f1a81bc20a815a8733f56c03825196d96c4d4e546f4462f1e929595f17a7d9"],
+  ["continuation-draft-reuse", "b45f3caea3722f916cf9a12bcb6c5d001178dad255905d7c0e0d78cc8c13834e"],
+  ["continuation-post-pr-binding", "6d2fb331a7bb49440c8b1a9acbd0ed0f4b6f0e1019f0bd1128da41b6738ff26a"],
   ["post-pr-phase-disabled", "3759b74ccea805c737ff3e1ed51e0aac37ed8a41ef91046e98b455f3ef53381c"],
   ["post-pr-phase-awaiting-pr", "940393c6d7cef5b19f8c3d8c8915ab3d42962bec7bb1dc270fb9436d4f9ec139"],
   ["post-pr-phase-observing", "46ad44282906d504922581ea07d169dfbf409f4f5a4043a221480bad8c31a6da"],
   ["post-pr-phase-failure-recording", "ce62fb142d27f61c0bd5349c34d6cb6ce296631042d723c5016f348ec07e8a77"],
   ["post-pr-phase-remediation-planned", "41420ec34d679574ec8030d475af2558382e2299c7a21f03ca08e871f112aa06"],
   ["post-pr-phase-remediation-running", "f82004b088fd60e59ada70c53916299a8de31c2903f78002319df7c7ef282d74"],
-  ["post-pr-phase-changes-observed", "f419962e6728b2da3a9b1f97591bb2f624fa72f778b3ac4a67bdd723311aea79"],
-  ["post-pr-phase-committed", "28454b20f7cb7dc046d3050626d40719ed2515c7a10060498aaf99760f98766b"],
-  ["post-pr-phase-revalidating", "2a13efd14497ba1ff1d9f6f9ea7fa2607d73dda729db296cb76e1e4aa17df83c"],
-  ["post-pr-phase-validated", "3bd891bd1a77c41bf13835a95a251cb035bcf081f9e41089e208ca21fdb0b82f"],
-  ["post-pr-phase-push-pending", "d6371b9abbe893d2d2465b5e6ad628286f0a3df4875386f59b8f7a04679e9db1"],
-  ["post-pr-phase-remote-confirmed", "7f34ed27ad0a518b4cbe6696a5f51ae23cd2ccea5f0b5f7ea3ad3d8a4fe58ee0"],
+  ["post-pr-phase-changes-observed", "90ad408d5236cf5d189c9ec62c0c575002f45471c7ce86a04eda2f8cafc405f9"],
+  ["post-pr-phase-committed", "a3323edcb9895bc799f68873c68c2a4c219f6899c813ce94b303ce2eb97f4837"],
+  ["post-pr-phase-revalidating", "bb6f14aebdd43671f2894d5e93698520cae5a936e3a8385f13dc45383279f473"],
+  ["post-pr-phase-validated", "4be6a6d2914136e48bb73878e8d15293c05672eee3c5acacfc8632b5d30b035a"],
+  ["post-pr-phase-push-pending", "c286baa3c63272f96b445c27764d8b0d7be33eb649889a5548029345e40fe7ca"],
+  ["post-pr-phase-remote-confirmed", "c09af62c9947a5b441a8ccc989f481f5f73401a2cb03ae7a4706d7f7625aa802"],
   ["post-pr-phase-succeeded", "e0b6e19b620fe59a3a92cd909b83a52a2887e6978909d1b1e14f623488052339"],
   ["post-pr-phase-blocked", "6810ba0d65030de06f23373e0d547b351039c679cb10d131f497176254c78e6d"],
   ["post-pr-phase-needs-human", "6f70fa6e0c6edf2cc9837b5539f168581f0cee03ca043fac6774c7f1f471467d"],
@@ -371,7 +386,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["post-pr-observation-review-request", "e29dbae9a8a7e7207fa41d2aa4e39b2360239800ce7744f8dd9951d30d80e919"],
   ["post-pr-observation-snapshot", "cca0f8f2a92e680b1ab3744b0d96d61900c424c4b71c6a85a50aa001d8b37fff"],
   ["post-pr-remediation-null", "94b4f5784f8cad86269dc0c40ca39db823f05d5dbb2eff6ef9369585fd16f273"],
-  ["post-pr-remediation-active", "a60e79b332c9d2f05477d7ec6b93063ebd63273898f97c4b04690ca7c9453363"],
+  ["post-pr-remediation-active", "fb21c115d06e585f85b1e5cc0cd2542c0e525f4d2e8feb475ee779a11d9d8522"],
   ["post-pr-remediation-owner", "a88dc76de76b7c27e25cd4f85b1061953839efc60943779bdf5915409e37de78"],
   ["post-pr-remediation-changes", "fec2603740f35975dbbac06c9515f8d41265cbb779a341c23d8ca82d7d39a184"],
   ["post-pr-remediation-change-entry", "f5fa0ac940c8fcdedf9c3261a00707d5f3a176bfdcf04ddbb7e20e3af6edb788"],
@@ -423,8 +438,8 @@ const DURABLE_AUTHORITY_METADATA_BY_ID = new Map(DURABLE_AUTHORITY_METADATA_MANI
 // exclusions. The hash input is canonical JSON for { targets, exclusions }; it binds target
 // order and every family, path, value, from, to, key, sidecar, and label without reading RECORDS.
 export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
-  ["plan-slices-json", "5615ea642b4ab7e7f4f596f806204c46e1f3b7bb3d77cfdaa0e00b75ada19391"],
-  ["final-plan-descriptor", "bf79367770e0f0c60217ee0e05daf2e7d96471adf0545cc28ee8a0a0acac83dd"],
+  ["plan-slices-json", "af303fa79406e4a20cbe888a2ab4e6e9b1e66a0a6c6e9ca2f08bd81172ea7663"],
+  ["final-plan-descriptor", "2214eb46d69ff71c3f99f18528c9afa9c8cf97d0cec8664265507caac30c15b7"],
   ["run-envelope-running", "0dfdf9c52ba1ee909070da85617630bbb0cac990f109bdc3c7f25c4f686276dd"],
   ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
   ["terminal-result-completed", "3d17906cce62941bf26a4817e5b9ccb8c31d1804878280f1a18b7b69632a98a0"],
@@ -453,28 +468,28 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["steering-last-action", "8d42d520ec811dad436e84cdc48b7ae6d2f13a442fdef2ba6397b13bdea16e67"],
   ["pr-created-result", "e37d53a5fb2e8a6007aa845a0b6dd1d18534ef406cd66e899b9f6c5568b30dbb"],
   ["continuation-envelope", "6bf3fb70f927af981715950d3e2d264bd72902599c95e07f82b01897fc4e05c9"],
-  ["continuation-parent-binding", "2b011867bd950f95457ed8d4073d30911d3a9b85b579c20cb5b9301cae88220a"],
-  ["continuation-selected-review", "7ce096ec80047c8df061dc7656446ad11bbf62cf633217e4ce56f5e1e8e4d6a8"],
+  ["continuation-parent-binding", "47781828b6ccc2a6bf504d35c346e1094399fbeece8faff7004d6dfe2a39fc64"],
+  ["continuation-selected-review", "c04a4c48c3c9275566203da9f2e0569d784a109c79e850ef0c53cd5822de702b"],
   ["continuation-target-binding", "8a93c4d661ea231228107766a88c0455c78133c01cd302dfe7ee357a4b58cd78"],
-  ["continuation-parent-artifact-sidecar", "1a62463f051598250f73d951ddfe53f8c27e3eaf4684f5c00e53e90f6d6163e9"],
-  ["continuation-parent-evidence-sidecar", "7ed49126e2e4f28ab9d2191f059fe92b8ac4418eed4118205da7bafe4ea9b1b4"],
-  ["continuation-parent-review-sidecar", "c000f120c08d85f52e53c82c2616b74d312719976e4ce4298c6c16c339c0694b"],
+  ["continuation-parent-artifact-sidecar", "70d0510eee199d118e60ca9d0e47dc67769e6f5eafcb8fac6228ac97d2d9cc67"],
+  ["continuation-parent-evidence-sidecar", "90e04ebe00a5c339d0cfea128ab4c5c6ed3ca306f9b4845f36394b8591531ea9"],
+  ["continuation-parent-review-sidecar", "38b4a8446ede77cc997e9d4b7c94d1db69100310e850e5ceb50cdf05234ccca0"],
   ["continuation-planning-reuse-ineligible", "299b7ff7f60229ffe0b23917aa491d84f23bbc7e71677a7b88049ebbade3b130"],
-  ["continuation-planning-reuse-eligible", "13accc56aa839eb2482f24a5292b78f014b02ae6889f498ed3a566664fea4b37"],
-  ["continuation-draft-reuse", "a5bd5d78043f8381e376cadbb1628e46d220cf74f2d1bec147c5f798ca985be8"],
-  ["continuation-post-pr-binding", "959836a883a8a206939b5a68bca2b498118d13ddcb784aa3caf44edb5751f467"],
+  ["continuation-planning-reuse-eligible", "be5197eb05c9eb3c9dc725d33cb737bbcce7bba2c43a84dea4b60a4c1a7853e7"],
+  ["continuation-draft-reuse", "47ab4eb6c8446104fe631fb366eb7902743613c88f00b4ca91b614996fcf611d"],
+  ["continuation-post-pr-binding", "785865c1a1d5bea1b5010e82c1c55d4286b3cc8660b2fd57e1769d2b24c57f73"],
   ["post-pr-phase-disabled", "513971086c59d58641e60d94eafbcd2bf14874ba9c6ccfc647232b41b7b07e34"],
   ["post-pr-phase-awaiting-pr", "bf1c21e663f13eb7e6a1be999f3909712e1c40b510ec6116c98d0cd01dc8e130"],
   ["post-pr-phase-observing", "e6a25d74454166eb044c588a5a59a3a711c1232821b9a06d7cdf26e7f098c8ce"],
   ["post-pr-phase-failure-recording", "069fdc97c5857cb5f2db059b088a26c093745a7e57f97a2d205ff0bf602525f5"],
   ["post-pr-phase-remediation-planned", "e206193f01349bd009a9a3d0e7369fda199d609bafe325dea0db0290c6e9a401"],
   ["post-pr-phase-remediation-running", "754e04090cdda9c8cc099bc794c6154534fcfd616187e9633ac3cc739fbaac2c"],
-  ["post-pr-phase-changes-observed", "fffea30b6bccd996c642f0a3641ebd6445c039580d03be1383acb1999e11e937"],
-  ["post-pr-phase-committed", "a8e0409e277950e434a396269c5fe85d6e8d0e7b7eb05b33a020a19b79c8a50c"],
-  ["post-pr-phase-revalidating", "3c0dae1595ed4570d0bc12c6b5c7807331dbd90e6f3cf7ee4bba48ac60ce7490"],
-  ["post-pr-phase-validated", "c7f4dedf62825b7203213ad32306cda12f37f732ca25b5b483cf21aed9e1d75f"],
-  ["post-pr-phase-push-pending", "8053e999b73cf43d539e860b9575f014944ce588b324e7cf2fec1c584a4cc588"],
-  ["post-pr-phase-remote-confirmed", "d1066e16f865e4f172285d5376382dd7fc2f6e53c8e5084606dd5edd6bad4481"],
+  ["post-pr-phase-changes-observed", "24e18a7b03897a68e1532efd4aba27fa4b77c293a30f630507c3b3ee2546e0d7"],
+  ["post-pr-phase-committed", "44ead2082ff8b6b99f08dfe6ba60b394ebe210855d7f4341adb60d43bd316811"],
+  ["post-pr-phase-revalidating", "dd5f45b9484cf3bca4c1946781298214e506fd5e47ee4050b896854a83c84ca6"],
+  ["post-pr-phase-validated", "cbcb2aeb7e65eba27b28a8a8ee3bea711b6280c84e270cfbc93633603182c560"],
+  ["post-pr-phase-push-pending", "68f28e2276575167214f93f9b40b0a604bf61c4590900577275147c629ef31d8"],
+  ["post-pr-phase-remote-confirmed", "3ff56803108c6fbcc9ea58489f9602e4d34aacaa6b819f89611eeec515515594"],
   ["post-pr-phase-succeeded", "f85af2b48c0926e215e4e52aa8ffd21c73009f3b83e3b58fa35ed98a1355a3f8"],
   ["post-pr-phase-blocked", "cb252153402eb377af2749e935a7c2fa95c5e38d2caa5320c2c0d5399d8679e1"],
   ["post-pr-phase-needs-human", "7cbad4902c5adc539c29f71d39d45bf7544e5d7fb0d670e46b750599a11caf5e"],
@@ -486,7 +501,7 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["post-pr-observation-review-request", "56615c1ed43d8357ceefc407b96b3a3458743c480e5bd650919528f99c0e64ed"],
   ["post-pr-observation-snapshot", "4d184a362df7a52c9c49a94419ace41595b7c2272d403298ead7643e2f019186"],
   ["post-pr-remediation-null", "b11b44e67fedeadb2f7ecd4d591f05ce615eaea5b2622950ae35a82b29cadb5e"],
-  ["post-pr-remediation-active", "60633c036049135027b1c5946262942d9b312ccb81b8c150850c5355562b2d27"],
+  ["post-pr-remediation-active", "65a3eacd1aeb8f18e952987841491bf7ec722b95b5333f21128f9436a23f59f2"],
   ["post-pr-remediation-owner", "d0de8ce88fb6d4fd46f561423ec15cbbd9c0d9f673d978803d181cb48f4e62ca"],
   ["post-pr-remediation-changes", "6407f76902b6e3e966837049a7a5be36002dfc1e391cb75fcda8c7d91b050572"],
   ["post-pr-remediation-change-entry", "c696de34634555c76db0c6a4818cba73e5cff137a1dc784ec5df4c599b5fb76a"],
@@ -534,31 +549,7 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
 ]);
 const DURABLE_AUTHORITY_DESCRIPTOR_BY_ID = new Map(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST);
 
-const CANONICAL_CORE_RECORD_IDS = Object.freeze([
-  "gate-pending",
-  "gate-approved-without-receipt",
-  "gate-approved-interactive",
-  "gate-changes-requested",
-  "gate-stopped",
-  "step-running",
-  "step-rejected",
-  "step-blocked",
-  "step-accepted",
-  "step-inherited-acceptance",
-  "slice-pending",
-  "slice-running",
-  "slice-review",
-  "slice-merged",
-  "slice-blocked",
-  "validator-verdict-binding",
-  "security-verdict-binding",
-  "steering-boundary",
-  "steering-action-claim",
-  "steering-last-action",
-]);
-const CANONICAL_POST_PR_RECORD_IDS = Object.freeze(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["post-pr-nested-records"]);
-const CANONICAL_REPAIR_RECORD_IDS = Object.freeze(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"]);
-const CANONICAL_SOURCE_RECORD_IDS = Object.freeze([...CANONICAL_CORE_RECORD_IDS, ...CANONICAL_POST_PR_RECORD_IDS, ...CANONICAL_REPAIR_RECORD_IDS]);
+const CANONICAL_SOURCE_RECORD_IDS = Object.freeze(Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat());
 const CANONICAL_SOURCE_RECORD_ID_SET = new Set(CANONICAL_SOURCE_RECORD_IDS);
 
 // Independently authored exact-value commitments over class/id placement, persisted
@@ -566,6 +557,14 @@ const CANONICAL_SOURCE_RECORD_ID_SET = new Set(CANONICAL_SOURCE_RECORD_IDS);
 // fact declarations, and separately modeled external source bytes. These digests are
 // literals rather than values derived from RECORDS or DURABLE_AUTHORITY_CATALOG.
 export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
+  ["plan-slices-json", "dd6fabc7def0955d82f37d30a53fc19e4e8cc8fa69fa445badbc3c051d4dd7b9"],
+  ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
+  ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
+  ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
+  ["terminal-result-completed", "c03d548c3d23d7235c80a4037dea9c0da0b4c14e26fcebe8a4a0832b03febe2c"],
+  ["terminal-result-blocked", "2e50300aa3e14e8fd6c935f3dae3fa44dd388c6ff386091ecbc28109f82ad855"],
+  ["terminal-result-partial", "b5808744bc1ae0146a9a59e9814be3d58712a04c0cfbaf6f5d1858ab698c7746"],
+  ["terminal-result-needs-human", "4c5aee988d94853ac78432435d4b65f7ebe8720dfa0652b6c9eeb8ee30bd0581"],
   ["gate-pending", "802c580efe10eaa5728775d05bb1f088c4831455b3763763b9daf3885c6442f4"],
   ["gate-approved-without-receipt", "9df0792243e07d8ee3ce2efb420e688522e78d645350806a54399294f810113d"],
   ["gate-approved-interactive", "d02715d4e0cf1db63f2cdbfae3770c0e959dfb48f6c14658bc9f43e6c99b5911"],
@@ -586,6 +585,18 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["steering-boundary", "b3477a6967254d04f869b97b8d15d00ddb952673f00807ebec41f05afdbdacfc"],
   ["steering-action-claim", "00866d18d439d808d2829e6d0967675629175bf8c1f00bec2130fa2728b30a21"],
   ["steering-last-action", "4fc3088a51000b12aed4ca3216c8e60b74c5206d8d9e75e4dea319cb31c62820"],
+  ["pr-created-result", "1ccd84b1e137fc59a416a3b584680907c1541d9b5cfacd98f8a94d62cb9cee28"],
+  ["continuation-envelope", "5e10d284d461eb4758d11241f6b8ba67acb7eef34144eee4655080a8e620e2fe"],
+  ["continuation-parent-binding", "ee8dabc5be43ce00230c86a075b90c23e978e3ee8a3cde8f3cb187676b0f0db5"],
+  ["continuation-selected-review", "e2469d19e003e6f3b357f62d89f112fed91f40602db79a587a925bb1f071d26a"],
+  ["continuation-target-binding", "579b338baade49828c938569cf4b4bc76e1125bda4ca04423865753f0a0a4e87"],
+  ["continuation-parent-artifact-sidecar", "089baa634d9bb1bb2699b047988fefd2cdf95e0dc6eef46ffc072c13e2c8a584"],
+  ["continuation-parent-evidence-sidecar", "f7f70a1daf94d5becccbd59f61df5a61ced521ed31d208b860a7ccc0f8625e79"],
+  ["continuation-parent-review-sidecar", "bf8e04a769d72ccdc6124cb03189d3e6d64109fba295634af5a4749a61b12f22"],
+  ["continuation-planning-reuse-ineligible", "185c450470908bdc215c6e82ed542ed8fc7284fa26a084e096e18b5d303ece08"],
+  ["continuation-planning-reuse-eligible", "38ded4bf546d577abf750b54b8a8363e2c988881e5035e70a22a55d9b5ef65fb"],
+  ["continuation-draft-reuse", "78b465df08ca5d06333f8b7fceeca2b92ff3bda67289f26e41e3ff0eeb83e669"],
+  ["continuation-post-pr-binding", "d060eae5fbb7c63c0adc70bdf71585dd16e2ded8f49ca2bd74eda42b02f2f3f7"],
   ["post-pr-phase-disabled", "4898a84d6f95e1a649122eadba90daab5786164dcbe11b6accbbe04b17b91a07"],
   ["post-pr-phase-awaiting-pr", "cf30eab403b52bdaf1e3e54c2ce0ab4bc24e7bd70d6f07ad2372a57647497fed"],
   ["post-pr-phase-observing", "5338e2ad9975937758224fdf86e9abe6ef7c7c5caf12fb2b59871fab4e6fd0b1"],
@@ -609,7 +620,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["post-pr-observation-review-request", "9566fd52bdcfd2827381ca03279711585eab7ecc3286e419e40420c72113d0bb"],
   ["post-pr-observation-snapshot", "19ded9f482060bd5202c40e356b13a3bb0cab5eb11213f9856add41a2cdb7f6b"],
   ["post-pr-remediation-null", "14d2db7f0f845f2efeab959de21c8b7f14e675358120358957e480c8138b427c"],
-  ["post-pr-remediation-active", "3c27545516acc8c47ee5ed9738d05c49fa015ab12db12b1027901c4191e642f2"],
+  ["post-pr-remediation-active", "71afb14f76720ef63877104a8c775761ceaf9d8e98aa7dcaa4de24235f474e12"],
   ["post-pr-remediation-owner", "61efc1abafdc6517729de0b3b42049a296be26101cc4dcc65dc5fb09990e9e1c"],
   ["post-pr-remediation-changes", "4c9443025aaee7943f100038014098e14ce736341300f7316c87493bb55584bf"],
   ["post-pr-remediation-change-entry", "4a21102892d5722e04e8fed6a834e1a64ba27833589b05287f6dd5ed0d2672ce"],
@@ -726,7 +737,7 @@ export function assertDurableAuthorityCatalogComplete(catalog) {
   if (!sameList(DURABLE_AUTHORITY_METADATA_MANIFEST.map(([id]) => id), expectedManifestIds)) throw new TypeError("independent metadata manifest must contain every required record id exactly once in source order");
   if (!sameList(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), expectedManifestIds)) throw new TypeError("independent descriptor manifest must contain every required record id exactly once in source order");
   if (!sameList(Object.keys(EXPLICIT_EXCLUDED_FAMILY_CODES), expectedManifestIds)) throw new TypeError("explicit family disposition registry must contain every required record id exactly once in source order");
-  if (!sameList(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id), CANONICAL_SOURCE_RECORD_IDS)) throw new TypeError("independent canonical source manifest must contain every canonical core and post-PR record id exactly once in source order");
+  if (!sameList(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id), CANONICAL_SOURCE_RECORD_IDS)) throw new TypeError("independent canonical source manifest must contain every required catalog row exactly once in source order");
 
   const seenRecordIds = new Set();
   for (const authorityClass of catalog) {
@@ -770,31 +781,37 @@ const RECORDS = [
     authorityClassId: "plan-slices-graph", id: "plan-slices-json", record: "plan/slices.json", variant: "accepted graph",
     writer: "factory slices-seed (checked plan validation and seed transition)",
     readers: ["validateSlicesPlan", "factory slices-seed", "transitionRunSlice and transitionSliceMerged", "transitionMergedSliceRepair owner-lane checks"],
-    source: { slices: [{ id: "B0.3", stack: "backend", paths: ["test/**"], depends_on: ["B0.2"], acceptance: ["AC3"], test_plan: ["node --test"] }] },
+    canonicalPath: ["plan/slices.json"], source: JSON.parse(PLAN_EXTERNAL.plan.bytes), externalSources: PLAN_EXTERNAL,
+    facts: exactFacts(JSON.parse(PLAN_EXTERNAL.plan.bytes)),
     requiredPath: ["slices"], typePath: ["slices"],
-    targets: [drift(["slices", 0], "depends_on", "dependencies"), stale(["slices", 0, "id"], "stale-slice"), cross(["slices", 0, "depends_on", 0], "other-wave")],
+    targets: [drift(["slices", 1], "depends_on", "dependencies"), stale(["slices", 1, "id"], "stale-slice"), cross(["slices", 1, "depends_on", 0], "other-wave")],
   }),
   recordEntry({
     authorityClassId: "plan-slices-graph", id: "final-plan-descriptor", record: "final.plan.json descriptor", variant: "required descriptor",
     writer: "work-decomposer final plan write followed by reviewed planning acceptance",
     readers: ["work-reviewer decomposition review", "factory slices-seed descriptor consumption"],
-    source: { schema_version: 1, kind: "final-plan", created_at: NOW, run_id: "catalog-run", descriptor: { kind: "slices-graph", ref: "plan/slices.json", hash: HASH_A }, sidecar_bytes: "{\"slices\":[]}" },
-    requiredPath: ["descriptor", "kind"], typePath: ["descriptor"], sidecars: [sidecar("plan", ["descriptor", "ref"], ["descriptor", "hash"], ["sidecar_bytes"])],
-    targets: [schema(["schema_version"]), kind(["descriptor", "kind"], "unknown-graph", "required descriptor.kind"), time(["created_at"]), ref(["descriptor", "ref"], "plan"), hash(["descriptor", "hash"], "plan"), bytes(["sidecar_bytes"], "plan"), drift(["descriptor"], "kind", "record_kind"), stale(["run_id"], "stale-run"), cross(["descriptor", "kind"], "other-boundary-kind", "descriptor boundary")],
+    canonicalPath: ["final.plan.json"],
+    source: { schema_version: 1, kind: "final-plan", created_at: NOW, run_id: "catalog-run", descriptor: { kind: "slices-graph", ref: PLAN_EXTERNAL.plan.ref, hash: hashBytes(PLAN_EXTERNAL.plan.bytes) } },
+    externalSources: PLAN_EXTERNAL,
+    facts: exactFacts({ schema_version: 1, kind: "final-plan", created_at: NOW, run_id: "catalog-run", descriptor: { kind: "slices-graph", ref: PLAN_EXTERNAL.plan.ref, hash: hashBytes(PLAN_EXTERNAL.plan.bytes) } }),
+    requiredPath: ["descriptor", "kind"], typePath: ["descriptor"], sidecars: [externalSidecar("plan", ["descriptor", "ref"], ["descriptor", "hash"])],
+    targets: [schema(["schema_version"]), kind(["descriptor", "kind"], "unknown-graph", "required descriptor.kind"), time(["created_at"]), ...externalSidecarTargets("plan", ["descriptor", "ref"], ["descriptor", "hash"]), drift(["descriptor"], "kind", "record_kind"), stale(["run_id"], "stale-run"), cross(["descriptor", "kind"], "other-boundary-kind", "descriptor boundary")],
   }),
 
   recordEntry({
     authorityClassId: "run-envelope-terminal-result", id: "run-envelope-running", record: "run.json", variant: "running",
     writer: "manifest bootstrap and transitionRunJson checked locked writers",
     readers: ["validateRun", "resumeFactory", "all checked run-state transitions through transitionRunJson", "factory status/list/watch eligibility readers"],
-    source: { schema_version: 1, run_id: "catalog-run", status: "running", updated_at: NOW, base_commit: SHA_A, branch: "catalog-run", worktree: "/tmp/catalog-run", terminal_result: null },
+    canonicalPath: [], source: { schema_version: 1, run_id: "catalog-run", status: "running", updated_at: NOW, base_commit: SHA_A, branch: "catalog-run", worktree: "/tmp/catalog-run", terminal_result: null },
+    facts: exactFacts({ schema_version: 1, run_id: "catalog-run", status: "running", updated_at: NOW, base_commit: SHA_A, branch: "catalog-run", worktree: "/tmp/catalog-run", terminal_result: null }),
     requiredPath: ["run_id"], typePath: ["status"], targets: [schema(["schema_version"]), time(["updated_at"]), ref(["worktree"]), stale(["base_commit"], SHA_B), cross(["run_id"], "other-run")],
   }),
   recordEntry({
     authorityClassId: "run-envelope-terminal-result", id: "run-envelope-terminal", record: "run.json", variant: "terminal envelope",
     writer: "transitionTerminalResult, transitionPrCreated, or transitionPostPrTerminal",
     readers: ["validateRun", "resumeFactory terminal check", "factory status/list/watch terminal readers", "cleanup eligibility readers"],
-    source: { schema_version: 1, run_id: "catalog-run", status: "blocked", updated_at: NOW, terminal_result: { status: "blocked", run_id: "catalog-run", reason: "review-blocked" } },
+    canonicalPath: [], source: { schema_version: 1, run_id: "catalog-run", status: "blocked", updated_at: NOW, terminal_result: { status: "blocked", run_id: "catalog-run", reason: "review-blocked" } },
+    facts: exactFacts({ schema_version: 1, run_id: "catalog-run", status: "blocked", updated_at: NOW, terminal_result: { status: "blocked", run_id: "catalog-run", reason: "review-blocked" } }),
     requiredPath: ["terminal_result"], typePath: ["status"], targets: [schema(["schema_version"]), time(["updated_at"]), stale(["status"], "running"), cross(["terminal_result", "run_id"], "other-run")],
   }),
   terminalResultEntry("terminal-result-completed", "completed", { pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo", draft: false, artifacts: { test_report: "artifacts/test-report.md" } }, [ref(["artifacts", "test_report"]), stale(["pr_number"], 6)]),
@@ -829,7 +846,8 @@ const RECORDS = [
     authorityClassId: "validator-security-pr-result", id: "pr-created-result", record: "PR-created terminal_result", variant: "completed external PR",
     writer: "transitionPrCreated after fenced external PR creation/re-observation",
     readers: ["validateRun terminal consistency", "resumeFactory terminal reader", "cleanup eligibility", "post-PR initialization and continuation admission"],
-    source: { status: "completed", run_id: "catalog-run", pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo", draft: false, head_sha: SHA_B },
+    canonicalPath: ["terminal_result"], source: { status: "completed", run_id: "catalog-run", pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo", draft: false, head_sha: SHA_B },
+    facts: exactFacts({ status: "completed", run_id: "catalog-run", pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo", draft: false, head_sha: SHA_B }),
     requiredPath: ["pr_url"], typePath: ["pr_number"], targets: [ref(["pr_url"]), stale(["head_sha"], SHA_A), cross(["repository"], "other/repo")],
   }),
 
@@ -844,31 +862,31 @@ const RECORDS = [
     authorityClassId: "continuation-planning-draft-reuse", id: "continuation-planning-reuse-ineligible", record: "continuation.planning_reuse", variant: "eligible false",
     writer: "factory continue planning reuse assessment",
     readers: ["validateContinuationPlanningReuse", "feature command payload normalization", "adoptContinuationPlanning refusal path"],
-    source: { eligible: false }, requiredPath: ["eligible"], typePath: ["eligible"], targets: [stale(["eligible"], true), cross(["eligible"], "parent-accepted")],
+    ...continuationRecordSource("continuation-planning-reuse-ineligible"), requiredPath: ["eligible"], typePath: ["eligible"], targets: [stale(["eligible"], true), cross(["eligible"], "parent-accepted")],
   }),
   recordEntry({
     authorityClassId: "continuation-planning-draft-reuse", id: "continuation-planning-reuse-eligible", record: "continuation.planning_reuse", variant: "eligible true with accepted bytes",
     writer: "factory continue planning reuse assessment",
     readers: ["validateContinuationPlanningReuse", "feature command payload normalization", "adoptContinuationPlanning checked adoption"],
-    source: { eligible: true, spec_review_ref: "reviews/spec-writer.json", spec_review_hash: HASH_A, spec_artifact_ref: "artifacts/technical-brief.md", spec_artifact_hash: HASH_B, sidecar_bytes: { review: "approve", artifact: "brief" } },
-    requiredPath: ["eligible"], typePath: ["spec_review_hash"], sidecars: [sidecar("review", ["spec_review_ref"], ["spec_review_hash"], ["sidecar_bytes", "review"]), sidecar("artifact", ["spec_artifact_ref"], ["spec_artifact_hash"], ["sidecar_bytes", "artifact"])],
-    targets: [...sidecarTargets("review", ["spec_review_ref"], ["spec_review_hash"], ["sidecar_bytes", "review"]), ...sidecarTargets("artifact", ["spec_artifact_ref"], ["spec_artifact_hash"], ["sidecar_bytes", "artifact"]), stale(["eligible"], false), cross(["spec_review_ref"], "reviews/other-run.json")],
+    ...continuationRecordSource("continuation-planning-reuse-eligible"),
+    requiredPath: ["eligible"], typePath: ["spec_review_hash"], sidecars: [externalSidecar("review", ["spec_review_ref"], ["spec_review_hash"]), externalSidecar("artifact", ["spec_artifact_ref"], ["spec_artifact_hash"])],
+    targets: [...externalSidecarTargets("review", ["spec_review_ref"], ["spec_review_hash"]), ...externalSidecarTargets("artifact", ["spec_artifact_ref"], ["spec_artifact_hash"]), stale(["eligible"], false), cross(["spec_review_ref"], "reviews/other-run.json")],
   }),
   recordEntry({
     authorityClassId: "continuation-planning-draft-reuse", id: "continuation-draft-reuse", record: "continuation.draft_spec_reuse", variant: "unaccepted draft with remaining retry budget",
     writer: "factory continue draft reuse admission",
     readers: ["validateContinuationDraftSpecReuse", "feature command payload normalization", "spec-writer attempt/budget initialization"],
-    source: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: HASH_A, parent_step_status: "rejected", parent_step_attempts: 1, max_retries: 3, remaining_attempts: 2, sidecar_bytes: "draft" },
-    requiredPath: ["artifact_ref"], typePath: ["remaining_attempts"], sidecars: [sidecar("draft", ["artifact_ref"], ["artifact_hash"], ["sidecar_bytes"])],
-    targets: [...sidecarTargets("draft", ["artifact_ref"], ["artifact_hash"], ["sidecar_bytes"]), stale(["parent_step_attempts"], 0), cross(["remaining_attempts"], 3)] ,
+    ...continuationRecordSource("continuation-draft-reuse"),
+    requiredPath: ["artifact_ref"], typePath: ["remaining_attempts"], sidecars: [externalSidecar("draft", ["artifact_ref"], ["artifact_hash"])],
+    targets: [...externalSidecarTargets("draft", ["artifact_ref"], ["artifact_hash"]), stale(["parent_step_attempts"], 0), cross(["remaining_attempts"], 3)] ,
   }),
   recordEntry({
     authorityClassId: "continuation-planning-draft-reuse", id: "continuation-post-pr-binding", record: "continuation.post_pr", variant: "blocked post-PR continuation context",
     writer: "factory continue post-PR continuation admission",
     readers: ["validateContinuationPostPr", "feature command payload normalization", "post-PR continuation workflow routing"],
-    source: { pr_url: "https://github.com/acme/repo/pull/7", repository: "acme/repo", pr_number: 7, head_sha: SHA_A, disposition: "leave-unchanged", post_pr_hash: HASH_A, evidence_ref: "evidence/post-pr.json", evidence_hash: HASH_B, continuation_review_ref: "reviews/post-pr.json", continuation_review_hash: HASH_C, sidecar_bytes: { evidence: "red", review: "blocked" } },
-    requiredPath: ["pr_url"], typePath: ["pr_number"], sidecars: [sidecar("evidence", ["evidence_ref"], ["evidence_hash"], ["sidecar_bytes", "evidence"]), sidecar("review", ["continuation_review_ref"], ["continuation_review_hash"], ["sidecar_bytes", "review"])],
-    targets: [...sidecarTargets("evidence", ["evidence_ref"], ["evidence_hash"], ["sidecar_bytes", "evidence"]), ...sidecarTargets("review", ["continuation_review_ref"], ["continuation_review_hash"], ["sidecar_bytes", "review"]), ref(["pr_url"]), hash(["post_pr_hash"]), stale(["head_sha"], SHA_B), cross(["repository"], "other/repo")],
+    ...continuationRecordSource("continuation-post-pr-binding"),
+    requiredPath: ["pr_url"], typePath: ["pr_number"], sidecars: [externalSidecar("evidence", ["evidence_ref"], ["evidence_hash"]), externalSidecar("review", ["continuation_review_ref"], ["continuation_review_hash"])],
+    targets: [...externalSidecarTargets("evidence", ["evidence_ref"], ["evidence_hash"]), ...externalSidecarTargets("review", ["continuation_review_ref"], ["continuation_review_hash"]), ref(["pr_url"]), hash(["post_pr_hash"]), stale(["head_sha"], SHA_B), cross(["repository"], "other/repo")],
   }),
 
   ...POST_PR_PHASES.map(postPrPhaseEntry),
@@ -978,11 +996,12 @@ export const DURABLE_AUTHORITY_EXCLUSIONS = deepFreeze([
 ]);
 
 function terminalResultEntry(id, status, extras, targets = []) {
+  const source = { status, run_id: "catalog-run", reason: status === "completed" ? null : extras.reason, summary: extras.summary ?? "PR created.", ...extras };
   return recordEntry({
     authorityClassId: "run-envelope-terminal-result", id, record: "run.json.terminal_result", variant: status,
     writer: status === "completed" ? "transitionPrCreated" : "transitionTerminalResult or transitionPostPrTerminal",
     readers: ["validateRun terminal consistency", "resumeFactory terminal check", "factory status/list/watch terminal readers", "cleanup eligibility readers"],
-    source: { status, run_id: "catalog-run", reason: status === "completed" ? null : extras.reason, summary: extras.summary ?? "PR created.", ...extras },
+    canonicalPath: ["terminal_result"], source, facts: exactFacts(source),
     requiredPath: ["status"], typePath: ["run_id"], targets: [...targets, stale(["status"], "running"), cross(["run_id"], "other-run")],
   });
 }
@@ -1188,11 +1207,13 @@ function sliceEntry(id, variant) {
 }
 
 function sidecarRecord(authorityClassId, id, record, variant, writer, readers, refValue, sidecarBytes) {
+  const source = { subject: "backend", attempt: 1, ref: refValue, hash: hashBytes(sidecarBytes) };
+  const externalSources = { sidecar: { ref: refValue, bytes: sidecarBytes } };
   return recordEntry({
     authorityClassId, id, record, variant, writer, readers,
-    source: { subject: "backend", attempt: 1, ref: refValue, hash: HASH_A, sidecar_bytes: sidecarBytes },
-    requiredPath: ["subject"], typePath: ["attempt"], sidecars: [sidecar("sidecar", ["ref"], ["hash"], ["sidecar_bytes"])],
-    targets: [...sidecarTargets("sidecar", ["ref"], ["hash"], ["sidecar_bytes"]), stale(["attempt"], 0), cross(["subject"], "other-subject")],
+    source, externalSources,
+    requiredPath: ["subject"], typePath: ["attempt"], sidecars: [externalSidecar("sidecar", ["ref"], ["hash"])],
+    targets: [...externalSidecarTargets("sidecar", ["ref"], ["hash"]), stale(["attempt"], 0), cross(["subject"], "other-subject")],
   });
 }
 
@@ -1244,66 +1265,203 @@ function steeringEntry(id, key) {
 }
 
 function continuationEnvelopeEntry() {
+  const fixture = continuationCatalogFixture("continuation-envelope");
   return recordEntry({
     authorityClassId: "continuation-planning-draft-reuse", id: "continuation-envelope", record: "run.json.continuation", variant: "blocked-run continuation",
     writer: "factory continue checked child-run admission",
     readers: ["validateContinuation", "feature command payload normalization", "continuation workflow routing", "adoptContinuationPlanning"],
-    source: { schema_version: 1, kind: "blocked-run-continuation", created_at: NOW, operator_summary: "Continue blocked run." },
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
     requiredPath: ["kind"], typePath: ["operator_summary"], targets: [schema(["schema_version"]), kind(["kind"], "resume"), time(["created_at"]), stale(["kind"], "existing-run-resume"), cross(["operator_summary"], "other run")],
   });
 }
 
 function continuationParentEntry() {
+  const fixture = continuationCatalogFixture("continuation-parent-binding");
   return recordEntry({
     authorityClassId: "continuation-planning-draft-reuse", id: "continuation-parent-binding", record: "continuation.parent", variant: "blocked parent",
     writer: "factory continue checked parent admission",
     readers: ["validateContinuationParent", "factory continue source revalidation", "adoptContinuationPlanning"],
-    source: { run_id: "parent-run", status: "blocked", run_ref: ".opencode/factory/parent-run/run.json", run_hash: HASH_A, branch: "parent", commit: SHA_A, worktree: ".opencode/worktrees/parent", sidecar_bytes: "parent run bytes" },
-    requiredPath: ["run_id"], typePath: ["status"], sidecars: [sidecar("parent-run", ["run_ref"], ["run_hash"], ["sidecar_bytes"])],
-    targets: [...sidecarTargets("parent-run", ["run_ref"], ["run_hash"], ["sidecar_bytes"]), stale(["commit"], SHA_B), cross(["run_id"], "child-run")],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
+    requiredPath: ["run_id"], typePath: ["status"], sidecars: [externalSidecar("parent-run", ["run_ref"], ["run_hash"])],
+    targets: [...externalSidecarTargets("parent-run", ["run_ref"], ["run_hash"]), stale(["commit"], SHA_B), cross(["run_id"], "child-run")],
   });
 }
 
 function continuationReviewEntry() {
+  const fixture = continuationCatalogFixture("continuation-selected-review");
   return recordEntry({
     authorityClassId: "continuation-planning-draft-reuse", id: "continuation-selected-review", record: "continuation.review", variant: "approved blocking review",
     writer: "factory continue selected-review admission",
     readers: ["validateContinuationReview", "validateContinuationSelectedReview", "continuation remediation decomposition"],
-    source: { kind: "validator", ref: "reviews/remediation-review.json", hash: HASH_A, subject: "parent", verdict: "APPROVE", source: "run.validator.review_ref", required_fixes: ["fix"], sidecar_bytes: "approved review" },
-    requiredPath: ["kind"], typePath: ["required_fixes"], sidecars: [sidecar("selected-review", ["ref"], ["hash"], ["sidecar_bytes"])],
-    targets: [kind(["kind"], "unknown-review"), ...sidecarTargets("selected-review", ["ref"], ["hash"], ["sidecar_bytes"]), stale(["verdict"], "REJECT"), cross(["subject"], "other-branch")],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
+    requiredPath: ["kind"], typePath: ["required_fixes"], sidecars: [externalSidecar("selected-review", ["ref"], ["hash"])],
+    targets: [kind(["kind"], "unknown-review"), ...externalSidecarTargets("selected-review", ["ref"], ["hash"]), stale(["verdict"], "REJECT"), cross(["subject"], "other-branch")],
   });
 }
 
 function continuationTargetEntry() {
+  const fixture = continuationCatalogFixture("continuation-target-binding");
   return recordEntry({
     authorityClassId: "continuation-planning-draft-reuse", id: "continuation-target-binding", record: "continuation.target", variant: "fresh child target",
     writer: "factory continue checked child target allocation",
     readers: ["validateContinuationTarget", "feature command payload normalization", "child bootstrap and Git/worktree creation"],
-    source: { run_id: "child-run", branch: "child", worktree: ".opencode/worktrees/child", base_ref: "main", base_commit: SHA_B },
+    canonicalPath: fixture.canonicalPath, source: fixture.source, facts: exactFacts(fixture.source),
     requiredPath: ["run_id"], typePath: ["base_commit"], targets: [ref(["worktree"]), stale(["base_commit"], SHA_A), cross(["run_id"], "parent-run")],
   });
 }
 
 function continuationContextEntry(id, record, kindValue, refValue) {
+  const fixture = continuationCatalogFixture(id);
   return recordEntry({
     authorityClassId: "continuation-planning-draft-reuse", id, record: `continuation.${record}`, variant: `${kindValue} context binding`,
     writer: "factory continue parent context inventory",
     readers: ["validateContinuationRefHashArray", "feature command payload normalization", "continuation planning/remediation context loader"],
-    source: { kind: kindValue, ref: refValue, hash: HASH_A, sidecar_bytes: `${kindValue} bytes` },
-    requiredPath: ["kind"], typePath: ["kind"], sidecars: [sidecar(kindValue, ["ref"], ["hash"], ["sidecar_bytes"])],
-    targets: [kind(["kind"], "other-kind"), ...sidecarTargets(kindValue, ["ref"], ["hash"], ["sidecar_bytes"]), stale(["hash"], HASH_B), cross(["ref"], `reviews/other-${kindValue}.json`)],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
+    requiredPath: ["kind"], typePath: ["kind"], sidecars: [externalSidecar(kindValue, ["ref"], ["hash"])],
+    targets: [kind(["kind"], "other-kind"), ...externalSidecarTargets(kindValue, ["ref"], ["hash"]), stale(["hash"], HASH_B), cross(["ref"], `reviews/other-${kindValue}.json`)],
   });
+}
+
+function continuationRecordSource(id) {
+  const fixture = continuationCatalogFixture(id);
+  return {
+    canonicalPath: fixture.canonicalPath,
+    source: fixture.source,
+    externalSources: fixture.externalSources,
+    facts: exactFacts(fixture.source),
+  };
+}
+
+function continuationCatalogFixture(id) {
+  const parent = {
+    run_id: "parent-run",
+    status: "blocked",
+    run_ref: CONTINUATION_EXTERNAL.parentRun.ref,
+    run_hash: hashBytes(CONTINUATION_EXTERNAL.parentRun.bytes),
+    branch: "parent",
+    commit: SHA_A,
+    worktree: ".opencode/worktrees/parent",
+  };
+  const review = {
+    kind: "validator",
+    ref: CONTINUATION_EXTERNAL.selectedReview.ref,
+    hash: hashBytes(CONTINUATION_EXTERNAL.selectedReview.bytes),
+    subject: "parent",
+    verdict: "APPROVE",
+    source: "run.validator.review_ref",
+    required_fixes: ["fix"],
+  };
+  const targetBinding = { run_id: "child-run", branch: "child", worktree: ".opencode/worktrees/child", base_ref: "main", base_commit: SHA_B };
+  const artifact = { kind: "artifact", ref: CONTINUATION_EXTERNAL.artifact.ref, hash: hashBytes(CONTINUATION_EXTERNAL.artifact.bytes) };
+  const evidence = { kind: "evidence", ref: CONTINUATION_EXTERNAL.evidence.ref, hash: hashBytes(CONTINUATION_EXTERNAL.evidence.bytes) };
+  const parentReview = { kind: "review", ref: CONTINUATION_EXTERNAL.review.ref, hash: hashBytes(CONTINUATION_EXTERNAL.review.bytes) };
+  const selectedParentReview = { kind: "review", ref: review.ref, hash: review.hash };
+  const continuation = {
+    schema_version: 1,
+    kind: "blocked-run-continuation",
+    created_at: NOW,
+    operator_summary: "Continue blocked run.",
+    parent,
+    review,
+    target: targetBinding,
+    parent_artifacts: [artifact],
+    parent_evidence: [evidence],
+    parent_reviews: [parentReview, selectedParentReview],
+    planning_reuse: { eligible: false },
+  };
+  let canonicalPath;
+  let externalSources = {};
+  if (id === "continuation-envelope") {
+    canonicalPath = ["continuation"];
+    externalSources = {
+      "parent-run": CONTINUATION_EXTERNAL.parentRun,
+      "selected-review": CONTINUATION_EXTERNAL.selectedReview,
+      artifact: CONTINUATION_EXTERNAL.artifact,
+      evidence: CONTINUATION_EXTERNAL.evidence,
+      review: CONTINUATION_EXTERNAL.review,
+    };
+  } else if (id === "continuation-parent-binding") {
+    canonicalPath = ["continuation", "parent"];
+    externalSources = { "parent-run": CONTINUATION_EXTERNAL.parentRun };
+  } else if (id === "continuation-selected-review") {
+    canonicalPath = ["continuation", "review"];
+    externalSources = { "selected-review": CONTINUATION_EXTERNAL.selectedReview };
+  } else if (id === "continuation-target-binding") {
+    canonicalPath = ["continuation", "target"];
+  } else if (id === "continuation-parent-artifact-sidecar") {
+    canonicalPath = ["continuation", "parent_artifacts", 0];
+    externalSources = { artifact: CONTINUATION_EXTERNAL.artifact };
+  } else if (id === "continuation-parent-evidence-sidecar") {
+    canonicalPath = ["continuation", "parent_evidence", 0];
+    externalSources = { evidence: CONTINUATION_EXTERNAL.evidence };
+  } else if (id === "continuation-parent-review-sidecar") {
+    canonicalPath = ["continuation", "parent_reviews", 0];
+    externalSources = { review: CONTINUATION_EXTERNAL.review };
+  } else if (id === "continuation-planning-reuse-ineligible") {
+    canonicalPath = ["continuation", "planning_reuse"];
+  } else if (id === "continuation-planning-reuse-eligible") {
+    continuation.planning_reuse = {
+      eligible: true,
+      spec_review_ref: CONTINUATION_EXTERNAL.acceptedReview.ref,
+      spec_review_hash: hashBytes(CONTINUATION_EXTERNAL.acceptedReview.bytes),
+      spec_artifact_ref: CONTINUATION_EXTERNAL.acceptedArtifact.ref,
+      spec_artifact_hash: hashBytes(CONTINUATION_EXTERNAL.acceptedArtifact.bytes),
+    };
+    canonicalPath = ["continuation", "planning_reuse"];
+    externalSources = { review: CONTINUATION_EXTERNAL.acceptedReview, artifact: CONTINUATION_EXTERNAL.acceptedArtifact };
+  } else if (id === "continuation-draft-reuse") {
+    continuation.draft_spec_reuse = {
+      artifact_ref: CONTINUATION_EXTERNAL.draft.ref,
+      artifact_hash: hashBytes(CONTINUATION_EXTERNAL.draft.bytes),
+      parent_step_status: "rejected",
+      parent_step_attempts: 1,
+      max_retries: 3,
+      remaining_attempts: 2,
+    };
+    canonicalPath = ["continuation", "draft_spec_reuse"];
+    externalSources = { draft: CONTINUATION_EXTERNAL.draft };
+  } else if (id === "continuation-post-pr-binding") {
+    continuation.post_pr = {
+      pr_url: "https://github.com/acme/repo/pull/7",
+      repository: "acme/repo",
+      pr_number: 7,
+      head_sha: SHA_A,
+      disposition: "leave-unchanged",
+      policy: postPrPolicy(true),
+      post_pr_hash: HASH_A,
+      evidence_ref: CONTINUATION_EXTERNAL.postPrEvidence.ref,
+      evidence_hash: hashBytes(CONTINUATION_EXTERNAL.postPrEvidence.bytes),
+      continuation_review_ref: CONTINUATION_EXTERNAL.postPrReview.ref,
+      continuation_review_hash: hashBytes(CONTINUATION_EXTERNAL.postPrReview.bytes),
+    };
+    canonicalPath = ["continuation", "post_pr"];
+    externalSources = { evidence: CONTINUATION_EXTERNAL.postPrEvidence, review: CONTINUATION_EXTERNAL.postPrReview };
+  } else {
+    throw new TypeError(`missing canonical continuation fixture for ${id}`);
+  }
+  return {
+    run: { schema_version: 1, run_id: "child-run", status: "running", branch: "child", worktree: ".opencode/worktrees/child", max_retries: id === "continuation-draft-reuse" ? 3 : 2, gates: {}, continuation },
+    canonicalPath,
+    source: structuredClone(valueAt({ continuation }, canonicalPath, id)),
+    externalSources: structuredClone(externalSources),
+  };
 }
 
 function postPrPhaseEntry(phase) {
   const fixture = postPrCatalogFixture(`post-pr-phase-${phase}`);
+  const bindsCandidate = ["changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"].includes(phase);
+  const sidecars = bindsCandidate ? [externalSidecar("remediation", ["remediation", "remediation_evidence_ref"], ["remediation", "remediation_evidence_hash"])] : [];
+  const authorityTargets = bindsCandidate ? [
+    ...externalSidecarTargets("remediation", ["remediation", "remediation_evidence_ref"], ["remediation", "remediation_evidence_hash"]),
+    stale(["remediation", "candidate_head_sha"], SHA_C),
+    cross(["remediation", "candidate_head_sha"], SHA_A, "cross-bound candidate head"),
+  ] : [];
   return recordEntry({
     authorityClassId: "post-pr-nested-records", id: `post-pr-phase-${phase}`, record: "run.json.post_pr", variant: phase,
     writer: phase === "disabled" || phase === "awaiting-pr" ? "createPostPrState policy initialization" : phase === "observing" ? "transitionPrCreated or transitionPostPrState observation transition" : ["blocked", "needs-human", "succeeded"].includes(phase) ? "transitionPostPrTerminal checked terminal transition" : phase === "failure-recording" ? "transitionPostPrFailure checked failure admission" : "transitionPostPrState checked phase transition",
     readers: ["validatePostPr phase/state consistency", "assertPostPrPhaseTransition", "assertPostPrMonotonicState", "post-PR workflow dispatch decision", "transitionPostPrTerminal reason preconditions", "resume and heartbeat eligibility"],
-    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
-    requiredPath: ["phase"], typePath: ["attempt"], targets: [schema(["schema_version"]), stale(["attempt"], fixture.source.attempt === 0 ? 1 : 0), cross(["phase"], phase === "disabled" ? "observing" : "disabled")],
+    canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, sidecars, facts: exactFacts(fixture.source),
+    requiredPath: ["phase"], typePath: ["attempt"], targets: [schema(["schema_version"]), stale(["attempt"], fixture.source.attempt === 0 ? 1 : 0), cross(["phase"], phase === "disabled" ? "observing" : "disabled"), ...authorityTargets],
   });
 }
 
@@ -1361,8 +1519,8 @@ function postPrRemediationEntry() {
     writer: "transitionPostPrFailure and transitionPostPrState",
     readers: ["validatePostPrRemediation", "assertPostPrAttemptTransition", "assertPostPrMonotonicState", "post-PR revalidation/push/terminal decisions"],
     canonicalPath: fixture.canonicalPath, source: fixture.source, externalSources: fixture.externalSources, facts: exactFacts(fixture.source),
-    requiredPath: ["attempt"], typePath: ["owner"], sidecars: [externalSidecar("failure-evidence", ["failure_evidence_ref"], ["failure_evidence_hash"])],
-    targets: [schema(["schema_version"]), ...externalSidecarTargets("failure-evidence", ["failure_evidence_ref"], ["failure_evidence_hash"]), kind(["owner", "kind"], "other-owner"), stale(["attempt"], 0), cross(["owner", "slice_id"], "frontend")],
+    requiredPath: ["attempt"], typePath: ["owner"], sidecars: [externalSidecar("failure-evidence", ["failure_evidence_ref"], ["failure_evidence_hash"]), externalSidecar("remediation", ["remediation_evidence_ref"], ["remediation_evidence_hash"])],
+    targets: [schema(["schema_version"]), ...externalSidecarTargets("failure-evidence", ["failure_evidence_ref"], ["failure_evidence_hash"]), ...externalSidecarTargets("remediation", ["remediation_evidence_ref"], ["remediation_evidence_hash"]), kind(["owner", "kind"], "other-owner"), stale(["candidate_head_sha"], SHA_C), cross(["candidate_head_sha"], SHA_A, "cross-bound candidate head")],
   });
 }
 
@@ -1493,6 +1651,28 @@ export function createPostPrCatalogBaseline(record) {
   return structuredClone({ run: fixture.run, externalSources: postPrExternalSourcesFor(fixture.run.post_pr, "post-pr-baseline"), transitionOnly: fixture.transitionOnly ?? null });
 }
 
+export function createDurableCatalogBaseline(record) {
+  if (!record || !CANONICAL_SOURCE_RECORD_ID_SET.has(record.id)) throw new TypeError("catalog baseline requires a registered canonical source row");
+  if (record.id === "plan-slices-json") {
+    return structuredClone({ consumer: "validateSlicesPlan", plan: record.source, externalSources: record.externalSources ?? {} });
+  }
+  if (record.id === "final-plan-descriptor") {
+    return structuredClone({ consumer: "final-plan-descriptor-contract", descriptor: record.source, externalSources: record.externalSources ?? {} });
+  }
+  if (record.authorityClassId === "post-pr-nested-records") {
+    return { consumer: "validateRun/checkRunConsistency", ...createPostPrCatalogBaseline(record) };
+  }
+  if (record.authorityClassId === "pr79-merged-slice-repair") {
+    return { consumer: "validateRun/checkRunConsistency", ...createRepairCatalogBaseline(record) };
+  }
+  if (record.authorityClassId === "continuation-planning-draft-reuse") {
+    const fixture = continuationCatalogFixture(record.id);
+    if (canonicalJson(record.source) !== canonicalJson(fixture.source) || canonicalJson(record.canonicalPath) !== canonicalJson(fixture.canonicalPath)) throw new TypeError(`${record.id} does not match its canonical continuation baseline fixture`);
+    return structuredClone({ consumer: "validateRun", run: fixture.run, externalSources: fixture.externalSources });
+  }
+  return structuredClone({ consumer: "validateRun", run: canonicalRunFixture(record), externalSources: record.externalSources ?? {} });
+}
+
 export function createRepairCatalogBaseline(record) {
   if (record?.authorityClassId !== "pr79-merged-slice-repair") throw new TypeError("repair fixture requires a registered PR79 repair record");
   if (canonicalJson(record.canonicalPath) !== canonicalJson(["merged_slice_repair"])) throw new TypeError(`${record.id} must bind run.json.merged_slice_repair`);
@@ -1517,6 +1697,48 @@ export function createRepairCatalogBaseline(record) {
       ownerReview: { ref: "reviews/owner.json", bytes: "{\"subject\":\"owner\",\"verdict\":\"APPROVE\",\"required_fixes\":[]}\n" },
     },
   });
+}
+
+function canonicalRunFixture(record) {
+  if (record.canonicalPath.length === 0) return structuredClone(record.source);
+  if (record.canonicalPath[0] === "terminal_result") {
+    return {
+      schema_version: 1,
+      run_id: "catalog-run",
+      status: record.source.status,
+      gates: {},
+      ...(record.source.pr_url ? { pr_url: record.source.pr_url } : {}),
+      terminal_result: structuredClone(record.source),
+    };
+  }
+  const run = {
+    schema_version: 1,
+    run_id: "catalog-run",
+    mode: record.id === "gate-approved-interactive" ? "interactive" : "autonomous",
+    status: "running",
+    gates: {},
+  };
+  if (record.canonicalPath[0] === "steering") {
+    run.steering = {
+      schema_version: 1,
+      generation: 2,
+      pending: null,
+      uncheckpointed: null,
+      boundary: null,
+      action_claim: null,
+      last_action: null,
+      pr_fence: null,
+      history: [],
+    };
+  }
+  let container = run;
+  for (let index = 0; index < record.canonicalPath.length - 1; index += 1) {
+    const segment = record.canonicalPath[index];
+    if (container[segment] === undefined) container[segment] = typeof record.canonicalPath[index + 1] === "number" ? [] : {};
+    container = container[segment];
+  }
+  container[record.canonicalPath.at(-1)] = structuredClone(record.source);
+  return run;
 }
 
 function postPrCatalogFixture(id) {
@@ -1544,7 +1766,7 @@ function postPrCatalogFixture(id) {
   } else if (id === "post-pr-remediation-null") {
     run = postPrRunForPhase("observing"); canonicalPath = ["post_pr"];
   } else if (id === "post-pr-remediation-active") {
-    run = postPrRunForPhase("remediation-planned"); canonicalPath = ["post_pr", "remediation"];
+    run = postPrRunForPhase("changes-observed"); canonicalPath = ["post_pr", "remediation"];
   } else if (id === "post-pr-remediation-owner") {
     run = postPrRunForPhase("remediation-planned"); canonicalPath = ["post_pr", "remediation", "owner"];
   } else if (id === "post-pr-remediation-changes") {
@@ -1736,7 +1958,7 @@ function postPrExternalSourcesFor(source, id) {
     ? [[`${id.match(/^post-pr-(canonical|validator|security)/u)[1]}-result`, POST_PR_EXTERNAL[id.match(/^post-pr-(canonical|validator|security)/u)[1]]]]
     : id === "post-pr-evidence-sidecar" ? [["sidecar", POST_PR_EXTERNAL.failure]]
       : id === "post-pr-continuation-review-bound" ? [["continuation-review", POST_PR_EXTERNAL.continuation]]
-        : id === "post-pr-remediation-active" ? [["failure-evidence", POST_PR_EXTERNAL.failure]]
+        : id === "post-pr-remediation-active" ? [["failure-evidence", POST_PR_EXTERNAL.failure], ["remediation", POST_PR_EXTERNAL.remediation]]
           : id === "post-pr-revalidation-bound" ? [["canonical", POST_PR_EXTERNAL.canonical], ["validator", POST_PR_EXTERNAL.validator], ["security", POST_PR_EXTERNAL.security]]
             : Object.entries(POST_PR_EXTERNAL);
   for (const [name, external] of definitions) if (containsScalar(source, external.ref)) matches[name] = structuredClone(external);
@@ -1884,7 +2106,8 @@ function metadataHash(record) {
 }
 
 function validateCanonicalCoreRecord(record, path) {
-  if (!Array.isArray(record.canonicalPath) || record.canonicalPath.length === 0) throw new TypeError(`${path}.canonicalPath must identify the exact run.json source location`);
+  if (!Array.isArray(record.canonicalPath)) throw new TypeError(`${path}.canonicalPath must identify the exact persisted source location`);
+  if (record.canonicalPath.length === 0 && !["run-envelope-running", "run-envelope-terminal"].includes(record.id)) throw new TypeError(`${path}.canonicalPath may be the run.json root only for a run-envelope row`);
   if (!Array.isArray(record.facts) || record.facts.length === 0) throw new TypeError(`${path}.facts must contain path and expected-value declarations`);
   for (const [index, declaration] of record.facts.entries()) {
     requireRecord(declaration, `${path}.facts[${index}]`);

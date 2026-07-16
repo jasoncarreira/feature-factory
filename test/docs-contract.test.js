@@ -314,9 +314,11 @@ describe("class-wide planning prompt contract", () => {
     assert.match(writerMatrix, /authority class, id, record, variant, canonical (?:persisted )?source path and exact shape/i);
     assert.match(writerMatrix, /path-plus-expected-value authority facts/i);
     assert.match(writerMatrix, /source deletion\/substitution[\s\S]*record(?: or |\/)variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /canonical-source manifest independently binds each core and post-PR row's authority class, id, record, variant, real run path, exact persisted source shape, path-plus-expected-value authority facts, and separately modeled external bytes/i);
+    assert.match(schemaCatalog, /canonical-source manifest covers all 108 catalog rows/i);
+    assert.match(schemaCatalog, /plan\/slices[\s\S]*future-only `final\.plan` descriptor[\s\S]*run envelopes[\s\S]*PR-created result[\s\S]*all continuation rows[\s\S]*all post-PR rows[\s\S]*all PR79 repair rows/i);
     assert.match(schemaCatalog, /source deletion or substitution[\s\S]*record\/variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /inserted at its real path in an internally consistent run accepted by exported `validateRun`/i);
+    assert.match(schemaCatalog, /actual exported `validateRun`, `validateSlicesPlan`, `checkRunConsistency`, or named checked consumer/i);
+    assert.match(schemaCatalog, /`final\.plan` is explicitly a descriptor contract[\s\S]*without claiming that current `validateRun` consumes it/i);
     for (const text of [writerMatrix, schemaCatalog]) {
       assert.match(text, /target-or-exclusion dispositions/i);
       assert.match(text, /complete target definition/i);
@@ -441,6 +443,12 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /Terminal fact is null or one of the eight validator-accepted forms/i);
     assert.match(schemaCatalog, /Mutation coverage changes each ref, each hash, and the actual external bytes independently/i);
     assert.match(schemaCatalog, /checked by `checkRunConsistency`/i);
+    assert.match(schemaCatalog, /`changes-observed`, `committed`, `revalidating`, `validated`, `push-pending`, and `remote-confirmed` phase rows each bind five independent authority targets/i);
+    assert.match(schemaCatalog, /remediation-evidence ref drift, hash drift, actual file-byte drift, stale candidate-head identity, and cross-bound candidate-head identity/i);
+    assert.match(schemaCatalog, /exported `transitionPostPrState` consumes the candidate identity and once-bound remediation bindings/i);
+    assert.match(SPEC_WRITER_PROMPT, /canonical-source oracle covers every catalog row/i);
+    assert.match(SPEC_WRITER_PROMPT, /future-only `final\.plan` descriptor/i);
+    assert.match(SPEC_WRITER_PROMPT, /post-PR phases `changes-observed`, `committed`, `revalidating`, `validated`, `push-pending`, and `remote-confirmed`/i);
     assert.match(schemaCatalog, /Reported persists exactly schema version, plan hash, owner\/consumer ids, defect path, original evidence ref\/hash[\s\S]*attempts zero[\s\S]*max_attempts: 2/i);
     assert.match(schemaCatalog, /Repairing has `status: "repairing"`, attempts one or two, `baseline_commit`, and optional branch\/worktree/i);
     assert.match(schemaCatalog, /review sources persist `status: "review"`[\s\S]*`APPROVE` or `REJECT` exists only in the separately bound review JSON/i);
