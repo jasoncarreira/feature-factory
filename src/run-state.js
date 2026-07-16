@@ -2535,7 +2535,8 @@ function postPrAuthorityExists(postPr) {
   if (!postPr || typeof postPr !== "object" || Array.isArray(postPr)) return false;
   if (!["disabled", "awaiting-pr"].includes(postPr.phase)) return true;
   if (Number.isInteger(postPr.attempt) && postPr.attempt > 0) return true;
-  return Boolean(postPr.observation || postPr.remediation || postPr.terminal_fact);
+  if (Array.isArray(postPr.evidence_refs) && postPr.evidence_refs.length > 0) return true;
+  return Boolean(postPr.observation || postPr.remediation || postPr.terminal_fact || postPr.continuation_review);
 }
 
 function assertRepairQuiescence(run, action) {

@@ -240,8 +240,32 @@ describe("merged-sibling repair", () => {
   it("rejects a report once actual post-PR authority exists", async () => {
     const fixture = createFixture();
     try {
-      mutateRun(fixture, (run) => { run.post_pr = { ...createPostPrState(POST_PR_POLICY(true)), attempt: 1 }; });
-      await assert.rejects(report(fixture), /after post-PR authority exists/u);
+      // Bare persisted policy shells are admissible in both pre-PR phases.
+      mutateRun(fixture, (run) => { run.post_pr = createPostPrState(POST_PR_POLICY(true)); run.merged_slice_repair = undefined; });
+      const { merged_slice_repair: awaiting } = await report(fixture);
+      assert.equal(awaiting.status, "reported");
+      // Every authority binding fails admission closed, including the
+      // append-only evidence and continuation-review bindings.
+      const authorityStates = [
+        { attempt: 1 },
+        { evidence_refs: [{ ref: "evidence/post-pr-observation.attempt-1.json", hash: "sha256:" + "f".repeat(64) }] },
+      ];
+      for (const authority of authorityStates) {
+        mutateRun(fixture, (run) => {
+          run.post_pr = { ...createPostPrState(POST_PR_POLICY(true)), ...authority };
+          run.merged_slice_repair = undefined;
+        });
+        await assert.rejects(report(fixture), /after post-PR authority exists/u, JSON.stringify(authority));
+      }
+      // continuation_review is schema-coupled to terminal retry exhaustion
+      // (phase blocked + terminal run), which admission already rejects three
+      // ways; the authority check is defense-in-depth for hand-edited state,
+      // and the checked transition still fails closed on it.
+      mutateRun(fixture, (run) => {
+        run.post_pr = { ...createPostPrState(POST_PR_POLICY(true)), continuation_review: { ref: "reviews/post-pr.json", hash: "sha256:" + "e".repeat(64) } };
+        run.merged_slice_repair = undefined;
+      });
+      await assert.rejects(report(fixture), /after post-PR authority exists|allowed only for retry exhaustion/u, "continuation_review must fail admission closed");
     } finally {
       cleanup(fixture);
     }
