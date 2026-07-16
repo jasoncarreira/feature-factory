@@ -557,6 +557,8 @@ Lifecycle:
 
 If attempt 2 fails, or the fix needs new scope, a different lane, or a contract amendment, record `factory repair <run-id> blocked --reason TEXT --json` and immediately terminalize the run through the canonical durable sequence for a recovery continuation. A blocked repair keeps the run-wide fence: nothing can progress except checked terminalization, so a failed repair can never be silently bypassed. Ordinary resume refuses a blocked-repair run (`merged-slice-repair-blocked`); go straight to `factory terminal`, which does not require resume.
 
+Ordinary resume also refuses every other unresolved repair state (`reported`, `repairing`, or `review` rejects with `merged-slice-repair-active`), whether the heartbeat is missing or stale — loss of orchestrator liveness is never permission for a second orchestrator to compete over a repair incident. Recover only through the checked repair transitions, which do not require resume: if the attempt's artifacts are durable and real, record its outcome (`review`, then `merged`, which lifts the fence and restores resumability); otherwise — including a `reported` repair, which has no durable attempt artifacts yet — record `blocked` and terminalize for a recovery continuation.
+
 ## Step 5 - Integrate And Validate
 
 Apply the Live-Run Steering Drain Protocol before each standalone or grouped parallel agent dispatch, after every heartbeat-bracketed wait, and before choosing, routing, or locally applying every remediation attempt.

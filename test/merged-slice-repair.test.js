@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
 import { createPostPrState, hasInFlightHeartbeatWork, transitionGateDecision, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
+import { resumeFactory } from "../src/factory.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
 
 const POST_PR_POLICY = (enabled) => ({ enabled, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } });
@@ -154,6 +155,94 @@ describe("merged-sibling repair", () => {
       assert.equal(resumed.slice.status, "running");
       await assert.rejects(transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 3 }), /terminal/u);
       assert.doesNotThrow(() => validateRun(readRun(fixture)));
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("fences ordinary resume across every unresolved repair state, with missing and stale heartbeats", async () => {
+    const fixture = createFixture();
+    const resume = () => resumeFactory(RUN_ID, { cwd: fixture.repo, dryRun: true, json: true, headless: true });
+    const heartbeatFile = join(fixture.runDir, "heartbeat.json");
+    const assertResumeRefusedWithoutLiveness = async (state) => {
+      rmSync(heartbeatFile, { force: true });
+      await assert.rejects(resume(), /resume ineligible: .*merged-slice-repair-active/u, `a missing heartbeat must not resume past a ${state} repair`);
+      writeJson(heartbeatFile, { schema_version: 1, run_id: RUN_ID, phase: "merged-slice-repair", pid: null, interval_ms: 30000, last_tick_at: "2026-01-01T00:00:00.000Z" });
+      await assert.rejects(resume(), /merged-slice-repair-active/u, `a stale released heartbeat must not resume past a ${state} repair`);
+      rmSync(heartbeatFile, { force: true });
+    };
+    try {
+      await report(fixture);
+      await assertResumeRefusedWithoutLiveness("reported");
+
+      await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
+      await assertResumeRefusedWithoutLiveness("repairing");
+
+      recordReview(fixture, "repair-approve", { verdict: "APPROVE", required_fixes: [] });
+      await review(fixture, "repair-approve");
+      await assertResumeRefusedWithoutLiveness("review");
+
+      writeJson(join(fixture.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
+      await merge(fixture);
+      const merged = await resume();
+      assert.equal(merged.eligible, true, "a merged repair lifts the resume fence");
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("routes a blocked repair to checked terminalization, never ordinary resume", async () => {
+    const fixture = createFixture();
+    try {
+      await report(fixture);
+      await transitionMergedSliceRepair(fixture.runDir, { status: "blocked", reason: "attempt budget exhausted" });
+      await assert.rejects(
+        resumeFactory(RUN_ID, { cwd: fixture.repo, dryRun: true, json: true, headless: true }),
+        /resume ineligible: .*merged-slice-repair-blocked/u,
+      );
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("treats a plain owner lane as an exact file, never a directory prefix", async () => {
+    const fixture = createFixture();
+    try {
+      await assert.rejects(
+        report(fixture, { defect_path: "test/owner.test.js/undeclared.js" }),
+        /outside owner slice/u,
+        "a same-named directory must not smuggle descendants into an exact-file lane",
+      );
+
+      await report(fixture);
+      await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
+      recordReview(fixture, "repair-descendant", { verdict: "APPROVE", required_fixes: [] });
+      writeJson(join(fixture.runDir, "evidence", "repair-descendant.json"), {
+        subject: "repair:owner",
+        changed_paths: ["src/owner/records.js", "test/owner.test.js/undeclared.js"],
+      });
+      await assert.rejects(
+        transitionMergedSliceRepair(fixture.runDir, { status: "review", review_ref: "reviews/repair-descendant.json", repair_evidence_ref: "evidence/repair-descendant.json" }),
+        /outside owner slice/u,
+        "observed changed paths under a same-named directory must reject the review",
+      );
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("fails closed on lane shapes outside the slice-lane grammar", async () => {
+    const fixture = createFixture();
+    try {
+      const planPath = join(fixture.runDir, "plan", "slices.json");
+      const plan = JSON.parse(readFileSync(planPath, "utf8"));
+      plan.slices.find((slice) => slice.id === "owner").paths = ["src/owner/*.js", "test/owner.test.js"];
+      writeJson(planPath, plan);
+      await assert.rejects(
+        report(fixture),
+        /outside owner slice/u,
+        "a glob shape the slice-lane grammar does not define must match nothing",
+      );
     } finally {
       cleanup(fixture);
     }

@@ -3635,6 +3635,7 @@ function resumeEligibility(runDir, run, opts = {}) {
   if (run.status !== "running") reasons.push(TERMINAL_STATUSES.has(run.status) ? "terminal-run" : "run-not-running");
   const repairFence = mergedSliceRepairFence(run);
   if (repairFence?.status === "blocked") reasons.push("merged-slice-repair-blocked");
+  else if (repairFence) reasons.push("merged-slice-repair-active");
   const diagnostics = diagnoseRunObject(run, { ...publicDiagnosticOptions(opts, opts.repoRoot || factoryRepoFromRunDir(runDir)), runDir, runFile: join(runDir, "run.json") });
   if (diagnosticsFailClosed(diagnostics)) reasons.push("invalid-run-state");
   const steeringChecks = steeringConsistencyChecks(runDir, run);

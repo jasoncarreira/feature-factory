@@ -2555,18 +2555,15 @@ function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath) {
   }
 }
 
+// Mirrors slice-lane ownership semantics (post-pr-ci sliceOwnsPath): a lane is
+// either `<dir>/**` or an exact file path; any other glob shape matches nothing.
 function repairPathWithinLane(path, lane) {
   const normalized = String(lane).trim();
-  if (normalized.endsWith("/**")) {
-    const base = normalized.slice(0, -3);
-    return path === base || path.startsWith(`${base}/`);
+  if (normalized.endsWith("/**") && !/[*?[\]{}]/u.test(normalized.slice(0, -3))) {
+    return path.startsWith(normalized.slice(0, -2));
   }
-  if (normalized.endsWith("/*")) {
-    const base = normalized.slice(0, -1);
-    return path.startsWith(base) && !path.slice(base.length).includes("/");
-  }
-  if (normalized.endsWith("/")) return path.startsWith(normalized);
-  return path === normalized || path.startsWith(`${normalized}/`);
+  if (/[*?[\]{}]/u.test(normalized)) return false;
+  return path === normalized;
 }
 
 function normalizePrCreatedTerminalResult(run, request) {
