@@ -452,6 +452,9 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
   const answerArchives = [];
   const result = await withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    if (nextGate.status === "approved" && mergedSliceRepairFence(current)) {
+      throw new Error(`gate '${gateName}' cannot be approved while a merged-slice repair is unresolved`);
+    }
     if (nextGate.status === "approved" && current.gates?.[gateName]?.status === "approved") {
       return reconcileApprovedGateRedelivery(runDir, current, gateName, nextGate, redeliveryInput);
     }
@@ -747,6 +750,7 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-open ${boundaryKind}`);
+    if (boundaryKind === "gate" && mergedSliceRepairFence(current)) throw new Error("gate boundary cannot open while a merged-slice repair is unresolved");
     if (boundaryKind === "terminal" && current.post_pr?.policy?.enabled === true && current.steering?.last_action?.outcome !== "closed") throw new Error("post-PR terminal boundary requires a closed origin action");
     const createdAt = timestamp(options.now);
     const token = safeBoundaryToken(options.token || randomUUID());
@@ -2521,7 +2525,17 @@ function assertRepairAdmissionWindow(run) {
   if (run.validator || run.security_review) throw new Error("repair cannot be reported after panel verdicts exist; their authority would go stale");
   if (run.gates && typeof run.gates === "object" && run.gates.pre_pr) throw new Error("repair cannot be reported after Gate 3 state exists; its authority would go stale");
   if (stringValue(run.pr_url)) throw new Error("repair cannot be reported after a PR exists");
-  if (run.post_pr) throw new Error("repair cannot be reported after post-PR state exists");
+  if (postPrAuthorityExists(run.post_pr)) throw new Error("repair cannot be reported after post-PR authority exists");
+}
+
+// The plugin persists the effective post-PR policy on every run, so a bare
+// pre-PR record (phase disabled/awaiting-pr, no attempts, no observation or
+// remediation or terminal fact) is normal state, not downstream authority.
+function postPrAuthorityExists(postPr) {
+  if (!postPr || typeof postPr !== "object" || Array.isArray(postPr)) return false;
+  if (!["disabled", "awaiting-pr"].includes(postPr.phase)) return true;
+  if (Number.isInteger(postPr.attempt) && postPr.attempt > 0) return true;
+  return Boolean(postPr.observation || postPr.remediation || postPr.terminal_fact);
 }
 
 function assertRepairQuiescence(run, action) {

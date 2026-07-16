@@ -4,8 +4,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
-import { hasInFlightHeartbeatWork, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged } from "../src/run-state.js";
+import { createPostPrState, hasInFlightHeartbeatWork, transitionGateDecision, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
+
+const POST_PR_POLICY = (enabled) => ({ enabled, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } });
 
 const RUN_ID = "repair-run";
 const FEATURE_BRANCH = "repair-feature";
@@ -200,6 +202,51 @@ describe("merged-sibling repair", () => {
     }
   });
 
+  it("fences gate boundaries and keeps persisted pre-PR post_pr policy admissible", async () => {
+    const fixture = createFixture();
+    try {
+      // Persisted default-off post-PR policy is normal pre-PR state, not authority.
+      mutateRun(fixture, (run) => { run.post_pr = createPostPrState(POST_PR_POLICY(false)); });
+      const { merged_slice_repair: repair } = await report(fixture);
+      assert.equal(repair.status, "reported");
+      // Gate boundaries and approvals are fenced while the repair is unresolved.
+      await assert.rejects(
+        transitionSteeringBoundaryOpened(fixture.runDir, "gate"),
+        /gate boundary cannot open while a merged-slice repair is unresolved/u,
+      );
+      await assert.rejects(
+        approveGate(fixture),
+        /cannot be approved while a merged-slice repair is unresolved/u,
+        "gate approval is fenced while the repair is active",
+      );
+      await transitionMergedSliceRepair(fixture.runDir, { status: "blocked", reason: "needs recovery" });
+      await assert.rejects(
+        transitionSteeringBoundaryOpened(fixture.runDir, "gate"),
+        /gate boundary cannot open while a merged-slice repair is unresolved/u,
+        "a blocked repair keeps the gate fence",
+      );
+      await assert.rejects(
+        approveGate(fixture),
+        /cannot be approved while a merged-slice repair is unresolved/u,
+        "gate approval stays fenced after the repair blocks",
+      );
+      const terminalBoundary = await transitionSteeringBoundaryOpened(fixture.runDir, "terminal");
+      assert.ok(terminalBoundary.run.steering.boundary.token, "terminal boundaries stay open for recovery");
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("rejects a report once actual post-PR authority exists", async () => {
+    const fixture = createFixture();
+    try {
+      mutateRun(fixture, (run) => { run.post_pr = { ...createPostPrState(POST_PR_POLICY(true)), attempt: 1 }; });
+      await assert.rejects(report(fixture), /after post-PR authority exists/u);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
   it("admits a report only in the pre-integration window", async () => {
     const fixture = createFixture();
     try {
@@ -337,6 +384,16 @@ function merge(fixture, overrides = {}) {
 
 function recordReview(fixture, name, review) {
   writeJson(join(fixture.runDir, "reviews", `${name}.json`), { subject: "repair:owner", ...review });
+}
+
+function approveGate(fixture) {
+  return transitionGateDecision(fixture.runDir, "pre_pr", {
+    status: "approved",
+    artifact: "artifacts/validation-report.md",
+    question_ref: "gates/pre_pr.question.md",
+    answer: "approve",
+    approval_source: "autonomous",
+  });
 }
 
 function mutateRun(fixture, mutate) {

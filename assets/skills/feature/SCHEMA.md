@@ -956,16 +956,16 @@ Optional top-level `run.json.merged_slice_repair` is the singleton record for on
   "consumer_slice_id": "critic-acceptance",
   "defect_path": "src/single-slice/schema-model/records.js",
   "evidence_ref": "evidence/critic-acceptance.attempt-1.json",
-  "evidence_hash": "sha256:...",
+  "evidence_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "status": "merged",
   "attempts": 1,
   "max_attempts": 2,
   "review_ref": "reviews/repair-attempt-1.json",
-  "review_hash": "sha256:...",
+  "review_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "repair_evidence_ref": "evidence/repair-attempt-1.json",
-  "repair_evidence_hash": "sha256:...",
+  "repair_evidence_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "verification_ref": "evidence/repair-verification.json",
-  "verification_hash": "sha256:...",
+  "verification_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
   "merge_commit": "abc1234",
   "created_at": "2026-07-15T00:00:00.000Z",
   "updated_at": "2026-07-15T00:00:00.000Z"
@@ -982,9 +982,9 @@ Rules:
 - Only one repair incident is allowed per run; `merged` and `blocked` are terminal, and a further defect requires a recovery run.
 - `attempts` advances exactly by one to a hard `max_attempts: 2`: attempt 1 is the initial correction, attempt 2 the single remediation after a finite rejecting review. The budget is separate durable state — it is never charged to the merged slice's immutable `max_attempts` history and never drawn from `run.max_retries`.
 - Repair reviews use subject `repair:<owner-slice-id>` and are hash-bound at recording; merge requires re-verifying an APPROVE verdict against the bound bytes.
-- An unresolved repair (any status other than `merged`) is a run-wide lifecycle fence: no slice may start or merge, no step may advance to `running` or `accepted`, panel verdicts are rejected, and `pr-created` fails closed. A `blocked` repair keeps the fence — the only legal progression is checked terminalization for a recovery run. No repair attempt may start while any slice is `running` or in `review`.
+- An unresolved repair (any status other than `merged`) is a run-wide lifecycle fence: no slice may start or merge, no step may advance to `running` or `accepted`, panel verdicts are rejected, gate approvals and gate boundaries are rejected, and `pr-created` fails closed. A `blocked` repair keeps the fence — the only legal progression is checked terminalization for a recovery run. No repair attempt may start while any slice is `running` or in `review`.
 - Admission is limited to the pre-integration window on a `running` run: reporting fails closed if the consumer is already merged, the `test-verifier` integration gate has started, panel verdicts or Gate 3 state exist, a PR exists, or post-PR state exists — downstream authority would go stale across a repair.
-- An executing repair (`repairing`/`review`) counts as in-flight heartbeat work, so the long repair builder/reviewer waits hold liveness like any other dispatch.
+- An executing repair (`repairing`/`review`) counts as in-flight heartbeat work, so the long repair builder/reviewer waits hold liveness like any other dispatch. Resume eligibility surfaces the repair state; a `blocked` repair refuses ordinary resume (`merged-slice-repair-blocked`) because checked terminalization via `factory terminal` is the only legal progression and does not require resume.
 - The final `test-verifier` integration gate and the pre-PR panel run unchanged after a merged repair.
 
 ## Steering And Resume

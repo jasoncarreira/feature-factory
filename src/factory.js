@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { assertRunJsonWriterAllowed, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, resolveGateAnswerTarget, transitionCostUsage, transitionGateDecision, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertRunJsonWriterAllowed, hashRunState, hasInFlightHeartbeatWork, mergedSliceRepairFence, inspectApprovalHandoffReceipt, resolveGateAnswerTarget, transitionCostUsage, transitionGateDecision, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -3633,6 +3633,8 @@ function buildResumePayload(run, opts) {
 function resumeEligibility(runDir, run, opts = {}) {
   const reasons = [];
   if (run.status !== "running") reasons.push(TERMINAL_STATUSES.has(run.status) ? "terminal-run" : "run-not-running");
+  const repairFence = mergedSliceRepairFence(run);
+  if (repairFence?.status === "blocked") reasons.push("merged-slice-repair-blocked");
   const diagnostics = diagnoseRunObject(run, { ...publicDiagnosticOptions(opts, opts.repoRoot || factoryRepoFromRunDir(runDir)), runDir, runFile: join(runDir, "run.json") });
   if (diagnosticsFailClosed(diagnostics)) reasons.push("invalid-run-state");
   const steeringChecks = steeringConsistencyChecks(runDir, run);
@@ -3643,7 +3645,14 @@ function resumeEligibility(runDir, run, opts = {}) {
   else if (heartbeat.value && heartbeatBlocksReplacement(heartbeat.value, timestamp(opts.now), opts)) reasons.push("active-heartbeat");
   if (run.steering?.action_claim) reasons.push("action-start-pending");
   if (run.steering?.pr_fence) reasons.push("pre-pr-fence-active");
-  return { eligible: reasons.length === 0, reasons: [...new Set(reasons)], diagnostics, steering_checks: steeringChecks, heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null };
+  return {
+    eligible: reasons.length === 0,
+    reasons: [...new Set(reasons)],
+    diagnostics,
+    steering_checks: steeringChecks,
+    heartbeat: heartbeat.value ? withHeartbeatLiveness(heartbeat.value, opts) : null,
+    merged_slice_repair: repairFence ? { status: repairFence.status, owner_slice_id: repairFence.owner_slice_id, consumer_slice_id: repairFence.consumer_slice_id, attempts: repairFence.attempts } : null,
+  };
 }
 
 function assertResumeMutationAllowed(runDir, run, opts = {}) {
