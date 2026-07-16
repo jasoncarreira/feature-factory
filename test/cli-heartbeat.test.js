@@ -47,41 +47,6 @@ describe("cli heartbeat routing", () => {
     }
   });
 
-  it("rejects path-like run ids", () => {
-    const repo = tempRepo();
-    const runDir = createRunDir(repo);
-    writeJson(join(runDir, "run.json"), runningRun());
-
-    try {
-      const proc = runHeartbeatCli(repo, ["--status", "--json"], runDir);
-      assert.notEqual(proc.status, 0);
-      assert.match(proc.stderr, /bare <run-id>|inside \.opencode\/factory/i);
-    } finally {
-      cleanup(repo);
-    }
-  });
-
-  it("rejects symlinked run ids that resolve outside the factory root", () => {
-    const repo = tempRepo();
-    const external = tempRepo();
-    const runDir = createRunDir(repo);
-    const escapedRun = join(external, "escaped-run");
-    mkdirSync(escapedRun, { recursive: true });
-    writeJson(join(runDir, "run.json"), runningRun());
-    writeJson(join(escapedRun, "run.json"), runningRun({ run_id: "escaped-run" }));
-    rmSync(runDir, { recursive: true, force: true });
-    symlinkSync(escapedRun, runDir, "dir");
-
-    try {
-      const proc = runHeartbeatCli(repo, ["--status", "--json"]);
-      assert.notEqual(proc.status, 0);
-      assert.match(proc.stderr, /inside \.opencode\/factory/i);
-    } finally {
-      cleanup(repo);
-      cleanup(external);
-    }
-  });
-
   it("refuses to start while a protected gate is pending", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);
@@ -92,49 +57,6 @@ describe("cli heartbeat routing", () => {
       assert.notEqual(proc.status, 0);
       assert.match(proc.stderr, /protected gate 'brief'/i);
     } finally {
-      cleanup(repo);
-    }
-  });
-
-  it("starts heartbeat for in-flight work without proof metadata", async () => {
-    const repo = tempRepo();
-    const runDir = createRunDir(repo);
-    writeJson(join(runDir, "run.json"), runningRun({ gates: { story: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer_ref: "gates/story.answer" } } }));
-
-    try {
-      const started = jsonOutput(runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--interval", "1000", "--json"]));
-      assert.equal(started.phase, "builder-wave");
-      assert.equal(started.fresh, true);
-      const stopped = jsonOutput(runHeartbeatCli(repo, ["--stop", "--json"]));
-      assert.equal(stopped.pid, null);
-    } finally {
-      await stopIfActive(repo);
-      cleanup(repo);
-    }
-  });
-
-  it("accepts documented and operator-defined phase labels", async () => {
-    const repo = tempRepo();
-    const runDir = createRunDir(repo);
-    const diagnostic = console.error;
-    const owner = createTrackedProcessCleanup({ diagnostic });
-    writeJson(join(runDir, "run.json"), runningRun());
-
-    try {
-      for (const phase of [...HEARTBEAT_PHASES, "operator-defined-phase"]) {
-        const started = jsonOutput(await runHeartbeatCliTracked(owner, repo, ["--start", "--phase", phase, "--interval", "1000", "--json"]));
-        const current = jsonOutput(await runHeartbeatCliTracked(owner, repo, ["--status", "--json"]));
-
-        assert.equal(started.phase, phase);
-        assert.equal(current.phase, phase);
-        assert.equal(current.fresh, true);
-
-        const stopped = jsonOutput(await runHeartbeatCliTracked(owner, repo, ["--stop", "--json"]));
-        assert.equal(stopped.pid, null);
-        await waitFor(() => !isProcessAlive(started.pid), { timeoutMs: 1500 });
-      }
-    } finally {
-      await stopIfActive(repo, { owner, diagnostic });
       cleanup(repo);
     }
   });

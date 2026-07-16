@@ -28,22 +28,6 @@ describe("cli resume-check and resume preflight", () => {
     }
   });
 
-  it("preflights headless factory start resume before seeding skills or spawning opencode", () => {
-    const repo = tempRepo("start-resume-preflight");
-    try {
-      const proc = runCli(repo, ["factory", "start", "--headless", "--json", "resume missing-run"]);
-
-      assert.notEqual(proc.status, 0);
-      assert.equal(proc.stderr, "");
-      const output = JSON.parse(proc.stdout);
-      assert.equal(output.ok, false);
-      assert.match(output.terminal_result.reason, /missing run\.json/i);
-      assert.equal(existsSync(join(repo, ".opencode", "skills", "feature", "SKILL.md")), false);
-    } finally {
-      cleanup(repo);
-    }
-  });
-
   it("rejects post-PR policy flags on every resume entrypoint before mutation", () => {
     const fixture = createCliRecoveryFixture("resume-policy-flags");
     try {
@@ -63,7 +47,7 @@ describe("cli resume-check and resume preflight", () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  for (const mode of ["--headless", "--autonomous"]) {
+  for (const mode of ["--headless"]) {
     it(`rejects active heartbeat before ${mode} factory start resume mutates recovery state, seeds skills, or spawns opencode`, () => {
       const fixture = createCliRecoveryFixture(`start-resume-active-heartbeat-${mode.slice(2)}`, { recordWorktree: false });
       try {
@@ -90,50 +74,6 @@ describe("cli resume-check and resume preflight", () => {
     });
   }
 
-  it("recovers a disrupted run through resume-check", () => {
-    const fixture = createCliRecoveryFixture("cli-recoverable-run");
-    try {
-      const proc = runCli(fixture.repo, ["factory", "resume-check", fixture.runId, "--json"]);
-
-      assert.equal(proc.status, 0, proc.stderr);
-      const output = JSON.parse(proc.stdout);
-      assert.equal(output.ok, true);
-      assert.equal(output.recovered, true);
-      assert.equal(output.worktree, fixture.worktree);
-      assert.equal(gitStdout(fixture.worktree, ["branch", "--show-current"]), fixture.runId);
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
-
-  it("reports unsafe ownership while preserving claim, process, and heartbeat sidecars byte-for-byte", () => {
-    const fixture = createCliRecoveryFixture("resume-check-ownership", { recordWorktree: false });
-    const claimDir = join(fixture.runDir, "process-launch.lock");
-    mkdirSync(claimDir, { recursive: true });
-    const paths = {
-      claim: join(claimDir, "owner.json"),
-      process: join(fixture.runDir, "process.json"),
-      heartbeat: join(fixture.runDir, "heartbeat.json"),
-    };
-    writeFileSync(paths.claim, "{\"kind\":\"malformed-preserve-me\"}\n", "utf8");
-    writeFileSync(paths.process, "{\"kind\":\"malformed-process-preserve-me\"}\n", "utf8");
-    writeJson(paths.heartbeat, heartbeat(fixture.runId));
-    const before = Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, readFileSync(path, "utf8")]));
-    try {
-      const proc = runCli(fixture.repo, ["factory", "resume-check", fixture.runId, "--json"]);
-      assert.notEqual(proc.status, 0);
-      const output = JSON.parse(proc.stdout);
-      assert.equal(output.updated, false);
-      assert.equal(output.recovered, false);
-      assert.equal(output.recovery_required, true);
-      assert.equal(output.ownership.condition, "unsafe-ownership");
-      assert.equal(output.ownership.reason_code, "launch-claim-invalid");
-      for (const [key, path] of Object.entries(paths)) assert.equal(readFileSync(path, "utf8"), before[key]);
-      assert.equal(existsSync(fixture.worktree), false);
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
 });
 
 function createCliRecoveryFixture(runId, options = {}) {

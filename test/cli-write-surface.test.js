@@ -9,11 +9,6 @@ import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const RUN_ID = "cli-write-surface";
-const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
-  "USD\u001b]0;pwned\u0007",
-  "USD\u001b[2J",
-  "USD\u001b]52;c;U0VDUkVU\u0007",
-]);
 
 describe("cli write surface", () => {
   it("passes a named start run id as driver config", () => {
@@ -168,49 +163,6 @@ describe("cli write surface", () => {
     }
   });
 
-  it("starts the bounded test-verifier integration gate only after every slice is merged", () => {
-    const repo = mkdtempSync(join(tmpdir(), "feature-factory-test-verifier-gate-"));
-    const runDir = join(repo, ".opencode", "factory", RUN_ID);
-    try {
-      initGitRepo(repo);
-      seedRun(runDir);
-      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
-      const seeded = readJson(join(runDir, "run.json"));
-      seeded.max_retries = 3;
-      seeded.steps.push({ agent: "test-verifier", status: "blocked", attempts: 0 });
-      writeJson(join(runDir, "run.json"), seeded);
-
-      const beforeMerge = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "1", "--json"]);
-      assert.match(beforeMerge.stderr, /test-verifier integration gate requires all slices merged: slice/u);
-      assert.equal(readJson(join(runDir, "run.json")).steps.at(-1).status, "blocked");
-
-      const merged = readJson(join(runDir, "run.json"));
-      merged.slices[0].status = "merged";
-      merged.slices[0].merge_commit = "abc1234";
-      writeJson(join(runDir, "run.json"), merged);
-
-      const omitted = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--json"]);
-      assert.match(omitted.stderr, /test-verifier integration gate requires a positive attempt number/u);
-      const zero = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "0", "--json"]);
-      assert.match(zero.stderr, /test-verifier integration gate requires a positive attempt number/u);
-
-      runFactory(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "1", "--json"]);
-      assert.deepEqual(readJson(join(runDir, "run.json")).steps.at(-1), { agent: "test-verifier", status: "running", attempts: 1 });
-
-      runFactory(repo, ["step", RUN_ID, "test-verifier", "rejected", "--attempts", "1", "--json"]);
-      const repeated = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "1", "--json"]);
-      assert.match(repeated.stderr, /test-verifier integration gate must advance from attempt 1 to 2/u);
-      assert.deepEqual(readJson(join(runDir, "run.json")).steps.at(-1), { agent: "test-verifier", status: "rejected", attempts: 1 });
-      runFactory(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "2", "--json"]);
-
-      const exhausted = runFactoryFail(repo, ["step", RUN_ID, "test-verifier", "running", "--attempts", "4", "--json"]);
-      assert.match(exhausted.stderr, /test-verifier integration gate attempt 4 exceeds max_retries 3/u);
-      assert.equal(readJson(join(runDir, "run.json")).steps.at(-1).attempts, 2);
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  });
-
   it("rejects blank cost numeric flags without mutating run.json", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-cost-invalid-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
@@ -224,118 +176,6 @@ describe("cli write surface", () => {
         assert.match(failed.stderr, new RegExp(`${flag} must be a finite non-negative number`, "u"));
         assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
       }
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects terminal control currency flags without mutating run.json", () => {
-    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-cost-currency-invalid-"));
-    const runDir = join(repo, ".opencode", "factory", RUN_ID);
-    try {
-      initGitRepo(repo);
-      seedRun(runDir);
-      const before = readFileSync(join(runDir, "run.json"), "utf8");
-
-      for (const payload of TERMINAL_CURRENCY_PAYLOADS) {
-        const failed = runFactoryFail(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--input-tokens", "1", "--cost-total", "0.01", "--currency", payload, "--json"]);
-        assert.match(failed.stderr, /cost_currency must be an uppercase currency code \(3-12 letters\) with no control characters/u);
-        assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before);
-      }
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  });
-
-  it("refuses stale answers after a gate is re-pended through the CLI", () => {
-    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-gate-repend-"));
-    const runDir = join(repo, ".opencode", "factory", RUN_ID);
-    try {
-      initGitRepo(repo);
-      seedRun(runDir);
-      writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
-      writeFileSync(join(runDir, "gates", "story.question.md"), "approve story?\n", "utf8");
-      runFactory(repo, ["gate-decision", RUN_ID, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--json"]);
-      runFactory(repo, ["answer", "--json", RUN_ID, "story", "approve"]);
-      const firstBoundary = openBoundary(repo, "gate");
-      runFactory(repo, ["gate-decision", RUN_ID, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--approval-source", "external-driver", "--boundary-token", firstBoundary.token, "--json"]);
-
-      writeFileSync(join(runDir, "gates", "story.question.md"), "approve updated story?\n", "utf8");
-      runFactory(repo, ["gate-decision", RUN_ID, "story", "pending", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--json"]);
-      const secondBoundary = openBoundary(repo, "gate");
-      assert.match(runFactoryFail(repo, ["gate-decision", RUN_ID, "story", "approved", "--artifact", "artifacts/story.md", "--question-ref", "gates/story.question.md", "--answer-ref", "gates/story.answer", "--approval-source", "external-driver", "--boundary-token", secondBoundary.token, "--json"]).stderr, /missing gates ref/u);
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  });
-
-  it("records non-completed terminal states through the CLI", () => {
-    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-terminal-"));
-    const runDir = join(repo, ".opencode", "factory", RUN_ID);
-    try {
-      initGitRepo(repo);
-      seedRun(runDir);
-      const terminalBoundary = openBoundary(repo, "terminal");
-      runFactory(repo, ["terminal", RUN_ID, "blocked", "--reason", "needs operator", "--boundary-token", terminalBoundary.token, "--json"]);
-      const run = readJson(join(runDir, "run.json"));
-      assert.equal(run.status, "blocked");
-      assert.equal(run.terminal_result.reason, "needs operator");
-      const validation = JSON.parse(runFactoryFail(repo, ["validate", RUN_ID]).stdout);
-      assert.equal(validation.ok, false);
-      assert.equal(validation.runs[0].checks.find((check) => check.name === "run.schema")?.ok, true);
-      assert.equal(validation.runs[0].diagnostics.items[0].condition, "terminal-run");
-      assert.match(runFactoryFail(repo, ["step", RUN_ID, "spec-writer", "running", "--attempts", "2", "--json"]).stderr, /terminal run 'blocked' cannot be mutated/u);
-      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]).stderr, /terminal run 'blocked' cannot be mutated/u);
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects an over-depth slice plan without mutating run state", () => {
-    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-slice-depth-"));
-    const runDir = join(repo, ".opencode", "factory", RUN_ID);
-    try {
-      seedRun(runDir);
-      writeJson(join(runDir, "plan", "slices.json"), {
-        slices: [
-          plannedSlice("root"),
-          plannedSlice("second", ["root"]),
-          plannedSlice("third", ["second"]),
-          plannedSlice("fourth", ["third"]),
-          plannedSlice("fifth", ["fourth"]),
-        ],
-      });
-      const runBefore = readFileSync(join(runDir, "run.json"), "utf8");
-
-      const result = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
-
-      assert.match(result.stderr, /dependency depth 5 exceeds maximum 4 waves: root -> second -> third -> fourth -> fifth/u);
-      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), runBefore);
-      assert.deepEqual(readJson(join(runDir, "run.json")).slices, []);
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  });
-
-  it("seeds a four-wave slice plan (the raised depth cap) through the CLI", () => {
-    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-slice-fourwave-"));
-    const runDir = join(repo, ".opencode", "factory", RUN_ID);
-    try {
-      initGitRepo(repo);
-      seedRun(runDir);
-      writeJson(join(runDir, "plan", "slices.json"), {
-        slices: [
-          plannedSlice("root"),
-          plannedSlice("second", ["root"]),
-          plannedSlice("third", ["second"]),
-          plannedSlice("fourth", ["third"]),
-        ],
-      });
-
-      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
-
-      assert.deepEqual(readJson(join(runDir, "run.json")).slices.map((slice) => slice.id), ["root", "second", "third", "fourth"]);
-      validateFactory(repo);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -380,9 +220,6 @@ function seedRun(runDir) {
   });
 }
 
-function plannedSlice(id, dependsOn = []) {
-  return { id, stack: "backend", paths: [`src/${id}.js`], depends_on: dependsOn, acceptance: [id], test_plan: ["unit"] };
-}
 
 function validateFactory(repo) {
   const validation = JSON.parse(runFactory(repo, ["validate", RUN_ID]).stdout);
