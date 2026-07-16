@@ -7,6 +7,7 @@ import { appendCostAttributionEntry } from "./cost-attribution.js";
 import { git } from "./git.js";
 import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
 import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
+import { normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
@@ -2326,10 +2327,11 @@ function normalizeMergedSliceRepairInput(input) {
 
 function normalizeRepairDefectPath(value) {
   const path = requireNonEmptyString(value, "repair defect path");
-  if (path.startsWith("/") || path.includes("\\") || path.split("/").some((part) => part === "" || part === "." || part === "..")) {
+  try {
+    return normalizeRepositoryPath(path);
+  } catch {
     throw new Error("repair defect path must be a safe repository-relative path");
   }
-  return path;
 }
 
 function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
@@ -2342,7 +2344,7 @@ function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
   const stampedAt = timestamp(options.now);
   if (request.status === "reported") return reportedMergedSliceRepair(runDir, run, current, request, stampedAt);
   if (!current) throw new Error("merged-slice repair must be reported before any other transition");
-  if (request.status === "repairing") return repairingMergedSliceRepair(runDir, run, current, request, stampedAt);
+  if (request.status === "repairing") return repairingMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   if (request.status === "review") return reviewMergedSliceRepair(runDir, current, request, stampedAt);
   if (request.status === "merged") return mergedMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   return { ...current, status: "blocked", reason: request.reason, updated_at: stampedAt };
@@ -2389,7 +2391,7 @@ function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
   };
 }
 
-function repairingMergedSliceRepair(runDir, run, current, request, stampedAt) {
+function repairingMergedSliceRepair(runDir, run, current, request, stampedAt, options = {}) {
   if (!["reported", "review"].includes(current.status)) {
     throw new Error(`repair cannot start an attempt from status '${current.status}'`);
   }
@@ -2404,14 +2406,26 @@ function repairingMergedSliceRepair(runDir, run, current, request, stampedAt) {
     const review = readBoundRepairReview(runDir, current);
     if (review.verdict !== "REJECT") throw new Error("a further repair attempt requires a REJECT verdict on the prior repair review");
   }
-  const evidence = resolveEvidenceRef(runDir, current.evidence_ref);
-  if (hashFile(evidence.path) !== current.evidence_hash) {
-    throw new Error("repair reproduction evidence no longer matches its hash-bound record");
+  assertRepairOriginalEvidenceIntact(runDir, current);
+  // Observe the feature head as the attempt baseline: the eventual merge must
+  // prove it contains new work on top of exactly this commit.
+  const repoRoot = options.repoRoot || runDir;
+  const featureBranch = requireNonEmptyString(run.branch, "run branch");
+  const baselineResult = git(repoRoot, ["rev-parse", "--verify", `refs/heads/${featureBranch}^{commit}`]);
+  if (!baselineResult.ok) {
+    throw new Error(`feature branch '${featureBranch}' head does not resolve; a repair attempt requires an observed baseline`);
   }
-  const next = { ...current, status: "repairing", attempts: request.attempts, updated_at: stampedAt };
+  const next = { ...current, status: "repairing", attempts: request.attempts, baseline_commit: baselineResult.stdout.trim(), updated_at: stampedAt };
   if (request.branch) next.branch = request.branch;
   if (request.worktree) next.worktree = request.worktree;
   return next;
+}
+
+function assertRepairOriginalEvidenceIntact(runDir, current) {
+  const evidence = resolveEvidenceRef(runDir, requireNonEmptyString(current.evidence_ref, "repair evidence_ref"));
+  if (hashFile(evidence.path) !== current.evidence_hash) {
+    throw new Error("repair reproduction evidence no longer matches its hash-bound record");
+  }
 }
 
 function reviewMergedSliceRepair(runDir, current, request, stampedAt) {
@@ -2420,6 +2434,7 @@ function reviewMergedSliceRepair(runDir, current, request, stampedAt) {
   // attempt: a bound REJECT can never be replaced by a different review — a
   // corrected verdict requires the next repair attempt.
   if (!["repairing", "review"].includes(current.status)) throw new Error(`repair review requires status 'repairing'; it is '${current.status}'`);
+  assertRepairOriginalEvidenceIntact(runDir, current);
   const review = resolveReviewRef(runDir, request.review_ref);
   const reviewHash = hashFile(review.path);
   if (current.status === "review") {
@@ -2471,21 +2486,46 @@ function assertRepairChangedPathsInOwnerLane(runDir, current, evidenceRef) {
 function mergedMergedSliceRepair(runDir, run, current, request, stampedAt, options = {}) {
   if (current.status !== "review") throw new Error(`repair merge requires status 'review'; it is '${current.status}'`);
   assertRepairQuiescence(run, "merge a repair");
+  assertRepairOriginalEvidenceIntact(runDir, current);
   const review = readBoundRepairReview(runDir, current);
   if (review.verdict !== "APPROVE") throw new Error("repair merge requires an APPROVE verdict on the bound repair review");
   const repairEvidence = resolveEvidenceRef(runDir, requireNonEmptyString(current.repair_evidence_ref, "repair_evidence_ref"));
   if (hashFile(repairEvidence.path) !== current.repair_evidence_hash) {
     throw new Error("repair attempt evidence no longer matches its hash-bound record");
   }
-  // The merge commit must actually exist in this repository AND already be
-  // contained in the feature branch — an arbitrary SHA-shaped string is not
-  // a merge.
+  // The merge commit must actually exist in this repository, be contained in
+  // the feature branch, BE the resulting feature head, and prove it contains
+  // the repair: new work on top of the baseline observed when the attempt
+  // started, whose entire observed diff stays inside the owner's lane.
   const repoRoot = options.repoRoot || runDir;
   const featureBranch = requireNonEmptyString(run.branch, "run branch");
   const commitResult = git(repoRoot, ["rev-parse", "--verify", `${request.merge_commit}^{commit}`]);
   if (!commitResult.ok) throw new Error(`repair merge commit '${request.merge_commit}' does not resolve in the repository`);
-  const ancestryResult = git(repoRoot, ["merge-base", "--is-ancestor", request.merge_commit, `refs/heads/${featureBranch}`]);
+  const mergeSha = commitResult.stdout.trim();
+  const ancestryResult = git(repoRoot, ["merge-base", "--is-ancestor", mergeSha, `refs/heads/${featureBranch}`]);
   if (!ancestryResult.ok) throw new Error(`repair merge commit '${request.merge_commit}' is not contained in feature branch '${featureBranch}'`);
+  const headResult = git(repoRoot, ["rev-parse", "--verify", `refs/heads/${featureBranch}^{commit}`]);
+  if (!headResult.ok) throw new Error(`feature branch '${featureBranch}' head does not resolve in the repository`);
+  if (headResult.stdout.trim() !== mergeSha) {
+    throw new Error(`repair merge commit '${request.merge_commit}' must be the resulting head of feature branch '${featureBranch}'`);
+  }
+  const baseline = requireNonEmptyString(current.baseline_commit, "repair baseline_commit");
+  if (mergeSha === baseline) {
+    throw new Error("repair merge commit must contain new work on top of the observed attempt baseline");
+  }
+  const baselineContained = git(repoRoot, ["merge-base", "--is-ancestor", baseline, mergeSha]);
+  if (!baselineContained.ok) {
+    throw new Error("repair merge commit must contain the observed attempt baseline; the feature branch history no longer matches it");
+  }
+  const diffResult = git(repoRoot, ["diff", "--name-only", "-z", baseline, mergeSha]);
+  if (!diffResult.ok) throw new Error("repair merge diff against the attempt baseline is not observable");
+  const mergedPaths = diffResult.stdout.split("\0").filter((path) => path !== "");
+  if (mergedPaths.length < 1) {
+    throw new Error("repair merge commit must contain observable changes on top of the attempt baseline");
+  }
+  for (const mergedPath of mergedPaths) {
+    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(mergedPath));
+  }
   // The original consumer reproduction must now pass, on observed evidence.
   const verification = resolveEvidenceRef(runDir, request.verification_ref);
   const verificationJson = parseJsonObjectFile(verification.path, "repair verification_ref");
@@ -2498,7 +2538,7 @@ function mergedMergedSliceRepair(runDir, run, current, request, stampedAt, optio
   return {
     ...current,
     status: "merged",
-    merge_commit: request.merge_commit,
+    merge_commit: mergeSha,
     verification_ref: request.verification_ref,
     verification_hash: hashFile(verification.path),
     updated_at: stampedAt,
@@ -2549,21 +2589,23 @@ function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath) {
   const plan = parseJsonObjectFile(planPath, "plan/slices.json");
   const planned = (Array.isArray(plan.slices) ? plan.slices : []).find((slice) => slice?.id === ownerSliceId);
   if (!planned) throw new Error(`repair owner slice '${ownerSliceId}' is missing from plan/slices.json`);
-  const lanes = Array.isArray(planned.paths) ? planned.paths.filter(stringValue) : [];
-  if (!lanes.some((lane) => repairPathWithinLane(defectPath, lane))) {
+  let lanes;
+  try {
+    lanes = (Array.isArray(planned.paths) ? planned.paths : []).map((lane) => validatePlanPath(lane));
+  } catch {
+    throw new Error(`repair owner slice '${ownerSliceId}' plan lanes are not valid repository paths`);
+  }
+  if (!lanes.filter(Boolean).some((lane) => repairPathWithinLane(defectPath, lane))) {
     throw new Error(`repair defect path '${defectPath}' is outside owner slice '${ownerSliceId}' lanes`);
   }
 }
 
-// Mirrors slice-lane ownership semantics (post-pr-ci sliceOwnsPath): a lane is
-// either `<dir>/**` or an exact file path; any other glob shape matches nothing.
+// Lane matching reuses the canonical plan-path grammar (post-pr-ci
+// validatePlanPath/sliceOwnsPath): a lane is either `<dir>/**` or an exact
+// file path, lane text is never locally normalized, and any other shape
+// matches nothing.
 function repairPathWithinLane(path, lane) {
-  const normalized = String(lane).trim();
-  if (normalized.endsWith("/**") && !/[*?[\]{}]/u.test(normalized.slice(0, -3))) {
-    return path.startsWith(normalized.slice(0, -2));
-  }
-  if (/[*?[\]{}]/u.test(normalized)) return false;
-  return path === normalized;
+  return lane.endsWith("/**") ? path.startsWith(lane.slice(0, -2)) : path === lane;
 }
 
 function normalizePrCreatedTerminalResult(run, request) {

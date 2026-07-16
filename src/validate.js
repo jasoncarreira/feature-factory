@@ -487,8 +487,10 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
   validateRedactedEnv(errors, payload, `${path}.env`);
 }
 
-const MERGED_SLICE_REPAIR_KEYS = new Set(["schema_version", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "branch", "worktree", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "verification_ref", "verification_hash", "merge_commit", "reason", "created_at", "updated_at"]);
+const MERGED_SLICE_REPAIR_KEYS = new Set(["schema_version", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "branch", "worktree", "baseline_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "verification_ref", "verification_hash", "merge_commit", "reason", "created_at", "updated_at"]);
 const MERGED_SLICE_REPAIR_STATUS_SET = new Set(["reported", "repairing", "review", "merged", "blocked"]);
+
+const MERGED_SLICE_REPAIR_BASELINE_PATTERN = /^[0-9a-f]{40}$/u;
 
 function validateMergedSliceRepair(errors, run, path) {
   const repair = run.merged_slice_repair;
@@ -525,6 +527,15 @@ function validateMergedSliceRepair(errors, run, path) {
   }
   if (["repairing", "review", "merged"].includes(repair.status) && (!Number.isInteger(repair.attempts) || repair.attempts < 1)) {
     errors.push({ path: `${path}.attempts`, message: "must be at least 1 once an attempt starts" });
+  }
+  if (["repairing", "review", "merged"].includes(repair.status) && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.baseline_commit ?? ""))) {
+    errors.push({ path: `${path}.baseline_commit`, message: "must be the observed 40-hex feature head once an attempt starts" });
+  }
+  if (repair.status === "reported" && repair.baseline_commit !== undefined) {
+    errors.push({ path: `${path}.baseline_commit`, message: "is allowed only once an attempt starts" });
+  }
+  if (repair.status === "blocked" && repair.baseline_commit !== undefined && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.baseline_commit))) {
+    errors.push({ path: `${path}.baseline_commit`, message: "must be the observed 40-hex feature head when present" });
   }
   if (repair.status === "merged" && !stringValue(repair.merge_commit)) {
     errors.push({ path: `${path}.merge_commit`, message: "merged repair requires merge_commit" });
