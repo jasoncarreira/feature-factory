@@ -262,6 +262,11 @@ export function checkRunConsistency(runDir, run) {
 
   const repair = validRun.merged_slice_repair;
   if (repair && typeof repair === "object" && !Array.isArray(repair)) {
+    checks.push(runCheck("run.merged_slice_repair.plan", () => {
+      const planPath = join(runDir, "plan", "slices.json");
+      if (hashFile(planPath) !== repair.plan_hash) fail([{ path: "run.merged_slice_repair.plan_hash", message: "must match plan/slices.json bytes bound at report" }]);
+      return { ref: "plan/slices.json" };
+    }));
     checks.push(runCheck("run.merged_slice_repair.evidence_ref", () => {
       const resolved = resolveEvidenceRef(runDir, repair.evidence_ref);
       if (hashFile(resolved.path) !== repair.evidence_hash) fail([{ path: "run.merged_slice_repair.evidence_hash", message: "must match evidence_ref bytes" }]);
@@ -487,7 +492,7 @@ function validateDebugSnapshotEvent(errors, snapshot, path) {
   validateRedactedEnv(errors, payload, `${path}.env`);
 }
 
-const MERGED_SLICE_REPAIR_KEYS = new Set(["schema_version", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "branch", "worktree", "baseline_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "verification_ref", "verification_hash", "merge_commit", "reason", "created_at", "updated_at"]);
+const MERGED_SLICE_REPAIR_KEYS = new Set(["schema_version", "plan_hash", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "branch", "worktree", "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "verification_ref", "verification_hash", "merge_commit", "reason", "created_at", "updated_at"]);
 const MERGED_SLICE_REPAIR_STATUS_SET = new Set(["reported", "repairing", "review", "merged", "blocked"]);
 
 const MERGED_SLICE_REPAIR_BASELINE_PATTERN = /^[0-9a-f]{40}$/u;
@@ -499,6 +504,7 @@ function validateMergedSliceRepair(errors, run, path) {
   allowedKeys(errors, repair, MERGED_SLICE_REPAIR_KEYS, path);
   requiredInteger(errors, repair, "schema_version", `${path}.schema_version`);
   if (repair.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredHash(errors, repair, "plan_hash", `${path}.plan_hash`);
   requiredString(errors, repair, "owner_slice_id", `${path}.owner_slice_id`);
   requiredString(errors, repair, "consumer_slice_id", `${path}.consumer_slice_id`);
   requiredString(errors, repair, "defect_path", `${path}.defect_path`);
@@ -536,6 +542,15 @@ function validateMergedSliceRepair(errors, run, path) {
   }
   if (repair.status === "blocked" && repair.baseline_commit !== undefined && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.baseline_commit))) {
     errors.push({ path: `${path}.baseline_commit`, message: "must be the observed 40-hex feature head when present" });
+  }
+  if (["review", "merged"].includes(repair.status) && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.reviewed_commit ?? ""))) {
+    errors.push({ path: `${path}.reviewed_commit`, message: "must bind the reviewed 40-hex repair commit" });
+  }
+  if (["reported", "repairing"].includes(repair.status) && repair.reviewed_commit !== undefined) {
+    errors.push({ path: `${path}.reviewed_commit`, message: "is allowed only once a review binds" });
+  }
+  if (repair.status === "blocked" && repair.reviewed_commit !== undefined && !MERGED_SLICE_REPAIR_BASELINE_PATTERN.test(String(repair.reviewed_commit))) {
+    errors.push({ path: `${path}.reviewed_commit`, message: "must bind the reviewed 40-hex repair commit when present" });
   }
   if (repair.status === "merged" && !stringValue(repair.merge_commit)) {
     errors.push({ path: `${path}.merge_commit`, message: "merged repair requires merge_commit" });

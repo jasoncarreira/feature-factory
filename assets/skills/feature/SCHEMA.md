@@ -138,7 +138,7 @@ feature-factory factory verdicts <run-id> --validator GO --report artifacts/vali
 feature-factory factory terminal <run-id> blocked --reason TEXT --boundary-token TOKEN --json
 feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json
 feature-factory factory repair <run-id> reported --owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref evidence/<file> --json
-feature-factory factory repair <run-id> <repairing|review|merged|blocked> [--attempts N] [--review-ref reviews/<file> --evidence-ref evidence/<file>] [--merge-commit SHA --verification-ref evidence/<file>] [--reason TEXT] --json
+feature-factory factory repair <run-id> <repairing|review|merged|blocked> [--attempts N] [--review-ref reviews/<file> --evidence-ref evidence/<file> --commit SHA] [--merge-commit SHA --verification-ref evidence/<file>] [--reason TEXT] --json
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN --json
 ```
 
@@ -952,6 +952,7 @@ Optional top-level `run.json.merged_slice_repair` is the singleton record for on
 ```json
 {
   "schema_version": 1,
+  "plan_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
   "owner_slice_id": "schema-model",
   "consumer_slice_id": "critic-acceptance",
   "defect_path": "src/single-slice/schema-model/records.js",
@@ -961,6 +962,7 @@ Optional top-level `run.json.merged_slice_repair` is the singleton record for on
   "attempts": 1,
   "max_attempts": 2,
   "baseline_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "reviewed_commit": "abababababababababababababababababababab",
   "review_ref": "reviews/repair-attempt-1.json",
   "review_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "repair_evidence_ref": "evidence/repair-attempt-1.json",
@@ -973,14 +975,14 @@ Optional top-level `run.json.merged_slice_repair` is the singleton record for on
 }
 ```
 
-The example shows a completed `merged` record; fields are state-specific. A fresh `reported` record carries only the identity/evidence fields with `attempts: 0`; `baseline_commit` is observed from the feature head when an attempt starts and is required from `repairing` onward; `review_ref`/`repair_evidence_ref` bind at `review`; `verification_ref` and `merge_commit` are valid only at `merged`; `reason` only at `blocked`.
+The example shows a completed `merged` record; fields are state-specific. A fresh `reported` record carries the identity/evidence fields, the bound `plan_hash`, and `attempts: 0`; `baseline_commit` is observed from the feature head when an attempt starts and is required from `repairing` onward; `reviewed_commit`, `review_ref`, and `repair_evidence_ref` bind at `review`; `verification_ref` and `merge_commit` are valid only at `merged`; `reason` only at `blocked`.
 
 Rules:
 
-- `reported` is the only creation transition and requires a merged owner slice, a consumer that directly depends on it, a defect path inside the owner's plan lane, and hash-bound reproduction evidence whose `subject` equals the consumer and whose `status` is `"fail"` from an observed failing run.
+- `reported` is the only creation transition and requires a merged owner slice, a consumer that directly depends on it, a defect path inside the owner's plan lane, and hash-bound reproduction evidence whose `subject` equals the consumer and whose `status` is `"fail"` from an observed failing run. Reporting binds `plan_hash` over `plan/slices.json`: every later lane check re-verifies it, so owner-lane authority can never be widened, narrowed, or replaced mid-incident.
 - `repairing` re-verifies the bound reproduction evidence and observes the feature head as the attempt's `baseline_commit` (40-hex); the merge must later prove it contains new work on top of exactly that commit.
-- `review` re-verifies the original reproduction binding and requires hash-bound repair-attempt evidence (`repair_evidence_ref`/`repair_evidence_hash`) with subject `repair:<owner-slice-id>` and the observed `changed_paths` list; every changed path must be inside the owner's plan lane — lane confinement is observed, never declared. The review binding is write-once per attempt: only a byte-identical re-record is accepted, and a different review requires the next attempt.
-- `merged` re-verifies every prior binding (original reproduction, review, repair evidence), requires the bound APPROVE review, and proves the merge from git itself: `merge_commit` must resolve in the repository, be contained in the feature branch, be the resulting feature head, contain new work on top of the bound `baseline_commit`, and its observed `git diff` against that baseline must stay entirely inside the owner's lane. Hash-bound verification evidence (`verification_ref`/`verification_hash`) must record the consumer reproduction passing (`subject` = consumer, `status` = `"pass"`).
+- `review` re-verifies the original reproduction binding and binds `reviewed_commit` — the exact commit whose bytes the reviewer saw. The baseline must be a proper ancestor of it, and its git-observed diff (rename detection disabled, so both sides of a rename stay visible) must stay inside the bound owner lane. Hash-bound repair-attempt evidence (`repair_evidence_ref`/`repair_evidence_hash`, subject `repair:<owner-slice-id>`) must record a `changed_paths` list equal to that git-observed diff — a claim that diverges from git is rejected. The review binding is write-once per attempt: only a byte-identical re-record with the same commit is accepted, and a different review requires the next attempt.
+- `merged` re-verifies every prior binding (original reproduction, review, repair evidence), requires the bound APPROVE review, and proves the merge from git itself: `merge_commit` must resolve in the repository, be contained in the feature branch, be the resulting feature head, contain new work on top of the bound `baseline_commit`, carry **exactly the reviewed tree** (`merge^{tree}` = `reviewed_commit^{tree}`, so nothing can be appended between APPROVE and merge), and its observed diff against the baseline must stay entirely inside the owner's lane. Hash-bound verification evidence (`verification_ref`/`verification_hash`) must record the consumer reproduction passing (`subject` = consumer, `status` = `"pass"`).
 - Only one repair incident is allowed per run; `merged` and `blocked` are terminal, and a further defect requires a recovery run.
 - `attempts` advances exactly by one to a hard `max_attempts: 2`: attempt 1 is the initial correction, attempt 2 the single remediation after a finite rejecting review. The budget is separate durable state — it is never charged to the merged slice's immutable `max_attempts` history and never drawn from `run.max_retries`.
 - Repair reviews use subject `repair:<owner-slice-id>` and are hash-bound at recording; merge requires re-verifying an APPROVE verdict against the bound bytes.

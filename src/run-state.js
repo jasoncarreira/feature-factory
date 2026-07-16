@@ -2314,6 +2314,9 @@ function normalizeMergedSliceRepairInput(input) {
   if (status === "review") {
     request.review_ref = requireNonEmptyString(input.review_ref, "repair review ref");
     request.repair_evidence_ref = requireNonEmptyString(input.repair_evidence_ref, "repair evidence ref (observed changed paths)");
+    const reviewedCommit = String(input.reviewed_commit || "").trim().toLowerCase();
+    if (!MERGED_SLICE_REPAIR_COMMIT_PATTERN.test(reviewedCommit)) throw new Error("repair review requires --commit with the exact repair commit under review");
+    request.reviewed_commit = reviewedCommit;
   }
   if (status === "merged") {
     const commit = String(input.merge_commit || "").trim().toLowerCase();
@@ -2345,7 +2348,7 @@ function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
   if (request.status === "reported") return reportedMergedSliceRepair(runDir, run, current, request, stampedAt);
   if (!current) throw new Error("merged-slice repair must be reported before any other transition");
   if (request.status === "repairing") return repairingMergedSliceRepair(runDir, run, current, request, stampedAt, options);
-  if (request.status === "review") return reviewMergedSliceRepair(runDir, current, request, stampedAt);
+  if (request.status === "review") return reviewMergedSliceRepair(runDir, current, request, stampedAt, options);
   if (request.status === "merged") return mergedMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   return { ...current, status: "blocked", reason: request.reason, updated_at: stampedAt };
 }
@@ -2367,7 +2370,11 @@ function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
   if (!consumerDeps.includes(owner.id)) {
     throw new Error(`repair consumer '${consumer.id}' must directly depend on owner '${owner.id}'`);
   }
-  assertRepairPathInOwnerLane(runDir, owner.id, request.defect_path);
+  // Owner-lane authority is bound at report time: every later transition
+  // re-verifies plan/slices.json against this hash, so the lane can never be
+  // widened, narrowed, or replaced mid-incident.
+  const planHash = hashFile(join(runDir, "plan", "slices.json"));
+  assertRepairPathInOwnerLane(runDir, owner.id, request.defect_path, planHash);
   const evidence = resolveEvidenceRef(runDir, request.evidence_ref);
   const evidenceJson = parseJsonObjectFile(evidence.path, "repair evidence_ref");
   if (evidenceJson.subject !== consumer.id) {
@@ -2378,6 +2385,7 @@ function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
   }
   return {
     schema_version: 1,
+    plan_hash: planHash,
     owner_slice_id: owner.id,
     consumer_slice_id: consumer.id,
     defect_path: request.defect_path,
@@ -2416,6 +2424,8 @@ function repairingMergedSliceRepair(runDir, run, current, request, stampedAt, op
     throw new Error(`feature branch '${featureBranch}' head does not resolve; a repair attempt requires an observed baseline`);
   }
   const next = { ...current, status: "repairing", attempts: request.attempts, baseline_commit: baselineResult.stdout.trim(), updated_at: stampedAt };
+  // A fresh attempt has no bound review yet; the commit binding is per-attempt.
+  delete next.reviewed_commit;
   if (request.branch) next.branch = request.branch;
   if (request.worktree) next.worktree = request.worktree;
   return next;
@@ -2428,20 +2438,35 @@ function assertRepairOriginalEvidenceIntact(runDir, current) {
   }
 }
 
-function reviewMergedSliceRepair(runDir, current, request, stampedAt) {
+function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = {}) {
   // Recording a review from `review` again is allowed ONLY as a byte-identical
   // idempotent re-record (crash recovery). The binding is write-once per
   // attempt: a bound REJECT can never be replaced by a different review — a
   // corrected verdict requires the next repair attempt.
   if (!["repairing", "review"].includes(current.status)) throw new Error(`repair review requires status 'repairing'; it is '${current.status}'`);
   assertRepairOriginalEvidenceIntact(runDir, current);
+  const repoRoot = options.repoRoot || runDir;
+  const commitResult = git(repoRoot, ["rev-parse", "--verify", `${request.reviewed_commit}^{commit}`]);
+  if (!commitResult.ok) throw new Error(`repair reviewed commit '${request.reviewed_commit}' does not resolve in the repository`);
+  const reviewedSha = commitResult.stdout.trim();
   const review = resolveReviewRef(runDir, request.review_ref);
   const reviewHash = hashFile(review.path);
   if (current.status === "review") {
-    if (request.review_ref !== current.review_ref || reviewHash !== current.review_hash) {
+    if (request.review_ref !== current.review_ref || reviewHash !== current.review_hash || reviewedSha !== current.reviewed_commit) {
       throw new Error("repair review binding is write-once per attempt; a different review requires the next repair attempt");
     }
     return { ...current, updated_at: stampedAt };
+  }
+  // The review binds the exact commit whose bytes the reviewer saw: the
+  // baseline must be a proper ancestor, and the observed diff — with both
+  // sides of any rename visible — must stay inside the owner's bound lane.
+  const baseline = requireNonEmptyString(current.baseline_commit, "repair baseline_commit");
+  if (reviewedSha === baseline) throw new Error("repair reviewed commit must contain new work on top of the observed attempt baseline");
+  const baselineContained = git(repoRoot, ["merge-base", "--is-ancestor", baseline, reviewedSha]);
+  if (!baselineContained.ok) throw new Error("repair reviewed commit must contain the observed attempt baseline");
+  const observedPaths = observeRepairChangedPaths(repoRoot, baseline, reviewedSha);
+  for (const observedPath of observedPaths) {
+    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(observedPath), current.plan_hash);
   }
   const reviewJson = parseJsonObjectFile(review.path, "repair review_ref");
   if (reviewJson.subject !== `repair:${current.owner_slice_id}`) {
@@ -2452,22 +2477,35 @@ function reviewMergedSliceRepair(runDir, current, request, stampedAt) {
     const fixes = Array.isArray(reviewJson.required_fixes) ? reviewJson.required_fixes.filter(stringValue) : [];
     if (fixes.length < 1) throw new Error("a rejecting repair review must enumerate finite required_fixes");
   }
-  const repairEvidence = assertRepairChangedPathsInOwnerLane(runDir, current, request.repair_evidence_ref);
+  const repairEvidence = assertRepairChangedPathsInOwnerLane(runDir, current, request.repair_evidence_ref, observedPaths);
   return {
     ...current,
     status: "review",
     review_ref: request.review_ref,
     review_hash: reviewHash,
+    reviewed_commit: reviewedSha,
     repair_evidence_ref: request.repair_evidence_ref,
     repair_evidence_hash: repairEvidence.hash,
     updated_at: stampedAt,
   };
 }
 
+// Diffs are observed with rename detection disabled so a rename's out-of-lane
+// source stays visible as a deletion instead of hiding behind an in-lane
+// destination.
+function observeRepairChangedPaths(repoRoot, fromCommit, toCommit) {
+  const diffResult = git(repoRoot, ["diff", "--name-only", "-z", "--no-renames", fromCommit, toCommit]);
+  if (!diffResult.ok) throw new Error("repair diff against the attempt baseline is not observable");
+  const paths = diffResult.stdout.split("\0").filter((path) => path !== "");
+  if (paths.length < 1) throw new Error("repair must contain observable changes on top of the attempt baseline");
+  return paths;
+}
+
 // Lane confinement is observed, not declared: the orchestrator records the
-// repair diff's actual changed paths as evidence, and every one of them must
-// fall inside the owner's plan lane before the review can bind.
-function assertRepairChangedPathsInOwnerLane(runDir, current, evidenceRef) {
+// repair diff's actual changed paths as evidence, every one of them must fall
+// inside the owner's bound plan lane, and the recorded list must equal the
+// git-observed diff — a claim that diverges from git is rejected outright.
+function assertRepairChangedPathsInOwnerLane(runDir, current, evidenceRef, observedPaths) {
   const evidence = resolveEvidenceRef(runDir, evidenceRef);
   const evidenceJson = parseJsonObjectFile(evidence.path, "repair evidence_ref");
   if (evidenceJson.subject !== `repair:${current.owner_slice_id}`) {
@@ -2478,7 +2516,12 @@ function assertRepairChangedPathsInOwnerLane(runDir, current, evidenceRef) {
     throw new Error("repair attempt evidence must record the observed non-empty changed_paths list");
   }
   for (const changedPath of changedPaths) {
-    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(changedPath));
+    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(changedPath), current.plan_hash);
+  }
+  const recorded = [...new Set(changedPaths.map((path) => normalizeRepairDefectPath(path)))].sort();
+  const observed = [...new Set(observedPaths)].sort();
+  if (recorded.length !== observed.length || recorded.some((path, index) => path !== observed[index])) {
+    throw new Error("repair attempt evidence changed_paths must equal the git-observed diff against the attempt baseline");
   }
   return { hash: hashFile(evidence.path) };
 }
@@ -2517,14 +2560,18 @@ function mergedMergedSliceRepair(runDir, run, current, request, stampedAt, optio
   if (!baselineContained.ok) {
     throw new Error("repair merge commit must contain the observed attempt baseline; the feature branch history no longer matches it");
   }
-  const diffResult = git(repoRoot, ["diff", "--name-only", "-z", baseline, mergeSha]);
-  if (!diffResult.ok) throw new Error("repair merge diff against the attempt baseline is not observable");
-  const mergedPaths = diffResult.stdout.split("\0").filter((path) => path !== "");
-  if (mergedPaths.length < 1) {
-    throw new Error("repair merge commit must contain observable changes on top of the attempt baseline");
+  // The bytes merged must be exactly the bytes reviewed: the resulting tree
+  // must equal the bound reviewed commit's tree, so nothing can be appended
+  // between APPROVE and merge.
+  const reviewedSha = requireNonEmptyString(current.reviewed_commit, "repair reviewed_commit");
+  const mergeTree = git(repoRoot, ["rev-parse", "--verify", `${mergeSha}^{tree}`]);
+  const reviewedTree = git(repoRoot, ["rev-parse", "--verify", `${reviewedSha}^{tree}`]);
+  if (!mergeTree.ok || !reviewedTree.ok || mergeTree.stdout.trim() !== reviewedTree.stdout.trim()) {
+    throw new Error("repair merge must carry exactly the reviewed tree; changes after the bound review require the next attempt");
   }
+  const mergedPaths = observeRepairChangedPaths(repoRoot, baseline, mergeSha);
   for (const mergedPath of mergedPaths) {
-    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(mergedPath));
+    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(mergedPath), current.plan_hash);
   }
   // The original consumer reproduction must now pass, on observed evidence.
   const verification = resolveEvidenceRef(runDir, request.verification_ref);
@@ -2584,8 +2631,11 @@ function assertRepairQuiescence(run, action) {
   if (busy) throw new Error(`cannot ${action} while slice '${busy.id}' is ${busy.status}; quiesce slice work first`);
 }
 
-function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath) {
+function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath, expectedPlanHash) {
   const planPath = join(runDir, "plan", "slices.json");
+  if (requireNonEmptyString(expectedPlanHash, "repair plan_hash") !== hashFile(planPath)) {
+    throw new Error("plan/slices.json no longer matches the lane authority bound when the repair was reported");
+  }
   const plan = parseJsonObjectFile(planPath, "plan/slices.json");
   const planned = (Array.isArray(plan.slices) ? plan.slices : []).find((slice) => slice?.id === ownerSliceId);
   if (!planned) throw new Error(`repair owner slice '${ownerSliceId}' is missing from plan/slices.json`);
