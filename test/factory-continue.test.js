@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { createReviewRecord } from "./helpers/review-record-fixture.js";
+import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,7 +129,7 @@ describe("factory continue", () => {
       {
         name: "security-parent-source",
         reviewRef: "reviews/security-reviewer.json",
-        review: { subject: "security-parent-source", summary: "security review blocks continuation" },
+        review: createReviewRecord({ subject: "security-parent-source", verdict: undefined, required_fixes: undefined, summary: "security review blocks continuation" }),
         patchRun(run) {
           run.security_review = { verdict: "BLOCK", review_ref: "reviews/security-reviewer.json" };
         },
@@ -137,7 +139,7 @@ describe("factory continue", () => {
       {
         name: "step-parent-source",
         reviewRef: "reviews/spec-review.json",
-        review: { subject: "spec-writer", summary: "step review blocks continuation" },
+        review: createReviewRecord({ subject: "spec-writer", verdict: undefined, required_fixes: undefined, summary: "step review blocks continuation" }),
         patchRun(run) {
           run.steps = [{ agent: "spec-writer", status: "blocked", review_ref: "reviews/spec-review.json" }];
         },
@@ -147,7 +149,7 @@ describe("factory continue", () => {
       {
         name: "slice-parent-source",
         reviewRef: "reviews/api-slice-review.json",
-        review: { subject: "api-slice", summary: "slice review blocks continuation" },
+        review: createReviewRecord({ subject: "api-slice", verdict: undefined, required_fixes: undefined, summary: "slice review blocks continuation" }),
         patchRun(run) {
           run.slices = [{ id: "api-slice", status: "blocked", review_ref: "reviews/api-slice-review.json" }];
         },
@@ -359,7 +361,7 @@ describe("factory continue", () => {
   it("rejects continuation reviews that are not referenced by parent run state or have mismatched subjects", () => {
     const unreferenced = createFixture("unreferenced-review");
     try {
-      writeJson(join(unreferenced.runDir, "reviews", "unreferenced.json"), { subject: unreferenced.runId, summary: "not linked" });
+      writeJson(join(unreferenced.runDir, "reviews", "unreferenced.json"), createReviewRecord({ subject: unreferenced.runId, verdict: undefined, required_fixes: undefined, summary: "not linked" }));
       assert.throws(
         () => continueFactory(unreferenced.runId, { cwd: unreferenced.repo, review: "unreferenced.json", runId: "unreferenced-review-next", dryRun: true }),
         /must be referenced by parent run state/u,
@@ -635,7 +637,7 @@ describe("continuation planning-artifact reuse", () => {
   it("reuses a draft recorded through the documented rejected-step CLI", () => {
     const fixture = createFixture("reuse-cli-rejected", { status: "running", spec: { status: "running", verdict: "REJECT", attempts: 1 } });
     try {
-      writeJson(join(fixture.runDir, "reviews", "spec-writer.attempt-1.json"), { subject: "spec-writer", verdict: "REJECT", summary: "spec review" });
+      writeJson(join(fixture.runDir, "reviews", "spec-writer.attempt-1.json"), createReviewRecord({ subject: "spec-writer", verdict: "REJECT", summary: "spec review", required_fixes: [] }));
       const rejected = runCli(fixture.repo, [
         "factory", "step", fixture.runId, "spec-writer", "rejected",
         "--attempts", "1",
@@ -806,7 +808,7 @@ describe("continuation planning-artifact reuse", () => {
     const fixture = createFixture("bind-write");
     try {
       writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
-      writeJson(join(fixture.runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", summary: "ok" });
+      writeJson(join(fixture.runDir, "reviews", "spec-writer.json"), createReviewRecord({ subject: "spec-writer", verdict: "APPROVE", summary: "ok", required_fixes: [] }));
       // seed the step so the accept transition has a step to bind
       updateRun(fixture, (run) => {
         run.status = "running";
@@ -829,7 +831,7 @@ describe("continuation planning-artifact reuse", () => {
     const fixture = createFixture("bind-clear");
     try {
       writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
-      writeJson(join(fixture.runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", summary: "ok" });
+      writeJson(join(fixture.runDir, "reviews", "spec-writer.json"), createReviewRecord({ subject: "spec-writer", verdict: "APPROVE", summary: "ok", required_fixes: [] }));
       updateRun(fixture, (run) => {
         run.status = "running";
         run.terminal_result = null;
@@ -977,21 +979,19 @@ function createFixture(runId, { status = "blocked", createBranch = true, review,
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
-  writeJson(join(runDir, "reviews", "reviewer.json"), review || { subject: runId, summary: "needs continuation" });
-  const run = {
-    schema_version: 1,
+  writeJson(join(runDir, "reviews", "reviewer.json"), review || createReviewRecord({ subject: runId, verdict: undefined, required_fixes: undefined, summary: "needs continuation" }));
+  const run = createRunRecord({
     run_id: runId,
     status,
     branch: runId,
     worktree: join(repo, ".opencode", "worktrees", runId),
     validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
-    gates: {},
     terminal_result: status === "blocked" ? { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} } : null,
-  };
+  });
   if (maxRetries !== undefined) run.max_retries = maxRetries;
   if (spec) {
     writeFileSync(join(runDir, "artifacts", "technical-brief.md"), spec.brief ?? "brief\n", "utf8");
-    writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: spec.verdict, summary: "spec review" });
+    writeJson(join(runDir, "reviews", "spec-writer.json"), createReviewRecord({ subject: "spec-writer", verdict: spec.verdict, summary: "spec review", required_fixes: [] }));
     const step = { agent: "spec-writer", status: spec.status, attempts: spec.attempts ?? 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json" };
     if (spec.status === "accepted" && spec.bind !== false) {
       step.acceptance = {
@@ -1068,16 +1068,13 @@ function parentArtifactKind(ref) {
 }
 
 function childRunFromPayload(continuation) {
-  return {
-    schema_version: 1,
+  return createRunRecord({
     run_id: continuation.target.run_id,
-    status: "running",
     branch: continuation.target.branch,
     worktree: continuation.target.worktree,
-    gates: {},
     ...(continuation.draft_spec_reuse ? { max_retries: continuation.draft_spec_reuse.max_retries } : {}),
     continuation,
-  };
+  });
 }
 
 function writeJson(file, value) {

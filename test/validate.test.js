@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createReviewRecord } from "./helpers/review-record-fixture.js";
+import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSlicesPlan } from "../src/validate.js";
@@ -21,6 +23,18 @@ const TERMINAL_LABEL_PAYLOADS = Object.freeze([
 ]);
 
 describe("run schema and consistency", () => {
+  it("builds valid canonical semantic run and review fixtures", () => {
+    const run = createRunRecord();
+    const review = createReviewRecord();
+
+    assert.equal(validateRun(run), run);
+    assert.equal(run.run_id, "fixture-run");
+    assert.equal(run.status, "running");
+    assert.equal(review.subject, "fixture-subject");
+    assert.equal(review.verdict, "APPROVE");
+    assert.deepEqual(review.required_fixes, []);
+  });
+
   it("accepts debug snapshots", () => {
     const run = validateRun({
       ...runningRun(),
@@ -575,7 +589,7 @@ describe("run schema and consistency", () => {
 });
 
 function runningRun(runId = "run") {
-  return { schema_version: 1, run_id: runId, status: "running", gates: {} };
+  return createRunRecord({ run_id: runId });
 }
 
 function snapshotRoot({ env } = {}) {
