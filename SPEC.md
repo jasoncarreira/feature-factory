@@ -28,6 +28,14 @@ Threat boundary:
 - Within that boundary, retain exact Git/test/review/merge provenance: full Git SHAs plus locally observed diffs, trees, and ancestry; exact test commands, results, attempts, and heads; review subjects, attempts, refs, hashes, and exact reviewed commits; and merge commits plus their reviewed-tree relation. A model claim never substitutes for those observations.
 - Retain idempotent external-effect controls: exclusive claims or fences and exact identity/token checks precede effects, unknown crash outcomes are re-observed before retry, and effects already recorded or observed are not repeated. In particular, after a PR exists, retain its fence and record that existing PR; do not create another.
 
+Boundary-retention decisions are finite and explicit in
+[`DURABLE-AUTHORITY-LEDGER.md`](DURABLE-AUTHORITY-LEDGER.md). The ledger aligns with
+the nine durable authority classes, preserves unique evidence and boundary identities,
+and permits consolidation only for duplicate internal attestations with a named
+canonical replacement. It is a documentation decision record only: persisted legacy
+records keep their original schema, and this milestone makes no production/schema
+shape change.
+
 Current guarantees:
 
 - `run.json`, gate answers, `evidence/*`, `reviews/*`, and `terminal_result` are durable local workflow state.

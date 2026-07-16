@@ -21,6 +21,7 @@ const CHANGELOG = readDoc("../CHANGELOG.md");
 const DOGFOOD_LEARNINGS = readDoc("../DOGFOOD-LEARNINGS.md");
 const RUN_LATENCY_FINDINGS = readDoc("../RUN-LATENCY-FINDINGS.md");
 const SIMPLIFICATION = readDoc("../SIMPLIFICATION.md");
+const DURABLE_AUTHORITY_LEDGER = readDoc("../DURABLE-AUTHORITY-LEDGER.md");
 const PACKAGE = JSON.parse(readDoc("../package.json"));
 const TOOL_VERSIONS = readDoc("../.tool-versions");
 const CI_WORKFLOW = readDoc("../.github/workflows/ci.yml");
@@ -328,6 +329,63 @@ describe("class-wide planning prompt contract", () => {
       assert.match(schemaCatalog, literalPattern(`\`${excluded}\``), `durable authority catalog must explicitly exclude ${excluded}`);
     }
     assert.match(schemaCatalog, /does not create `src\/single-slice\/schema-model`, add a production validator, or change production behavior/i);
+  });
+
+  it("keeps the boundary-retention ledger finite and aligned with all nine authority classes", () => {
+    const authorityClasses = [
+      "Plan and slices graph",
+      "Run envelope and terminal result",
+      "Gates, pending snapshot, and handoff receipt",
+      "Steps and acceptance inheritance",
+      "Slices and review/evidence bindings",
+      "Validator, security, and PR-created result",
+      "Continuation and planning/draft reuse",
+      "Post-PR nested records",
+      "PR79 merged slice repair",
+    ];
+    const classHeadings = [...DURABLE_AUTHORITY_LEDGER.matchAll(/^## (\d+)\. Authority class: (.+)$/gmu)];
+    assert.equal(classHeadings.length, 9, "boundary-retention ledger must contain exactly nine authority-class sections");
+    assert.deepEqual(
+      classHeadings.map((match) => [Number(match[1]), match[2]]),
+      authorityClasses.map((authorityClass, index) => [index + 1, authorityClass]),
+      "boundary-retention ledger authority classes must exactly match the B0.3 catalog",
+    );
+    for (const disposition of ["`RETAIN`", "`REOBSERVE`", "`CONSOLIDATE/REMOVE`"]) {
+      assert.match(DURABLE_AUTHORITY_LEDGER, literalPattern(disposition), `ledger missing disposition ${disposition}`);
+    }
+    for (const doc of [SPEC, SCHEMA]) assert.match(doc, /DURABLE-AUTHORITY-LEDGER\.md/, "schema/spec must link the canonical ledger");
+  });
+
+  it("preserves observation, evidence, review, merge, continuation, handoff, and external-effect controls", () => {
+    for (const control of [
+      /model claim[\s\S]*mutable working-tree file[\s\S]*never a substitute for Git observation/i,
+      /Test\/reproduction evidence exact bytes[\s\S]*command bytes[\s\S]*exact result[\s\S]*observed head[\s\S]*changed_paths/i,
+      /Independent review exact bytes[\s\S]*review ref\/hash[\s\S]*exact reviewed commit/i,
+      /merge_commit\^\{tree\} = reviewed_commit\^\{tree\}/i,
+      /Parent and child continuation identity[\s\S]*exact parent\/child run ids, commits, hashes, and review bytes survive/i,
+      /handoff_receipt[\s\S]*approval fingerprint[\s\S]*steering generation/i,
+      /PR\/GitHub external identities[\s\S]*external creation operation identity/i,
+      /unknown external outcome[\s\S]*re-observed before retry/i,
+      /process-launch\.lock\/owner\.json[\s\S]*nonce/i,
+      /action-claim token[\s\S]*Unknown start outcome is reconciled, not repeated/i,
+      /PR fence token[\s\S]*Never clear after a PR exists/i,
+    ]) assert.match(DURABLE_AUTHORITY_LEDGER, control);
+  });
+
+  it("records the complete PR 79 disposition without weakening legacy or single-repair authority", () => {
+    const pr79 = markdownSection(DURABLE_AUTHORITY_LEDGER, "9. Authority class: PR79 merged slice repair");
+    for (const retained of [
+      "Original reproduction `evidence_ref` and `evidence_hash`",
+      "`baseline_commit`",
+      "`reviewed_commit`, `review_ref`, and `review_hash`",
+      "`verification_ref` and `verification_hash`",
+      "`merge_commit` and the equality `merge_commit^{tree} = reviewed_commit^{tree}`",
+    ]) assert.match(pr79, literalPattern(retained), `PR 79 ledger missing retained boundary ${retained}`);
+    assert.match(pr79, /`plan_hash`[\s\S]*`CONSOLIDATE\/REMOVE`[\s\S]*canonical owner\/effective-path snapshot[\s\S]*re-observe that snapshot/i);
+    assert.match(pr79, /`repair_evidence_ref` and `repair_evidence_hash`[\s\S]*`CONSOLIDATE\/REMOVE` only when the repair facts exist exactly once in the canonical amendment manifest[\s\S]*Consumption must re-observe/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /Persisted legacy records keep their original schema/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /No two repair authorities may be active for one run/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /adds no production manifest,[\s\S]*schema field, or migration/i);
   });
 
   it("requires first review to consolidate same-class findings across every consequential dimension", () => {

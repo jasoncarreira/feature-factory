@@ -589,6 +589,13 @@ Explicit catalog exclusions:
 
 This catalog is a test and documentation contract only. It does not create `src/single-slice/schema-model`, add a production validator, or change production behavior.
 
+The finite retain/re-observe/consolidate decision for every class is recorded in
+[`DURABLE-AUTHORITY-LEDGER.md`](../../../DURABLE-AUTHORITY-LEDGER.md). That ledger
+preserves exact Git/test/review/merge and external-effect boundary controls, requires
+named canonical replacements for duplicate internal attestations, keeps persisted
+legacy records on their original schema, and introduces no production or schema-shape
+change.
+
 ## run.json
 
 ```json
