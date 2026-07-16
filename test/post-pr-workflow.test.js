@@ -1,6 +1,6 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
@@ -437,32 +437,31 @@ describe("post-PR workflow orchestration", () => {
       ["unexpected-result-keys", throwingToJson], ["unexpected-result-keys", { verdict: "GO", [Symbol("secret")]: true }],
       ["invalid-verdict", { verdict: "WRONG" }], ["invalid-verdict", { verdict: 1 }],
     ];
-    for (const activity of ["validator", "security"]) {
-      for (const [issue, supplied] of cases) {
-        const result = supplied;
-        const fixture = createPanelRecoveryFixture(`p25-${activity}-${issue}-${Math.random().toString(16).slice(2)}`, activity);
-        let dispatches = 0; let terminalChecks = 0;
-        try {
-          const beforeSideEffects = panelSideEffectCounters(fixture, activity);
-          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => {
-            dispatches += 1;
-            return { started: true, exit_code: 0, signal: null, result };
-          }, beforePostPrTerminal: ({ run: terminalRun }) => { terminalChecks += 1; assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null); assert.equal(terminalRun.steering.last_action.kind, "terminal"); assert.equal(terminalRun.steering.last_action.outcome, "started"); } }), /terminal-run|resume ineligible/u);
-          const run = readRun(fixture); const job = run.post_pr.remediation.revalidation.jobs[activity];
-          assert.equal(run.status, "needs-human");
-          assert.equal(run.terminal_result.reason, "post-pr-metadata-unsafe");
-          assert.deepEqual(run.post_pr.terminal_fact, { schema_version: 1, kind: "panel-runner-result-malformed", observed_at: "2026-07-12T12:05:00.000Z", attempt: 1, activity,
-            dispatch_id: job.dispatch_id, candidate_head_sha: fixture.candidate, issue });
-          for (const ref of fixedPanelRefs(activity)) assert.equal(existsSync(join(fixture.runDir, ref)), false);
-          assert.equal(job.status, "running");
-          assert.equal(run.post_pr.attempt, 1);
-          assert.equal(activity === "validator" ? run.post_pr.remediation.revalidation.jobs.security : undefined, undefined);
-          assert.deepEqual(panelSideEffectCounters(fixture, activity), beforeSideEffects);
-          await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u);
-          assert.equal(dispatches, 1); assert.equal(terminalChecks, 1); assert.deepEqual(panelSideEffectCounters(fixture, activity), beforeSideEffects);
-        } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
-      }
-    }
+    const tasks = ["validator", "security"].flatMap((activity) => cases.map(([issue, supplied]) => ({ activity, issue, supplied })));
+    await runRowsConcurrently(tasks, async ({ activity, issue, supplied }) => {
+      const result = supplied;
+      const fixture = createPanelRecoveryFixture(`p25-${activity}-${issue}-${Math.random().toString(16).slice(2)}`, activity);
+      let dispatches = 0; let terminalChecks = 0;
+      try {
+        const beforeSideEffects = panelSideEffectCounters(fixture, activity);
+        await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => {
+          dispatches += 1;
+          return { started: true, exit_code: 0, signal: null, result };
+        }, beforePostPrTerminal: ({ run: terminalRun }) => { terminalChecks += 1; assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null); assert.equal(terminalRun.steering.last_action.kind, "terminal"); assert.equal(terminalRun.steering.last_action.outcome, "started"); } }), /terminal-run|resume ineligible/u);
+        const run = readRun(fixture); const job = run.post_pr.remediation.revalidation.jobs[activity];
+        assert.equal(run.status, "needs-human");
+        assert.equal(run.terminal_result.reason, "post-pr-metadata-unsafe");
+        assert.deepEqual(run.post_pr.terminal_fact, { schema_version: 1, kind: "panel-runner-result-malformed", observed_at: "2026-07-12T12:05:00.000Z", attempt: 1, activity,
+          dispatch_id: job.dispatch_id, candidate_head_sha: fixture.candidate, issue });
+        for (const ref of fixedPanelRefs(activity)) assert.equal(existsSync(join(fixture.runDir, ref)), false);
+        assert.equal(job.status, "running");
+        assert.equal(run.post_pr.attempt, 1);
+        assert.equal(activity === "validator" ? run.post_pr.remediation.revalidation.jobs.security : undefined, undefined);
+        assert.deepEqual(panelSideEffectCounters(fixture, activity), beforeSideEffects);
+        await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, executePostPrRecoveryJob: async () => { dispatches += 1; } }), /terminal-run|resume ineligible/u);
+        assert.equal(dispatches, 1); assert.equal(terminalChecks, 1); assert.deepEqual(panelSideEffectCounters(fixture, activity), beforeSideEffects);
+      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+    });
 
     for (const [label, overrides, pattern] of [
       ["token", { terminalActionTokenOverride: "wrong-terminal-token" }, /terminal action/u],
@@ -560,10 +559,11 @@ describe("post-PR workflow orchestration", () => {
       missing("path-malformed-unicode", () => ["\uD800"]),
       { label: "path-nfc-duplicates-byte-sort", make: () => ["src/é.js", "src/e\u0301.js", "src/api.js"], category: "unowned-path", hash: "0c5966fdf11b361b50edc4de95bf8751a89f9dfc431be364c353c5197a9e1836" },
     ];
-    for (const activity of ["validator", "security"]) for (const row of rows) {
+    const tasks = ["validator", "security"].flatMap((activity) => rows.map((row) => ({ activity, row })));
+    await runRowsConcurrently(tasks, async ({ activity, row }) => {
       if (row.success) await assertAffectedWorkflowSuccess(activity, row.label, row.make());
       else await assertAffectedWorkflowTerminal(activity, row.label, row.make(), row);
-    }
+    });
   });
 
   for (const [name, activity] of [
@@ -675,13 +675,31 @@ function createFixture(runId, { nextPollAt = "2026-07-12T12:00:00.000Z", reviewe
   return { repo, runDir, runId };
 }
 
+// The base/candidate git history is identical for every revalidation fixture, so
+// it is built once and copied per fixture; nine git subprocesses become one
+// recursive copy. Tests receive only copies — the template repo is never mutated.
+let revalidationGitTemplate = null;
+
+function revalidationTemplate() {
+  if (!revalidationGitTemplate) {
+    const repo = mkdtempSync(join(tmpdir(), "post-pr-revalidation-template-"));
+    runGit(repo, ["init", "-b", "main"]); runGit(repo, ["config", "user.email", "test@example.com"]); runGit(repo, ["config", "user.name", "Test"]);
+    mkdirSync(join(repo, "src")); writeFileSync(join(repo, "src", "api.js"), "export const value = 1;\n"); writeFileSync(join(repo, ".gitignore"), ".opencode/\n"); runGit(repo, ["add", "src/api.js", ".gitignore"]); runGit(repo, ["commit", "-m", "base"]);
+    const baseline = gitOutput(repo, ["rev-parse", "HEAD"]);
+    writeFileSync(join(repo, "src", "api.js"), "export const value = 2;\n"); runGit(repo, ["add", "src/api.js"]); runGit(repo, ["commit", "-m", "candidate"]);
+    const candidate = gitOutput(repo, ["rev-parse", "HEAD"]);
+    revalidationGitTemplate = { repo, baseline, candidate };
+  }
+  return revalidationGitTemplate;
+}
+
+after(() => { if (revalidationGitTemplate) rmSync(revalidationGitTemplate.repo, { recursive: true, force: true }); });
+
 function createRevalidationFixture(runId) {
+  const template = revalidationTemplate();
   const repo = mkdtempSync(join(tmpdir(), "post-pr-revalidation-"));
-  runGit(repo, ["init", "-b", "main"]); runGit(repo, ["config", "user.email", "test@example.com"]); runGit(repo, ["config", "user.name", "Test"]);
-  mkdirSync(join(repo, "src")); writeFileSync(join(repo, "src", "api.js"), "export const value = 1;\n"); writeFileSync(join(repo, ".gitignore"), ".opencode/\n"); runGit(repo, ["add", "src/api.js", ".gitignore"]); runGit(repo, ["commit", "-m", "base"]);
-  const baseline = gitOutput(repo, ["rev-parse", "HEAD"]);
-  writeFileSync(join(repo, "src", "api.js"), "export const value = 2;\n"); runGit(repo, ["add", "src/api.js"]); runGit(repo, ["commit", "-m", "candidate"]);
-  const candidate = gitOutput(repo, ["rev-parse", "HEAD"]);
+  cpSync(template.repo, repo, { recursive: true });
+  const { baseline, candidate } = template;
   const runDir = join(repo, ".opencode", "factory", runId); mkdirSync(join(runDir, "plan"), { recursive: true }); mkdirSync(join(runDir, "evidence")); mkdirSync(join(runDir, "reviews")); mkdirSync(join(runDir, "artifacts"));
   writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify({ slices: [{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }] })}\n`);
   writeFileSync(join(runDir, "evidence", "post-pr-ci.attempt-1.json"), "{}\n");
@@ -870,6 +888,19 @@ function writeRecoveryPanelArtifact(fixture, activity) {
     writeFileSync(join(fixture.runDir, reportRef), `# Post-PR validator report\n\n\`\`\`json\n${JSON.stringify(reportPayload, null, 2)}\n\`\`\`\n`);
     writeJson(join(fixture.runDir, "reviews", "post-pr-validator.attempt-1.json"), { schema_version: 1, kind: "post-pr-validator-review", ...Object.fromEntries(Object.entries(base).filter(([key]) => key !== "schema_version")), report: { ref: reportRef, hash: fileHash(join(fixture.runDir, reportRef)) }, started_at: job.started_at, completed_at: "2026-07-12T12:04:00.000Z" });
   } else writeJson(join(fixture.runDir, "reviews", "post-pr-security.attempt-1.json"), { schema_version: 1, kind: "post-pr-security-review", ...Object.fromEntries(Object.entries(base).filter(([key]) => key !== "schema_version")), started_at: job.started_at, completed_at: "2026-07-12T12:04:00.000Z" });
+}
+
+// Rows operate on fully independent fixture repos, so a bounded worker pool is
+// safe; the limit caps concurrent run-dir trees and open file descriptors.
+async function runRowsConcurrently(rows, task, limit = 8) {
+  let index = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, rows.length) }, async () => {
+    while (index < rows.length) {
+      const row = rows[index];
+      index += 1;
+      await task(row);
+    }
+  }));
 }
 
 function runGit(repo, args) { const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8" }); assert.equal(proc.status, 0, proc.stderr); }
