@@ -137,6 +137,8 @@ feature-factory factory step <run-id> <known-agent> rejected --review-ref review
 feature-factory factory verdicts <run-id> --validator GO --report artifacts/validation-report.md --security PASS --review-ref reviews/security-reviewer.json --json
 feature-factory factory terminal <run-id> blocked --reason TEXT --boundary-token TOKEN --json
 feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json
+feature-factory factory repair <run-id> reported --owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref evidence/<file> --json
+feature-factory factory repair <run-id> <repairing|review|merged|blocked> [--attempts N] [--review-ref reviews/<file> --evidence-ref evidence/<file> --commit SHA] [--merge-commit SHA --verification-ref evidence/<file>] [--reason TEXT] --json
 feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN --json
 ```
 
@@ -942,6 +944,54 @@ Rules:
 - Waves are derived from `depends_on`: a root slice is wave 1, and the longest dependency path may span at most four waves (prefer three or fewer for a shorter critical path).
 - `max_parallel_slices` limits concurrency within a wave; it does not override the four-wave depth cap.
 - `factory slices-seed` and pre-seed validation enforce the cap for new plans. Existing durable runs with older, deeper seeded plans remain readable and resumable; the cap does not rewrite persisted plan state.
+
+## merged_slice_repair Bounded Repair State
+
+Optional top-level `run.json.merged_slice_repair` is the singleton record for one bounded merged-sibling repair per run:
+
+```json
+{
+  "schema_version": 1,
+  "plan_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "owner_slice_id": "schema-model",
+  "consumer_slice_id": "critic-acceptance",
+  "defect_path": "src/single-slice/schema-model/records.js",
+  "evidence_ref": "evidence/critic-acceptance.attempt-1.json",
+  "evidence_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "merged",
+  "attempts": 1,
+  "max_attempts": 2,
+  "baseline_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "reviewed_commit": "abababababababababababababababababababab",
+  "review_ref": "reviews/repair-attempt-1.json",
+  "review_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "repair_evidence_ref": "evidence/repair-attempt-1.json",
+  "repair_evidence_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "verification_ref": "evidence/repair-verification.json",
+  "verification_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "merge_commit": "ffffffffffffffffffffffffffffffffffffffff",
+  "created_at": "2026-07-15T00:00:00.000Z",
+  "updated_at": "2026-07-15T00:00:00.000Z"
+}
+```
+
+The example shows a completed `merged` record; fields are state-specific. A fresh `reported` record carries the identity/evidence fields, the bound `plan_hash`, and `attempts: 0`; `baseline_commit` is observed from the feature head when an attempt starts and is required from `repairing` onward; `reviewed_commit`, `review_ref`, and `repair_evidence_ref` bind at `review`; `verification_ref` and `merge_commit` are valid only at `merged`; `reason` only at `blocked`.
+
+Rules:
+
+- `reported` is the only creation transition and requires a merged owner slice, a consumer that directly depends on it, a defect path inside the owner's plan lane, and hash-bound reproduction evidence whose `subject` equals the consumer and whose `status` is `"fail"` from an observed failing run. Reporting binds `plan_hash` over `plan/slices.json`: every later lane check re-verifies it, so owner-lane authority can never be widened, narrowed, or replaced mid-incident.
+- `repairing` re-verifies the bound reproduction evidence and observes the feature head as the attempt's `baseline_commit` (40-hex); the merge must later prove it contains new work on top of exactly that commit.
+- `review` re-verifies the original reproduction binding and binds `reviewed_commit` — the exact commit whose bytes the reviewer saw. The baseline must be a proper ancestor of it, and its git-observed diff (rename detection disabled, so both sides of a rename stay visible) must stay inside the bound owner lane. Hash-bound repair-attempt evidence (`repair_evidence_ref`/`repair_evidence_hash`, subject `repair:<owner-slice-id>`) must record a `changed_paths` list equal to that git-observed diff — a claim that diverges from git is rejected. The independent review artifact must itself record `attempt` and `commit`, and both are verified against the current attempt and the observed commit (re-verified again at merge) — a stale verdict can never be re-paired with a commit the reviewer did not see. The review binding is write-once per attempt: only a byte-identical re-record with the same commit is accepted, and a different review requires the next attempt.
+- `merged` re-verifies every prior binding (original reproduction, review, repair evidence), requires the bound APPROVE review, and proves the merge from git itself: `merge_commit` must resolve in the repository, be contained in the feature branch, be the resulting feature head, contain new work on top of the bound `baseline_commit`, carry **exactly the reviewed tree** (`merge^{tree}` = `reviewed_commit^{tree}`, so nothing can be appended between APPROVE and merge), and its observed diff against the baseline must stay entirely inside the owner's lane. Hash-bound verification evidence (`verification_ref`/`verification_hash`) must record the consumer reproduction passing (`subject` = consumer, `status` = `"pass"`).
+- Only one repair incident is allowed per run; `merged` and `blocked` are terminal, and a further defect requires a recovery run.
+- `attempts` advances exactly by one to a hard `max_attempts: 2`: attempt 1 is the initial correction, attempt 2 the single remediation after a finite rejecting review. The budget is separate durable state — it is never charged to the merged slice's immutable `max_attempts` history and never drawn from `run.max_retries`.
+- Repair reviews use subject `repair:<owner-slice-id>` and are hash-bound at recording; merge requires re-verifying an APPROVE verdict against the bound bytes.
+- An unresolved repair (any status other than `merged`) is a run-wide lifecycle fence: no slice may start or merge, no step may advance to `running` or `accepted`, panel verdicts are rejected, gate approvals and gate boundaries are rejected, and `pr-created` fails closed. A `blocked` repair keeps the fence — the only legal progression is checked terminalization for a recovery run. No repair attempt may start while any slice is `running` or in `review`.
+- Admission is limited to the pre-integration window on a `running` run: reporting fails closed if the consumer is already merged, the `test-verifier` integration gate has started, panel verdicts or Gate 3 state exist, a PR exists, or post-PR state exists — downstream authority would go stale across a repair.
+- An executing repair (`repairing`/`review`) counts as in-flight heartbeat work, so the long repair builder/reviewer waits hold liveness like any other dispatch. Resume eligibility surfaces the repair state; a `blocked` repair refuses ordinary resume (`merged-slice-repair-blocked`) because checked terminalization via `factory terminal` is the only legal progression and does not require resume.
+- Every other unresolved repair state (`reported`/`repairing`/`review`) also refuses ordinary resume (`merged-slice-repair-active`) even when the heartbeat is missing or stale — loss of liveness never licenses a second orchestrator to compete over a repair incident. Recovery is only through the checked repair transitions themselves (record `review`/`merged` from durable artifacts — a merged repair restores resumability — or record `blocked` and terminalize), none of which require resume.
+- Repair lane confinement reuses the canonical plan-path validator and slice-lane grammar: a plan path is either `<dir>/**` (prefix) or an exact file path — a plain path never admits descendants, any other glob shape matches nothing, lane text is never locally normalized (padded text grants nothing), and malformed lane text fails the whole check closed.
+- The final `test-verifier` integration gate and the pre-PR panel run unchanged after a merged repair.
 
 ## Steering And Resume
 

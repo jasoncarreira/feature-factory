@@ -34,6 +34,7 @@ Run the narrowest typecheck/build/unit commands that prove the slice. Add determ
 - **No vaporware.** No `TODO`/`FIXME`/`STUB`/placeholder text or stub bodies (throwing "not implemented", returning hardcoded sentinels) in changed implementation paths. A `TODO` is allowed only when it names a future planned slice.
 - **Mechanically complete.** No unhandled or silently-swallowed error/loading states, no unused imports you added, no unreachable/dead code, and no leftover debug/console statements from this change.
 - **In lane.** Every changed file is within the slice `paths` plus directly required frontend test paths; no out-of-lane edits.
+- **Cross-slice defects are reported, never edited.** When your failure's root cause lives in another slice's lane — including its test files — stop and report the cross-slice defect naming the owning slice, the exact defective path, and the reproduction; the orchestrator owns the repair route. Regression tests for consumed sibling behavior belong in your own test files, never in the sibling's.
 - **Every AC is implemented and tested.** Each slice acceptance criterion has real behavior plus at least one exact-value assertion in a named test the orchestrator can observe — not a presence-only check that passes regardless of behavior.
 - **Verified, not masked.** You ran the narrowest commands that prove the slice; a failure that reveals a real source bug is reported, never worked around by weakening an assertion.
 

@@ -12,7 +12,7 @@ import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
 import { canonicalizeGithubPrUrl } from "./refs.js";
-import { normalizePrNumber as normalizeTransitionPrNumber, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { normalizePrNumber as normalizeTransitionPrNumber, transitionPrCreated, transitionRecoverOrphan, mergedSliceRepairFence, transitionMergedSliceRepair, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
@@ -31,7 +31,7 @@ const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--new-pr"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--subject", "--prompt-bytes", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--commit", "--owner-slice", "--consumer-slice", "--defect-path", "--verification-ref", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--subject", "--prompt-bytes", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
 const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
 const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
 const COST_NUMERIC_FLAGS = new Map([
@@ -85,6 +85,7 @@ Commands:
   factory gate-decision <run> <gate> <pending|approved|changes_requested|stopped> [--artifact REF] [--question-ref REF] [--answer-ref REF|--answer TEXT] [--approval-source SOURCE] [--boundary-token TOKEN]
   factory slices-seed <run-id> --from plan/slices.json
   factory slice-status <run-id> <slice-id> <running|review|blocked> [--branch REF] [--worktree PATH] [--attempts N] [--evidence-ref REF] [--review-ref REF] [--reason TEXT]
+  factory repair <run-id> <reported|repairing|review|merged|blocked> [--owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref REF] [--attempts N] [--review-ref REF --evidence-ref REF --commit SHA] [--merge-commit SHA --verification-ref REF] [--reason TEXT]
   factory step <run-id> <agent> <running|accepted|rejected|blocked> [--artifact-ref REF] [--evidence-ref REF] [--review-ref REF] [--attempts N]
   factory verdicts <run-id> --validator GO|GO-WITH-NITS|NO-GO --report artifacts/validation-report.md --security PASS|BLOCK --review-ref reviews/security-reviewer.json
   factory terminal <run-id> <blocked|partial|needs-human> --reason TEXT --boundary-token TOKEN
@@ -242,6 +243,7 @@ async function factory(args, dependencies = {}) {
   if (sub === "gate-decision") return gateDecision(rest, dependencies);
   if (sub === "slices-seed") return slicesSeed(rest);
   if (sub === "slice-status") return sliceStatus(rest);
+  if (sub === "repair") return repairStatus(rest);
   if (sub === "step") return step(rest);
   if (sub === "verdicts") return verdicts(rest);
   if (sub === "terminal") return terminal(rest);
@@ -523,6 +525,10 @@ function options(args) {
     if (args[index] === "--answered-at") opts.answeredAt = args[++index];
     if (args[index] === "--reason") opts.reason = args[++index];
     if (args[index] === "--merge-commit") opts.mergeCommit = args[++index];
+    if (args[index] === "--owner-slice") opts.ownerSlice = args[++index];
+    if (args[index] === "--consumer-slice") opts.consumerSlice = args[++index];
+    if (args[index] === "--defect-path") opts.defectPath = args[++index];
+    if (args[index] === "--verification-ref") opts.verificationRef = args[++index];
     if (args[index] === "--pr-url") opts.prUrl = args[++index];
     if (args[index] === "--pr-number") opts.prNumber = args[++index];
     if (args[index] === "--repository") opts.repository = args[++index];
@@ -767,6 +773,38 @@ async function sliceStatus(args) {
   return print(await transitionRunSlice(resolveRunDir(runId, opts), sliceId, update, { ...opts, mustExist: true }), opts);
 }
 
+async function repairStatus(args) {
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId, statusValue] = positional;
+  if (!stringValue(runId) || !stringValue(statusValue) || positional.length !== 2) {
+    throw new Error("factory repair requires <run-id> <reported|repairing|review|merged|blocked>");
+  }
+  const input = { status: String(statusValue).trim() };
+  if (input.status === "reported") {
+    input.owner_slice_id = requiredOption(opts.ownerSlice, "--owner-slice", "factory repair reported");
+    input.consumer_slice_id = requiredOption(opts.consumerSlice, "--consumer-slice", "factory repair reported");
+    input.defect_path = requiredOption(opts.defectPath, "--defect-path", "factory repair reported");
+    input.evidence_ref = requiredOption(opts.evidenceRef, "--evidence-ref", "factory repair reported");
+  }
+  if (input.status === "repairing") {
+    input.attempts = normalizeNonNegativeInteger(requiredOption(opts.attempts, "--attempts", "factory repair repairing"), "--attempts");
+    if (stringValue(opts.branch)) input.branch = opts.branch;
+    if (stringValue(opts.worktree)) input.worktree = opts.worktree;
+  }
+  if (input.status === "review") {
+    input.review_ref = requiredOption(opts.reviewRef, "--review-ref", "factory repair review");
+    input.repair_evidence_ref = requiredOption(opts.evidenceRef, "--evidence-ref", "factory repair review");
+    input.reviewed_commit = requiredOption(opts.commit, "--commit", "factory repair review");
+  }
+  if (input.status === "merged") {
+    input.merge_commit = requiredOption(opts.mergeCommit, "--merge-commit", "factory repair merged");
+    input.verification_ref = requiredOption(opts.verificationRef, "--verification-ref", "factory repair merged");
+  }
+  if (input.status === "blocked") input.reason = requiredOption(opts.reason, "--reason", "factory repair blocked");
+  return print(await transitionMergedSliceRepair(resolveRunDir(runId, opts), input, opts), opts);
+}
+
 async function step(args) {
   const opts = options(args);
   const positional = positionals(args);
@@ -792,6 +830,7 @@ async function verdicts(args) {
   const report = assertRefUnder(requiredOption(opts.report, "--report", "factory verdicts"), "artifacts/", "--report");
   const reviewRef = assertRefUnder(requiredOption(opts.reviewRef, "--review-ref", "factory verdicts"), "reviews/", "--review-ref");
   return print(await transitionRunJson(resolveRunDir(runId, opts), (run) => {
+    if (mergedSliceRepairFence(run)) throw new Error("panel verdicts are fenced while a merged-slice repair is unresolved");
     run.validator = { verdict: validator, report, review_ref: "reviews/implementation-validator.json" };
     run.security_review = { verdict: security, review_ref: reviewRef };
   }, opts), opts);
@@ -1098,6 +1137,7 @@ function hasInFlightHeartbeatWork(run) {
   if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) {
     return true;
   }
+  if (["repairing", "review"].includes(run?.merged_slice_repair?.status)) return true;
   return false;
 }
 
