@@ -296,13 +296,16 @@ describe("class-wide planning prompt contract", () => {
     const writerMatrix = markdownSection(SPEC_WRITER_PROMPT, "Durable authority integrity matrix (required when applicable)");
     const schemaCatalog = markdownSection(SCHEMA, "Durable Authority Integrity Catalog");
 
-    for (const column of ["Authority record", "Writer / transition", "Authority reader / decision sink", "Required adversarial mutation families", "Exclusion reason", "Test"]) {
+    for (const column of ["Authority record / state variant", "Writer / checked transition", "Every decision-making consumer / reader", "Required adversarial mutation families", "Exclusion reason", "Named test"]) {
       assert.match(writerMatrix, literalPattern(column), `durable authority matrix missing ${column}`);
     }
     assert.match(SPEC_WRITER_PROMPT, /newly introduced durable authority record has no integrity-coverage claim until it is registered/i);
     assert.match(schemaCatalog, /cannot claim integrity coverage until it is registered in the finite matrix/i);
     assert.match(schemaCatalog, /missing and unknown keys[\s\S]*wrong schema, kind, time, and type[\s\S]*wrong ref, hash, and bytes[\s\S]*descriptor key-shape drift[\s\S]*stale and cross-bound identity/i);
     assert.match(schemaCatalog, /excluded with a non-empty record-specific reason/i);
+    assert.match(SPEC_WRITER_PROMPT, /One aggregate row or one mutation elsewhere in the authority class never covers a sibling record or variant/i);
+    assert.match(schemaCatalog, /wrong ref does not count as wrong bytes/i);
+    assert.match(schemaCatalog, /reject completeness unless every required per-record entry passes/i);
 
     for (const authorityClass of [
       "Plan and slices graph",
@@ -317,6 +320,24 @@ describe("class-wide planning prompt contract", () => {
     ]) {
       assert.match(schemaCatalog, literalPattern(authorityClass), `durable authority catalog missing ${authorityClass}`);
     }
+    for (const variant of [
+      "post-pr-observation-null",
+      "post-pr-observation-active",
+      "post-pr-remediation-null",
+      "post-pr-remediation-active",
+      "post-pr-revalidation-empty",
+      "post-pr-revalidation-bound",
+      "post-pr-continuation-review-null",
+      "post-pr-continuation-review-bound",
+      "post-pr-terminal-fact-null",
+      "post-pr-terminal-fact-bound",
+      "repair-reported",
+      "repair-repairing",
+      "repair-review",
+      "repair-merged",
+      "repair-blocked",
+    ]) assert.match(schemaCatalog, literalPattern(`\`${variant}\``), `durable authority catalog missing variant ${variant}`);
+    assert.match(schemaCatalog, /defect path[\s\S]*owner\/consumer[\s\S]*plan\/owner snapshot[\s\S]*baseline[\s\S]*original evidence[\s\S]*repair evidence[\s\S]*reviewed commit and review bytes[\s\S]*verification[\s\S]*merge commit and reviewed-tree equality[\s\S]*attempts[\s\S]*quiescence/i);
 
     for (const excluded of [
       "run.json.debug_snapshot",

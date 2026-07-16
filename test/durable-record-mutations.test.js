@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   DURABLE_AUTHORITY_CATALOG,
   DURABLE_AUTHORITY_EXCLUSIONS,
+  DURABLE_AUTHORITY_REQUIRED_RECORD_IDS,
   DURABLE_MUTATION_FAMILIES,
+  assertDurableAuthorityCatalogComplete,
   emitDurableRecordMutations,
 } from "./helpers/durable-record-mutations.js";
 
@@ -96,58 +98,154 @@ describe("durable record mutation helper", () => {
 });
 
 describe("finite durable-authority catalog", () => {
-  it("registers exactly the nine authority classes and classifies every mutation family", () => {
+  it("registers exactly the nine authority classes and every required record/variant separately", () => {
     assert.deepEqual(DURABLE_AUTHORITY_CATALOG.map(({ id }) => id), AUTHORITY_CLASS_IDS);
     assert.equal(new Set(DURABLE_AUTHORITY_CATALOG.map(({ id }) => id)).size, 9);
+    assert.equal(assertDurableAuthorityCatalogComplete(DURABLE_AUTHORITY_CATALOG), true);
 
-    const emittedFamilies = new Set();
-    for (const entry of DURABLE_AUTHORITY_CATALOG) {
-      assert.ok(entry.authorityRecords.length > 0, `${entry.id} must name its finite record surface`);
-      const cases = emitDurableRecordMutations(entry.source, entry.descriptor);
-      assert.ok(cases.length > 0, `${entry.id} must emit adversarial cases`);
-      assert.equal(new Set(cases.map(({ name }) => name)).size, cases.length, `${entry.id} case names must be unique`);
-      for (const mutationCase of cases) emittedFamilies.add(mutationCase.family);
+    let recordCount = 0;
+    for (const authorityClass of DURABLE_AUTHORITY_CATALOG) {
+      assert.deepEqual(
+        authorityClass.records.map(({ id }) => id),
+        DURABLE_AUTHORITY_REQUIRED_RECORD_IDS[authorityClass.id],
+        `${authorityClass.id} must not collapse sibling records or variants into one aggregate descriptor`,
+      );
+      for (const record of authorityClass.records) {
+        recordCount += 1;
+        assert.equal(record.authorityClassId, authorityClass.id);
+        assert.ok(record.writer.trim().length > 0, `${record.id} must name its writer/checked transition`);
+        assert.ok(record.readers.length > 0, `${record.id} must name every decision-making reader`);
+        assert.ok(record.tests.length > 0, `${record.id} must name a test`);
+        const cases = emitDurableRecordMutations(record.source, record.descriptor);
+        assert.ok(cases.length > 0, `${record.id} must emit adversarial cases`);
+        assert.equal(new Set(cases.map(({ name }) => name)).size, cases.length, `${record.id} case names must be unique`);
+        for (const family of DURABLE_MUTATION_FAMILIES) {
+          const targets = record.descriptor.targets.filter((mutationTarget) => mutationTarget.family === family);
+          const reason = record.descriptor.exclusions[family];
+          assert.equal(targets.length > 0 || (typeof reason === "string" && reason.trim().length > 0), true, `${record.id} must classify ${family}`);
+          assert.equal(targets.length > 0 && reason !== undefined, false, `${record.id} cannot target and exclude ${family}`);
+        }
+      }
     }
-
-    assert.deepEqual([...emittedFamilies].sort(), [...DURABLE_MUTATION_FAMILIES].sort());
+    assert.equal(recordCount, 65);
   });
 
-  it("covers every required authority record surface with exact catalog entries", () => {
-    const records = DURABLE_AUTHORITY_CATALOG.flatMap(({ authorityRecords }) => authorityRecords);
-    for (const required of [
-      "plan/slices.json",
-      "run.json.terminal_result",
-      "pending_snapshot",
-      "handoff_receipt",
-      "steps[].acceptance",
-      "steps[].inherited_acceptance",
-      "slices[].review_binding",
-      "slices[].attempt_reviews[]",
-      "evidence/review byte bindings",
-      "run.json.validator",
-      "run.json.security_review",
-      "PR-created terminal_result",
-      "run.json.continuation",
-      "continuation.planning_reuse",
-      "continuation.draft_spec_reuse",
-      "post_pr.remediation.revalidation",
-      "post_pr.terminal_fact",
-      "run.json.merged_slice_repair (PR79)",
-    ]) {
-      assert.ok(records.includes(required), `catalog missing ${required}`);
+  it("rejects the aggregate-class completeness bypass and omitted sibling records", () => {
+    const aggregateOnly = structuredClone(DURABLE_AUTHORITY_CATALOG);
+    delete aggregateOnly[0].records;
+    aggregateOnly[0].source = { slices: [] };
+    aggregateOnly[0].descriptor = { record: "aggregate", targets: [], exclusions: {} };
+    assert.throws(
+      () => assertDurableAuthorityCatalogComplete(aggregateOnly),
+      /records must register per-record entries/u,
+      "one aggregate mutation list must not establish class completeness",
+    );
+
+    const missingSibling = structuredClone(DURABLE_AUTHORITY_CATALOG);
+    missingSibling[0].records.pop();
+    assert.throws(
+      () => assertDurableAuthorityCatalogComplete(missingSibling),
+      /must contain every required per-record and per-variant entry/u,
+      "removing final.plan.json while retaining plan/slices.json must fail completeness",
+    );
+  });
+
+  it("rejects per-record family, metadata, and sidecar-byte omissions", () => {
+    const missingFamily = structuredClone(DURABLE_AUTHORITY_CATALOG);
+    const finalPlan = findRecord(missingFamily, "final-plan-descriptor");
+    finalPlan.descriptor.targets = finalPlan.descriptor.targets.filter(({ family }) => family !== "wrong-kind");
+    assert.throws(() => assertDurableAuthorityCatalogComplete(missingFamily), /wrong-kind must have a target or a record-specific exclusion/u);
+
+    for (const field of ["writer", "readers", "tests"]) {
+      const missingMetadata = structuredClone(DURABLE_AUTHORITY_CATALOG);
+      const plan = findRecord(missingMetadata, "plan-slices-json");
+      plan[field] = field === "writer" ? "" : field === "readers" ? plan.readers.slice(1) : [];
+      assert.throws(() => assertDurableAuthorityCatalogComplete(missingMetadata), new RegExp(`${field}.*(?:non-empty|string|array|every registered)`, "u"));
     }
+
+    const conflatedBytes = structuredClone(DURABLE_AUTHORITY_CATALOG);
+    const review = findRecord(conflatedBytes, "slice-review-sidecar");
+    review.descriptor.targets = review.descriptor.targets.filter(({ family }) => family !== "wrong-bytes");
+    review.descriptor.exclusions["wrong-bytes"] = "Ref text was already mutated.";
+    assert.throws(
+      () => assertDurableAuthorityCatalogComplete(conflatedBytes),
+      /sidecar sidecar must target wrong-bytes independently/u,
+      "ref drift must not stand in for referenced sidecar byte drift",
+    );
+
+    const omittedSidecar = structuredClone(DURABLE_AUTHORITY_CATALOG);
+    findRecord(omittedSidecar, "post-pr-revalidation-bound").sidecars.pop();
+    assert.throws(() => assertDurableAuthorityCatalogComplete(omittedSidecar), /sidecars must contain every registered byte binding/u);
+  });
+
+  it("mutates sidecar ref, hash, and bytes as independent adversarial cases", () => {
+    const review = findRecord(DURABLE_AUTHORITY_CATALOG, "slice-review-sidecar");
+    const cases = Object.fromEntries(emitDurableRecordMutations(review.source, review.descriptor).map((mutationCase) => [mutationCase.family, mutationCase.record]));
+    assert.equal(cases["wrong-ref"].ref, "../outside.json");
+    assert.equal(cases["wrong-ref"].sidecar_bytes, "{\"verdict\":\"APPROVE\"}");
+    assert.equal(cases["wrong-hash"].hash, "sha256:short");
+    assert.equal(cases["wrong-hash"].sidecar_bytes, "{\"verdict\":\"APPROVE\"}");
+    assert.equal(cases["wrong-bytes"].ref, "reviews/backend.attempt-2.json");
+    assert.equal(cases["wrong-bytes"].hash, `sha256:${"a".repeat(64)}`);
+    assert.equal(cases["wrong-bytes"].sidecar_bytes, "tampered-sidecar-bytes");
   });
 
   it("generates the required kind mutation for the final.plan.json descriptor", () => {
-    const planEntry = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "plan-slices-graph");
+    const planEntry = findRecord(DURABLE_AUTHORITY_CATALOG, "final-plan-descriptor");
     const sourceBefore = structuredClone(planEntry.source);
     const kindMutation = emitDurableRecordMutations(planEntry.source, planEntry.descriptor)
       .find(({ family, name }) => family === "wrong-kind" && name.includes("required descriptor.kind"));
 
-    assert.equal(kindMutation.name, "final.plan.json: wrong-kind (required descriptor.kind)");
+    assert.equal(kindMutation.name, "final-plan-descriptor: wrong-kind (required descriptor.kind)");
     assert.equal(kindMutation.record.descriptor.kind, "unknown-graph");
     assert.equal(kindMutation.record.kind, "final-plan");
     assert.deepEqual(planEntry.source, sourceBefore);
+  });
+
+  it("registers post_pr null/non-null variants and independent bound bytes", () => {
+    const postPr = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "post-pr-nested-records");
+    assert.deepEqual(postPr.records.map(({ id }) => id), DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["post-pr-nested-records"]);
+    for (const [nullId, boundId] of [
+      ["post-pr-observation-null", "post-pr-observation-active"],
+      ["post-pr-remediation-null", "post-pr-remediation-active"],
+      ["post-pr-revalidation-empty", "post-pr-revalidation-bound"],
+      ["post-pr-continuation-review-null", "post-pr-continuation-review-bound"],
+      ["post-pr-terminal-fact-null", "post-pr-terminal-fact-bound"],
+    ]) {
+      assert.equal(findRecord(DURABLE_AUTHORITY_CATALOG, nullId).variant.includes("null") || nullId.endsWith("empty"), true);
+      assert.notEqual(findRecord(DURABLE_AUTHORITY_CATALOG, boundId).variant, "null");
+    }
+    assert.deepEqual(
+      findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-revalidation-bound").sidecars.map(({ name }) => name),
+      ["canonical", "validator", "security"],
+    );
+    assert.deepEqual(
+      findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-push-confirmed").source,
+      { status: "confirmed", remote_before_sha: "a".repeat(40), local_head_sha: "a".repeat(40), remote_after_sha: "b".repeat(40), consecutive_transient_errors: 0, next_retry_at: null, pushed_at: "2026-07-16T12:00:00.000Z" },
+    );
+  });
+
+  it("registers all PR79 repair states and every required authority fact", () => {
+    const repairClass = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "pr79-merged-slice-repair");
+    assert.deepEqual(repairClass.records.map(({ id }) => id), ["repair-reported", "repair-repairing", "repair-review", "repair-merged", "repair-blocked"]);
+    const facts = new Set(repairClass.records.flatMap(({ facts: recordFacts }) => recordFacts));
+    assert.deepEqual([...facts].sort(), [
+      "attempts-quiescence",
+      "baseline",
+      "defect-path",
+      "merge-commit-tree",
+      "original-evidence",
+      "owner-consumer",
+      "plan-owner-snapshot",
+      "repair-evidence",
+      "reviewed-commit-review-bytes",
+      "verification",
+    ]);
+    const merged = findRecord(DURABLE_AUTHORITY_CATALOG, "repair-merged");
+    assert.deepEqual(merged.sidecars.map(({ name }) => name), ["plan-owner", "original-evidence", "repair-evidence", "review", "verification"]);
+    assert.equal(merged.source.reviewed_tree, merged.source.merge_tree);
+    assert.equal(merged.descriptor.targets.some(({ family, path }) => family === "cross-bound-identity" && path.join(".") === "merge_tree"), true);
+    assert.equal(merged.descriptor.targets.some(({ family, path }) => family === "wrong-type" && path.join(".") === "quiescent"), true);
   });
 
   it("explicitly excludes diagnostics and liveness, lock, and process records with reasons", () => {
@@ -168,7 +266,26 @@ describe("finite durable-authority catalog", () => {
       assert.ok(reason.trim().length > 0, `${record} exclusion must have a reason`);
     }
 
-    const cataloged = new Set(DURABLE_AUTHORITY_CATALOG.flatMap(({ authorityRecords }) => authorityRecords));
+    const cataloged = new Set(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records.map(({ record }) => record)));
     for (const record of Object.keys(exclusions)) assert.equal(cataloged.has(record), false, `${record} must stay outside the authority catalog`);
   });
 });
+
+describe("per-record durable authority mutation matrices", () => {
+  for (const authorityClass of DURABLE_AUTHORITY_CATALOG) {
+    for (const record of authorityClass.records) {
+      it(`${record.id} mutation matrix`, () => {
+        assert.deepEqual(record.tests, [`test/durable-record-mutations.test.js: ${record.id} mutation matrix`]);
+        const sourceBefore = structuredClone(record.source);
+        const cases = emitDurableRecordMutations(record.source, record.descriptor);
+        assert.equal(cases.length, record.descriptor.targets.length);
+        assert.deepEqual(cases.map(({ family }) => family).sort(), record.descriptor.targets.map(({ family }) => family).sort());
+        assert.deepEqual(record.source, sourceBefore);
+      });
+    }
+  }
+});
+
+function findRecord(catalog, id) {
+  return catalog.flatMap(({ records }) => records).find((record) => record.id === id);
+}
