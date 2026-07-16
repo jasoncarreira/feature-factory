@@ -1,6 +1,6 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
@@ -636,30 +636,48 @@ describe("merged-sibling repair", () => {
   });
 });
 
+// The base/feature/main-only git history is identical for every fixture, so it
+// is built once and copied per test; fourteen git subprocesses become one
+// recursive copy. Tests receive only copies — the template repo is never
+// handed out or mutated.
+let repairGitTemplate = null;
+
+function repairTemplate() {
+  if (!repairGitTemplate) {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-repair-template-"));
+    git(repo, ["init", "-q", "-b", "main"]);
+    git(repo, ["config", "user.email", "test@example.com"]);
+    git(repo, ["config", "user.name", "Test"]);
+    writeFileSync(join(repo, "README.md"), "fixture\n");
+    git(repo, ["add", "README.md"]);
+    git(repo, ["commit", "-q", "-m", "base"]);
+    git(repo, ["branch", FEATURE_BRANCH]);
+    git(repo, ["checkout", "-q", FEATURE_BRANCH]);
+    writeFileSync(join(repo, "feature.txt"), "feature work\n");
+    mkdirSync(join(repo, "src", "consumer"), { recursive: true });
+    writeFileSync(join(repo, "src", "consumer", "legacy.js"), "consumer legacy\n");
+    git(repo, ["add", "feature.txt", "src/consumer/legacy.js"]);
+    git(repo, ["commit", "-q", "-m", "feature work"]);
+    const featureCommit = git(repo, ["rev-parse", "HEAD"]).trim();
+    git(repo, ["checkout", "-q", "main"]);
+    writeFileSync(join(repo, "main-only.txt"), "main only\n");
+    git(repo, ["add", "main-only.txt"]);
+    git(repo, ["commit", "-q", "-m", "main only"]);
+    const mainOnlyCommit = git(repo, ["rev-parse", "HEAD"]).trim();
+    repairGitTemplate = { repo, featureCommit, mainOnlyCommit };
+  }
+  return repairGitTemplate;
+}
+
+after(() => { if (repairGitTemplate) rmSync(repairGitTemplate.repo, { recursive: true, force: true }); });
+
 function createFixture() {
+  const template = repairTemplate();
   const repo = mkdtempSync(join(tmpdir(), "feature-factory-repair-"));
+  cpSync(template.repo, repo, { recursive: true });
+  const { featureCommit, mainOnlyCommit } = template;
   const runDir = join(repo, ".opencode", "factory", RUN_ID);
   for (const dir of ["evidence", "reviews", "plan"]) mkdirSync(join(runDir, dir), { recursive: true });
-
-  git(repo, ["init", "-q", "-b", "main"]);
-  git(repo, ["config", "user.email", "test@example.com"]);
-  git(repo, ["config", "user.name", "Test"]);
-  writeFileSync(join(repo, "README.md"), "fixture\n");
-  git(repo, ["add", "README.md"]);
-  git(repo, ["commit", "-q", "-m", "base"]);
-  git(repo, ["branch", FEATURE_BRANCH]);
-  git(repo, ["checkout", "-q", FEATURE_BRANCH]);
-  writeFileSync(join(repo, "feature.txt"), "feature work\n");
-  mkdirSync(join(repo, "src", "consumer"), { recursive: true });
-  writeFileSync(join(repo, "src", "consumer", "legacy.js"), "consumer legacy\n");
-  git(repo, ["add", "feature.txt", "src/consumer/legacy.js"]);
-  git(repo, ["commit", "-q", "-m", "feature work"]);
-  const featureCommit = git(repo, ["rev-parse", "HEAD"]).trim();
-  git(repo, ["checkout", "-q", "main"]);
-  writeFileSync(join(repo, "main-only.txt"), "main only\n");
-  git(repo, ["add", "main-only.txt"]);
-  git(repo, ["commit", "-q", "-m", "main only"]);
-  const mainOnlyCommit = git(repo, ["rev-parse", "HEAD"]).trim();
 
   writeJson(join(runDir, "run.json"), createRunRecord({
     run_id: RUN_ID,

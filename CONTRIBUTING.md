@@ -27,7 +27,7 @@ Before submitting a change, run the aggregate gate:
 npm run check
 ```
 
-`npm run check` runs `npm run test:unit` first and `npm run smoke:pack` second. The repository does not currently define a lint or typecheck script.
+`npm run check` runs `node scripts/run-unit-tests.mjs --with-smoke`: the same unit files as `npm run test:unit` plus the `npm run smoke:pack` package smoke test, all in one `node --test` invocation so the smoke test overlaps with unit files instead of running as a serial tail. The runner caps file concurrency below node's one-process-per-core default because the suite is child-process heavy and oversubscription costs wall time and causes spurious failures under load. The repository does not currently define a lint or typecheck script.
 
 The package smoke test packs the project, which invokes `prepack` and generates `dist/tui.js` from `src/tui.jsx`. `dist/tui.js` is generated output: do not edit it, stage it, or commit it. It is ignored by Git and may be removed after local checks.
 

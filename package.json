@@ -34,9 +34,9 @@
     "doctor": "node src/cli.js doctor",
     "doctor:local": "node src/cli.js doctor --local",
     "test": "npm run test:unit",
-    "test:unit": "node --test test/*.test.js",
+    "test:unit": "node scripts/run-unit-tests.mjs",
     "smoke:pack": "node --test test/package-smoke.mjs",
-    "check": "npm run test:unit && npm run smoke:pack"
+    "check": "node scripts/run-unit-tests.mjs --with-smoke"
   },
   "keywords": [
     "opencode",

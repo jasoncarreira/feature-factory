@@ -1,19 +1,38 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runFixtureGit } from "./git-fixture.js";
 
+// The base repository history is identical for every sweep fixture, so it is
+// built once per test process and copied per fixture; six git subprocesses
+// become one recursive copy. Fixtures receive only copies — the template repo
+// is never handed out or mutated, and it is removed on process exit.
+let sweepGitTemplate = null;
+
+function sweepTemplate() {
+  if (!sweepGitTemplate) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "feature-factory-sweep-template-")));
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    mustGit(repo, ["init", "-b", "main"]);
+    mustGit(repo, ["config", "user.name", "Fixture"]);
+    mustGit(repo, ["config", "user.email", "fixture@example.invalid"]);
+    writeFileSync(join(repo, "README.md"), "fixture\n");
+    mustGit(repo, ["add", "README.md"]);
+    mustGit(repo, ["commit", "-m", "fixture base"]);
+    const baseSha = gitOutput(repo, ["rev-parse", "HEAD"]);
+    sweepGitTemplate = { root, repo, baseSha };
+    process.once("exit", () => rmSync(root, { recursive: true, force: true }));
+  }
+  return sweepGitTemplate;
+}
+
 export function createCleanupSweepFixture(name = "eligibility") {
+  const template = sweepTemplate();
   const root = realpathSync(mkdtempSync(join(tmpdir(), `feature-factory-${name}-`)));
   const repo = join(root, "repo");
-  mkdirSync(repo);
-  mustGit(repo, ["init", "-b", "main"]);
-  mustGit(repo, ["config", "user.name", "Fixture"]);
-  mustGit(repo, ["config", "user.email", "fixture@example.invalid"]);
-  writeFileSync(join(repo, "README.md"), "fixture\n");
-  mustGit(repo, ["add", "README.md"]);
-  mustGit(repo, ["commit", "-m", "fixture base"]);
-  const baseSha = gitOutput(repo, ["rev-parse", "HEAD"]);
+  cpSync(template.repo, repo, { recursive: true });
+  const baseSha = template.baseSha;
   const factoryRoot = join(repo, ".opencode", "factory");
   const worktreeRoot = join(repo, ".opencode", "worktrees");
   mkdirSync(factoryRoot, { recursive: true });
