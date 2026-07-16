@@ -701,36 +701,51 @@ describe("finite durable-authority catalog", () => {
     assert.equal(testedTargets, 35);
   });
 
-  it("executes remediation ref/hash/byte and candidate drift through consistency and the checked transition", async () => {
-    const record = findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-phase-changes-observed");
-    const authorityCases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources)
-      .filter(({ name }) => /remediation (?:ref|hash|sidecar bytes)|candidate_head_sha|cross-bound candidate head/u.test(name));
-    assert.equal(authorityCases.length, 5);
+  it("executes every post-change and push phase remediation binding through its actual consumers", async () => {
+    const phaseIds = [
+      "post-pr-phase-changes-observed",
+      "post-pr-phase-committed",
+      "post-pr-phase-revalidating",
+      "post-pr-phase-validated",
+      "post-pr-phase-push-pending",
+      "post-pr-phase-remote-confirmed",
+    ];
     const root = mkdtempSync(join(tmpdir(), "post-pr-remediation-authority-"));
+    let consistencyCases = 0;
+    let transitionCases = 0;
     try {
-      for (const mutationCase of authorityCases) {
-        const fixture = createPostPrCatalogBaseline(record);
-        const runDir = join(root, mutationCase.family);
-        materializeCatalogSources(runDir, mutationCase.externalSources);
-        const mutatedRun = structuredClone(fixture.run);
-        mutatedRun.post_pr = structuredClone(mutationCase.record);
-        const consistency = checkRunConsistency(runDir, mutatedRun);
-        if (mutationCase.family === "stale-identity") {
-          assert.equal(consistency.ok, true, "schema/sidecar consistency does not observe Git candidate authority");
-        } else {
-          assert.equal(consistency.ok, false, `${mutationCase.name} must fail schema or external-source consistency`);
-        }
+      for (const id of phaseIds) {
+        const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+        const authorityCases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources)
+          .filter(({ name }) => /remediation (?:ref|hash|sidecar bytes)|candidate_head_sha|cross-bound candidate head/u.test(name));
+        assert.equal(authorityCases.length, 5, `${id} must expose all five authority mutations`);
+        for (const mutationCase of authorityCases) {
+          const fixture = createPostPrCatalogBaseline(record);
+          const runDir = join(root, id, mutationCase.family);
+          materializeCatalogSources(runDir, mutationCase.externalSources);
+          if (["wrong-ref", "wrong-hash", "wrong-bytes"].includes(mutationCase.family)) {
+            const mutatedRun = structuredClone(fixture.run);
+            mutatedRun.post_pr = structuredClone(mutationCase.record);
+            const consistency = checkRunConsistency(runDir, mutatedRun);
+            consistencyCases += 1;
+            assert.equal(consistency.ok, false, `${mutationCase.name} must fail external-source consistency`);
+          }
 
-        writeJson(join(runDir, "run.json"), fixture.run);
-        const next = structuredClone(mutationCase.record);
-        next.observation.poll_count += 1;
-        next.observation.next_poll_at = "2026-07-16T12:01:00.000Z";
-        await assert.rejects(
-          transitionPostPrState(runDir, next, { now: "2026-07-16T12:01:00.000Z" }),
-          /cannot change once bound|ref\/hash invariant failed/u,
-          mutationCase.name,
-        );
+          if (mutationCase.family === "wrong-bytes" && id !== "post-pr-phase-changes-observed") continue;
+          writeJson(join(runDir, "run.json"), fixture.run);
+          const next = structuredClone(mutationCase.record);
+          next.observation.poll_count += 1;
+          next.observation.next_poll_at = "2026-07-16T12:01:00.000Z";
+          transitionCases += 1;
+          await assert.rejects(
+            transitionPostPrState(runDir, next, { now: "2026-07-16T12:01:00.000Z" }),
+            /cannot change once bound|ref\/hash invariant failed/u,
+            mutationCase.name,
+          );
+        }
       }
+      assert.equal(consistencyCases, 18, "six rows must each execute ref, hash, and actual file-byte drift through checkRunConsistency");
+      assert.equal(transitionCases, 25, "six rows must execute ref/hash and both candidate mutations, retaining the changes-observed byte transition");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
