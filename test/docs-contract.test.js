@@ -307,10 +307,19 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /wrong ref does not count as wrong bytes/i);
     assert.match(schemaCatalog, /reject completeness unless every required per-record entry passes/i);
     assert.match(writerMatrix, /independently authored closed completeness oracle/i);
-    assert.match(writerMatrix, /exact writer, all readers, named tests, authority facts, sidecar byte bindings, and all mutation-family dispositions/i);
-    assert.match(schemaCatalog, /independently authored closed metadata manifest is not derived from the catalog under test/i);
+    assert.match(writerMatrix, /exact writer, all readers, named tests, authority facts, sidecar byte bindings, all mutation-family target-or-exclusion dispositions/i);
+    assert.match(schemaCatalog, /independently authored closed manifests are not generated from or derived from the catalog under test/i);
     assert.match(schemaCatalog, /omission or substitution at the source boundary fails completeness/i);
     assert.match(schemaCatalog, /absent targets never receive automatic exclusions/i);
+    for (const text of [writerMatrix, schemaCatalog]) {
+      assert.match(text, /target-or-exclusion dispositions/i);
+      assert.match(text, /complete target definition/i);
+      assert.match(text, /path[\s\S]*value[\s\S]*from[\s\S]*to[\s\S]*key[\s\S]*sidecar[\s\S]*label/i);
+      assert.match(text, /target deletion/i);
+      assert.match(text, /target-to-exclusion[\s\S]*exclusion-to-target/i);
+      assert.match(text, /mutation of any bound target field|target-field mutation/i);
+    }
+    assert.match(schemaCatalog, /not generated from or derived from the catalog under test/i);
 
     for (const authorityClass of [
       "Plan and slices graph",
@@ -401,7 +410,8 @@ describe("class-wide planning prompt contract", () => {
     ]) {
       assert.match(schemaCatalog, literalPattern(`\`${excluded}\``), `durable authority catalog must explicitly exclude ${excluded}`);
     }
-    assert.match(schemaCatalog, /does not create `src\/single-slice\/schema-model`, add a production validator, or change production behavior/i);
+    assert.match(schemaCatalog, /test\/docs-only, non-enforcing contracts/i);
+    assert.match(schemaCatalog, /do not create `src\/single-slice\/schema-model`, add a production validator, authorize a runtime transition, or change production behavior/i);
   });
 
   it("keeps the boundary-retention ledger finite and aligned with all nine authority classes", () => {

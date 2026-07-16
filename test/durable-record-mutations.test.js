@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DURABLE_AUTHORITY_CATALOG,
+  DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST,
   DURABLE_AUTHORITY_EXCLUSIONS,
   DURABLE_AUTHORITY_METADATA_MANIFEST,
   DURABLE_AUTHORITY_REQUIRED_RECORD_IDS,
@@ -21,6 +22,31 @@ const AUTHORITY_CLASS_IDS = Object.freeze([
   "continuation-planning-draft-reuse",
   "post-pr-nested-records",
   "pr79-merged-slice-repair",
+]);
+
+const TARGET_FIELDS_BY_FAMILY = Object.freeze({
+  "missing-key": ["path", "label"],
+  "unknown-key": ["path", "label", "key", "value"],
+  "wrong-schema": ["path", "label", "value"],
+  "wrong-kind": ["path", "label", "value"],
+  "wrong-time": ["path", "label", "value"],
+  "wrong-type": ["path", "label"],
+  "wrong-ref": ["path", "label", "value", "sidecar"],
+  "wrong-hash": ["path", "label", "value", "sidecar"],
+  "wrong-bytes": ["path", "label", "value", "sidecar"],
+  "descriptor-key-shape-drift": ["path", "label", "from", "to"],
+  "stale-identity": ["path", "label", "value"],
+  "cross-bound-identity": ["path", "label", "value"],
+});
+
+const FAMILIES_WITH_EXCLUSIONS = Object.freeze([
+  "wrong-schema",
+  "wrong-kind",
+  "wrong-time",
+  "wrong-ref",
+  "wrong-hash",
+  "wrong-bytes",
+  "descriptor-key-shape-drift",
 ]);
 
 describe("durable record mutation helper", () => {
@@ -180,11 +206,101 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
+  it("uses an independent closed descriptor oracle for all 106 exact target/exclusion definitions", () => {
+    const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
+    assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 106);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
+    const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
+    assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
+    assert.doesNotMatch(helperSource, /DURABLE_AUTHORITY_CATALOG[\s\S]{0,200}DESCRIPTOR_MANIFEST/u, "descriptor expectations must not be produced from the catalog export");
+  });
+
+  it("rejects both observed final.plan descriptor oracle bypasses", () => {
+    const targetToExclusion = structuredClone(DURABLE_AUTHORITY_CATALOG);
+    const excludedKind = findRecord(targetToExclusion, "final-plan-descriptor");
+    excludedKind.descriptor.targets = excludedKind.descriptor.targets.filter(({ family }) => family !== "wrong-kind");
+    excludedKind.descriptor.exclusions["wrong-kind"] = "Descriptor kind is intentionally excluded.";
+    assert.throws(
+      () => assertDurableAuthorityCatalogComplete(targetToExclusion),
+      /wrong-kind target-or-exclusion disposition must exactly match the independent family disposition registry/u,
+    );
+
+    const changedPath = structuredClone(DURABLE_AUTHORITY_CATALOG);
+    findRecord(changedPath, "final-plan-descriptor").descriptor.targets.find(({ family }) => family === "wrong-kind").path = ["kind"];
+    assert.throws(
+      () => assertDurableAuthorityCatalogComplete(changedPath),
+      /mutation target definitions and exclusions must exactly match the independent descriptor manifest/u,
+    );
+  });
+
+  it("rejects target deletion and target-to-exclusion substitution across all twelve families", () => {
+    assert.deepEqual(Object.keys(TARGET_FIELDS_BY_FAMILY), DURABLE_MUTATION_FAMILIES);
+    for (const family of DURABLE_MUTATION_FAMILIES) {
+      const deletedTarget = structuredClone(DURABLE_AUTHORITY_CATALOG);
+      const deletedRecord = findRecordWithTarget(deletedTarget, family);
+      deletedRecord.descriptor.targets = deletedRecord.descriptor.targets.filter((targetDefinition) => targetDefinition.family !== family);
+      assert.throws(
+        () => assertDurableAuthorityCatalogComplete(deletedTarget),
+        /target-or-exclusion disposition must exactly match the independent family disposition registry/u,
+        `${family} target deletion must fail independently of the catalog descriptor`,
+      );
+
+      const substitutedExclusion = structuredClone(DURABLE_AUTHORITY_CATALOG);
+      const substitutedRecord = findRecordWithTarget(substitutedExclusion, family);
+      substitutedRecord.descriptor.targets = substitutedRecord.descriptor.targets.filter((targetDefinition) => targetDefinition.family !== family);
+      substitutedRecord.descriptor.exclusions[family] = `${family} was incorrectly substituted with an exclusion.`;
+      assert.throws(
+        () => assertDurableAuthorityCatalogComplete(substitutedExclusion),
+        /target-or-exclusion disposition must exactly match the independent family disposition registry/u,
+        `${family} target-to-exclusion substitution must fail`,
+      );
+    }
+  });
+
+  it("rejects exclusion-to-target substitution for every family with record-specific exclusions", () => {
+    for (const family of FAMILIES_WITH_EXCLUSIONS) {
+      const substitutedTarget = structuredClone(DURABLE_AUTHORITY_CATALOG);
+      const excludedRecord = findRecordWithExclusion(substitutedTarget, family);
+      const targetTemplate = findTarget(DURABLE_AUTHORITY_CATALOG, family);
+      delete excludedRecord.descriptor.exclusions[family];
+      excludedRecord.descriptor.targets.push(structuredClone(targetTemplate));
+      assert.throws(
+        () => assertDurableAuthorityCatalogComplete(substitutedTarget),
+        /target-or-exclusion disposition must exactly match the independent family disposition registry/u,
+        `${family} exclusion-to-target substitution must fail`,
+      );
+    }
+  });
+
+  it("rejects every applicable target-field mutation across all twelve families", () => {
+    let testedFields = 0;
+    for (const [family, fields] of Object.entries(TARGET_FIELDS_BY_FAMILY)) {
+      const observedFields = new Set(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records)
+        .flatMap(({ descriptor }) => descriptor.targets)
+        .filter((targetDefinition) => targetDefinition.family === family)
+        .flatMap((targetDefinition) => Object.keys(targetDefinition).filter((field) => field !== "family")));
+      assert.deepEqual([...observedFields].sort(), [...fields].sort(), `${family} field matrix must name every applicable target field`);
+      for (const field of fields) {
+        const mutatedCatalog = structuredClone(DURABLE_AUTHORITY_CATALOG);
+        const targetDefinition = findTarget(mutatedCatalog, family, field);
+        targetDefinition[field] = changedTargetFieldValue(field, targetDefinition[field]);
+        assert.throws(
+          () => assertDurableAuthorityCatalogComplete(mutatedCatalog),
+          /mutation target definitions and exclusions must exactly match the independent descriptor manifest/u,
+          `${family}.${field} mutation must fail independently of the catalog descriptor`,
+        );
+        testedFields += 1;
+      }
+    }
+    assert.equal(testedFields, 39);
+  });
+
   it("rejects per-record family and sidecar-byte omissions", () => {
     const missingFamily = structuredClone(DURABLE_AUTHORITY_CATALOG);
     const finalPlan = findRecord(missingFamily, "final-plan-descriptor");
     finalPlan.descriptor.targets = finalPlan.descriptor.targets.filter(({ family }) => family !== "wrong-kind");
-    assert.throws(() => assertDurableAuthorityCatalogComplete(missingFamily), /wrong-kind must have a target or a record-specific exclusion/u);
+    assert.throws(() => assertDurableAuthorityCatalogComplete(missingFamily), /wrong-kind target-or-exclusion disposition must exactly match the independent family disposition registry/u);
 
     const conflatedBytes = structuredClone(DURABLE_AUTHORITY_CATALOG);
     const review = findRecord(conflatedBytes, "slice-review-sidecar");
@@ -192,7 +308,7 @@ describe("finite durable-authority catalog", () => {
     review.descriptor.exclusions["wrong-bytes"] = "Ref text was already mutated.";
     assert.throws(
       () => assertDurableAuthorityCatalogComplete(conflatedBytes),
-      /sidecar sidecar must target wrong-bytes independently/u,
+      /wrong-bytes target-or-exclusion disposition must exactly match the independent family disposition registry/u,
       "ref drift must not stand in for referenced sidecar byte drift",
     );
 
@@ -341,4 +457,38 @@ describe("per-record durable authority mutation matrices", () => {
 
 function findRecord(catalog, id) {
   return catalog.flatMap(({ records }) => records).find((record) => record.id === id);
+}
+
+function findRecordWithTarget(catalog, family) {
+  const record = catalog.flatMap(({ records }) => records)
+    .find(({ descriptor }) => descriptor.targets.some((targetDefinition) => targetDefinition.family === family));
+  assert.ok(record, `catalog must contain a ${family} target`);
+  return record;
+}
+
+function findRecordWithExclusion(catalog, family) {
+  const record = catalog.flatMap(({ records }) => records)
+    .find(({ descriptor }) => Object.hasOwn(descriptor.exclusions, family));
+  assert.ok(record, `catalog must contain a ${family} exclusion`);
+  return record;
+}
+
+function findTarget(catalog, family, field) {
+  const record = catalog.flatMap(({ records }) => records)
+    .find(({ descriptor }) => descriptor.targets.some((targetDefinition) => (
+      targetDefinition.family === family && (field === undefined || Object.hasOwn(targetDefinition, field))
+    )));
+  assert.ok(record, `catalog must contain a ${family} target${field === undefined ? "" : ` with ${field}`}`);
+  return record.descriptor.targets.find((targetDefinition) => (
+    targetDefinition.family === family && (field === undefined || Object.hasOwn(targetDefinition, field))
+  ));
+}
+
+function changedTargetFieldValue(field, value) {
+  if (field === "path") return [...value, "oracle-bypass"];
+  if (typeof value === "string") return `${value}-oracle-bypass`;
+  if (typeof value === "number") return value + 1;
+  if (typeof value === "boolean") return !value;
+  if (value === null) return "oracle-bypass";
+  return { oracle_bypass: true };
 }

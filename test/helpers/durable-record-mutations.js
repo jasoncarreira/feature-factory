@@ -391,6 +391,119 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
 ]);
 const DURABLE_AUTHORITY_METADATA_BY_ID = new Map(DURABLE_AUTHORITY_METADATA_MANIFEST);
 
+// Independently authored exact-value snapshots over each descriptor's complete targets and
+// exclusions. The hash input is canonical JSON for { targets, exclusions }; it binds target
+// order and every family, path, value, from, to, key, sidecar, and label without reading RECORDS.
+export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
+  ["plan-slices-json", "5615ea642b4ab7e7f4f596f806204c46e1f3b7bb3d77cfdaa0e00b75ada19391"],
+  ["final-plan-descriptor", "bf79367770e0f0c60217ee0e05daf2e7d96471adf0545cc28ee8a0a0acac83dd"],
+  ["run-envelope-running", "0dfdf9c52ba1ee909070da85617630bbb0cac990f109bdc3c7f25c4f686276dd"],
+  ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
+  ["terminal-result-completed", "3d17906cce62941bf26a4817e5b9ccb8c31d1804878280f1a18b7b69632a98a0"],
+  ["terminal-result-blocked", "9e2aac2293e6a2aa0ff69725ec484565d1ba598e4f921be01c44267eaab6d231"],
+  ["terminal-result-partial", "c7c56d99562df246e6e5219fb7ca002924103fea7be86bc2cab1b8c04eada6f6"],
+  ["terminal-result-needs-human", "f10e0e1b566924c9b223e63b30426d6004b3210b0be12d884c63ec42310af5b9"],
+  ["gate-pending", "d70533c9fc537f05cbde547e86f10c506e3f76d3d2afe7173122753ea333bfe6"],
+  ["gate-decided", "e8a5f0aa5c350559d9dedb3c26815837d375ffdf169e89ca7dd0c5a493dff49a"],
+  ["pending-snapshot", "78e4bb00d1b6b13bff01a2d917ce073f85eb27fa7f34aeede96ab839ceb49217"],
+  ["handoff-receipt", "58e23ebcd17030b2cfa4866b0019183eee886d33130309abae4239043a54bcb6"],
+  ["step-running", "c3c0602fa5bb98c69173989ce208f621a32f97d194ea33973954d5b49a4e6e7b"],
+  ["step-unaccepted", "5e848d9b66c052700f913cec70973f9540f8353116442f379a818b3885d95b91"],
+  ["step-accepted", "3410950dfd62131d5b0bb2af4b6edba1299a2a5ed9b966942c8702ec0efb3b6f"],
+  ["step-acceptance-binding", "2add010067f1fac89b2a813351a5b2bfdeac8249a950dc2c92bf63081f144e8d"],
+  ["step-inherited-acceptance", "89f696795438daef31ea897ff192d4290d8222917b908c819c674fa890aaf77e"],
+  ["slice-pending-running", "3acddfcce109c5a9eb9b4273ec7248d5775502bda046b9583216d2ae84648a3f"],
+  ["slice-review", "6bd682fac2d47133137131621f0e2257cbcda4426ff452e3151da2818b87c121"],
+  ["slice-terminal", "3099c5701e189d736b24bb8e0a5e680c128d189725082dceddf07d22edadc88b"],
+  ["slice-review-binding", "9760b016740fa49cb973b37306bc7063aa7d7ba0877b31fac495f5befc90b260"],
+  ["slice-attempt-review", "687aa6cd4f82f5dfe53a31edc61d99d169f0825879a2994f0f20ae8c404627c7"],
+  ["slice-evidence-sidecar", "dee23812ff8fab1766d3a97fbe23f81ecb9031fe6c324050567e30fc704e04e4"],
+  ["slice-review-sidecar", "8b384799deb03803bb75ee60c8cc714751728c1a329fa2f27f288bf1985be3f4"],
+  ["validator-verdict-binding", "e7cb4828eeb247f0bec58bce65cc8efd15e770602d9bb16787c9fea1e71ab018"],
+  ["security-verdict-binding", "788a30ee97790fb5f9ba09915a2a281fb58ac542d15fe5bbf906548ffe45d110"],
+  ["pr-created-result", "e37d53a5fb2e8a6007aa845a0b6dd1d18534ef406cd66e899b9f6c5568b30dbb"],
+  ["continuation-envelope", "6bf3fb70f927af981715950d3e2d264bd72902599c95e07f82b01897fc4e05c9"],
+  ["continuation-parent-binding", "2b011867bd950f95457ed8d4073d30911d3a9b85b579c20cb5b9301cae88220a"],
+  ["continuation-selected-review", "7ce096ec80047c8df061dc7656446ad11bbf62cf633217e4ce56f5e1e8e4d6a8"],
+  ["continuation-target-binding", "8a93c4d661ea231228107766a88c0455c78133c01cd302dfe7ee357a4b58cd78"],
+  ["continuation-parent-artifact-sidecar", "1a62463f051598250f73d951ddfe53f8c27e3eaf4684f5c00e53e90f6d6163e9"],
+  ["continuation-parent-evidence-sidecar", "7ed49126e2e4f28ab9d2191f059fe92b8ac4418eed4118205da7bafe4ea9b1b4"],
+  ["continuation-parent-review-sidecar", "c000f120c08d85f52e53c82c2616b74d312719976e4ce4298c6c16c339c0694b"],
+  ["continuation-planning-reuse-ineligible", "299b7ff7f60229ffe0b23917aa491d84f23bbc7e71677a7b88049ebbade3b130"],
+  ["continuation-planning-reuse-eligible", "13accc56aa839eb2482f24a5292b78f014b02ae6889f498ed3a566664fea4b37"],
+  ["continuation-draft-reuse", "a5bd5d78043f8381e376cadbb1628e46d220cf74f2d1bec147c5f798ca985be8"],
+  ["continuation-post-pr-binding", "959836a883a8a206939b5a68bca2b498118d13ddcb784aa3caf44edb5751f467"],
+  ["post-pr-phase-disabled", "513971086c59d58641e60d94eafbcd2bf14874ba9c6ccfc647232b41b7b07e34"],
+  ["post-pr-phase-awaiting-pr", "bf1c21e663f13eb7e6a1be999f3909712e1c40b510ec6116c98d0cd01dc8e130"],
+  ["post-pr-phase-observing", "278b11bb3583952da9b8ae74b828e57bff0896f3d03b8bd5b2b0dd780d6b4bdd"],
+  ["post-pr-phase-failure-recording", "069fdc97c5857cb5f2db059b088a26c093745a7e57f97a2d205ff0bf602525f5"],
+  ["post-pr-phase-remediation-planned", "e206193f01349bd009a9a3d0e7369fda199d609bafe325dea0db0290c6e9a401"],
+  ["post-pr-phase-remediation-running", "754e04090cdda9c8cc099bc794c6154534fcfd616187e9633ac3cc739fbaac2c"],
+  ["post-pr-phase-changes-observed", "fffea30b6bccd996c642f0a3641ebd6445c039580d03be1383acb1999e11e937"],
+  ["post-pr-phase-committed", "a8e0409e277950e434a396269c5fe85d6e8d0e7b7eb05b33a020a19b79c8a50c"],
+  ["post-pr-phase-revalidating", "3c0dae1595ed4570d0bc12c6b5c7807331dbd90e6f3cf7ee4bba48ac60ce7490"],
+  ["post-pr-phase-validated", "c7f4dedf62825b7203213ad32306cda12f37f732ca25b5b483cf21aed9e1d75f"],
+  ["post-pr-phase-push-pending", "8053e999b73cf43d539e860b9575f014944ce588b324e7cf2fec1c584a4cc588"],
+  ["post-pr-phase-remote-confirmed", "d1066e16f865e4f172285d5376382dd7fc2f6e53c8e5084606dd5edd6bad4481"],
+  ["post-pr-phase-succeeded", "f85af2b48c0926e215e4e52aa8ffd21c73009f3b83e3b58fa35ed98a1355a3f8"],
+  ["post-pr-phase-blocked", "cb252153402eb377af2749e935a7c2fa95c5e38d2caa5320c2c0d5399d8679e1"],
+  ["post-pr-phase-needs-human", "7cbad4902c5adc539c29f71d39d45bf7544e5d7fb0d670e46b750599a11caf5e"],
+  ["post-pr-policy-disabled", "76f1b7264a0cb181f8b3884c890dff1e80662be726d05dff020e63d874a76bb0"],
+  ["post-pr-policy-enabled", "298024312242448d270702936af48830268f6a1b61178959ac1728e1fa2d5aaa"],
+  ["post-pr-observation-null", "6832f22ef92cdf429615e13b927440741ac4cfeca5e8fc353c6ea501d96a6252"],
+  ["post-pr-observation-active", "e0f334f36636f4c4cd7fdfeef2e7de13a92c714272ca227205df487810ad7c54"],
+  ["post-pr-observation-last-error", "732e1bb8f0c5dc307f0415288bd6c599681043994a26fe3a152d870c413a9af9"],
+  ["post-pr-observation-review-request", "56615c1ed43d8357ceefc407b96b3a3458743c480e5bd650919528f99c0e64ed"],
+  ["post-pr-observation-snapshot", "4d184a362df7a52c9c49a94419ace41595b7c2272d403298ead7643e2f019186"],
+  ["post-pr-remediation-null", "a9699daf0f74cc82d9200448497a35f258e6bf1ff8c7abd6ccb45829f25e83e4"],
+  ["post-pr-remediation-active", "ada46ba3e5fe393173303af8b5e97541618190011adc27323f4d8c1f601d1c24"],
+  ["post-pr-remediation-owner", "d0de8ce88fb6d4fd46f561423ec15cbbd9c0d9f673d978803d181cb48f4e62ca"],
+  ["post-pr-remediation-changes", "6407f76902b6e3e966837049a7a5be36002dfc1e391cb75fcda8c7d91b050572"],
+  ["post-pr-remediation-change-entry", "c696de34634555c76db0c6a4818cba73e5cff137a1dc784ec5df4c599b5fb76a"],
+  ["post-pr-dispatch-planned", "a71360216563456d2dad79c83a7018800b98727041b342e48ad81d69c7fccea7"],
+  ["post-pr-dispatch-running", "3eab951f904a67218716f18047cbe976ef336b7f6e6488a578a5e6e91f4fe147"],
+  ["post-pr-dispatch-returned", "2ffb3a5e416345718902ea9e864391547b0797c16646efe4d161cc5f32f6f70d"],
+  ["post-pr-revalidation-empty", "302761cb949ccc43da4f9a602a7ebd091df624097011bb7958cfdeab319a80bc"],
+  ["post-pr-revalidation-bound", "80abaaba81eedda77a8e7dae19a2a4d474bc85d5ccb5adb74437c0f7ad31417d"],
+  ["post-pr-canonical-job-planned", "815d94caec57b7afa24ea0b6b45a8b9a57858cf06015f7c24e2d2cd9fdd5fc7f"],
+  ["post-pr-canonical-job-running", "fc33c41aa3ce0fa4df42af7b33405415564d453763d5c9bc07654d90f4444c3e"],
+  ["post-pr-canonical-job-retry-wait", "bd1c9e9194488a16122331b2f0342cf3d2fa1ba620e2cab0590f948d44247dd2"],
+  ["post-pr-canonical-job-bound", "600eb75c7073f358ef3b92b23f03ecae3bb72de60694ba0274d230ad4003e3e0"],
+  ["post-pr-validator-job-planned", "07fb026dbf33320ca36f905dc1755fe5752812c42379e250148b109809834884"],
+  ["post-pr-validator-job-running", "1ab84f8d6b675ccb12ec6f266acd8710da74d8a1d10d596b963fd73393798d77"],
+  ["post-pr-validator-job-retry-wait", "d05820c27e6c8f10a25e8818264da10b325c744eecbbc8dbd9870310fcfc2929"],
+  ["post-pr-validator-job-bound", "b77581865f3c75ca0d682891570be23f9d2dea7150e36617400c3a719d0f0178"],
+  ["post-pr-security-job-planned", "585ead6e646fa65a2c5f7ebcfda1ffee031a75b0d55565b8c7fe502b8f8a8ca5"],
+  ["post-pr-security-job-running", "3a90f0cb1692ba8141b175585f345ac12406b1852de6aa1c35ce30ad1009beaa"],
+  ["post-pr-security-job-retry-wait", "7d3734ebd954bbc2acad5a1ac1a7a50206586fca10f990fe6a13edd5f606c2f1"],
+  ["post-pr-security-job-bound", "cfa50cf2a4df1ba81a5e5077fd46956b44869c7672934b4fe6a845dc70a053a5"],
+  ["post-pr-push-not-ready", "395dc43d65cec206025ee43d80c11ac489507f58c5af5228eb6c6d6380d20815"],
+  ["post-pr-push-pending", "ac97e631f9618c582a1b55b07229967e2531d271c8516065435155dba49123f9"],
+  ["post-pr-push-confirmed", "70a523f94e9711765f33721aaeeb93603f6cf3b600fd28a49a3edd4f841f7b7c"],
+  ["post-pr-push-last-error", "2488926b85aac8d01c8efabf743d157b64c52d9f5f511885ba895352389c30c8"],
+  ["post-pr-evidence-sidecar", "7e1f2813cdbf989ddf2764bae919ecb9401fba296810cef54edcadc627f13ef0"],
+  ["post-pr-continuation-review-null", "92960267c0c4fb308202f0ef2f90cfc52dec35df19e7e6e4da3f30d6b3aed05c"],
+  ["post-pr-continuation-review-bound", "73f9ebd1ef1c52cd12bc8a4d381a85e780ee6f9ade46e7ea78a670e011342755"],
+  ["post-pr-terminal-fact-null", "5aec52113785aff02962da6c7569a939245627f87cab4c98ec20837346b70063"],
+  ["post-pr-terminal-fact-account-switch-failed-github-auth", "89db42abf207f47db3f5f2dcc28cb1f61ade51b7679e3e5b0be805d6d7b94436"],
+  ["post-pr-terminal-fact-account-switch-failed-push", "a8a67f1c8e774c621d92c8a4e69bdbcd3b9cacb06da840cd55d0593e956bfa1a"],
+  ["post-pr-terminal-fact-dispatch-start-unknown", "7a2d731df3167d87dec0923f1316a9ab4b0b4a919d31bf5344e09a7fecb4dee4"],
+  ["post-pr-terminal-fact-path-lane-violation", "500e294346fe7f0d09dab8503578549c5bf1cb8deafd9e74102d5a9db690c20f"],
+  ["post-pr-terminal-fact-remote-head-diverged", "7fe532840107a81679fc124cdde6e499aaf4e02313b791d6a44189eb5ce77432"],
+  ["post-pr-terminal-fact-panel-runner-result-malformed", "78c5bc14d1c19f8bd3b449d2ba59160173d05698cbc61a6fab5f2b3e76e1ac2a"],
+  ["post-pr-terminal-fact-push-failed", "2d49a423c4c8a2f70c1af4f3d598afdf6f22fad34df57b5cc323d4ac01c49511"],
+  ["post-pr-terminal-fact-panel-attribution-unsafe", "7681ab4e932991797750ed39c61569748ed8690a291f27f6f0a4f91a5cd65844"],
+  ["repair-reported", "ef3d9ae37c72a04894ce56d2e9c9f8f09aa3d65d7baf6c4f6b605b8f9830745b"],
+  ["repair-repairing", "6062c58a7d49d7c4f7fe1f317013104b393a5fdbc25ecda125a837ebbfa39264"],
+  ["repair-review-approve", "e224f1a3dc1c8e486c7963f575225c4d13154760db24643ead5a808c32c1446b"],
+  ["repair-review-reject", "da2b33bb1df30abfb9e9c5d76c9d1db7fa13a8c0c67a22475bfd7ef6e62246c4"],
+  ["repair-merged", "ba7f499cf894cf32b5c72841e49d15aa227b05a4a0e688845d45c54c5f920374"],
+  ["repair-blocked-from-reported", "772b29a3b9bb10e02df054279568f292e02b5e91d57f362f402f9d647437eab0"],
+  ["repair-blocked-from-repairing", "73fd358d7bfda416fd1ba881e3b557b28c9c4cbe5cba1b545ee026dcfd68d89d"],
+  ["repair-blocked-from-review", "e0c16182c9ade7bcb8dce57cabb3292d5039dabc191ce1422a35aa6fd8398267"],
+]);
+const DURABLE_AUTHORITY_DESCRIPTOR_BY_ID = new Map(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST);
+
 export function emitDurableRecordMutations(source, descriptor) {
   requireRecord(source, "source");
   requireRecord(descriptor, "descriptor");
@@ -451,6 +564,7 @@ export function assertDurableAuthorityCatalogComplete(catalog) {
   if (!sameList(actualClassIds, expectedClassIds)) throw new TypeError("durable authority catalog must contain exactly the nine registered authority classes in order");
   const expectedManifestIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
   if (!sameList(DURABLE_AUTHORITY_METADATA_MANIFEST.map(([id]) => id), expectedManifestIds)) throw new TypeError("independent metadata manifest must contain every required record id exactly once in source order");
+  if (!sameList(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), expectedManifestIds)) throw new TypeError("independent descriptor manifest must contain every required record id exactly once in source order");
   if (!sameList(Object.keys(EXPLICIT_EXCLUDED_FAMILY_CODES), expectedManifestIds)) throw new TypeError("explicit family disposition registry must contain every required record id exactly once in source order");
 
   const seenRecordIds = new Set();
@@ -477,6 +591,10 @@ export function assertDurableAuthorityCatalogComplete(catalog) {
       requireRecord(record.source, `${path}.source`);
       requireRecord(record.descriptor, `${path}.descriptor`);
       if (record.descriptor.record !== record.id) throw new TypeError(`${path}.descriptor.record must equal the record id`);
+      validateExpectedDescriptorDispositions(record, path);
+      const expectedDescriptorHash = DURABLE_AUTHORITY_DESCRIPTOR_BY_ID.get(record.id);
+      const actualDescriptorHash = descriptorHash(record.descriptor);
+      if (actualDescriptorHash !== expectedDescriptorHash) throw new TypeError(`${path} mutation target definitions and exclusions must exactly match the independent descriptor manifest`);
       emitDurableRecordMutations(record.source, record.descriptor);
       validateRecordSidecars(record, path);
     }
@@ -1148,6 +1266,32 @@ function metadataHash(record) {
     sidecars: record.sidecars,
   };
   return createHash("sha256").update(JSON.stringify(exactMetadata)).digest("hex");
+}
+
+function validateExpectedDescriptorDispositions(record, path) {
+  const expectedExcludedFamilies = new Set([...EXPLICIT_EXCLUDED_FAMILY_CODES[record.id]].map((code) => FAMILY_BY_CODE[code]));
+  for (const family of DURABLE_MUTATION_FAMILIES) {
+    const targetCount = record.descriptor.targets.filter((mutationTarget) => mutationTarget.family === family).length;
+    const hasExclusion = Object.hasOwn(record.descriptor.exclusions, family);
+    const expectedExclusion = expectedExcludedFamilies.has(family);
+    if (expectedExclusion ? targetCount !== 0 || !hasExclusion : targetCount === 0 || hasExclusion) {
+      throw new TypeError(`${path}.${family} target-or-exclusion disposition must exactly match the independent family disposition registry`);
+    }
+  }
+}
+
+function descriptorHash(descriptor) {
+  return createHash("sha256")
+    .update(canonicalJson({ targets: descriptor.targets, exclusions: descriptor.exclusions }))
+    .digest("hex");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function validateRecordSidecars(record, path) {
