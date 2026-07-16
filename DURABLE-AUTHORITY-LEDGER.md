@@ -141,6 +141,7 @@ original schema and are not rewritten, stripped, or reinterpreted by this ledger
 | PR #79 field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
 | `plan_hash` | `CONSOLIDATE/REMOVE` for a successor authority; `RETAIN` unchanged in persisted legacy records | Replace a second whole-plan chain with accepted `plan/slices.json`/`factory slices-seed` authority and a canonical owner/effective-path snapshot in the canonical amendment manifest, written by the canonical amendment admission transition. Re-observe that snapshot at every consuming lane check. |
+| Canonical owner/effective-path snapshot at each consuming lane check | `REOBSERVE` | Resolve owner authority from the accepted plan binding and derive effective changed paths from Git; neither a copied plan hash nor mutable local path claims may substitute. |
 | Owner slice, consumer slice, defect path, status, attempt, and fixed attempt ceiling | `RETAIN` | Retain as incident identity/lifecycle at repair admission; do not infer them from a prompt or mutable path. |
 | Original reproduction `evidence_ref` and `evidence_hash`, including exact failing command/result bytes, subject, attempt, and head | `RETAIN` | Retain at report/admission and re-hash the exact evidence bytes at each later transition. |
 | `baseline_commit` | `RETAIN` | Retain the exact feature-head commit observed when the attempt starts; re-observe existence and ancestry from Git at review/merge. |
