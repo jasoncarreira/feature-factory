@@ -889,6 +889,10 @@ describe("continuation planning-artifact reuse", () => {
     const cases = [
       ["parent manifest", (fixture) => join(fixture.runDir, "run.json")],
       ["selected parent review", (fixture) => join(fixture.runDir, "reviews", "reviewer.json")],
+      ["parent story artifact", (fixture) => join(fixture.runDir, "artifacts", "story.md")],
+      ["parent technical brief", (fixture) => join(fixture.runDir, "artifacts", "technical-brief.md")],
+      ["parent context evidence", (fixture) => join(fixture.runDir, "evidence", "context.json")],
+      ["parent spec review", (fixture) => join(fixture.runDir, "reviews", "spec-writer.json")],
       ["seeded child artifact", (_fixture, child) => join(child.childRunDir, "artifacts", "technical-brief.md")],
       ["seeded child review", (_fixture, child) => join(child.childRunDir, "reviews", "spec-writer.json")],
     ];
@@ -896,7 +900,15 @@ describe("continuation planning-artifact reuse", () => {
     for (const [name, targetFile] of cases) {
       const fixture = createFixture(`adopt-authority-race-${name.replaceAll(" ", "-")}`, { spec: { status: "accepted", verdict: "APPROVE" } });
       try {
+        mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+        writeJson(join(fixture.runDir, "evidence", "context.json"), { subject: "spec-writer", status: "pass" });
+        updateRun(fixture, (run) => { run.steps[0].evidence_ref = "evidence/context.json"; });
         const child = seedChildForAdopt(fixture, `${fixture.runId}-next`);
+        assert.deepEqual(child.continuation.parent_evidence, [{
+          kind: "evidence",
+          ref: "evidence/context.json",
+          hash: hashFile(join(fixture.runDir, "evidence", "context.json")),
+        }], `${name} fixture must bind parent context evidence`);
         const childRunFile = join(child.childRunDir, "run.json");
         const childArtifactFile = join(child.childRunDir, "artifacts", "technical-brief.md");
         const childReviewFile = join(child.childRunDir, "reviews", "spec-writer.json");
