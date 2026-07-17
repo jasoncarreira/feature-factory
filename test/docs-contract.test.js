@@ -1655,14 +1655,28 @@ describe("planned v2 reviewed carry-forward docs contract", () => {
     assert.match(futureSchema, /adds no row or production-integrity-coverage claim/i);
   });
 
-  it("closes carry_forward and makes accepted plus remaining the exact ordered plan partition", () => {
+  it("closes carry_forward and classifies every plan slice exactly once in plan order", () => {
     for (const text of [design, futureSchema]) {
-      assert.match(text, /closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted`, and `remaining`/i);
+      assert.match(text, /closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted_slices`, and `remaining_slice_ids`/i);
       assert.match(text, /`scope` is exactly `full-remaining-plan`|`scope: "full-remaining-plan"`/i);
       assert.match(text, /closed to exactly `id`, `attempts`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`/i);
-      assert.match(text, /accepted IDs concatenated with `remaining` must exactly equal[\s\S]*ordered `slices\[\]\.id`/i);
-      assert.match(text, /accepted[^.]*exact prefix[\s\S]*remaining[^.]*non-empty suffix/i);
+      assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order/i);
+      assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order/i);
+      assert.match(text, /unique[\s\S]*disjoint[\s\S]*set union[\s\S]*exactly[\s\S]*(?:complete `slices\[\]\.id` set|full plan)/i);
       assert.match(text, /remaining[\s\S]*inherit[^.]*no|Remaining rows inherit only[\s\S]*never status/i);
+      assert.doesNotMatch(text, /accepted (?:is|slices are)[^.]*exact prefix|remaining[^.]*non-empty suffix/i);
+    }
+  });
+
+  it("permits non-prefix accepted slices and out-of-plan-order integration merges", () => {
+    for (const text of [design, futureSchema, README]) {
+      assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order/i);
+      assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order/i);
+      assert.match(text, /PLAN order `\[A, B, C\]`[\s\S]*merged `A` and `C`[\s\S]*`accepted_slices: \[A, C\]`[\s\S]*`remaining_slice_ids: \[B\]`[\s\S]*valid/i);
+      assert.match(text, /actual integration merge order may differ from PLAN and dependency-execution order/i);
+      assert.match(text, /does not require `accepted_slices` order to equal first-parent chain order/i);
+      assert.match(text, /`accepted_slices: \[A, C\]`[\s\S]*first-parent chain `\[C, A\]`[\s\S]*valid/i);
+      assert.doesNotMatch(text, /first-parent chain in PLAN order|accepted merge commits[^.]*in PLAN order/i);
     }
   });
 
@@ -1671,8 +1685,12 @@ describe("planned v2 reviewed carry-forward docs contract", () => {
       assert.match(text, /pre-PR[\s\S]*status is exactly `blocked`/i);
       assert.match(text, /no PR[\s\S]*no active post-PR/i);
       assert.match(text, /complete B0MR successor tuple|complete unchanged B0MR/i);
-      assert.match(text, /complete first-parent chain[\s\S]*target base[\s\S]*`start_commit`/i);
+      assert.match(text, /first-parent range from `target\.base_commit` exclusive through `start_commit` inclusive/i);
+      assert.match(text, /exactly once[\s\S]*set of `accepted_slices\[\]\.merge_commit` values/i);
       assert.match(text, /no extra commit/i);
+      assert.match(text, /chain length equals `accepted_slices\.length`|length exactly `accepted_slices\.length`/i);
+      assert.match(text, /each first-parent commit|Every first-parent commit/i);
+      assert.match(text, /`start_commit` is (?:the )?parent branch HEAD[\s\S]*last actual merge[\s\S]*`target\.base_commit` when `accepted_slices` is empty/i);
       assert.match(text, /parent panel[\s\S]*optional[\s\S]*`reviewed_head_sha`[\s\S]*`start_commit`|optional parent[\s\S]*`reviewed_head_sha`[\s\S]*`start_commit`/i);
       assert.match(text, /never inherited[\s\S]*fresh (?:validator\/security |final )?panel/i);
     }
@@ -1728,7 +1746,7 @@ describe("planned v2 reviewed carry-forward docs contract", () => {
     assert.match(ownership, /B1\.1[\s\S]*documentation and documentation tests only[\s\S]*no runtime behavior, resource, current promise, schema acceptance, or catalog coverage/i);
     assert.match(ownership, /B1\.2[\s\S]*builds and rechecks[\s\S]*creates no claim ref, branch, worktree, child run directory, or other resource/i);
     assert.match(ownership, /B1\.3[\s\S]*claim-ref\/child-branch transaction[\s\S]*worktree[\s\S]*publishes no child manifest[\s\S]*semantic workflow authority/i);
-    assert.match(ownership, /B1\.4[\s\S]*atomically publishes the child[\s\S]*complete hash-bound plan[\s\S]*adopts the accepted prefix[\s\S]*remaining slice without inherited authority[\s\S]*panels fresh[\s\S]*activates/i);
+    assert.match(ownership, /B1\.4[\s\S]*atomically publishes the child[\s\S]*complete hash-bound plan[\s\S]*adopts every `accepted_slices` entry without rerunning it[\s\S]*remaining_slice_ids[\s\S]*without inherited authority[\s\S]*panels fresh[\s\S]*normal dependency readiness/i);
   });
 });
 

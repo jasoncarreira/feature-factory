@@ -4,7 +4,7 @@ Status — approved v2 design, 2026-07-17: Option A(a) / D is the decision. The 
 
 ## Decision
 
-A blocked feature has one continuation, not one continuation per remaining concern. The child owns the parent's complete remaining plan, starts from the parent's validated integration HEAD, and re-adopts only the parent's exact reviewed-and-merged prefix. Remaining slices run as normal dependency waves inside that one child. The whole-story pre-PR gate remains unchanged.
+A blocked feature has one continuation, not one continuation per remaining concern. The child owns the parent's complete remaining plan, starts from the parent's validated integration HEAD, and re-adopts exactly every parent slice that is already reviewed and merged. Remaining slices run as normal dependency waves inside that one child. The whole-story pre-PR gate remains unchanged.
 
 This approves Option A(a) (branch from the validated integration HEAD and durably re-adopt accepted slices) and Option D (do not fragment one blocked run into sibling continuations). Scope-aware partial PR gates, cross-continuation joins, replaying already accepted slices, and independent sibling continuations are rejected.
 
@@ -22,7 +22,7 @@ V2 adds one closed `continuation.carry_forward` object:
   "plan_ref": "plan/slices.json",
   "plan_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "start_commit": "1111111111111111111111111111111111111111",
-  "accepted": [
+  "accepted_slices": [
     {
       "id": "B0MR",
       "attempts": 1,
@@ -34,19 +34,19 @@ V2 adds one closed `continuation.carry_forward` object:
       "merge_commit": "5555555555555555555555555555555555555555"
     }
   ],
-  "remaining": ["B1.1", "B1.2", "B1.3", "B1.4"]
+  "remaining_slice_ids": ["B1.1", "B1.2", "B1.3", "B1.4"]
 }
 ```
 
-The `carry_forward` object is closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted`, and `remaining`; `scope` is exactly `full-remaining-plan`. Every `accepted` entry is closed to exactly `id`, `attempts`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`. `remaining` contains slice IDs only. Unknown, missing, duplicate, null, abbreviated, or synthetic fields fail closed.
+The `carry_forward` object is closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted_slices`, and `remaining_slice_ids`; `scope` is exactly `full-remaining-plan`. Every `accepted_slices` entry is closed to exactly `id`, `attempts`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`. `remaining_slice_ids` contains slice IDs only. Unknown, missing, duplicate, null, abbreviated, or synthetic fields fail closed.
 
-`plan_ref` is the parent-relative `plan/slices.json`, and `plan_hash` binds its exact regular-file bytes. The accepted IDs concatenated with `remaining` must exactly equal the bound plan's ordered `slices[].id` list, with no omission, duplication, reordering, or extra ID. `accepted` is therefore an exact prefix and `remaining` the non-empty suffix beginning at the first incomplete slice. Remaining rows inherit identity and plan dependencies only: they inherit no status, attempts, evidence, review, reviewed commit, merge commit, test result, panel verdict, or other authority from the parent.
+`plan_ref` is the parent-relative `plan/slices.json`, and `plan_hash` binds its exact regular-file bytes. `accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order. `remaining_slice_ids` contains every nonmerged slice ID, in PLAN order. IDs are unique within each array, the arrays are disjoint, and their set union is exactly the bound plan's complete `slices[].id` set, with no omission or extra ID. They are ordered filtered subsequences, not a prefix/suffix split: for plan order `[A, B, C]`, merged `A` and `C` produces `accepted_slices: [A, C]` and `remaining_slice_ids: [B]`, which is valid. Remaining rows inherit identity and plan dependencies only: they inherit no status, attempts, evidence, review, reviewed commit, merge commit, test result, panel verdict, or other authority from the parent.
 
 ## Planned v2 eligibility and integration proof
 
-V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. A parent with a PR, active post-PR state, a non-`blocked` status, an empty `remaining` suffix, or ambiguous state is ineligible for v2. Current v1 post-PR continuation remains unchanged and is not routed through v2 carry-forward.
+V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. A parent with a PR, active post-PR state, a non-`blocked` status, no nonmerged slice, or ambiguous state is ineligible for v2. Current v1 post-PR continuation remains unchanged and is not routed through v2 carry-forward.
 
-Each accepted row must match the same-ID parent slice with positive `attempts`, status exactly `merged`, the complete B0MR successor tuple, and unchanged exact evidence/review bytes. Its merge is revalidated with the B0MR proof: exactly two ordered parents `P1, reviewed_commit`, a unique full `git merge-base --all`, equal NUL-delimited rename-disabled changed-path sets, and per-path absence or mode/type/object identity. Starting at the recorded target base commit, the accepted `merge_commit` values must be the complete first-parent chain in plan order and end exactly at `start_commit`. `git rev-list --first-parent <target-base>..<start_commit>` may contain those accepted merge commits and no extra commit; skipped, reordered, squash, linear, manual, or unrecorded commits fail closed.
+Each accepted row must match the same-ID parent slice with positive `attempts`, status exactly `merged`, the complete B0MR successor tuple, and unchanged exact evidence/review bytes. Actual integration merge order may differ from PLAN and dependency-execution order. The Git first-parent range from `target.base_commit` exclusive through `start_commit` inclusive must contain exactly once the set of `accepted_slices[].merge_commit` values and no extra commit; its chain length equals `accepted_slices.length`. Every first-parent commit is associated by its `merge_commit` value with exactly one accepted entry and is revalidated with that entry's B0MR proof: exactly two ordered parents `P1, reviewed_commit`, a unique full `git merge-base --all`, equal NUL-delimited rename-disabled changed-path sets, and per-path absence or mode/type/object identity. `start_commit` is the parent branch HEAD and the last actual merge in that first-parent range, or equals `target.base_commit` when `accepted_slices` is empty. This does not require `accepted_slices` order to equal first-parent chain order: for PLAN-ordered `accepted_slices: [A, C]`, an actual first-parent chain `[C, A]` is valid when both mapped merges pass B0MR. Missing, duplicate, squash, linear, manual, or unrecorded commits fail closed.
 
 Parent panel bindings are optional evidence only. If either parent panel binding is present, both validator and security bindings must be complete B0MR successor tuples, their exact sidecars must still hash correctly, and both `reviewed_head_sha` values must equal `start_commit`. Parent panels are never inherited as child verdict authority: the child always runs and publishes a fresh validator/security panel at its final child HEAD.
 
@@ -59,7 +59,7 @@ After an authoritative fetch/observation of the configured target base, evaluate
 3. **moved** — the tip differs and does not contain `start_commit`; stop with `stale-parent-base-moved` rather than building on stale ancestry.
 4. **unavailable** — the origin/base cannot be fetched or observed unambiguously; fail closed as `origin-base-unavailable`.
 
-The candidate build, resource publication, and semantic adoption/activation stages each re-read and recheck parent identity, parent status, pre-PR eligibility, exact plan bytes/hash/partition, accepted sidecar bytes and B0MR merge chain, `start_commit`, optional panel completeness, and the ordered origin-base outcome. A prior observation or caller-supplied boolean is never mutation authority.
+The candidate build, resource publication, and semantic adoption/activation stages each re-read and recheck parent identity, parent status, pre-PR eligibility, exact plan bytes/hash/classification, accepted sidecar bytes and B0MR merge set/actual first-parent chain, `start_commit`, optional panel completeness, and the ordered origin-base outcome. A prior observation or caller-supplied boolean is never mutation authority.
 
 ## Planned v2 claim and branch transaction
 
@@ -109,7 +109,7 @@ Claim lifecycle is monotonic. A crash before transaction commit leaves neither r
 - **B1.1 (this slice):** documentation and documentation tests only, owned exactly by `CONTINUATION-SCOPE-DESIGN.md`, `README.md`, `assets/skills/feature/SCHEMA.md`, and `test/docs-contract.test.js`. It creates no runtime behavior, resource, current promise, schema acceptance, or catalog coverage.
 - **B1.2:** builds and rechecks the v2 candidate but creates no claim ref, branch, worktree, child run directory, or other resource.
 - **B1.3:** implements the atomic claim-ref/child-branch transaction and post-transaction worktree creation/recovery. Those resources are allocation only: B1.3 publishes no child manifest, `carry_forward`, plan, adopted slice state, panel verdict, or executable semantic workflow authority.
-- **B1.4:** after another full recheck, atomically publishes the child plus the complete hash-bound plan, adopts the accepted prefix, initializes every remaining slice without inherited authority, leaves child validator/security panels fresh and unbound, and only then activates child execution at the first remaining slice.
+- **B1.4:** after another full recheck, atomically publishes the child plus the complete hash-bound plan, adopts every `accepted_slices` entry without rerunning it, initializes every `remaining_slice_ids` entry without inherited authority, leaves child validator/security panels fresh and unbound, and only then activates remaining work by normal dependency readiness.
 
 Until B1.4 lands, a B1.3 claim, branch, or worktree is not a runnable continuation and no reader may infer semantic adoption from its existence.
 
