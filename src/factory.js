@@ -8,8 +8,8 @@ import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
-import { git, repoRoot } from "./git.js";
-import { checkWorktreeIdentity, deriveExpectedWorktreePath, parseWorktreeListPorcelain } from "./worktrees.js";
+import { createTwoRefsAtomicallyNoReplace, git, repoRoot } from "./git.js";
+import { checkWorktreeIdentity, createOrRecoverWorktree, deriveExpectedWorktreePath, parseWorktreeListPorcelain } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { prepareTelemetryEnv } from "./telemetry.js";
@@ -49,6 +49,7 @@ const CONTINUATION_PARENT_ARTIFACT_REFS = [
   { kind: "validation_report", ref: "artifacts/validation-report.md" },
   { kind: "pr_body", ref: "artifacts/pr-body.md" },
 ];
+const CARRY_FORWARD_ALLOCATION_REPLAY = Symbol("carry-forward-allocation-replay");
 // Planning artifacts the parent already had accepted. A blocked-run continuation
 // reuses these verbatim instead of regenerating story/research/spec from scratch.
 // Outcome artifacts (test-report, validation-report, pr-body) are intentionally
@@ -635,13 +636,22 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 export function continueFactory(parentRunId, opts = {}) {
   assertPostPrCliOptions(opts, { command: "factory continue" });
   const repo = repoRoot(opts.cwd || process.cwd());
-  const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
+  const allocationReplay = opts.carryForward === true && !opts.dryRun;
+  const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
   const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
 
   if (continuation.schema_version === 2) {
-    if (!opts.dryRun) throw new Error("v2 carry-forward candidate is non-launchable before the B1.3 resource transaction");
-    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false, beforeOriginFetch: opts.beforeOriginFetch, originSpawnSync: opts.originSpawnSync });
-    return { status: "dry-run", launchable: false, candidate: continuation };
+    if (opts.dryRun) {
+      assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false, beforeOriginFetch: opts.beforeOriginFetch, originSpawnSync: opts.originSpawnSync });
+      return { status: "dry-run", launchable: false, candidate: continuation };
+    }
+    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
+      targetPublished: false,
+      beforeOriginFetch: opts.beforeOriginFetch,
+      originSpawnSync: opts.originSpawnSync,
+      [CARRY_FORWARD_ALLOCATION_REPLAY]: true,
+    });
+    return allocateCarryForwardResources(repo, continuation, opts);
   }
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
   const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
@@ -2565,7 +2575,8 @@ export function buildContinuation(parentRunId, opts = {}) {
   }
 
   const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
-  assertContinuationTargetAvailable(repo, targetRunId);
+  if (opts[CARRY_FORWARD_ALLOCATION_REPLAY]) assertContinuationSemanticTargetAbsent(repo, targetRunId);
+  else assertContinuationTargetAvailable(repo, targetRunId);
   const review = resolveContinuationReview(parentRunDir, requiredContinuationReview(opts.review));
   if (postPrParent) {
     if (review.ref !== parentRun.post_pr.continuation_review.ref) throw new Error("post-PR continuation must select run.post_pr.continuation_review.ref");
@@ -2619,7 +2630,12 @@ export function buildContinuation(parentRunId, opts = {}) {
   if (carryForward) {
     continuation.carry_forward = collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, opts);
     if (typeof opts.beforeCarryForwardReturn === "function") opts.beforeCarryForwardReturn({ continuation, parentRunDir });
-    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false, beforeOriginFetch: opts.beforeOriginFetch, originSpawnSync: opts.originSpawnSync });
+    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
+      targetPublished: false,
+      beforeOriginFetch: opts.beforeOriginFetch,
+      originSpawnSync: opts.originSpawnSync,
+      ...(opts[CARRY_FORWARD_ALLOCATION_REPLAY] ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}),
+    });
   }
   return continuation;
 }
@@ -2707,8 +2723,155 @@ export function assertContinuationBindingsCurrent(repo, parentRunDir, continuati
       throw new Error("continuation target run binding is stale");
     }
   } else {
-    assertContinuationTargetAvailable(repo, target.run_id);
+    if (options[CARRY_FORWARD_ALLOCATION_REPLAY]) assertContinuationSemanticTargetAbsent(repo, target.run_id);
+    else assertContinuationTargetAvailable(repo, target.run_id);
   }
+}
+
+function allocateCarryForwardResources(repo, continuation, options = {}) {
+  assertContinuationSemanticTargetAbsent(repo, continuation.target.run_id);
+  const parentIdentity = carryForwardParentIdentity(continuation);
+  const parentIdentityBytes = canonicalJsonBytes(parentIdentity);
+  const claimRef = `refs/opencode/continuations/${createHash("sha256").update(parentIdentityBytes).digest("hex")}`;
+  const childBranchRef = `refs/heads/${continuation.target.branch}`;
+  const startCommit = continuation.carry_forward.start_commit;
+  const claim = {
+    schema_version: 2,
+    kind: "blocked-run-continuation-claim",
+    parent_identity: parentIdentity,
+    child_run_id: continuation.target.run_id,
+    child_branch_ref: childBranchRef,
+    start_commit: startCommit,
+  };
+  const claimBytes = canonicalJsonBytes(claim);
+  const written = git(repo, ["hash-object", "-w", "--stdin"], {
+    input: claimBytes,
+    ...(typeof options.claimBlobSpawnSync === "function" ? { spawnSync: options.claimBlobSpawnSync } : {}),
+  });
+  const claimOid = written.stdout.trim();
+  if (!written.ok || !FULL_COMMIT_PATTERN.test(claimOid)) {
+    throw new Error(`continuation claim blob could not be written: ${(written.stderr || written.stdout || "unknown git error").trim()}`);
+  }
+
+  let refState = inspectCarryForwardRefs(repo, { claimRef, claimOid, claimBytes, childBranchRef, startCommit });
+  let replayed = refState === "exact";
+  if (refState === "absent") {
+    if (typeof options.beforeRefTransaction === "function") {
+      options.beforeRefTransaction({ claimRef, claimOid, claimBytes, childBranchRef, startCommit });
+    }
+    const parentRunDir = resolve(repo, dirname(continuation.parent.run_ref));
+    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
+      targetPublished: false,
+      beforeOriginFetch: options.beforeOriginFetch,
+      originSpawnSync: options.originSpawnSync,
+      [CARRY_FORWARD_ALLOCATION_REPLAY]: true,
+    });
+    const transaction = createTwoRefsAtomicallyNoReplace(
+      repo,
+      { ref: parentIdentity.parent_branch_ref, oid: parentIdentity.start_commit },
+      { ref: claimRef, oid: claimOid },
+      { ref: childBranchRef, oid: startCommit },
+      typeof options.refTransactionSpawnSync === "function" ? { spawnSync: options.refTransactionSpawnSync } : {},
+    );
+    if (!transaction.ok) {
+      refState = inspectCarryForwardRefs(repo, { claimRef, claimOid, claimBytes, childBranchRef, startCommit });
+      if (refState !== "exact") {
+        throw new Error(`continuation claim/branch transaction conflicted without partial repair: ${(transaction.stderr || transaction.stdout || "unknown git error").trim()}`);
+      }
+      replayed = true;
+    } else {
+      refState = inspectCarryForwardRefs(repo, { claimRef, claimOid, claimBytes, childBranchRef, startCommit });
+      if (refState !== "exact") throw new Error("continuation claim/branch transaction did not publish the exact registered pair");
+    }
+  }
+  if (typeof options.afterRefTransaction === "function") {
+    options.afterRefTransaction({ claimRef, claimOid, childBranchRef, startCommit, replayed });
+  }
+
+  const worktree = createOrRecoverWorktree(repo, continuation.target.worktree, {
+    branch: continuation.target.branch,
+    head: startCommit,
+    claim: claimOid,
+  }, {
+    ...(typeof options.beforeWorktreeAdd === "function" ? { beforeAdd: options.beforeWorktreeAdd } : {}),
+    ...(typeof options.afterWorktreeReserve === "function" ? { afterReserve: options.afterWorktreeReserve } : {}),
+    ...(typeof options.afterWorktreeAdd === "function" ? { afterAdd: options.afterWorktreeAdd } : {}),
+    ...(typeof options.afterWorktreeMove === "function" ? { afterMove: options.afterWorktreeMove } : {}),
+    ...(typeof options.worktreeSpawnSync === "function" ? { spawnSync: options.worktreeSpawnSync } : {}),
+  });
+  if (inspectCarryForwardRefs(repo, { claimRef, claimOid, claimBytes, childBranchRef, startCommit }) !== "exact") {
+    throw new Error("continuation claim/branch final verification found missing refs");
+  }
+  const finalWorktree = checkWorktreeIdentity(repo, continuation.target.worktree, { branch: continuation.target.branch, head: startCommit });
+  if (!finalWorktree.ok) throw new Error(`continuation worktree final identity check failed: ${finalWorktree.reason}`);
+  const finalHead = git(continuation.target.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!finalHead.ok || finalHead.stdout.trim() !== startCommit) throw new Error("continuation worktree final HEAD does not equal start_commit");
+  assertContinuationSemanticTargetAbsent(repo, continuation.target.run_id);
+  return {
+    status: "allocated",
+    launchable: false,
+    candidate: continuation,
+    claim_ref: claimRef,
+    claim_oid: claimOid,
+    child_branch_ref: childBranchRef,
+    start_commit: startCommit,
+    worktree: finalWorktree.worktree,
+    replayed,
+    worktree_recovered: worktree.recovered,
+  };
+}
+
+function carryForwardParentIdentity(continuation) {
+  return {
+    schema_version: 2,
+    kind: "blocked-run-continuation-parent",
+    parent_run_id: continuation.parent.run_id,
+    parent_run_ref: continuation.parent.run_ref,
+    parent_run_hash: continuation.parent.run_hash,
+    parent_branch_ref: `refs/heads/${continuation.parent.branch}`,
+    target_base_ref: continuation.target.base_ref,
+    target_base_commit: continuation.target.base_commit,
+    plan_ref: continuation.carry_forward.plan_ref,
+    plan_hash: continuation.carry_forward.plan_hash,
+    start_commit: continuation.carry_forward.start_commit,
+  };
+}
+
+function canonicalJsonBytes(value) {
+  return Buffer.from(JSON.stringify(sortCanonicalJson(value)), "utf8");
+}
+
+function sortCanonicalJson(value) {
+  if (Array.isArray(value)) return value.map(sortCanonicalJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortCanonicalJson(value[key])]));
+}
+
+function inspectCarryForwardRefs(repo, expected) {
+  const claimOid = readExactRefOid(repo, expected.claimRef);
+  const branchOid = readExactRefOid(repo, expected.childBranchRef);
+  if (claimOid === null && branchOid === null) return "absent";
+  if (claimOid === null || branchOid === null) throw new Error("continuation claim/branch conflict: only one registered ref exists");
+  if (git(repo, ["symbolic-ref", "-q", expected.claimRef]).ok || git(repo, ["symbolic-ref", "-q", expected.childBranchRef]).ok) {
+    throw new Error("continuation claim/branch conflict: registered refs must be direct refs");
+  }
+  if (claimOid !== expected.claimOid) throw new Error("continuation claim conflict: claim ref points to different bytes or child identity");
+  const type = git(repo, ["cat-file", "-t", claimOid]);
+  if (!type.ok || type.stdout.trim() !== "blob") throw new Error("continuation claim conflict: claim ref must point to a blob");
+  const content = git(repo, ["cat-file", "blob", claimOid]);
+  if (!content.ok || content.stdout !== expected.claimBytes.toString("utf8")) {
+    throw new Error("continuation claim conflict: claim blob bytes are not the exact canonical claim");
+  }
+  if (branchOid !== expected.startCommit) throw new Error("continuation child branch conflict: target is not start_commit");
+  return "exact";
+}
+
+function readExactRefOid(repo, ref) {
+  const observed = git(repo, ["show-ref", "--verify", "--hash", ref]);
+  if (!observed.ok) return null;
+  const oid = observed.stdout.trim();
+  if (!FULL_COMMIT_PATTERN.test(oid)) throw new Error(`continuation ref '${ref}' has an invalid object id`);
+  return oid;
 }
 
 function normalizeContinuationReuseForComparison(reuse) {
@@ -2977,6 +3140,14 @@ function assertContinuationTargetAvailable(repo, targetRunId) {
   if (branchExists(repo, targetRunId)) throw new Error(`target branch already exists: ${targetRunId}`);
   const targetWorktree = resolve(repo, ".opencode", "worktrees", targetRunId);
   if (existsSync(targetWorktree)) throw new Error(`target worktree already exists: ${targetWorktree}`);
+}
+
+function assertContinuationSemanticTargetAbsent(repo, targetRunId) {
+  const roots = new Set([...factoryRootsForLookup(repo), factoryRoot(repo)]);
+  for (const rootPath of roots) {
+    const targetRunDir = resolve(rootPath, targetRunId);
+    if (existsSync(targetRunDir)) throw new Error(`v2 allocation conflicts with existing child factory run directory: ${targetRunDir}`);
+  }
 }
 
 function requiredContinuationReview(value) {
