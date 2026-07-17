@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
@@ -13,6 +13,7 @@ import {
   DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST,
   DURABLE_AUTHORITY_EXCLUSIONS,
   DURABLE_AUTHORITY_METADATA_MANIFEST,
+  DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS,
   DURABLE_AUTHORITY_REQUIRED_RECORD_IDS,
   DURABLE_MUTATION_FAMILIES,
   assertDurableAuthorityCatalogComplete,
@@ -23,7 +24,27 @@ import {
   renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
 import { checkRunConsistency, validateRun, validateSlicesPlan } from "../src/validate.js";
-import { transitionMergedSliceRepair, transitionPostPrState } from "../src/run-state.js";
+import { continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
+import {
+  assertContinuationAuthorityCurrent,
+  transitionMergedSliceRepair,
+  mergedSliceRepairFence,
+  transitionPanelVerdicts,
+  transitionContinuationAdoption,
+  transitionPostPrState,
+  transitionPrCreated,
+  transitionPrePrFenceCleared,
+  transitionPrePrFenceEstablished,
+  transitionRunJson,
+  transitionRunSlice,
+  transitionRunStep,
+  transitionSliceMerged,
+  transitionSlicesSeed,
+  transitionSteeringActionClosed,
+  transitionSteeringActionStarted,
+  transitionSteeringBoundaryCrossed,
+  transitionSteeringBoundaryOpened,
+} from "../src/run-state.js";
 
 const AUTHORITY_CLASS_IDS = Object.freeze([
   "plan-slices-graph",
@@ -61,6 +82,733 @@ const FAMILIES_WITH_EXCLUSIONS = Object.freeze([
   "wrong-bytes",
   "descriptor-key-shape-drift",
 ]);
+
+const B0M3_CONTINUATION_EXACT_CASES = Object.freeze([
+  { name: "continuation-envelope: cross-bound-identity (cross-bound operator_summary)", record_id: "continuation-envelope", family: "cross-bound-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation operator_summary is stale or cross-bound" },
+  { name: "continuation-parent-binding: wrong-hash (parent-run hash)", record_id: "continuation-parent-binding", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent run.json changed since observation" },
+  { name: "continuation-parent-binding: wrong-bytes (parent-run sidecar bytes)", record_id: "continuation-parent-binding", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent run.json changed since observation" },
+  { name: "continuation-parent-binding: stale-identity (stale commit)", record_id: "continuation-parent-binding", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent branch/commit binding is stale" },
+  { name: "continuation-selected-review: wrong-bytes (selected-review sidecar bytes)", record_id: "continuation-selected-review", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation selected review hash mismatch" },
+  { name: "continuation-selected-review: stale-identity (stale verdict)", record_id: "continuation-selected-review", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation selected review identity is stale or cross-bound" },
+  { name: "continuation-selected-review: cross-bound-identity (cross-bound subject)", record_id: "continuation-selected-review", family: "cross-bound-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation selected review identity is stale or cross-bound" },
+  { name: "continuation-target-binding: stale-identity (stale base_commit)", record_id: "continuation-target-binding", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation target base binding is stale" },
+  { name: "continuation-parent-artifact-sidecar: wrong-hash (artifact hash)", record_id: "continuation-parent-artifact-sidecar", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_artifacts binding is stale" },
+  { name: "continuation-parent-artifact-sidecar: wrong-bytes (artifact sidecar bytes)", record_id: "continuation-parent-artifact-sidecar", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_artifacts binding is stale" },
+  { name: "continuation-parent-artifact-sidecar: stale-identity (stale hash)", record_id: "continuation-parent-artifact-sidecar", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_artifacts binding is stale" },
+  { name: "continuation-parent-evidence-sidecar: wrong-hash (evidence hash)", record_id: "continuation-parent-evidence-sidecar", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_evidence binding is stale" },
+  { name: "continuation-parent-evidence-sidecar: wrong-bytes (evidence sidecar bytes)", record_id: "continuation-parent-evidence-sidecar", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_evidence binding is stale" },
+  { name: "continuation-parent-evidence-sidecar: stale-identity (stale hash)", record_id: "continuation-parent-evidence-sidecar", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_evidence binding is stale" },
+  { name: "continuation-parent-review-sidecar: wrong-hash (review hash)", record_id: "continuation-parent-review-sidecar", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
+  { name: "continuation-parent-review-sidecar: wrong-bytes (review sidecar bytes)", record_id: "continuation-parent-review-sidecar", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
+  { name: "continuation-parent-review-sidecar: stale-identity (stale hash)", record_id: "continuation-parent-review-sidecar", family: "stale-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
+  { name: "continuation-parent-review-sidecar: cross-bound-identity (cross-bound ref)", record_id: "continuation-parent-review-sidecar", family: "cross-bound-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
+  { name: "continuation-planning-reuse-eligible: wrong-hash (review hash)", record_id: "continuation-planning-reuse-eligible", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation planning_reuse binding is stale" },
+  { name: "continuation-planning-reuse-eligible: wrong-hash (artifact hash)", record_id: "continuation-planning-reuse-eligible", family: "wrong-hash", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation planning_reuse binding is stale" },
+  { name: "continuation-planning-reuse-eligible: wrong-bytes (review sidecar bytes)", record_id: "continuation-planning-reuse-eligible", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_reviews binding is stale" },
+  { name: "continuation-planning-reuse-eligible: wrong-bytes (artifact sidecar bytes)", record_id: "continuation-planning-reuse-eligible", family: "wrong-bytes", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation parent_artifacts binding is stale" },
+  { name: "continuation-planning-reuse-eligible: cross-bound-identity (cross-bound spec_review_ref)", record_id: "continuation-planning-reuse-eligible", family: "cross-bound-identity", consumer: "transitionContinuationAdoption", rejector: "Error :: continuation planning_reuse binding is stale" },
+  { name: "continuation-draft-reuse: wrong-hash (draft hash)", record_id: "continuation-draft-reuse", family: "wrong-hash", consumer: "seedContinuationPlanningArtifacts", rejector: "Error :: continuation draft_spec_reuse binding is stale" },
+  { name: "continuation-draft-reuse: wrong-bytes (draft sidecar bytes)", record_id: "continuation-draft-reuse", family: "wrong-bytes", consumer: "seedContinuationPlanningArtifacts", rejector: "Error :: continuation parent_artifacts bindings changed since payload build" },
+  { name: "continuation-post-pr-binding: wrong-hash (evidence hash)", record_id: "continuation-post-pr-binding", family: "wrong-hash", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation post-PR evidence hash mismatch" },
+  { name: "continuation-post-pr-binding: wrong-hash (review hash)", record_id: "continuation-post-pr-binding", family: "wrong-hash", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation post-PR review hash mismatch" },
+  { name: "continuation-post-pr-binding: wrong-hash (hash post_pr_hash)", record_id: "continuation-post-pr-binding", family: "wrong-hash", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation post_pr state hash is stale" },
+  { name: "continuation-post-pr-binding: wrong-bytes (evidence sidecar bytes)", record_id: "continuation-post-pr-binding", family: "wrong-bytes", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation parent_evidence binding is stale" },
+  { name: "continuation-post-pr-binding: wrong-bytes (review sidecar bytes)", record_id: "continuation-post-pr-binding", family: "wrong-bytes", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation selected review hash mismatch" },
+  { name: "continuation-post-pr-binding: stale-identity (stale head_sha)", record_id: "continuation-post-pr-binding", family: "stale-identity", consumer: "assertContinuationAuthorityCurrent", rejector: "Error :: continuation post_pr failed head binding is stale" },
+]);
+
+const B0M4_EXACT_CASES = Object.freeze([
+  { name: "post-pr-phase-disabled: missing-key (required field)", record_id: "post-pr-phase-disabled", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-disabled: unknown-key (record root)", record_id: "post-pr-phase-disabled", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-disabled: wrong-schema (schema version)", record_id: "post-pr-phase-disabled", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-disabled: wrong-type (typed field)", record_id: "post-pr-phase-disabled", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-disabled: stale-identity (stale attempt)", record_id: "post-pr-phase-disabled", family: "stale-identity", target_label: "stale attempt", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition requires enabled persisted post-PR policy" },
+  { name: "post-pr-phase-disabled: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-disabled", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: disabled policy requires disabled phase" },
+  { name: "post-pr-phase-awaiting-pr: missing-key (required field)", record_id: "post-pr-phase-awaiting-pr", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-awaiting-pr: unknown-key (record root)", record_id: "post-pr-phase-awaiting-pr", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-awaiting-pr: wrong-schema (schema version)", record_id: "post-pr-phase-awaiting-pr", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-awaiting-pr: wrong-type (typed field)", record_id: "post-pr-phase-awaiting-pr", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-awaiting-pr: stale-identity (stale attempt)", record_id: "post-pr-phase-awaiting-pr", family: "stale-identity", target_label: "stale attempt", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR attempt changes must use transitionPostPrFailure" },
+  { name: "post-pr-phase-awaiting-pr: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-awaiting-pr", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-observing: missing-key (required field)", record_id: "post-pr-phase-observing", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-observing: unknown-key (record root)", record_id: "post-pr-phase-observing", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-observing: wrong-schema (schema version)", record_id: "post-pr-phase-observing", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-observing: wrong-type (typed field)", record_id: "post-pr-phase-observing", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-observing: stale-identity (stale attempt)", record_id: "post-pr-phase-observing", family: "stale-identity", target_label: "stale attempt", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR attempt changes must use transitionPostPrFailure" },
+  { name: "post-pr-phase-observing: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-observing", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-failure-recording: missing-key (required field)", record_id: "post-pr-phase-failure-recording", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-failure-recording: unknown-key (record root)", record_id: "post-pr-phase-failure-recording", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-failure-recording: wrong-schema (schema version)", record_id: "post-pr-phase-failure-recording", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-failure-recording: wrong-type (typed field)", record_id: "post-pr-phase-failure-recording", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-failure-recording: stale-identity (stale attempt)", record_id: "post-pr-phase-failure-recording", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-failure-recording: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-failure-recording", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-remediation-planned: missing-key (required field)", record_id: "post-pr-phase-remediation-planned", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-remediation-planned: unknown-key (record root)", record_id: "post-pr-phase-remediation-planned", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-remediation-planned: wrong-schema (schema version)", record_id: "post-pr-phase-remediation-planned", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-remediation-planned: wrong-type (typed field)", record_id: "post-pr-phase-remediation-planned", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-remediation-planned: stale-identity (stale attempt)", record_id: "post-pr-phase-remediation-planned", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-remediation-planned: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-remediation-planned", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-remediation-running: missing-key (required field)", record_id: "post-pr-phase-remediation-running", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-remediation-running: unknown-key (record root)", record_id: "post-pr-phase-remediation-running", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-remediation-running: wrong-schema (schema version)", record_id: "post-pr-phase-remediation-running", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-remediation-running: wrong-type (typed field)", record_id: "post-pr-phase-remediation-running", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-remediation-running: stale-identity (stale attempt)", record_id: "post-pr-phase-remediation-running", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-remediation-running: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-remediation-running", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-changes-observed: missing-key (required field)", record_id: "post-pr-phase-changes-observed", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-changes-observed: unknown-key (record root)", record_id: "post-pr-phase-changes-observed", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-changes-observed: wrong-schema (schema version)", record_id: "post-pr-phase-changes-observed", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-changes-observed: wrong-type (typed field)", record_id: "post-pr-phase-changes-observed", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-changes-observed: wrong-ref (remediation ref)", record_id: "post-pr-phase-changes-observed", family: "wrong-ref", target_label: "remediation ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "post-pr-phase-changes-observed: wrong-hash (remediation hash)", record_id: "post-pr-phase-changes-observed", family: "wrong-hash", target_label: "remediation hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-changes-observed: wrong-bytes (remediation sidecar bytes)", record_id: "post-pr-phase-changes-observed", family: "wrong-bytes", target_label: "remediation sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-changes-observed: stale-identity (stale attempt)", record_id: "post-pr-phase-changes-observed", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-changes-observed: stale-identity (stale remediation.candidate_head_sha)", record_id: "post-pr-phase-changes-observed", family: "stale-identity", target_label: "stale remediation.candidate_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation candidate_head_sha cannot change once bound" },
+  { name: "post-pr-phase-changes-observed: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-changes-observed", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-changes-observed: cross-bound-identity (cross-bound candidate head)", record_id: "post-pr-phase-changes-observed", family: "cross-bound-identity", target_label: "cross-bound candidate head", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.candidate_head_sha :: must differ from failed_head_sha" },
+  { name: "post-pr-phase-committed: missing-key (required field)", record_id: "post-pr-phase-committed", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-committed: unknown-key (record root)", record_id: "post-pr-phase-committed", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-committed: wrong-schema (schema version)", record_id: "post-pr-phase-committed", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-committed: wrong-type (typed field)", record_id: "post-pr-phase-committed", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-committed: wrong-ref (remediation ref)", record_id: "post-pr-phase-committed", family: "wrong-ref", target_label: "remediation ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "post-pr-phase-committed: wrong-hash (remediation hash)", record_id: "post-pr-phase-committed", family: "wrong-hash", target_label: "remediation hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-committed: wrong-bytes (remediation sidecar bytes)", record_id: "post-pr-phase-committed", family: "wrong-bytes", target_label: "remediation sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-committed: stale-identity (stale attempt)", record_id: "post-pr-phase-committed", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-committed: stale-identity (stale remediation.candidate_head_sha)", record_id: "post-pr-phase-committed", family: "stale-identity", target_label: "stale remediation.candidate_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation candidate_head_sha cannot change once bound" },
+  { name: "post-pr-phase-committed: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-committed", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-committed: cross-bound-identity (cross-bound candidate head)", record_id: "post-pr-phase-committed", family: "cross-bound-identity", target_label: "cross-bound candidate head", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.candidate_head_sha :: must differ from failed_head_sha" },
+  { name: "post-pr-phase-revalidating: missing-key (required field)", record_id: "post-pr-phase-revalidating", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-revalidating: unknown-key (record root)", record_id: "post-pr-phase-revalidating", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-revalidating: wrong-schema (schema version)", record_id: "post-pr-phase-revalidating", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-revalidating: wrong-type (typed field)", record_id: "post-pr-phase-revalidating", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-revalidating: wrong-ref (remediation ref)", record_id: "post-pr-phase-revalidating", family: "wrong-ref", target_label: "remediation ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "post-pr-phase-revalidating: wrong-hash (remediation hash)", record_id: "post-pr-phase-revalidating", family: "wrong-hash", target_label: "remediation hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-revalidating: wrong-bytes (remediation sidecar bytes)", record_id: "post-pr-phase-revalidating", family: "wrong-bytes", target_label: "remediation sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-revalidating: stale-identity (stale attempt)", record_id: "post-pr-phase-revalidating", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-revalidating: stale-identity (stale remediation.candidate_head_sha)", record_id: "post-pr-phase-revalidating", family: "stale-identity", target_label: "stale remediation.candidate_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation candidate_head_sha cannot change once bound" },
+  { name: "post-pr-phase-revalidating: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-revalidating", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-revalidating: cross-bound-identity (cross-bound candidate head)", record_id: "post-pr-phase-revalidating", family: "cross-bound-identity", target_label: "cross-bound candidate head", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.candidate_head_sha :: must differ from failed_head_sha" },
+  { name: "post-pr-phase-validated: missing-key (required field)", record_id: "post-pr-phase-validated", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-validated: unknown-key (record root)", record_id: "post-pr-phase-validated", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-validated: wrong-schema (schema version)", record_id: "post-pr-phase-validated", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-validated: wrong-type (typed field)", record_id: "post-pr-phase-validated", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-validated: wrong-ref (remediation ref)", record_id: "post-pr-phase-validated", family: "wrong-ref", target_label: "remediation ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "post-pr-phase-validated: wrong-hash (remediation hash)", record_id: "post-pr-phase-validated", family: "wrong-hash", target_label: "remediation hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-validated: wrong-bytes (remediation sidecar bytes)", record_id: "post-pr-phase-validated", family: "wrong-bytes", target_label: "remediation sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-validated: stale-identity (stale attempt)", record_id: "post-pr-phase-validated", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-validated: stale-identity (stale remediation.candidate_head_sha)", record_id: "post-pr-phase-validated", family: "stale-identity", target_label: "stale remediation.candidate_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation candidate_head_sha cannot change once bound" },
+  { name: "post-pr-phase-validated: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-validated", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-validated: cross-bound-identity (cross-bound candidate head)", record_id: "post-pr-phase-validated", family: "cross-bound-identity", target_label: "cross-bound candidate head", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.candidate_head_sha :: must differ from failed_head_sha" },
+  { name: "post-pr-phase-push-pending: missing-key (required field)", record_id: "post-pr-phase-push-pending", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-push-pending: unknown-key (record root)", record_id: "post-pr-phase-push-pending", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-push-pending: wrong-schema (schema version)", record_id: "post-pr-phase-push-pending", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-push-pending: wrong-type (typed field)", record_id: "post-pr-phase-push-pending", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-push-pending: wrong-ref (remediation ref)", record_id: "post-pr-phase-push-pending", family: "wrong-ref", target_label: "remediation ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "post-pr-phase-push-pending: wrong-hash (remediation hash)", record_id: "post-pr-phase-push-pending", family: "wrong-hash", target_label: "remediation hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-push-pending: wrong-bytes (remediation sidecar bytes)", record_id: "post-pr-phase-push-pending", family: "wrong-bytes", target_label: "remediation sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-push-pending: stale-identity (stale attempt)", record_id: "post-pr-phase-push-pending", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-push-pending: stale-identity (stale remediation.candidate_head_sha)", record_id: "post-pr-phase-push-pending", family: "stale-identity", target_label: "stale remediation.candidate_head_sha", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.local_head_sha :: must equal candidate_head_sha while push is pending" },
+  { name: "post-pr-phase-push-pending: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-push-pending", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-push-pending: cross-bound-identity (cross-bound candidate head)", record_id: "post-pr-phase-push-pending", family: "cross-bound-identity", target_label: "cross-bound candidate head", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.candidate_head_sha :: must differ from failed_head_sha" },
+  { name: "post-pr-phase-remote-confirmed: missing-key (required field)", record_id: "post-pr-phase-remote-confirmed", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-remote-confirmed: unknown-key (record root)", record_id: "post-pr-phase-remote-confirmed", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-remote-confirmed: wrong-schema (schema version)", record_id: "post-pr-phase-remote-confirmed", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-remote-confirmed: wrong-type (typed field)", record_id: "post-pr-phase-remote-confirmed", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-remote-confirmed: wrong-ref (remediation ref)", record_id: "post-pr-phase-remote-confirmed", family: "wrong-ref", target_label: "remediation ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "post-pr-phase-remote-confirmed: wrong-hash (remediation hash)", record_id: "post-pr-phase-remote-confirmed", family: "wrong-hash", target_label: "remediation hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-remote-confirmed: wrong-bytes (remediation sidecar bytes)", record_id: "post-pr-phase-remote-confirmed", family: "wrong-bytes", target_label: "remediation sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-phase-remote-confirmed: stale-identity (stale attempt)", record_id: "post-pr-phase-remote-confirmed", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must equal run.post_pr.attempt" },
+  { name: "post-pr-phase-remote-confirmed: stale-identity (stale remediation.candidate_head_sha)", record_id: "post-pr-phase-remote-confirmed", family: "stale-identity", target_label: "stale remediation.candidate_head_sha", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push :: remote-confirmed requires confirmed remote_after_sha equal to candidate_head_sha" },
+  { name: "post-pr-phase-remote-confirmed: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-remote-confirmed", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-remote-confirmed: cross-bound-identity (cross-bound candidate head)", record_id: "post-pr-phase-remote-confirmed", family: "cross-bound-identity", target_label: "cross-bound candidate head", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.candidate_head_sha :: must differ from failed_head_sha" },
+  { name: "post-pr-phase-succeeded: missing-key (required field)", record_id: "post-pr-phase-succeeded", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-succeeded: unknown-key (record root)", record_id: "post-pr-phase-succeeded", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-succeeded: wrong-schema (schema version)", record_id: "post-pr-phase-succeeded", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-succeeded: wrong-type (typed field)", record_id: "post-pr-phase-succeeded", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-succeeded: stale-identity (stale attempt)", record_id: "post-pr-phase-succeeded", family: "stale-identity", target_label: "stale attempt", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'completed'" },
+  { name: "post-pr-phase-succeeded: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-succeeded", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-blocked: missing-key (required field)", record_id: "post-pr-phase-blocked", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-blocked: unknown-key (record root)", record_id: "post-pr-phase-blocked", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-blocked: wrong-schema (schema version)", record_id: "post-pr-phase-blocked", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-blocked: wrong-type (typed field)", record_id: "post-pr-phase-blocked", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-blocked: stale-identity (stale attempt)", record_id: "post-pr-phase-blocked", family: "stale-identity", target_label: "stale attempt", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'blocked'" },
+  { name: "post-pr-phase-blocked: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-blocked", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-phase-needs-human: missing-key (required field)", record_id: "post-pr-phase-needs-human", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: must be one of disabled, awaiting-pr, observing, failure-recording, remediation-planned, remediation-running, changes-observed, committed, revalidating, validated, push-pending, remote-confirmed, succeeded, blocked, needs-human" },
+  { name: "post-pr-phase-needs-human: unknown-key (record root)", record_id: "post-pr-phase-needs-human", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-phase-needs-human: wrong-schema (schema version)", record_id: "post-pr-phase-needs-human", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.schema_version :: must equal 1" },
+  { name: "post-pr-phase-needs-human: wrong-type (typed field)", record_id: "post-pr-phase-needs-human", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.attempt :: must be a non-negative integer" },
+  { name: "post-pr-phase-needs-human: stale-identity (stale attempt)", record_id: "post-pr-phase-needs-human", family: "stale-identity", target_label: "stale attempt", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'needs-human'" },
+  { name: "post-pr-phase-needs-human: cross-bound-identity (cross-bound phase)", record_id: "post-pr-phase-needs-human", family: "cross-bound-identity", target_label: "cross-bound phase", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.phase :: enabled policy cannot use disabled phase" },
+  { name: "post-pr-policy-disabled: missing-key (required field)", record_id: "post-pr-policy-disabled", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.enabled :: must be a boolean" },
+  { name: "post-pr-policy-disabled: unknown-key (record root)", record_id: "post-pr-policy-disabled", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-policy-disabled: wrong-type (typed field)", record_id: "post-pr-policy-disabled", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.wait_ms :: must be an integer from 1800000 to 86400000" },
+  { name: "post-pr-policy-disabled: descriptor-key-shape-drift (reviewer_login renamed)", record_id: "post-pr-policy-disabled", family: "descriptor-key-shape-drift", target_label: "reviewer_login renamed", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.review.login :: is not allowed" },
+  { name: "post-pr-policy-disabled: stale-identity (stale max_transient_errors)", record_id: "post-pr-policy-disabled", family: "stale-identity", target_label: "stale max_transient_errors", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition requires enabled persisted post-PR policy" },
+  { name: "post-pr-policy-disabled: cross-bound-identity (cross-bound review.required)", record_id: "post-pr-policy-disabled", family: "cross-bound-identity", target_label: "cross-bound review.required", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.review.reviewer_login :: must be a non-empty string" },
+  { name: "post-pr-policy-enabled: missing-key (required field)", record_id: "post-pr-policy-enabled", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.enabled :: must be a boolean" },
+  { name: "post-pr-policy-enabled: unknown-key (record root)", record_id: "post-pr-policy-enabled", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-policy-enabled: wrong-type (typed field)", record_id: "post-pr-policy-enabled", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.wait_ms :: must be an integer from 1800000 to 86400000" },
+  { name: "post-pr-policy-enabled: descriptor-key-shape-drift (reviewer_login renamed)", record_id: "post-pr-policy-enabled", family: "descriptor-key-shape-drift", target_label: "reviewer_login renamed", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.review.login :: is not allowed" },
+  { name: "post-pr-policy-enabled: stale-identity (stale max_transient_errors)", record_id: "post-pr-policy-enabled", family: "stale-identity", target_label: "stale max_transient_errors", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: persisted post-PR schema and policy are immutable" },
+  { name: "post-pr-policy-enabled: cross-bound-identity (cross-bound review.required)", record_id: "post-pr-policy-enabled", family: "cross-bound-identity", target_label: "cross-bound review.required", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.policy.review.reviewer_login :: must be null when review is not required" },
+  { name: "post-pr-observation-null: missing-key (required field)", record_id: "post-pr-observation-null", family: "missing-key", target_label: "required field", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.observation: is required, using null when unbound" },
+  { name: "post-pr-observation-null: unknown-key (record root)", record_id: "post-pr-observation-null", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-observation-null: wrong-type (typed field)", record_id: "post-pr-observation-null", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.epoch :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-observation-null: stale-identity (stale phase)", record_id: "post-pr-observation-null", family: "stale-identity", target_label: "stale phase", consumer: "validateRun", rejector: "validatePostPr :: run.pr_url :: is required while post-PR phase is observing" },
+  { name: "post-pr-observation-null: cross-bound-identity (cross-bound observation)", record_id: "post-pr-observation-null", family: "cross-bound-identity", target_label: "cross-bound observation", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.from_other_attempt :: is not allowed" },
+  { name: "post-pr-observation-active: missing-key (required field)", record_id: "post-pr-observation-active", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.epoch :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-observation-active: unknown-key (record root)", record_id: "post-pr-observation-active", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-observation-active: wrong-time (timestamp started_at)", record_id: "post-pr-observation-active", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation started_at is immutable within an epoch" },
+  { name: "post-pr-observation-active: wrong-type (typed field)", record_id: "post-pr-observation-active", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.poll_count :: must be an integer from 0 to 9007199254740991" },
+  { name: "post-pr-observation-active: descriptor-key-shape-drift (expected_head_sha renamed)", record_id: "post-pr-observation-active", family: "descriptor-key-shape-drift", target_label: "expected_head_sha renamed", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.head_sha :: is not allowed" },
+  { name: "post-pr-observation-active: stale-identity (stale epoch)", record_id: "post-pr-observation-active", family: "stale-identity", target_label: "stale epoch", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.epoch :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-observation-active: cross-bound-identity (cross-bound expected_head_sha)", record_id: "post-pr-observation-active", family: "cross-bound-identity", target_label: "cross-bound expected_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation expected_head_sha is immutable within an epoch" },
+  { name: "post-pr-observation-last-error: missing-key (required field)", record_id: "post-pr-observation-last-error", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.last_error.class :: must be one of timeout, network, rate-limit, server, account-auth, permission, not-found, protocol, command" },
+  { name: "post-pr-observation-last-error: unknown-key (record root)", record_id: "post-pr-observation-last-error", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.last_error.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-observation-last-error: wrong-time (timestamp occurred_at)", record_id: "post-pr-observation-last-error", family: "wrong-time", target_label: "timestamp occurred_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-observation-last-error: wrong-type (typed field)", record_id: "post-pr-observation-last-error", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.last_error.exit_code :: must be a non-negative integer" },
+  { name: "post-pr-observation-last-error: stale-identity (stale next_retry_at)", record_id: "post-pr-observation-last-error", family: "stale-identity", target_label: "stale next_retry_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-observation-last-error: cross-bound-identity (cross-bound class)", record_id: "post-pr-observation-last-error", family: "cross-bound-identity", target_label: "cross-bound class", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-observation-review-request: missing-key (required field)", record_id: "post-pr-observation-review-request", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.review_request.status :: must be one of pending, requested" },
+  { name: "post-pr-observation-review-request: unknown-key (record root)", record_id: "post-pr-observation-review-request", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.review_request.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-observation-review-request: wrong-time (timestamp requested_at)", record_id: "post-pr-observation-review-request", family: "wrong-time", target_label: "timestamp requested_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR reviewer requested_at cannot change once bound" },
+  { name: "post-pr-observation-review-request: wrong-type (typed field)", record_id: "post-pr-observation-review-request", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.observation.review_request.attempts :: must be an integer from 0 to 9007199254740991" },
+  { name: "post-pr-observation-review-request: stale-identity (stale attempts)", record_id: "post-pr-observation-review-request", family: "stale-identity", target_label: "stale attempts", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR reviewer request attempts cannot decrease" },
+  { name: "post-pr-observation-review-request: cross-bound-identity (cross-bound status)", record_id: "post-pr-observation-review-request", family: "cross-bound-identity", target_label: "cross-bound status", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR reviewer request status cannot move backwards" },
+  { name: "post-pr-observation-snapshot: missing-key (required field)", record_id: "post-pr-observation-snapshot", family: "missing-key", target_label: "required field", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-observation-snapshot: unknown-key (record root)", record_id: "post-pr-observation-snapshot", family: "unknown-key", target_label: "record root", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-observation-snapshot: wrong-type (typed field)", record_id: "post-pr-observation-snapshot", family: "wrong-type", target_label: "typed field", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-observation-snapshot: descriptor-key-shape-drift (checks renamed)", record_id: "post-pr-observation-snapshot", family: "descriptor-key-shape-drift", target_label: "checks renamed", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-observation-snapshot: stale-identity (stale checks.0.verdict)", record_id: "post-pr-observation-snapshot", family: "stale-identity", target_label: "stale checks.0.verdict", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-observation-snapshot: cross-bound-identity (cross-bound reviews.0.login)", record_id: "post-pr-observation-snapshot", family: "cross-bound-identity", target_label: "cross-bound reviews.0.login", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observation result changes must advance poll_count" },
+  { name: "post-pr-remediation-null: missing-key (required field)", record_id: "post-pr-remediation-null", family: "missing-key", target_label: "required field", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation: is required, using null when unbound" },
+  { name: "post-pr-remediation-null: unknown-key (record root)", record_id: "post-pr-remediation-null", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-remediation-null: wrong-type (typed field)", record_id: "post-pr-remediation-null", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.schema_version :: must be a non-negative integer" },
+  { name: "post-pr-remediation-null: stale-identity (stale phase)", record_id: "post-pr-remediation-null", family: "stale-identity", target_label: "stale phase", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: invalid post-PR phase transition 'observing' -> 'awaiting-pr'" },
+  { name: "post-pr-remediation-null: cross-bound-identity (cross-bound remediation)", record_id: "post-pr-remediation-null", family: "cross-bound-identity", target_label: "cross-bound remediation", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.from_other_attempt :: is not allowed" },
+  { name: "post-pr-remediation-active: missing-key (required field)", record_id: "post-pr-remediation-active", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-remediation-active: unknown-key (record root)", record_id: "post-pr-remediation-active", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-remediation-active: wrong-schema (schema version)", record_id: "post-pr-remediation-active", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.schema_version :: must equal 1" },
+  { name: "post-pr-remediation-active: wrong-kind (kind)", record_id: "post-pr-remediation-active", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.owner.kind :: must be one of slice, integration" },
+  { name: "post-pr-remediation-active: wrong-type (typed field)", record_id: "post-pr-remediation-active", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.owner :: must be an object" },
+  { name: "post-pr-remediation-active: wrong-ref (failure-evidence ref)", record_id: "post-pr-remediation-active", family: "wrong-ref", target_label: "failure-evidence ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs :: must bind the current failure evidence ref/hash" },
+  { name: "post-pr-remediation-active: wrong-ref (remediation ref)", record_id: "post-pr-remediation-active", family: "wrong-ref", target_label: "remediation ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "post-pr-remediation-active: wrong-hash (failure-evidence hash)", record_id: "post-pr-remediation-active", family: "wrong-hash", target_label: "failure-evidence hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs :: must bind the current failure evidence ref/hash" },
+  { name: "post-pr-remediation-active: wrong-hash (remediation hash)", record_id: "post-pr-remediation-active", family: "wrong-hash", target_label: "remediation hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-remediation-active: wrong-bytes (failure-evidence sidecar bytes)", record_id: "post-pr-remediation-active", family: "wrong-bytes", target_label: "failure-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0].hash :: must match referenced file" },
+  { name: "post-pr-remediation-active: wrong-bytes (remediation sidecar bytes)", record_id: "post-pr-remediation-active", family: "wrong-bytes", target_label: "remediation sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.remediation.remediation_evidence_ref :: run.post_pr.remediation.remediation_evidence_ref.hash :: must match referenced file" },
+  { name: "post-pr-remediation-active: stale-identity (stale candidate_head_sha)", record_id: "post-pr-remediation-active", family: "stale-identity", target_label: "stale candidate_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation candidate_head_sha cannot change once bound" },
+  { name: "post-pr-remediation-active: cross-bound-identity (cross-bound candidate head)", record_id: "post-pr-remediation-active", family: "cross-bound-identity", target_label: "cross-bound candidate head", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.candidate_head_sha :: must differ from failed_head_sha" },
+  { name: "post-pr-remediation-owner: missing-key (required field)", record_id: "post-pr-remediation-owner", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.owner.kind :: must be one of slice, integration" },
+  { name: "post-pr-remediation-owner: unknown-key (record root)", record_id: "post-pr-remediation-owner", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.owner.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-remediation-owner: wrong-kind (kind)", record_id: "post-pr-remediation-owner", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.owner :: integration owner requires test lane and test-verifier route" },
+  { name: "post-pr-remediation-owner: wrong-type (typed field)", record_id: "post-pr-remediation-owner", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.owner.slice_id :: must be a non-empty string" },
+  { name: "post-pr-remediation-owner: stale-identity (stale slice_id)", record_id: "post-pr-remediation-owner", family: "stale-identity", target_label: "stale slice_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation owner is immutable within an attempt" },
+  { name: "post-pr-remediation-owner: cross-bound-identity (cross-bound stack)", record_id: "post-pr-remediation-owner", family: "cross-bound-identity", target_label: "cross-bound stack", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.owner :: slice owner requires matching slice lane and builder route" },
+  { name: "post-pr-remediation-changes: missing-key (required field)", record_id: "post-pr-remediation-changes", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.changes.paths :: must be an array" },
+  { name: "post-pr-remediation-changes: unknown-key (record root)", record_id: "post-pr-remediation-changes", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.changes.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-remediation-changes: wrong-type (typed field)", record_id: "post-pr-remediation-changes", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.changes.entries :: must be an array" },
+  { name: "post-pr-remediation-changes: wrong-hash (hash tree_hash)", record_id: "post-pr-remediation-changes", family: "wrong-hash", target_label: "hash tree_hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-remediation-changes: descriptor-key-shape-drift (paths renamed)", record_id: "post-pr-remediation-changes", family: "descriptor-key-shape-drift", target_label: "paths renamed", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.changes.changed_paths :: is not allowed" },
+  { name: "post-pr-remediation-changes: stale-identity (stale tree_hash)", record_id: "post-pr-remediation-changes", family: "stale-identity", target_label: "stale tree_hash", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observed remediation changes are immutable" },
+  { name: "post-pr-remediation-changes: cross-bound-identity (cross-bound paths.0)", record_id: "post-pr-remediation-changes", family: "cross-bound-identity", target_label: "cross-bound paths.0", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observed remediation changes are immutable" },
+  { name: "post-pr-remediation-change-entry: missing-key (required field)", record_id: "post-pr-remediation-change-entry", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.changes.entries[0].path :: must be a non-empty string" },
+  { name: "post-pr-remediation-change-entry: unknown-key (record root)", record_id: "post-pr-remediation-change-entry", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.changes.entries[0].unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-remediation-change-entry: wrong-type (typed field)", record_id: "post-pr-remediation-change-entry", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.changes.entries[0].status :: must be one of modified, added, untracked, deleted, renamed, copied" },
+  { name: "post-pr-remediation-change-entry: wrong-ref (changed path)", record_id: "post-pr-remediation-change-entry", family: "wrong-ref", target_label: "changed path", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-remediation-change-entry: descriptor-key-shape-drift (previous_path renamed)", record_id: "post-pr-remediation-change-entry", family: "descriptor-key-shape-drift", target_label: "previous_path renamed", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.changes.entries[0].old_path :: is not allowed" },
+  { name: "post-pr-remediation-change-entry: stale-identity (stale old_mode)", record_id: "post-pr-remediation-change-entry", family: "stale-identity", target_label: "stale old_mode", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observed remediation changes are immutable" },
+  { name: "post-pr-remediation-change-entry: cross-bound-identity (cross-bound path)", record_id: "post-pr-remediation-change-entry", family: "cross-bound-identity", target_label: "cross-bound path", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR observed remediation changes are immutable" },
+  { name: "post-pr-dispatch-planned: missing-key (required field)", record_id: "post-pr-dispatch-planned", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.id :: must be a non-empty string" },
+  { name: "post-pr-dispatch-planned: unknown-key (record root)", record_id: "post-pr-dispatch-planned", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-dispatch-planned: wrong-time (timestamp started_at)", record_id: "post-pr-dispatch-planned", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.dispatch.started_at: must be an ISO timestamp or null; run.post_pr.remediation.dispatch: planned dispatch requires null start and return times" },
+  { name: "post-pr-dispatch-planned: wrong-type (typed field)", record_id: "post-pr-dispatch-planned", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.status :: must be one of planned, running, returned" },
+  { name: "post-pr-dispatch-planned: stale-identity (stale status)", record_id: "post-pr-dispatch-planned", family: "stale-identity", target_label: "stale status", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.dispatch: running dispatch requires a start time and null return time" },
+  { name: "post-pr-dispatch-planned: cross-bound-identity (cross-bound subject)", record_id: "post-pr-dispatch-planned", family: "cross-bound-identity", target_label: "cross-bound subject", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation dispatch.subject is immutable within an attempt" },
+  { name: "post-pr-dispatch-running: missing-key (required field)", record_id: "post-pr-dispatch-running", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.id :: must be a non-empty string" },
+  { name: "post-pr-dispatch-running: unknown-key (record root)", record_id: "post-pr-dispatch-running", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-dispatch-running: wrong-time (timestamp started_at)", record_id: "post-pr-dispatch-running", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.dispatch.started_at: must be an ISO timestamp or null; run.post_pr.remediation.dispatch: running dispatch requires a start time and null return time" },
+  { name: "post-pr-dispatch-running: wrong-type (typed field)", record_id: "post-pr-dispatch-running", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.status :: must be one of planned, running, returned" },
+  { name: "post-pr-dispatch-running: stale-identity (stale status)", record_id: "post-pr-dispatch-running", family: "stale-identity", target_label: "stale status", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation dispatch status cannot move backwards" },
+  { name: "post-pr-dispatch-running: cross-bound-identity (cross-bound subject)", record_id: "post-pr-dispatch-running", family: "cross-bound-identity", target_label: "cross-bound subject", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation dispatch.subject is immutable within an attempt" },
+  { name: "post-pr-dispatch-returned: missing-key (required field)", record_id: "post-pr-dispatch-returned", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.id :: must be a non-empty string" },
+  { name: "post-pr-dispatch-returned: unknown-key (record root)", record_id: "post-pr-dispatch-returned", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-dispatch-returned: wrong-time (timestamp returned_at)", record_id: "post-pr-dispatch-returned", family: "wrong-time", target_label: "timestamp returned_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.dispatch.returned_at: must be an ISO timestamp or null; run.post_pr.remediation.dispatch: returned dispatch requires start and return times" },
+  { name: "post-pr-dispatch-returned: wrong-type (typed field)", record_id: "post-pr-dispatch-returned", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.dispatch.status :: must be one of planned, running, returned" },
+  { name: "post-pr-dispatch-returned: stale-identity (stale status)", record_id: "post-pr-dispatch-returned", family: "stale-identity", target_label: "stale status", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation dispatch status cannot move backwards" },
+  { name: "post-pr-dispatch-returned: cross-bound-identity (cross-bound subject)", record_id: "post-pr-dispatch-returned", family: "cross-bound-identity", target_label: "cross-bound subject", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation dispatch.subject is immutable within an attempt" },
+  { name: "post-pr-revalidation-empty: missing-key (required field)", record_id: "post-pr-revalidation-empty", family: "missing-key", target_label: "required field", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.canonical_verdict: canonical authority keys must be all absent or all present" },
+  { name: "post-pr-revalidation-empty: unknown-key (record root)", record_id: "post-pr-revalidation-empty", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-revalidation-empty: wrong-type (typed field)", record_id: "post-pr-revalidation-empty", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.validator_verdict :: must be one of GO, GO-WITH-NITS, NO-GO" },
+  { name: "post-pr-revalidation-empty: stale-identity (stale canonical_verdict)", record_id: "post-pr-revalidation-empty", family: "stale-identity", target_label: "stale canonical_verdict", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.canonical_verdict: canonical authority ref/hash/verdict must be a complete tuple" },
+  { name: "post-pr-revalidation-empty: cross-bound-identity (cross-bound validator_verdict)", record_id: "post-pr-revalidation-empty", family: "cross-bound-identity", target_label: "cross-bound validator_verdict", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.validator_verdict: validator authority ref/hash/verdict must be a complete tuple" },
+  { name: "post-pr-revalidation-bound: missing-key (required field)", record_id: "post-pr-revalidation-bound", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.verdict :: must equal revalidation.canonical_verdict for a bound canonical job" },
+  { name: "post-pr-revalidation-bound: unknown-key (record root)", record_id: "post-pr-revalidation-bound", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-revalidation-bound: wrong-type (typed field)", record_id: "post-pr-revalidation-bound", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.validator_verdict :: must be one of GO, GO-WITH-NITS, NO-GO" },
+  { name: "post-pr-revalidation-bound: wrong-ref (canonical ref)", record_id: "post-pr-revalidation-bound", family: "wrong-ref", target_label: "canonical ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.result_ref :: must equal revalidation.canonical_evidence_ref for a bound canonical job" },
+  { name: "post-pr-revalidation-bound: wrong-ref (validator ref)", record_id: "post-pr-revalidation-bound", family: "wrong-ref", target_label: "validator ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.result_ref :: must equal revalidation.validator_review_ref for a bound validator job" },
+  { name: "post-pr-revalidation-bound: wrong-ref (security ref)", record_id: "post-pr-revalidation-bound", family: "wrong-ref", target_label: "security ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.result_ref :: must equal revalidation.security_review_ref for a bound security job" },
+  { name: "post-pr-revalidation-bound: wrong-hash (canonical hash)", record_id: "post-pr-revalidation-bound", family: "wrong-hash", target_label: "canonical hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.result_hash :: must equal revalidation.canonical_evidence_hash for a bound canonical job" },
+  { name: "post-pr-revalidation-bound: wrong-hash (validator hash)", record_id: "post-pr-revalidation-bound", family: "wrong-hash", target_label: "validator hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.result_hash :: must equal revalidation.validator_review_hash for a bound validator job" },
+  { name: "post-pr-revalidation-bound: wrong-hash (security hash)", record_id: "post-pr-revalidation-bound", family: "wrong-hash", target_label: "security hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.result_hash :: must equal revalidation.security_review_hash for a bound security job" },
+  { name: "post-pr-revalidation-bound: wrong-bytes (canonical sidecar bytes)", record_id: "post-pr-revalidation-bound", family: "wrong-bytes", target_label: "canonical sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-revalidation-bound: wrong-bytes (validator sidecar bytes)", record_id: "post-pr-revalidation-bound", family: "wrong-bytes", target_label: "validator sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-revalidation-bound: wrong-bytes (security sidecar bytes)", record_id: "post-pr-revalidation-bound", family: "wrong-bytes", target_label: "security sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-revalidation-bound: stale-identity (stale canonical_verdict)", record_id: "post-pr-revalidation-bound", family: "stale-identity", target_label: "stale canonical_verdict", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.verdict :: must equal revalidation.canonical_verdict for a bound canonical job" },
+  { name: "post-pr-revalidation-bound: cross-bound-identity (cross-bound security_verdict)", record_id: "post-pr-revalidation-bound", family: "cross-bound-identity", target_label: "cross-bound security_verdict", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.verdict :: must equal revalidation.security_verdict for a bound security job" },
+  { name: "post-pr-canonical-job-planned: missing-key (required field)", record_id: "post-pr-canonical-job-planned", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-canonical-job-planned: unknown-key (record root)", record_id: "post-pr-canonical-job-planned", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-canonical-job-planned: wrong-time (timestamp started_at)", record_id: "post-pr-canonical-job-planned", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.canonical.started_at: must be an ISO timestamp or null; run.post_pr.remediation.revalidation.jobs.canonical: planned job must not carry started steering authority" },
+  { name: "post-pr-canonical-job-planned: wrong-type (typed field)", record_id: "post-pr-canonical-job-planned", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-canonical-job-planned: stale-identity (stale steering_generation)", record_id: "post-pr-canonical-job-planned", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.canonical: planned job must not carry started steering authority" },
+  { name: "post-pr-canonical-job-planned: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-canonical-job-planned", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR canonical dispatch id is immutable" },
+  { name: "post-pr-canonical-job-running: missing-key (required field)", record_id: "post-pr-canonical-job-running", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-canonical-job-running: unknown-key (record root)", record_id: "post-pr-canonical-job-running", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-canonical-job-running: wrong-time (timestamp started_at)", record_id: "post-pr-canonical-job-running", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.canonical.started_at: must be an ISO timestamp or null" },
+  { name: "post-pr-canonical-job-running: wrong-type (typed field)", record_id: "post-pr-canonical-job-running", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-canonical-job-running: stale-identity (stale steering_generation)", record_id: "post-pr-canonical-job-running", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR canonical job steering_generation cannot change once bound" },
+  { name: "post-pr-canonical-job-running: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-canonical-job-running", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR canonical dispatch id is immutable" },
+  { name: "post-pr-canonical-job-retry-wait: missing-key (required field)", record_id: "post-pr-canonical-job-retry-wait", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-canonical-job-retry-wait: unknown-key (record root)", record_id: "post-pr-canonical-job-retry-wait", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-canonical-job-retry-wait: wrong-time (timestamp next_retry_at)", record_id: "post-pr-canonical-job-retry-wait", family: "wrong-time", target_label: "timestamp next_retry_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.canonical.next_retry_at: must be an ISO timestamp or null" },
+  { name: "post-pr-canonical-job-retry-wait: wrong-type (typed field)", record_id: "post-pr-canonical-job-retry-wait", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-canonical-job-retry-wait: stale-identity (stale steering_generation)", record_id: "post-pr-canonical-job-retry-wait", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR canonical job steering_generation cannot change once bound" },
+  { name: "post-pr-canonical-job-retry-wait: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-canonical-job-retry-wait", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR canonical dispatch id is immutable" },
+  { name: "post-pr-canonical-job-bound: missing-key (required field)", record_id: "post-pr-canonical-job-bound", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-canonical-job-bound: unknown-key (record root)", record_id: "post-pr-canonical-job-bound", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-canonical-job-bound: wrong-type (typed field)", record_id: "post-pr-canonical-job-bound", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-canonical-job-bound: wrong-ref (canonical-result ref)", record_id: "post-pr-canonical-job-bound", family: "wrong-ref", target_label: "canonical-result ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.result_ref :: must equal revalidation.canonical_evidence_ref for a bound canonical job" },
+  { name: "post-pr-canonical-job-bound: wrong-hash (canonical-result hash)", record_id: "post-pr-canonical-job-bound", family: "wrong-hash", target_label: "canonical-result hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.result_hash :: must equal revalidation.canonical_evidence_hash for a bound canonical job" },
+  { name: "post-pr-canonical-job-bound: wrong-bytes (canonical-result sidecar bytes)", record_id: "post-pr-canonical-job-bound", family: "wrong-bytes", target_label: "canonical-result sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-canonical-job-bound: stale-identity (stale verdict)", record_id: "post-pr-canonical-job-bound", family: "stale-identity", target_label: "stale verdict", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.canonical.verdict :: must equal revalidation.canonical_verdict for a bound canonical job" },
+  { name: "post-pr-canonical-job-bound: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-canonical-job-bound", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR canonical dispatch id is immutable" },
+  { name: "post-pr-validator-job-planned: missing-key (required field)", record_id: "post-pr-validator-job-planned", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-validator-job-planned: unknown-key (record root)", record_id: "post-pr-validator-job-planned", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-validator-job-planned: wrong-time (timestamp started_at)", record_id: "post-pr-validator-job-planned", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.validator.started_at: must be an ISO timestamp or null; run.post_pr.remediation.revalidation.jobs.validator: planned job must not carry started steering authority" },
+  { name: "post-pr-validator-job-planned: wrong-type (typed field)", record_id: "post-pr-validator-job-planned", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-validator-job-planned: stale-identity (stale steering_generation)", record_id: "post-pr-validator-job-planned", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.validator: planned job must not carry started steering authority" },
+  { name: "post-pr-validator-job-planned: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-validator-job-planned", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR validator dispatch id is immutable" },
+  { name: "post-pr-validator-job-running: missing-key (required field)", record_id: "post-pr-validator-job-running", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-validator-job-running: unknown-key (record root)", record_id: "post-pr-validator-job-running", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-validator-job-running: wrong-time (timestamp started_at)", record_id: "post-pr-validator-job-running", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.validator.started_at: must be an ISO timestamp or null" },
+  { name: "post-pr-validator-job-running: wrong-type (typed field)", record_id: "post-pr-validator-job-running", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-validator-job-running: stale-identity (stale steering_generation)", record_id: "post-pr-validator-job-running", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR validator job steering_generation cannot change once bound" },
+  { name: "post-pr-validator-job-running: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-validator-job-running", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR validator dispatch id is immutable" },
+  { name: "post-pr-validator-job-retry-wait: missing-key (required field)", record_id: "post-pr-validator-job-retry-wait", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-validator-job-retry-wait: unknown-key (record root)", record_id: "post-pr-validator-job-retry-wait", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-validator-job-retry-wait: wrong-time (timestamp next_retry_at)", record_id: "post-pr-validator-job-retry-wait", family: "wrong-time", target_label: "timestamp next_retry_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.validator.next_retry_at: must be an ISO timestamp or null" },
+  { name: "post-pr-validator-job-retry-wait: wrong-type (typed field)", record_id: "post-pr-validator-job-retry-wait", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-validator-job-retry-wait: stale-identity (stale steering_generation)", record_id: "post-pr-validator-job-retry-wait", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR validator job steering_generation cannot change once bound" },
+  { name: "post-pr-validator-job-retry-wait: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-validator-job-retry-wait", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR validator dispatch id is immutable" },
+  { name: "post-pr-validator-job-bound: missing-key (required field)", record_id: "post-pr-validator-job-bound", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-validator-job-bound: unknown-key (record root)", record_id: "post-pr-validator-job-bound", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-validator-job-bound: wrong-type (typed field)", record_id: "post-pr-validator-job-bound", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-validator-job-bound: wrong-ref (validator-result ref)", record_id: "post-pr-validator-job-bound", family: "wrong-ref", target_label: "validator-result ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.result_ref :: must equal revalidation.validator_review_ref for a bound validator job" },
+  { name: "post-pr-validator-job-bound: wrong-hash (validator-result hash)", record_id: "post-pr-validator-job-bound", family: "wrong-hash", target_label: "validator-result hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.result_hash :: must equal revalidation.validator_review_hash for a bound validator job" },
+  { name: "post-pr-validator-job-bound: wrong-bytes (validator-result sidecar bytes)", record_id: "post-pr-validator-job-bound", family: "wrong-bytes", target_label: "validator-result sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-validator-job-bound: stale-identity (stale verdict)", record_id: "post-pr-validator-job-bound", family: "stale-identity", target_label: "stale verdict", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.validator.verdict :: must equal revalidation.validator_verdict for a bound validator job" },
+  { name: "post-pr-validator-job-bound: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-validator-job-bound", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR validator dispatch id is immutable" },
+  { name: "post-pr-security-job-planned: missing-key (required field)", record_id: "post-pr-security-job-planned", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-security-job-planned: unknown-key (record root)", record_id: "post-pr-security-job-planned", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-security-job-planned: wrong-time (timestamp started_at)", record_id: "post-pr-security-job-planned", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.security.started_at: must be an ISO timestamp or null; run.post_pr.remediation.revalidation.jobs.security: planned job must not carry started steering authority" },
+  { name: "post-pr-security-job-planned: wrong-type (typed field)", record_id: "post-pr-security-job-planned", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-security-job-planned: stale-identity (stale steering_generation)", record_id: "post-pr-security-job-planned", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.security: planned job must not carry started steering authority" },
+  { name: "post-pr-security-job-planned: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-security-job-planned", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR security dispatch id is immutable" },
+  { name: "post-pr-security-job-running: missing-key (required field)", record_id: "post-pr-security-job-running", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-security-job-running: unknown-key (record root)", record_id: "post-pr-security-job-running", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-security-job-running: wrong-time (timestamp started_at)", record_id: "post-pr-security-job-running", family: "wrong-time", target_label: "timestamp started_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.security.started_at: must be an ISO timestamp or null" },
+  { name: "post-pr-security-job-running: wrong-type (typed field)", record_id: "post-pr-security-job-running", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-security-job-running: stale-identity (stale steering_generation)", record_id: "post-pr-security-job-running", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR security job steering_generation cannot change once bound" },
+  { name: "post-pr-security-job-running: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-security-job-running", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR security dispatch id is immutable" },
+  { name: "post-pr-security-job-retry-wait: missing-key (required field)", record_id: "post-pr-security-job-retry-wait", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-security-job-retry-wait: unknown-key (record root)", record_id: "post-pr-security-job-retry-wait", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-security-job-retry-wait: wrong-time (timestamp next_retry_at)", record_id: "post-pr-security-job-retry-wait", family: "wrong-time", target_label: "timestamp next_retry_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.revalidation.jobs.security.next_retry_at: must be an ISO timestamp or null" },
+  { name: "post-pr-security-job-retry-wait: wrong-type (typed field)", record_id: "post-pr-security-job-retry-wait", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-security-job-retry-wait: stale-identity (stale steering_generation)", record_id: "post-pr-security-job-retry-wait", family: "stale-identity", target_label: "stale steering_generation", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR security job steering_generation cannot change once bound" },
+  { name: "post-pr-security-job-retry-wait: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-security-job-retry-wait", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR security dispatch id is immutable" },
+  { name: "post-pr-security-job-bound: missing-key (required field)", record_id: "post-pr-security-job-bound", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.dispatch_id :: must be a non-empty string" },
+  { name: "post-pr-security-job-bound: unknown-key (record root)", record_id: "post-pr-security-job-bound", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-security-job-bound: wrong-type (typed field)", record_id: "post-pr-security-job-bound", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.status :: must be one of planned, running, retry-wait, bound" },
+  { name: "post-pr-security-job-bound: wrong-ref (security-result ref)", record_id: "post-pr-security-job-bound", family: "wrong-ref", target_label: "security-result ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.result_ref :: must equal revalidation.security_review_ref for a bound security job" },
+  { name: "post-pr-security-job-bound: wrong-hash (security-result hash)", record_id: "post-pr-security-job-bound", family: "wrong-hash", target_label: "security-result hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.result_hash :: must equal revalidation.security_review_hash for a bound security job" },
+  { name: "post-pr-security-job-bound: wrong-bytes (security-result sidecar bytes)", record_id: "post-pr-security-job-bound", family: "wrong-bytes", target_label: "security-result sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-security-job-bound: stale-identity (stale verdict)", record_id: "post-pr-security-job-bound", family: "stale-identity", target_label: "stale verdict", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.revalidation.jobs.security.verdict :: must equal revalidation.security_verdict for a bound security job" },
+  { name: "post-pr-security-job-bound: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-security-job-bound", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR security dispatch id is immutable" },
+  { name: "post-pr-push-not-ready: missing-key (required field)", record_id: "post-pr-push-not-ready", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.status :: must be one of not-ready, pending, confirmed" },
+  { name: "post-pr-push-not-ready: unknown-key (record root)", record_id: "post-pr-push-not-ready", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-push-not-ready: wrong-time (timestamp pushed_at)", record_id: "post-pr-push-not-ready", family: "wrong-time", target_label: "timestamp pushed_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.push.pushed_at: must be an ISO timestamp or null; run.post_pr.remediation.push: not-ready push must not carry remote, local, or publication authority" },
+  { name: "post-pr-push-not-ready: wrong-type (typed field)", record_id: "post-pr-push-not-ready", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.consecutive_transient_errors :: must be an integer from 0 to 9007199254740991" },
+  { name: "post-pr-push-not-ready: stale-identity (stale remote_before_sha)", record_id: "post-pr-push-not-ready", family: "stale-identity", target_label: "stale remote_before_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.push: not-ready push must not carry remote, local, or publication authority" },
+  { name: "post-pr-push-not-ready: cross-bound-identity (cross-bound local_head_sha)", record_id: "post-pr-push-not-ready", family: "cross-bound-identity", target_label: "cross-bound local_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.push: not-ready push must not carry remote, local, or publication authority" },
+  { name: "post-pr-push-pending: missing-key (required field)", record_id: "post-pr-push-pending", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.status :: must be one of not-ready, pending, confirmed" },
+  { name: "post-pr-push-pending: unknown-key (record root)", record_id: "post-pr-push-pending", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-push-pending: wrong-time (timestamp pushed_at)", record_id: "post-pr-push-pending", family: "wrong-time", target_label: "timestamp pushed_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.push.pushed_at: must be an ISO timestamp or null; run.post_pr.remediation.push: pending push must bind remote_before and the current candidate only" },
+  { name: "post-pr-push-pending: wrong-type (typed field)", record_id: "post-pr-push-pending", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.consecutive_transient_errors :: must be an integer from 0 to 9007199254740991" },
+  { name: "post-pr-push-pending: stale-identity (stale remote_before_sha)", record_id: "post-pr-push-pending", family: "stale-identity", target_label: "stale remote_before_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation push.remote_before_sha cannot change once bound" },
+  { name: "post-pr-push-pending: cross-bound-identity (cross-bound local_head_sha)", record_id: "post-pr-push-pending", family: "cross-bound-identity", target_label: "cross-bound local_head_sha", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.local_head_sha :: must equal candidate_head_sha while push is pending" },
+  { name: "post-pr-push-confirmed: missing-key (required field)", record_id: "post-pr-push-confirmed", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.status :: must be one of not-ready, pending, confirmed" },
+  { name: "post-pr-push-confirmed: unknown-key (record root)", record_id: "post-pr-push-confirmed", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-push-confirmed: wrong-time (timestamp pushed_at)", record_id: "post-pr-push-confirmed", family: "wrong-time", target_label: "timestamp pushed_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation push.pushed_at cannot change once bound" },
+  { name: "post-pr-push-confirmed: wrong-type (typed field)", record_id: "post-pr-push-confirmed", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.consecutive_transient_errors :: must be an integer from 0 to 9007199254740991" },
+  { name: "post-pr-push-confirmed: stale-identity (stale remote_before_sha)", record_id: "post-pr-push-confirmed", family: "stale-identity", target_label: "stale remote_before_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation push.remote_before_sha cannot change once bound" },
+  { name: "post-pr-push-confirmed: cross-bound-identity (cross-bound local_head_sha)", record_id: "post-pr-push-confirmed", family: "cross-bound-identity", target_label: "cross-bound local_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR remediation push.local_head_sha cannot change once bound" },
+  { name: "post-pr-push-last-error: missing-key (required field)", record_id: "post-pr-push-last-error", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.last_error.operation :: must be one of remote-head, fast-forward-push, remote-confirmation" },
+  { name: "post-pr-push-last-error: unknown-key (record root)", record_id: "post-pr-push-last-error", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.remediation.push.last_error.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-push-last-error: wrong-time (timestamp observed_at)", record_id: "post-pr-push-last-error", family: "wrong-time", target_label: "timestamp observed_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.push.last_error.observed_at: must be an ISO timestamp" },
+  { name: "post-pr-push-last-error: wrong-type (typed field)", record_id: "post-pr-push-last-error", family: "wrong-type", target_label: "typed field", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.push.last_error.exit_code: must be a non-negative integer" },
+  { name: "post-pr-push-last-error: stale-identity (stale next_retry_at)", record_id: "post-pr-push-last-error", family: "stale-identity", target_label: "stale next_retry_at", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.push.last_error.next_retry_at: must equal push.next_retry_at" },
+  { name: "post-pr-push-last-error: cross-bound-identity (cross-bound candidate_head_sha)", record_id: "post-pr-push-last-error", family: "cross-bound-identity", target_label: "cross-bound candidate_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: ValidationError :: run.post_pr.remediation.push.last_error.candidate_head_sha: must equal remediation candidate_head_sha" },
+  { name: "post-pr-evidence-sidecar: missing-key (required field)", record_id: "post-pr-evidence-sidecar", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs[0].ref :: must be a non-empty string" },
+  { name: "post-pr-evidence-sidecar: unknown-key (record root)", record_id: "post-pr-evidence-sidecar", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs[0].unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-evidence-sidecar: wrong-type (typed field)", record_id: "post-pr-evidence-sidecar", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs[0].hash :: must be a sha256 hash" },
+  { name: "post-pr-evidence-sidecar: wrong-ref (sidecar ref)", record_id: "post-pr-evidence-sidecar", family: "wrong-ref", target_label: "sidecar ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs :: must bind the current failure evidence ref/hash" },
+  { name: "post-pr-evidence-sidecar: wrong-hash (sidecar hash)", record_id: "post-pr-evidence-sidecar", family: "wrong-hash", target_label: "sidecar hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs :: must bind the current failure evidence ref/hash" },
+  { name: "post-pr-evidence-sidecar: wrong-bytes (sidecar sidecar bytes)", record_id: "post-pr-evidence-sidecar", family: "wrong-bytes", target_label: "sidecar sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0].hash :: must match referenced file" },
+  { name: "post-pr-evidence-sidecar: stale-identity (stale hash)", record_id: "post-pr-evidence-sidecar", family: "stale-identity", target_label: "stale hash", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs :: must bind the current failure evidence ref/hash" },
+  { name: "post-pr-evidence-sidecar: cross-bound-identity (cross-bound ref)", record_id: "post-pr-evidence-sidecar", family: "cross-bound-identity", target_label: "cross-bound ref", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.evidence_refs :: must bind the current failure evidence ref/hash" },
+  { name: "post-pr-continuation-review-null: missing-key (required field)", record_id: "post-pr-continuation-review-null", family: "missing-key", target_label: "required field", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'completed'" },
+  { name: "post-pr-continuation-review-null: unknown-key (record root)", record_id: "post-pr-continuation-review-null", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-continuation-review-null: wrong-type (typed field)", record_id: "post-pr-continuation-review-null", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.continuation_review.ref :: must be a non-empty string" },
+  { name: "post-pr-continuation-review-null: stale-identity (stale phase)", record_id: "post-pr-continuation-review-null", family: "stale-identity", target_label: "stale phase", consumer: "validateRun", rejector: "validatePostPr :: run.status :: must be blocked when post-PR phase is blocked" },
+  { name: "post-pr-continuation-review-null: cross-bound-identity (cross-bound continuation_review)", record_id: "post-pr-continuation-review-null", family: "cross-bound-identity", target_label: "cross-bound continuation_review", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.continuation_review.from_other_attempt :: is not allowed" },
+  { name: "post-pr-continuation-review-bound: missing-key (required field)", record_id: "post-pr-continuation-review-bound", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.continuation_review.ref :: must be a non-empty string" },
+  { name: "post-pr-continuation-review-bound: unknown-key (record root)", record_id: "post-pr-continuation-review-bound", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.continuation_review.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-continuation-review-bound: wrong-type (typed field)", record_id: "post-pr-continuation-review-bound", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.continuation_review.hash :: must be a sha256 hash" },
+  { name: "post-pr-continuation-review-bound: wrong-ref (continuation-review ref)", record_id: "post-pr-continuation-review-bound", family: "wrong-ref", target_label: "continuation-review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-continuation-review-bound: wrong-hash (continuation-review hash)", record_id: "post-pr-continuation-review-bound", family: "wrong-hash", target_label: "continuation-review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-continuation-review-bound: wrong-bytes (continuation-review sidecar bytes)", record_id: "post-pr-continuation-review-bound", family: "wrong-bytes", target_label: "continuation-review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.post_pr.evidence_refs[0] :: run.post_pr.evidence_refs[0] :: missing evidence ref: evidence/post-pr-ci.attempt-1.json" },
+  { name: "post-pr-continuation-review-bound: stale-identity (stale hash)", record_id: "post-pr-continuation-review-bound", family: "stale-identity", target_label: "stale hash", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'blocked'" },
+  { name: "post-pr-continuation-review-bound: cross-bound-identity (cross-bound ref)", record_id: "post-pr-continuation-review-bound", family: "cross-bound-identity", target_label: "cross-bound ref", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'blocked'" },
+  { name: "post-pr-terminal-fact-null: missing-key (required field)", record_id: "post-pr-terminal-fact-null", family: "missing-key", target_label: "required field", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'completed'" },
+  { name: "post-pr-terminal-fact-null: unknown-key (record root)", record_id: "post-pr-terminal-fact-null", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-null: wrong-type (typed field)", record_id: "post-pr-terminal-fact-null", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: is allowed only for fact-bound post-PR terminal reasons" },
+  { name: "post-pr-terminal-fact-null: stale-identity (stale phase)", record_id: "post-pr-terminal-fact-null", family: "stale-identity", target_label: "stale phase", consumer: "validateRun", rejector: "validatePostPr :: run.status :: must be blocked when post-PR phase is blocked" },
+  { name: "post-pr-terminal-fact-null: cross-bound-identity (cross-bound terminal_fact)", record_id: "post-pr-terminal-fact-null", family: "cross-bound-identity", target_label: "cross-bound terminal_fact", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: is allowed only for fact-bound post-PR terminal reasons" },
+  { name: "post-pr-terminal-fact-account-switch-failed-github-auth: missing-key (required field)", record_id: "post-pr-terminal-fact-account-switch-failed-github-auth", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of account-switch-failed" },
+  { name: "post-pr-terminal-fact-account-switch-failed-github-auth: unknown-key (record root)", record_id: "post-pr-terminal-fact-account-switch-failed-github-auth", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-account-switch-failed-github-auth: wrong-schema (schema version)", record_id: "post-pr-terminal-fact-account-switch-failed-github-auth", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.schema_version :: must equal 1" },
+  { name: "post-pr-terminal-fact-account-switch-failed-github-auth: wrong-kind (kind)", record_id: "post-pr-terminal-fact-account-switch-failed-github-auth", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of account-switch-failed" },
+  { name: "post-pr-terminal-fact-account-switch-failed-github-auth: wrong-time (timestamp observed_at)", record_id: "post-pr-terminal-fact-account-switch-failed-github-auth", family: "wrong-time", target_label: "timestamp observed_at", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.observed_at :: must be an ISO timestamp" },
+  { name: "post-pr-terminal-fact-account-switch-failed-github-auth: wrong-type (typed field)", record_id: "post-pr-terminal-fact-account-switch-failed-github-auth", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.exit_code :: must be an integer from 0 to 255" },
+  { name: "post-pr-terminal-fact-account-switch-failed-github-auth: stale-identity (stale exit_code)", record_id: "post-pr-terminal-fact-account-switch-failed-github-auth", family: "stale-identity", target_label: "stale exit_code", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: must bind the persisted account-switch error exactly" },
+  { name: "post-pr-terminal-fact-account-switch-failed-github-auth: cross-bound-identity (cross-bound github_account)", record_id: "post-pr-terminal-fact-account-switch-failed-github-auth", family: "cross-bound-identity", target_label: "cross-bound github_account", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.github_account :: must match run.github_account" },
+  { name: "post-pr-terminal-fact-account-switch-failed-push: missing-key (required field)", record_id: "post-pr-terminal-fact-account-switch-failed-push", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of account-switch-failed" },
+  { name: "post-pr-terminal-fact-account-switch-failed-push: unknown-key (record root)", record_id: "post-pr-terminal-fact-account-switch-failed-push", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-account-switch-failed-push: wrong-schema (schema version)", record_id: "post-pr-terminal-fact-account-switch-failed-push", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.schema_version :: must equal 1" },
+  { name: "post-pr-terminal-fact-account-switch-failed-push: wrong-kind (kind)", record_id: "post-pr-terminal-fact-account-switch-failed-push", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of account-switch-failed" },
+  { name: "post-pr-terminal-fact-account-switch-failed-push: wrong-time (timestamp observed_at)", record_id: "post-pr-terminal-fact-account-switch-failed-push", family: "wrong-time", target_label: "timestamp observed_at", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.observed_at :: must be an ISO timestamp" },
+  { name: "post-pr-terminal-fact-account-switch-failed-push: wrong-type (typed field)", record_id: "post-pr-terminal-fact-account-switch-failed-push", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-account-switch-failed-push: stale-identity (stale attempt)", record_id: "post-pr-terminal-fact-account-switch-failed-push", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-account-switch-failed-push: cross-bound-identity (cross-bound candidate_head_sha)", record_id: "post-pr-terminal-fact-account-switch-failed-push", family: "cross-bound-identity", target_label: "cross-bound candidate_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'needs-human'" },
+  { name: "post-pr-terminal-fact-dispatch-start-unknown: missing-key (required field)", record_id: "post-pr-terminal-fact-dispatch-start-unknown", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of dispatch-start-unknown" },
+  { name: "post-pr-terminal-fact-dispatch-start-unknown: unknown-key (record root)", record_id: "post-pr-terminal-fact-dispatch-start-unknown", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-dispatch-start-unknown: wrong-schema (schema version)", record_id: "post-pr-terminal-fact-dispatch-start-unknown", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.schema_version :: must equal 1" },
+  { name: "post-pr-terminal-fact-dispatch-start-unknown: wrong-kind (kind)", record_id: "post-pr-terminal-fact-dispatch-start-unknown", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of dispatch-start-unknown" },
+  { name: "post-pr-terminal-fact-dispatch-start-unknown: wrong-time (timestamp observed_at)", record_id: "post-pr-terminal-fact-dispatch-start-unknown", family: "wrong-time", target_label: "timestamp observed_at", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.observed_at :: must be an ISO timestamp" },
+  { name: "post-pr-terminal-fact-dispatch-start-unknown: wrong-type (typed field)", record_id: "post-pr-terminal-fact-dispatch-start-unknown", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-dispatch-start-unknown: stale-identity (stale attempt)", record_id: "post-pr-terminal-fact-dispatch-start-unknown", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-dispatch-start-unknown: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-terminal-fact-dispatch-start-unknown", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: must bind the running dispatch identity exactly" },
+  { name: "post-pr-terminal-fact-path-lane-violation: missing-key (required field)", record_id: "post-pr-terminal-fact-path-lane-violation", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of path-lane-violation" },
+  { name: "post-pr-terminal-fact-path-lane-violation: unknown-key (record root)", record_id: "post-pr-terminal-fact-path-lane-violation", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-path-lane-violation: wrong-schema (schema version)", record_id: "post-pr-terminal-fact-path-lane-violation", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.schema_version :: must equal 1" },
+  { name: "post-pr-terminal-fact-path-lane-violation: wrong-kind (kind)", record_id: "post-pr-terminal-fact-path-lane-violation", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of path-lane-violation" },
+  { name: "post-pr-terminal-fact-path-lane-violation: wrong-time (timestamp observed_at)", record_id: "post-pr-terminal-fact-path-lane-violation", family: "wrong-time", target_label: "timestamp observed_at", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.observed_at :: must be an ISO timestamp" },
+  { name: "post-pr-terminal-fact-path-lane-violation: wrong-type (typed field)", record_id: "post-pr-terminal-fact-path-lane-violation", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-path-lane-violation: stale-identity (stale attempt)", record_id: "post-pr-terminal-fact-path-lane-violation", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-path-lane-violation: cross-bound-identity (cross-bound lane)", record_id: "post-pr-terminal-fact-path-lane-violation", family: "cross-bound-identity", target_label: "cross-bound lane", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: must bind the remediation lane and changed paths exactly" },
+  { name: "post-pr-terminal-fact-remote-head-diverged: missing-key (required field)", record_id: "post-pr-terminal-fact-remote-head-diverged", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of remote-head-diverged" },
+  { name: "post-pr-terminal-fact-remote-head-diverged: unknown-key (record root)", record_id: "post-pr-terminal-fact-remote-head-diverged", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-remote-head-diverged: wrong-schema (schema version)", record_id: "post-pr-terminal-fact-remote-head-diverged", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.schema_version :: must equal 1" },
+  { name: "post-pr-terminal-fact-remote-head-diverged: wrong-kind (kind)", record_id: "post-pr-terminal-fact-remote-head-diverged", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of remote-head-diverged" },
+  { name: "post-pr-terminal-fact-remote-head-diverged: wrong-time (timestamp observed_at)", record_id: "post-pr-terminal-fact-remote-head-diverged", family: "wrong-time", target_label: "timestamp observed_at", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.observed_at :: must be an ISO timestamp" },
+  { name: "post-pr-terminal-fact-remote-head-diverged: wrong-type (typed field)", record_id: "post-pr-terminal-fact-remote-head-diverged", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-remote-head-diverged: stale-identity (stale attempt)", record_id: "post-pr-terminal-fact-remote-head-diverged", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-remote-head-diverged: cross-bound-identity (cross-bound candidate_head_sha)", record_id: "post-pr-terminal-fact-remote-head-diverged", family: "cross-bound-identity", target_label: "cross-bound candidate_head_sha", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: must bind the push-pending remote and candidate heads exactly" },
+  { name: "post-pr-terminal-fact-panel-runner-result-malformed: missing-key (required field)", record_id: "post-pr-terminal-fact-panel-runner-result-malformed", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: is allowed only for fact-bound post-PR terminal reasons" },
+  { name: "post-pr-terminal-fact-panel-runner-result-malformed: unknown-key (record root)", record_id: "post-pr-terminal-fact-panel-runner-result-malformed", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-panel-runner-result-malformed: wrong-schema (schema version)", record_id: "post-pr-terminal-fact-panel-runner-result-malformed", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.schema_version :: must equal 1" },
+  { name: "post-pr-terminal-fact-panel-runner-result-malformed: wrong-kind (kind)", record_id: "post-pr-terminal-fact-panel-runner-result-malformed", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: is allowed only for fact-bound post-PR terminal reasons" },
+  { name: "post-pr-terminal-fact-panel-runner-result-malformed: wrong-time (timestamp observed_at)", record_id: "post-pr-terminal-fact-panel-runner-result-malformed", family: "wrong-time", target_label: "timestamp observed_at", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.observed_at :: must be an ISO timestamp" },
+  { name: "post-pr-terminal-fact-panel-runner-result-malformed: wrong-type (typed field)", record_id: "post-pr-terminal-fact-panel-runner-result-malformed", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-panel-runner-result-malformed: stale-identity (stale attempt)", record_id: "post-pr-terminal-fact-panel-runner-result-malformed", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-panel-runner-result-malformed: cross-bound-identity (cross-bound dispatch_id)", record_id: "post-pr-terminal-fact-panel-runner-result-malformed", family: "cross-bound-identity", target_label: "cross-bound dispatch_id", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact :: must bind the running panel job exactly" },
+  { name: "post-pr-terminal-fact-push-failed: missing-key (required field)", record_id: "post-pr-terminal-fact-push-failed", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of push-failed" },
+  { name: "post-pr-terminal-fact-push-failed: unknown-key (record root)", record_id: "post-pr-terminal-fact-push-failed", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-push-failed: wrong-schema (schema version)", record_id: "post-pr-terminal-fact-push-failed", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.schema_version :: must equal 1" },
+  { name: "post-pr-terminal-fact-push-failed: wrong-kind (kind)", record_id: "post-pr-terminal-fact-push-failed", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of push-failed" },
+  { name: "post-pr-terminal-fact-push-failed: wrong-time (timestamp observed_at)", record_id: "post-pr-terminal-fact-push-failed", family: "wrong-time", target_label: "timestamp observed_at", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.observed_at :: must be an ISO timestamp" },
+  { name: "post-pr-terminal-fact-push-failed: wrong-type (typed field)", record_id: "post-pr-terminal-fact-push-failed", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-push-failed: stale-identity (stale attempt)", record_id: "post-pr-terminal-fact-push-failed", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-push-failed: cross-bound-identity (cross-bound candidate_head_sha)", record_id: "post-pr-terminal-fact-push-failed", family: "cross-bound-identity", target_label: "cross-bound candidate_head_sha", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'needs-human'" },
+  { name: "post-pr-terminal-fact-panel-attribution-unsafe: missing-key (required field)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of panel-attribution-unsafe" },
+  { name: "post-pr-terminal-fact-panel-attribution-unsafe: unknown-key (record root)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.unexpected_authority_key :: is not allowed" },
+  { name: "post-pr-terminal-fact-panel-attribution-unsafe: wrong-schema (schema version)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.schema_version :: must equal 1" },
+  { name: "post-pr-terminal-fact-panel-attribution-unsafe: wrong-kind (kind)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "wrong-kind", target_label: "kind", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.kind :: must be one of panel-attribution-unsafe" },
+  { name: "post-pr-terminal-fact-panel-attribution-unsafe: wrong-time (timestamp observed_at)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "wrong-time", target_label: "timestamp observed_at", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.observed_at :: must be an ISO timestamp" },
+  { name: "post-pr-terminal-fact-panel-attribution-unsafe: wrong-type (typed field)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-panel-attribution-unsafe: stale-identity (stale attempt)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "stale-identity", target_label: "stale attempt", consumer: "validateRun", rejector: "validatePostPr :: run.post_pr.terminal_fact.attempt :: must be an integer from 1 to 9007199254740991" },
+  { name: "post-pr-terminal-fact-panel-attribution-unsafe: cross-bound-identity (cross-bound panel)", record_id: "post-pr-terminal-fact-panel-attribution-unsafe", family: "cross-bound-identity", target_label: "cross-bound panel", consumer: "transitionPostPrState", rejector: "transitionPostPrState :: Error :: post-PR transition rejected: terminal run 'needs-human'" },
+  { name: "repair-reported: missing-key (required field)", record_id: "repair-reported", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
+  { name: "repair-reported: unknown-key (record root)", record_id: "repair-reported", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
+  { name: "repair-reported: wrong-schema (schema version)", record_id: "repair-reported", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
+  { name: "repair-reported: wrong-time (timestamp updated_at)", record_id: "repair-reported", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
+  { name: "repair-reported: wrong-type (typed field)", record_id: "repair-reported", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
+  { name: "repair-reported: wrong-ref (plan ref)", record_id: "repair-reported", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
+  { name: "repair-reported: wrong-ref (original-evidence ref)", record_id: "repair-reported", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-reported: wrong-hash (plan hash)", record_id: "repair-reported", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-reported: wrong-hash (original-evidence hash)", record_id: "repair-reported", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-reported: wrong-bytes (plan sidecar bytes)", record_id: "repair-reported", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-reported: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-reported", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-reported: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-reported", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
+  { name: "repair-reported: stale-identity (stale attempts)", record_id: "repair-reported", family: "stale-identity", target_label: "stale attempts", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair attempt must advance from 1 to 2" },
+  { name: "repair-reported: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-reported", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
+  { name: "repair-repairing: missing-key (required field)", record_id: "repair-repairing", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
+  { name: "repair-repairing: unknown-key (record root)", record_id: "repair-repairing", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
+  { name: "repair-repairing: wrong-schema (schema version)", record_id: "repair-repairing", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
+  { name: "repair-repairing: wrong-time (timestamp updated_at)", record_id: "repair-repairing", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
+  { name: "repair-repairing: wrong-type (typed field)", record_id: "repair-repairing", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
+  { name: "repair-repairing: wrong-ref (plan ref)", record_id: "repair-repairing", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
+  { name: "repair-repairing: wrong-ref (original-evidence ref)", record_id: "repair-repairing", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-repairing: wrong-hash (plan hash)", record_id: "repair-repairing", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-repairing: wrong-hash (original-evidence hash)", record_id: "repair-repairing", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-repairing: wrong-bytes (plan sidecar bytes)", record_id: "repair-repairing", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-repairing: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-repairing", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-repairing: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-repairing", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
+  { name: "repair-repairing: stale-identity (stale attempts)", record_id: "repair-repairing", family: "stale-identity", target_label: "stale attempts", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be at least 1 once an attempt starts" },
+  { name: "repair-repairing: stale-identity (stale baseline_commit)", record_id: "repair-repairing", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair reviewed commit must contain new work on top of the observed attempt baseline" },
+  { name: "repair-repairing: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-repairing", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
+  { name: "repair-review-approve: missing-key (required field)", record_id: "repair-review-approve", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
+  { name: "repair-review-approve: unknown-key (record root)", record_id: "repair-review-approve", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
+  { name: "repair-review-approve: wrong-schema (schema version)", record_id: "repair-review-approve", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
+  { name: "repair-review-approve: wrong-time (timestamp updated_at)", record_id: "repair-review-approve", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
+  { name: "repair-review-approve: wrong-type (typed field)", record_id: "repair-review-approve", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
+  { name: "repair-review-approve: wrong-ref (plan ref)", record_id: "repair-review-approve", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
+  { name: "repair-review-approve: wrong-ref (original-evidence ref)", record_id: "repair-review-approve", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-review-approve: wrong-ref (repair-evidence ref)", record_id: "repair-review-approve", family: "wrong-ref", target_label: "repair-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-review-approve: wrong-ref (review ref)", record_id: "repair-review-approve", family: "wrong-ref", target_label: "review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_ref :: reviews ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-review-approve: wrong-hash (plan hash)", record_id: "repair-review-approve", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-review-approve: wrong-hash (original-evidence hash)", record_id: "repair-review-approve", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-review-approve: wrong-hash (repair-evidence hash)", record_id: "repair-review-approve", family: "wrong-hash", target_label: "repair-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
+  { name: "repair-review-approve: wrong-hash (review hash)", record_id: "repair-review-approve", family: "wrong-hash", target_label: "review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
+  { name: "repair-review-approve: wrong-bytes (plan sidecar bytes)", record_id: "repair-review-approve", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-review-approve: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-review-approve", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-review-approve: wrong-bytes (repair-evidence sidecar bytes)", record_id: "repair-review-approve", family: "wrong-bytes", target_label: "repair-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
+  { name: "repair-review-approve: wrong-bytes (review sidecar bytes)", record_id: "repair-review-approve", family: "wrong-bytes", target_label: "review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
+  { name: "repair-review-approve: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-review-approve", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
+  { name: "repair-review-approve: stale-identity (stale attempts)", record_id: "repair-review-approve", family: "stale-identity", target_label: "stale attempts", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be at least 1 once an attempt starts" },
+  { name: "repair-review-approve: stale-identity (stale baseline_commit)", record_id: "repair-review-approve", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair merge commit must contain new work on top of the observed attempt baseline" },
+  { name: "repair-review-approve: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-review-approve", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
+  { name: "repair-review-approve: cross-bound-identity (cross-bound reviewed_commit)", record_id: "repair-review-approve", family: "cross-bound-identity", target_label: "cross-bound reviewed_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair review must bind the exact reviewed commit; the recorded commit does not match the observed repair" },
+  { name: "repair-review-reject: missing-key (required field)", record_id: "repair-review-reject", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
+  { name: "repair-review-reject: unknown-key (record root)", record_id: "repair-review-reject", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
+  { name: "repair-review-reject: wrong-schema (schema version)", record_id: "repair-review-reject", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
+  { name: "repair-review-reject: wrong-time (timestamp updated_at)", record_id: "repair-review-reject", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
+  { name: "repair-review-reject: wrong-type (typed field)", record_id: "repair-review-reject", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
+  { name: "repair-review-reject: wrong-ref (plan ref)", record_id: "repair-review-reject", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
+  { name: "repair-review-reject: wrong-ref (original-evidence ref)", record_id: "repair-review-reject", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-review-reject: wrong-ref (repair-evidence ref)", record_id: "repair-review-reject", family: "wrong-ref", target_label: "repair-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-review-reject: wrong-ref (review ref)", record_id: "repair-review-reject", family: "wrong-ref", target_label: "review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_ref :: reviews ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-review-reject: wrong-hash (plan hash)", record_id: "repair-review-reject", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-review-reject: wrong-hash (original-evidence hash)", record_id: "repair-review-reject", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-review-reject: wrong-hash (repair-evidence hash)", record_id: "repair-review-reject", family: "wrong-hash", target_label: "repair-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
+  { name: "repair-review-reject: wrong-hash (review hash)", record_id: "repair-review-reject", family: "wrong-hash", target_label: "review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
+  { name: "repair-review-reject: wrong-bytes (plan sidecar bytes)", record_id: "repair-review-reject", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-review-reject: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-review-reject", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-review-reject: wrong-bytes (repair-evidence sidecar bytes)", record_id: "repair-review-reject", family: "wrong-bytes", target_label: "repair-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
+  { name: "repair-review-reject: wrong-bytes (review sidecar bytes)", record_id: "repair-review-reject", family: "wrong-bytes", target_label: "review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
+  { name: "repair-review-reject: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-review-reject", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
+  { name: "repair-review-reject: stale-identity (stale attempts)", record_id: "repair-review-reject", family: "stale-identity", target_label: "stale attempts", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be at least 1 once an attempt starts" },
+  { name: "repair-review-reject: stale-identity (stale baseline_commit)", record_id: "repair-review-reject", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: rejected repair review must bind work after the observed attempt baseline" },
+  { name: "repair-review-reject: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-review-reject", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
+  { name: "repair-review-reject: cross-bound-identity (cross-bound reviewed_commit)", record_id: "repair-review-reject", family: "cross-bound-identity", target_label: "cross-bound reviewed_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: repair review must bind the exact reviewed commit; the recorded commit does not match the observed repair" },
+  { name: "repair-merged: missing-key (required field)", record_id: "repair-merged", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
+  { name: "repair-merged: unknown-key (record root)", record_id: "repair-merged", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
+  { name: "repair-merged: wrong-schema (schema version)", record_id: "repair-merged", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
+  { name: "repair-merged: wrong-time (timestamp updated_at)", record_id: "repair-merged", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
+  { name: "repair-merged: wrong-type (typed field)", record_id: "repair-merged", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
+  { name: "repair-merged: wrong-ref (plan ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
+  { name: "repair-merged: wrong-ref (original-evidence ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-merged: wrong-ref (repair-evidence ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "repair-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-merged: wrong-ref (review ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_ref :: reviews ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-merged: wrong-ref (verification ref)", record_id: "repair-merged", family: "wrong-ref", target_label: "verification ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.verification_ref :: run.merged_slice_repair.verification_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-merged: wrong-hash (plan hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-merged: wrong-hash (original-evidence hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-merged: wrong-hash (repair-evidence hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "repair-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
+  { name: "repair-merged: wrong-hash (review hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
+  { name: "repair-merged: wrong-hash (verification hash)", record_id: "repair-merged", family: "wrong-hash", target_label: "verification hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.verification_ref :: run.merged_slice_repair.verification_hash :: must match verification_ref bytes" },
+  { name: "repair-merged: wrong-bytes (plan sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-merged: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-merged: wrong-bytes (repair-evidence sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "repair-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
+  { name: "repair-merged: wrong-bytes (review sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
+  { name: "repair-merged: wrong-bytes (verification sidecar bytes)", record_id: "repair-merged", family: "wrong-bytes", target_label: "verification sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.verification_ref :: run.merged_slice_repair.verification_hash :: must match verification_ref bytes" },
+  { name: "repair-merged: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-merged", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
+  { name: "repair-merged: stale-identity (stale attempts)", record_id: "repair-merged", family: "stale-identity", target_label: "stale attempts", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be at least 1 once an attempt starts" },
+  { name: "repair-merged: stale-identity (stale baseline_commit)", record_id: "repair-merged", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('merged'); a further defect requires a recovery run" },
+  { name: "repair-merged: stale-identity (stale merge_commit)", record_id: "repair-merged", family: "stale-identity", target_label: "stale merge_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('merged'); a further defect requires a recovery run" },
+  { name: "repair-merged: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-merged", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
+  { name: "repair-merged: cross-bound-identity (cross-bound reviewed_commit)", record_id: "repair-merged", family: "cross-bound-identity", target_label: "cross-bound reviewed_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('merged'); a further defect requires a recovery run" },
+  { name: "repair-blocked-from-reported: missing-key (required field)", record_id: "repair-blocked-from-reported", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
+  { name: "repair-blocked-from-reported: unknown-key (record root)", record_id: "repair-blocked-from-reported", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
+  { name: "repair-blocked-from-reported: wrong-schema (schema version)", record_id: "repair-blocked-from-reported", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
+  { name: "repair-blocked-from-reported: wrong-time (timestamp updated_at)", record_id: "repair-blocked-from-reported", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
+  { name: "repair-blocked-from-reported: wrong-type (typed field)", record_id: "repair-blocked-from-reported", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
+  { name: "repair-blocked-from-reported: wrong-ref (plan ref)", record_id: "repair-blocked-from-reported", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
+  { name: "repair-blocked-from-reported: wrong-ref (original-evidence ref)", record_id: "repair-blocked-from-reported", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-blocked-from-reported: wrong-hash (plan hash)", record_id: "repair-blocked-from-reported", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-blocked-from-reported: wrong-hash (original-evidence hash)", record_id: "repair-blocked-from-reported", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-blocked-from-reported: wrong-bytes (plan sidecar bytes)", record_id: "repair-blocked-from-reported", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-blocked-from-reported: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-blocked-from-reported", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-blocked-from-reported: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-blocked-from-reported", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
+  { name: "repair-blocked-from-reported: stale-identity (stale attempts)", record_id: "repair-blocked-from-reported", family: "stale-identity", target_label: "stale attempts", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
+  { name: "repair-blocked-from-reported: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-blocked-from-reported", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
+  { name: "repair-blocked-from-repairing: missing-key (required field)", record_id: "repair-blocked-from-repairing", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
+  { name: "repair-blocked-from-repairing: unknown-key (record root)", record_id: "repair-blocked-from-repairing", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
+  { name: "repair-blocked-from-repairing: wrong-schema (schema version)", record_id: "repair-blocked-from-repairing", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
+  { name: "repair-blocked-from-repairing: wrong-time (timestamp updated_at)", record_id: "repair-blocked-from-repairing", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
+  { name: "repair-blocked-from-repairing: wrong-type (typed field)", record_id: "repair-blocked-from-repairing", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
+  { name: "repair-blocked-from-repairing: wrong-ref (plan ref)", record_id: "repair-blocked-from-repairing", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
+  { name: "repair-blocked-from-repairing: wrong-ref (original-evidence ref)", record_id: "repair-blocked-from-repairing", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-blocked-from-repairing: wrong-hash (plan hash)", record_id: "repair-blocked-from-repairing", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-blocked-from-repairing: wrong-hash (original-evidence hash)", record_id: "repair-blocked-from-repairing", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-blocked-from-repairing: wrong-bytes (plan sidecar bytes)", record_id: "repair-blocked-from-repairing", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-blocked-from-repairing: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-blocked-from-repairing", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-blocked-from-repairing: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-blocked-from-repairing", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
+  { name: "repair-blocked-from-repairing: stale-identity (stale attempts)", record_id: "repair-blocked-from-repairing", family: "stale-identity", target_label: "stale attempts", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
+  { name: "repair-blocked-from-repairing: stale-identity (stale baseline_commit)", record_id: "repair-blocked-from-repairing", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
+  { name: "repair-blocked-from-repairing: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-blocked-from-repairing", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
+  { name: "repair-blocked-from-review: missing-key (required field)", record_id: "repair-blocked-from-review", family: "missing-key", target_label: "required field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.status :: must be one of reported, repairing, review, merged, blocked" },
+  { name: "repair-blocked-from-review: unknown-key (record root)", record_id: "repair-blocked-from-review", family: "unknown-key", target_label: "record root", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.unexpected_authority_key :: is not allowed" },
+  { name: "repair-blocked-from-review: wrong-schema (schema version)", record_id: "repair-blocked-from-review", family: "wrong-schema", target_label: "schema version", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.schema_version :: must equal 1" },
+  { name: "repair-blocked-from-review: wrong-time (timestamp updated_at)", record_id: "repair-blocked-from-review", family: "wrong-time", target_label: "timestamp updated_at", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: ValidationError :: run.merged_slice_repair.updated_at: must be an ISO timestamp" },
+  { name: "repair-blocked-from-review: wrong-type (typed field)", record_id: "repair-blocked-from-review", family: "wrong-type", target_label: "typed field", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.attempts :: must be an integer from 0 to 2" },
+  { name: "repair-blocked-from-review: wrong-ref (plan ref)", record_id: "repair-blocked-from-review", family: "wrong-ref", target_label: "plan ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan :: referenced authority file does not exist" },
+  { name: "repair-blocked-from-review: wrong-ref (original-evidence ref)", record_id: "repair-blocked-from-review", family: "wrong-ref", target_label: "original-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-blocked-from-review: wrong-ref (repair-evidence ref)", record_id: "repair-blocked-from-review", family: "wrong-ref", target_label: "repair-evidence ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_ref :: evidence ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-blocked-from-review: wrong-ref (review ref)", record_id: "repair-blocked-from-review", family: "wrong-ref", target_label: "review ref", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_ref :: reviews ref must not contain empty, '.' or '..' path segments" },
+  { name: "repair-blocked-from-review: wrong-hash (plan hash)", record_id: "repair-blocked-from-review", family: "wrong-hash", target_label: "plan hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-blocked-from-review: wrong-hash (original-evidence hash)", record_id: "repair-blocked-from-review", family: "wrong-hash", target_label: "original-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-blocked-from-review: wrong-hash (repair-evidence hash)", record_id: "repair-blocked-from-review", family: "wrong-hash", target_label: "repair-evidence hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
+  { name: "repair-blocked-from-review: wrong-hash (review hash)", record_id: "repair-blocked-from-review", family: "wrong-hash", target_label: "review hash", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
+  { name: "repair-blocked-from-review: wrong-bytes (plan sidecar bytes)", record_id: "repair-blocked-from-review", family: "wrong-bytes", target_label: "plan sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.plan :: run.merged_slice_repair.plan_hash :: must match plan/slices.json bytes bound at report" },
+  { name: "repair-blocked-from-review: wrong-bytes (original-evidence sidecar bytes)", record_id: "repair-blocked-from-review", family: "wrong-bytes", target_label: "original-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.evidence_ref :: run.merged_slice_repair.evidence_hash :: must match evidence_ref bytes" },
+  { name: "repair-blocked-from-review: wrong-bytes (repair-evidence sidecar bytes)", record_id: "repair-blocked-from-review", family: "wrong-bytes", target_label: "repair-evidence sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.repair_evidence_ref :: run.merged_slice_repair.repair_evidence_hash :: must match repair_evidence_ref bytes" },
+  { name: "repair-blocked-from-review: wrong-bytes (review sidecar bytes)", record_id: "repair-blocked-from-review", family: "wrong-bytes", target_label: "review sidecar bytes", consumer: "checkRunConsistency", rejector: "checkRunConsistency :: run.merged_slice_repair.review_ref :: run.merged_slice_repair.review_hash :: must match review_ref bytes" },
+  { name: "repair-blocked-from-review: descriptor-key-shape-drift (evidence_ref renamed)", record_id: "repair-blocked-from-review", family: "descriptor-key-shape-drift", target_label: "evidence_ref renamed", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.reproduction_ref :: is not allowed" },
+  { name: "repair-blocked-from-review: stale-identity (stale attempts)", record_id: "repair-blocked-from-review", family: "stale-identity", target_label: "stale attempts", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
+  { name: "repair-blocked-from-review: stale-identity (stale baseline_commit)", record_id: "repair-blocked-from-review", family: "stale-identity", target_label: "stale baseline_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
+  { name: "repair-blocked-from-review: cross-bound-identity (cross-bound consumer_slice_id)", record_id: "repair-blocked-from-review", family: "cross-bound-identity", target_label: "cross-bound consumer_slice_id", consumer: "validateRun", rejector: "validateMergedSliceRepair :: run.merged_slice_repair.consumer_slice_id :: must differ from owner_slice_id" },
+  { name: "repair-blocked-from-review: cross-bound-identity (cross-bound reviewed_commit)", record_id: "repair-blocked-from-review", family: "cross-bound-identity", target_label: "cross-bound reviewed_commit", consumer: "transitionMergedSliceRepair", rejector: "transitionMergedSliceRepair :: Error :: merged-slice repair is terminal ('blocked'); a further defect requires a recovery run" },
+]);
+
+const B0M4_LITERAL_ROW_COUNTS = Object.freeze({
+  "post-pr-phase-disabled": 6,
+  "post-pr-phase-awaiting-pr": 6,
+  "post-pr-phase-observing": 6,
+  "post-pr-phase-failure-recording": 6,
+  "post-pr-phase-remediation-planned": 6,
+  "post-pr-phase-remediation-running": 6,
+  "post-pr-phase-changes-observed": 11,
+  "post-pr-phase-committed": 11,
+  "post-pr-phase-revalidating": 11,
+  "post-pr-phase-validated": 11,
+  "post-pr-phase-push-pending": 11,
+  "post-pr-phase-remote-confirmed": 11,
+  "post-pr-phase-succeeded": 6,
+  "post-pr-phase-blocked": 6,
+  "post-pr-phase-needs-human": 6,
+  "post-pr-policy-disabled": 6,
+  "post-pr-policy-enabled": 6,
+  "post-pr-observation-null": 5,
+  "post-pr-observation-active": 7,
+  "post-pr-observation-last-error": 6,
+  "post-pr-observation-review-request": 6,
+  "post-pr-observation-snapshot": 6,
+  "post-pr-remediation-null": 5,
+  "post-pr-remediation-active": 13,
+  "post-pr-remediation-owner": 6,
+  "post-pr-remediation-changes": 7,
+  "post-pr-remediation-change-entry": 7,
+  "post-pr-dispatch-planned": 6,
+  "post-pr-dispatch-running": 6,
+  "post-pr-dispatch-returned": 6,
+  "post-pr-revalidation-empty": 5,
+  "post-pr-revalidation-bound": 14,
+  "post-pr-canonical-job-planned": 6,
+  "post-pr-canonical-job-running": 6,
+  "post-pr-canonical-job-retry-wait": 6,
+  "post-pr-canonical-job-bound": 8,
+  "post-pr-validator-job-planned": 6,
+  "post-pr-validator-job-running": 6,
+  "post-pr-validator-job-retry-wait": 6,
+  "post-pr-validator-job-bound": 8,
+  "post-pr-security-job-planned": 6,
+  "post-pr-security-job-running": 6,
+  "post-pr-security-job-retry-wait": 6,
+  "post-pr-security-job-bound": 8,
+  "post-pr-push-not-ready": 6,
+  "post-pr-push-pending": 6,
+  "post-pr-push-confirmed": 6,
+  "post-pr-push-last-error": 6,
+  "post-pr-evidence-sidecar": 8,
+  "post-pr-continuation-review-null": 5,
+  "post-pr-continuation-review-bound": 8,
+  "post-pr-terminal-fact-null": 5,
+  "post-pr-terminal-fact-account-switch-failed-github-auth": 8,
+  "post-pr-terminal-fact-account-switch-failed-push": 8,
+  "post-pr-terminal-fact-dispatch-start-unknown": 8,
+  "post-pr-terminal-fact-path-lane-violation": 8,
+  "post-pr-terminal-fact-remote-head-diverged": 8,
+  "post-pr-terminal-fact-panel-runner-result-malformed": 8,
+  "post-pr-terminal-fact-push-failed": 8,
+  "post-pr-terminal-fact-panel-attribution-unsafe": 8,
+  "repair-reported": 14,
+  "repair-repairing": 15,
+  "repair-review-approve": 22,
+  "repair-review-reject": 22,
+  "repair-merged": 26,
+  "repair-blocked-from-reported": 14,
+  "repair-blocked-from-repairing": 15,
+  "repair-blocked-from-review": 22,
+});
+const B0M4_LITERAL_POST_PR_COUNT = 429;
+const B0M4_LITERAL_REPAIR_COUNT = 150;
+
+const B0M4_PREREQUISITE_VALID_SCENARIOS = Object.freeze({
+  "post-pr-revalidation-empty: missing-key (required field)": "post-pr",
+  "post-pr-revalidation-empty: stale-identity (stale canonical_verdict)": "post-pr",
+  "post-pr-revalidation-empty: cross-bound-identity (cross-bound validator_verdict)": "post-pr",
+  "post-pr-canonical-job-planned: wrong-time (timestamp started_at)": "post-pr",
+  "post-pr-canonical-job-planned: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-canonical-job-running: wrong-time (timestamp started_at)": "post-pr",
+  "post-pr-canonical-job-running: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-canonical-job-retry-wait: wrong-time (timestamp next_retry_at)": "post-pr",
+  "post-pr-canonical-job-retry-wait: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-validator-job-planned: wrong-time (timestamp started_at)": "post-pr",
+  "post-pr-validator-job-planned: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-validator-job-running: wrong-time (timestamp started_at)": "post-pr",
+  "post-pr-validator-job-running: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-validator-job-retry-wait: wrong-time (timestamp next_retry_at)": "post-pr",
+  "post-pr-validator-job-retry-wait: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-security-job-planned: wrong-time (timestamp started_at)": "post-pr",
+  "post-pr-security-job-planned: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-security-job-running: wrong-time (timestamp started_at)": "post-pr",
+  "post-pr-security-job-running: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-security-job-retry-wait: wrong-time (timestamp next_retry_at)": "post-pr",
+  "post-pr-security-job-retry-wait: stale-identity (stale steering_generation)": "post-pr",
+  "post-pr-push-not-ready: wrong-time (timestamp pushed_at)": "post-pr",
+  "post-pr-push-not-ready: stale-identity (stale remote_before_sha)": "post-pr",
+  "post-pr-push-not-ready: cross-bound-identity (cross-bound local_head_sha)": "post-pr",
+  "post-pr-push-pending: wrong-time (timestamp pushed_at)": "post-pr",
+  "post-pr-push-last-error: wrong-time (timestamp observed_at)": "post-pr",
+  "post-pr-push-last-error: wrong-type (typed field)": "post-pr",
+  "post-pr-push-last-error: stale-identity (stale next_retry_at)": "post-pr",
+  "post-pr-push-last-error: cross-bound-identity (cross-bound candidate_head_sha)": "post-pr",
+  "repair-reported: stale-identity (stale attempts)": "repair-reported",
+  "repair-repairing: stale-identity (stale baseline_commit)": "repair-repairing",
+  "repair-review-approve: stale-identity (stale baseline_commit)": "repair-review-approve-baseline",
+  "repair-review-approve: cross-bound-identity (cross-bound reviewed_commit)": "repair-review-approve-reviewed",
+  "repair-review-reject: stale-identity (stale baseline_commit)": "repair-review-reject-baseline",
+  "repair-review-reject: cross-bound-identity (cross-bound reviewed_commit)": "repair-review-reject-reviewed",
+});
 
 describe("durable record mutation helper", () => {
   it("deep-clones its source and emits deterministic named adversarial cases", () => {
@@ -140,6 +888,102 @@ describe("durable record mutation helper", () => {
 });
 
 describe("finite durable-authority catalog", () => {
+  it("preflights the independently literal exact 579-case B0M.4 inventory and exact-name dispositions", () => {
+    const dispositionByName = exactB0m4DispositionMap(B0M4_EXACT_CASES);
+    const emitted = [];
+    const emittedNames = new Set();
+    for (const recordId of Object.keys(B0M4_LITERAL_ROW_COUNTS)) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, recordId);
+      const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+      assert.equal(cases.length, B0M4_LITERAL_ROW_COUNTS[recordId], `${recordId} exact literal row count`);
+      for (const mutationCase of cases) {
+        assert.equal(emittedNames.has(mutationCase.name), false, `duplicate emitted name ${mutationCase.name}`);
+        emittedNames.add(mutationCase.name);
+        const disposition = dispositionByName.get(mutationCase.name);
+        assert.ok(disposition, `unknown emitted name ${mutationCase.name}`);
+        emitted.push({ name: mutationCase.name, record_id: recordId, family: mutationCase.family, target_label: disposition.target_label, consumer: disposition.consumer, rejector: disposition.rejector });
+      }
+    }
+    assert.equal(B0M4_EXACT_CASES.length, 579);
+    assert.equal(B0M4_LITERAL_POST_PR_COUNT, 429);
+    assert.equal(B0M4_LITERAL_REPAIR_COUNT, 150);
+    assert.equal(Object.keys(B0M4_PREREQUISITE_VALID_SCENARIOS).length, 35);
+    for (const name of Object.keys(B0M4_PREREQUISITE_VALID_SCENARIOS)) assert.equal(dispositionByName.has(name), true, `unknown prerequisite-valid case ${name}`);
+    assert.equal(dispositionByName.size, 579);
+    assert.deepEqual(emitted, B0M4_EXACT_CASES, "missing, duplicate, unknown, reordered, or mismatched tuple/consumer/rejector must fail preflight");
+    const duplicateDisposition = B0M4_EXACT_CASES.slice();
+    duplicateDisposition.push(B0M4_EXACT_CASES[0]);
+    assert.throws(() => exactB0m4DispositionMap(duplicateDisposition), /duplicate exact B0M\.4 case/u);
+    assert.throws(() => exactB0m4DispositionMap([{ ...B0M4_EXACT_CASES[0], consumer: "" }]), /literal consumer|concrete consumer and rejector/u);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 108);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 109);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
+  });
+
+  it("executes every one of the exact 579 B0M.4 cases once through its literal concrete consumer", async () => {
+    const root = mkdtempSync(join(tmpdir(), "b0m4-exact-consumers-"));
+    const executed = new Set();
+    try {
+      for (const expected of B0M4_EXACT_CASES) {
+        assert.equal(executed.has(expected.name), false, `duplicate execution ${expected.name}`);
+        const record = findRecord(DURABLE_AUTHORITY_CATALOG, expected.record_id);
+        const mutationCase = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources).find(({ name }) => name === expected.name);
+        assert.ok(mutationCase, `literal case has no emitted mutation ${expected.name}`);
+        if (Object.hasOwn(B0M4_PREREQUISITE_VALID_SCENARIOS, expected.name)) {
+          await consumePrerequisiteValidB0M4Case(expected, record, mutationCase, B0M4_PREREQUISITE_VALID_SCENARIOS[expected.name]);
+        } else if (expected.consumer === "validateRun") {
+          const fixture = expected.record_id.startsWith("repair-") ? createRepairCatalogBaseline(record) : createPostPrCatalogBaseline(record);
+          const mutatedRun = replaceCanonicalRecord(fixture.run, record.canonicalPath, mutationCase.record);
+          assert.throws(() => validateRun(mutatedRun), (error) => {
+            assert.equal(error?.name, "ValidationError", `${expected.name} must reach ${expected.rejector}`);
+            const [rejector, path, message] = expected.rejector.split(" :: ");
+            assert.equal(["validatePostPr", "validateMergedSliceRepair"].includes(rejector), true, expected.name);
+            assert.equal(error.errors.some((item) => item.path === path && item.message === message), true, `${expected.name} exact nested path/message`);
+            return true;
+          });
+        } else if (expected.consumer === "checkRunConsistency") {
+          const fixture = expected.record_id.startsWith("repair-") ? createRepairCatalogBaseline(record) : createPostPrCatalogBaseline(record);
+          const mutatedRun = replaceCanonicalRecord(fixture.run, record.canonicalPath, mutationCase.record);
+          const runDir = join(root, String(executed.size));
+          materializeCatalogSources(runDir, mutationCase.externalSources, fixture.supportSources);
+          const consistency = checkRunConsistency(runDir, mutatedRun);
+          assert.equal(consistency.ok, false, `${expected.name} must reach ${expected.rejector}`);
+          const [, checkName, path, message] = expected.rejector.split(" :: ");
+          const check = consistency.checks.find(({ name }) => name === checkName);
+          assert.ok(check, `${expected.name} exact consistency check`);
+          assert.equal(check.errors.some((item) => item.path === path && item.message === message), true, `${expected.name} exact consistency path/message`);
+        } else if (expected.consumer === "transitionPostPrState") {
+          const fixture = createPostPrCatalogBaseline(record);
+          const runDir = join(root, String(executed.size));
+          materializeCatalogSources(runDir, fixture.externalSources);
+          writeJson(join(runDir, "run.json"), fixture.run);
+          const before = readFileSync(join(runDir, "run.json"), "utf8");
+          const mutatedRun = replaceCanonicalRecord(fixture.run, record.canonicalPath, mutationCase.record);
+          const [, errorName, errorMessage] = expected.rejector.split(" :: ");
+          await assert.rejects(transitionPostPrState(runDir, mutatedRun.post_pr, { now: "2026-07-16T12:06:00.000Z" }), (error) => error.name === errorName && error.message === errorMessage, `${expected.name} must reach ${expected.rejector}`);
+          assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before, `${expected.name} protected bytes`);
+        } else if (expected.consumer === "transitionMergedSliceRepair") {
+          const fixture = createRepairCatalogBaseline(record);
+          const runDir = join(root, String(executed.size));
+          materializeCatalogSources(runDir, mutationCase.externalSources, fixture.supportSources);
+          const mutatedRun = replaceCanonicalRecord(fixture.run, record.canonicalPath, mutationCase.record);
+          writeJson(join(runDir, "run.json"), mutatedRun);
+          const before = readFileSync(join(runDir, "run.json"), "utf8");
+          const fence = structuredClone(mergedSliceRepairFence(mutatedRun));
+          const [, errorName, errorMessage] = expected.rejector.split(" :: ");
+          await assert.rejects(transitionMergedSliceRepair(runDir, repairProbeRequest(mutationCase.record), { repoRoot: runDir, now: "2026-07-16T12:06:00.000Z" }), (error) => error.name === errorName && error.message === errorMessage, `${expected.name} must reach ${expected.rejector}`);
+          assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before, `${expected.name} protected bytes`);
+          assert.deepEqual(mergedSliceRepairFence(JSON.parse(before)), fence, `${expected.name} repair fence`);
+        } else assert.fail(`unknown literal consumer for ${expected.name}: ${expected.consumer}`);
+        executed.add(expected.name);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    assert.equal(executed.size, 579);
+    assert.deepEqual([...executed], B0M4_EXACT_CASES.map(({ name }) => name));
+  });
+
   it("registers exactly the nine authority classes and every required record/variant separately", () => {
     assert.deepEqual(DURABLE_AUTHORITY_CATALOG.map(({ id }) => id), AUTHORITY_CLASS_IDS);
     assert.equal(new Set(DURABLE_AUTHORITY_CATALOG.map(({ id }) => id)).size, 9);
@@ -169,7 +1013,7 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 108);
+    assert.equal(recordCount, 109);
   });
 
   it("rejects aggregate, omitted, and substituted source-boundary entries", () => {
@@ -220,10 +1064,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 108 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 109 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 108);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 109);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -252,6 +1096,91 @@ describe("finite durable-authority catalog", () => {
     assert.equal(oldReview.metadata.writer, record.writer, "old readable snapshot must remain independently reviewable");
     assert.equal(oldReview.descriptor.targets.find(({ family }) => family === "wrong-kind").value, "unknown-graph");
     assert.equal(oldReview.canonicalSource.source.descriptor.kind, "slices-graph");
+  });
+
+  it("proves the reviewed plan descriptor manifest update changed only the stale dependency identity target", () => {
+    const current = findRecord(DURABLE_AUTHORITY_CATALOG, "plan-slices-json");
+    const prior = structuredClone(current);
+    const priorTarget = prior.descriptor.targets.find(({ family }) => family === "stale-identity");
+    Object.assign(priorTarget, { path: ["slices", 1, "id"], label: "stale slices.1.id", value: "stale-slice" });
+    const oldReview = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(prior));
+    const newReview = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(current));
+
+    assert.deepEqual(oldReview.canonicalSource, newReview.canonicalSource);
+    assert.deepEqual(oldReview.metadata, newReview.metadata);
+    assert.deepEqual(oldReview.descriptor.exclusions, newReview.descriptor.exclusions);
+    assert.deepEqual(oldReview.descriptor.targets.filter(({ family }) => family !== "stale-identity"), newReview.descriptor.targets.filter(({ family }) => family !== "stale-identity"));
+    assert.deepEqual(oldReview.descriptor.targets.find(({ family }) => family === "stale-identity"), { family: "stale-identity", label: "stale slices.1.id", path: ["slices", 1, "id"], value: "stale-slice" });
+    assert.deepEqual(newReview.descriptor.targets.find(({ family }) => family === "stale-identity"), { family: "stale-identity", label: "stale slices.1.depends_on.0", path: ["slices", 1, "depends_on", 0], value: "stale-slice" });
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.find(([id]) => id === "plan-slices-json")[1], "3c923442fe75f188546037455e61dca6f3172bb766399c4df4289de2f1c6f726");
+  });
+
+  it("reviews readable old/new successor catalog values before the four manifest digest changes", () => {
+    const expectedDigests = {
+      "slice-review": ["8fd0fae00323e9bed95c0673fc1f4f22d345a0f886438fee4991e7a390b7e7b0", "1d0d4c6beaa40f3f3397a3d015ae7d682cd8eb4ed10e268998b59bf14d7c76ef", "ac668a5340a0db81df8ad31e4d73302234dfd49da5933161e0f43d869e8a3262"],
+      "slice-merged": ["785275ed7b23a9ecb8fd33d838e0e3a6acc2980d9e69e96ebd0f4cb6a9410707", "d02186b0bac9122bd39058f4205cc5234e6a8da5bc82fd221c6b88ca76e6633f", "ad2674135456283cf415406224c7a04cf661565770b6a7270a00d673fe2d6869"],
+      "validator-verdict-binding": ["ce1205fb84feece303f45e9841916d68fe26431d3117636aecc4b0cdccc79e14", "d5663f22b888f878625141430a2602863730f8ab122a815359dd545d876b49cb", "22c22e8e118609a58e29101a6f6a89dacc8ddfddcc92974c810fe4b51cc5fdc9"],
+      "security-verdict-binding": ["81cbb46158b44646aabf50e0152b80d5ed6dc423826337bf45fe6be7c24e5995", "88c89ebb14e5f14121dc022da8f0c73dc1e5e9639d570337edcfb09cef5c17d7", "56e34d4427dc76cb46caee5a002856e4e97ef2dc870543fc489a750e384e6d99"],
+    };
+    for (const [id, digests] of Object.entries(expectedDigests)) {
+      const current = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const prior = structuredClone(current);
+      for (const key of ["evidence_hash", "review_hash", "reviewed_commit", "report_hash", "reviewed_head_sha"]) delete prior.source[key];
+      prior.externalSources = {};
+      prior.sidecars = [];
+      delete prior.observations;
+      const oldReview = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(prior));
+      const newReview = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(current));
+      assert.equal(Object.hasOwn(oldReview.canonicalSource.source, id.startsWith("slice-") ? "reviewed_commit" : "reviewed_head_sha"), false, id);
+      assert.equal(Object.hasOwn(newReview.canonicalSource.source, id.startsWith("slice-") ? "reviewed_commit" : "reviewed_head_sha"), true, id);
+      assert.deepEqual(Object.keys(oldReview.canonicalSource.externalSources), []);
+      assert.ok(Object.keys(newReview.canonicalSource.externalSources).length > 0, id);
+      assert.ok(newReview.descriptor.targets.some(({ family }) => family === "wrong-hash"), id);
+      assert.ok(newReview.descriptor.targets.some(({ family }) => family === "wrong-bytes"), id);
+      assert.deepEqual([
+        DURABLE_AUTHORITY_METADATA_MANIFEST.find(([row]) => row === id)[1],
+        DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.find(([row]) => row === id)[1],
+        DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.find(([row]) => row === id)[1],
+      ], digests, id);
+    }
+  });
+
+  it("reviews B0MR.2 fence and universal PR tuple values before manifest digest updates", () => {
+    const expectedDigests = {
+      "terminal-result-completed": ["624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c", "8156685012bdcf0072fc38331dd34c2ee2f0ac59c94d14418a0cadc3f92b84be", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
+      "steering-pr-fence": ["372be755ffb890bc4fdc9ae5913adad802c809e3d35c0e8c4746917c82e59b8a", "aae0a3986f100717159038cc2b06cfd835b1313305e22fc7beeea4929db3d662", "16fa47900dbcbd6618a6ebd0eed5cb705910a2ccfc8478bd1f554c7f8ebef406"],
+      "pr-created-result": ["3b863980fbc4b34d584f7ef02b57e5a16ca37858f2c8dc347addcdb02c8446a3", "6b510aefac2fe46ad7ea3679ab0b023eda0ad0702139fdcfe62176b0404272bc", "619a77468645eec8923dec7f7e3c8b0d1aa11064aac4494e039b7aa282e6f9ea"],
+    };
+    for (const [id, digests] of Object.entries(expectedDigests)) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const prior = structuredClone(record);
+      if (id === "steering-pr-fence") {
+        prior.source = Object.fromEntries(["token", "generation", "state_hash", "created_at"].map((key) => [key, prior.source[key]]));
+      } else {
+        for (const key of ["pr_node_id", "operation_id", "head_ref", "base_ref", "base_sha"]) delete prior.source[key];
+        if (id === "terminal-result-completed") delete prior.source.head_sha;
+      }
+      const oldReview = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(prior));
+      const review = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(record));
+      assert.equal(Object.hasOwn(oldReview.canonicalSource.source, "operation_id"), false, `${id} readable legacy/absent operation identity`);
+      assert.equal(review.canonicalSource.source.operation_id, `ffpr-v1-${"d".repeat(64)}`, id);
+      for (const [key, expected] of Object.entries({ repository: "acme/repo", head_ref: "feature--catalog", head_sha: "b".repeat(40), base_ref: "main", base_sha: "a".repeat(40), draft: false })) {
+        assert.equal(review.canonicalSource.source[key], expected, `${id}.${key}`);
+      }
+      if (id === "steering-pr-fence") {
+        assert.equal(review.canonicalSource.canonicalPath.join("."), "steering.pr_fence");
+        assert.equal(review.canonicalSource.source.created_at, "2026-07-16T12:00:00.000Z");
+      } else {
+        assert.equal(review.canonicalSource.source.pr_node_id, "PR_catalog_operation");
+        assert.equal(review.canonicalSource.source.pr_url, "https://github.com/acme/repo/pull/7");
+        assert.equal(review.canonicalSource.source.pr_number, 7);
+      }
+      assert.deepEqual([
+        DURABLE_AUTHORITY_METADATA_MANIFEST.find(([row]) => row === id)[1],
+        DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.find(([row]) => row === id)[1],
+        DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.find(([row]) => row === id)[1],
+      ], digests, id);
+    }
   });
 
   it("rejects both observed final.plan descriptor oracle bypasses", () => {
@@ -374,7 +1303,7 @@ describe("finite durable-authority catalog", () => {
   it("binds every catalog row's source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
-    assert.equal(canonicalIds.length, 108);
+    assert.equal(canonicalIds.length, 109);
     assert.deepEqual(canonicalIds, requiredIds);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
@@ -473,9 +1402,9 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("routes every canonical baseline through the exported production validator or its named descriptor consumer", () => {
+  it("routes exactly the adopted canonical baselines through production validation and keeps final.plan descriptor-only", () => {
     const observedConsumers = new Map();
-    for (const [id] of DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST) {
+    for (const id of [...DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS, "final-plan-descriptor"]) {
       const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
       const baseline = createDurableCatalogBaseline(record);
       observedConsumers.set(id, baseline.consumer);
@@ -492,8 +1421,155 @@ describe("finite durable-authority catalog", () => {
         assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
       }
     }
-    assert.equal(observedConsumers.size, 108);
+    assert.equal(observedConsumers.size, 109);
+    assert.deepEqual([...observedConsumers.keys()].slice(0, 108), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
     assert.equal(observedConsumers.get("final-plan-descriptor"), "final-plan-descriptor-contract", "future-only final.plan is a descriptor contract, not claimed as current validateRun input");
+  });
+
+  it("preserves the prior B0M.1-B0M.3 production-consumer regression matrix", async () => {
+    const expectedIds = [
+      "plan-slices-json",
+      "run-envelope-running",
+      "run-envelope-terminal",
+      "terminal-result-completed",
+      "terminal-result-blocked",
+      "terminal-result-partial",
+      "terminal-result-needs-human",
+      "gate-pending",
+      "gate-approved-without-receipt",
+      "gate-approved-interactive",
+      "gate-changes-requested",
+      "gate-stopped",
+      "step-running",
+      "step-rejected",
+      "step-blocked",
+      "step-accepted",
+      "step-inherited-acceptance",
+      "continuation-envelope",
+      "continuation-parent-binding",
+      "continuation-selected-review",
+      "continuation-target-binding",
+      "continuation-parent-artifact-sidecar",
+      "continuation-parent-evidence-sidecar",
+      "continuation-parent-review-sidecar",
+      "continuation-planning-reuse-ineligible",
+      "continuation-planning-reuse-eligible",
+      "continuation-draft-reuse",
+      "continuation-post-pr-binding",
+      "slice-pending",
+      "slice-running",
+      "slice-review",
+      "slice-merged",
+      "slice-blocked",
+      "validator-verdict-binding",
+      "security-verdict-binding",
+      "steering-boundary",
+      "steering-action-claim",
+      "steering-last-action",
+      "steering-pr-fence",
+      "pr-created-result",
+    ];
+    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.slice(0, 40), expectedIds);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
+    const continuationDispositions = exactB0m3ContinuationDispositionMap(B0M3_CONTINUATION_EXACT_CASES);
+    const executedContinuationCases = [];
+    const results = {};
+    const root = mkdtempSync(join(tmpdir(), "b0m-production-consumers-"));
+    try {
+      for (const id of expectedIds) {
+        const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+        const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+        results[id] = { count: cases.length, consumers: new Set() };
+        for (const mutationCase of cases) {
+          if (id === "plan-slices-json") {
+            assert.throws(() => validateSlicesPlan(mutationCase.record), validationErrorFor(mutationCase.name));
+            results[id].consumers.add("validateSlicesPlan");
+            continue;
+          }
+          if (id === "run-envelope-running" && ["stale-identity", "cross-bound-identity"].includes(mutationCase.family)) {
+            const runDir = join(root, mutationCase.family);
+            mkdirSync(runDir, { recursive: true });
+            writeJson(join(runDir, "run.json"), record.source);
+            await assert.rejects(transitionRunJson(runDir, () => mutationCase.record), /run identity field '(?:base_commit|run_id)' is immutable/u, mutationCase.name);
+            results[id].consumers.add("transitionRunJson identity guard");
+            continue;
+          }
+          if (id.startsWith("steering-")) {
+            const consumer = await consumeSteeringMutation(root, record, mutationCase);
+            results[id].consumers.add(consumer);
+            continue;
+          }
+          const fixture = createDurableCatalogBaseline(record);
+          const mutatedRun = replaceCanonicalRecord(fixture.run, record.canonicalPath, mutationCase.record);
+          try {
+            validateRun(mutatedRun);
+          } catch (error) {
+            assert.equal(validationErrorFor(mutationCase.name)(error), true);
+            results[id].consumers.add("validateRun");
+            continue;
+          }
+
+          const runDir = join(root, id, mutationCase.name.replaceAll(/[^a-z0-9]+/giu, "-"));
+          materializeCatalogSources(runDir, mutationCase.externalSources);
+          if (id.startsWith("gate-") || ["step-accepted", "step-inherited-acceptance"].includes(id)) {
+            const consistency = checkRunConsistency(runDir, mutatedRun);
+            if (!consistency.ok) {
+              results[id].consumers.add("checkRunConsistency");
+              continue;
+            }
+          }
+          if (id.startsWith("step-") && ["stale-identity", "cross-bound-identity"].includes(mutationCase.family)) {
+            writeJson(join(runDir, "run.json"), fixture.run);
+            await assert.rejects(transitionRunStep(runDir, "spec-writer", mutationCase.record), /attempts cannot regress|agent identity is immutable|inherited_acceptance can only be created/u, mutationCase.name);
+            results[id].consumers.add("transitionRunStep");
+            continue;
+          }
+          if (id.startsWith("continuation-")) {
+            const disposition = continuationDispositions.get(mutationCase.name);
+            assert.ok(disposition, `schema-valid continuation case requires an exact disposition: ${mutationCase.name}`);
+            assert.equal(disposition.record_id, id, mutationCase.name);
+            assert.equal(disposition.family, mutationCase.family, mutationCase.name);
+            await consumeContinuationMutation(root, record, mutationCase, disposition, executedContinuationCases.length);
+            executedContinuationCases.push(mutationCase.name);
+            results[id].consumers.add(disposition.consumer);
+            continue;
+          }
+          if (id.startsWith("slice-") || id.endsWith("-verdict-binding") || ["terminal-result-completed", "pr-created-result"].includes(id)) {
+            const consumer = await consumeB0M3Mutation(root, record, mutationCase);
+            results[id].consumers.add(consumer);
+            continue;
+          }
+          assert.fail(`${mutationCase.name} escaped every approved production consumer`);
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    const expectedCounts = Object.fromEntries(expectedIds.map((id) => {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      return [id, emitDurableRecordMutations(record.source, record.descriptor, record.externalSources).length];
+    }));
+    assert.deepEqual(Object.fromEntries(Object.entries(results).map(([id, value]) => [id, value.count])), expectedCounts);
+    assert.equal(Object.values(results).every(({ consumers }) => consumers.size > 0), true);
+    assert.equal(executedContinuationCases.length, 31, "all 31 schema-valid continuation mutations must execute a checked production consumer");
+    assert.deepEqual(executedContinuationCases, B0M3_CONTINUATION_EXACT_CASES.map(({ name }) => name));
+    const expectedB0M3Consumers = {
+      "slice-pending": "transitionSlicesSeed",
+      "slice-running": "transitionRunSlice",
+      "slice-review": "transitionRunSlice",
+      "slice-merged": "transitionSliceMerged",
+      "slice-blocked": "transitionRunSlice",
+      "validator-verdict-binding": "transitionPanelVerdicts",
+      "security-verdict-binding": "transitionPanelVerdicts",
+      "steering-boundary": "transitionSteeringBoundaryCrossed",
+      "steering-action-claim": "transitionSteeringActionStarted",
+      "steering-last-action": "transitionSteeringActionClosed",
+      "pr-created-result": "transitionPrCreated",
+    };
+    for (const [id, consumer] of Object.entries(expectedB0M3Consumers)) {
+      assert.equal(results[id].consumers.has(consumer), true, `${id} must reach ${consumer}`);
+      assert.equal(results[id].consumers.has("transitionRunJson B0M.3 authority guard"), false, `${id} must not use the generic guard as its mutation consumer`);
+    }
   });
 
   it("uses exact persisted gate, step, slice, panel, and steering variants without synthetic wrappers", () => {
@@ -515,14 +1591,15 @@ describe("finite durable-authority catalog", () => {
     const slices = ["slice-pending", "slice-running", "slice-review", "slice-merged", "slice-blocked"]
       .map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id));
     assert.deepEqual(slices.map(({ source }) => source.status), ["pending", "running", "review", "merged", "blocked"]);
-    for (const { source } of slices) {
-      for (const key of ["review_binding", "attempt_reviews", "reviewed_commit", "sidecar_bytes", "review_hash", "evidence_hash"]) assert.equal(Object.hasOwn(source, key), false);
+    for (const { source } of slices) for (const key of ["review_binding", "attempt_reviews", "sidecar_bytes"]) assert.equal(Object.hasOwn(source, key), false);
+    for (const source of [slices[0].source, slices[1].source, slices[4].source]) {
+      for (const key of ["reviewed_commit", "review_hash", "evidence_hash"]) assert.equal(Object.hasOwn(source, key), false);
     }
-    assert.deepEqual(Object.keys(slices[2].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "evidence_ref", "review_ref"]);
-    assert.deepEqual(Object.keys(slices[3].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "evidence_ref", "review_ref", "merge_commit", "updated_at"]);
+    assert.deepEqual(Object.keys(slices[2].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit"]);
+    assert.deepEqual(Object.keys(slices[3].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "updated_at"]);
 
-    assert.deepEqual(findRecord(DURABLE_AUTHORITY_CATALOG, "validator-verdict-binding").source, { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" });
-    assert.deepEqual(findRecord(DURABLE_AUTHORITY_CATALOG, "security-verdict-binding").source, { verdict: "PASS", review_ref: "reviews/security-reviewer.json" });
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "validator-verdict-binding").source), ["verdict", "report", "review_ref", "report_hash", "review_hash", "reviewed_head_sha"]);
+    assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "security-verdict-binding").source), ["verdict", "review_ref", "review_hash", "reviewed_head_sha"]);
     const steering = ["steering-boundary", "steering-action-claim", "steering-last-action"].map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id));
     assert.deepEqual(steering.map(({ canonicalPath }) => canonicalPath.join(".")), ["steering.boundary", "steering.action_claim", "steering.last_action"]);
     assert.deepEqual(steering.map(({ source }) => source.token), ["dispatch-token-1", "dispatch-token-1", "dispatch-token-1"]);
@@ -1022,10 +2099,253 @@ describe("per-record durable authority mutation matrices", () => {
   }
 });
 
+async function consumeB0M3Mutation(root, record, mutationCase) {
+  const safeName = mutationCase.name.replaceAll(/[^a-z0-9]+/giu, "-");
+  if (record.id.startsWith("slice-")) return consumeSliceMutation(root, record, mutationCase, safeName);
+  if (record.id.endsWith("-verdict-binding")) return consumePanelMutation(root, record, mutationCase, safeName);
+  if (record.id.startsWith("steering-")) return consumeSteeringMutation(root, record, mutationCase, safeName);
+  if (["terminal-result-completed", "pr-created-result"].includes(record.id)) return consumePrCreatedMutation(root, record, mutationCase, safeName);
+  throw new Error(`no B0M.3 consumer for ${record.id}`);
+}
+
+async function consumeSliceMutation(root, record, mutationCase, safeName) {
+  const mutation = mutationCase.record;
+  if (["slice-review", "slice-merged"].includes(record.id)) {
+    const repo = join(root, `actual-${record.id}`, safeName);
+    const runDir = join(repo, ".opencode", "factory", "catalog-run");
+    initCatalogGit(repo);
+    fixtureGit(repo, ["branch", "feature--backend"]);
+    const sliceWorktree = join(repo, ".opencode", "worktrees", "backend");
+    mkdirSync(join(repo, ".opencode", "worktrees"), { recursive: true });
+    fixtureGit(repo, ["worktree", "add", sliceWorktree, "feature--backend"]);
+    writeFileSync(join(sliceWorktree, "backend.txt"), "reviewed backend\n");
+    fixtureGit(sliceWorktree, ["add", "backend.txt"]);
+    fixtureGit(sliceWorktree, ["commit", "-q", "-m", "reviewed backend"]);
+    const reviewedHead = fixtureGit(sliceWorktree, ["rev-parse", "HEAD"]).trim();
+    const adaptSliceSources = (sources) => Object.fromEntries(Object.entries(sources || {}).map(([name, external]) => [name, {
+      ...external,
+      bytes: typeof external.bytes === "string" ? external.bytes.replaceAll("b".repeat(40), reviewedHead) : external.bytes,
+    }]));
+    materializeCatalogSources(runDir, adaptSliceSources(record.externalSources));
+    const expectedEvidenceHash = hashFileBytes(join(runDir, "evidence", "backend.json"));
+    const expectedReviewHash = hashFileBytes(join(runDir, "reviews", "backend.json"));
+    materializeCatalogSources(runDir, adaptSliceSources(mutationCase.externalSources));
+    const current = {
+      id: "backend", stack: "backend", depends_on: [], status: record.id === "slice-merged" ? "merged" : "review", attempts: 1,
+      branch: "feature--backend", worktree: sliceWorktree,
+      evidence_ref: "evidence/backend.json", evidence_hash: expectedEvidenceHash,
+      review_ref: "reviews/backend.json", review_hash: expectedReviewHash, reviewed_commit: reviewedHead,
+    };
+    let mergeCommit = null;
+    if (record.id === "slice-merged") {
+      fixtureGit(repo, ["merge", "--no-ff", "feature--backend", "-m", "merge backend"]);
+      mergeCommit = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+      current.merge_commit = mergeCommit;
+      current.updated_at = record.source.updated_at;
+    }
+    applyMutationDifference(current, record.source, mutation);
+    writeJson(join(runDir, "run.json"), createRunRecord({ run_id: "catalog-run", branch: "main", worktree: repo, slices: [current] }));
+    if (record.id === "slice-merged") {
+      await assert.rejects(transitionSliceMerged(runDir, "backend", { merge_commit: mergeCommit }, { repoRoot: repo }), undefined, mutationCase.name);
+      return "transitionSliceMerged";
+    }
+    await assert.rejects(transitionRunSlice(runDir, "backend", {
+      status: "review", attempts: current.attempts, evidence_ref: current.evidence_ref, review_ref: current.review_ref,
+    }, { repoRoot: repo }), undefined, mutationCase.name);
+    return "transitionRunSlice";
+  }
+
+  const runDir = join(root, `actual-${record.id}`, safeName);
+  mkdirSync(runDir, { recursive: true });
+  if (record.id === "slice-pending") {
+    const current = { ...structuredClone(record.source), branch: "progress-bound" };
+    writeJson(join(runDir, "run.json"), createRunRecord({ run_id: "catalog-run", slices: [current] }));
+    await assert.rejects(transitionSlicesSeed(runDir, [mutation]), undefined, record.id);
+    return "transitionSlicesSeed";
+  }
+
+  const current = { ...structuredClone(record.source), status: "running", attempts: Math.max(1, record.source.attempts || 1) };
+  delete current.evidence_ref;
+  delete current.review_ref;
+  delete current.merge_commit;
+  delete current.blocked_reason;
+  delete current.updated_at;
+  if (record.id === "slice-review") materializeSliceSidecars(runDir, mutation.id);
+  writeJson(join(runDir, "run.json"), createRunRecord({ run_id: "catalog-run", slices: [current] }));
+  await assert.rejects(transitionRunSlice(runDir, "backend", mutation), undefined, record.id);
+  return "transitionRunSlice";
+}
+
+async function consumePanelMutation(root, record, mutationCase, safeName) {
+  const repo = join(root, `actual-${record.id}`, safeName);
+  const runDir = join(repo, ".opencode", "factory", "catalog-run");
+  initCatalogGit(repo);
+  fixtureGit(repo, ["branch", "feature--catalog"]);
+  fixtureGit(repo, ["checkout", "feature--catalog"]);
+  const head = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  for (const dir of ["artifacts", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
+  writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
+  writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "feature--catalog", attempt: 1, verdict: "GO", reviewed_head_sha: head });
+  writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "feature--catalog", attempt: 1, verdict: "PASS", reviewed_head_sha: head });
+  const adaptPanelSources = (sources) => Object.fromEntries(Object.entries(sources || {}).map(([name, external]) => [name, {
+    ...external,
+    bytes: typeof external.bytes === "string" ? external.bytes.replaceAll("b".repeat(40), head) : external.bytes,
+  }]));
+  materializeCatalogSources(runDir, adaptPanelSources(record.externalSources));
+  const expectedReportHash = hashFileBytes(join(runDir, "artifacts", "validation-report.md"));
+  const expectedValidatorHash = hashFileBytes(join(runDir, "reviews", "implementation-validator.json"));
+  const expectedSecurityHash = hashFileBytes(join(runDir, "reviews", "security-reviewer.json"));
+  materializeCatalogSources(runDir, adaptPanelSources(mutationCase.externalSources));
+  const validator = {
+    verdict: "GO", report: "artifacts/validation-report.md", report_hash: expectedReportHash,
+    review_ref: "reviews/implementation-validator.json", review_hash: expectedValidatorHash, reviewed_head_sha: head,
+  };
+  const security = {
+    verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: expectedSecurityHash, reviewed_head_sha: head,
+  };
+  const target = record.id === "validator-verdict-binding" ? validator : security;
+  applyMutationDifference(target, record.source, mutationCase.record);
+  writeJson(join(runDir, "run.json"), createRunRecord({ run_id: "catalog-run", branch: "feature--catalog", worktree: repo, slices: [], validator, security_review: security }));
+  await assert.rejects(transitionPanelVerdicts(runDir, {
+    validator: { verdict: validator.verdict, report: validator.report, review_ref: validator.review_ref },
+    security_review: { verdict: security.verdict, review_ref: security.review_ref },
+  }), undefined, mutationCase.name);
+  return "transitionPanelVerdicts";
+}
+
+async function consumeSteeringMutation(root, record, mutationCase) {
+  if (record.id === "steering-pr-fence") return consumePrFenceMutation(root, record, mutationCase);
+  const safeName = mutationCase.name.replaceAll(/[^a-z0-9]+/giu, "-");
+  const runDir = join(root, `actual-${record.id}`, safeName);
+  const runFile = join(runDir, "run.json");
+  const steering = { schema_version: 1, generation: 2, pending: null, uncheckpointed: null, boundary: null, action_claim: null, last_action: null, pr_fence: null, history: [] };
+  writeJson(runFile, createRunRecord({ run_id: "catalog-run", slices: [], steering }));
+  const opened = await transitionSteeringBoundaryOpened(runDir, "dispatch", { token: "dispatch-token-1", now: "2026-07-16T12:00:00.000Z" });
+  let authorityKey;
+  let consumer;
+  let consume;
+  if (record.id === "steering-boundary") {
+    authorityKey = "boundary";
+    consumer = "transitionSteeringBoundaryCrossed";
+    consume = () => transitionSteeringBoundaryCrossed(runDir, "dispatch", opened.boundary.token, { now: "2026-07-16T12:00:00.000Z" });
+  } else {
+    const crossed = await transitionSteeringBoundaryCrossed(runDir, "dispatch", opened.boundary.token, { now: "2026-07-16T12:00:00.000Z" });
+    if (record.id === "steering-action-claim") {
+      authorityKey = "action_claim";
+      consumer = "transitionSteeringActionStarted";
+      consume = () => transitionSteeringActionStarted(runDir, "dispatch", crossed.action_claim.token, { now: "2026-07-16T12:00:01.000Z" });
+    } else {
+      const started = await transitionSteeringActionStarted(runDir, "dispatch", crossed.action_claim.token, { now: "2026-07-16T12:00:01.000Z" });
+      authorityKey = "last_action";
+      consumer = "transitionSteeringActionClosed";
+      consume = () => transitionSteeringActionClosed(runDir, "dispatch", started.action.token, { now: "2026-07-16T12:00:02.000Z" });
+    }
+  }
+  const persisted = JSON.parse(readFileSync(runFile, "utf8"));
+  applyMutationDifference(persisted.steering[authorityKey], record.source, mutationCase.record);
+  writeJson(runFile, persisted);
+  const before = readFileSync(runFile, "utf8");
+  await assert.rejects(consume(), (error) => isExactSteeringRejection(record, mutationCase, error), `${mutationCase.name} exact steering rejection`);
+  assert.equal(readFileSync(runFile, "utf8"), before, `${mutationCase.name} protected run bytes`);
+  return consumer;
+}
+
+async function consumePrFenceMutation(root, record, mutationCase) {
+  const safeName = mutationCase.name.replaceAll(/[^a-z0-9]+/giu, "-");
+  const fixture = createPrOperationTransitionFixture(root, "actual-pr-fence", safeName);
+  const established = await transitionPrePrFenceEstablished(fixture.runDir);
+  const persisted = JSON.parse(readFileSync(fixture.runFile, "utf8"));
+  applyMutationDifference(persisted.steering.pr_fence, record.source, mutationCase.record);
+  writeJson(fixture.runFile, persisted);
+  const before = readFileSync(fixture.runFile, "utf8");
+  await assert.rejects(
+    transitionPrePrFenceCleared(fixture.runDir, established.fence.token, { repoRoot: fixture.repo, observePrOperation: async () => ({ disposition: "absent", reason: "complete-absence", pull_request: null }) }),
+    undefined,
+    mutationCase.name,
+  );
+  assert.equal(readFileSync(fixture.runFile, "utf8"), before, `${mutationCase.name} protected run bytes`);
+  return "transitionPrePrFenceCleared";
+}
+
+async function consumePrCreatedMutation(root, record, mutationCase, safeName) {
+  const fixture = createPrOperationTransitionFixture(root, "actual-pr-created", safeName);
+  const { repo, runDir, runFile } = fixture;
+  const established = await transitionPrePrFenceEstablished(runDir);
+  const persisted = JSON.parse(readFileSync(runFile, "utf8"));
+  if (mutationCase.record.operation_id !== record.source.operation_id) persisted.steering.pr_fence.operation_id = mutationCase.record.operation_id;
+  writeJson(runFile, persisted);
+  const operation = persisted.steering.pr_fence;
+  const observed = {
+    pr_url: mutationCase.record.pr_url,
+    pr_number: mutationCase.record.pr_number,
+    pr_node_id: mutationCase.record.pr_node_id,
+    repository: mutationCase.record.repository,
+    head_ref: mutationCase.record.head_ref,
+    head_sha: mutationCase.record.head_sha,
+    base_ref: mutationCase.record.base_ref,
+    base_sha: mutationCase.record.base_sha,
+    draft: mutationCase.record.draft,
+  };
+  const before = readFileSync(runFile, "utf8");
+  await assert.rejects(
+    transitionPrCreated(runDir, {}, { fenceToken: operation.token, repoRoot: repo, observePrOperation: async () => ({ disposition: "open", reason: "unique-exact-open", pull_request: observed }) }),
+    undefined,
+    mutationCase.name,
+  );
+  assert.equal(readFileSync(runFile, "utf8"), before, `${mutationCase.name} protected run bytes`);
+  return "transitionPrCreated";
+}
+
+function createPrOperationTransitionFixture(root, family, safeName) {
+  const repo = join(root, family, safeName);
+  const runDir = join(repo, ".opencode", "factory", "catalog-run");
+  const runFile = join(runDir, "run.json");
+  initCatalogGit(repo);
+  fixtureGit(repo, ["remote", "add", "origin", "https://github.com/acme/repo.git"]);
+  fixtureGit(repo, ["config", `url.file://${repo}/.insteadOf`, "https://github.com/acme/repo.git"]);
+  const head = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
+  writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
+  writeJson(join(runDir, "evidence", "backend.json"), { subject: "backend", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+  writeJson(join(runDir, "reviews", "backend.json"), { subject: "backend", attempt: 1, verdict: "APPROVE", reviewed_commit: head });
+  writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "main", attempt: 1, verdict: "GO", reviewed_head_sha: head });
+  writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "main", attempt: 1, verdict: "PASS", reviewed_head_sha: head });
+  writeJson(runFile, createRunRecord({
+    run_id: "catalog-run",
+    branch: "main",
+    worktree: repo,
+    base_ref: "main",
+    base_commit: head,
+    github_account: "acme",
+    pr_mode: "ready",
+    gates: { pre_pr: { status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre-pr.md", answer: "approve", answered_at: "2026-07-16T12:00:00.000Z" } },
+    slices: [{ id: "backend", status: "merged", attempts: 1, evidence_ref: "evidence/backend.json", evidence_hash: hashFileBytes(join(runDir, "evidence", "backend.json")), review_ref: "reviews/backend.json", review_hash: hashFileBytes(join(runDir, "reviews", "backend.json")), reviewed_commit: head, merge_commit: head }],
+    validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFileBytes(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFileBytes(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
+    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFileBytes(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head },
+  }));
+  return { repo, runDir, runFile, head };
+}
+
+function materializeSliceSidecars(runDir, subject, reviewedHead = "b".repeat(40)) {
+  writeJson(join(runDir, "evidence", "backend.json"), { subject, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedHead });
+  writeJson(join(runDir, "reviews", "backend.json"), { subject, attempt: 1, verdict: "APPROVE", reviewed_commit: reviewedHead });
+}
+
+function initCatalogGit(repo) {
+  mkdirSync(repo, { recursive: true });
+  fixtureGit(repo, ["init", "-q", "-b", "main"]);
+  fixtureGit(repo, ["config", "user.email", "test@example.com"]);
+  fixtureGit(repo, ["config", "user.name", "Test"]);
+  writeFileSync(join(repo, "README.md"), "fixture\n");
+  fixtureGit(repo, ["add", "README.md"]);
+  fixtureGit(repo, ["commit", "-q", "-m", "baseline"]);
+}
+
 function materializeCatalogSources(runDir, ...sourceGroups) {
   mkdirSync(runDir, { recursive: true });
   for (const sources of sourceGroups) {
     for (const { ref, bytes } of Object.values(sources ?? {})) {
+      if (bytes === null) continue;
       if (ref.startsWith("../") || ref.includes("/../")) {
         assert.equal(ref, "../outside.json", `unexpected traversal ref must fail materialization: ${ref}`);
         continue;
@@ -1035,6 +2355,15 @@ function materializeCatalogSources(runDir, ...sourceGroups) {
       writeFileSync(file, bytes);
     }
   }
+}
+
+function replaceCanonicalRecord(run, canonicalPath, record) {
+  if (canonicalPath.length === 0) return structuredClone(record);
+  const next = structuredClone(run);
+  let owner = next;
+  for (const segment of canonicalPath.slice(0, -1)) owner = owner[segment];
+  owner[canonicalPath.at(-1)] = structuredClone(record);
+  return next;
 }
 
 function failedConsistencyMessages(result) {
@@ -1129,6 +2458,396 @@ function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function exactB0m3ContinuationDispositionMap(cases) {
+  const dispositions = new Map();
+  for (const exactCase of cases) {
+    if (dispositions.has(exactCase.name)) throw new Error(`duplicate exact B0M.3 continuation case ${exactCase.name}`);
+    for (const key of ["name", "record_id", "family", "consumer", "rejector"]) {
+      if (typeof exactCase[key] !== "string" || exactCase[key].length === 0) throw new Error(`exact B0M.3 continuation case requires literal ${key}`);
+    }
+    dispositions.set(exactCase.name, exactCase);
+  }
+  assert.equal(dispositions.size, 31, "exactly 31 schema-valid continuation dispositions are required");
+  return dispositions;
+}
+
+async function consumeContinuationMutation(root, record, mutationCase, disposition, index) {
+  const fixture = createContinuationMutationFixture(root, record.id, index);
+  const childRunDir = join(fixture.repo, ".opencode", "factory", fixture.childRunId);
+  try {
+    if (disposition.consumer === "seedContinuationPlanningArtifacts") {
+      const continuation = structuredClone(fixture.continuation);
+      const actualRecord = continuationRecordAtPath(continuation, record);
+      applyMutationDifference(actualRecord, record.source, mutationCase.record);
+      injectContinuationExternalMutation(fixture, record, mutationCase, actualRecord);
+      const parentRunBefore = readFileSync(join(fixture.parentRunDir, "run.json"));
+      const parentSourcesBefore = continuationSourceSnapshot(fixture.parentRunDir, continuation, record.id);
+      assert.throws(
+        () => seedContinuationPlanningArtifacts(fixture.repo, fixture.parentRunDir, continuation),
+        (error) => isExactNamedRejection(error, disposition.rejector),
+        `${mutationCase.name} must reach ${disposition.rejector}`,
+      );
+      assert.equal(existsSync(childRunDir), false, `${mutationCase.name} must not publish child seed bytes`);
+      assert.deepEqual(readFileSync(join(fixture.parentRunDir, "run.json")), parentRunBefore, `${mutationCase.name} protected parent run bytes`);
+      assert.deepEqual(continuationSourceSnapshot(fixture.parentRunDir, continuation, record.id), parentSourcesBefore, `${mutationCase.name} protected parent source bytes`);
+      return;
+    }
+
+    const seeded = seedContinuationPlanningArtifacts(fixture.repo, fixture.parentRunDir, fixture.continuation);
+    if (disposition.consumer === "transitionContinuationAdoption") assert.equal(seeded.eligible, true, `${mutationCase.name} adoption fixture must seed accepted planning authority`);
+    else assert.equal(seeded.eligible, false, `${mutationCase.name} authority-reader fixture must remain reuse-ineligible`);
+    writeJson(join(childRunDir, "run.json"), continuationChildRun(fixture.continuation));
+    const childRun = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+    const actualRecord = continuationRecordAtPath(childRun.continuation, record);
+    applyMutationDifference(actualRecord, record.source, mutationCase.record);
+    writeJson(join(childRunDir, "run.json"), childRun);
+    injectContinuationExternalMutation(fixture, record, mutationCase, actualRecord);
+    const runBefore = readFileSync(join(childRunDir, "run.json"));
+    const seedBefore = childSeedSnapshot(childRunDir, seeded);
+
+    if (disposition.consumer === "assertContinuationAuthorityCurrent") {
+      assert.throws(
+        () => assertContinuationAuthorityCurrent(childRunDir, childRun, { repoRoot: fixture.repo }),
+        (error) => isExactNamedRejection(error, disposition.rejector),
+        `${mutationCase.name} must reach ${disposition.rejector}`,
+      );
+    } else if (disposition.consumer === "transitionContinuationAdoption") {
+      await assert.rejects(
+        transitionContinuationAdoption(childRunDir, { repoRoot: fixture.repo }),
+        (error) => isExactNamedRejection(error, disposition.rejector),
+        `${mutationCase.name} must reach ${disposition.rejector}`,
+      );
+    } else {
+      assert.fail(`unknown exact continuation consumer ${disposition.consumer}`);
+    }
+    assert.deepEqual(readFileSync(join(childRunDir, "run.json")), runBefore, `${mutationCase.name} protected child run bytes`);
+    assert.deepEqual(childSeedSnapshot(childRunDir, seeded), seedBefore, `${mutationCase.name} protected child seed bytes`);
+  } finally {
+    rmSync(fixture.repo, { recursive: true, force: true });
+  }
+}
+
+function createContinuationMutationFixture(root, recordId, index) {
+  const requestedRepo = join(root, "continuation-consumers", String(index));
+  initCatalogGit(requestedRepo);
+  const repo = fixtureGit(requestedRepo, ["rev-parse", "--show-toplevel"]).trim();
+  const parentRunId = `continuation-parent-${index}`;
+  const childRunId = `continuation-child-${index}`;
+  fixtureGit(repo, ["branch", parentRunId]);
+  const parentRunDir = join(repo, ".opencode", "factory", parentRunId);
+  for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(parentRunDir, dir), { recursive: true });
+  writeFileSync(join(parentRunDir, "artifacts", "story.md"), "story\n");
+  writeJson(join(parentRunDir, "reviews", "reviewer.json"), createReviewRecord({ subject: parentRunId, verdict: undefined, required_fixes: undefined, summary: "needs continuation" }));
+  writeJson(join(parentRunDir, "reviews", "security.json"), createReviewRecord({ subject: parentRunId, verdict: "BLOCK", summary: "security context", required_fixes: [] }));
+  writeJson(join(parentRunDir, "evidence", "context.json"), { subject: "spec-writer", status: "fail" });
+
+  const spec = recordId === "continuation-draft-reuse"
+    ? { status: "rejected", verdict: "REJECT" }
+    : recordId === "continuation-post-pr-binding"
+      ? null
+      : { status: "accepted", verdict: "APPROVE" };
+  let selectedReview = "reviewer.json";
+  let parentRun = createRunRecord({
+    run_id: parentRunId,
+    status: "blocked",
+    branch: parentRunId,
+    worktree: join(repo, ".opencode", "worktrees", parentRunId),
+    validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
+    security_review: { verdict: "BLOCK", review_ref: "reviews/security.json" },
+    terminal_result: { status: "blocked", run_id: parentRunId, reason: "review blocked", summary: "blocked", artifacts: {} },
+  });
+  if (recordId === "continuation-post-pr-binding") {
+    const postPrRecord = findRecord(DURABLE_AUTHORITY_CATALOG, "post-pr-continuation-review-bound");
+    parentRun = structuredClone(createPostPrCatalogBaseline(postPrRecord).run);
+    parentRun.run_id = parentRunId;
+    parentRun.branch = parentRunId;
+    parentRun.worktree = join(repo, ".opencode", "worktrees", parentRunId);
+    parentRun.terminal_result.run_id = parentRunId;
+    const failureRef = parentRun.post_pr.evidence_refs.at(-1).ref;
+    writeJson(join(parentRunDir, failureRef), { kind: "post-pr-failure", failed_head_sha: parentRun.post_pr.remediation.failed_head_sha, verdict: "red" });
+    const failureHash = hashFileBytes(join(parentRunDir, failureRef));
+    parentRun.post_pr.evidence_refs.at(-1).hash = failureHash;
+    parentRun.post_pr.remediation.failure_evidence_hash = failureHash;
+    selectedReview = parentRun.post_pr.continuation_review.ref;
+    writeJson(join(parentRunDir, selectedReview), createReviewRecord({
+      subject: parentRunId,
+      verdict: "BLOCKED",
+      summary: "Post-PR remediation retry budget exhausted.",
+      required_fixes: ["Continue remediation on a fresh PR."],
+      head_sha: parentRun.post_pr.remediation.failed_head_sha,
+    }));
+    parentRun.post_pr.continuation_review.hash = hashFileBytes(join(parentRunDir, selectedReview));
+  } else if (spec) {
+    writeFileSync(join(parentRunDir, "artifacts", "technical-brief.md"), "brief\n");
+    writeJson(join(parentRunDir, "reviews", "spec-writer.json"), createReviewRecord({ subject: "spec-writer", verdict: spec.verdict, summary: "spec review", required_fixes: [] }));
+    const step = { agent: "spec-writer", status: spec.status, attempts: 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json", evidence_ref: "evidence/context.json" };
+    if (spec.status === "accepted") {
+      step.acceptance = {
+        artifact_ref: "artifacts/technical-brief.md",
+        artifact_hash: hashFileBytes(join(parentRunDir, "artifacts", "technical-brief.md")),
+        review_ref: "reviews/spec-writer.json",
+        review_hash: hashFileBytes(join(parentRunDir, "reviews", "spec-writer.json")),
+      };
+    }
+    parentRun.steps = [step];
+  } else {
+    parentRun.steps = [{ agent: "context-reader", status: "blocked", attempts: 1, evidence_ref: "evidence/context.json" }];
+  }
+  writeJson(join(parentRunDir, "run.json"), parentRun);
+  const { payload } = continueFactory(parentRunId, {
+    cwd: repo,
+    review: selectedReview,
+    runId: childRunId,
+    dryRun: true,
+    newPr: recordId === "continuation-post-pr-binding",
+    now: "2026-07-16T12:00:00.000Z",
+  });
+  return { repo, parentRunDir, parentRunId, childRunId, continuation: payload.continuation };
+}
+
+function continuationChildRun(continuation) {
+  return createRunRecord({
+    run_id: continuation.target.run_id,
+    branch: continuation.target.branch,
+    worktree: continuation.target.worktree,
+    ...(continuation.draft_spec_reuse ? { max_retries: continuation.draft_spec_reuse.max_retries } : {}),
+    continuation,
+  });
+}
+
+function continuationRecordAtPath(continuation, record) {
+  if (record.id === "continuation-parent-review-sidecar") {
+    const contextualReview = continuation.parent_reviews.find(({ ref }) => ref !== continuation.review.ref && ref !== continuation.planning_reuse?.spec_review_ref);
+    assert.ok(contextualReview, "continuation parent-review mutation requires a non-selected contextual review");
+    return contextualReview;
+  }
+  const { canonicalPath, source } = record;
+  if (canonicalPath.length === 1) return continuation;
+  let current = continuation;
+  for (const segment of canonicalPath.slice(1, -1)) current = current[segment];
+  const key = canonicalPath.at(-1);
+  if (current[key] === undefined) current[key] = structuredClone(source);
+  return current[key];
+}
+
+function applyMutationDifference(actual, source, mutated) {
+  for (const key of Object.keys(source)) {
+    if (!Object.hasOwn(mutated, key)) {
+      delete actual[key];
+      continue;
+    }
+    const sourceValue = source[key];
+    const mutatedValue = mutated[key];
+    if (isPlainObject(sourceValue) && isPlainObject(mutatedValue) && isPlainObject(actual[key])) {
+      applyMutationDifference(actual[key], sourceValue, mutatedValue);
+    } else if (JSON.stringify(sourceValue) !== JSON.stringify(mutatedValue)) {
+      actual[key] = structuredClone(mutatedValue);
+    }
+  }
+  for (const key of Object.keys(mutated)) {
+    if (!Object.hasOwn(source, key)) actual[key] = structuredClone(mutated[key]);
+  }
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function injectContinuationExternalMutation(fixture, record, mutationCase, actualRecord) {
+  const externalSources = record.externalSources ?? {};
+  const changed = Object.keys(externalSources).filter((key) => JSON.stringify(externalSources[key]) !== JSON.stringify(mutationCase.externalSources[key]));
+  if (changed.length === 0) return;
+  assert.equal(changed.length, 1, `${mutationCase.name} must mutate exactly one external source`);
+  const externalKey = changed[0];
+  let ref;
+  if (record.id === "continuation-parent-binding" && externalKey === "parent-run") {
+    const parentFile = join(fixture.parentRunDir, "run.json");
+    writeFileSync(parentFile, `${readFileSync(parentFile, "utf8")} `);
+    return;
+  }
+  if (record.id === "continuation-selected-review" && externalKey === "selected-review") ref = fixture.continuation.review.ref;
+  else if (record.id === "continuation-planning-reuse-eligible" && externalKey === "review") ref = fixture.continuation.planning_reuse.spec_review_ref;
+  else if (record.id === "continuation-planning-reuse-eligible" && externalKey === "artifact") ref = fixture.continuation.planning_reuse.spec_artifact_ref;
+  else if (record.id === "continuation-draft-reuse" && externalKey === "draft") ref = fixture.continuation.draft_spec_reuse.artifact_ref;
+  else if (["continuation-parent-artifact-sidecar", "continuation-parent-evidence-sidecar", "continuation-parent-review-sidecar"].includes(record.id)) ref = actualRecord.ref;
+  else if (record.id === "continuation-post-pr-binding" && externalKey === "evidence") ref = actualRecord.evidence_ref;
+  else if (record.id === "continuation-post-pr-binding" && externalKey === "review") ref = actualRecord.continuation_review_ref;
+  else throw new Error(`no external mutation injector for ${record.id}/${externalKey}`);
+  writeFileSync(join(fixture.parentRunDir, ref), `tampered bytes for ${mutationCase.name}\n`);
+}
+
+function childSeedSnapshot(childRunDir, seeded) {
+  const refs = [...seeded.artifacts, ...(seeded.spec_review_ref ? [seeded.spec_review_ref] : [])].sort();
+  return Object.fromEntries(refs.map((ref) => [ref, readFileSync(join(childRunDir, ref))]));
+}
+
+function continuationSourceSnapshot(parentRunDir, continuation, recordId) {
+  const refs = recordId === "continuation-draft-reuse" ? [continuation.draft_spec_reuse.artifact_ref] : [];
+  return Object.fromEntries(refs.map((ref) => [ref, readFileSync(join(parentRunDir, ref))]));
+}
+
+function hashFileBytes(file) {
+  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+}
+
+function isExactNamedRejection(error, rejector) {
+  const [name, message] = rejector.split(" :: ");
+  return error?.name === name && error?.message === message;
+}
+
+function isExactSteeringRejection(record, mutationCase, error) {
+  const authorityKey = record.canonicalPath.at(-1);
+  const path = `run.steering.${authorityKey}`;
+  if (["missing-key", "unknown-key", "wrong-kind", "wrong-time", "wrong-type", "descriptor-key-shape-drift"].includes(mutationCase.family)) {
+    assert.equal(error?.name, "ValidationError", `${mutationCase.name} validation error type`);
+    let expected;
+    if (mutationCase.family === "missing-key") {
+      expected = { path: `${path}.token`, message: "must be a non-empty string" };
+    } else if (mutationCase.family === "unknown-key") {
+      expected = { path: `${path}.unexpected_authority_key`, message: "is not allowed" };
+    } else if (mutationCase.family === "wrong-kind") {
+      const values = authorityKey === "boundary"
+        ? "gate, dispatch, remediation, terminal, post-pr-observe, post-pr-push"
+        : "dispatch, remediation, terminal, post-pr-observe, post-pr-push";
+      expected = { path: `${path}.kind`, message: `must be one of ${values}` };
+    } else if (mutationCase.family === "wrong-time") {
+      const key = authorityKey === "boundary" ? "created_at" : authorityKey === "action_claim" ? "claimed_at" : "resolved_at";
+      expected = { path: `${path}.${key}`, message: "must be an ISO timestamp" };
+    } else if (mutationCase.family === "wrong-type") {
+      expected = { path: `${path}.generation`, message: "must be a non-negative integer" };
+    } else {
+      expected = { path: `${path}.operation_token`, message: "is not allowed" };
+    }
+    assert.equal(error.errors.some((item) => item.path === expected.path && item.message === expected.message), true, `${mutationCase.name} exact timestamp/schema invariant`);
+    return true;
+  }
+  const exactMessage = authorityKey === "boundary"
+    ? mutationCase.family === "cross-bound-identity" ? "dispatch boundary token mismatch" : "dispatch boundary observation is stale"
+    : authorityKey === "action_claim"
+      ? mutationCase.family === "cross-bound-identity" ? "action start claim token mismatch" : "action start claim is stale"
+      : "origin action is missing, stale, or not started";
+  return error?.name === "Error" && error?.message === exactMessage;
+}
+
+function exactB0m4DispositionMap(cases) {
+  const dispositions = new Map();
+  for (const exactCase of cases) {
+    if (dispositions.has(exactCase.name)) throw new Error(`duplicate exact B0M.4 case ${exactCase.name}`);
+    for (const key of ["name", "record_id", "family", "target_label", "consumer", "rejector"]) {
+      if (typeof exactCase[key] !== "string" || exactCase[key].length === 0) throw new Error(`exact B0M.4 case requires literal ${key}`);
+    }
+    if (!exactCase.consumer || !exactCase.rejector) throw new Error("exact B0M.4 case requires a concrete consumer and rejector");
+    dispositions.set(exactCase.name, exactCase);
+  }
+  return dispositions;
+}
+
+async function consumePrerequisiteValidB0M4Case(expected, record, mutationCase, scenario) {
+  if (scenario === "post-pr") {
+    const control = createPrerequisitePostPrFixture(record, mutationCase, false);
+    try {
+      const result = await transitionPostPrState(control.runDir, control.next.post_pr, { worktree: control.repo, now: "2026-07-16T12:06:00.000Z" });
+      assert.deepEqual(result.run.post_pr, control.next.post_pr, `${expected.name} canonical control`);
+    } finally { rmSync(control.repo, { recursive: true, force: true }); }
+    const mutated = createPrerequisitePostPrFixture(record, mutationCase, true);
+    try {
+      const before = readFileSync(join(mutated.runDir, "run.json"), "utf8");
+      await assertExactB0M4Rejection(transitionPostPrState(mutated.runDir, mutated.next.post_pr, { worktree: mutated.repo, now: "2026-07-16T12:06:00.000Z" }), expected);
+      assert.equal(readFileSync(join(mutated.runDir, "run.json"), "utf8"), before, `${expected.name} protected bytes`);
+    } finally { rmSync(mutated.repo, { recursive: true, force: true }); }
+    return;
+  }
+  const control = await createPrerequisiteRepairFixture(scenario);
+  try {
+    const result = await advancePrerequisiteRepairFixture(control, scenario);
+    assert.equal(result.updated, true, `${expected.name} canonical control`);
+  } finally { rmSync(control.repo, { recursive: true, force: true }); }
+  const mutated = await createPrerequisiteRepairFixture(scenario);
+  try {
+    mutatePrerequisiteRepairAuthority(mutated, scenario);
+    const before = readFileSync(join(mutated.runDir, "run.json"), "utf8");
+    await assertExactB0M4Rejection(advancePrerequisiteRepairFixture(mutated, scenario), expected);
+    assert.equal(readFileSync(join(mutated.runDir, "run.json"), "utf8"), before, `${expected.name} protected bytes`);
+    assert.deepEqual(mergedSliceRepairFence(JSON.parse(before)), mutated.mutatedFence, `${expected.name} repair fence`);
+  } finally { rmSync(mutated.repo, { recursive: true, force: true }); }
+}
+
+function createPrerequisitePostPrFixture(record, mutationCase, mutated) {
+  const repo = mkdtempSync(join(tmpdir(), "b0m4-post-pr-prerequisite-"));
+  initCatalogGit(repo);
+  const baseline = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  const path = join(repo, "src", "backend.js");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "candidate\n");
+  fixtureGit(repo, ["add", "src/backend.js"]);
+  fixtureGit(repo, ["commit", "-q", "-m", "candidate"]);
+  const candidate = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  const stale = fixtureGit(repo, ["commit-tree", `${baseline}^{tree}`, "-p", baseline, "-m", "stale authority"]).trim();
+  const fixture = createPostPrCatalogBaseline(record);
+  const translate = (value) => translateCatalogCommitIdentities(value, { ["a".repeat(40)]: baseline, ["b".repeat(40)]: candidate, ["c".repeat(40)]: stale });
+  const run = translate(fixture.run);
+  run.worktree = repo;
+  run.branch = "main";
+  run.base_commit = baseline;
+  const runDir = join(repo, ".opencode", "factory", "prerequisite-run");
+  materializeCatalogSources(runDir, fixture.externalSources);
+  writeJson(join(runDir, "run.json"), run);
+  const next = mutated ? replaceCanonicalRecord(run, record.canonicalPath, translate(mutationCase.record)) : structuredClone(run);
+  return { repo, runDir, next };
+}
+
+function translateCatalogCommitIdentities(value, replacements) {
+  if (typeof value === "string") return replacements[value] || value;
+  if (Array.isArray(value)) return value.map((item) => translateCatalogCommitIdentities(item, replacements));
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, translateCatalogCommitIdentities(item, replacements)]));
+}
+
+async function createPrerequisiteRepairFixture(scenario) {
+  const fixture = createRepairTransitionFixture();
+  await transitionRepairReport(fixture);
+  if (scenario === "repair-reported") return fixture;
+  await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 }, { repoRoot: fixture.repo });
+  fixture.repairHead = commitTransitionRepair(fixture, scenario);
+  fixture.reviewVerdict = scenario.startsWith("repair-review-reject") ? "REJECT" : "APPROVE";
+  writeTransitionReview(fixture, fixture.reviewVerdict, fixture.repairHead);
+  if (scenario !== "repair-repairing") await transitionRepairReview(fixture, fixture.repairHead);
+  return fixture;
+}
+
+function advancePrerequisiteRepairFixture(fixture, scenario) {
+  if (scenario === "repair-reported") return transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 }, { repoRoot: fixture.repo });
+  if (scenario === "repair-repairing") return transitionRepairReview(fixture, fixture.repairHead);
+  if (scenario.startsWith("repair-review-approve")) {
+    writeJson(join(fixture.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
+    return transitionMergedSliceRepair(fixture.runDir, { status: "merged", merge_commit: fixture.repairHead, verification_ref: "evidence/verification-pass.json" }, { repoRoot: fixture.repo });
+  }
+  return transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 2 }, { repoRoot: fixture.repo });
+}
+
+function mutatePrerequisiteRepairAuthority(fixture, scenario) {
+  const runPath = join(fixture.runDir, "run.json");
+  const run = JSON.parse(readFileSync(runPath, "utf8"));
+  const repair = run.merged_slice_repair;
+  if (scenario === "repair-reported") repair.attempts = 1;
+  else if (scenario === "repair-repairing" || scenario.endsWith("baseline")) repair.baseline_commit = fixture.repairHead;
+  else if (scenario.endsWith("reviewed")) repair.reviewed_commit = repair.baseline_commit;
+  writeJson(runPath, run);
+  fixture.mutatedFence = structuredClone(mergedSliceRepairFence(run));
+}
+
+async function assertExactB0M4Rejection(promise, expected) {
+  const [, errorName, errorMessage] = expected.rejector.split(" :: ");
+  await assert.rejects(promise, (error) => error.name === errorName && error.message === errorMessage, `${expected.name} must reach ${expected.rejector}`);
+}
+
+function repairProbeRequest(repair) {
+  if (repair.status === "reported") return { status: "repairing", attempts: repair.attempts + 1 };
+  if (repair.status === "repairing") return { status: "review", review_ref: "reviews/repair.json", repair_evidence_ref: "evidence/repair.json", reviewed_commit: "b".repeat(40) };
+  if (repair.status === "review") return { status: "review", review_ref: repair.review_ref, repair_evidence_ref: repair.repair_evidence_ref, reviewed_commit: repair.reviewed_commit };
+  return { status: "blocked", reason: "terminal repair mutation probe" };
+}
+
 function findRecord(catalog, id) {
   return catalog.flatMap(({ records }) => records).find((record) => record.id === id);
 }
@@ -1177,4 +2896,11 @@ function changedTargetFieldValue(field, value) {
   if (typeof value === "boolean") return !value;
   if (value === null) return "oracle-bypass";
   return { oracle_bypass: true };
+}
+
+function validationErrorFor(name) {
+  return (error) => {
+    assert.equal(error?.name, "ValidationError", `${name} must be rejected by schema validation`);
+    return true;
+  };
 }

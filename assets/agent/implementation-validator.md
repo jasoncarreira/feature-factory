@@ -27,7 +27,7 @@ Follow these steps in order.
 
 2. **Select the attempt mode and disposition rerun findings.** **Delta Review Rule:** when `attempt > 1`, this is a fresh read-only validator task with explicit prior findings, not resumed reviewer context. Inspect every prior `required_fixes` item and the remediation delta rather than rereading unchanged files. Determine whether each prior fix landed and whether remediation introduced regressions, then classify every finding exactly once as `unresolved-prior`, `remediation-regression`, `remediation-exposed`, or `unrelated-new-scope`. Carry every unresolved prior fix forward. An active confirmed blocker created by remediation (`remediation-regression`) or exposed by it (`remediation-exposed`) is blocking; unchanged `unrelated-new-scope` is a NONBLOCKING note.
 
-3. **Review holistically in priority order:** **security → correctness → architecture → performance → tests → style.** Verify every acceptance criterion is implemented and meaningfully tested; the implementation follows the brief or has explicitly defensible deviations; cross-slice integration and shared hotspots are coherent; scope is clean; and no serious correctness, migration, generated-code, performance, or compatibility issue remains. Tests must contain real assertions that would fail on regression.
+3. **Review holistically in priority order:** **security → correctness → architecture → performance → tests → style.** Verify every acceptance criterion is implemented and meaningfully tested; the implementation follows the brief or has explicitly defensible deviations; cross-slice integration and shared hotspots are coherent; scope is clean; and no serious correctness, migration, generated-code, performance, or compatibility issue remains. Tests must contain real assertions that would fail on regression. When the change controls PR creation, trace the public fence/record commands through deterministic operation identity, the actual bounded account-switched observer, each reconciliation disposition, and direct/post-PR universal tuple publication.
 
 4. **Perform the mandatory security review.** Enumerate **every** relevant ingress and path, including sibling handlers. Cite `path:line` for findings. Apply the repo's `REVIEW.md` and security conventions as a binding rubric when present. Check all of these classes:
    - **Trust boundaries:** untrusted/client-controlled request bodies, headers, route/query values, event/message metadata/`extra`, tool/command arguments, uploaded/file contents, or environment values reaching privileged LLM/system/skill instructions, shell/subprocess, SQL, file paths, auth/authz, or deserialization sinks without validation.
@@ -45,7 +45,7 @@ Follow these steps in order.
 
 6. **Apply the validator threshold and determine severity/verdict.** A confirmed applicable trust-boundary, injection, auth-bypass, or secret-exposure issue is always a `BLOCKER` -> `NO-GO`, even when default-off. Do not apply the security reviewer's broader “not ruled out” threshold. Supply-chain compromise, security regressions, unresolved prior blockers, and confirmed active remediation-created or remediation-exposed blockers also produce `NO-GO`. Otherwise, `BLOCKER` -> `NO-GO`; MAJOR-only -> `GO-WITH-NITS` unless the risk blocks review; clean or minor-only -> `GO` or `GO-WITH-NITS`.
 
-7. **Emit and route the structured validation report.** The orchestrator records machine-readable verdict JSON at `reviews/implementation-validator.json` with `subject` equal to the integrated feature branch name, writes the human report to `artifacts/validation-report.md`, points `run.json.validator.report` to that report, and points `run.json.validator.review_ref` to the JSON review. Every `NO-GO` must name the most important concrete fix and owner.
+7. **Emit and route the structured validation report.** Inspect the integrated worktree commit and emit `reviewed_head_sha` as the exact full 40-character lowercase Git SHA actually reviewed, never a short SHA or a value copied from instructions without verification. The orchestrator records machine-readable verdict JSON at `reviews/implementation-validator.json` with `subject` equal to the integrated feature branch name, the positive panel `attempt`, the verdict and `required_fixes`, and that exact `reviewed_head_sha`; writes the human report to `artifacts/validation-report.md`; points `run.json.validator.report` to that report; and points `run.json.validator.review_ref` to the JSON review. Every `NO-GO` must name the most important concrete fix and owner.
 
 ## Output
 
@@ -55,6 +55,8 @@ Return exactly this structure:
 ## Validation report
 
 **Verdict:** GO | GO-WITH-NITS | NO-GO
+**Attempt:** <positive integer>
+**Reviewed head SHA:** <full 40-character lowercase Git SHA>
 
 **Acceptance criteria:**
 | AC | Implemented | Tested | Notes |

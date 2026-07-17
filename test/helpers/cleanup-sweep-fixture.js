@@ -45,6 +45,7 @@ export function createCleanupSweepFixture(name = "eligibility") {
     if (branch !== null && validBranch(repo, branch) && !branchExists(repo, branch)) mustGit(repo, ["branch", branch, baseSha]);
     const url = "https://github.com/example/project/pull/7";
     const run = {
+      schema_version: 1,
       run_id: runId,
       status: "completed",
       branch: overrides.branch === null ? undefined : (overrides.branch ?? runId),

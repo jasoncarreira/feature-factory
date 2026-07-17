@@ -196,15 +196,15 @@ describe("feature command payload parsing", () => {
     assert.deepEqual(decoded.payload.continuation, continuation);
 
     const directoryReview = structuredClone(continuation);
-    directoryReview.review.ref = "reviews/";
-    directoryReview.parent_reviews[0].ref = "reviews/";
-    directoryReview.operator_summary = `Continue blocked run '${directoryReview.parent.run_id}' from reviews/.`;
+    directoryReview.review.ref = "reviews/not-json.md";
+    directoryReview.parent_reviews[0].ref = "reviews/not-json.md";
+    directoryReview.operator_summary = `Continue blocked run '${directoryReview.parent.run_id}' from reviews/not-json.md.`;
 
     const directoryArtifact = structuredClone(continuation);
-    directoryArtifact.parent_artifacts[0].ref = "artifacts/";
+    directoryArtifact.parent_artifacts[0].ref = "artifacts/not-approved.md";
 
     const directoryEvidence = structuredClone(continuation);
-    directoryEvidence.parent_evidence[0].ref = "evidence/";
+    directoryEvidence.parent_evidence[0].ref = "evidence/not-json.md";
 
     const arbitraryWorktree = structuredClone(continuation);
     arbitraryWorktree.target.worktree = "/etc";

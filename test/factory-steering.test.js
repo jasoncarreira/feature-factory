@@ -112,9 +112,13 @@ describe("factory steering queue and consume", () => {
       assert.equal(result.ok, false);
       assert.equal(result.conflict, true);
       assert.equal(result.status, "needs-human");
-      assert.equal(result.terminal_result.artifacts.reason_code, "accepted-state-conflict");
+      assert.deepEqual(result.terminal_result.artifacts, {});
+      assert.deepEqual(result.steering, { ref: consumed.steering.ref, hash: consumed.steering.hash });
+      assert.deepEqual(result.protected_state, []);
       assert.equal(JSON.stringify(result).includes("operator reported conflict"), false);
       assert.equal(run.status, "needs-human");
+      assert.equal(run.steering.history.at(-1).ref, consumed.steering.ref);
+      assert.equal(run.steering.history.at(-1).hash, consumed.steering.hash);
       assert.equal(Object.hasOwn(result, "run"), false);
       assert.equal(JSON.stringify(result).includes("raw conflict text"), false);
       assert.equal(JSON.stringify(status(fixture.runId, { cwd: fixture.repo })).includes("raw conflict text"), false);
@@ -136,7 +140,9 @@ describe("factory steering queue and consume", () => {
       const output = JSON.parse(proc.stdout);
       assert.equal(output.conflict, true);
       assert.equal(output.status, "needs-human");
-      assert.equal(output.terminal_result.artifacts.reason_code, "accepted-state-conflict");
+      assert.deepEqual(output.terminal_result.artifacts, {});
+      assert.deepEqual(output.steering, { ref: consumed.steering.ref, hash: consumed.steering.hash });
+      assert.deepEqual(output.protected_state, []);
       assert.equal(JSON.stringify(output).includes("cli conflict"), false);
       assert.equal(JSON.stringify(output).includes("raw cli conflict text"), false);
     } finally {

@@ -536,7 +536,7 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
         } else {
           fixture.createBranch("slice");
           externalWorktree = fixture.addRegisteredWorktree("slice", "slice");
-          fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree: externalWorktree }] });
+          fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree: externalWorktree, status: "running", attempts: 1 }] });
         }
         const authorization = await preview(fixture);
         const externalRoot = join(fixture.root, `external-${target}`);
@@ -576,7 +576,7 @@ describe("cleanup sweep execution R23 and R43-R55", () => {
         } else {
           fixture.createBranch("slice");
           worktree = fixture.addRegisteredWorktree("slice", "slice");
-          fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree }] });
+          fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree, status: "running", attempts: 1 }] });
         }
         const authorization = await preview(fixture);
         const authorizedIdentity = authorization.candidates[0].evidence.worktrees[0];

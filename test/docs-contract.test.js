@@ -95,7 +95,7 @@ const STATE_WRITE_COMMANDS = Object.freeze([
   "factory terminal <run-id> blocked --reason TEXT",
   "factory slice-merged <run-id> <slice-id> --merge-commit SHA",
   "factory repair <run-id> reported --owner-slice",
-  "factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO",
+  "factory pr-created <run-id> --fence-token TOKEN --json",
 ]);
 const PROCESS_SIDECAR_COMMANDS = Object.freeze([
   "factory cancel <run-id> --json",
@@ -309,7 +309,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /Registration, mutation emission, and catalog completeness are necessary but not sufficient for a production-integrity-coverage claim/i);
     assert.match(schemaCatalog, /every applicable emitted mutation case for that row must also be asserted rejected through the row's named production validator, consistency checker, or checked transition/i);
     assert.match(schemaCatalog, /https:\/\/github\.com\/jasoncarreira\/opencode-feature-factory\/issues\/82/i);
-    assert.match(schemaCatalog, /does not claim production integrity coverage merely because inventory, emission, or completeness checks pass/i);
+    assert.match(schemaCatalog, /manifest remains an inventory oracle rather than an automatic production-coverage claim/i);
     assert.match(writerMatrix, /independently authored closed completeness oracle/i);
     assert.match(writerMatrix, /exact writer, all readers, named tests, authority facts, sidecar byte bindings, all mutation-family target-or-exclusion dispositions/i);
     assert.match(schemaCatalog, /independently authored closed manifests are not generated from or derived from the catalog under test/i);
@@ -318,11 +318,11 @@ describe("class-wide planning prompt contract", () => {
     assert.match(writerMatrix, /authority class, id, record, variant, canonical (?:persisted )?source path and exact shape/i);
     assert.match(writerMatrix, /path-plus-expected-value authority facts/i);
     assert.match(writerMatrix, /source deletion\/substitution[\s\S]*record(?: or |\/)variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /canonical-source manifest covers all 108 catalog rows/i);
+    assert.match(schemaCatalog, /canonical-source manifest covers all 109 catalog rows/i);
     assert.match(schemaCatalog, /plan\/slices[\s\S]*future-only `final\.plan` descriptor[\s\S]*run envelopes[\s\S]*PR-created result[\s\S]*all continuation rows[\s\S]*all post-PR rows[\s\S]*all PR79 repair rows/i);
     assert.match(schemaCatalog, /source deletion or substitution[\s\S]*record\/variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /actual exported `validateRun`, `validateSlicesPlan`, `checkRunConsistency`, or named checked consumer/i);
-    assert.match(schemaCatalog, /`final\.plan` is explicitly a descriptor contract[\s\S]*without claiming that current `validateRun` consumes it/i);
+    assert.match(schemaCatalog, /seven B0M\.1 rows[\s\S]*named exported validator or checked transition[\s\S]*every applicable generated mutation/i);
+    assert.match(schemaCatalog, /`final\.plan` remains explicitly future-only and descriptor-only[\s\S]*without claiming production coverage or claiming that current `validateRun` consumes it/i);
     for (const text of [writerMatrix, schemaCatalog]) {
       assert.match(text, /target-or-exclusion dispositions/i);
       assert.match(text, /complete target definition/i);
@@ -445,10 +445,11 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /Only the interactive approved gate has the exact nested `handoff_receipt`/i);
     assert.match(schemaCatalog, /separate external-source declarations rather than a `sidecar_bytes` member of the gate/i);
     assert.match(schemaCatalog, /No step variant joins `rejected` and `blocked`/i);
-    assert.match(schemaCatalog, /no synthetic `review_binding`, `attempt_reviews`, or slice-level `reviewed_commit`/i);
-    assert.match(schemaCatalog, /validator source is exactly `\{verdict, report, review_ref\}` and the security source exactly `\{verdict, review_ref\}`/i);
+    assert.match(schemaCatalog, /no synthetic `review_binding` or `attempt_reviews`/i);
+    assert.match(schemaCatalog, /Successor `slice-review` and `slice-merged` use the actual top-level all-or-none `\{evidence_hash, review_hash, reviewed_commit\}` fields/i);
+    assert.match(schemaCatalog, /successor validator source is exactly `\{verdict, report, report_hash, review_ref, review_hash, reviewed_head_sha\}` and the successor security source exactly `\{verdict, review_ref, review_hash, reviewed_head_sha\}`/i);
     assert.match(schemaCatalog, /no token is invented at the `post_pr` root, remediation container, dispatch, or push/i);
-    assert.match(schemaCatalog, /closed to exactly `schema_version`, `policy`, `phase`, `attempt`, `observation`, `remediation`, `evidence_refs`, `continuation_review`, and `terminal_fact`/i);
+    assert.match(schemaCatalog, /closed to exactly `schema_version`, `policy`, `phase`, `attempt`, optional successor `pr_operation`, `observation`, `remediation`, `evidence_refs`, `continuation_review`, and `terminal_fact`/i);
     assert.match(schemaCatalog, /never persists synthetic `run_status` or `sidecar_bytes`/i);
     assert.match(schemaCatalog, /All fifteen phase rows are complete enclosing records/i);
     assert.match(schemaCatalog, /failure fingerprint\/head\/evidence ref-plus-hash/i);
@@ -490,6 +491,98 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /test\/docs-only, non-enforcing contracts/i);
     assert.match(schemaCatalog, /do not create `src\/single-slice\/schema-model`, add a production validator, authorize a runtime transition, or change production behavior/i);
     assert.match(schemaCatalog, /Baseline acceptance by a production validator or consumer is not a substitute for asserting every applicable emitted mutation rejected at that production seam/i);
+  });
+
+  it("documents exactly the seven B0M.1 production rows and their closed production envelopes", () => {
+    const schemaCatalog = markdownSection(SCHEMA, "Durable Authority Integrity Catalog");
+    const adopted = ["plan-slices-json", "run-envelope-running", "run-envelope-terminal", "terminal-result-completed", "terminal-result-blocked", "terminal-result-partial", "terminal-result-needs-human"];
+    const adoptionSentence = schemaCatalog.match(/B0M\.1 production adoption[\s\S]*?No other catalog row gains production-integrity coverage from B0M\.1\./iu)?.[0] || "";
+    for (const id of adopted) assert.match(adoptionSentence, literalPattern(`\`${id}\``), `${id} must be explicitly production-covered`);
+    assert.equal((adoptionSentence.match(/`(?:plan-slices-json|run-envelope-(?:running|terminal)|terminal-result-(?:completed|blocked|partial|needs-human))`/gu) || []).length, 7);
+    assert.doesNotMatch(adoptionSentence, /final-plan-descriptor/u);
+    assert.match(schemaCatalog, /No other catalog row gains production-integrity coverage from B0M\.1/i);
+
+    const runSchema = markdownSection(SCHEMA, "run.json");
+    assert.match(runSchema, /root is closed to exactly `schema_version`, `run_id`, `mode`, `status`, `created_at`, `updated_at`, `heartbeat_at`, `base_ref`, `base_commit`, `branch`, `worktree`, `github_account`, `pr_mode`, `pr_url`, `max_parallel_slices`, `max_retries`, `review_tier`, `debug_snapshot`, `provenance`, `merged_slice_repair`, `continuation`, `steering`, `post_pr`, `gates`, `slices`, `cost_attribution`, `steps`, `validator`, `security_review`, and `terminal_result`/i);
+    assert.match(runSchema, /Unknown root keys have no legacy fallback[\s\S]*`schema_version` is required and equals `1`/i);
+    assert.match(runSchema, /Ordinary checked `run\.json` transitions keep `run_id`, `base_commit`, `branch`, and `worktree` immutable/i);
+    assert.match(runSchema, /`recoverDisruptedRun` is the sole worktree-rebinding exception[\s\S]*may change only top-level `worktree`/i);
+    assert.match(runSchema, /terminal result is closed to common keys `status`, `run_id`, `pr_url`, `reason`, `summary`, and `artifacts`/i);
+    assert.match(runSchema, /completed result may additionally contain `pr_number`, `pr_node_id`, `repository`, `operation_id`, `head_ref`, `head_sha`, `base_ref`, `base_sha`, and `draft`/i);
+    assert.match(runSchema, /repository-relative durable artifact-ref grammar/i);
+    assert.doesNotMatch(runSchema, /"external_ref"/u);
+
+    const planSchema = markdownSection(SCHEMA, "plan/slices.json");
+    assert.match(planSchema, /plan root is closed to the single key `slices`/i);
+    assert.match(planSchema, /planned slice is closed to exactly `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`/i);
+    assert.match(planSchema, /stale or non-existent `depends_on` identity is invalid/i);
+  });
+
+  it("documents B0MR.1 reviewed-code bindings, exact merge proof, upgrades, and fence re-observation", () => {
+    const schemaCatalog = markdownSection(SCHEMA, "Durable Authority Integrity Catalog");
+    const runSchema = markdownSection(SCHEMA, "run.json");
+    const buildSlices = markdownSection(SKILL, "Step 4 - Build Slices");
+    const integrate = markdownSection(SKILL, "Step 5 - Integrate And Validate");
+
+    assert.match(schemaCatalog, /B0MR\.1 additionally gives production-consumer coverage to exactly `slice-review`, `slice-merged`, `validator-verdict-binding`, and `security-verdict-binding`/i);
+    assert.match(schemaCatalog, /canonical-source manifest covers all 109 catalog rows/i);
+
+    for (const text of [README, SPEC, SCHEMA]) {
+      assert.match(text, /`?evidence_hash`?.*`?review_hash`?.*`?reviewed_commit`?/is);
+      assert.match(text, /`?report_hash`?.*`?review_hash`?.*`?reviewed_head_sha`?/is);
+    }
+    assert.match(runSchema, /For slice `review` and `merged`, `evidence_hash`, `review_hash`, and `reviewed_commit` are all present or all absent/i);
+    assert.match(runSchema, /Validator and security must both use their successor tuples or both use the legacy ref-only form/i);
+    assert.match(buildSlices, /full 40-character lowercase `head_sha`/i);
+    assert.match(buildSlices, /`reviewed_commit` equal to the exact full SHA the reviewer inspected/i);
+    assert.match(integrate, /Both review JSON files must carry the integration branch as `subject`, the same positive `attempt`, and `reviewed_head_sha`/i);
+
+    for (const text of [SPEC, SCHEMA, SKILL]) {
+      assert.match(text, /exact two-parent merge|exactly ordered parents/is);
+      assert.match(text, /unique full (?:`git )?merge-base --all/i);
+      assert.match(text, /NUL-delimited.*no-renames|NUL-delimited, rename-disabled/is);
+      assert.match(text, /mode\/type\/object identity/i);
+    }
+    assert.match(runSchema, /earlier merged slice commit must already be an ancestor of `P1`/i);
+
+    for (const text of [README, SPEC, SCHEMA, SKILL]) {
+      assert.match(text, /legacy.*(?:review|slice).*upgrade/is);
+      assert.match(text, /partial successor.*reject/is);
+      assert.match(text, /legacy completed.*read-only/is);
+      assert.match(text, /re-hash.*slice\/panel|re-hash.*bound slice\/panel/is);
+      assert.match(text, /current clean integration (?:branch\/worktree )?HEAD/i);
+    }
+    assert.match(runSchema, /legacy merged slice authority upgrade failed/i);
+
+    assert.match(WORK_REVIEWER_PROMPT, /machine-readable review JSON.*exact slice `subject`, positive `attempt`.*`reviewed_commit`/is);
+    assert.match(WORK_REVIEWER_PROMPT, /Reviewed commit.*full 40-character lowercase Git SHA/i);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /machine-readable verdict JSON.*positive panel `attempt`.*`reviewed_head_sha`/is);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Reviewed head SHA.*full 40-character lowercase Git SHA/i);
+    assert.match(SECURITY_REVIEWER_PROMPT, /machine-readable verdict JSON.*positive panel `attempt`.*`reviewed_head_sha`/is);
+    assert.match(SECURITY_REVIEWER_PROMPT, /Reviewed head SHA.*full 40-character lowercase Git SHA/i);
+  });
+
+  it("documents B0MR.2 deterministic PR-operation reconciliation and catalog closure", () => {
+    const activeDocs = [README, SPEC, SKILL, SCHEMA, COMMAND];
+    const contract = [...activeDocs, DURABLE_AUTHORITY_LEDGER].join("\n");
+    for (const text of activeDocs) {
+      assert.match(text, /factory pr-created <run-id> --fence-token (?:TOKEN|<token>|<fence\.token>).*--json/i);
+      assert.doesNotMatch(text, /factory pr-created <run-id>[^\n]*--(?:pr-url|pr-number|repository|draft|no-draft|head-sha|node-id)/i);
+    }
+    assert.match(contract, /\{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft\}.*all-or-none/is);
+    assert.match(contract, /ffpr-v1-.*lowercase SHA-256.*canonical UTF-8 JSON.*base_commit.*branch.*created_at.*repository.*run_id.*lexical key order/is);
+    assert.match(contract, /exactly one standalone `?<!-- opencode-feature-factory:pr-operation=<(?:(?:operation_)?id)> -->`?/i);
+    assert.match(contract, /GET repos\/\{repository\}\/pulls\?state=all&head=\{owner\}:\{head_ref\}&base=\{base_ref\}&per_page=100/i);
+    assert.match(contract, /account-switched.*shell-free.*(?:at most|maximum-)10.*Link/is);
+    assert.match(contract, /unique exact open.*unique exact merged.*closed-unmerged.*needs-human.*ambiguous.*unknown.*retain/is);
+    assert.match(contract, /only complete checked absence.*clear/i);
+    assert.match(contract, /legacy-pr-fence-operation-identity-missing.*retain/is);
+    assert.match(contract, /\{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft\}/i);
+    assert.match(SCHEMA, /all 109 catalog rows, with 108 production-covered rows and sole future row `final-plan-descriptor`/i);
+    assert.match(SCHEMA, /`steering-pr-fence`/i);
+    assert.match(WORK_REVIEWER_PROMPT, /deterministic marker identity.*account-switched GitHub observer/is);
+    assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /deterministic operation identity.*account-switched observer/is);
+    assert.match(SECURITY_REVIEWER_PROMPT, /caller-forged URL\/number\/repository\/draft\/SHA fields.*marker ambiguity.*pagination substitution/is);
   });
 
   it("keeps the boundary-retention ledger finite and aligned with all nine authority classes", () => {
@@ -569,7 +662,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(pr79, /A local\/model statement that the repair was reviewed, merged, or verified[\s\S]*`CONSOLIDATE\/REMOVE`/i);
     assert.match(DURABLE_AUTHORITY_LEDGER, /Persisted legacy records keep their original schema/i);
     assert.match(DURABLE_AUTHORITY_LEDGER, /No two repair authorities may be active for one run/i);
-    assert.match(DURABLE_AUTHORITY_LEDGER, /adds no production manifest,[\s\S]*schema field, or migration/i);
+    assert.match(DURABLE_AUTHORITY_LEDGER, /B0MR\.1 is[\s\S]*narrow successor exception[\s\S]*without adding a second[\s\S]*authority class or rewriting legacy records eagerly/i);
   });
 
   it("requires first review to consolidate same-class findings across every consequential dimension", () => {
@@ -1737,6 +1830,10 @@ describe("interrupt steer resume docs contract", () => {
     assert.match(SCHEMA, /ok:false[\s\S]*conflict:true[\s\S]*updated:true[\s\S]*status:\"needs-human\"/i, "SCHEMA must document steer-conflict response semantics");
     assert.match(SCHEMA, /inactive heartbeat/i, "SCHEMA must require inactive heartbeat for steer-conflict");
     assert.match(SCHEMA, /consumed steering file[\s\S]*hash matches/i, "SCHEMA must verify consumed steering file hash");
+    for (const [name, text] of documentEntries({ SCHEMA, README, SPEC })) {
+      assert.match(text, /terminal_result\.artifacts`? (?:is|remains) empty/i, `${name} must keep scalar steering diagnostics out of terminal artifacts`);
+      assert.match(text, /steering history[\s\S]*ref\/hash/i, `${name} must retain durable steering authority outside terminal artifacts`);
+    }
   });
 
   it("preserves PR review boundary and no-merge rule in docs", () => {

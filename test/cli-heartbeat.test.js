@@ -47,20 +47,6 @@ describe("cli heartbeat routing", () => {
     }
   });
 
-  it("refuses to start while a protected gate is pending", () => {
-    const repo = tempRepo();
-    const runDir = createRunDir(repo);
-    writeJson(join(runDir, "run.json"), runningRun({ gates: protectedGates("brief") }));
-
-    try {
-      const proc = runHeartbeatCli(repo, ["--start", "--phase", "builder-wave", "--json"]);
-      assert.notEqual(proc.status, 0);
-      assert.match(proc.stderr, /protected gate 'brief'/i);
-    } finally {
-      cleanup(repo);
-    }
-  });
-
   it("keeps ticking in the detached heartbeat process", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);

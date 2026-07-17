@@ -279,7 +279,7 @@ describe("TUI factory scanner", () => {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
       slices: [
-        { id: "done", status: "pending", attempts: 1 },
+        { id: "done", status: "pending", attempts: 0 },
         { id: "docs-authority-contract", status: "running", attempts: 2 },
       ],
       steps: [{ agent: "work-decomposer", status: "running", attempts: 1 }],
@@ -725,6 +725,7 @@ function writeRun(repo, id, input) {
   const dir = join(repo, ".opencode", "factory", id);
   mkdirSync(dir, { recursive: true });
   const run = {
+    schema_version: 1,
     run_id: input.run_id === undefined ? id : input.run_id,
     status: input.status,
     updated_at: input.updated_at,
@@ -734,7 +735,13 @@ function writeRun(repo, id, input) {
   if (input.branch !== undefined) run.branch = input.branch;
   if (input.pr_url !== undefined) run.pr_url = input.pr_url;
   if (input.review_tier !== undefined) run.review_tier = input.review_tier;
-  if (input.slices !== undefined) run.slices = input.slices;
+  if (input.slices !== undefined) {
+    run.slices = input.slices.map((slice) => ({
+      ...slice,
+      ...(slice.attempts === undefined ? { attempts: slice.status === "pending" ? 0 : 1 } : {}),
+      ...(slice.status === "blocked" && slice.blocked_reason === undefined ? { blocked_reason: "blocked fixture" } : {}),
+    }));
+  }
   if (input.steps !== undefined) run.steps = input.steps;
   if (input.validator !== undefined) run.validator = input.validator;
   if (input.security_review !== undefined) run.security_review = input.security_review;

@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   DEFAULT_GITHUB_MAX_BUFFER,
   DEFAULT_GITHUB_TIMEOUT_MS,
   MAX_GITHUB_MAX_BUFFER,
   MAX_GITHUB_TIMEOUT_MS,
+  MAX_PR_OPERATION_PAGES,
+  canonicalGithubRepositoryFromOrigin,
+  computePrOperationId,
   github,
   lookupPullRequest,
   normalizePullRequestResponse,
   normalizeRecordedPullRequest,
   pullRequestLookupArgs,
+  observePullRequestOperation,
+  prOperationMarker,
+  pullRequestOperationQueryArgs,
 } from "../src/github.js";
 
 const cwd = process.cwd();
@@ -203,4 +210,225 @@ test("R27 performs the exact injected lookup and returns only normalized respons
   assert.equal(result.reason, null);
   assert.deepEqual(result.pullRequest, normalizePullRequestResponse(response()));
   assert.deepEqual(Object.keys(result.pullRequest), ["url", "number", "state", "repository", "base_ref", "base_sha"]);
+});
+
+const OPERATION_ID = `ffpr-v1-${"1".repeat(64)}`;
+const HEAD_SHA = "a".repeat(40);
+const BASE_SHA = "b".repeat(40);
+
+function operationIdentity(overrides = {}) {
+  return { repository: "acme/repo", operation_id: OPERATION_ID, head_ref: "feature/one", head_sha: HEAD_SHA, base_ref: "main", base_sha: BASE_SHA, draft: false, ...overrides };
+}
+
+function operationPull(overrides = {}) {
+  return {
+    html_url: "https://github.com/acme/repo/pull/7",
+    number: 7,
+    node_id: "PR_kwDO_operation",
+    draft: false,
+    body: `Summary\n\n${prOperationMarker(OPERATION_ID)}\n`,
+    state: "open",
+    merged_at: null,
+    head: { ref: "feature/one", sha: HEAD_SHA, repo: { full_name: "acme/repo" } },
+    base: { ref: "main", sha: BASE_SHA, repo: { full_name: "acme/repo" } },
+    ...overrides,
+  };
+}
+
+function included(body, link = null) {
+  return `HTTP/2 200 OK\r\ncontent-type: application/json${link ? `\r\nlink: ${link}` : ""}\r\n\r\n${JSON.stringify(body)}`;
+}
+
+function operationPage(page, overrides = {}) {
+  const query = new URLSearchParams({ state: "all", head: "acme:feature/one", base: "main", per_page: "100", page: String(page) });
+  return `https://api.github.com/repos/acme/repo/pulls?${query.toString()}${overrides.suffix || ""}`;
+}
+
+test("computes ffpr-v1 from the exact lexical canonical JSON and accepts only canonical GitHub origins", () => {
+  const source = { run_id: "run-1", repository: "Acme/Repo", created_at: "2026-07-17T12:00:00.000Z", branch: "feature/one", base_commit: BASE_SHA };
+  const canonical = JSON.stringify({ base_commit: BASE_SHA, branch: "feature/one", created_at: source.created_at, repository: "acme/repo", run_id: "run-1" });
+  const independent = `ffpr-v1-${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
+  assert.equal(computePrOperationId(source), independent);
+  assert.equal(prOperationMarker(independent), `<!-- opencode-feature-factory:pr-operation=${independent} -->`);
+  for (const origin of ["https://github.com/Acme/Repo.git", "https://github.com/acme/repo", "git@github.com:Acme/Repo.git", "ssh://git@github.com/acme/repo.git"]) {
+    assert.equal(canonicalGithubRepositoryFromOrigin(origin), "acme/repo", origin);
+  }
+  for (const origin of ["http://github.com/acme/repo.git", "https://git.example/acme/repo.git", "ssh://root@github.com/acme/repo.git", "https://github.com/acme/repo/issues", "file:///tmp/repo"]) {
+    assert.throws(() => canonicalGithubRepositoryFromOrigin(origin), /canonical GitHub|exactly one GitHub/u, origin);
+  }
+});
+
+test("builds the complete exact state-all operation GET and classifies exact marker states", async () => {
+  assert.deepEqual(pullRequestOperationQueryArgs(operationIdentity()), [
+    "api", "--method", "GET", "--include",
+    "repos/acme/repo/pulls?state=all&head=acme%3Afeature%2Fone&base=main&per_page=100",
+    "--header", "Accept:application/vnd.github+json",
+  ]);
+  for (const [state, mergedAt, disposition] of [["open", null, "open"], ["closed", "2026-07-17T12:30:00Z", "merged"], ["closed", null, "closed"]]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull({ state, merged_at: mergedAt })]) });
+    assert.equal(result.disposition, disposition);
+    assert.deepEqual(Object.keys(result.pull_request), ["pr_url", "pr_number", "pr_node_id", "repository", "draft", "body", "state", "merged_at", "head_ref", "head_sha", "head_repository", "base_ref", "base_sha", "base_repository"]);
+    assert.equal(result.pull_request.pr_node_id, "PR_kwDO_operation");
+  }
+});
+
+test("classifies every malformed or conflicting own operation marker as ambiguous", async () => {
+  for (const body of [
+    `${prOperationMarker(OPERATION_ID)}\n${prOperationMarker(OPERATION_ID)}`,
+    `prefix ${prOperationMarker(OPERATION_ID)}`,
+    `<!-- opencode-feature-factory:pr-operation=${OPERATION_ID} --`,
+    `${prOperationMarker(OPERATION_ID)}\n<!-- opencode-feature-factory:pr-operation=malformed -->`,
+    `${prOperationMarker(OPERATION_ID)}\n<!-- opencode-feature-factory:pr-operation=ffpr-v1-${"2".repeat(64)} -->`,
+  ]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull({ body })]) });
+    assert.equal(result.disposition, "ambiguous", body);
+  }
+  for (const pull of [
+    operationPull({ html_url: "https://github.com/other/repo/pull/7", base: { ...operationPull().base, repo: { full_name: "other/repo" } } }),
+    operationPull({ head: { ...operationPull().head, ref: "feature/other" } }),
+    operationPull({ head: { ...operationPull().head, sha: "c".repeat(40) } }),
+    operationPull({ base: { ...operationPull().base, ref: "release" } }),
+    operationPull({ base: { ...operationPull().base, sha: "c".repeat(40) } }),
+    operationPull({ draft: true }),
+  ]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([pull]) });
+    assert.equal(result.disposition, "ambiguous");
+  }
+  for (const body of ["no marker", `<!-- opencode-feature-factory:pr-operation=ffpr-v1-${"2".repeat(64)} -->`, "<!-- opencode-feature-factory:pr-operation=malformed -->"]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull({ body })]) });
+    assert.equal(result.disposition, "absent", body);
+  }
+  const exact = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull()]) });
+  assert.equal(exact.disposition, "open");
+});
+
+test("ignores unrelated nullable bodies before normalizing an exact marked pull request", async () => {
+  const unrelated = operationPull({
+    html_url: "https://github.com/acme/repo/pull/6",
+    number: 6,
+    node_id: "PR_unrelated_null_body",
+    body: null,
+  });
+  const result = await observePullRequestOperation({
+    ...operationIdentity(),
+    observePage: () => included([unrelated, operationPull()]),
+  });
+
+  assert.equal(result.disposition, "open");
+  assert.equal(result.pull_request.pr_number, 7);
+  assert.equal(result.records, 2);
+});
+
+test("classifies a complete query containing only an unrelated nullable body as absent", async () => {
+  const result = await observePullRequestOperation({
+    ...operationIdentity(),
+    observePage: () => included([operationPull({ body: null })]),
+  });
+
+  assert.equal(result.disposition, "absent");
+  assert.equal(result.reason, null);
+  assert.equal(result.pull_request, null);
+  assert.equal(result.pages, 1);
+  assert.equal(result.records, 1);
+});
+
+test("follows only same-host/path/filter Link pagination and rejects repeated, foreign, malformed, and capped traversal", async () => {
+  const calls = [];
+  const normal = await observePullRequestOperation({
+    ...operationIdentity(),
+    observePage({ page, pageUrl, args }) {
+      calls.push({ page, pageUrl, args });
+      return page === 1 ? included([], `<${operationPage(2)}>; rel="next"`) : included([operationPull()]);
+    },
+  });
+  assert.equal(normal.disposition, "open");
+  assert.equal(normal.pages, 2);
+  assert.equal(calls[1].args[4], operationPage(2));
+
+  for (const [label, first, second] of [
+    ["foreign", "https://evil.example/repos/acme/repo/pulls?state=all&head=acme%3Afeature%2Fone&base=main&per_page=100&page=2", null],
+    ["changed-filter", operationPage(2, { suffix: "&base=other" }), null],
+    ["malformed", "not a URL", null],
+    ["repeated", operationPage(2), operationPage(2)],
+  ]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: ({ page }) => included([], `<${page === 1 ? first : second}>; rel="next"`) });
+    assert.equal(result.disposition, "unknown", label);
+  }
+
+  const capped = await observePullRequestOperation({ ...operationIdentity(), observePage: ({ page }) => included([], `<${operationPage(page + 1)}>; rel="next"`) });
+  assert.equal(capped.disposition, "unknown");
+  assert.equal(capped.reason, "pagination-cap-exceeded");
+  assert.equal(MAX_PR_OPERATION_PAGES, 10);
+});
+
+test("validates every pagination relation, contiguous next pages, and full-page termination proof", async () => {
+  const full = Array.from({ length: 100 }, (_, index) => operationPull({
+    html_url: `https://github.com/acme/repo/pull/${index + 100}`,
+    number: index + 100,
+    node_id: `PR_page_${index}`,
+    body: "ordinary PR",
+  }));
+  for (const [label, link] of [
+    ["foreign-last", `<${operationPage(2)}>; rel="next", <https://evil.example/repos/acme/repo/pulls?state=all&head=acme%3Afeature%2Fone&base=main&per_page=100&page=4>; rel="last"`],
+    ["page-jump", `<${operationPage(3)}>; rel="next"`],
+    ["repeated-relation", `<${operationPage(2)}>; rel="next", <${operationPage(3)}>; rel="next"`],
+  ]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([], link) });
+    assert.equal(result.disposition, "unknown", label);
+  }
+  const omitted = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included(full) });
+  assert.equal(omitted.disposition, "unknown");
+  const omittedAnnounced = await observePullRequestOperation({
+    ...operationIdentity(),
+    observePage: ({ page }) => page === 1
+      ? included([], `<${operationPage(2)}>; rel="next", <${operationPage(4)}>; rel="last"`)
+      : included([]),
+  });
+  assert.equal(omittedAnnounced.disposition, "unknown");
+  const proven = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included(full, `<${operationPage(1)}>; rel="last"`) });
+  assert.equal(proven.disposition, "absent");
+});
+
+test("returns unknown for incomplete output, adapter failures, duplicate records, and malformed strict tuples", async () => {
+  for (const output of ["", "[]", "HTTP/2 500 Server Error\r\n\r\n[]", "HTTP/2 200 OK\r\n\r\nnot-json"]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => output });
+    assert.equal(result.disposition, "unknown");
+  }
+  for (const message of ["auth", "timeout", "output-cap", "protocol"]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => { throw new Error(message); } });
+    assert.equal(result.disposition, "unknown");
+  }
+  const duplicate = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull(), operationPull()]) });
+  assert.equal(duplicate.disposition, "unknown");
+  for (const malformed of [
+    operationPull({ node_id: null }), operationPull({ number: "7" }), operationPull({ draft: "false" }),
+    operationPull({ state: "OPEN" }), operationPull({ merged_at: "bad" }), operationPull({ head: { ...operationPull().head, sha: "short" } }),
+    operationPull({ base: { ...operationPull().base, repo: { full_name: "other/repo" } } }),
+  ]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([malformed]) });
+    assert.equal(result.disposition, "unknown");
+  }
+});
+
+test("accepts only null or canonical valid RFC3339 UTC merged_at values", async () => {
+  for (const merged_at of ["2026-07-17T12:30:00Z", "2026-07-17T12:30:00.123Z"]) {
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull({ state: "closed", merged_at })]) });
+    assert.equal(result.disposition, "merged", merged_at);
+  }
+  const missing = operationPull({ state: "closed" });
+  delete missing.merged_at;
+  for (const merged_at of [missing, 7, "not-a-time", "2026-07-17", "Fri, 17 Jul 2026 12:30:00 GMT", "0", "2026-02-30T12:30:00Z"]) {
+    const pull = typeof merged_at === "object" ? merged_at : operationPull({ state: "closed", merged_at });
+    const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([pull]) });
+    assert.equal(result.disposition, "unknown", String(merged_at));
+  }
+  const contradictory = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull({ state: "open", merged_at: "2026-07-17T12:30:00Z" })]) });
+  assert.equal(contradictory.disposition, "unknown");
+});
+
+test("distinguishes complete absence from ambiguous exact operation records", async () => {
+  const absent = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull({ body: "ordinary PR" })]) });
+  assert.equal(absent.disposition, "absent");
+  const ambiguous = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull(), operationPull({ html_url: "https://github.com/acme/repo/pull/8", number: 8, node_id: "PR_other" })]) });
+  assert.equal(ambiguous.disposition, "ambiguous");
 });

@@ -917,6 +917,7 @@ function createFixture(runId, { gate = false, terminal = false, git = false, rep
     updated_at: updatedAt,
     branch: git ? runId : null,
     worktree: git ? join(repo, ".opencode", "worktrees", runId) : null,
+    pr_url: terminal ? "https://github.com/jasoncarreira/opencode-feature-factory/pull/1" : undefined,
     gates: gate ? {
       story: {
         status: "pending",
@@ -933,7 +934,17 @@ function createFixture(runId, { gate = false, terminal = false, git = false, rep
         },
       },
     } : {},
-    terminal_result: terminal ? { status: "completed", run_id: runId, pr_url: null, reason: null, summary: "done", artifacts: {} } : null,
+    terminal_result: terminal ? {
+      status: "completed",
+      run_id: runId,
+      pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/1",
+      pr_number: 1,
+      repository: "jasoncarreira/opencode-feature-factory",
+      draft: false,
+      reason: null,
+      summary: "done",
+      artifacts: {},
+    } : null,
   };
   writeJson(join(runDir, "run.json"), run);
   return { repo, runDir, runId };

@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { assertRunJsonWriterAllowed, hashRunState, hasInFlightHeartbeatWork, mergedSliceRepairFence, inspectApprovalHandoffReceipt, resolveGateAnswerTarget, transitionCostUsage, transitionGateDecision, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertRunJsonWriterAllowed, hashRunState, hasInFlightHeartbeatWork, mergedSliceRepairFence, inspectApprovalHandoffReceipt, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -194,6 +194,15 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   if (readResult.error) return syntheticDisruptedTerminal(target.runId, target.runDir, target.runFile, readResult.error, opts);
 
   const run = readResult.run;
+  const legacyFence = await transitionLegacyPrFenceNeedsHuman(target.runDir, opts);
+  if (legacyFence) return recoveryEnvelope(legacyFence.run, {
+    ok: false,
+    durable: true,
+    updated: true,
+    recovered: false,
+    runDir: target.runDir,
+    reason: legacyFence.reason,
+  });
   if (TERMINAL_STATUSES.has(run.status)) return recoveryEnvelope(run, {
     ok: false,
     durable: true,
@@ -264,9 +273,11 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   let updated = false;
   let nextRun = run;
   if (run.worktree !== worktree.path) {
+    const expectedRunHash = hashRunState(run);
     nextRun = await withRunJsonLock(target.runDir, async () => {
       const currentRun = readRunFile(target.runFile);
       assertRunJsonWriterAllowed(currentRun, "recovery worktree update");
+      if (hashRunState(currentRun) !== expectedRunHash) throw new Error("recovery worktree update rejected: run manifest changed after recovery checks");
       const next = validateRun({ ...currentRun, worktree: worktree.path });
       writeJsonAtomic(target.runFile, next);
       return next;
@@ -628,6 +639,7 @@ export function continueFactory(parentRunId, opts = {}) {
   const launchEnv = factoryLaunchEnv(opts);
   if (opts.dryRun) return { status: "dry-run", payload, seed_plan: continuationSeedPlan(continuation) };
 
+  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
   seedRepoSkill(repo);
   // Seed the accepted parent planning artifacts into the child run up front so the
   // orchestrator reuses the approved brief/research/story instead of regenerating
@@ -1460,7 +1472,7 @@ export async function establishPrePrFence(runId, opts = {}) {
 export async function clearPrePrFence(runId, token, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
   const result = await transitionPrePrFenceCleared(runDir, token, opts);
-  return { run_id: result.run.run_id, fence: result.fence };
+  return { ok: result.ok, run_id: result.run.run_id, status: result.status, disposition: result.disposition, reason: result.reason ?? null, pr_url: result.pr_url ?? null, fence: result.fence, terminal_result: result.terminal_result ?? null };
 }
 
 export async function recordSteeringConflict(runId, input, opts = {}) {
@@ -1596,6 +1608,23 @@ export function heartbeatStatus(runId, opts = {}) {
   return withHeartbeatLiveness(readHeartbeatFile(file), opts);
 }
 
+export function assertHeartbeatStartable(run) {
+  if (run.status !== "running") {
+    throw new Error(`run '${run.run_id}' must be running to start a heartbeat`);
+  }
+  if (run.steering?.pending) throw new Error(`run '${run.run_id}' has pending steering; drain it before starting a heartbeat`);
+  if (run.steering?.uncheckpointed) throw new Error(`run '${run.run_id}' has consumed steering awaiting acknowledgement`);
+  if (run.steering?.action_claim) throw new Error(`run '${run.run_id}' has an action awaiting start acknowledgement`);
+  if (run.steering?.pr_fence) throw new Error(`run '${run.run_id}' has an active pre-PR fence`);
+  const protectedGate = pendingProtectedGate(run);
+  if (protectedGate) {
+    throw new Error(`run '${run.run_id}' is waiting at protected gate '${protectedGate}'`);
+  }
+  if (!hasInFlightHeartbeatWork(run)) {
+    throw new Error(`run '${run.run_id}' has no in-flight factory work for heartbeat`);
+  }
+}
+
 export async function startHeartbeat(runId, config = {}, opts = {}) {
   const runDir = resolveHeartbeatRunDir(runId, opts);
   const heartbeatFile = heartbeatPath(runDir);
@@ -1606,20 +1635,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 
   await withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
-    if (run.status !== "running") {
-      throw new Error(`run '${run.run_id}' must be running to start a heartbeat`);
-    }
-    if (run.steering?.pending) throw new Error(`run '${run.run_id}' has pending steering; drain it before starting a heartbeat`);
-    if (run.steering?.uncheckpointed) throw new Error(`run '${run.run_id}' has consumed steering awaiting acknowledgement`);
-    if (run.steering?.action_claim) throw new Error(`run '${run.run_id}' has an action awaiting start acknowledgement`);
-    if (run.steering?.pr_fence) throw new Error(`run '${run.run_id}' has an active pre-PR fence`);
-    const protectedGate = pendingProtectedGate(run);
-    if (protectedGate) {
-      throw new Error(`run '${run.run_id}' is waiting at protected gate '${protectedGate}'`);
-    }
-    if (!hasInFlightHeartbeatWork(run)) {
-      throw new Error(`run '${run.run_id}' has no in-flight factory work for heartbeat`);
-    }
+    assertHeartbeatStartable(run);
     const current = tryReadHeartbeatFile(heartbeatFile);
     if (current.error) throw new Error(`invalid heartbeat at ${heartbeatFile}: ${current.error}`);
     if (current.value && heartbeatBlocksReplacement(current.value, startedAt, opts)) {
@@ -2588,6 +2604,90 @@ function buildContinuation(parentRunId, opts = {}) {
   return continuation;
 }
 
+function assertContinuationBindingsCurrent(repo, parentRunDir, continuation, options = {}) {
+  if (!continuation || continuation.kind !== "blocked-run-continuation") throw new Error("continuation binding check requires blocked-run-continuation metadata");
+  validateRun({
+    schema_version: 1,
+    run_id: continuation.target?.run_id,
+    status: "running",
+    branch: continuation.target?.branch,
+    worktree: continuation.target?.worktree,
+    max_retries: continuation.draft_spec_reuse?.max_retries ?? 3,
+    gates: {},
+    continuation,
+  });
+  const canonicalRepo = repoRoot(repo);
+  const parentRoot = resolve(parentRunDir);
+  const parentFile = join(parentRoot, "run.json");
+  lstatRequiredNoSymlinks(repo, parentFile, "parent run.json", "parent run.json must not contain symlinks");
+  const expectedParentRef = relativeRef(repo, parentFile);
+  if (continuation.parent?.run_ref !== expectedParentRef) throw new Error("continuation parent run_ref no longer identifies the selected parent");
+  if (sha256File(parentFile) !== continuation.parent.run_hash) throw new Error("continuation parent run.json changed since payload build");
+  const parentRun = readRunFile(parentFile);
+  for (const [key, actual] of [
+    ["run_id", parentRun.run_id],
+    ["status", parentRun.status],
+    ["branch", parentRun.branch],
+    ["worktree", parentRun.worktree],
+  ]) {
+    if (continuation.parent[key] !== actual) throw new Error(`continuation parent ${key} binding is stale`);
+  }
+  if (!branchExists(repo, continuation.parent.branch) || branchCommit(repo, continuation.parent.branch) !== continuation.parent.commit) {
+    throw new Error("continuation parent branch/commit binding is stale");
+  }
+
+  const review = resolveContinuationReview(parentRoot, continuation.review?.ref);
+  if (sha256File(review.path) !== continuation.review.hash) throw new Error("continuation selected review changed since payload build");
+  const reviewSource = resolveContinuationReviewSource(parentRun, review.ref);
+  const currentReview = {
+    kind: reviewSource.kind,
+    ref: review.ref,
+    hash: sha256File(review.path),
+    ...validateContinuationReview(readReviewJson(review.path), review.ref, reviewSource, parentRoot),
+  };
+  if (!sameJsonValue(currentReview, continuation.review)) throw new Error("continuation selected review identity is stale or cross-bound");
+  if (continuation.operator_summary !== `Continue blocked run '${parentRun.run_id}' from ${review.ref}.`) throw new Error("continuation operator_summary is stale or cross-bound");
+
+  const currentArtifacts = collectContinuationParentArtifacts(parentRoot);
+  const currentEvidence = collectContinuationParentEvidence(parentRoot, parentRun);
+  const currentReviews = collectContinuationParentReviews(parentRoot, parentRun);
+  for (const [label, expected, actual] of [
+    ["parent_artifacts", continuation.parent_artifacts, currentArtifacts],
+    ["parent_evidence", continuation.parent_evidence, currentEvidence],
+    ["parent_reviews", continuation.parent_reviews, currentReviews],
+  ]) {
+    if (!sameJsonValue(expected, actual)) throw new Error(`continuation ${label} bindings changed since payload build`);
+  }
+
+  const currentReuse = continuationPlanningReuse(parentRun, parentRoot);
+  if (!sameJsonValue(normalizeContinuationReuseForComparison(continuation.planning_reuse), normalizeContinuationReuseForComparison(currentReuse))) {
+    throw new Error("continuation planning_reuse binding is stale");
+  }
+  const currentDraft = continuationDraftSpecReuse(parentRun, parentRoot);
+  if (!sameJsonValue(continuation.draft_spec_reuse ?? null, currentDraft ?? null)) throw new Error("continuation draft_spec_reuse binding is stale");
+  const currentPostPr = stringValue(parentRun.pr_url) ? continuationPostPrBinding(parentRun, parentRoot) : null;
+  if (!sameJsonValue(continuation.post_pr ?? null, currentPostPr)) throw new Error("continuation post_pr binding is stale");
+
+  const target = continuation.target;
+  if (!target || target.run_id === parentRun.run_id || target.branch !== target.run_id) throw new Error("continuation target identity is cross-bound");
+  if (target.worktree !== resolve(canonicalRepo, ".opencode", "worktrees", target.run_id)) throw new Error("continuation target worktree binding is stale");
+  if (continuationBaseCommit(repo, parentRun, target.base_ref) !== target.base_commit) throw new Error("continuation target base binding is stale");
+  if (options.targetPublished) {
+    const childRunDir = resolve(options.childRunDir || join(factoryRoot(repo), target.run_id));
+    const child = readRunFile(join(childRunDir, "run.json"));
+    if (child.run_id !== target.run_id || child.branch !== target.branch || child.worktree !== target.worktree || !sameJsonValue(child.continuation, continuation)) {
+      throw new Error("continuation target run binding is stale");
+    }
+  } else {
+    assertContinuationTargetAvailable(repo, target.run_id);
+  }
+}
+
+function normalizeContinuationReuseForComparison(reuse) {
+  if (!reuse || reuse.eligible !== true) return reuse ?? null;
+  return { ...reuse, child_spec_review_ref: reuse.child_spec_review_ref || CHILD_SPEC_REVIEW_REF };
+}
+
 function requiredParentWorktree(parentRun) {
   if (!stringValue(parentRun.worktree)) throw new Error(`parent run '${parentRun.run_id}' must have a recorded worktree`);
   return parentRun.worktree;
@@ -2856,6 +2956,7 @@ function continuationSeedPlan(continuation) {
 // memory BEFORE anything is written, so a missing source or a later hash mismatch
 // aborts the whole seed with no partial child run directory left behind.
 export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuation, options = {}) {
+  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
   const reuse = continuation?.planning_reuse;
   const draft = continuation?.draft_spec_reuse;
   if ((!reuse || reuse.eligible !== true) && !draft) {
@@ -2916,6 +3017,7 @@ export function seedContinuationPlanningArtifacts(repo, parentRunDir, continuati
       mkdirSync(dirname(stagedDest), { recursive: true });
       writeFileSync(stagedDest, item.bytes, { flag: "wx" });
     }
+    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
     if (options.beforePublish) options.beforePublish({ stagingRoot, targetRunDir });
     renameSync(stagingRoot, targetRunDir);
   } catch (error) {
@@ -2965,18 +3067,9 @@ export async function adoptContinuation(childRunId, opts = {}) {
   verifySeededChildFile(childRoot, "artifacts", "artifacts/technical-brief.md", reuse.spec_artifact_hash);
   verifySeededChildFile(childRoot, "reviews", CHILD_SPEC_REVIEW_REF, reuse.spec_review_hash);
 
-  const result = await transitionRunStep(childRunDir, "spec-writer", (step) => {
-    step.status = "accepted";
-    step.artifact_ref = "artifacts/technical-brief.md";
-    step.review_ref = CHILD_SPEC_REVIEW_REF;
-    if (!Number.isInteger(step.attempts)) step.attempts = 0;
-    step.inherited_acceptance = {
-      from_run_id: continuation.parent.run_id,
-      parent_spec_review_ref: reuse.spec_review_ref,
-      artifact_hash: reuse.spec_artifact_hash,
-      review_hash: reuse.spec_review_hash,
-    };
-  }, { ...opts, mustExist: false });
+  const parentRunDir = resolve(repo, dirname(continuation.parent.run_ref));
+  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: true, childRunDir });
+  const result = await transitionContinuationAdoption(childRunDir, { ...opts, repoRoot: repo });
   return { status: "adopted", run_id: childRunId, step: result.step };
 }
 
@@ -4104,6 +4197,9 @@ function newPostPrJob(activity, attempt) {
 async function reconcilePostPrRevalidation(runDir, initialRun, opts) {
   let run = initialRun;
   let jobs = run.post_pr.remediation.revalidation.jobs;
+  if ((!jobs || typeof jobs !== "object" || Array.isArray(jobs) || Object.keys(jobs).length === 0) && run.post_pr.remediation.revalidation.canonical_verdict === "fail") {
+    return reconcileLegacyCanonicalFailure(runDir, run, opts);
+  }
   if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) {
     const next = cloneJson(run.post_pr);
     next.remediation.revalidation.jobs = {};
@@ -4122,6 +4218,7 @@ async function reconcilePostPrRevalidation(runDir, initialRun, opts) {
     return { action: "canonical-planned" };
   }
   if (canonical.status !== "bound") return dispatchPostPrRecoveryJob(runDir, run, "canonical", opts);
+  if (canonical.verdict === "red" || run.post_pr.remediation.revalidation.canonical_verdict === "red") return evaluateBoundPostPrPanels(runDir, run, opts);
   const validator = jobs.validator;
   if (!validator) {
     const next = cloneJson(run.post_pr); next.remediation.revalidation.jobs.validator = newPostPrJob("validator", run.post_pr.attempt);
@@ -4137,6 +4234,15 @@ async function reconcilePostPrRevalidation(runDir, initialRun, opts) {
   }
   if (security.status !== "bound") return dispatchPostPrRecoveryJob(runDir, run, "security", opts);
   return evaluateBoundPostPrPanels(runDir, run, opts);
+}
+
+async function reconcileLegacyCanonicalFailure(runDir, run, opts) {
+  const revalidation = run.post_pr.remediation.revalidation;
+  const binding = readBoundRunJson(runDir, revalidation.canonical_evidence_ref, "evidence");
+  if (binding.hash !== revalidation.canonical_evidence_hash || binding.value.verdict !== "fail") throw new Error("legacy canonical fail authority is inconsistent");
+  const paths = [...run.post_pr.remediation.changes.paths];
+  const ownership = { owner: cloneJson(run.post_pr.remediation.owner), route: run.post_pr.remediation.route, lane: run.post_pr.remediation.lane };
+  return reserveLocalRedRemediation(runDir, run, opts, paths, ownership, { panel: "canonical", canonical_verdict: "red" });
 }
 
 function boundLegacyJob(activity, attempt, ref, hash, verdict) {
@@ -4369,6 +4475,11 @@ function validateRecoveryPanelArtifact(run, binding, activity) {
 
 async function evaluateBoundPostPrPanels(runDir, run, opts) {
   const revalidation = run.post_pr.remediation.revalidation;
+  if (revalidation.canonical_verdict === "red") {
+    const paths = [...run.post_pr.remediation.changes.paths];
+    const ownership = { owner: cloneJson(run.post_pr.remediation.owner), route: run.post_pr.remediation.route, lane: run.post_pr.remediation.lane };
+    return reserveLocalRedRemediation(runDir, run, opts, paths, ownership, { panel: "canonical", canonical_verdict: "red" });
+  }
   if (revalidation.canonical_verdict === "pass" && ["GO", "GO-WITH-NITS"].includes(revalidation.validator_verdict) && revalidation.security_verdict === "PASS") {
     const next = cloneJson(run.post_pr); next.phase = "validated"; next.remediation.stage = "validated";
     await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree, expectedCurrentHash: hashRunState(run) });
@@ -4387,15 +4498,20 @@ async function evaluateBoundPostPrPanels(runDir, run, opts) {
   } catch { return postPrTerminal(runDir, run, "needs-human", "post-pr-metadata-unsafe", opts); }
   const redPanels = [revalidation.validator_verdict === "NO-GO" ? "validator" : null, revalidation.security_verdict === "BLOCK" ? "security" : null].filter(Boolean);
   if (!redPanels.length) return postPrTerminal(runDir, run, "needs-human", "post-pr-metadata-unsafe", opts);
-  const attempt = run.post_pr.attempt + 1;
   const owner = panelIdentityAttribution(runDir, run, paths);
-  const evidenceCore = { run_id: run.run_id, attempt, source: "local-red", verdict: "red", failed_head_sha: run.post_pr.remediation.candidate_head_sha, affected_paths: paths,
-    panel: redPanels.length === 2 ? "combined" : redPanels[0], validator_verdict: revalidation.validator_verdict, security_verdict: revalidation.security_verdict };
+  return reserveLocalRedRemediation(runDir, run, opts, paths, owner, {
+    panel: redPanels.length === 2 ? "combined" : redPanels[0], validator_verdict: revalidation.validator_verdict, security_verdict: revalidation.security_verdict,
+  });
+}
+
+async function reserveLocalRedRemediation(runDir, run, opts, paths, ownership, verdicts) {
+  const attempt = run.post_pr.attempt + 1;
+  const evidenceCore = { run_id: run.run_id, attempt, source: "local-red", verdict: "red", failed_head_sha: run.post_pr.remediation.candidate_head_sha, affected_paths: paths, ...verdicts };
   const evidence = { ...evidenceCore, failure_fingerprint: hashJson(evidenceCore) };
   const binding = publishRunJsonEvidence(runDir, `evidence/post-pr-local-failure.attempt-${attempt}.json`, evidence);
   const max = Number.isInteger(run.max_retries) ? run.max_retries : 3;
   if (run.post_pr.attempt >= max) return exhaustPostPr(runDir, run, opts, binding);
-  const remediation = newRemediation(run, attempt, evidence.failure_fingerprint, binding, owner); remediation.reason_code = "local-red"; remediation.failed_head_sha = evidence.failed_head_sha; remediation.baseline_head_sha = evidence.failed_head_sha;
+  const remediation = newRemediation(run, attempt, evidence.failure_fingerprint, binding, ownership); remediation.reason_code = "local-red"; remediation.failed_head_sha = evidence.failed_head_sha; remediation.baseline_head_sha = evidence.failed_head_sha;
   await transitionPostPrFailure(runDir, { remediation }, { ...opts, expectedCurrentHash: hashRunState(run) });
   const current = readRunFile(join(runDir, "run.json")); const next = cloneJson(current.post_pr); next.phase = "remediation-planned";
   await transitionPostPrState(runDir, next, { ...opts, expectedCurrentHash: hashRunState(current) });

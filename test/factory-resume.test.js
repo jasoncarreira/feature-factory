@@ -11,14 +11,16 @@ import { transitionGateDecision, transitionSteeringBoundaryOpened } from "../src
 describe("factory resume", () => {
   const behavioralCases = [
     { code: "matching-detached-shepherd-live", setup: (f) => writeRunningEvidence(f, "matching-live"), options: (f) => ({ inspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: f.repo }) }) },
-    { code: "run-mode-not-interactive", setup: (f) => mutateRun(f, (run) => { run.mode = "headless"; }) },
-    { code: "approval-receipt-missing", setup: (f) => mutateRun(f, (run) => { delete run.gates.story.handoff_receipt; }) },
+    { code: "run-mode-not-interactive", setup: (f) => mutateRun(f, (run) => { run.mode = "headless"; delete run.gates.story.handoff_receipt; }) },
     { code: "protected-gate-pending", setup: async (f) => {
       writeFileSync(join(f.runDir, "artifacts", "brief.md"), "brief\n");
       writeFileSync(join(f.runDir, "gates", "brief.question.md"), "approve brief?\n");
       await transitionGateDecision(f.runDir, "brief", { status: "pending", artifact: "artifacts/brief.md", question_ref: "gates/brief.question.md" });
     } },
-    { code: "terminal-run", setup: (f) => mutateRun(f, (run) => Object.assign(run, { status: "completed", terminal_result: { status: "completed", run_id: f.runId, pr_url: null, reason: null, summary: "done", artifacts: {} } })) },
+    { code: "terminal-run", setup: (f) => mutateRun(f, (run) => {
+      const terminalResult = completedTerminalResult(f.runId);
+      Object.assign(run, { status: "completed", pr_url: terminalResult.pr_url, terminal_result: terminalResult });
+    }) },
     { code: "validated-cancelled", setup: (f) => writeStoppedEvidence(f, "cancelled") },
     { code: "cancel-pending", setup: (f) => writeRunningEvidence(f, "exec-cancel", { cancel: { requested_at: new Date().toISOString(), signal: "SIGTERM", confirmed_at: null, result: "pending", reason: "pending" } }) },
     { code: "approval-snapshot-mismatch", setup: (f) => writeFileSync(join(f.runDir, "artifacts", "story.md"), "changed\n") },
@@ -73,6 +75,19 @@ describe("factory resume", () => {
       }
     });
   }
+
+  it("rejects a missing interactive approval receipt before handoff", async () => {
+    const fixture = await createApprovedHandoffFixture("behavior-approval-receipt-missing");
+    try {
+      mutateRun(fixture, (run) => { delete run.gates.story.handoff_receipt; });
+      await assert.rejects(
+        transitionGateDecisionAndHandoff(fixture.runDir, "story", fixture.decision, { cwd: fixture.repo }),
+        /handoff_receipt: is required for an interactive approval/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
 
   const ownershipRows = [
     { name: "interactive foreground resume", durableMode: "interactive", driverMode: "interactive", invoke: (f, o) => resumeFactory(f.runId, o), payloadKind: "resume" },
@@ -587,7 +602,6 @@ function fakeLaunchOptions(fixture, options = {}) {
 const BEHAVIOR_ROWS = {
   "matching-detached-shepherd-live": ["already-running", true, "A matching detached interactive shepherd is already running.", "watch"],
   "run-mode-not-interactive": ["manual", false, "The durable run mode is not interactive; the external driver remains responsible for continuation.", "external-driver-continues"],
-  "approval-receipt-missing": ["recovery-required", false, "The accepted approval has no valid durable handoff receipt.", "run-resume-check"],
   "protected-gate-pending": ["paused-at-protected-gate", false, "The run is paused at a protected gate awaiting an explicit answer.", "answer-protected-gate"],
   "terminal-run": ["terminal", false, "The run is already terminal; inspect the durable terminal result.", "inspect-terminal-result"],
   "validated-cancelled": ["stopped", false, "Validated process evidence shows that the detached shepherd is cancelled.", "confirm-cancellation"],
@@ -608,6 +622,20 @@ const BEHAVIOR_ROWS = {
   "launch-readiness-failed": ["recovery-required", false, "Detached launch did not produce matching readiness evidence within the bounded wait.", "manual-ownership-reconciliation"],
   "launch-evidence-mismatch": ["recovery-required", false, "Published detached process evidence does not match the launch claim execution.", "manual-ownership-reconciliation"],
 };
+
+function completedTerminalResult(runId) {
+  return {
+    status: "completed",
+    run_id: runId,
+    pr_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/1",
+    pr_number: 1,
+    repository: "jasoncarreira/opencode-feature-factory",
+    draft: false,
+    reason: null,
+    summary: "done",
+    artifacts: {},
+  };
+}
 
 function assertBehaviorHandoff(handoff, code, runId) {
   const [status, automatic, reason, action] = BEHAVIOR_ROWS[code];

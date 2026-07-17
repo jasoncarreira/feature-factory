@@ -255,8 +255,13 @@ test("R13-R22 classify inaccessible sidecars and run locks through the filesyste
 
 test("R24-R28 require exact closed PR metadata and a freshly fetched exact base", async (t) => {
   const cases = [
-    ["metadata mismatch", ({ fixture }) => { const run = fixture.readRun("run"); run.pr_url = null; fixture.writeRun("run", run); }, "SKIPPED_PR_METADATA_MISMATCH", {}],
-    ["terminal tuple mismatch", ({ fixture }) => { const run = fixture.readRun("run"); run.terminal_result.pr_number = 8; fixture.writeRun("run", run); }, "SKIPPED_PR_METADATA_MISMATCH", {}],
+    ["metadata mismatch", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { github: { html_url: "https://github.com/example/project/pull/8", number: 8 } }],
+    ["terminal tuple mismatch", ({ fixture }) => {
+      const run = fixture.readRun("run");
+      delete run.terminal_result.repository;
+      delete run.terminal_result.pr_number;
+      fixture.writeRun("run", run);
+    }, "SKIPPED_PR_METADATA_MISMATCH", {}],
     ["lookup unavailable", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { githubRunner: () => ({ ok: false, status: 1, stdout: "" }) }],
     ["lookup exception", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { githubRunner: () => { throw new Error("injected"); } }],
     ["malformed response", () => {}, "SKIPPED_PR_LOOKUP_UNCERTAIN", { githubRunner: () => ({ ok: true, status: 0, stdout: "{" }) }],
@@ -486,7 +491,7 @@ test("R36-R41 verify recorded worktree containment, registration, branch/head id
     try {
       fixture.createBranch("slice");
       const worktree = fixture.addRegisteredWorktree("slice", "slice");
-      fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree }] });
+      fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree, status: "running", attempts: 1 }] });
       assert.equal(inspect(fixture).candidates[0].classification, "eligible");
     } finally { fixture.cleanup(); }
   });
@@ -497,7 +502,7 @@ test("R36-R41 verify recorded worktree containment, registration, branch/head id
       const worktree = fixture.addRecordedWorktree("run");
       fixture.createBranch("slice");
       const run = fixture.readRun("run");
-      run.slices = [{ id: "slice", branch: "slice", worktree }];
+      run.slices = [{ id: "slice", branch: "slice", worktree, status: "running", attempts: 1 }];
       fixture.writeRun("run", run);
       const candidate = inspect(fixture).candidates[0];
       assert.deepEqual(candidate.reason_codes, ["SKIPPED_WORKTREE_IDENTITY"]);

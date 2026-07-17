@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, resumeFactory, startHeartbeat, status, stopHeartbeat, writeSteering } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
+import { computePrOperationId } from "../src/github.js";
 
 const SHA = "a".repeat(40);
 const EMPTY_PATHS_HASH = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
@@ -35,6 +36,7 @@ describe("post-PR workflow orchestration", () => {
     const calls = [];
     try {
       const result = await postPrObserve(fixture.runId, {
+        ...operationAuthorityOptions(fixture),
         cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z",
         executeGithub: async ({ args }) => {
           calls.push(args);
@@ -585,6 +587,81 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
+  it("canonical red published-unbound recovery binds and reaches local-red remediation", async () => {
+    const fixture = createPanelRecoveryFixture("crash-canonical-red", "validator");
+    try {
+      updateRunFile(fixture, (run) => {
+        run.post_pr.remediation.revalidation.jobs.canonical = panelJob("canonical", "running");
+        delete run.post_pr.remediation.revalidation.jobs.validator;
+        Object.assign(run.post_pr.remediation.revalidation, { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null });
+      });
+      const canonicalPath = join(fixture.runDir, "evidence", "post-pr-canonical.attempt-1.json");
+      const canonical = JSON.parse(readFileSync(canonicalPath, "utf8"));
+      canonical.verdict = "red";
+      writeJson(canonicalPath, canonical);
+      const first = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => { throw new Error("must not rerun"); } });
+      assert.equal(first.status, "dry-run");
+      assert.equal(readRun(fixture).post_pr.remediation.revalidation.jobs.canonical.verdict, "red");
+      assert.equal(readRun(fixture).post_pr.remediation.revalidation.canonical_verdict, "red");
+      const second = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:06:00.000Z" });
+      assert.equal(second.status, "dry-run");
+      assert.equal(readRun(fixture).post_pr.phase, "remediation-planned");
+      assert.equal(readRun(fixture).post_pr.remediation.reason_code, "local-red");
+      assert.equal(readRun(fixture).post_pr.attempt, 2);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("canonical red normal publication persists red and reaches local-red remediation", async () => {
+    const fixture = createPanelRecoveryFixture("canonical-red-normal", "validator");
+    try {
+      updateRunFile(fixture, (run) => {
+        run.post_pr.remediation.revalidation.jobs.canonical = panelJob("canonical", "planned");
+        delete run.post_pr.remediation.revalidation.jobs.validator;
+        Object.assign(run.post_pr.remediation.revalidation, { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null });
+      });
+      rmSync(join(fixture.runDir, "evidence", "post-pr-canonical.attempt-1.json"), { force: true });
+      const first = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", executePostPrRecoveryJob: async () => ({ started: true, exit_code: 1, signal: null, result: { verdict: "red" } }) });
+      assert.equal(first.status, "dry-run");
+      const published = readRun(fixture);
+      assert.equal(published.post_pr.remediation.revalidation.jobs.canonical.verdict, "red");
+      assert.equal(published.post_pr.remediation.revalidation.canonical_verdict, "red");
+      assert.equal(JSON.parse(readFileSync(join(fixture.runDir, published.post_pr.remediation.revalidation.canonical_evidence_ref), "utf8")).verdict, "red");
+      await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:06:00.000Z" });
+      assert.equal(readRun(fixture).post_pr.remediation.reason_code, "local-red");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("legacy top-level-only canonical fail recovers to local-red without emitting fail state", async () => {
+    const fixture = createPanelRecoveryFixture("canonical-fail-legacy", "validator");
+    try {
+      const canonicalPath = join(fixture.runDir, "evidence", "post-pr-canonical.attempt-1.json");
+      const legacy = JSON.parse(readFileSync(canonicalPath, "utf8"));
+      legacy.verdict = "fail";
+      writeJson(canonicalPath, legacy);
+      const legacyBytes = readFileSync(canonicalPath, "utf8");
+      updateRunFile(fixture, (run) => {
+        const revalidation = run.post_pr.remediation.revalidation;
+        delete revalidation.jobs;
+        Object.assign(revalidation, {
+          canonical_evidence_hash: fileHash(canonicalPath), canonical_verdict: "fail",
+          validator_review_ref: null, validator_review_hash: null, validator_verdict: null,
+          security_review_ref: null, security_review_hash: null, security_verdict: null,
+        });
+      });
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
+      assert.equal(result.status, "dry-run");
+      const recovered = readRun(fixture);
+      assert.equal(recovered.post_pr.phase, "remediation-planned");
+      assert.equal(recovered.post_pr.remediation.reason_code, "local-red");
+      assert.equal(recovered.post_pr.remediation.revalidation.canonical_verdict, null);
+      assert.deepEqual(recovered.post_pr.remediation.revalidation.jobs, {});
+      assert.equal(readFileSync(canonicalPath, "utf8"), legacyBytes, "legacy evidence bytes remain unchanged");
+      const localEvidence = JSON.parse(readFileSync(join(fixture.runDir, recovered.post_pr.remediation.failure_evidence_ref), "utf8"));
+      assert.equal(localEvidence.verdict, "red");
+      assert.equal(JSON.stringify(recovered).includes('"verdict":"fail"'), false);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
   it("P18 canonical bound replay preserves one successor transition", async () => {
     const fixture = createPanelRecoveryFixture("crash-p18", "validator"); let dispatches = 0;
     try {
@@ -659,12 +736,34 @@ function createFixture(runId, { nextPollAt = "2026-07-12T12:00:00.000Z", reviewe
   writeFileSync(join(runDir, "plan", "slices.json"), `${JSON.stringify({ slices: [{ id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] }] })}\n`);
   const review = reviewer ? { required: true, reviewer_login: reviewer, source: "driver" } : { required: false, reviewer_login: null, source: "none" };
   writeFileSync(join(runDir, "run.json"), `${JSON.stringify({
-    schema_version: 1, run_id: runId, status: "running", max_retries: 3, github_account: "octocat", pr_url: "https://github.com/acme/widgets/pull/7", pr_mode: "ready", gates: {},
+    schema_version: 1, run_id: runId, status: "running", max_retries: 3, github_account: "octocat", branch: "feature", worktree: repo, base_ref: "main", base_commit: SHA, pr_url: "https://github.com/acme/widgets/pull/7", pr_mode: "ready", gates: {},
     post_pr: { schema_version: 1, policy: { enabled: true, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review }, phase: "observing", attempt: 0,
       observation: { epoch: 1, expected_head_sha: SHA, started_at: "2026-07-12T12:00:00.000Z", deadline_at: "2026-07-12T13:00:00.000Z", next_poll_at: nextPollAt, poll_count: 0, unchanged_count: 0, current_interval_ms: 30000, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "not_started", last_review_verdict: reviewer ? "pending" : "not_required", last_verdict: "pending", last_error: null, review_request: reviewer ? { status: requested ? "requested" : "pending", attempts: requested ? 1 : 0, requested_at: requested ? "2026-07-12T11:59:00.000Z" : null } : null, snapshot: null },
-      remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null },
+      remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null,
+      pr_operation: { operation_id: computePrOperationId({ base_commit: SHA, branch: "feature", created_at: "2026-07-12T12:00:00.000Z", repository: "acme/widgets", run_id: runId }), repository: "acme/widgets", created_at: "2026-07-12T12:00:00.000Z", head_ref: "feature", head_sha: SHA, base_ref: "main", base_sha: SHA, draft: false, pr_url: "https://github.com/acme/widgets/pull/7", pr_number: 7, pr_node_id: "PR_workflow" } },
   }, null, 2)}\n`);
   return { repo, runDir, runId };
+}
+
+function operationAuthorityOptions(fixture) {
+  return {
+    repoRoot: fixture.repo,
+    gitFn(_cwd, args) {
+      if (args.join(" ") === "config --get remote.origin.url") return { ok: true, status: 0, stdout: "https://github.com/acme/widgets.git\n", stderr: "" };
+      if (args[0] === "ls-remote") {
+        const ref = args[3].slice("refs/heads/".length);
+        return { ok: true, status: 0, stdout: `${SHA}\trefs/heads/${ref}\n`, stderr: "" };
+      }
+      if (args[0] === "rev-parse") return { ok: true, status: 0, stdout: `${SHA}\n`, stderr: "" };
+      if (args[0] === "symbolic-ref") return { ok: true, status: 0, stdout: "feature\n", stderr: "" };
+      if (args[0] === "status") return { ok: true, status: 0, stdout: "", stderr: "" };
+      if (args[0] === "merge-base") return { ok: true, status: 0, stdout: "", stderr: "" };
+      throw new Error(`unexpected git authority command: ${args.join(" ")}`);
+    },
+    observePrOperation(identity) {
+      return { disposition: "open", reason: null, pull_request: { pr_url: "https://github.com/acme/widgets/pull/7", pr_number: 7, pr_node_id: "PR_workflow", repository: "acme/widgets", draft: false, body: "", state: "open", merged_at: null, head_ref: "feature", head_sha: identity.head_sha, head_repository: "acme/widgets", base_ref: "main", base_sha: SHA, base_repository: "acme/widgets" } };
+    },
+  };
 }
 
 // The base/candidate git history is identical for every revalidation fixture, so

@@ -1,10 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "./helpers/git-fixture.js";
 import { resolvePostPrCiPolicy } from "../src/config.js";
 import { hashFile, hashValue } from "../src/refs.js";
+import { computePrOperationId } from "../src/github.js";
+import { git } from "../src/git.js";
 import {
   createPostPrState,
   hashRunState,
@@ -77,15 +80,15 @@ describe("checked post-PR transitions", () => {
     for (const enabled of [false, true]) {
       const fixture = createPrFixture(`pr-${enabled}`, enabled);
       try {
-        const fence = await transitionPrePrFenceEstablished(fixture.runDir, { now: NOW, token: "fence-token-123" });
-        const input = { pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo", head_sha: enabled ? HEAD : undefined };
-        const result = await transitionPrCreated(fixture.runDir, input, { now: NOW, fenceToken: fence.fence.token });
+        const options = prOperationOptions(fixture, { now: NOW });
+        const fence = await transitionPrePrFenceEstablished(fixture.runDir, { ...options, token: "fence-token-123" });
+        const result = await transitionPrCreated(fixture.runDir, {}, { ...options, fenceToken: fence.fence.token });
         if (enabled) {
           assert.equal(result.run.status, "running");
           assert.equal(result.run.post_pr.phase, "observing");
           assert.equal(result.run.post_pr.observation.epoch, 1);
           assert.equal(result.run.post_pr.observation.deadline_at, "2026-07-12T13:00:00.000Z");
-          assert.equal(result.run.post_pr.observation.expected_head_sha, HEAD);
+          assert.equal(result.run.post_pr.observation.expected_head_sha, fixture.head);
         } else assert.equal(result.run.status, "completed");
       } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
     }
@@ -94,8 +97,10 @@ describe("checked post-PR transitions", () => {
   it("requires a full head SHA for enabled pr-created without weakening the fence", async () => {
     const fixture = createPrFixture("head-required", true);
     try {
-      const fence = await transitionPrePrFenceEstablished(fixture.runDir, { now: NOW, token: "fence-token-123" });
-      await assert.rejects(transitionPrCreated(fixture.runDir, { pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo" }, { now: NOW, fenceToken: fence.fence.token }), /requires a full 40-character/u);
+      const options = prOperationOptions(fixture, { now: NOW });
+      const fence = await transitionPrePrFenceEstablished(fixture.runDir, { ...options, token: "fence-token-123" });
+      const malformed = { ...options, observePrOperation: () => ({ disposition: "open", pull_request: { ...operationPull(fence.fence), head_sha: "short" } }) };
+      await assert.rejects(transitionPrCreated(fixture.runDir, {}, { ...malformed, fenceToken: fence.fence.token }), /head_sha does not match the fenced operation/u);
       assert.equal(readJson(join(fixture.runDir, "run.json")).pr_url, null);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -133,7 +138,7 @@ describe("checked post-PR transitions", () => {
       await assert.rejects(transitionPostPrFailure(fixture.runDir, { remediation: { ...next, attempt: 2 } }), /requires observing phase/u);
 
       writeJson(join(fixture.runDir, ref), { tampered: true });
-      const running = { ...planned, phase: "remediation-running", remediation: { ...next, stage: "running", dispatch: { ...next.dispatch, status: "running" } } };
+      const running = { ...planned, phase: "remediation-running", remediation: { ...next, stage: "running", dispatch: { ...next.dispatch, status: "running", started_at: NOW } } };
       await assert.rejects(transitionPostPrState(fixture.runDir, running), /ref\/hash invariant failed/u);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -145,11 +150,29 @@ describe("checked post-PR transitions", () => {
       await assert.rejects(transitionRunJson(fixture.runDir, (run) => { run.status = "completed"; }), /post-PR runs can only terminalize/u);
       await assert.rejects(transitionPostPrTerminal(fixture.runDir, { status: "blocked", reason: "made-up" }), /invalid closed post-PR terminal reason/u);
       const green = readJson(join(fixture.runDir, "run.json"));
+      green.worktree = fixture.repo;
       green.post_pr.observation.last_verdict = "green";
       green.post_pr.observation.last_check_verdict = "pass";
       writeJson(join(fixture.runDir, "run.json"), green);
       const done = await transitionPostPrTerminal(fixture.runDir, { status: "completed", reason: "post-pr-ci-green" }, { now: NOW, ...(await freshTerminalOptions(fixture)) });
       assert.equal(done.run.post_pr.phase, "succeeded");
+      assert.deepEqual(done.run.terminal_result, {
+        status: "completed",
+        run_id: "guards",
+        pr_url: "https://github.com/acme/repo/pull/7",
+        pr_number: 7,
+        pr_node_id: "PR_post_pr_state",
+        repository: "acme/repo",
+        operation_id: operationRecord("guards").operation_id,
+        head_ref: "feature",
+        head_sha: HEAD,
+        base_ref: "main",
+        base_sha: HEAD,
+        draft: false,
+        reason: "post-pr-ci-green",
+        summary: "post-pr-ci-green",
+        artifacts: {},
+      });
       await assert.rejects(transitionPostPrState(fixture.runDir, done.run.post_pr), /terminal run/u);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -379,6 +402,166 @@ describe("checked post-PR transitions", () => {
       assert.deepEqual(result.run.post_pr.terminal_fact, fact);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
+  it("binds canonical, validator, and security jobs to top-level and exact result authorities", async () => {
+    const definitions = {
+      canonical: ["evidence/job-canonical.json", "canonical_evidence_ref", "canonical_evidence_hash", "canonical_verdict", "pass"],
+      validator: ["reviews/job-validator.json", "validator_review_ref", "validator_review_hash", "validator_verdict", "GO"],
+      security: ["reviews/job-security.json", "security_review_ref", "security_review_hash", "security_verdict", "PASS"],
+    };
+    for (const [activity, [ref, refKey, hashKey, verdictKey, verdict]] of Object.entries(definitions)) {
+      for (const defect of ["wrong-ref", "wrong-hash", "stale-verdict", "cross-dispatch", "wrong-bytes", "valid-legacy-bytes"]) {
+        const fixture = createActiveFixture(`job-${activity}-${defect}`);
+        try {
+          const reserved = await transitionPostPrFailure(fixture.runDir, { remediation: prepareCheckRedFailure(fixture, 1) });
+          const current = structuredClone(reserved.run);
+          current.post_pr.phase = "revalidating";
+          current.post_pr.remediation.stage = "revalidating";
+          current.post_pr.remediation.revalidation.jobs = { [activity]: runningPostPrJob(activity) };
+          writeJson(join(fixture.runDir, "run.json"), current);
+          mkdirSync(join(fixture.runDir, ref.split("/")[0]), { recursive: true });
+          writeJson(join(fixture.runDir, ref), defect === "valid-legacy-bytes" ? { verdict } : { verdict, dispatch_id: `${activity}-dispatch-1` });
+          const hash = hashFile(join(fixture.runDir, ref));
+          const next = structuredClone(current.post_pr);
+          Object.assign(next.remediation.revalidation, { [refKey]: ref, [hashKey]: hash, [verdictKey]: verdict });
+          Object.assign(next.remediation.revalidation.jobs[activity], { status: "bound", returned_at: NOW, result_ref: ref, result_hash: hash, verdict });
+          if (defect === "wrong-ref") next.remediation.revalidation.jobs[activity].result_ref = activity === "canonical" ? "evidence/other.json" : "reviews/other.json";
+          if (defect === "wrong-hash") next.remediation.revalidation.jobs[activity].result_hash = `sha256:${"f".repeat(64)}`;
+          if (defect === "stale-verdict") next.remediation.revalidation.jobs[activity].verdict = activity === "canonical" ? "red" : activity === "validator" ? "NO-GO" : "BLOCK";
+          if (defect === "cross-dispatch") {
+            writeJson(join(fixture.runDir, ref), { verdict, dispatch_id: "other-dispatch" });
+            const crossHash = hashFile(join(fixture.runDir, ref));
+            next.remediation.revalidation[hashKey] = crossHash;
+            next.remediation.revalidation.jobs[activity].result_hash = crossHash;
+          }
+          if (defect === "wrong-bytes") writeJson(join(fixture.runDir, ref), { verdict, dispatch_id: `${activity}-dispatch-1`, changed: true });
+          const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+          if (defect === "valid-legacy-bytes") {
+            const result = await transitionPostPrState(fixture.runDir, next);
+            assert.equal(result.run.post_pr.remediation.revalidation.jobs[activity].result_hash, hash);
+          } else {
+            await assert.rejects(transitionPostPrState(fixture.runDir, next), defect === "cross-dispatch" ? /dispatch_id in exact result_ref bytes/u : defect === "wrong-bytes" ? /exact result_ref bytes/u : /must equal revalidation\./u, `${activity}:${defect}`);
+            assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+          }
+        } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+      }
+    }
+  });
+
+  it("persists the canonical red vocabulary through the checked transition", async () => {
+    const fixture = createActiveFixture("canonical-red-transition");
+    try {
+      const reserved = await transitionPostPrFailure(fixture.runDir, { remediation: prepareCheckRedFailure(fixture, 1) });
+      const current = structuredClone(reserved.run);
+      current.post_pr.phase = "revalidating";
+      current.post_pr.remediation.stage = "revalidating";
+      current.post_pr.remediation.revalidation.jobs = { canonical: runningPostPrJob("canonical") };
+      writeJson(join(fixture.runDir, "run.json"), current);
+      const ref = "evidence/job-canonical-red.json";
+      writeJson(join(fixture.runDir, ref), { verdict: "red", dispatch_id: "canonical-dispatch-1" });
+      const hash = hashFile(join(fixture.runDir, ref));
+      const next = structuredClone(current.post_pr);
+      Object.assign(next.remediation.revalidation, { canonical_evidence_ref: ref, canonical_evidence_hash: hash, canonical_verdict: "red" });
+      Object.assign(next.remediation.revalidation.jobs.canonical, { status: "bound", returned_at: NOW, result_ref: ref, result_hash: hash, verdict: "red" });
+      const result = await transitionPostPrState(fixture.runDir, next);
+      assert.equal(result.run.post_pr.remediation.revalidation.canonical_verdict, "red");
+      assert.equal(result.run.post_pr.remediation.revalidation.jobs.canonical.verdict, "red");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("rejects partial top-level revalidation tuples before publication", async () => {
+    const fixture = createActiveFixture("partial-revalidation-tuples");
+    try {
+      const reserved = await transitionPostPrFailure(fixture.runDir, { remediation: prepareCheckRedFailure(fixture, 1) });
+      const current = structuredClone(reserved.run);
+      current.post_pr.phase = "revalidating";
+      current.post_pr.remediation.stage = "revalidating";
+      current.post_pr.remediation.revalidation.jobs = {};
+      writeJson(join(fixture.runDir, "run.json"), current);
+      const control = await transitionPostPrState(fixture.runDir, structuredClone(current.post_pr));
+      assert.equal(control.run.post_pr.remediation.revalidation.canonical_verdict, null);
+      for (const [activity, verdictKey, verdict] of [["canonical", "canonical_verdict", "pass"], ["validator", "validator_verdict", "GO"], ["security", "security_verdict", "PASS"]]) {
+        const next = structuredClone(control.run.post_pr);
+        next.remediation.revalidation[verdictKey] = verdict;
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(transitionPostPrState(fixture.runDir, next), new RegExp(`${activity} authority ref/hash/verdict must be a complete tuple`, "u"));
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      }
+      const legacyRef = "evidence/new-canonical-fail.json";
+      writeJson(join(fixture.runDir, legacyRef), { verdict: "fail" });
+      const legacy = structuredClone(control.run.post_pr);
+      Object.assign(legacy.remediation.revalidation, { canonical_evidence_ref: legacyRef, canonical_evidence_hash: hashFile(join(fixture.runDir, legacyRef)), canonical_verdict: "fail" });
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionPostPrState(fixture.runDir, legacy), /fail is legacy read-only state/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("rejects a nonexistent candidate at its first changes-observed publication", async () => {
+    const fixture = await prepareInitialCandidateTransition("initial-fake-candidate");
+    try {
+      const next = initialChangesObservedState(fixture, "f".repeat(40));
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionPostPrState(fixture.runDir, next, { worktree: fixture.repo }), /candidate|authority|Git/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("rechecks the first candidate publication inside the observation-to-replacement interval", async () => {
+    const fixture = await prepareInitialCandidateTransition("initial-candidate-race");
+    try {
+      const next = initialChangesObservedState(fixture, fixture.candidate);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionPostPrState(fixture.runDir, next, {
+        worktree: fixture.repo,
+        atomicWriteHooks: { beforeCommit: () => fixtureGit(fixture.repo, ["update-ref", "refs/heads/main", fixture.baseline]) },
+      }), publicationRaceError("post-PR authority changed before run.json publication"));
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      assert.deepEqual(tempRunJsonFiles(fixture.runDir), []);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("rechecks post-PR sidecar authority inside the protected commit boundary", async () => {
+    const fixture = createActiveFixture("post-pr-sidecar-race");
+    try {
+      const reserved = await transitionPostPrFailure(fixture.runDir, { remediation: prepareCheckRedFailure(fixture, 1) });
+      const next = structuredClone(reserved.run.post_pr);
+      next.phase = "remediation-planned";
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionPostPrState(fixture.runDir, next, { atomicWriteHooks: { beforeCommit: () => writeJson(join(fixture.runDir, next.remediation.failure_evidence_ref), { raced: true }) } }), publicationRaceError("post-PR authority changed before run.json publication"));
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      assert.deepEqual(tempRunJsonFiles(fixture.runDir), []);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("rechecks post-PR candidate Git identity inside the protected commit boundary", async () => {
+    const fixture = createActiveFixture("post-pr-git-race");
+    try {
+      fixtureGit(fixture.repo, ["init", "-q", "-b", "main"]);
+      writeFileSync(join(fixture.repo, "candidate.txt"), "baseline\n");
+      fixtureGit(fixture.repo, ["add", "candidate.txt"]);
+      fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "baseline"]);
+      const baseline = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
+      writeFileSync(join(fixture.repo, "candidate.txt"), "candidate\n");
+      fixtureGit(fixture.repo, ["add", "candidate.txt"]);
+      fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "candidate"]);
+      const candidate = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
+      const reserved = await transitionPostPrFailure(fixture.runDir, { remediation: prepareCheckRedFailure(fixture, 1) });
+      const current = structuredClone(reserved.run);
+      current.worktree = fixture.repo;
+      current.post_pr.phase = "changes-observed";
+      Object.assign(current.post_pr.remediation, { stage: "changes-observed", baseline_head_sha: baseline, candidate_head_sha: candidate, changes: { paths: ["candidate.txt"], tree_hash: null }, remediation_evidence_ref: "evidence/remediation.json" });
+      writeJson(join(fixture.runDir, "evidence", "remediation.json"), { candidate });
+      current.post_pr.remediation.remediation_evidence_hash = hashFile(join(fixture.runDir, "evidence", "remediation.json"));
+      writeJson(join(fixture.runDir, "run.json"), current);
+      const next = structuredClone(current.post_pr);
+      next.phase = "committed";
+      next.remediation.stage = "committed";
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionPostPrState(fixture.runDir, next, { worktree: fixture.repo, atomicWriteHooks: { beforeCommit: () => fixtureGit(fixture.repo, ["update-ref", "refs/heads/main", baseline]) } }), publicationRaceError("post-PR authority changed before run.json publication"));
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      assert.deepEqual(tempRunJsonFiles(fixture.runDir), []);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
 });
 
 function policy(enabled) {
@@ -393,11 +576,57 @@ function observation() {
   return { epoch: 1, expected_head_sha: HEAD, started_at: NOW, deadline_at: "2026-07-12T13:00:00.000Z", next_poll_at: NOW, poll_count: 0, unchanged_count: 0, current_interval_ms: 30_000, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "not_started", last_review_verdict: "not_required", last_verdict: "pending", last_error: null };
 }
 
+function operationRecord(runId) {
+  return {
+    operation_id: computePrOperationId({ base_commit: HEAD, branch: "feature", created_at: NOW, repository: "acme/repo", run_id: runId }),
+    repository: "acme/repo", created_at: NOW, head_ref: "feature", head_sha: HEAD, base_ref: "main", base_sha: HEAD, draft: false,
+    pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, pr_node_id: "PR_post_pr_state",
+  };
+}
+
+function operationPull(identity) {
+  return {
+    pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, pr_node_id: "PR_post_pr_state", repository: "acme/repo", draft: false,
+    body: "", state: "open", merged_at: null, head_ref: identity.head_ref, head_sha: identity.head_sha, head_repository: "acme/repo",
+    base_ref: identity.base_ref, base_sha: identity.base_sha, base_repository: "acme/repo",
+  };
+}
+
+function prOperationOptions(fixture, overrides = {}) {
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const head = run.post_pr?.observation?.expected_head_sha || fixture.head || run.base_commit || HEAD;
+  return {
+    ...overrides,
+    repoRoot: fixture.repo,
+    gitFn: overrides.gitFn || ((cwd, args) => {
+      if (args.join(" ") === "config --get remote.origin.url") return { ok: true, status: 0, stdout: "https://github.com/acme/repo.git\n", stderr: "" };
+      if (args[0] === "ls-remote") {
+        const ref = args[3].slice("refs/heads/".length);
+        const sha = ref === run.base_ref ? run.base_commit : head;
+        return { ok: true, status: 0, stdout: `${sha}\trefs/heads/${ref}\n`, stderr: "" };
+      }
+      if (args[0] === "rev-parse" && args[2]?.startsWith("refs/heads/")) return { ok: true, status: 0, stdout: `${head}\n`, stderr: "" };
+      if (args[0] === "symbolic-ref") return { ok: true, status: 0, stdout: `${run.branch}\n`, stderr: "" };
+      if (args[0] === "rev-parse" && args[2] === "HEAD^{commit}") return { ok: true, status: 0, stdout: `${head}\n`, stderr: "" };
+      if (args[0] === "status") return { ok: true, status: 0, stdout: "", stderr: "" };
+      if (args[0] === "merge-base") return { ok: true, status: 0, stdout: "", stderr: "" };
+      return git(cwd, args);
+    }),
+    observePrOperation: overrides.observePrOperation || ((identity) => ({ disposition: "open", reason: null, pull_request: operationPull(identity) })),
+  };
+}
+
 function activeRun(runId = "active") {
   const run = baseRun(runId, createPostPrState(policy(true)));
+  run.branch = "feature";
+  run.base_ref = "main";
+  run.base_commit = HEAD;
+  run.pr_mode = "ready";
+  run.github_account = "acme";
   run.pr_url = "https://github.com/acme/repo/pull/7";
   run.post_pr.phase = "observing";
   run.post_pr.observation = observation();
+  run.post_pr.pr_operation = operationRecord(runId);
   return run;
 }
 
@@ -415,19 +644,27 @@ function remediation(attempt, stage, overrides = {}) {
 
 function createPrFixture(runId, enabled) {
   const repo = mkdtempSync(join(tmpdir(), "post-pr-state-"));
+  fixtureGit(repo, ["init", "-q", "-b", "main"]);
+  writeFileSync(join(repo, "tracked.txt"), "tracked\n");
+  fixtureGit(repo, ["add", "tracked.txt"]);
+  fixtureGit(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "fixture"]);
+  const head = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  fixtureGit(repo, ["checkout", "-q", "-b", "feature"]);
   const runDir = join(repo, ".opencode", "factory", runId);
-  for (const dir of ["artifacts", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
+  for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
-  writeJson(join(runDir, "reviews", "implementation-validator.json"), { verdict: "GO" });
-  writeJson(join(runDir, "reviews", "security-reviewer.json"), { verdict: "PASS" });
+  writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "feature", attempt: 1, verdict: "GO", reviewed_head_sha: head });
+  writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "feature", attempt: 1, verdict: "PASS", reviewed_head_sha: head });
+  writeJson(join(runDir, "evidence", "api.json"), { subject: "api", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+  writeJson(join(runDir, "reviews", "api.json"), { subject: "api", attempt: 1, verdict: "APPROVE", required_fixes: [], reviewed_commit: head });
   writeJson(join(runDir, "run.json"), {
-    schema_version: 1, run_id: runId, status: "running", max_retries: 3, gates: { pre_pr: { status: "approved" } }, pr_url: null,
-    slices: [{ id: "api", stack: "backend", status: "merged", merge_commit: HEAD }],
-    validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
-    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" }, steering: { schema_version: 1, generation: 0, pending: null, uncheckpointed: null, boundary: null, action_claim: null, last_action: null, pr_fence: null, history: [] },
+    schema_version: 1, run_id: runId, status: "running", branch: "feature", base_ref: "main", base_commit: head, worktree: repo, github_account: "acme", pr_mode: "ready", max_retries: 3, gates: { pre_pr: { status: "approved" } }, pr_url: null,
+    slices: [{ id: "api", stack: "backend", status: "merged", attempts: 1, evidence_ref: "evidence/api.json", evidence_hash: hashFile(join(runDir, "evidence", "api.json")), review_ref: "reviews/api.json", review_hash: hashFile(join(runDir, "reviews", "api.json")), reviewed_commit: head, merge_commit: head }],
+    validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFile(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFile(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
+    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFile(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head }, steering: { schema_version: 1, generation: 0, pending: null, uncheckpointed: null, boundary: null, action_claim: null, last_action: null, pr_fence: null, history: [] },
     post_pr: createPostPrState(policy(enabled)), terminal_result: null,
   });
-  return { repo, runDir };
+  return { repo, runDir, head };
 }
 
 function createActiveFixture(runId) {
@@ -452,6 +689,68 @@ function prepareCheckRedFailure(fixture, attempt) {
 
 function failureEvidence(runId, value) {
   return { schema_version: 1, kind: "post-pr-ci", run_id: runId, attempt: value.attempt, source: value.reason_code, verdict: "red", failed_head_sha: value.failed_head_sha, failure_fingerprint: value.failure_fingerprint };
+}
+
+function runningPostPrJob(activity) {
+  return { dispatch_id: `${activity}-dispatch-1`, status: "running", action_token: `${activity}-action-1`, steering_generation: 0, started_at: NOW, returned_at: null, result_ref: null, result_hash: null, verdict: null, transient_error_count: 0, next_retry_at: null, last_error: null };
+}
+
+function tempRunJsonFiles(runDir) {
+  return readdirSync(runDir).filter((name) => name.startsWith(".run.json.") && name.endsWith(".tmp"));
+}
+
+function publicationRaceError(message) {
+  return (error) => error?.cause?.message === message || error?.cause?.message?.startsWith("post-PR ref/hash invariant failed:") || error?.cause?.message?.startsWith("post-PR candidate Git authority");
+}
+
+function fixtureGit(repo, args) {
+  return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+}
+
+async function prepareInitialCandidateTransition(runId) {
+  const fixture = createActiveFixture(runId);
+  fixtureGit(fixture.repo, ["init", "-q", "-b", "main"]);
+  writeFileSync(join(fixture.repo, "candidate.txt"), "baseline\n");
+  fixtureGit(fixture.repo, ["add", "candidate.txt"]);
+  fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "baseline"]);
+  fixture.baseline = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
+  writeFileSync(join(fixture.repo, "candidate.txt"), "candidate\n");
+  fixtureGit(fixture.repo, ["add", "candidate.txt"]);
+  fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "candidate"]);
+  fixture.candidate = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
+  const run = readJson(join(fixture.runDir, "run.json"));
+  run.worktree = fixture.repo;
+  run.branch = "main";
+  run.base_commit = fixture.baseline;
+  run.post_pr.observation.expected_head_sha = fixture.baseline;
+  writeJson(join(fixture.runDir, "run.json"), run);
+  const failure = prepareCheckRedFailure(fixture, 1);
+  failure.failed_head_sha = fixture.baseline;
+  failure.baseline_head_sha = fixture.baseline;
+  writeJson(join(fixture.runDir, failure.failure_evidence_ref), failureEvidence(fixture.runId, failure));
+  failure.failure_evidence_hash = hashFile(join(fixture.runDir, failure.failure_evidence_ref));
+  const reserved = await transitionPostPrFailure(fixture.runDir, { remediation: failure });
+  const current = structuredClone(reserved.run);
+  current.post_pr.phase = "remediation-running";
+  current.post_pr.remediation.stage = "running";
+  Object.assign(current.post_pr.remediation.dispatch, { status: "running", started_at: NOW });
+  writeJson(join(fixture.runDir, "run.json"), current);
+  return fixture;
+}
+
+function initialChangesObservedState(fixture, candidate) {
+  const current = readJson(join(fixture.runDir, "run.json"));
+  const ref = "evidence/remediation.json";
+  writeJson(join(fixture.runDir, ref), { candidate });
+  const next = structuredClone(current.post_pr);
+  next.phase = "changes-observed";
+  next.remediation.stage = "changes-observed";
+  Object.assign(next.remediation.dispatch, { status: "returned", returned_at: "2026-07-12T12:01:00.000Z" });
+  next.remediation.changes = { paths: ["candidate.txt"], tree_hash: null };
+  next.remediation.candidate_head_sha = candidate;
+  next.remediation.remediation_evidence_ref = ref;
+  next.remediation.remediation_evidence_hash = hashFile(join(fixture.runDir, ref));
+  return next;
 }
 
 async function prepareTerminalRemediation(fixture, phase, stage) {
@@ -497,7 +796,7 @@ async function freshTerminalOptions(fixture) {
   const terminalBoundary = await transitionSteeringBoundaryOpened(fixture.runDir, "terminal", { expectedCurrentHash: hashRunState(closed.run), now: NOW });
   const terminalClaim = await transitionSteeringBoundaryCrossed(fixture.runDir, "terminal", terminalBoundary.boundary.token, { expectedCurrentHash: hashRunState(terminalBoundary.run), now: NOW });
   const terminalStarted = await transitionSteeringActionStarted(fixture.runDir, "terminal", terminalClaim.action_claim.token, { expectedCurrentHash: hashRunState(terminalClaim.run), now: NOW });
-  return { now: NOW, expectedCurrentHash: hashRunState(terminalStarted.run), terminalActionToken: terminalStarted.action.token, terminalActionGeneration: terminalStarted.action.generation };
+  return { ...prOperationOptions(fixture), now: NOW, expectedCurrentHash: hashRunState(terminalStarted.run), terminalActionToken: terminalStarted.action.token, terminalActionGeneration: terminalStarted.action.generation };
 }
 function writeJson(path, value) { writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`); }
 function readJson(path) { return JSON.parse(readFileSync(path, "utf8")); }

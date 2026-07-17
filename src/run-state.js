@@ -1,16 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
+import { constants, existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { lstat, open, readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
 import { git } from "./git.js";
 import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
-import { canonicalizeGithubPrUrl, githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
+import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
+import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
+import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
 import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
+import { deriveExpectedWorktreePath } from "./worktrees.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -32,6 +35,22 @@ const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "ter
 const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
 const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
 const POST_PR_TERMINAL_PHASE = Object.freeze({ completed: "succeeded", blocked: "blocked", "needs-human": "needs-human" });
+const MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY = Symbol("merged-slice-repair-transition-authority");
+const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
+const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
+const SECURITY_BINDING_KEYS = Object.freeze(["review_hash", "reviewed_head_sha"]);
+const PR_FENCE_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
+const LEGACY_MERGED_UPGRADE_ERROR = "legacy merged slice authority upgrade failed";
+const CONTINUATION_PARENT_ARTIFACTS = Object.freeze([
+  ["story", "artifacts/story.md"],
+  ["research_map", "artifacts/research-map.md"],
+  ["design_brief", "artifacts/design-brief.md"],
+  ["technical_brief", "artifacts/technical-brief.md"],
+  ["test_report", "artifacts/test-report.md"],
+  ["validation_report", "artifacts/validation-report.md"],
+  ["pr_body", "artifacts/pr-body.md"],
+]);
+const APPROVING_CONTINUATION_REVIEW_VERDICTS = new Set(["APPROVE", "APPROVED", "ACCEPT", "ACCEPTED", "GO", "PASS"]);
 const POST_PR_TRANSITIONS = new Map([
   ["awaiting-pr", new Set(["observing"])],
   ["observing", new Set(["observing", "failure-recording", "succeeded", "blocked", "needs-human"])],
@@ -425,7 +444,7 @@ export function hashRunState(run) {
 }
 
 export function createPostPrState(policy) {
-  const postPr = { schema_version: 1, policy: cloneJson(policy), phase: policy?.enabled === true ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null };
+  const postPr = { schema_version: 1, policy: cloneJson(policy), phase: policy?.enabled === true ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null };
   validateRun({ schema_version: 1, run_id: "post-pr-policy-check", status: "running", max_retries: 3, gates: {}, post_pr: postPr });
   return postPr;
 }
@@ -451,6 +470,7 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
   };
   const nextGate = normalizeGateDecision(gateName, gate, options);
   const answerArchives = [];
+  const publishedArchives = [];
   const result = await withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
     if (nextGate.status === "approved" && mergedSliceRepairFence(current)) {
@@ -459,29 +479,43 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
     if (nextGate.status === "approved" && current.gates?.[gateName]?.status === "approved") {
       return reconcileApprovedGateRedelivery(runDir, current, gateName, nextGate, redeliveryInput);
     }
-    return transitionRunJsonLocked(
-      runDir,
-      (draft) => {
-        if (nextGate.status === "approved") consumeSteeringBoundary(draft, "gate", options.boundaryToken);
-        draft.gates = normalizeGateMap(draft.gates);
-        const prepared = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, (archive) => answerArchives.push(archive));
-        if (nextGate.status === "approved" && draft.mode === "interactive") {
-          prepared.handoff_receipt = createApprovalHandoffReceipt(runDir, gateName, prepared, draft);
-        }
-        delete prepared._handoff_answer_hash;
-        draft.gates[gateName] = prepared;
-      },
-      options,
-      { authorizedGate: gateName, beforeWrite: async () => {
-        for (const archive of answerArchives) await archiveConsumedGateAnswer(archive);
-      } },
-    );
+    try {
+      return await transitionRunJsonLocked(
+        runDir,
+        (draft) => {
+          if (nextGate.status === "approved") consumeSteeringBoundary(draft, "gate", options.boundaryToken);
+          draft.gates = normalizeGateMap(draft.gates);
+          const prepared = prepareGateDecisionTransition(runDir, gateName, draft.gates[gateName], nextGate, (archive) => answerArchives.push(archive));
+          if (nextGate.status === "approved" && draft.mode === "interactive") {
+            prepared.handoff_receipt = createApprovalHandoffReceipt(runDir, gateName, prepared, draft);
+          }
+          delete prepared._handoff_answer_hash;
+          draft.gates[gateName] = prepared;
+        },
+        options,
+        { authorizedGate: gateName, beforeWrite: async () => {
+          for (const archive of answerArchives) {
+            await archiveConsumedGateAnswer(archive);
+            publishedArchives.push(archive);
+          }
+        } },
+      );
+    } catch (error) {
+      await restoreConsumedGateAnswers(publishedArchives);
+      throw error;
+    }
   }, options);
   return { ...result, gate: gateName };
 }
 
 export function inspectApprovalHandoffReceipt(runDir, run, gateName) {
+  try {
+    validateRun(run);
+  } catch {
+    return { ok: false, reason_code: "approval-receipt-missing" };
+  }
   const gate = run?.gates?.[gateName];
+  if (run.mode !== "interactive" || gate?.status !== "approved") return { ok: false, reason_code: "approval-receipt-missing" };
   if (!isRecord(gate?.handoff_receipt)) return { ok: false, reason_code: "approval-receipt-missing" };
   const receipt = gate.handoff_receipt;
   try {
@@ -509,7 +543,7 @@ export function inspectApprovalHandoffReceipt(runDir, run, gateName) {
   } catch {
     return { ok: false, reason_code: "approval-snapshot-mismatch" };
   }
-  if (stringValue(gate.answer_ref) && receipt.answer_hash !== approvedAnswerHash(runDir, gate)) return { ok: false, reason_code: "approval-snapshot-mismatch" };
+  if (receipt.answer_hash !== approvedAnswerHash(runDir, gate)) return { ok: false, reason_code: "approval-snapshot-mismatch" };
   if (receipt.approval_fingerprint !== approvalFingerprint(gateName, gate, receipt)) return { ok: false, reason_code: "approval-snapshot-mismatch" };
   if (receipt.steering_generation !== steeringGeneration(run)) return { ok: false, reason_code: "steering-generation-mismatch" };
   if (!cleanSteeringForHandoff(run.steering)) return { ok: false, reason_code: "steering-state-not-clean" };
@@ -862,7 +896,8 @@ export async function transitionPrePrFenceEstablished(runDir, options = {}) {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, "pr-fence");
-    assertPrCreatedReadiness(runDir, current);
+    const authority = assertPrCreatedReadiness(runDir, current);
+    const gitAuthority = observePrOperationGitAuthority(runDir, current, options, "pr-fence");
     const createdAt = timestamp(options.now);
     const token = safeBoundaryToken(options.token || randomUUID());
     const base = {
@@ -875,26 +910,25 @@ export async function transitionPrePrFenceEstablished(runDir, options = {}) {
       generation: steeringGeneration(current),
       state_hash: steeringBoundaryStateHash(base),
       created_at: createdAt,
+      operation_id: computePrOperationId({ base_commit: gitAuthority.base_sha, branch: gitAuthority.head_ref, created_at: createdAt, repository: gitAuthority.repository, run_id: current.run_id }),
+      repository: gitAuthority.repository,
+      head_ref: gitAuthority.head_ref,
+      head_sha: gitAuthority.head_sha,
+      base_ref: gitAuthority.base_ref,
+      base_sha: gitAuthority.base_sha,
+      draft: current.pr_mode === "draft",
     };
     const next = validateRun(base);
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeProtectedRunJson(runDir, next, options, () => {
+      assertPrCreatedAuthorityCurrent(runDir, current, authority);
+      assertSamePrOperationGitAuthority(runDir, current, options, gitAuthority, "pr-fence");
+    });
     return { updated: true, status: next.status, run: next, fence: cloneJson(next.steering.pr_fence) };
   }, options);
 }
 
 export async function transitionPrePrFenceCleared(runDir, token, options = {}) {
-  return withRunJsonLock(runDir, async () => {
-    const current = await readRunJson(runDir);
-    assertExpectedCurrentHash(current, options.expectedCurrentHash);
-    assertPrFenceToken(current, token);
-    const next = validateRun({
-      ...cloneJson(current),
-      updated_at: timestamp(options.now),
-      steering: normalizedSteeringState(current, { pr_fence: null }),
-    });
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
-    return { updated: true, status: next.status, run: next, fence: null };
-  }, options);
+  return reconcilePrOperation(runDir, token, "clear", options);
 }
 
 export function resolveGateAnswerTarget(runDir, gateName, gate) {
@@ -911,30 +945,176 @@ export function resolveGateAnswerTarget(runDir, gateName, gate) {
   return { gatesDir: dirname(answer.path), answerPath: answer.path };
 }
 
-export async function transitionPrCreated(runDir, input, options = {}) {
-  const request = { ...normalizePrCreatedInput(input), runDir };
-  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(
-    runDir,
-    (draft) => {
-      if (mergedSliceRepairFence(draft)) throw new Error("pr-created is fenced while a merged-slice repair is unresolved");
-      assertSteeringBoundaryClear(draft, "pr-created");
-      assertPrFence(draft, options.fenceToken);
-      assertPrCreatedPreconditions(draft, request);
-      draft.pr_url = request.pr_url;
+export async function transitionPrCreated(runDir, input = {}, options = {}) {
+  if (!isRecord(input) || Object.keys(input).length !== 0) throw new Error("transitionPrCreated derives PR metadata from checked GitHub observation and accepts no caller PR fields");
+  return reconcilePrOperation(runDir, options.fenceToken, "record", options);
+}
+
+async function reconcilePrOperation(runDir, token, mode, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (current.status !== "running") throw new Error(`${mode === "clear" ? "pr-fence clear" : "pr-created"} requires a running run`);
+    if (mergedSliceRepairFence(current)) throw new Error("pr-created is fenced while a merged-slice repair is unresolved");
+    const fence = assertPrFence(current, token);
+    if (!hasCompleteBinding(fence, PR_FENCE_IDENTITY_KEYS)) return terminalizeLegacyPrFenceLocked(runDir, current, options);
+
+    const readiness = assertPrCreatedReadiness(runDir, current);
+    const gitAuthority = assertPrFenceGitAuthorityCurrent(runDir, current, fence, options);
+    const observation = await observeFencedPrOperation(current, fence, options, gitAuthority.head_sha);
+    if (["unknown", "ambiguous"].includes(observation.disposition) || observation.disposition === "absent" && mode === "record") {
+      return { ok: false, updated: false, disposition: observation.disposition, reason: observation.reason, status: current.status, run: current, fence: cloneJson(fence), pr_url: null, terminal_result: null };
+    }
+
+    if (observation.disposition === "absent") {
+      const next = validateRun({ ...cloneJson(current), updated_at: timestamp(options.now), steering: normalizedSteeringState(current, { pr_fence: null }) });
+      await writeProtectedRunJson(runDir, next, options, () => assertPrReconciliationCurrent(runDir, current, fence, readiness, observation, options));
+      return { ok: true, updated: true, disposition: "absent", status: next.status, run: next, fence: null, pr_url: null, terminal_result: null };
+    }
+
+    const pullRequest = observation.pull_request;
+    const draft = cloneJson(current);
+    draft.pr_url = pullRequest.pr_url;
+    if (observation.disposition === "closed") {
+      draft.status = "needs-human";
+      draft.terminal_result = {
+        status: "needs-human",
+        run_id: current.run_id,
+        pr_url: pullRequest.pr_url,
+        reason: "pr-operation-closed-unmerged",
+        summary: "The fenced PR operation resolved to a closed, unmerged pull request and requires human reconciliation.",
+        artifacts: {},
+      };
+    } else if (observation.disposition === "merged") {
+      draft.status = "completed";
+      if (draft.post_pr?.policy?.enabled === true) {
+        draft.post_pr = initializePostPrObservation(draft.post_pr, pullRequest, options.now, fence);
+        draft.post_pr.phase = "succeeded";
+        draft.post_pr.observation.last_observed_at = timestamp(options.now);
+        draft.post_pr.observation.last_verdict = "external-merge";
+      }
+      draft.terminal_result = normalizePrCreatedTerminalResult(draft, pullRequest, fence, { reason: draft.post_pr?.policy?.enabled === true ? "post-pr-external-merge" : null });
+      draft.steering = normalizedSteeringState(draft, { boundary: null, pr_fence: null });
+    } else {
       if (draft.post_pr?.policy?.enabled === true) {
         draft.status = "running";
         draft.terminal_result = null;
-        draft.post_pr = initializePostPrObservation(draft.post_pr, request, options.now);
+        draft.post_pr = initializePostPrObservation(draft.post_pr, pullRequest, options.now, fence);
       } else {
         draft.status = "completed";
-        draft.terminal_result = normalizePrCreatedTerminalResult(draft, request);
+        draft.terminal_result = normalizePrCreatedTerminalResult(draft, pullRequest, fence);
       }
       draft.steering = normalizedSteeringState(draft, { boundary: null, pr_fence: null });
+    }
+    draft.updated_at = timestamp(options.now);
+    const next = validateRun(draft);
+    await writeProtectedRunJson(runDir, next, options, () => assertPrReconciliationCurrent(runDir, current, fence, readiness, observation, options));
+    return {
+      ok: observation.disposition !== "closed",
+      updated: true,
+      disposition: observation.disposition,
+      reason: next.terminal_result?.reason ?? null,
+      status: next.status,
+      run: next,
+      fence: cloneJson(next.steering?.pr_fence ?? null),
+      pr_url: next.pr_url,
+      terminal_result: next.terminal_result,
+    };
+  }, options);
+}
+
+async function assertPrReconciliationCurrent(runDir, current, fence, readiness, expectedObservation, options) {
+  assertPrCreatedAuthorityCurrent(runDir, current, readiness);
+  const authority = assertPrFenceGitAuthorityCurrent(runDir, current, fence, options);
+  const observed = await observeFencedPrOperation(current, fence, options, authority.head_sha);
+  if (!sameJson(observed, expectedObservation)) throw new Error("PR operation GitHub observation changed before publication");
+}
+
+async function observeFencedPrOperation(run, fence, options, expectedHeadSha) {
+  const observer = typeof options.observePrOperation === "function" ? options.observePrOperation : observePullRequestOperation;
+  let result;
+  try {
+    result = await observer({
+      repositoryRoot: resolveAuthorityRepository(options.runDir, run, options),
+      cwd: resolveAuthorityRepository(options.runDir, run, options),
+      account: run.github_account,
+      repository: fence.repository,
+      operation_id: fence.operation_id,
+      head_ref: fence.head_ref,
+      head_sha: expectedHeadSha,
+      base_ref: fence.base_ref,
+      base_sha: fence.base_sha,
+      draft: fence.draft,
+      executable: options.ghExecutable,
+      execute: options.executeGithub,
+      spawnImpl: options.spawnImpl,
+      lockOptions: options.githubLockOptions,
+      observePage: options.observePrOperationPage,
+    });
+  } catch (error) {
+    return { disposition: "unknown", reason: error instanceof Error ? error.message : "observer-threw", pull_request: null };
+  }
+  if (!isRecord(result) || !["open", "merged", "closed", "absent", "ambiguous", "unknown"].includes(result.disposition)) {
+    return { disposition: "unknown", reason: "observer-result-malformed", pull_request: null };
+  }
+  if (["open", "merged", "closed"].includes(result.disposition)) assertObservedPrTuple(result.pull_request, fence, expectedHeadSha);
+  return result;
+}
+
+function assertObservedPrTuple(pullRequest, fence, expectedHeadSha) {
+  if (!isRecord(pullRequest)) throw new Error("checked GitHub observation returned no pull-request tuple");
+  const expected = {
+    repository: fence.repository,
+    head_ref: fence.head_ref,
+    head_sha: expectedHeadSha,
+    base_ref: fence.base_ref,
+    base_sha: fence.base_sha,
+    draft: fence.draft,
+  };
+  for (const [key, value] of Object.entries(expected)) if (pullRequest[key] !== value) throw new Error(`checked GitHub pull-request ${key} does not match the fenced operation`);
+  for (const key of ["pr_url", "pr_node_id"]) requireNonEmptyString(pullRequest[key], `checked GitHub pull-request ${key}`);
+  normalizePrNumber(pullRequest.pr_number);
+}
+
+function terminalizeLegacyPrFenceLocked(runDir, current, options = {}) {
+  const now = timestamp(options.now);
+  const next = validateRun({
+    ...cloneJson(current),
+    status: "needs-human",
+    updated_at: now,
+    terminal_result: {
+      status: "needs-human",
+      run_id: current.run_id,
+      pr_url: current.pr_url || null,
+      reason: "legacy-pr-fence-operation-identity-missing",
+      summary: "The active legacy PR fence has no operation identity and requires human reconciliation.",
+      artifacts: {},
     },
-    options,
-    { prCreated: true },
-  ), options);
-  return { ...result, pr_url: result.run.pr_url, terminal_result: result.run.terminal_result };
+  });
+  return writeJsonAtomically(join(runDir, RUN_FILE), next).then(() => ({
+    ok: false,
+    updated: true,
+    disposition: "legacy",
+    reason: next.terminal_result.reason,
+    status: next.status,
+    run: next,
+    fence: cloneJson(next.steering.pr_fence),
+    pr_url: next.pr_url ?? null,
+    terminal_result: next.terminal_result,
+  }));
+}
+
+export async function transitionLegacyPrFenceNeedsHuman(runDir, options = {}) {
+  const observed = await readRunJson(runDir);
+  const observedFence = observed.steering?.pr_fence;
+  if (!isRecord(observedFence) || hasCompleteBinding(observedFence, PR_FENCE_IDENTITY_KEYS) || observed.status !== "running") return null;
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const fence = current.steering?.pr_fence;
+    if (!isRecord(fence) || hasCompleteBinding(fence, PR_FENCE_IDENTITY_KEYS)) return null;
+    if (current.status !== "running") return null;
+    return terminalizeLegacyPrFenceLocked(runDir, current, options);
+  }, options);
 }
 
 /** Checked replacement used by the orchestration layer after external work is inactive. */
@@ -986,24 +1166,29 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
   const status = requireNonEmptyString(input.status, "post-PR terminal status");
   const reason = requireNonEmptyString(input.reason, "post-PR terminal reason");
   if (!POST_PR_TERMINAL_PHASE[status] || !POST_PR_TERMINAL_REASONS[status]?.includes(reason)) throw new Error(`invalid closed post-PR terminal reason '${reason}' for ${status}`);
-  return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+  let completedPrAuthority = null;
+  return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft, { current }) => {
     assertPostPrMutationReady(runDir, current, options, "post-PR terminal transition");
     const phase = POST_PR_TERMINAL_PHASE[status];
     if (current.post_pr?.phase === phase && current.status === status && current.terminal_result?.reason === reason) return;
     if (!current.post_pr?.policy?.enabled) throw new Error("post-PR terminal transition requires enabled persisted policy");
     assertPostPrTerminalPreconditions(current, status, reason, input, options);
+    const completedPr = status === "completed" ? await observePostPrCompletedIdentity(runDir, current, reason, options) : null;
+    completedPrAuthority = completedPr;
     assertPostPrPhaseTransition(current.post_pr, { ...current.post_pr, phase });
     draft.status = status;
     draft.post_pr = { ...cloneJson(current.post_pr), phase, terminal_fact: normalizedPostPrTerminalFact(reason, input.trigger_fact) };
     if (reason === "post-pr-retry-exhausted") draft.post_pr.continuation_review = bindPostPrContinuationReview(runDir, current, input.continuation_review);
-    draft.terminal_result = {
-      status,
-      run_id: current.run_id,
-      pr_url: current.pr_url,
-      reason,
-      summary: stringValue(input.summary) ? input.summary : reason,
-      artifacts: isRecord(input.artifacts) ? cloneJson(input.artifacts) : {},
-    };
+    draft.terminal_result = completedPr
+      ? normalizePrCreatedTerminalResult(draft, completedPr, current.post_pr.pr_operation, { reason, summary: stringValue(input.summary) ? input.summary : reason, artifacts: input.artifacts })
+      : {
+          status,
+          run_id: current.run_id,
+          pr_url: current.pr_url,
+          reason,
+          summary: stringValue(input.summary) ? input.summary : reason,
+          artifacts: isRecord(input.artifacts) ? cloneJson(input.artifacts) : {},
+        };
     validateRun(draft);
     const terminalAction = current.steering?.last_action;
     if (!stringValue(options.terminalActionToken) || !Number.isInteger(options.terminalActionGeneration)
@@ -1011,7 +1196,15 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
       throw new Error("post-PR terminal transition requires the exact fresh started terminal action");
     }
     draft.updated_at = timestamp(options.now);
-  }, options, { postPr: true, postPrTerminal: true, beforeWrite: (next) => assertPostPrRefsConsistent(runDir, next) }), options);
+  }, options, {
+    postPr: true,
+    postPrTerminal: true,
+    beforeWrite: (next) => assertPostPrRefsConsistent(runDir, next),
+    beforeReplace: status === "completed" ? async (_next, current) => {
+      const observed = await observePostPrCompletedIdentity(runDir, current, reason, options);
+      if (!sameJson(observed, completedPrAuthority)) throw new Error("post-PR completion GitHub observation changed before publication");
+    } : undefined,
+  }), options);
 }
 
 export async function transitionTerminalResult(runDir, terminalResult, options = {}) {
@@ -1046,7 +1239,10 @@ export async function transitionRecoverOrphan(runDir, reason = "orphaned factory
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.status !== "running") throw new Error(`recover requires a running run, found '${current.status}'`);
     assertSteeringBoundaryClear(current, "recover");
-    if (isRecord(current.steering?.pr_fence)) throw new Error("recover rejected: active pre-PR fence");
+    if (isRecord(current.steering?.pr_fence)) {
+      if (!hasCompleteBinding(current.steering.pr_fence, PR_FENCE_IDENTITY_KEYS)) return terminalizeLegacyPrFenceLocked(runDir, current, options);
+      throw new Error("recover rejected: active pre-PR fence");
+    }
     const recoverable = inspectRecoverableHeartbeat(runDir, options);
     if (!recoverable.ok) throw new Error(`recover requires terminal, missing, stale, or dead heartbeat: ${recoverable.reason}`);
 
@@ -1072,9 +1268,293 @@ export async function transitionRecoverOrphan(runDir, reason = "orphaned factory
 }
 
 export async function transitionRunStep(runDir, stepSelector, updater, options = {}) {
+  return transitionRunStepChecked(runDir, stepSelector, updater, options, { allowInheritedAcceptance: false });
+}
+
+export async function transitionContinuationAdoption(runDir, options = {}) {
+  let stepIndex = -1;
+  let adoptionAuthority = null;
+  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft) => {
+    const continuation = draft.continuation;
+    const reuse = continuation?.planning_reuse;
+    if (continuation?.kind !== "blocked-run-continuation" || reuse?.eligible !== true) throw new Error("checked continuation adoption requires reuse-eligible continuation metadata");
+    adoptionAuthority = observeContinuationAdoptionAuthority(runDir, draft, options);
+    const hadSteps = Array.isArray(draft.steps);
+    const steps = hadSteps ? draft.steps : [];
+    const priorIndex = selectCollectionItemIndex(steps, "spec-writer", "step selector", "agent");
+    const priorStep = priorIndex >= 0 ? cloneJson(steps[priorIndex]) : null;
+    const update = await applyCollectionItemUpdate({
+      items: steps,
+      selector: "spec-writer",
+      selectorLabel: "step selector",
+      seed: seedRunStep("spec-writer"),
+      identityKey: "agent",
+      updater(step) {
+        step.status = "accepted";
+        step.artifact_ref = "artifacts/technical-brief.md";
+        step.review_ref = "reviews/spec-writer.json";
+        if (!Number.isInteger(step.attempts)) step.attempts = 0;
+        step.inherited_acceptance = {
+          from_run_id: continuation.parent.run_id,
+          parent_spec_review_ref: reuse.spec_review_ref,
+          artifact_hash: reuse.spec_artifact_hash,
+          review_hash: reuse.spec_review_hash,
+        };
+      },
+    });
+    stepIndex = update.index;
+    if (!update.changed) return;
+    if (!hadSteps) draft.steps = steps;
+    assertStepIdentityAndAttempts("spec-writer", priorStep, steps[stepIndex]);
+    prepareStepAcceptanceAuthority(priorStep, steps[stepIndex], { allowInheritedAcceptance: true });
+    bindStepAcceptance(runDir, steps[stepIndex]);
+  }, options, {
+    authorizedStep: "spec-writer",
+    allowInheritedAcceptance: true,
+    beforeReplace: (_next, current) => assertContinuationAdoptionAuthorityCurrent(runDir, current, options, adoptionAuthority),
+  }), options);
+  return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
+}
+
+export function assertContinuationAuthorityCurrent(runDir, run, options = {}) {
+  validateRun(run);
+  const continuation = run.continuation;
+  if (continuation?.kind !== "blocked-run-continuation") throw new Error("continuation authority requires blocked-run-continuation metadata");
+  const repo = resolve(options.repoRoot || resolve(runDir, "../../.."));
+  const parentFile = resolve(repo, continuation.parent.run_ref);
+  assertNoSymlinkPath(repo, parentFile, "continuation parent run.json");
+  if (!existsSync(parentFile)) throw new Error("continuation parent run.json is missing");
+  if (hashFile(parentFile) !== continuation.parent.run_hash) throw new Error("continuation parent run.json changed since observation");
+  const parentRun = validateRun(parseJsonObjectFile(parentFile, "continuation parent run.json"));
+  for (const key of ["run_id", "status", "branch", "worktree"]) {
+    if (continuation.parent[key] !== parentRun[key]) throw new Error(`continuation parent ${key} binding is stale`);
+  }
+  const branch = git(repo, ["rev-parse", "--verify", `refs/heads/${continuation.parent.branch}^{commit}`]);
+  if (!branch.ok || branch.stdout.trim() !== continuation.parent.commit) throw new Error("continuation parent branch/commit binding is stale");
+
+  const reviewSource = continuationReviewAuthority(parentRun, continuation.review.ref);
+  if (!reviewSource || reviewSource.kind !== continuation.review.kind || reviewSource.source !== continuation.review.source) throw new Error("continuation selected review source is stale");
+  const selectedReview = readBoundContinuationFile(parentRunDir(parentFile), continuation.review.ref, continuation.review.hash, resolveReviewRef, "selected review");
+  const selectedSubject = String(selectedReview.value.subject || "").trim();
+  if (!reviewSource.subjects.has(selectedSubject)) throw new Error("continuation selected review subject is cross-bound");
+  const currentReview = {
+    kind: reviewSource.kind,
+    ref: selectedReview.ref,
+    hash: selectedReview.hash,
+    subject: selectedSubject,
+    summary: stringValue(selectedReview.value.summary) ? String(selectedReview.value.summary).trim() : null,
+    required_fixes: Array.isArray(selectedReview.value.required_fixes) ? selectedReview.value.required_fixes.filter(stringValue).map((value) => String(value).trim()) : [],
+  };
+  if (stringValue(selectedReview.value.verdict)) currentReview.verdict = String(selectedReview.value.verdict).trim();
+  if (stringValue(reviewSource.source)) currentReview.source = reviewSource.source;
+  if (!sameJson(currentReview, continuation.review)) throw new Error("continuation selected review identity is stale or cross-bound");
+  const expectedSummary = `Continue blocked run '${parentRun.run_id}' from ${continuation.review.ref}.`;
+  if (continuation.operator_summary !== expectedSummary) throw new Error("continuation operator_summary is stale or cross-bound");
+
+  assertContinuationContext(parentFile, parentRun, continuation);
+  assertContinuationPlanningReuse(parentFile, parentRun, continuation);
+  assertContinuationPostPr(parentFile, parentRun, continuation);
+  assertContinuationTarget(repo, run, parentRun, continuation);
+  return { parentRun, repo, parentFile };
+}
+
+function observeContinuationAdoptionAuthority(runDir, run, options) {
+  const first = assertContinuationAuthorityCurrent(runDir, run, options);
+  const firstSnapshot = continuationAdoptionAuthoritySnapshot(runDir, run, first);
+  const second = assertContinuationAuthorityCurrent(runDir, run, options);
+  const secondSnapshot = continuationAdoptionAuthoritySnapshot(runDir, run, second);
+  if (!sameJson(firstSnapshot, secondSnapshot)) throw new Error("continuation adoption authority changed during observation");
+  return secondSnapshot;
+}
+
+function assertContinuationAdoptionAuthorityCurrent(runDir, run, options, observed) {
+  if (!observed) throw new Error("continuation adoption authority was not observed");
+  const current = observeContinuationAdoptionAuthority(runDir, run, options);
+  if (!sameJson(current, observed)) throw new Error("continuation adoption authority changed before run.json replacement");
+}
+
+function continuationAdoptionAuthoritySnapshot(runDir, run, authority) {
+  const continuation = run.continuation;
+  const parentDir = parentRunDir(authority.parentFile);
+  const reuse = continuation.planning_reuse;
+  const branch = git(authority.repo, ["rev-parse", "--verify", `refs/heads/${continuation.parent.branch}^{commit}`]);
+  if (!branch.ok) throw new Error("continuation parent branch/commit binding is stale");
+  return {
+    parent_manifest: { ref: continuation.parent.run_ref, hash: hashFile(authority.parentFile) },
+    parent_branch_commit: branch.stdout.trim(),
+    selected_review: hashContinuationRef(parentDir, continuation.review.ref, resolveReviewRef),
+    parent_artifacts: hashContinuationRefs(parentDir, continuation.parent_artifacts, resolveArtifactRef),
+    parent_evidence: hashContinuationRefs(parentDir, continuation.parent_evidence, resolveEvidenceRef),
+    parent_reviews: hashContinuationRefs(parentDir, continuation.parent_reviews, resolveReviewRef),
+    planning_artifact: hashContinuationRef(parentDir, reuse.spec_artifact_ref, resolveArtifactRef),
+    planning_review: hashContinuationRef(parentDir, reuse.spec_review_ref, resolveReviewRef),
+    child_artifact: hashContinuationRef(runDir, "artifacts/technical-brief.md", resolveArtifactRef),
+    child_review: hashContinuationRef(runDir, "reviews/spec-writer.json", resolveReviewRef),
+  };
+}
+
+function hashContinuationRefs(runDir, bindings, resolver) {
+  return bindings.map(({ ref }) => hashContinuationRef(runDir, ref, resolver));
+}
+
+function hashContinuationRef(runDir, ref, resolver) {
+  const resolved = resolver(runDir, ref);
+  return { ref: resolved.ref, hash: hashFile(resolved.path) };
+}
+
+function parentRunDir(parentFile) {
+  return dirname(parentFile);
+}
+
+function assertNoSymlinkPath(rootDir, targetPath, label) {
+  const root = resolve(rootDir);
+  const target = resolve(targetPath);
+  const rel = relative(root, target);
+  if (rel === "" || rel === ".." || rel.startsWith("../")) throw new Error(`${label} escapes repository`);
+  let current = root;
+  for (const segment of rel.split("/").filter(Boolean)) {
+    current = join(current, segment);
+    if (!existsSync(current)) return;
+    if (lstatSync(current).isSymbolicLink()) throw new Error(`${label} must not contain symlinks`);
+  }
+}
+
+function continuationReviewAuthority(parentRun, ref) {
+  const subjects = new Set([parentRun.run_id, parentRun.branch, "feature-branch"].filter(stringValue).map((value) => String(value).trim()));
+  const candidates = [];
+  if (stringValue(parentRun.post_pr?.continuation_review?.ref)) candidates.push({ kind: "post_pr", source: "run.post_pr.continuation_review.ref", ref: normalizeContinuationRef(parentRun.post_pr.continuation_review.ref, "reviews"), subjects: new Set([parentRun.run_id]) });
+  if (stringValue(parentRun.validator?.review_ref)) candidates.push({ kind: "validator", source: "run.validator.review_ref", ref: normalizeContinuationRef(parentRun.validator.review_ref, "reviews"), subjects });
+  if (stringValue(parentRun.security_review?.review_ref)) candidates.push({ kind: "security_review", source: "run.security_review.review_ref", ref: normalizeContinuationRef(parentRun.security_review.review_ref, "reviews"), subjects });
+  for (const step of parentRun.steps || []) if (stringValue(step?.review_ref) && stringValue(step?.agent)) candidates.push({ kind: "step", source: `run.steps.${step.agent}.review_ref`, ref: normalizeContinuationRef(step.review_ref, "reviews"), subjects: new Set([String(step.agent).trim()]) });
+  for (const slice of parentRun.slices || []) if (stringValue(slice?.review_ref) && stringValue(slice?.id)) candidates.push({ kind: "slice", source: `run.slices.${slice.id}.review_ref`, ref: normalizeContinuationRef(slice.review_ref, "reviews"), subjects: new Set([String(slice.id).trim()]) });
+  return candidates.find((candidate) => candidate.ref === ref) || null;
+}
+
+function readBoundContinuationFile(runDir, ref, expectedHash, resolver, label) {
+  const resolved = resolver(runDir, ref);
+  const actualHash = hashFile(resolved.path);
+  if (actualHash !== expectedHash) throw new Error(`continuation ${label} hash mismatch`);
+  return { ref, hash: actualHash, value: parseJsonObjectFile(resolved.path, `continuation ${label}`) };
+}
+
+function assertContinuationContext(parentFile, parentRun, continuation) {
+  const parentDir = parentRunDir(parentFile);
+  const expectedArtifacts = CONTINUATION_PARENT_ARTIFACTS.flatMap(([kind, ref]) => {
+    const candidate = resolveArtifactRef(parentDir, ref, { mustExist: false });
+    if (!existsSync(candidate.path)) return [];
+    const resolved = resolveArtifactRef(parentDir, ref);
+    return [{ kind, ref, hash: hashFile(resolved.path) }];
+  }).sort((left, right) => left.ref.localeCompare(right.ref));
+  const evidenceRefs = [];
+  for (const step of parentRun.steps || []) if (stringValue(step?.evidence_ref)) evidenceRefs.push(step.evidence_ref);
+  for (const slice of parentRun.slices || []) if (stringValue(slice?.evidence_ref)) evidenceRefs.push(slice.evidence_ref);
+  if (stringValue(parentRun.post_pr?.remediation?.failure_evidence_ref)) evidenceRefs.push(parentRun.post_pr.remediation.failure_evidence_ref);
+  for (const binding of parentRun.post_pr?.evidence_refs || []) if (stringValue(binding?.ref)) evidenceRefs.push(binding.ref);
+  const expectedEvidence = bindUniqueContinuationRefs(parentDir, evidenceRefs, "evidence", "evidence", resolveEvidenceRef);
+  const reviewRefs = [];
+  for (const value of [parentRun.post_pr?.continuation_review?.ref, parentRun.validator?.review_ref, parentRun.security_review?.review_ref]) if (stringValue(value)) reviewRefs.push(value);
+  for (const step of parentRun.steps || []) if (stringValue(step?.review_ref)) reviewRefs.push(step.review_ref);
+  for (const slice of parentRun.slices || []) if (stringValue(slice?.review_ref)) reviewRefs.push(slice.review_ref);
+  const expectedReviews = bindUniqueContinuationRefs(parentDir, reviewRefs, "reviews", "review", resolveReviewRef);
+  for (const [label, expected, actual] of [
+    ["parent_artifacts", expectedArtifacts, continuation.parent_artifacts],
+    ["parent_evidence", expectedEvidence, continuation.parent_evidence],
+    ["parent_reviews", expectedReviews, continuation.parent_reviews],
+  ]) if (!sameJson(expected, actual)) throw new Error(`continuation ${label} binding is stale`);
+}
+
+function bindUniqueContinuationRefs(runDir, refs, rootName, kind, resolver) {
+  return [...new Set(refs.map((ref) => normalizeContinuationRef(ref, rootName)))].sort((left, right) => left.localeCompare(right)).map((ref) => {
+    const resolved = resolver(runDir, ref);
+    return { kind, ref, hash: hashFile(resolved.path) };
+  });
+}
+
+function normalizeContinuationRef(ref, rootName) {
+  const value = String(ref).trim();
+  return value.startsWith(`${rootName}/`) ? value : `${rootName}/${value}`;
+}
+
+function assertContinuationPlanningReuse(parentFile, parentRun, continuation) {
+  const parentDir = parentRunDir(parentFile);
+  const step = (parentRun.steps || []).find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
+  const reuse = continuation.planning_reuse;
+  if (reuse?.eligible === true) {
+    if (step?.status !== "accepted" || !isRecord(step.acceptance)) throw new Error("continuation planning_reuse parent acceptance is stale");
+    if (reuse.spec_artifact_ref !== "artifacts/technical-brief.md" || (reuse.child_spec_review_ref && reuse.child_spec_review_ref !== "reviews/spec-writer.json")) throw new Error("continuation planning_reuse target refs are stale");
+    if (step.acceptance.artifact_ref !== reuse.spec_artifact_ref || step.acceptance.artifact_hash !== reuse.spec_artifact_hash
+      || normalizeContinuationRef(step.acceptance.review_ref, "reviews") !== reuse.spec_review_ref || step.acceptance.review_hash !== reuse.spec_review_hash) throw new Error("continuation planning_reuse binding is stale");
+    const artifact = resolveArtifactRef(parentDir, reuse.spec_artifact_ref);
+    if (hashFile(artifact.path) !== reuse.spec_artifact_hash) throw new Error("continuation planning_reuse artifact bytes changed");
+    const review = readBoundContinuationFile(parentDir, reuse.spec_review_ref, reuse.spec_review_hash, resolveReviewRef, "planning review");
+    if (String(review.value.subject || "").trim() !== "spec-writer" || !APPROVING_CONTINUATION_REVIEW_VERDICTS.has(String(review.value.verdict || "").trim().toUpperCase())) throw new Error("continuation planning_reuse review is not approving");
+  } else if (currentParentPlanningReuseEligible(parentDir, step)) {
+    throw new Error("continuation planning_reuse eligibility is stale");
+  }
+  const draft = continuation.draft_spec_reuse;
+  if (draft) {
+    if (!step || step.status !== draft.parent_step_status || step.attempts !== draft.parent_step_attempts || parentRun.max_retries !== draft.max_retries || step.acceptance || step.inherited_acceptance) throw new Error("continuation draft_spec_reuse binding is stale");
+    const artifact = resolveArtifactRef(parentDir, draft.artifact_ref);
+    if (hashFile(artifact.path) !== draft.artifact_hash) throw new Error("continuation draft_spec_reuse artifact bytes changed");
+  }
+}
+
+function currentParentPlanningReuseEligible(parentDir, step) {
+  if (step?.status !== "accepted" || !isRecord(step.acceptance) || step.acceptance.artifact_ref !== "artifacts/technical-brief.md" || !stringValue(step.acceptance.review_ref)) return false;
+  try {
+    const artifact = resolveArtifactRef(parentDir, step.acceptance.artifact_ref);
+    const review = resolveReviewRef(parentDir, step.acceptance.review_ref);
+    if (hashFile(artifact.path) !== step.acceptance.artifact_hash || hashFile(review.path) !== step.acceptance.review_hash) return false;
+    const reviewValue = parseJsonObjectFile(review.path, "continuation planning review");
+    return String(reviewValue.subject || "").trim() === "spec-writer" && APPROVING_CONTINUATION_REVIEW_VERDICTS.has(String(reviewValue.verdict || "").trim().toUpperCase());
+  } catch {
+    return false;
+  }
+}
+
+function assertContinuationPostPr(parentFile, parentRun, continuation) {
+  const binding = continuation.post_pr;
+  if (!binding) {
+    if (stringValue(parentRun.pr_url)) throw new Error("continuation post_pr binding is missing");
+    return;
+  }
+  const parentDir = parentRunDir(parentFile);
+  const identity = githubPrUrlParts(parentRun.pr_url);
+  if (binding.pr_url !== identity.url || binding.repository !== identity.repository || binding.pr_number !== identity.number) throw new Error("continuation post_pr PR identity is stale");
+  if (binding.disposition !== "leave-unchanged" || !sameJson(binding.policy, parentRun.post_pr?.policy)) throw new Error("continuation post_pr policy binding is stale");
+  const postPr = cloneJson(parentRun.post_pr);
+  delete postPr.continuation_review;
+  if (binding.post_pr_hash !== hashValue(postPr)) throw new Error("continuation post_pr state hash is stale");
+  const evidence = readBoundContinuationFile(parentDir, binding.evidence_ref, binding.evidence_hash, resolveEvidenceRef, "post-PR evidence");
+  const review = readBoundContinuationFile(parentDir, binding.continuation_review_ref, binding.continuation_review_hash, resolveReviewRef, "post-PR review");
+  const latestEvidence = parentRun.post_pr?.evidence_refs?.at(-1) || { ref: parentRun.post_pr?.remediation?.failure_evidence_ref, hash: parentRun.post_pr?.remediation?.failure_evidence_hash };
+  if (latestEvidence?.ref !== binding.evidence_ref || latestEvidence?.hash !== binding.evidence_hash) throw new Error("continuation post_pr latest evidence binding is stale");
+  if (evidence.value.failed_head_sha !== binding.head_sha || review.value.head_sha !== binding.head_sha) throw new Error("continuation post_pr failed head binding is stale");
+  if (parentRun.post_pr?.continuation_review?.ref !== binding.continuation_review_ref || parentRun.post_pr.continuation_review.hash !== binding.continuation_review_hash) throw new Error("continuation post_pr review binding is stale");
+}
+
+function assertContinuationTarget(repo, run, parentRun, continuation) {
+  const target = continuation.target;
+  if (run.run_id !== target.run_id || run.branch !== target.branch || run.worktree !== target.worktree || target.run_id === parentRun.run_id || target.branch !== target.run_id) throw new Error("continuation target binding is stale");
+  if (target.worktree !== resolve(repo, ".opencode", "worktrees", target.run_id)) throw new Error("continuation target worktree binding is stale");
+  let expectedBase;
+  if (stringValue(parentRun.base_commit)) {
+    const resolved = git(repo, ["rev-parse", "--verify", `${parentRun.base_commit}^{commit}`]);
+    if (!resolved.ok) throw new Error("continuation target parent base commit is missing");
+    expectedBase = resolved.stdout.trim();
+    if (!git(repo, ["merge-base", "--is-ancestor", expectedBase, parentRun.branch]).ok) throw new Error("continuation target parent base commit is not on the parent branch");
+  } else {
+    const resolved = git(repo, ["rev-parse", "--verify", `${target.base_ref}^{commit}`]);
+    if (!resolved.ok) throw new Error("continuation target base ref is missing");
+    expectedBase = resolved.stdout.trim();
+  }
+  if (target.base_commit !== expectedBase) throw new Error("continuation target base binding is stale");
+}
+
+async function transitionRunStepChecked(runDir, stepSelector, updater, options, authority) {
   assertCollectionUpdater(updater, "transitionRunStep");
   let stepIndex = -1;
-  const result = await transitionRunJson(runDir, async (draft) => {
+  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft) => {
     const hadSteps = Array.isArray(draft.steps);
     const steps = hadSteps ? draft.steps : [];
     if (options.mustExist && !collectionHasItem(steps, stepSelector, "agent")) throw new Error(`step '${formatSelector(stepSelector)}' not found`);
@@ -1085,6 +1565,8 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
     if (!update.changed) return;
     if (!hadSteps) draft.steps = steps;
     if (stepIndex >= 0) {
+      assertStepIdentityAndAttempts(stepSelector, priorStep, steps[stepIndex]);
+      prepareStepAcceptanceAuthority(priorStep, steps[stepIndex], authority);
       if (["running", "accepted"].includes(steps[stepIndex]?.status) && mergedSliceRepairFence(draft)) {
         throw new Error(`step '${steps[stepIndex].agent || formatSelector(stepSelector)}' cannot advance while a merged-slice repair is unresolved`);
       }
@@ -1092,8 +1574,36 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
       assertDraftSpecReuseAttempt(draft, steps[stepIndex], priorStep);
       bindStepAcceptance(runDir, steps[stepIndex]);
     }
-  }, options);
+  }, options, { authorizedStep: stepIdentityForSelector(stepSelector), allowInheritedAcceptance: authority.allowInheritedAcceptance }), options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
+}
+
+function assertStepIdentityAndAttempts(selector, priorStep, step) {
+  const expectedAgent = priorStep?.agent || stepIdentityForSelector(selector);
+  if (stringValue(expectedAgent) && step?.agent !== expectedAgent) throw new Error(`step agent identity is immutable; expected '${expectedAgent}'`);
+  if (Number.isInteger(priorStep?.attempts) && Number.isInteger(step?.attempts) && step.attempts < priorStep.attempts) {
+    throw new Error(`step '${expectedAgent}' attempts cannot regress from ${priorStep.attempts} to ${step.attempts}`);
+  }
+}
+
+function prepareStepAcceptanceAuthority(priorStep, step, authority) {
+  if (step.status !== "accepted") {
+    delete step.acceptance;
+    delete step.inherited_acceptance;
+    return;
+  }
+  if (!authority.allowInheritedAcceptance && !sameJson(priorStep?.inherited_acceptance ?? null, step.inherited_acceptance ?? null)) {
+    throw new Error("inherited_acceptance can only be created by checked continuation adoption");
+  }
+  if (authority.allowInheritedAcceptance && !isRecord(step.inherited_acceptance)) {
+    throw new Error("checked continuation adoption requires inherited_acceptance");
+  }
+}
+
+function stepIdentityForSelector(selector) {
+  if (stringValue(selector)) return selector;
+  if (isRecord(selector) && stringValue(selector.agent)) return selector.agent;
+  return null;
 }
 
 function assertDraftSpecReuseAttempt(run, step, priorStep) {
@@ -1157,17 +1667,19 @@ function bindStepAcceptance(runDir, step) {
   delete step.acceptance;
   if (step.status !== "accepted") return;
   const artifactRef = typeof step.artifact_ref === "string" ? step.artifact_ref.trim() : "";
-  if (!artifactRef) return;
+  if (!artifactRef) {
+    if (step.agent === "spec-writer") throw new Error("accepted spec-writer step requires artifact_ref");
+    return;
+  }
   const artifactHash = tryHashDurableRef(() => resolveArtifactRef(runDir, artifactRef, { mustExist: true }));
-  if (!artifactHash) return;
+  if (!artifactHash) throw new Error(`accepted step artifact_ref '${artifactRef}' must resolve to current bytes`);
   const acceptance = { artifact_ref: artifactRef, artifact_hash: artifactHash };
   const reviewRef = typeof step.review_ref === "string" ? step.review_ref.trim() : "";
   if (reviewRef) {
     const reviewHash = tryHashDurableRef(() => resolveReviewRef(runDir, reviewRef, { mustExist: true }));
-    if (reviewHash) {
-      acceptance.review_ref = reviewRef;
-      acceptance.review_hash = reviewHash;
-    }
+    if (!reviewHash) throw new Error(`accepted step review_ref '${reviewRef}' must resolve to current bytes`);
+    acceptance.review_ref = reviewRef;
+    acceptance.review_hash = reviewHash;
   }
   step.acceptance = acceptance;
 }
@@ -1183,30 +1695,59 @@ function tryHashDurableRef(resolveFn) {
 export async function transitionRunSlice(runDir, sliceId, updater, options = {}) {
   assertCollectionUpdater(updater, "transitionRunSlice");
   let sliceIndex = -1;
-  const result = await transitionRunJson(runDir, async (draft) => {
-    const hadSlices = Array.isArray(draft.slices);
-    const slices = hadSlices ? draft.slices : [];
-    if (options.mustExist && !collectionHasItem(slices, sliceId, "id")) throw new Error(`slice '${formatSelector(sliceId)}' not found`);
-    // `merged` is a one-way state owned by transitionSliceMerged. Reject any
-    // generic mutation of an already-merged slice so its durable merged state
-    // (merge_commit, review_ref) cannot be rolled back to running/review/blocked
-    // through the public slice-status path.
+  let priorReviewAuthority = null;
+  let nextReviewAuthority = null;
+  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft, { current }) => {
+    const slices = Array.isArray(draft.slices) ? draft.slices : [];
+    if (!collectionHasItem(slices, sliceId, "id")) throw new Error(`slice '${formatSelector(sliceId)}' not found`);
     const priorIndex = selectCollectionItemIndex(slices, sliceId, "slice selector", "id");
-    if (priorIndex >= 0 && slices[priorIndex]?.status === "merged") {
-      throw new Error(`slice '${slices[priorIndex].id || formatSelector(sliceId)}' is already merged; merged slices are immutable via transitionRunSlice`);
-    }
+    const priorSlice = cloneJson(current.slices[priorIndex]);
     const update = await applyCollectionItemUpdate({ items: slices, selector: sliceId, updater, selectorLabel: "slice selector", seed: seedRunSlice(sliceId), identityKey: "id" });
     sliceIndex = update.index;
-    if (!update.changed) return;
-    if (!hadSlices) draft.slices = slices;
+    if (!update.changed) {
+      if (priorSlice.status !== "review") return;
+      if (hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)) {
+        assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
+        return;
+      }
+      if (TERMINAL_RUN_STATUSES.has(current.status)) return;
+      nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, options);
+      Object.assign(slices[priorIndex], nextReviewAuthority.binding);
+      sliceIndex = priorIndex;
+    }
     if (sliceIndex >= 0 && slices[sliceIndex].status === "merged") {
       throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' merges must use transitionSliceMerged`);
     }
     if (sliceIndex >= 0 && slices[sliceIndex].status === "running" && mergedSliceRepairFence(draft)) {
       throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' cannot start while a merged-slice repair is unresolved`);
     }
-    if (sliceIndex >= 0) assertSliceReviewPreconditions(runDir, slices[sliceIndex].id || sliceId, slices[sliceIndex]);
-  }, options);
+    if (sliceIndex >= 0) {
+      if (update.changed) {
+        normalizeSliceTransition(priorSlice, slices[sliceIndex]);
+        assertSliceTransition(runDir, priorSlice, slices[sliceIndex]);
+        if (priorSlice.status === "review") priorReviewAuthority = hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)
+          ? assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice)
+          : observeSliceReviewSidecars(runDir, priorSlice.id, priorSlice);
+        if (slices[sliceIndex].status === "review") {
+          if (priorSlice.status === "review" && !hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)) {
+            throw new Error(`legacy slice '${priorSlice.id}' review upgrade requires an exact same-status replay`);
+          }
+          if (priorSlice.status === "review") throw new Error(`slice '${priorSlice.id}' review binding is write-once; return to running before publishing another review`);
+          assertNoBindingFields(slices[sliceIndex], SLICE_REVIEW_BINDING_KEYS, `slice '${priorSlice.id}' review binding`);
+          nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], options);
+          Object.assign(slices[sliceIndex], nextReviewAuthority.binding);
+        }
+      }
+    }
+  }, options, {
+    sliceTransition: true,
+    beforeReplace: (next, current) => {
+      const prior = current.slices?.[sliceIndex];
+      const slice = next.slices?.[sliceIndex];
+      if (priorReviewAuthority) assertSliceReviewAuthorityCurrent(runDir, prior.id, prior, priorReviewAuthority);
+      if (nextReviewAuthority) assertSliceReviewPublicationAuthorityCurrent(runDir, next, slice.id, slice, nextReviewAuthority, options);
+    },
+  }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
 }
 
@@ -1214,26 +1755,108 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
   if (!stringValue(sliceId)) throw new Error("transitionSliceMerged requires a slice id");
   const request = normalizeSliceMergedInput(input);
   let sliceIndex = -1;
-  const result = await transitionRunJson(runDir, (draft) => {
+  let mergeAuthority = null;
+  let legacyUpgrade = false;
+  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft) => {
     const slices = Array.isArray(draft.slices) ? draft.slices : [];
     sliceIndex = slices.findIndex((slice) => slice?.id === sliceId);
     if (sliceIndex < 0) throw new Error(`slice '${sliceId}' not found`);
     const currentSlice = slices[sliceIndex];
-    if (currentSlice.status === "merged") throw new Error(`slice '${sliceId}' is already merged`);
     if (mergedSliceRepairFence(draft)) throw new Error(`slice '${sliceId}' cannot merge while a merged-slice repair is unresolved`);
+    if (currentSlice.status === "merged") {
+      if (hasCompleteBinding(currentSlice, SLICE_REVIEW_BINDING_KEYS)) {
+        if (!TERMINAL_RUN_STATUSES.has(draft.status) && request.merge_commit === currentSlice.merge_commit) {
+          observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, options);
+        }
+        throw new Error(`slice '${sliceId}' is already merged`);
+      }
+      if (TERMINAL_RUN_STATUSES.has(draft.status)) throw new Error("legacy completed run is read-only");
+      if (request.merge_commit !== currentSlice.merge_commit) throw new Error(LEGACY_MERGED_UPGRADE_ERROR);
+      legacyUpgrade = true;
+      try {
+        mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, allowLegacyMergedUpgrade: true });
+      } catch (error) {
+        throw new Error(LEGACY_MERGED_UPGRADE_ERROR, { cause: error });
+      }
+      Object.assign(currentSlice, mergeAuthority.review_authority.binding);
+      return;
+    }
+    if (currentSlice.status !== "review") throw new Error(`slice '${sliceId}' can merge only from review`);
     const updatedAt = timestamp(options.now);
-    const nextSlice = { ...currentSlice, merge_commit: request.merge_commit };
-    assertSliceMergedPreconditions(runDir, sliceId, nextSlice, options);
+    mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, options);
+    const nextSlice = { ...currentSlice, merge_commit: mergeAuthority.merge_commit };
     slices[sliceIndex] = {
       ...nextSlice,
       status: "merged",
-      merge_commit: request.merge_commit,
+      merge_commit: mergeAuthority.merge_commit,
       updated_at: updatedAt,
     };
     draft.slices = slices;
     draft.updated_at = updatedAt;
-  }, options);
+  }, options, {
+    sliceTransition: true,
+    beforeReplace: (next) => {
+      try {
+        return assertSliceMergeAuthorityCurrent(runDir, next, sliceId, next.slices[sliceIndex], mergeAuthority, options);
+      } catch (error) {
+        if (legacyUpgrade) throw new Error(LEGACY_MERGED_UPGRADE_ERROR, { cause: error });
+        throw error;
+      }
+    },
+  }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
+}
+
+export async function transitionSlicesSeed(runDir, slices, options = {}) {
+  const projection = normalizePendingSliceProjection(slices);
+  return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+    const existing = Array.isArray(current.slices) ? current.slices : [];
+    if (sameJson(existing, projection)) return;
+    if (existing.some(hasSliceProgress)) {
+      throw new Error("factory slices-seed refuses to replace non-pending slice progress after work has started");
+    }
+    draft.slices = cloneJson(projection);
+  }, options, { slicesSeed: true }), options);
+}
+
+function hasSliceProgress(slice) {
+  if (slice?.status !== "pending" || slice?.attempts !== 0) return true;
+  return ["branch", "worktree", "evidence_ref", "review_ref", "merge_commit", "blocked_reason", "updated_at"]
+    .some((key) => slice?.[key] !== undefined && slice?.[key] !== null);
+}
+
+export async function transitionPanelVerdicts(runDir, input, options = {}) {
+  const request = normalizePanelVerdictInput(input);
+  let authority = null;
+  return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+    if (mergedSliceRepairFence(current)) throw new Error("panel verdicts are fenced while a merged-slice repair is unresolved");
+    const exactReplay = panelBaseEquals(current.validator, request.validator) && panelBaseEquals(current.security_review, request.security_review);
+    const legacyValidator = isRecord(current.validator) && !hasCompleteBinding(current.validator, VALIDATOR_BINDING_KEYS);
+    const legacySecurity = isRecord(current.security_review) && !hasCompleteBinding(current.security_review, SECURITY_BINDING_KEYS);
+    if (TERMINAL_RUN_STATUSES.has(current.status) && (legacyValidator || legacySecurity)) {
+      throw new Error("legacy completed run is read-only");
+    }
+    if ((legacyValidator || legacySecurity)
+      && (!legacyValidator || !legacySecurity || !exactReplay)) {
+      throw new Error("legacy panel upgrade requires both existing rows and an exact replay");
+    }
+    authority = observePanelVerdictSources(runDir, current, request, options);
+    if (exactReplay && hasCompleteBinding(current.validator, VALIDATOR_BINDING_KEYS)) {
+      if (!sameJson(pickBinding(current.validator, VALIDATOR_BINDING_KEYS), authority.validator_binding)
+        || !sameJson(pickBinding(current.security_review, SECURITY_BINDING_KEYS), authority.security_binding)) {
+        throw new Error("persisted panel successor binding is stale");
+      }
+      if (TERMINAL_RUN_STATUSES.has(current.status)) return;
+    }
+    const validator = { ...cloneJson(request.validator), ...(exactReplay && current.validator?.loops !== undefined ? { loops: current.validator.loops } : {}), ...authority.validator_binding };
+    const securityReview = { ...cloneJson(request.security_review), ...(exactReplay && current.security_review?.loops !== undefined ? { loops: current.security_review.loops } : {}), ...authority.security_binding };
+    if (sameJson(current.validator, validator) && sameJson(current.security_review, securityReview)) return;
+    draft.validator = validator;
+    draft.security_review = securityReview;
+  }, options, {
+    panelVerdicts: true,
+    beforeReplace: (_next, current) => assertPanelVerdictAuthorityCurrent(runDir, current, request, authority, options),
+  }), options);
 }
 
 export async function transitionLifecycleRun(runDir, mutator, options = {}) {
@@ -1284,12 +1907,77 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   }
 
   assertPostPrGenericMutation(current, nextValue, hooks);
+  assertScopedAuthorityTransitions(current, nextValue, hooks);
+  assertGateDecisionTransitions(current, nextValue, hooks);
+  assertStepTransitions(current, nextValue, hooks);
   const next = validateRun(nextValue);
+  assertRunIdentityTransition(current, next);
+  assertScopedAuthorityTransitions(current, next, hooks);
   assertGateDecisionTransitions(current, next, hooks);
+  assertStepTransitions(current, next, hooks);
   assertTerminalTransition(current, next, hooks);
   if (typeof hooks.beforeWrite === "function") await hooks.beforeWrite(next, current);
-  await writeJsonAtomically(join(runDir, RUN_FILE), next);
+  const postPrPublicationAuthority = hooks.postPr === true ? observePostPrPublicationAuthority(runDir, next, options) : null;
+  const repairPublicationAuthority = hooks.mergedSliceRepair === MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY ? observeRepairPublicationAuthority(runDir, next, options) : null;
+  const beforeReplace = hooks.beforeReplace || postPrPublicationAuthority || repairPublicationAuthority
+    ? async () => {
+        if (hooks.beforeReplace) await hooks.beforeReplace(next, current);
+        if (postPrPublicationAuthority) assertPostPrPublicationAuthorityCurrent(runDir, next, options, postPrPublicationAuthority);
+        if (repairPublicationAuthority) assertRepairPublicationAuthorityCurrent(runDir, next, options, repairPublicationAuthority);
+      }
+    : null;
+  await writeProtectedRunJson(runDir, next, options, beforeReplace);
   return { updated: true, status: next.status, run: next };
+}
+
+function assertRunIdentityTransition(current, next) {
+  for (const key of ["run_id", "base_commit", "branch"]) {
+    if (current[key] !== next[key]) throw new Error(`run identity field '${key}' is immutable`);
+  }
+  if (current.worktree !== next.worktree) {
+    throw new Error("run identity field 'worktree' is immutable outside disrupted-run recovery");
+  }
+}
+
+function assertScopedAuthorityTransitions(current, next, hooks = {}) {
+  if (hooks.slicesSeed !== true && hooks.sliceTransition !== true && !sameJson(current.slices, next.slices)) {
+    throw new Error("run slices can only be changed by checked slice transitions");
+  }
+  if (hooks.panelVerdicts !== true) {
+    if (!sameJson(current.validator, next.validator)) throw new Error("run validator can only be changed by the checked panel verdict transition");
+    if (!sameJson(current.security_review, next.security_review)) throw new Error("run security_review can only be changed by the checked panel verdict transition");
+  }
+  if (hooks.mergedSliceRepair !== MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY && !sameJson(current.merged_slice_repair, next.merged_slice_repair)) {
+    throw new Error("run merged_slice_repair can only be changed by transitionMergedSliceRepair");
+  }
+  const checkedBoundaryWriter = hooks.authorizedGate !== undefined || hooks.terminal === true || hooks.prCreated === true;
+  for (const key of ["boundary", "action_claim", "last_action"]) {
+    if (!(key === "boundary" && checkedBoundaryWriter) && !sameJson(current.steering?.[key], next.steering?.[key])) {
+      throw new Error(`run steering.${key} can only be changed by checked steering transitions`);
+    }
+  }
+  if (hooks.prCreated !== true && current.pr_url !== next.pr_url) {
+    throw new Error("run pr_url can only be changed by transitionPrCreated");
+  }
+  const completedAuthority = current.status === "completed" || next.status === "completed"
+    || current.terminal_result?.status === "completed" || next.terminal_result?.status === "completed";
+  if (hooks.prCreated !== true && hooks.postPrTerminal !== true && completedAuthority
+    && (current.status !== next.status || !sameJson(current.terminal_result, next.terminal_result))) {
+    throw new Error("completed status and terminal_result can only be changed by transitionPrCreated");
+  }
+}
+
+async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace = null) {
+  const fsOps = typeof beforeReplace === "function"
+    ? {
+        rename: (source, destination) => {
+          const observed = beforeReplace();
+          if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => rename(source, destination));
+          return rename(source, destination);
+        },
+      }
+    : undefined;
+  await writeProtectedJsonAtomic(runDir, RUN_FILE, next, { hooks: options.atomicWriteHooks, fsOps });
 }
 
 async function readRunJson(runDir) {
@@ -1473,6 +2161,7 @@ function assertPrFence(run, token) {
   const fence = assertPrFenceToken(run, token);
   if (fence.generation !== steeringGeneration(run)) throw new Error("pre-PR fence is stale");
   if (fence.state_hash !== steeringBoundaryStateHash(run)) throw new Error("pre-PR fence is stale");
+  return fence;
 }
 
 function assertPrFenceToken(run, token) {
@@ -1588,7 +2277,7 @@ function createApprovalHandoffReceipt(_runDir, gateName, gate, run) {
     gate: gateName,
     approval_fingerprint: "",
     pending_snapshot_hash: hashValue(gate.pending_snapshot),
-    answer_hash: gate._handoff_answer_hash,
+    answer_hash: stringValue(gate.answer_ref) ? gate._handoff_answer_hash : hashValue(gate.answer),
     steering_generation: steeringGeneration(run),
     accepted_at: acceptedAt,
   };
@@ -1642,7 +2331,8 @@ function cleanSteeringForHandoff(steering) {
 
 function reconcileApprovedGateRedelivery(runDir, run, gateName, requested, input = {}) {
   const approved = run.gates[gateName];
-  const receiptCheck = inspectApprovalHandoffReceipt(runDir, run, gateName);
+  const interactive = run.mode === "interactive";
+  const receiptCheck = interactive ? inspectApprovalHandoffReceipt(runDir, run, gateName) : { ok: true, receipt: null };
   if (!receiptCheck.ok) throw handoffReceiptError(receiptCheck.reason_code);
   const same = requested.status === "approved"
     && requested.artifact === approved.artifact
@@ -1650,9 +2340,21 @@ function reconcileApprovedGateRedelivery(runDir, run, gateName, requested, input
     && requested.approval_source === approved.approval_source
     && (requested.decision_note || null) === (approved.decision_note || null)
     && (!input.answeredAtExplicit || requested.answered_at === approved.answered_at)
-    && exactRedeliveredAnswer(runDir, requested, approved, receiptCheck.receipt, input);
+    && (interactive
+      ? exactRedeliveredAnswer(runDir, requested, approved, receiptCheck.receipt, input)
+      : exactReceiptFreeRedeliveredAnswer(runDir, requested, approved, input));
   if (!same) throw handoffReceiptError("approval-snapshot-mismatch");
   return { updated: false, reason: "redelivered-approved", status: run.status, run };
+}
+
+function exactReceiptFreeRedeliveredAnswer(runDir, requested, approved, input = {}) {
+  if (stringValue(requested.answer)) return input.rawAnswer === approved.answer;
+  if (!stringValue(requested.answer_ref) || requested.answer_ref !== approved.pending_snapshot?.answer_ref) return false;
+  try {
+    return readFileSync(resolveGateRef(runDir, approved.answer_ref).path, "utf8").trim() === approved.answer;
+  } catch {
+    return false;
+  }
 }
 
 function exactRedeliveredAnswer(runDir, requested, approved, receipt, input = {}) {
@@ -1753,6 +2455,14 @@ async function archiveConsumedGateAnswer(archive) {
   await rename(archive.fromPath, archive.toPath);
 }
 
+async function restoreConsumedGateAnswers(archives) {
+  for (const archive of [...archives].reverse()) {
+    if (!existsSync(archive.toPath)) continue;
+    if (existsSync(archive.fromPath)) throw new Error(`gate answer archival rollback target already exists: ${archive.fromPath}`);
+    await rename(archive.toPath, archive.fromPath);
+  }
+}
+
 function normalizeGateAnswer(gateName, answer) {
   const text = String(answer || "").trim();
   if (text === "approve" || text === "stop") return text;
@@ -1792,6 +2502,11 @@ function assertGateDecisionTransitions(current, next, hooks = {}) {
   const currentGates = isRecord(current.gates) ? current.gates : {};
   const nextGates = isRecord(next.gates) ? next.gates : {};
   const errors = [];
+  for (const gateName of new Set([...Object.keys(currentGates), ...Object.keys(nextGates)])) {
+    if (gateName !== authorizedGate && !sameJson(currentGates[gateName] ?? null, nextGates[gateName] ?? null)) {
+      errors.push({ path: `run.gates.${gateName}`, message: "gate changes must use transitionGateDecision" });
+    }
+  }
   for (const [gateName, gate] of Object.entries(nextGates)) {
     if (!isRecord(gate)) continue;
     const currentGate = currentGates[gateName];
@@ -1816,7 +2531,24 @@ function assertGateDecisionTransitions(current, next, hooks = {}) {
   if (errors.length > 0) throw new Error(formatErrorItems(errors));
 }
 
-function initializePostPrObservation(postPr, request, now) {
+function assertStepTransitions(current, next, hooks = {}) {
+  const currentSteps = Array.isArray(current.steps) ? current.steps : [];
+  const nextSteps = Array.isArray(next.steps) ? next.steps : [];
+  if (sameJson(currentSteps, nextSteps)) return;
+  const authorizedAgent = stringValue(hooks.authorizedStep) ? hooks.authorizedStep : null;
+  if (!authorizedAgent) throw new Error("step transitions must use transitionRunStep");
+  const currentByAgent = new Map(currentSteps.map((step) => [step?.agent, step]));
+  const nextByAgent = new Map(nextSteps.map((step) => [step?.agent, step]));
+  for (const [agent, step] of currentByAgent) {
+    if (agent === authorizedAgent) continue;
+    if (!sameJson(step, nextByAgent.get(agent))) throw new Error(`step '${agent}' cannot be changed by transition for '${authorizedAgent}'`);
+  }
+  for (const agent of nextByAgent.keys()) {
+    if (agent !== authorizedAgent && !currentByAgent.has(agent)) throw new Error(`step '${agent}' cannot be created by transition for '${authorizedAgent}'`);
+  }
+}
+
+function initializePostPrObservation(postPr, request, now, fence) {
   if (postPr.phase !== "awaiting-pr") throw new Error(`enabled pr-created requires post_pr phase awaiting-pr, found '${postPr.phase}'`);
   if (!stringValue(request.head_sha) || !/^[0-9a-f]{40}$/u.test(request.head_sha)) throw new Error("enabled pr-created requires a full 40-character lowercase head SHA");
   const startedAt = timestamp(now);
@@ -1848,6 +2580,19 @@ function initializePostPrObservation(postPr, request, now) {
     evidence_refs: Array.isArray(postPr.evidence_refs) ? cloneJson(postPr.evidence_refs) : [],
     continuation_review: null,
     terminal_fact: null,
+    pr_operation: {
+      operation_id: fence.operation_id,
+      repository: fence.repository,
+      created_at: fence.created_at,
+      head_ref: fence.head_ref,
+      head_sha: fence.head_sha,
+      base_ref: fence.base_ref,
+      base_sha: fence.base_sha,
+      draft: fence.draft,
+      pr_url: request.pr_url,
+      pr_number: request.pr_number,
+      pr_node_id: request.pr_node_id,
+    },
   };
 }
 
@@ -1881,6 +2626,8 @@ function assertPostPrAttemptTransition(currentRun, nextPostPr) {
 }
 
 function assertPostPrMonotonicState(current, next) {
+  if (isRecord(current.pr_operation) && !sameJson(current.pr_operation, next.pr_operation)) throw new Error("post-PR PR operation identity is immutable");
+  if (!isRecord(current.pr_operation) && isRecord(next.pr_operation) && current.phase !== "awaiting-pr") throw new Error("post-PR PR operation identity can be bound only at PR recording");
   const currentObservation = current.observation;
   const nextObservation = next.observation;
   if (isRecord(currentObservation) && !isRecord(nextObservation)) throw new Error("post-PR observation state cannot be removed");
@@ -1915,6 +2662,7 @@ function assertPostPrMonotonicState(current, next) {
     assertRankDoesNotDecrease(currentRemediation.dispatch?.status, nextRemediation.dispatch?.status, ["planned", "running", "returned"], "post-PR remediation dispatch status");
     for (const key of ["candidate_head_sha", "remediation_evidence_ref", "remediation_evidence_hash"]) assertOnceBound(currentRemediation, nextRemediation, key, `post-PR remediation ${key}`);
     for (const key of ["canonical_evidence_ref", "canonical_evidence_hash", "canonical_verdict", "validator_review_ref", "validator_review_hash", "validator_verdict", "security_review_ref", "security_review_hash", "security_verdict"]) assertOnceBound(currentRemediation.revalidation, nextRemediation.revalidation, key, `post-PR remediation revalidation.${key}`);
+    if (currentRemediation.revalidation?.canonical_verdict !== "fail" && nextRemediation.revalidation?.canonical_verdict === "fail") throw new Error("new canonical verdicts must use pass or red; fail is legacy read-only state");
     for (const activity of ["canonical", "validator", "security"]) assertPostPrJobMonotonic(currentRemediation.revalidation?.jobs?.[activity], nextRemediation.revalidation?.jobs?.[activity], activity);
     for (const key of ["remote_before_sha", "local_head_sha", "remote_after_sha", "pushed_at"]) assertOnceBound(currentRemediation.push, nextRemediation.push, key, `post-PR remediation push.${key}`);
     assertRankDoesNotDecrease(currentRemediation.push?.status, nextRemediation.push?.status, ["not-ready", "pending", "confirmed"], "post-PR remediation push status");
@@ -1932,6 +2680,7 @@ function assertPostPrJobMonotonic(current, next, activity) {
   const transitions = { planned: new Set(["planned", "running"]), running: new Set(["running", "retry-wait", "bound"]), "retry-wait": new Set(["retry-wait", "running"]), bound: new Set(["bound"]) };
   if (!transitions[current.status]?.has(next.status)) throw new Error(`invalid post-PR ${activity} job transition '${current.status}' -> '${next.status}'`);
   for (const key of ["result_ref", "result_hash", "verdict", "returned_at"]) assertOnceBound(current, next, key, `post-PR ${activity} job ${key}`);
+  assertOnceBound(current, next, "steering_generation", `post-PR ${activity} job steering_generation`);
   if (next.transient_error_count < current.transient_error_count) throw new Error(`post-PR ${activity} transient error count cannot decrease`);
 }
 
@@ -2081,6 +2830,26 @@ function assertPostPrTerminalPreconditions(run, status, reason, input, options) 
   }
 }
 
+async function observePostPrCompletedIdentity(runDir, run, reason, options = {}) {
+  const operation = run.post_pr?.pr_operation;
+  if (!isRecord(operation)) throw new Error("post-PR completion requires the successor PR operation identity");
+  const expectedHeadSha = requireNonEmptyString(run.post_pr?.observation?.expected_head_sha, "post-PR expected head");
+  const authority = observePrOperationGitAuthority(runDir, run, options, "post-PR completion");
+  for (const [key, value] of Object.entries({ repository: authority.repository, head_ref: authority.head_ref, base_ref: authority.base_ref, base_sha: authority.base_sha, draft: authority.draft })) {
+    if (operation[key] !== value) throw new Error(`post-PR PR operation ${key} no longer matches local/origin authority`);
+  }
+  if (authority.head_sha !== expectedHeadSha) throw new Error("post-PR completion requires local, worktree, origin, and expected remediation head equality");
+  const stableOperationId = computePrOperationId({ base_commit: operation.base_sha, branch: operation.head_ref, created_at: operation.created_at, repository: operation.repository, run_id: run.run_id });
+  if (operation.operation_id !== stableOperationId) throw new Error("post-PR operation_id is stale or malformed");
+  const observation = await observeFencedPrOperation(run, operation, options, expectedHeadSha);
+  const requiredDisposition = reason === "post-pr-external-merge" ? "merged" : "open";
+  if (observation.disposition !== requiredDisposition) throw new Error(`post-PR completion GitHub observation is ${observation.disposition}, expected ${requiredDisposition}`);
+  if (observation.pull_request.pr_url !== operation.pr_url || observation.pull_request.pr_number !== operation.pr_number || observation.pull_request.pr_node_id !== operation.pr_node_id) {
+    throw new Error("post-PR completion GitHub PR identity differs from the recorded operation");
+  }
+  return observation.pull_request;
+}
+
 function requirePostPrTerminalFact(reason, fact, kind) {
   if (!isRecord(fact) || fact.kind !== kind) throw new Error(`${reason} requires persisted ${kind} trigger fact`);
 }
@@ -2168,68 +2937,130 @@ function assertTerminalTransition(current, next, hooks = {}) {
   throw new Error(next.status === "completed" ? "completed terminal transitions must use transitionPrCreated" : "terminal transitions must use transitionTerminalResult");
 }
 
-function assertPrCreatedPreconditions(run, request) {
-  if (stringValue(run.pr_url)) throw new Error("pr-created requires run.pr_url to be unset");
-  assertPrCreatedReadiness(request.runDir, run);
-  assertPrNumberMatchesUrl(request.pr_url, request.pr_number);
-}
-
 function assertPrCreatedReadiness(runDir, run) {
+  if (stringValue(run.pr_url)) throw new Error("pr-created requires run.pr_url to be unset");
   if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
-  assertPrCreatedSliceState(run);
-  assertPassingVerdictArtifacts(runDir, run);
+  return {
+    slices: assertPrCreatedSliceState(runDir, run),
+    panels: assertPassingVerdictArtifacts(runDir, run),
+  };
 }
 
-function assertPrCreatedSliceState(run) {
+function assertPrCreatedSliceState(runDir, run) {
   const slices = Array.isArray(run.slices) ? run.slices : [];
   const unfinished = slices.filter((slice) => slice?.status !== "merged" && slice?.status !== "blocked").map((slice) => slice?.id || "<unknown>");
   if (unfinished.length > 0) throw new Error(`pr-created requires all slices to be merged or blocked; unfinished slices: ${unfinished.join(", ")}`);
   if (!slices.some((slice) => slice?.status === "merged")) throw new Error("pr-created requires at least one merged slice");
+  return slices.filter((candidate) => candidate?.status === "merged").map((slice) => {
+    if (!hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) throw new Error(`pr-created requires successor review binding for merged slice '${slice.id}'`);
+    const observed = assertSliceReviewBindingCurrent(runDir, slice.id, slice);
+    if (observed.review.verdict !== "APPROVE") throw new Error(`pr-created requires merged slice '${slice.id}' review verdict APPROVE`);
+    return { id: slice.id, authority: observed };
+  });
 }
 
 function assertPassingVerdictArtifacts(runDir, run) {
   if (!stringValue(runDir)) throw new Error("pr-created requires run directory context");
-  if (!stringValue(run.validator?.report)) throw new Error("pr-created requires validator report ref");
-  resolveArtifactRef(runDir, run.validator.report);
-  const validatorReviewRef = stringValue(run.validator.review_ref) ? run.validator.review_ref : "reviews/implementation-validator.json";
-  const validatorReview = resolveReviewRef(runDir, validatorReviewRef);
-  const validatorJson = parseJsonObjectFile(validatorReview.path, "validator review_ref");
-  if (!PASSING_VALIDATOR_VERDICTS.has(validatorJson.verdict)) throw new Error("pr-created requires validator review verdict GO or GO-WITH-NITS");
-  if (validatorJson.verdict !== run.validator.verdict) throw new Error("pr-created requires validator review verdict to match run.validator.verdict");
-  if (!stringValue(run.security_review?.review_ref)) throw new Error("pr-created requires security_review review_ref");
-  const securityReview = resolveReviewRef(runDir, run.security_review.review_ref);
-  const securityJson = parseJsonObjectFile(securityReview.path, "security_review.review_ref");
-  if (securityJson.verdict !== "PASS") throw new Error("pr-created requires security_review review verdict PASS");
-  if (securityJson.verdict !== run.security_review.verdict) throw new Error("pr-created requires security review verdict to match run.security_review.verdict");
+  if (!hasCompleteBinding(run.validator, VALIDATOR_BINDING_KEYS) || !hasCompleteBinding(run.security_review, SECURITY_BINDING_KEYS)) {
+    throw new Error("pr-created requires successor validator and security reviewed-head bindings");
+  }
+  const request = {
+    validator: panelBaseRecord(run.validator, true),
+    security_review: panelBaseRecord(run.security_review, false),
+  };
+  const observed = observePanelVerdictSources(runDir, run, request, {});
+  if (!sameJson(observed.validator_binding, pickBinding(run.validator, VALIDATOR_BINDING_KEYS))) throw new Error("validator panel binding is stale");
+  if (!sameJson(observed.security_binding, pickBinding(run.security_review, SECURITY_BINDING_KEYS))) throw new Error("security panel binding is stale");
+  return observed;
 }
 
-function assertPrNumberMatchesUrl(prUrl, prNumber) {
-  if (githubPrUrlParts(prUrl).number !== prNumber) throw new Error("pr-created requires pr_number to match the GitHub PR URL");
+function assertPrCreatedAuthorityCurrent(runDir, run, expected) {
+  const current = assertPrCreatedReadiness(runDir, run);
+  if (!sameJson(current, expected)) throw new Error("PR admission authority bytes changed before publication");
+  return current;
 }
 
-function normalizePrCreatedInput(input) {
-  if (!isRecord(input)) throw new Error("transitionPrCreated requires an input object");
-  const prUrl = canonicalizeGithubPrUrl(firstNonEmptyString(input.pr_url, input.prUrl));
-  const repository = requireNonEmptyString(input.repository, "repository");
-  const parts = githubPrUrlParts(prUrl);
-  if (repository !== parts.repository) throw new Error("pr-created requires repository to match the GitHub PR URL");
+function normalizePanelVerdictInput(input) {
+  if (!isRecord(input)) throw new Error("transitionPanelVerdicts requires an input object");
+  const validatorInput = input.validator;
+  const securityInput = input.security_review ?? input.securityReview;
+  if (!isRecord(validatorInput) || !isRecord(securityInput)) throw new Error("panel verdict transition requires validator and security_review records");
+  if (Object.keys(validatorInput).some((key) => !["verdict", "report", "review_ref"].includes(key))) throw new Error("validator panel input contains unsupported fields");
+  if (Object.keys(securityInput).some((key) => !["verdict", "review_ref"].includes(key))) throw new Error("security panel input contains unsupported fields");
+  const validatorVerdict = requireNonEmptyString(validatorInput.verdict, "validator verdict");
+  if (!["GO", "GO-WITH-NITS", "NO-GO"].includes(validatorVerdict)) throw new Error("validator verdict must be GO, GO-WITH-NITS, or NO-GO");
+  const securityVerdict = requireNonEmptyString(securityInput.verdict, "security verdict");
+  if (!["PASS", "BLOCK"].includes(securityVerdict)) throw new Error("security verdict must be PASS or BLOCK");
+  const validatorReviewRef = validatorInput.review_ref ?? "reviews/implementation-validator.json";
+  if (validatorReviewRef !== "reviews/implementation-validator.json") throw new Error("validator review_ref must be reviews/implementation-validator.json");
   return {
-    ...cloneJson(input),
-    pr_url: prUrl,
-    pr_number: normalizePrNumber(input.pr_number ?? input.prNumber),
-    repository,
-    draft: input.draft === undefined ? false : normalizeBoolean(input.draft, "draft"),
-    head_sha: normalizeOptionalHeadSha(input.head_sha ?? input.headSha),
+    validator: {
+      verdict: validatorVerdict,
+      report: requireNonEmptyString(validatorInput.report, "validator report"),
+      review_ref: validatorReviewRef,
+    },
+    security_review: {
+      verdict: securityVerdict,
+      review_ref: requireNonEmptyString(securityInput.review_ref, "security review_ref"),
+    },
   };
 }
 
-function normalizeOptionalHeadSha(value) {
-  if (value === undefined || value === null || value === "") return null;
-  const sha = String(value).trim();
-  if (!/^[0-9a-f]{40}$/u.test(sha)) throw new Error("head_sha must be a full 40-character lowercase git SHA");
-  return sha;
+function observePanelVerdictSources(runDir, run, request, options = {}) {
+  const report = resolveArtifactRef(runDir, request.validator.report);
+  const reportBytes = readRegularNonEmptyFile(report.path, "validator report");
+  const validatorReview = resolveReviewRef(runDir, request.validator.review_ref);
+  const securityReview = resolveReviewRef(runDir, request.security_review.review_ref);
+  const validatorBytes = readRegularNonEmptyFile(validatorReview.path, "validator review");
+  const securityBytes = readRegularNonEmptyFile(securityReview.path, "security review");
+  const validatorJson = parseJsonObjectBytes(validatorBytes, "validator review");
+  const securityJson = parseJsonObjectBytes(securityBytes, "security review");
+  if (validatorJson.verdict !== request.validator.verdict) throw new Error("validator review verdict must exactly match caller verdict");
+  if (securityJson.verdict !== request.security_review.verdict) throw new Error("security review verdict must exactly match caller verdict");
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "panel verdict publication");
+  assertPanelReviewIdentity(run, validatorJson, securityJson, integration.head);
+  const reportHash = sha256Bytes(reportBytes);
+  const validatorHash = sha256Bytes(validatorBytes);
+  const securityHash = sha256Bytes(securityBytes);
+  return {
+    ...authorityBytes({ report: reportBytes, validator: validatorBytes, security: securityBytes }),
+    integration,
+    validator_binding: { report_hash: reportHash, review_hash: validatorHash, reviewed_head_sha: integration.head },
+    security_binding: { review_hash: securityHash, reviewed_head_sha: integration.head },
+  };
+}
+
+function assertPanelVerdictAuthorityCurrent(runDir, run, request, expected, options = {}) {
+  const current = observePanelVerdictSources(runDir, run, request, options);
+  if (!sameJson(current, expected)) throw new Error("panel authority bytes changed before publication");
+  return current;
+}
+
+function assertPanelReviewIdentity(run, validatorReview, securityReview, reviewedHead) {
+  const validatorSubject = requireNonEmptyString(validatorReview.subject, "validator review subject");
+  const securitySubject = requireNonEmptyString(securityReview.subject, "security review subject");
+  if (stringValue(run.branch)) {
+    if (validatorSubject !== run.branch || securitySubject !== run.branch) throw new Error("panel review subjects must equal run.branch");
+  } else if (validatorSubject !== securitySubject) {
+    throw new Error("branchless panel review subjects must be the same nonempty subject");
+  }
+  const validatorAttempt = validatorReview.attempt;
+  const securityAttempt = securityReview.attempt;
+  const bothMatchingPositive = Number.isInteger(validatorAttempt) && validatorAttempt > 0 && validatorAttempt === securityAttempt;
+  if (!bothMatchingPositive) throw new Error("panel review attempts must be the same positive integer");
+  if (validatorReview.reviewed_head_sha !== reviewedHead || securityReview.reviewed_head_sha !== reviewedHead) {
+    throw new Error("panel review reviewed_head_sha values must equal the current integration head");
+  }
+}
+
+function readRegularNonEmptyFile(path, label) {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`${label} must be a regular non-symlink file`);
+  const bytes = readFileSync(path);
+  if (bytes.length === 0) throw new Error(`${label} must be nonempty`);
+  return bytes;
 }
 
 function normalizeSliceMergedInput(input) {
@@ -2237,23 +3068,273 @@ function normalizeSliceMergedInput(input) {
   return { merge_commit: requireNonEmptyString(input.merge_commit ?? input.mergeCommit, "merge_commit") };
 }
 
-function assertSliceMergedPreconditions(runDir, sliceId, slice, options = {}) {
-  if (!stringValue(slice.merge_commit)) throw new Error(`slice '${sliceId}' merge requires merge_commit`);
-  const review = resolveReviewRef(runDir, requireNonEmptyString(slice.review_ref, "review_ref"));
-  const reviewJson = parseJsonObjectFile(review.path, `slice '${sliceId}' review_ref`);
-  if (reviewJson.verdict !== "APPROVE") throw new Error(`slice '${sliceId}' merge requires APPROVE review`);
-  if (reviewJson.subject !== sliceId) throw new Error(`slice '${sliceId}' review subject must match slice id`);
-  resolveEvidenceRef(runDir, requireNonEmptyString(slice.evidence_ref, "evidence_ref"));
-  const branch = requireNonEmptyString(slice.branch, "branch");
-  const branchResult = git(options.repoRoot || runDir, ["rev-parse", "--verify", `refs/heads/${branch}`]);
-  if (!branchResult.ok) throw new Error(`slice '${sliceId}' merge requires existing branch '${branch}'`);
+function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, options = {}) {
+  const legacyUpgrade = options.allowLegacyMergedUpgrade === true;
+  if (!legacyUpgrade && !hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) {
+    throw new Error(`slice '${sliceId}' merge requires a successor review binding; replay the legacy review first`);
+  }
+  const observed = legacyUpgrade
+    ? observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options)
+    : assertSliceReviewBindingCurrent(runDir, sliceId, slice);
+  if (observed.review.verdict !== "APPROVE") throw new Error(`slice '${sliceId}' merge requires APPROVE review`);
+  const sliceGit = legacyUpgrade ? observed.git : observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
+  if (sliceGit.head !== observed.binding.reviewed_commit) throw new Error(`slice '${sliceId}' current branch/worktree head differs from reviewed_commit`);
+  const repository = resolveAuthorityRepository(runDir, run, options);
+  if (!stringValue(repository)) throw new Error(`slice '${sliceId}' merge requires a local git repository`);
+  const commitResult = authorityGit(options, repository, ["rev-parse", "--verify", `${requireNonEmptyString(mergeCommit, "merge_commit")}^{commit}`]);
+  if (!commitResult.ok || !/^[0-9a-f]{40}$/u.test(commitResult.stdout.trim())) throw new Error(`slice '${sliceId}' merge commit does not resolve`);
+  const canonicalCommit = commitResult.stdout.trim();
+  const integrationBranch = requireNonEmptyString(run.branch, "run.branch");
+  const integrationBranchResult = authorityGit(options, repository, ["rev-parse", "--verify", `refs/heads/${integrationBranch}^{commit}`]);
+  if (!integrationBranchResult.ok || integrationBranchResult.stdout.trim() !== canonicalCommit) {
+    throw new Error(`slice '${sliceId}' merge commit must equal current run.branch head`);
+  }
+  const worktree = resolve(repository, requireNonEmptyString(run.worktree, "run.worktree"));
+  const checkedOut = authorityGit(options, worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!checkedOut.ok || checkedOut.stdout.trim() !== integrationBranch) throw new Error("run.worktree must be checked out on run.branch for slice merge");
+  const worktreeHead = authorityGit(options, worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!worktreeHead.ok || worktreeHead.stdout.trim() !== canonicalCommit) throw new Error(`slice '${sliceId}' merge commit must equal run.worktree HEAD`);
+  const cleanliness = authorityGit(options, worktree, gitCleanlinessArgs());
+  if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error(`slice '${sliceId}' merge requires a clean integration worktree`);
+  const reviewedCommit = observed.binding.reviewed_commit;
+  const proof = observeExactSliceMergeProof(repository, run, sliceId, canonicalCommit, reviewedCommit, options);
+  return {
+    merge_commit: canonicalCommit,
+    integration_branch: integrationBranch,
+    integration_branch_head: integrationBranchResult.stdout.trim(),
+    worktree_head: worktreeHead.stdout.trim(),
+    integration_clean: true,
+    slice_branch: slice.branch,
+    slice_branch_head: reviewedCommit,
+    proof,
+    review_authority: { ...observed, git: sliceGit },
+  };
 }
 
-function assertSliceReviewPreconditions(runDir, sliceId, slice) {
-  if (slice.status !== "review") return;
+function assertSliceMergeAuthorityCurrent(runDir, run, sliceId, slice, expected, options = {}) {
+  const current = observeSliceMergeAuthority(runDir, run, sliceId, slice, expected.merge_commit, options);
+  if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' merge authority changed before publication`);
+  return current;
+}
+
+function observeSliceReviewSidecars(runDir, sliceId, slice) {
   const evidence = resolveEvidenceRef(runDir, requireNonEmptyString(slice.evidence_ref, "evidence_ref"));
-  const evidenceJson = parseJsonObjectFile(evidence.path, `slice '${sliceId}' evidence_ref`);
-  if (stringValue(evidenceJson.subject) && evidenceJson.subject !== sliceId) throw new Error(`slice '${sliceId}' evidence subject must match slice id`);
+  const evidenceBytes = readRegularNonEmptyFile(evidence.path, `slice '${sliceId}' evidence_ref`);
+  const evidenceJson = parseJsonObjectBytes(evidenceBytes, `slice '${sliceId}' evidence_ref`);
+  const review = resolveReviewRef(runDir, requireNonEmptyString(slice.review_ref, "review_ref"));
+  const reviewBytes = readRegularNonEmptyFile(review.path, `slice '${sliceId}' review_ref`);
+  const reviewJson = parseJsonObjectBytes(reviewBytes, `slice '${sliceId}' review_ref`);
+  if (evidenceJson.subject !== sliceId) throw new Error(`slice '${sliceId}' evidence subject must match slice id`);
+  if (evidenceJson.status !== "pass" || evidenceJson.review_ready !== true) throw new Error(`slice '${sliceId}' evidence must be pass and review_ready`);
+  if (reviewJson.subject !== sliceId) throw new Error(`slice '${sliceId}' review subject must match slice id`);
+  if (!["APPROVE", "REJECT"].includes(reviewJson.verdict)) throw new Error(`slice '${sliceId}' review verdict must be APPROVE or REJECT`);
+  const evidenceAttempt = evidenceJson.attempt;
+  const reviewAttempt = reviewJson.attempt;
+  const bothAbsent = evidenceAttempt === undefined && reviewAttempt === undefined;
+  const bothMatching = Number.isInteger(evidenceAttempt) && evidenceAttempt > 0 && evidenceAttempt === reviewAttempt && evidenceAttempt === slice.attempts;
+  if (!bothAbsent && !bothMatching) throw new Error(`slice '${sliceId}' evidence and review attempts must both be absent or equal slice.attempts`);
+  return {
+    evidence: evidenceJson,
+    review: reviewJson,
+    binding: {
+      evidence_hash: sha256Bytes(evidenceBytes),
+      review_hash: sha256Bytes(reviewBytes),
+      reviewed_commit: stringValue(reviewJson.reviewed_commit) ? reviewJson.reviewed_commit : null,
+    },
+    ...authorityBytes({ evidence: evidenceBytes, review: reviewBytes }),
+  };
+}
+
+function assertSliceReviewAuthorityCurrent(runDir, sliceId, slice, expected) {
+  const current = observeSliceReviewSidecars(runDir, sliceId, slice);
+  if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' review authority bytes changed before publication`);
+  return current;
+}
+
+function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options = {}) {
+  const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
+  const attempt = slice.attempts;
+  if (!Number.isInteger(attempt) || attempt < 1 || observed.evidence.attempt !== attempt || observed.review.attempt !== attempt) {
+    throw new Error(`slice '${sliceId}' successor evidence and review attempts must equal the positive slice attempt`);
+  }
+  const gitAuthority = observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
+  if (observed.evidence.head_sha !== gitAuthority.head) throw new Error(`slice '${sliceId}' evidence head_sha must equal the current slice head`);
+  if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
+  return {
+    ...observed,
+    binding: { ...observed.binding, reviewed_commit: gitAuthority.head },
+    git: gitAuthority,
+  };
+}
+
+function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, options = {}) {
+  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options);
+  if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' review authority changed before publication`);
+  return current;
+}
+
+function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
+  const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
+  if (!hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) throw new Error(`slice '${sliceId}' successor review binding is missing`);
+  if (!Number.isInteger(slice.attempts) || slice.attempts < 1 || observed.evidence.attempt !== slice.attempts || observed.review.attempt !== slice.attempts) {
+    throw new Error(`slice '${sliceId}' successor sidecar attempts must equal the positive slice attempt`);
+  }
+  if (observed.evidence.head_sha !== slice.reviewed_commit || observed.review.reviewed_commit !== slice.reviewed_commit) {
+    throw new Error(`slice '${sliceId}' successor sidecar heads must equal reviewed_commit`);
+  }
+  if (observed.binding.evidence_hash !== slice.evidence_hash || observed.binding.review_hash !== slice.review_hash) {
+    throw new Error(`slice '${sliceId}' successor review hashes are stale`);
+  }
+  return { ...observed, binding: pickBinding(slice, SLICE_REVIEW_BINDING_KEYS) };
+}
+
+function observeSliceHeadAuthority(runDir, run, sliceId, slice, options = {}) {
+  const repository = resolveAuthorityRepository(runDir, run, options);
+  const branch = requireNonEmptyString(slice.branch, `slice '${sliceId}' branch`);
+  const worktree = resolve(repository, requireNonEmptyString(slice.worktree, `slice '${sliceId}' worktree`));
+  const branchResult = authorityGit(options, repository, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (!branchResult.ok || !/^[0-9a-f]{40}$/u.test(branchResult.stdout.trim())) throw new Error(`slice '${sliceId}' requires existing branch '${branch}'`);
+  const head = branchResult.stdout.trim();
+  const checkedOut = authorityGit(options, worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!checkedOut.ok || checkedOut.stdout.trim() !== branch) throw new Error(`slice '${sliceId}' worktree must be checked out on slice.branch`);
+  const worktreeHead = authorityGit(options, worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!worktreeHead.ok || worktreeHead.stdout.trim() !== head) throw new Error(`slice '${sliceId}' branch and worktree heads must match`);
+  const cleanliness = authorityGit(options, worktree, gitCleanlinessArgs());
+  if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error(`slice '${sliceId}' review requires a clean slice worktree`);
+  return { repository, branch, worktree, head, clean: true };
+}
+
+function observeExactSliceMergeProof(repository, run, sliceId, mergeCommit, reviewedCommit, options = {}) {
+  const parentsResult = authorityGit(options, repository, ["rev-list", "--parents", "-n", "1", mergeCommit]);
+  if (!parentsResult.ok) throw new Error(`slice '${sliceId}' merge parents cannot be observed`);
+  const parents = parentsResult.stdout.trim().split(/\s+/u);
+  if (parents.length !== 3 || parents[0] !== mergeCommit) throw new Error(`slice '${sliceId}' merge commit must have exactly two ordered parents`);
+  const firstParent = parents[1];
+  const secondParent = parents[2];
+  if (secondParent !== reviewedCommit) throw new Error(`slice '${sliceId}' merge second parent must equal reviewed_commit`);
+
+  const basesResult = authorityGit(options, repository, ["merge-base", "--all", firstParent, reviewedCommit]);
+  if (!basesResult.ok) throw new Error(`slice '${sliceId}' merge base cannot be observed`);
+  const bases = basesResult.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean);
+  if (bases.length !== 1 || !/^[0-9a-f]{40}$/u.test(bases[0])) throw new Error(`slice '${sliceId}' merge requires exactly one full merge base`);
+  const base = bases[0];
+  if (base === reviewedCommit) throw new Error(`slice '${sliceId}' reviewed_commit must not be an ancestor of the merge first parent`);
+  for (const commit of [firstParent, reviewedCommit]) {
+    if (!authorityGit(options, repository, ["merge-base", "--is-ancestor", base, commit]).ok) {
+      throw new Error(`slice '${sliceId}' merge base must be an ancestor of both parents`);
+    }
+  }
+
+  const reviewedPaths = observeNoRenamePathSet(repository, base, reviewedCommit, options, `slice '${sliceId}' reviewed diff`);
+  const mergedPaths = observeNoRenamePathSet(repository, firstParent, mergeCommit, options, `slice '${sliceId}' merged diff`);
+  if (!sameStringSet(reviewedPaths, mergedPaths)) throw new Error(`slice '${sliceId}' merged path set must exactly equal the reviewed path set`);
+  for (const path of reviewedPaths) {
+    const literalPathspec = `:(literal)${path}`;
+    const reviewedEntry = authorityGit(options, repository, ["ls-tree", "-z", reviewedCommit, "--", literalPathspec]);
+    const mergedEntry = authorityGit(options, repository, ["ls-tree", "-z", mergeCommit, "--", literalPathspec]);
+    if (!reviewedEntry.ok || !mergedEntry.ok) throw new Error(`slice '${sliceId}' tree identity cannot be observed for a reviewed path`);
+    if (reviewedEntry.stdout !== mergedEntry.stdout) throw new Error(`slice '${sliceId}' merged path '${path}' differs in presence, mode, type, or object identity`);
+  }
+
+  for (const prior of Array.isArray(run.slices) ? run.slices : []) {
+    if (prior?.id === sliceId || prior?.status !== "merged") continue;
+    const priorMerge = requireNonEmptyString(prior.merge_commit, `prior merged slice '${prior?.id || "unknown"}' merge_commit`);
+    if (!authorityGit(options, repository, ["merge-base", "--is-ancestor", priorMerge, firstParent]).ok) {
+      throw new Error(`prior merged slice '${prior.id}' must be an ancestor of the new merge first parent`);
+    }
+  }
+  return { first_parent: firstParent, second_parent: secondParent, merge_base: base, paths: [...reviewedPaths].sort() };
+}
+
+function observeNoRenamePathSet(repository, from, to, options, label) {
+  const result = authorityGit(options, repository, ["diff", "--name-only", "-z", "--no-renames", from, to]);
+  if (!result.ok) throw new Error(`${label} cannot be observed`);
+  if (result.stdout === "") return new Set();
+  if (!result.stdout.endsWith("\0")) throw new Error(`${label} must be NUL-delimited`);
+  const paths = result.stdout.slice(0, -1).split("\0");
+  if (paths.some((path) => path.length === 0) || new Set(paths).size !== paths.length) throw new Error(`${label} contains an invalid path set`);
+  return new Set(paths);
+}
+
+function sameStringSet(left, right) {
+  if (left.size !== right.size) return false;
+  for (const value of left) if (!right.has(value)) return false;
+  return true;
+}
+
+function assertSliceTransition(runDir, prior, next) {
+  for (const key of ["id", "stack", "depends_on"]) {
+    if (!sameJson(prior?.[key], next?.[key])) throw new Error(`slice ${key} is immutable`);
+  }
+  const transitions = {
+    pending: new Set(["running", "blocked"]),
+    running: new Set(["running", "review", "blocked"]),
+    review: new Set(["running", "review", "blocked"]),
+    merged: new Set(),
+    blocked: new Set(),
+  };
+  if (!transitions[prior.status]?.has(next.status)) throw new Error(`slice '${prior.id}' cannot transition from ${prior.status} to ${next.status}`);
+  for (const key of ["branch", "worktree"]) {
+    if (stringValue(prior[key]) && prior[key] !== next[key]) throw new Error(`slice ${key} is immutable once bound`);
+    if (next[key] !== undefined && !stringValue(next[key])) throw new Error(`slice ${key} must be nonempty when bound`);
+  }
+  if (next.status === "running" || next.status === "review" || prior.status !== "pending") {
+    if (!Number.isInteger(next.attempts) || next.attempts < 1) throw new Error(`slice '${prior.id}' attempts must be positive once running`);
+  } else if (!Number.isInteger(next.attempts) || next.attempts < 0) {
+    throw new Error(`slice '${prior.id}' attempts must be non-negative`);
+  }
+  if (Number.isInteger(prior.attempts) && next.attempts < prior.attempts) throw new Error(`slice '${prior.id}' attempts cannot regress from ${prior.attempts} to ${next.attempts}`);
+  if (prior.status === "review") {
+    const currentReview = observeSliceReviewSidecars(runDir, prior.id, prior).review;
+    const retry = next.status === "running" || next.status === "review" && !sameJson(prior, next);
+    if (retry && currentReview.verdict === "REJECT" && next.attempts <= prior.attempts) throw new Error(`slice '${prior.id}' retry after REJECT requires a greater attempt`);
+  }
+  if (next.status === "review") observeSliceReviewSidecars(runDir, next.id, next);
+  if (next.status === "blocked") {
+    requireNonEmptyString(next.blocked_reason, "blocked_reason");
+    for (const key of ["evidence_ref", "review_ref"]) {
+      if (prior[key] !== next[key]) throw new Error(`blocked slice cannot create or change retained ${key}`);
+    }
+  }
+}
+
+function normalizeSliceTransition(prior, next) {
+  if (next.status === "running") {
+    delete next.evidence_ref;
+    delete next.evidence_hash;
+    delete next.review_ref;
+    delete next.review_hash;
+    delete next.reviewed_commit;
+    delete next.merge_commit;
+    delete next.blocked_reason;
+    delete next.updated_at;
+  } else if (next.status === "review") {
+    delete next.merge_commit;
+    delete next.blocked_reason;
+    delete next.updated_at;
+  } else if (next.status === "blocked") {
+    delete next.merge_commit;
+    delete next.evidence_hash;
+    delete next.review_hash;
+    delete next.reviewed_commit;
+    delete next.updated_at;
+  }
+  if (prior.status === "pending" && next.status === "blocked") {
+    delete next.branch;
+    delete next.worktree;
+  }
+}
+
+function normalizePendingSliceProjection(slices) {
+  if (!Array.isArray(slices)) throw new Error("slice seed requires an array");
+  const allowed = new Set(["id", "stack", "depends_on", "status", "attempts"]);
+  return slices.map((slice, index) => {
+    if (!isRecord(slice) || Object.keys(slice).some((key) => !allowed.has(key))) throw new Error(`slice seed entry ${index} must use the canonical pending shape`);
+    requireNonEmptyString(slice.id, `slice seed entry ${index} id`);
+    if (slice.status !== "pending" || slice.attempts !== 0) throw new Error(`slice seed entry ${index} must be pending with attempts=0`);
+    if (!stringValue(slice.stack) || !Array.isArray(slice.depends_on)) throw new Error(`slice seed entry ${index} requires stack and depends_on`);
+    return cloneJson(slice);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2270,10 +3351,47 @@ const MERGED_SLICE_REPAIR_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/u;
 
 export async function transitionMergedSliceRepair(runDir, input = {}, options = {}) {
   const request = normalizeMergedSliceRepairInput(input);
-  const result = await transitionRunJson(runDir, (draft) => {
+  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft) => {
     draft.merged_slice_repair = nextMergedSliceRepair(runDir, draft, draft.merged_slice_repair, request, options);
-  }, options);
+  }, options, { mergedSliceRepair: MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY }), options);
   return { ...result, merged_slice_repair: result.run.merged_slice_repair ?? null };
+}
+
+function observeRepairPublicationAuthority(runDir, run, options = {}) {
+  const repair = run.merged_slice_repair;
+  if (!isRecord(repair)) return null;
+  const files = new Map();
+  const addPath = (name, path) => files.set(name, exactAuthorityFile(path));
+  const addRef = (name, ref, resolver) => {
+    if (stringValue(ref)) addPath(name, resolver(runDir, ref).path);
+  };
+  addPath("plan/slices.json", join(runDir, "plan", "slices.json"));
+  addRef("original-evidence", repair.evidence_ref, resolveEvidenceRef);
+  addRef("repair-evidence", repair.repair_evidence_ref, resolveEvidenceRef);
+  addRef("review", repair.review_ref, resolveReviewRef);
+  addRef("verification", repair.verification_ref, resolveEvidenceRef);
+  const repoRoot = options.repoRoot || runDir;
+  const commands = [];
+  if (stringValue(run.branch) && ["repairing", "review", "merged"].includes(repair.status)) {
+    commands.push(["feature-head", ["rev-parse", "--verify", `refs/heads/${run.branch}^{commit}`]]);
+    commands.push(["cleanliness", gitCleanlinessArgs()]);
+  }
+  if (stringValue(repair.baseline_commit) && stringValue(repair.reviewed_commit)) {
+    commands.push(["reviewed-ancestry", ["merge-base", "--is-ancestor", repair.baseline_commit, repair.reviewed_commit]]);
+    commands.push(["reviewed-tree", ["rev-parse", "--verify", `${repair.reviewed_commit}^{tree}`]]);
+    commands.push(["reviewed-diff", ["diff", "--name-only", "-z", "--no-renames", repair.baseline_commit, repair.reviewed_commit]]);
+  }
+  if (stringValue(repair.merge_commit)) {
+    commands.push(["merge-ancestry", ["merge-base", "--is-ancestor", repair.baseline_commit, repair.merge_commit]]);
+    commands.push(["merge-tree", ["rev-parse", "--verify", `${repair.merge_commit}^{tree}`]]);
+    commands.push(["merge-diff", ["diff", "--name-only", "-z", "--no-renames", repair.baseline_commit, repair.merge_commit]]);
+  }
+  return { files: Object.fromEntries(files), git: commands.length ? observeGitPublicationAuthority(repoRoot, commands) : null };
+}
+
+function assertRepairPublicationAuthorityCurrent(runDir, run, options, expected) {
+  const current = observeRepairPublicationAuthority(runDir, run, options);
+  if (!sameJson(current, expected)) throw new Error("merged-slice repair authority changed before run.json publication");
 }
 
 export function activeMergedSliceRepair(run) {
@@ -2413,6 +3531,12 @@ function repairingMergedSliceRepair(runDir, run, current, request, stampedAt, op
   if (current.status === "review") {
     const review = readBoundRepairReview(runDir, current);
     if (review.verdict !== "REJECT") throw new Error("a further repair attempt requires a REJECT verdict on the prior repair review");
+    const reviewedCommit = requireNonEmptyString(current.reviewed_commit, "repair reviewed_commit");
+    assertRepairReviewBinding(review, current.attempts, reviewedCommit);
+    const baseline = requireNonEmptyString(current.baseline_commit, "repair baseline_commit");
+    if (baseline === reviewedCommit) throw new Error("rejected repair review must bind work after the observed attempt baseline");
+    const repoRoot = options.repoRoot || runDir;
+    if (!git(repoRoot, ["merge-base", "--is-ancestor", baseline, reviewedCommit]).ok) throw new Error("rejected repair review no longer contains its observed attempt baseline");
   }
   assertRepairOriginalEvidenceIntact(runDir, current);
   // Observe the feature head as the attempt baseline: the eventual merge must
@@ -2672,19 +3796,23 @@ function repairPathWithinLane(path, lane) {
   return lane.endsWith("/**") ? path.startsWith(lane.slice(0, -2)) : path === lane;
 }
 
-function normalizePrCreatedTerminalResult(run, request) {
-  const terminalResult = isRecord(request.terminal_result) ? cloneJson(request.terminal_result) : {};
+function normalizePrCreatedTerminalResult(run, request, operation, overrides = {}) {
   return {
-    ...terminalResult,
     status: "completed",
     run_id: run.run_id,
     pr_url: request.pr_url,
     pr_number: request.pr_number,
+    pr_node_id: request.pr_node_id,
     repository: request.repository,
+    operation_id: operation.operation_id,
+    head_ref: request.head_ref,
+    head_sha: request.head_sha,
+    base_ref: request.base_ref,
+    base_sha: request.base_sha,
     draft: request.draft,
-    reason: terminalResult.reason ?? null,
-    summary: terminalResult.summary ?? (request.draft ? "Draft PR created." : "PR created."),
-    artifacts: isRecord(terminalResult.artifacts) ? terminalResult.artifacts : {},
+    reason: overrides.reason ?? null,
+    summary: overrides.summary ?? (request.draft ? "Draft PR created." : "PR created."),
+    artifacts: isRecord(overrides.artifacts) ? cloneJson(overrides.artifacts) : {},
   };
 }
 
@@ -2698,11 +3826,6 @@ export function normalizePrNumber(value) {
   const number = typeof value === "string" && value.trim() !== "" ? Number(value.trim()) : value;
   if (!Number.isInteger(number) || number < 1 || String(number) !== String(value).trim()) throw new Error("transitionPrCreated requires pr_number");
   return number;
-}
-
-function normalizeBoolean(value, label) {
-  if (typeof value !== "boolean") throw new Error(`transitionPrCreated requires boolean ${label}`);
-  return value;
 }
 
 function normalizeGateMap(gates) {
@@ -2836,6 +3959,200 @@ function parseJsonObjectFile(path, label) {
   const value = parseJsonFile(path, label);
   if (!isRecord(value)) throw new Error(`${label} must be a JSON object`);
   return value;
+}
+
+function parseJsonObjectBytes(bytes, label) {
+  let value;
+  try {
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    throw new Error(`${label} must be valid JSON: ${error.message}`);
+  }
+  if (!isRecord(value)) throw new Error(`${label} must be a JSON object`);
+  return value;
+}
+
+function authorityBytes(entries) {
+  return Object.fromEntries(Object.entries(entries).map(([key, bytes]) => [`${key}_bytes`, bytes.toString("base64")]));
+}
+
+function sha256Bytes(bytes) {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function hasCompleteBinding(value, keys) {
+  return keys.every((key) => value?.[key] !== undefined && value?.[key] !== null);
+}
+
+function pickBinding(value, keys) {
+  return Object.fromEntries(keys.map((key) => [key, value[key]]));
+}
+
+function assertNoBindingFields(value, keys, label) {
+  if (keys.some((key) => value?.[key] !== undefined && value?.[key] !== null)) throw new Error(`${label} is computed by the checked transition`);
+}
+
+function panelBaseRecord(value, validator) {
+  return validator
+    ? { verdict: value.verdict, report: value.report, review_ref: value.review_ref }
+    : { verdict: value.verdict, review_ref: value.review_ref };
+}
+
+function panelBaseEquals(left, right) {
+  if (!isRecord(left) || !isRecord(right)) return false;
+  return left.verdict === right.verdict && left.report === right.report && left.review_ref === right.review_ref;
+}
+
+function resolveAuthorityRepository(runDir, run, options = {}) {
+  if (stringValue(options.repoRoot)) return resolve(options.repoRoot);
+  const probeCwd = stringValue(runDir) ? runDir : run?.worktree;
+  const result = authorityGit(options, probeCwd, ["rev-parse", "--show-toplevel"]);
+  if (!result.ok || !stringValue(result.stdout)) throw new Error("reviewed-code authority requires a local git repository");
+  return result.stdout.trim();
+}
+
+function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR operation") {
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, `${label} authority`);
+  const origin = authorityGit(options, integration.repository, ["config", "--get", "remote.origin.url"]);
+  if (!origin.ok || !stringValue(origin.stdout) || origin.stdout.trim().includes("\n")) throw new Error(`${label} requires exactly one canonical GitHub origin`);
+  const repository = canonicalGithubRepositoryFromOrigin(origin.stdout.trim());
+  const headRef = requireNonEmptyString(run.branch, "run.branch");
+  const baseRef = requireNonEmptyString(run.base_ref, "run.base_ref");
+  if (!run.pr_mode || !["draft", "ready"].includes(run.pr_mode)) throw new Error(`${label} requires persisted run.pr_mode`);
+  const headSha = observeExactRemoteHead(options, integration.repository, headRef, label);
+  const baseSha = observeExactRemoteHead(options, integration.repository, baseRef, label);
+  if (headSha !== integration.head) throw new Error(`${label} requires local, worktree, and origin head equality`);
+  if (requireNonEmptyString(run.base_commit, "run.base_commit") !== baseSha) throw new Error(`${label} requires run.base_commit equal to the exact origin base head`);
+  if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", baseSha, headSha]).ok) throw new Error(`${label} requires the origin base to be an ancestor of the origin head`);
+  return { repository, origin: origin.stdout.trim(), head_ref: headRef, head_sha: headSha, base_ref: baseRef, base_sha: baseSha, draft: run.pr_mode === "draft", integration };
+}
+
+function observeExactRemoteHead(options, repository, ref, label) {
+  const result = authorityGit(options, repository, ["ls-remote", "--exit-code", "origin", `refs/heads/${ref}`]);
+  if (!result.ok) throw new Error(`${label} requires exact origin head refs`);
+  const lines = result.stdout.split("\n").filter(Boolean);
+  const match = lines.length === 1 ? /^([0-9a-f]{40})\trefs\/heads\/(.+)$/u.exec(lines[0]) : null;
+  if (!match || match[2] !== ref) throw new Error(`${label} requires one exact origin head ref for '${ref}'`);
+  return match[1];
+}
+
+function assertSamePrOperationGitAuthority(runDir, run, options, expected, label) {
+  const current = observePrOperationGitAuthority(runDir, run, options, label);
+  if (!sameJson(current, expected)) throw new Error(`${label} Git authority changed before publication`);
+  return current;
+}
+
+function assertPrFenceGitAuthorityCurrent(runDir, run, fence, options = {}) {
+  const authority = observePrOperationGitAuthority(runDir, run, options, "PR operation reconciliation");
+  const expected = {
+    repository: authority.repository,
+    head_ref: authority.head_ref,
+    head_sha: authority.head_sha,
+    base_ref: authority.base_ref,
+    base_sha: authority.base_sha,
+    draft: authority.draft,
+  };
+  for (const [key, value] of Object.entries(expected)) if (fence[key] !== value) throw new Error(`pre-PR fence ${key} no longer matches local/origin authority`);
+  const operationId = computePrOperationId({ base_commit: fence.base_sha, branch: fence.head_ref, created_at: fence.created_at, repository: fence.repository, run_id: run.run_id });
+  if (fence.operation_id !== operationId) throw new Error("pre-PR fence operation_id is stale or malformed");
+  if (run.validator?.reviewed_head_sha !== fence.head_sha || run.security_review?.reviewed_head_sha !== fence.head_sha) throw new Error("pre-PR fence head no longer equals both reviewed panel heads");
+  return authority;
+}
+
+function authorityGit(options, cwd, args) {
+  const runner = typeof options.gitFn === "function" ? options.gitFn : git;
+  const result = runner(cwd, args);
+  if (!isRecord(result) || typeof result.ok !== "boolean" || typeof result.stdout !== "string") {
+    throw new Error("git authority observer returned an invalid result");
+  }
+  return result;
+}
+
+function observeIntegrationHeadAuthority(run, options = {}, label = "reviewed-code authority") {
+  const repository = resolveAuthorityRepository(options.runDir, run, options);
+  const branch = requireNonEmptyString(run.branch, "run.branch");
+  const worktree = stringValue(run.worktree) ? resolve(repository, run.worktree) : deriveExpectedWorktreePath(repository, branch);
+  const branchResult = authorityGit(options, repository, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (!branchResult.ok || !/^[0-9a-f]{40}$/u.test(branchResult.stdout.trim())) throw new Error(`${label} requires an existing integration branch`);
+  const head = branchResult.stdout.trim();
+  const checkedOut = authorityGit(options, worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!checkedOut.ok || checkedOut.stdout.trim() !== branch) throw new Error(`${label} requires run.worktree checked out on run.branch`);
+  const worktreeHead = authorityGit(options, worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!worktreeHead.ok || worktreeHead.stdout.trim() !== head) throw new Error(`${label} requires integration branch and worktree HEAD equality`);
+  const cleanliness = authorityGit(options, worktree, gitCleanlinessArgs());
+  if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error(`${label} requires a clean integration worktree`);
+  return { repository, branch, worktree, head, clean: true };
+}
+
+function observePostPrPublicationAuthority(runDir, run, options = {}) {
+  assertPostPrRefsConsistent(runDir, run);
+  const postPr = run.post_pr;
+  const remediation = postPr?.remediation;
+  const files = new Map();
+  const add = (ref, resolver) => {
+    if (!stringValue(ref) || files.has(ref)) return;
+    files.set(ref, exactAuthorityFile(resolver(runDir, ref).path));
+  };
+  for (const binding of postPr?.evidence_refs || []) add(binding?.ref, resolveEvidenceRef);
+  add(remediation?.failure_evidence_ref, resolveEvidenceRef);
+  add(remediation?.remediation_evidence_ref, resolveEvidenceRef);
+  add(remediation?.revalidation?.canonical_evidence_ref, resolveEvidenceRef);
+  add(remediation?.revalidation?.validator_review_ref, resolveReviewRef);
+  add(remediation?.revalidation?.security_review_ref, resolveReviewRef);
+  add(postPr?.continuation_review?.ref, resolveReviewRef);
+  for (const [activity, resolver] of [["canonical", resolveEvidenceRef], ["validator", resolveReviewRef], ["security", resolveReviewRef]]) {
+    const job = remediation?.revalidation?.jobs?.[activity];
+    if (job?.status === "bound") add(job.result_ref, resolver);
+  }
+  const planPath = join(runDir, "plan", "slices.json");
+  if (isRecord(remediation) && existsSync(planPath)) files.set("plan/slices.json", exactAuthorityFile(planPath));
+  return { files: Object.fromEntries([...files.entries()].sort(([left], [right]) => left.localeCompare(right))), git: observePostPrGitPublicationAuthority(run, options) };
+}
+
+function assertPostPrPublicationAuthorityCurrent(runDir, run, options, expected) {
+  if (!sameJson(observePostPrPublicationAuthority(runDir, run, options), expected)) throw new Error("post-PR authority changed before run.json publication");
+}
+
+function observePostPrGitPublicationAuthority(run, options = {}) {
+  const remediation = run.post_pr?.remediation;
+  if (!isRecord(remediation) || !stringValue(remediation.candidate_head_sha)
+    || !["changes-observed", "committed", "revalidating", "validated", "push-pending", "remote-confirmed"].includes(remediation.stage)) return null;
+  const worktree = options.worktree || run.worktree;
+  if (!stringValue(worktree)) return null;
+  const authority = observeGitPublicationAuthority(worktree, [
+    ["head", ["rev-parse", "--verify", "HEAD^{commit}"]],
+    ["candidate-tree", ["rev-parse", "--verify", `${remediation.candidate_head_sha}^{tree}`]],
+    ["baseline-tree", ["rev-parse", "--verify", `${remediation.baseline_head_sha}^{tree}`]],
+    ["ancestry", ["merge-base", "--is-ancestor", remediation.baseline_head_sha, remediation.candidate_head_sha]],
+    ["cleanliness", gitCleanlinessArgs()],
+    ["diff", ["diff", "--name-status", "-z", "--find-renames", "--find-copies", `${remediation.baseline_head_sha}..${remediation.candidate_head_sha}`]],
+  ]);
+  assertPostPrGitPublicationAuthority(authority, remediation.candidate_head_sha);
+  return authority;
+}
+
+function assertPostPrGitPublicationAuthority(authority, candidateHead) {
+  for (const [name, result] of Object.entries(authority)) {
+    if (!result.ok) throw new Error(`post-PR candidate Git authority '${name}' is invalid`);
+  }
+  if (authority.head.stdout.trim() !== candidateHead) throw new Error("post-PR candidate Git authority HEAD does not equal candidate_head_sha");
+  if (authority.cleanliness.stdout !== "") throw new Error("post-PR candidate Git authority requires a clean worktree");
+}
+
+function exactAuthorityFile(path) {
+  const bytes = readFileSync(path);
+  return { hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`, bytes: bytes.toString("base64") };
+}
+
+function observeGitPublicationAuthority(repoRoot, commands) {
+  return Object.fromEntries(commands.map(([name, args]) => {
+    const result = git(repoRoot, args);
+    return [name, { ok: result.ok, status: result.status, stdout: result.stdout }];
+  }));
+}
+
+function gitCleanlinessArgs() {
+  return ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", ":(exclude,top,glob).opencode/**"];
 }
 
 function normalizePositiveInteger(value, fallback) {

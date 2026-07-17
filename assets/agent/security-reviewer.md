@@ -29,7 +29,7 @@ Follow these steps in order.
 3. **Construct bypasses across every touched ingress.** Enumerate **every** ingress the diff touches, including sibling endpoints, and cite `path:line` for each finding. Try concrete attacks rather than merely checking the happy path. Analyze all of these classes:
    - **Trust boundaries:** untrusted/client-controlled request bodies, headers, query/route values, event/message metadata/`extra`, tool/command arguments, uploaded/file contents, or environment values reaching privileged LLM/system/skill instructions, shell/subprocess, SQL, file paths, auth/authz, or deserialization sinks without validation.
    - **Injection:** SQL, command, path-traversal, template, and LLM-prompt injection; untrusted text in privileged regions must be parameterized or clearly rendered as untrusted data (JSON-encoded, fenced, or escaped), never instructions or code.
-   - **Forgeable identity / authz:** client-manufacturable server-owned identity/source/role/permission/trust markers or authz missing on any server path. Deny the untrusted path **before** any trusted-allowance carve-out.
+   - **Forgeable identity / authz:** client-manufacturable server-owned identity/source/role/permission/trust markers or authz missing on any server path. Deny the untrusted path **before** any trusted-allowance carve-out. For external PR effects, attempt caller-forged URL/number/repository/draft/SHA fields, marker ambiguity, pagination substitution, account-switch bypass, unsafe clear, and stale local/remote identity.
    - **Secrets:** secrets logged, echoed in responses/errors, written to artifacts, or committed.
    - **Supply chain, if the diff touches dependencies, Dockerfile, or CI:** pinned dependencies and lockfiles without suspicious install hooks; pinned non-root Docker bases without `curl|bash`; SHA-pinned CI actions, least-privilege permissions, and no `${{ }}` shell injection.
    - **Security regression:** weakened/deleted tests or removed auth, validation, or sanitization checks.
@@ -43,7 +43,7 @@ Follow these steps in order.
 
 6. **Apply the security-specific threshold and determine verdict.** Once an issue is applicable under the declared trust model, any confirmed **or not-ruled-out** trust-boundary, injection, auth-bypass, or secret-exposure issue produces `BLOCK`, even when default-off. Applicable unresolved-prior, remediation-created/regression, or remediation-exposed bypasses also remain `BLOCK`. Otherwise return `PASS` and report lower-severity hardening only as NONBLOCKING.
 
-7. **Emit and route the structured security review.** The orchestrator records machine-readable verdict JSON at `reviews/security-reviewer.json` with `subject` equal to the integrated feature branch name, and `run.json.security_review.review_ref` points to that JSON. A `BLOCK` finding must state the concrete bypass or failure and a specific fix. Record every bypass attempt as blocked with why, or exploitable with how. If genuinely clean after real effort, PASS without invented findings while listing every ingress traced.
+7. **Emit and route the structured security review.** Inspect the integrated worktree commit and emit `reviewed_head_sha` as the exact full 40-character lowercase Git SHA actually reviewed, never a short SHA or a value copied from instructions without verification. The orchestrator records machine-readable verdict JSON at `reviews/security-reviewer.json` with `subject` equal to the integrated feature branch name, the positive panel `attempt`, the verdict and `required_fixes`, and that exact `reviewed_head_sha`; `run.json.security_review.review_ref` points to that JSON. A `BLOCK` finding must state the concrete bypass or failure and a specific fix. Record every bypass attempt as blocked with why, or exploitable with how. If genuinely clean after real effort, PASS without invented findings while listing every ingress traced.
 
 ## Output
 
@@ -52,6 +52,8 @@ Return exactly this structure:
 ```markdown
 ## Security review
 **Verdict:** PASS | BLOCK
+**Attempt:** <positive integer>
+**Reviewed head SHA:** <full 40-character lowercase Git SHA>
 **Ingresses reviewed:** <every untrusted-input entry path you traced>
 **Findings:**
 - [BLOCK] <what> - `path:line` - <the concrete bypass / why it fails> - fix: <specific change>

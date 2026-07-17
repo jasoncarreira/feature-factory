@@ -3,11 +3,28 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { heartbeatStatus, startHeartbeat, stopHeartbeat } from "../src/factory.js";
+import { assertHeartbeatStartable, heartbeatStatus, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 
 const RUN_ID = "heartbeat-liveness";
 
 describe("factory heartbeat lifecycle", () => {
+  it("centralizes every heartbeat start guard", () => {
+    const cases = [
+      ["run status", runningRun({ status: "blocked" }), /must be running/u],
+      ["pending steering", runningRun({ steering: { pending: {} } }), /pending steering/u],
+      ["uncheckpointed steering", runningRun({ steering: { uncheckpointed: {} } }), /awaiting acknowledgement/u],
+      ["action claim", runningRun({ steering: { action_claim: {} } }), /action awaiting start acknowledgement/u],
+      ["pre-PR fence", runningRun({ steering: { pr_fence: {} } }), /active pre-PR fence/u],
+      ["protected gate", runningRun({ gates: protectedGates("brief") }), /protected gate 'brief'/u],
+      ["no in-flight work", runningRun({ steps: [], slices: [] }), /no in-flight factory work/u],
+    ];
+
+    assert.doesNotThrow(() => assertHeartbeatStartable(runningRun()));
+    for (const [name, run, expected] of cases) {
+      assert.throws(() => assertHeartbeatStartable(run), expected, name);
+    }
+  });
+
   it("rejects path-like heartbeat run ids", async () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo);

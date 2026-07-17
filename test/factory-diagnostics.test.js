@@ -261,10 +261,20 @@ function runningRun(overrides = {}) {
 }
 
 function terminalRun(status) {
+  const prUrl = "https://github.com/acme/diagnostics/pull/7";
   return {
     ...runningRun(),
     status,
-    terminal_result: { status, run_id: RUN_ID, pr_url: null, reason: status === "completed" ? null : `${status} run`, summary: "done", artifacts: {} },
+    ...(status === "completed" ? { pr_url: prUrl } : {}),
+    terminal_result: {
+      status,
+      run_id: RUN_ID,
+      pr_url: status === "completed" ? prUrl : null,
+      reason: status === "completed" ? null : `${status} run`,
+      summary: "done",
+      artifacts: {},
+      ...(status === "completed" ? { repository: "acme/diagnostics", pr_number: 7, draft: false } : {}),
+    },
   };
 }
 

@@ -1,12 +1,12 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
-import { createPostPrState, hasInFlightHeartbeatWork, transitionGateDecision, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
+import { createPostPrState, hasInFlightHeartbeatWork, transitionGateDecision, transitionMergedSliceRepair, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 import { resumeFactory } from "../src/factory.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
 
@@ -634,6 +634,60 @@ describe("merged-sibling repair", () => {
       cleanup(fixture);
     }
   });
+
+  it("denies generic merged_slice_repair create, change, and delete while preserving checked progression", async () => {
+    const fixture = createFixture();
+    try {
+      const original = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionRunJson(fixture.runDir, (run) => { run.merged_slice_repair = { status: "reported" }; }), /only be changed by transitionMergedSliceRepair/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), original);
+
+      const reported = await report(fixture);
+      assert.equal(reported.merged_slice_repair.status, "reported");
+      const reportedBytes = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionRunJson(fixture.runDir, (run) => { run.merged_slice_repair.status = "blocked"; run.merged_slice_repair.reason = "generic bypass"; }), /only be changed by transitionMergedSliceRepair/u);
+      await assert.rejects(transitionRunJson(fixture.runDir, (run) => { delete run.merged_slice_repair; }), /only be changed by transitionMergedSliceRepair/u);
+      await assert.rejects(transitionRunJson(fixture.runDir, () => ({ ...readRun(fixture), merged_slice_repair: undefined })), /only be changed by transitionMergedSliceRepair/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), reportedBytes);
+
+      const repairing = await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 });
+      assert.equal(repairing.merged_slice_repair.status, "repairing");
+      assert.equal(repairing.merged_slice_repair.attempts, 1);
+    } finally { cleanup(fixture); }
+  });
+
+  it("rejects repair sidecar and Git mutation in the protected observation-to-publication interval", async () => {
+    const sidecarFixture = createFixture();
+    try {
+      const runPath = join(sidecarFixture.runDir, "run.json");
+      const before = readFileSync(runPath, "utf8");
+      await assert.rejects(transitionMergedSliceRepair(sidecarFixture.runDir, {
+        status: "reported", owner_slice_id: "owner", consumer_slice_id: "consumer", defect_path: "src/owner/records.js", evidence_ref: "evidence/consumer-failure.json",
+      }, {
+        atomicWriteHooks: { beforeCommit: () => writeJson(join(sidecarFixture.runDir, "evidence", "consumer-failure.json"), { subject: "consumer", status: "fail", raced: true }) },
+      }), publicationRaceError("merged-slice repair authority changed before run.json publication"));
+      assert.equal(readFileSync(runPath, "utf8"), before);
+      assert.deepEqual(tempRunJsonFiles(sidecarFixture.runDir), []);
+    } finally { cleanup(sidecarFixture); }
+
+    const gitFixture = createFixture();
+    try {
+      await report(gitFixture);
+      await transitionMergedSliceRepair(gitFixture.runDir, { status: "repairing", attempts: 1 });
+      const repairHead = commitRepairFix(gitFixture);
+      recordReview(gitFixture, "repair-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
+      await review(gitFixture, "repair-approve", repairHead);
+      writeJson(join(gitFixture.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
+      const runPath = join(gitFixture.runDir, "run.json");
+      const before = readFileSync(runPath, "utf8");
+      await assert.rejects(transitionMergedSliceRepair(gitFixture.runDir, { status: "merged", merge_commit: repairHead, verification_ref: "evidence/verification-pass.json" }, {
+        repoRoot: gitFixture.repo,
+        atomicWriteHooks: { beforeCommit: () => git(gitFixture.repo, ["update-ref", `refs/heads/${FEATURE_BRANCH}`, gitFixture.featureCommit]) },
+      }), publicationRaceError("merged-slice repair authority changed before run.json publication"));
+      assert.equal(readFileSync(runPath, "utf8"), before);
+      assert.deepEqual(tempRunJsonFiles(gitFixture.runDir), []);
+    } finally { cleanup(gitFixture); }
+  });
 });
 
 // The base/feature/main-only git history is identical for every fixture, so it
@@ -709,6 +763,14 @@ function createFixture() {
 
 function git(repo, args) {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+}
+
+function tempRunJsonFiles(runDir) {
+  return readdirSync(runDir).filter((name) => name.startsWith(".run.json.") && name.endsWith(".tmp"));
+}
+
+function publicationRaceError(message) {
+  return (error) => error?.cause?.message === message;
 }
 
 function report(fixture, overrides = {}) {
