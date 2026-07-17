@@ -34,7 +34,9 @@ Active guarantees:
 - Pending gates include `pending_snapshot` entries for `question_ref`, `question_hash`, `artifact_ref`, `artifact_hash`, and answer material. Gate answer consumption fails closed if current refs are missing, escaped, stale, or hash-mismatched.
 - Detached opencode processes are cancellable only when they have run-scoped evidence from a known explicit run id: `$RUN/process.json` points at one verified process identity and `$RUN/processes/<timestamp>.log` records stdout/stderr. Run-owned detached launches fail before writing `process.json` if live process identity cannot be verified. `factory cancel` sends a single targeted `SIGTERM` only when that evidence validates; missing, invalid, stale, mismatched, or non-running evidence returns a fail-closed response and sends no signal. There is no broad process kill, process-group kill, `pkill`, or `killall` fallback.
 - Effective-content provenance is recorded at run creation, resume, and review dispatch. It hashes the rendered command, resolved agent prompts, repo-seeded skills, loaded plugin source, exact dynamic review prompt bytes, OpenCode version, configured model profiles, and Git HEAD/dirty state without storing raw prompts, credentials, or dirty path names. Configured models are not reported as actual provider selections when runtime metadata is unavailable.
-- PR URLs are written only through the fenced `feature-factory factory pr-created ... --fence-token TOKEN` transition, which checks `pre_pr` approval, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, a canonical GitHub PR URL, and the current fence before updating `run.pr_url` and `terminal_result.pr_url`.
+- Slice `review`/`merged` rows bind `{evidence_hash, review_hash, reviewed_commit}` all-or-none. Checked review publication hashes exact evidence/review bytes only when positive attempts and subjects match and evidence `head_sha`/review `reviewed_commit` equal the clean slice branch/worktree HEAD. Merge admission re-observes those bindings and requires an exact two-parent merge whose ordered second parent is that reviewed commit, whose unique full `git merge-base --all` base is valid, and whose NUL-delimited no-renames path set and per-path presence/mode/type/object identities exactly carry the reviewed change onto the integration first parent.
+- Validator rows bind `{report_hash, review_hash, reviewed_head_sha}` and security rows bind `{review_hash, reviewed_head_sha}`; both panel rows are successor-bound or both legacy. Checked panel publication binds both atomically to the same clean integration HEAD. Exact checked replays may upgrade only unchanged legacy in-flight slice review, same-merge legacy merged, or dual-panel rows. Partial successor tuples reject, successor merged rows stay immutable, and legacy completed runs remain read-only.
+- PR URLs are written only through `feature-factory factory pr-created <run-id> --fence-token TOKEN`. Fence establishment derives, rather than accepts, the canonical GitHub origin repository, clean equal local/worktree/origin head, exact remote base, persisted ready/draft mode, and base ancestry. Fence establishment and reconciliation re-hash all bound slice/panel sidecars and require the current clean integration HEAD. The fence binds those values to an `ffpr-v1-...` operation identity. PR recording then re-observes GitHub and writes the canonical GitHub PR URL, number, node ID, operation ID, head/base refs and SHAs, repository, and draft state; callers cannot supply PR metadata.
 - Blocked-run continuation payloads are operator data/config, not privileged instructions. `factory continue` validates a parent whose status is exactly `blocked`, validates recognized subject-consistent approved review evidence, records read-only parent context under `run.json.continuation`, and still requires the normal gates, observed evidence, validator, security review, and configured PR checks.
 - `run.json.debug_snapshot` is diagnostic-only creation/resume metadata. It helps debug the factory/opencode/plugin substrate, but it is not authority for gates, reviews, merges, or PR URLs. Persisted snapshots omit sensitive keys and redact token-shaped or high-entropy credential values, including GitHub PAT shapes (`ghp_*`, `github_pat_*`, `gho_*`), OpenAI keys (`sk-proj_*`, `sk-*`), Slack tokens (`xoxb_*`), bearer/JWT/AWS-shaped values, credential-bearing URLs, and similar high-entropy secrets.
 - `run.json.cost_attribution` is diagnostic-only local current-run usage/cost attribution. It is not billing authority, invoice data, quota enforcement, or cross-run chargeback state. It records provider-supplied usage and cost metadata only; the factory does not maintain pricing tables, call pricing APIs, estimate missing costs, or coerce missing usage/cost to zero.
@@ -497,7 +499,7 @@ feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --has
 feature-factory factory cost-record <run-id> --agent AGENT --step STEP --provider PROVIDER --model MODEL --input-tokens N --output-tokens N --total-tokens N --cost-total N --currency CODE --json
 feature-factory factory cost-report <run-id> [--json] [--telemetry]
 feature-factory factory pr-fence <run-id> --json
-feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN --json
+feature-factory factory pr-created <run-id> --fence-token TOKEN --json
 ```
 
 `factory provenance` is the help-advertised compatibility alias for the diagnostic `factory env` command; neither is workflow authority.
@@ -627,7 +629,7 @@ feature-factory factory env record-resume <run-id> --json
 
 These commands update `run.json.debug_snapshot.created_with`, `last_resumed_with`, and `resume_count` using redacted diagnostic-only snapshots. They must not persist raw token-shaped or high-entropy credentials such as `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, or `xoxb_*`.
 
-After the final steering drain/checkpoint, Gate 3 approval, final push, and PR metadata preparation, establish the checked fence before creating the external PR:
+After the final steering drain/checkpoint, Gate 3 approval, and final push, establish the checked fence before creating the external PR:
 
 ```sh
 feature-factory factory pr-fence <run-id> --json
@@ -635,22 +637,17 @@ gh pr create ...
 gh pr view <url>
 ```
 
-The fence response supplies `fence.token`. Fence creation rechecks canonical PR readiness under the run lock and blocks new steering and every other `run.json` writer so the checked state cannot churn between external creation and recording. After creating the PR, verify it with `gh pr view <url>`, then record it instead of editing the manifest directly:
+The fence response supplies `fence.token`; the durable fence supplies `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}` all-or-none. `operation_id` is `ffpr-v1-` plus lowercase SHA-256 of canonical UTF-8 JSON `{"base_commit":...,"branch":...,"created_at":...,"repository":...,"run_id":...}` in lexical key order. Append exactly one standalone `<!-- opencode-feature-factory:pr-operation=<operation_id> -->` line to the external PR body. Fence creation rechecks canonical PR readiness under the run lock and blocks new steering and every other `run.json` writer so the checked state cannot churn between external creation and reconciliation.
 
 ```sh
-feature-factory factory pr-created <run-id> \
-  --pr-url URL \
-  --pr-number N \
-  --repository OWNER/REPO \
-  --fence-token TOKEN \
-  --json
+feature-factory factory pr-created <run-id> --fence-token TOKEN --json
 ```
 
-`factory pr-created` rejects a missing, mismatched, or stale fence. It checks the approved `pre_pr` gate, validator `GO` or `GO-WITH-NITS` with a report file, security `PASS` with a review file, completed slice state, matching PR number, canonical GitHub PR URL, and unchanged fenced state. Only then does it atomically clear the fence and write `run.pr_url`, `status: completed`, and `terminal_result.pr_url`.
+`factory pr-created` rejects a missing, mismatched, or stale fence, rejects caller PR metadata, and accepts only the run ID and exact fence token. Through the persisted GitHub account it performs a bounded, account-switched, shell-free `GET repos/{repository}/pulls?state=all&head={owner}:{head_ref}&base={base_ref}&per_page=100`, following only valid Link pagination for at most 10 pages. A unique exact open PR records the universal operation/node/head/base tuple and either completes or starts enabled post-PR observation; a unique exact merged PR completes without polling. Closed-unmerged becomes `needs-human`; absent, ambiguous, malformed, foreign/repeated/incomplete pagination, adapter failure, or other unknown observation retains the fence and does not claim completion.
 
-Before an external PR exists, or after `gh pr create` definitively fails without creating one, clear the exact fence with `feature-factory factory pr-fence <run-id> --clear --fence-token TOKEN --json`. After an external PR exists, never clear the fence: keep the token and recover by recording that PR with `factory pr-created`. Treat fenced creation and immediate recording as one logical operation; do not insert another steering drain after the PR exists.
+Only complete checked absence permits `feature-factory factory pr-fence <run-id> --clear --fence-token TOKEN --json`; a caller assertion that creation failed is not authority. After an external PR exists, never clear the fence: keep the token and reconcile that PR with `factory pr-created`. An identity-less legacy fence cannot be reconciled safely; its next mutation atomically terminalizes `needs-human` with reason `legacy-pr-fence-operation-identity-missing` while retaining the fence.
 
-`factory pr-created` records ready-for-review PRs by default. Pass `--draft` only when the effective PR mode intentionally created a draft PR.
+The ready/draft choice comes only from persisted `run.json.pr_mode` at fence establishment. `factory pr-created` has no `--draft`, URL, number, repository, node-ID, or SHA override.
 
 ## Heartbeat helper and monitoring
 
@@ -902,4 +899,4 @@ After `steer-consume`, run a steering-conflict checkpoint. Compare the untrusted
 feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json
 ```
 
-`factory steer-conflict` requires the run to still be `running`, requires inactive heartbeat, verifies the latest consumed steering ref/hash and consumed file hash, then writes terminal `status:"needs-human"` with `terminal_result.summary` explaining that accepted durable state would have to change. Its JSON response has `ok:false`, `conflict:true`, `updated:true`, `status:"needs-human"`, the steering ref/hash, `protected_state`, and `terminal_result`. The operator must reconcile manually; the factory must not silently reset gates, unmerge slices, rewrite evidence/reviews, remove PR URLs, or continue from stale accepted artifacts.
+`factory steer-conflict` requires the run to still be `running`, requires inactive heartbeat, verifies the latest consumed steering ref/hash and consumed file hash, then writes terminal `status:"needs-human"` with fixed safe `terminal_result.reason` and `terminal_result.summary` text explaining that accepted durable state would have to change. Because the transition creates no durable artifact, `terminal_result.artifacts` is empty rather than storing scalar diagnostic metadata. The existing steering history retains the consumed ref/hash, and the JSON response has `ok:false`, `conflict:true`, `updated:true`, `status:"needs-human"`, the steering ref/hash, `protected_state`, and `terminal_result`. The operator must reconcile manually; the factory must not silently reset gates, unmerge slices, rewrite evidence/reviews, remove PR URLs, or continue from stale accepted artifacts.

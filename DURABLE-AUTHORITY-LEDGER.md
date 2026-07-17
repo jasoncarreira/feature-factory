@@ -1,7 +1,8 @@
 # Durable Authority Boundary-Retention Ledger
 
-Status: finite design ledger for B0.4. This document does not change a production
-schema, persisted shape, transition, or compatibility rule.
+Status: finite design ledger established by B0.4 and consumed by B0MR.1. B0.4 made no
+production change; B0MR.1 implements only the reviewed-code successor exception
+recorded in the compatibility section below.
 
 This ledger decides which facts must survive an authority boundary and which facts
 must be observed again. It is closed over the nine authority classes in the B0.3
@@ -58,7 +59,7 @@ boundary; they are not cryptographic authentication.
 | Authority-bearing field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
 | Run `schema_version`, `run_id`, `external_ref`, `base_ref`, exact `base_commit`, `branch`, `worktree`, lifecycle `status`, retry/parallel limits, effective `pr_mode`, and configured GitHub account identity | `RETAIN` | Retain in `run.json` at bootstrap and through checked locked transitions. Exact commits are never shortened or replaced by branch names. |
-| Terminal `status`, `run_id`, reason/reason code, summary, artifact refs, canonical PR URL, PR number, repository, and draft state | `RETAIN` | Retain once in `run.json.terminal_result` through `factory terminal`, `factory pr-created`, or the class-specific checked terminal transition. |
+| Terminal `status`, `run_id`, reason/reason code, summary, artifact refs, and the universal PR operation/node/head/base tuple | `RETAIN` | Retain once in `run.json.terminal_result` through `factory terminal`, checked `factory pr-created`, or the class-specific checked terminal transition. New completed PR results require `{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft}`; legacy completed tuples remain readable but read-only. |
 | Current branch ref, worktree identity, HEAD, commit existence, trees, and required ancestry | `REOBSERVE` | Query Git at resume, merge, repair, push, and terminal consumption boundaries; a mutable `run.json` branch/worktree string cannot substitute. |
 | A free-standing producer or model terminal-success claim | `CONSOLIDATE/REMOVE` | Replace with `run.json.terminal_result` written by `factory terminal` or `factory pr-created` after their checked preconditions. |
 
@@ -84,26 +85,29 @@ boundary; they are not cryptographic authentication.
 
 | Authority-bearing field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
-| Slice id/stack/dependencies, status, branch/worktree, attempt, evidence/review refs, review binding, attempt-review history, blocked reason, and exact merge commit | `RETAIN` | Retain in `run.json.slices[]` through `factory slice-status` and `factory slice-merged`. |
+| Slice id/stack/dependencies, status, branch/worktree, attempt, evidence/review refs, successor `evidence_hash`/`review_hash`/`reviewed_commit`, blocked reason, and exact merge commit | `RETAIN` | Retain in `run.json.slices[]` through checked `factory slice-status` and `factory slice-merged`; the successor triple is all-or-none only for review/merged. |
 | Test/reproduction evidence exact bytes and binding: subject, attempt, status, `review_ready`, command bytes, exact result, observed head, and exact `changed_paths` where applicable | `RETAIN` | Retain the evidence ref/hash at the slice or repair transition. Commands and results are evidence bytes, not summaries. |
 | Independent review exact bytes and binding: subject, attempt, verdict, required fixes, review ref/hash, and exact reviewed commit where the subject has code bytes | `RETAIN` | Retain at the review transition; a later merge must consume the same review bytes and reviewed commit. |
-| Candidate commit/tree, base ancestry, and changed-path set | `REOBSERVE` | Query Git at review recording and again at merge. Compare evidence `changed_paths` exactly to Git with rename detection disabled. |
+| Candidate commit/tree, slice branch/worktree HEAD and cleanliness, merge parents/base, and changed-path/object set | `REOBSERVE` | Query Git at review recording and merge. Merge requires ordered parents `P1,R`, unique full base `B`, equal NUL-safe no-renames path sets `B..R`/`P1..M`, and equal per-path absence or mode/type/object identity. |
 | Builder/model claim fields that duplicate orchestrator-observed evidence | `CONSOLIDATE/REMOVE` | Replace with the canonical `evidence/<subject>.json` binding and `factory slice-status ... review`; producer claim blocks remain non-authoritative. |
 
 ## 6. Authority class: Validator, security, and PR-created result
 
 | Authority-bearing field or fact | Disposition | Canonical boundary or replacement |
 |---|---|---|
-| Validator and security subject, attempt, verdict, required fixes, report/review refs and hashes, exact independent review bytes, and reviewed commit/head where recorded | `RETAIN` | Retain through `factory verdicts`; PR creation must consume the passing bound panel result. |
-| PR/GitHub external identities: host, owner/repository, PR number/node identity when available, canonical URL, head/base refs and SHAs, draft state, and external creation operation identity | `RETAIN` | Retain at the fenced `factory pr-created` boundary and in the completed terminal result. |
-| Actual PR existence and current GitHub URL/number/repository/head/base/draft state, including an unknown create outcome | `REOBSERVE` | Use a checked `gh pr view` or equivalent GitHub operation before recording or retrying. After a PR exists, record that PR and never create another. |
+| Validator subject/attempt/verdict/report/review refs plus successor `report_hash`/`review_hash`/`reviewed_head_sha`, and security subject/attempt/verdict/review ref plus successor `review_hash`/`reviewed_head_sha` | `RETAIN` | Retain atomically through `factory verdicts`; both rows are successor or both legacy, and PR readiness consumes the passing bound panel result. |
+| Successor PR fence identity `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}` plus token, generation, state hash, and creation time | `RETAIN` | Derive all-or-none from canonical GitHub origin, exact clean local/worktree/remote head, exact remote base equal to `run.base_commit`, base ancestry, and persisted `run.pr_mode`. `operation_id` is the specified `ffpr-v1` canonical-JSON SHA-256 identity. |
+| PR/GitHub external identities: canonical URL, number, node identity, repository, head/base refs and SHAs, draft state, and external creation operation identity | `RETAIN` | Retain at checked reconciliation in the completed terminal result and, when enabled, `post_pr.pr_operation`. New direct and post-PR completion use the same universal tuple. |
+| Actual PR existence/state and exact operation marker, including an unknown create outcome | `REOBSERVE` | Account-switch, then perform the shell-free bounded `state=all`, exact owner/head and base query. Strictly normalize all tuple fields and follow only valid Link pagination for at most 10 pages. After a PR exists, reconcile it and never create another. |
 | A second PR-success or passing-panel attestation in an internal wrapper | `CONSOLIDATE/REMOVE` | Replace with `run.json.validator`, `run.json.security_review`, and `run.json.terminal_result` written by `factory verdicts` and fenced `factory pr-created`. |
 
-The `steering.pr_fence` token, generation, state hash, and creation time are `RETAIN`
-controls from immediately before `gh pr create` until the PR is recorded or creation is
-definitively observed not to have happened. `run-json.lock/` must serialize fence
-creation/consumption. A missing or mismatched token never authorizes the effect, and an
-unknown external outcome is always re-observed before retry.
+The external body carries exactly one standalone
+`<!-- opencode-feature-factory:pr-operation=<operation_id> -->` marker. Unique exact open
+normally records; unique exact merged completes without polling; closed-unmerged is
+`needs-human`; absent, ambiguous, and unknown retain the fence. Only complete checked
+absence authorizes clear. An identity-less legacy fence mutation terminalizes
+`needs-human` with `legacy-pr-fence-operation-identity-missing` while retaining the fence.
+An unknown external outcome is always re-observed before retry.
 
 ## 7. Authority class: Continuation and planning/draft reuse
 
@@ -166,7 +170,7 @@ authority class.
 | `process-launch.lock/owner.json` run/execution identity, launch kind/phase, process identity, and nonce | `RETAIN` through launch handoff/reconciliation | Create exclusively; phase change/release requires exact nonce, prior phase, directory/file identity, and live process identity. Ambiguity fails closed. |
 | Gate/terminal boundary token and steering generation/state hash | `RETAIN` from `factory boundary-open` until atomic consumption | The privileged transition consumes the exact token under lock. |
 | Dispatch/remediation action-claim token, operation kind/generation, and started/abort result | `RETAIN` until the external action start is recorded or safely aborted | `factory boundary-cross`, `factory action-started`, and exact-token `factory action-abort` are the canonical transitions. Unknown start outcome is reconciled, not repeated. |
-| PR fence token and PR-create operation/external identity | `RETAIN` until `factory pr-created` or definitive no-create observation | Never clear after a PR exists; re-observe GitHub after an unknown outcome and record the existing PR. |
+| PR fence token and deterministic PR-create operation/external identity | `RETAIN` until checked `factory pr-created` reconciliation or complete checked absence | The observation and mutation remain under the run lock with a second pre-publication observation. Never clear after a PR exists; ambiguous/unknown retains the fence. |
 | Post-PR dispatch, push, check, review, and publication operation ids/tokens | `RETAIN` through their terminal observation | A retry addresses the same operation or begins only after checked absence/failure; success booleans do not replace external identity. |
 
 ## Compatibility and single-authority rule
@@ -174,6 +178,11 @@ authority class.
 - Persisted legacy records keep their original schema. Readers validate and consume
   them under the schema/version that wrote them; there is no eager rewrite, field
   stripping, synthetic backfill, or reinterpretation of missing successor fields.
+- The reviewed-code successor is a narrow checked-replay exception: exact same-status
+  legacy slice review, exact same-merge legacy merged, and exact dual-panel verdict
+  replays may atomically add only their complete hash/head tuples after current bytes,
+  Git identities, attempts, subjects, refs, and cleanliness prove the binding. Partial
+  tuples, mismatched replays, and all legacy completed mutations fail closed.
 - A successor may consolidate a legacy duplicate only at a checked transition that
   writes the named canonical replacement and preserves every unique retained fact.
 - No two repair authorities may be active for one run. Admission and resume must
@@ -181,5 +190,7 @@ authority class.
   a canonical amendment repair, and post-PR remediation. Complete/terminalize the
   active authority or start the prescribed recovery/continuation run; never mirror
   one repair into a second active state machine.
-- This ledger changes documentation and tests only. It adds no production manifest,
-  transition, command, schema field, or migration.
+- The original B0.4 ledger milestone changed documentation and tests only. B0MR.1 is
+  the narrow successor exception: it adds only the reviewed-code tuple fields and
+  checked replay/merge/panel/fence consumers described above, without adding a second
+  authority class or rewriting legacy records eagerly.

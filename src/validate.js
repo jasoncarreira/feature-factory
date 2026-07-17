@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency, sanitizePublicCostText } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
 import { PROCESS_EVIDENCE_FILE, processEvidenceProcessesDir, validateProcessEvidence } from "./process-evidence.js";
-import { hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
+import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -57,6 +57,39 @@ export const POST_PR_TERMINAL_REASONS = Object.freeze({
 const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
+const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
+const PLAN_KEYS = new Set(["slices"]);
+const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
+const TERMINAL_RESULT_COMMON_KEYS = new Set(["status", "run_id", "pr_url", "reason", "summary", "artifacts"]);
+const TERMINAL_RESULT_COMPLETED_KEYS = new Set([...TERMINAL_RESULT_COMMON_KEYS, "pr_number", "pr_node_id", "repository", "operation_id", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
+const DURABLE_REF_ROOTS = new Set(["artifacts", "evidence", "reviews", "gates", "steering"]);
+const GATE_KEYS = new Set(["status", "artifact", "question_ref", "answer_ref", "answered_at", "answer", "decision_note", "approval_source", "pending_snapshot", "handoff_receipt"]);
+const PENDING_SNAPSHOT_KEYS = new Set(["question_ref", "question_hash", "artifact_ref", "artifact_hash", "answer_ref", "answer_hash", "created_at"]);
+const HANDOFF_RECEIPT_KEYS = new Set(["schema_version", "kind", "gate", "approval_fingerprint", "pending_snapshot_hash", "answer_hash", "steering_generation", "accepted_at"]);
+const STEP_KEYS = new Set(["agent", "status", "attempts", "artifact_ref", "review_ref", "evidence_ref", "acceptance", "inherited_acceptance"]);
+const STEP_ACCEPTANCE_KEYS = new Set(["artifact_ref", "artifact_hash", "review_ref", "review_hash"]);
+const STEP_INHERITED_ACCEPTANCE_KEYS = new Set(["from_run_id", "parent_spec_review_ref", "artifact_hash", "review_hash"]);
+const SLICE_KEYS = new Set(["id", "stack", "depends_on", "status", "branch", "worktree", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "blocked_reason", "updated_at"]);
+const VERDICT_KEYS = new Set(["verdict", "report", "report_hash", "review_ref", "review_hash", "reviewed_head_sha", "loops"]);
+const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
+const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
+const SECURITY_BINDING_KEYS = Object.freeze(["review_hash", "reviewed_head_sha"]);
+const STEERING_BOUNDARY_KEYS = new Set(["kind", "token", "generation", "state_hash", "created_at"]);
+const STEERING_FENCE_CONTROL_KEYS = Object.freeze(["token", "generation", "state_hash", "created_at"]);
+const PR_OPERATION_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
+const STEERING_FENCE_KEYS = new Set([...STEERING_FENCE_CONTROL_KEYS, ...PR_OPERATION_IDENTITY_KEYS]);
+const POST_PR_OPERATION_KEYS = new Set(["operation_id", "repository", "created_at", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "pr_url", "pr_number", "pr_node_id"]);
+const STEERING_ACTION_CLAIM_KEYS = new Set(["kind", "token", "generation", "claimed_at"]);
+const STEERING_LAST_ACTION_KEYS = new Set(["kind", "token", "generation", "outcome", "claimed_at", "resolved_at"]);
+const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr"]);
+const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
+const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "verdict", "summary", "required_fixes", "source"]);
+const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice", "post_pr"]);
+const CONTINUATION_TARGET_KEYS = new Set(["run_id", "branch", "worktree", "base_ref", "base_commit"]);
+const CONTINUATION_REF_HASH_KEYS = new Set(["kind", "ref", "hash"]);
+const CONTINUATION_ARTIFACT_KINDS = new Set(["artifact", "story", "research_map", "design_brief", "technical_brief", "test_report", "validation_report", "pr_body"]);
+const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CONTINUATION_DRAFT_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -75,17 +108,20 @@ export function validateRun(run) {
   const errors = [];
   if (!isRecord(run)) return fail([{ path: "run", message: "must be an object" }]);
 
+  allowedKeys(errors, run, RUN_KEYS, "run");
+  requiredInteger(errors, run, "schema_version", "run.schema_version");
+  if (run.schema_version !== 1) errors.push({ path: "run.schema_version", message: "must equal 1" });
   requiredString(errors, run, "run_id", "run.run_id");
-  optionalNumber(errors, run, "schema_version", "run.schema_version");
   optionalEnum(errors, run, "mode", RUN_MODES, "run.mode");
   requiredEnum(errors, run, "status", RUN_STATUSES, "run.status");
-  optionalString(errors, run, "created_at", "run.created_at");
-  optionalString(errors, run, "updated_at", "run.updated_at");
-  optionalString(errors, run, "heartbeat_at", "run.heartbeat_at");
+  optionalTimestamp(errors, run, "created_at", "run.created_at");
+  optionalTimestamp(errors, run, "updated_at", "run.updated_at");
+  optionalTimestamp(errors, run, "heartbeat_at", "run.heartbeat_at");
   optionalString(errors, run, "base_ref", "run.base_ref");
   optionalString(errors, run, "base_commit", "run.base_commit");
   optionalString(errors, run, "branch", "run.branch");
-  optionalString(errors, run, "worktree", "run.worktree");
+  if (run.continuation && run.worktree === run.continuation?.target?.worktree) optionalString(errors, run, "worktree", "run.worktree");
+  else optionalAbsolutePath(errors, run, "worktree", "run.worktree");
   optionalNonEmptyString(errors, run, "github_account", "run.github_account");
   optionalEnum(errors, run, "pr_mode", PR_MODES, "run.pr_mode");
   optionalString(errors, run, "pr_url", "run.pr_url");
@@ -99,12 +135,13 @@ export function validateRun(run) {
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
 
-  validateGateMap(errors, run.gates, "run.gates");
+  validateGateMap(errors, run, "run.gates");
   validateRunSlices(errors, run.slices, "run.slices");
   validateCostAttribution(errors, run.cost_attribution, "run.cost_attribution", run);
-  validateSteps(errors, run.steps, "run.steps");
+  validateSteps(errors, run, "run.steps");
   validateVerdict(errors, run.validator, "run.validator", VALIDATOR_VERDICTS);
   validateVerdict(errors, run.security_review, "run.security_review", SECURITY_VERDICTS);
+  validatePanelBindingGeneration(errors, run);
   validateTerminalResult(errors, run, "run.terminal_result");
 
   if (errors.length) fail(errors);
@@ -128,6 +165,7 @@ export function validateCostAttributionEntries(entries, runId) {
 export function validateSlicesPlan(plan, { enforceDependencyDepth = true } = {}) {
   const errors = [];
   if (!isRecord(plan)) return fail([{ path: "plan", message: "must be an object" }]);
+  allowedKeys(errors, plan, PLAN_KEYS, "plan");
   if (!Array.isArray(plan.slices)) errors.push({ path: "plan.slices", message: "must be an array" });
   else validatePlannedSlices(errors, plan.slices, "plan.slices", { enforceDependencyDepth });
   if (errors.length) fail(errors);
@@ -251,13 +289,51 @@ export function checkRunConsistency(runDir, run) {
     }
     if (stringValue(gate.answer_ref)) {
       checks.push(refCheck(`run.gates.${gateName}.answer_ref`, () => resolveGateRef(runDir, gate.answer_ref, { mustExist: gate.status !== "pending" })));
+      if (gate.status !== "pending") checks.push(runCheck(`run.gates.${gateName}.answer`, () => {
+        const answer = resolveGateRef(runDir, gate.answer_ref);
+        if (readFileSync(answer.path, "utf8").trim() !== gate.answer) fail([{ path: `run.gates.${gateName}.answer`, message: "must match archived answer_ref bytes" }]);
+        return { ref: gate.answer_ref };
+      }));
     }
+    if (isRecord(gate.pending_snapshot)) {
+      checks.push(runCheck(`run.gates.${gateName}.pending_snapshot`, () => {
+        const artifact = resolveArtifactRef(runDir, gate.pending_snapshot.artifact_ref, { mustExist: gate.status !== "pending" });
+        const question = resolveGateRef(runDir, gate.pending_snapshot.question_ref, { mustExist: gate.status !== "pending" });
+        if (gate.status !== "pending" || existsSync(artifact.path)) {
+          if (hashFile(artifact.path) !== gate.pending_snapshot.artifact_hash) fail([{ path: `run.gates.${gateName}.pending_snapshot.artifact_hash`, message: "must match artifact_ref bytes" }]);
+        }
+        if (gate.status !== "pending" || existsSync(question.path)) {
+          if (hashFile(question.path) !== gate.pending_snapshot.question_hash) fail([{ path: `run.gates.${gateName}.pending_snapshot.question_hash`, message: "must match question_ref bytes" }]);
+        }
+        if (stringValue(gate.pending_snapshot.answer_ref) && stringValue(gate.pending_snapshot.answer_hash)) {
+          const answer = resolveGateRef(runDir, gate.pending_snapshot.answer_ref);
+          if (hashFile(answer.path) !== gate.pending_snapshot.answer_hash) fail([{ path: `run.gates.${gateName}.pending_snapshot.answer_hash`, message: "must match answer_ref bytes" }]);
+        }
+        return { gate: gateName };
+      }));
+    }
+    if (isRecord(gate.handoff_receipt)) checks.push(runCheck(`run.gates.${gateName}.handoff_receipt`, () => {
+      const receipt = gate.handoff_receipt;
+      if (receipt.pending_snapshot_hash !== hashValue(gate.pending_snapshot)) fail([{ path: `run.gates.${gateName}.handoff_receipt.pending_snapshot_hash`, message: "must match pending_snapshot" }]);
+      const answerHash = stringValue(gate.answer_ref) ? hashFile(resolveGateRef(runDir, gate.answer_ref).path) : hashValue(gate.answer);
+      if (receipt.answer_hash !== answerHash) fail([{ path: `run.gates.${gateName}.handoff_receipt.answer_hash`, message: "must match persisted answer bytes" }]);
+      if (receipt.approval_fingerprint !== gateApprovalFingerprint(gateName, gate, receipt)) fail([{ path: `run.gates.${gateName}.handoff_receipt.approval_fingerprint`, message: "must match approved gate facts" }]);
+      if (isRecord(validRun.steering) && receipt.steering_generation !== validRun.steering.generation) fail([{ path: `run.gates.${gateName}.handoff_receipt.steering_generation`, message: "must match run steering generation" }]);
+      return { gate: gateName };
+    }));
   }
 
   for (const [index, step] of (Array.isArray(validRun.steps) ? validRun.steps : []).entries()) {
     if (stringValue(step?.evidence_ref)) checks.push(refCheck(`run.steps[${index}].evidence_ref`, () => resolveEvidenceRef(runDir, step.evidence_ref)));
     if (stringValue(step?.review_ref)) checks.push(refCheck(`run.steps[${index}].review_ref`, () => resolveReviewRef(runDir, step.review_ref)));
     if (stringValue(step?.artifact_ref)) checks.push(refCheck(`run.steps[${index}].artifact_ref`, () => resolveArtifactRef(runDir, step.artifact_ref)));
+    if (isRecord(step?.acceptance)) {
+      checks.push(refHashCheck(`run.steps[${index}].acceptance.artifact`, runDir, { ref: step.acceptance.artifact_ref, hash: step.acceptance.artifact_hash }, resolveArtifactRef));
+      if (stringValue(step.acceptance.review_ref)) checks.push(refHashCheck(`run.steps[${index}].acceptance.review`, runDir, { ref: step.acceptance.review_ref, hash: step.acceptance.review_hash }, resolveReviewRef));
+    }
+    if (isRecord(step?.inherited_acceptance)) {
+      checks.push(refHashCheck(`run.steps[${index}].inherited_acceptance.review`, runDir, { ref: step.inherited_acceptance.parent_spec_review_ref, hash: step.inherited_acceptance.review_hash }, resolveReviewRef));
+    }
   }
 
   const repair = validRun.merged_slice_repair;
@@ -325,6 +401,24 @@ export function checkRunConsistency(runDir, run) {
   return { ok: checks.every((item) => item.ok), checks };
 }
 
+function gateApprovalFingerprint(gateName, gate, receipt) {
+  return hashValue({
+    gate: gateName,
+    status: gate.status,
+    artifact: gate.artifact,
+    question_ref: gate.question_ref,
+    answer_ref: gate.answer_ref || null,
+    answer: gate.answer,
+    approval_source: gate.approval_source,
+    decision_note: gate.decision_note || null,
+    answered_at: gate.answered_at,
+    pending_snapshot_hash: receipt.pending_snapshot_hash,
+    answer_hash: receipt.answer_hash,
+    steering_generation: receipt.steering_generation,
+    accepted_at: receipt.accepted_at,
+  });
+}
+
 export function postPrConsistencyChecks(runDir, run) {
   const postPr = run?.post_pr;
   if (!isRecord(postPr)) return [];
@@ -343,6 +437,28 @@ export function postPrConsistencyChecks(runDir, run) {
     ]) {
       const owner = argumentsForNestedRef(remediation, refKey, hashKey, resolver);
       if (owner) checks.push(refHashCheck(`run.post_pr.remediation.${owner.prefix}${refKey}`, runDir, owner.value, resolver));
+    }
+    const revalidation = remediation.revalidation;
+    for (const [activity, resolver] of [["canonical", resolveEvidenceRef], ["validator", resolveReviewRef], ["security", resolveReviewRef]]) {
+      const job = revalidation?.jobs?.[activity];
+      if (!isRecord(job) || job.status !== "bound") continue;
+      checks.push(runCheck(`run.post_pr.remediation.revalidation.jobs.${activity}.result`, () => {
+        const resolved = resolver(runDir, job.result_ref);
+        const actualHash = hashFile(resolved.path, { mode: "raw" });
+        if (actualHash !== job.result_hash) fail([{ path: `run.post_pr.remediation.revalidation.jobs.${activity}.result_hash`, message: "must match exact result_ref bytes" }]);
+        let result;
+        try {
+          result = JSON.parse(readFileSync(resolved.path, "utf8"));
+        } catch (error) {
+          fail([{ path: `run.post_pr.remediation.revalidation.jobs.${activity}.result_ref`, message: `must contain valid JSON result bytes: ${error.message}` }]);
+        }
+        if (!isRecord(result)) fail([{ path: `run.post_pr.remediation.revalidation.jobs.${activity}.result_ref`, message: "must contain a JSON object result" }]);
+        if (result.verdict !== job.verdict) fail([{ path: `run.post_pr.remediation.revalidation.jobs.${activity}.verdict`, message: "must equal the verdict in exact result_ref bytes" }]);
+        if (Object.hasOwn(result, "dispatch_id") && result.dispatch_id !== job.dispatch_id) {
+          fail([{ path: `run.post_pr.remediation.revalidation.jobs.${activity}.dispatch_id`, message: "must equal dispatch_id in exact result_ref bytes when present" }]);
+        }
+        return { ref: resolved.ref, path: resolved.path, hash: actualHash, verdict: result.verdict };
+      }));
     }
   }
   if (isRecord(postPr.continuation_review)) checks.push(refHashCheck("run.post_pr.continuation_review", runDir, postPr.continuation_review, resolveReviewRef));
@@ -447,11 +563,13 @@ function runCheck(name, fn) {
   try {
     return { name, ok: true, errors: [], details: fn() || {} };
   } catch (error) {
-    return { name, ok: false, errors: error instanceof ValidationError ? error.errors : [{ path: name, message: error.message }] };
+    const message = error?.code === "ENOENT" ? "referenced authority file does not exist" : error.message;
+    return { name, ok: false, errors: error instanceof ValidationError ? error.errors : [{ path: name, message }] };
   }
 }
 
-function validateGateMap(errors, gates, path) {
+function validateGateMap(errors, run, path) {
+  const gates = run.gates;
   if (gates === undefined || gates === null) return;
   if (!isRecord(gates)) {
     errors.push({ path, message: "must be an object" });
@@ -459,7 +577,7 @@ function validateGateMap(errors, gates, path) {
   }
   for (const [name, gate] of Object.entries(gates)) {
     validateGateName(errors, name, `${path}.${name}`);
-    validateGate(errors, gate, `${path}.${name}`, name);
+    validateGate(errors, run, gate, `${path}.${name}`, name);
   }
 }
 
@@ -514,6 +632,8 @@ function validateMergedSliceRepair(errors, run, path) {
   boundedInteger(errors, repair, "attempts", 0, 2, `${path}.attempts`);
   requiredInteger(errors, repair, "max_attempts", `${path}.max_attempts`);
   if (repair.max_attempts !== 2) errors.push({ path: `${path}.max_attempts`, message: "must equal 2" });
+  requiredTimestamp(errors, repair, "created_at", `${path}.created_at`);
+  requiredTimestamp(errors, repair, "updated_at", `${path}.updated_at`);
   optionalNonEmptyString(errors, repair, "branch", `${path}.branch`);
   optionalNonEmptyString(errors, repair, "worktree", `${path}.worktree`);
   optionalNonEmptyString(errors, repair, "reason", `${path}.reason`);
@@ -664,10 +784,11 @@ function validateContinuation(errors, run, path) {
     return;
   }
 
+  allowedKeys(errors, continuation, CONTINUATION_KEYS, path);
   requiredInteger(errors, continuation, "schema_version", `${path}.schema_version`);
   if (Number.isInteger(continuation.schema_version) && continuation.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
   requiredEnum(errors, continuation, "kind", CONTINUATION_KINDS, `${path}.kind`);
-  requiredString(errors, continuation, "created_at", `${path}.created_at`);
+  requiredTimestamp(errors, continuation, "created_at", `${path}.created_at`);
   requiredString(errors, continuation, "operator_summary", `${path}.operator_summary`);
   validateContinuationParent(errors, continuation.parent, `${path}.parent`);
   validateContinuationReview(errors, continuation.review, `${path}.review`);
@@ -690,12 +811,22 @@ function validateContinuationPlanningReuse(errors, reuse, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, reuse, CONTINUATION_PLANNING_REUSE_KEYS, path);
   if (typeof reuse.eligible !== "boolean") errors.push({ path: `${path}.eligible`, message: "must be a boolean" });
   if (reuse.eligible === true) {
     requiredString(errors, reuse, "spec_review_ref", `${path}.spec_review_ref`);
     requiredHash(errors, reuse, "spec_review_hash", `${path}.spec_review_hash`);
     requiredString(errors, reuse, "spec_artifact_ref", `${path}.spec_artifact_ref`);
     requiredHash(errors, reuse, "spec_artifact_hash", `${path}.spec_artifact_hash`);
+    optionalString(errors, reuse, "child_spec_review_ref", `${path}.child_spec_review_ref`);
+    validateDurableRef(errors, reuse.spec_review_ref, "reviews", `${path}.spec_review_ref`);
+    validateDurableRef(errors, reuse.spec_artifact_ref, "artifacts", `${path}.spec_artifact_ref`);
+    if (reuse.child_spec_review_ref !== undefined) validateDurableRef(errors, reuse.child_spec_review_ref, "reviews", `${path}.child_spec_review_ref`);
+  } else {
+    optionalString(errors, reuse, "reason", `${path}.reason`);
+    for (const key of ["spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]) {
+      if (reuse[key] !== undefined) errors.push({ path: `${path}.${key}`, message: "is allowed only when eligible is true" });
+    }
   }
 }
 
@@ -705,9 +836,11 @@ function validateContinuationDraftSpecReuse(errors, run, draft, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, draft, CONTINUATION_DRAFT_REUSE_KEYS, path);
   requiredString(errors, draft, "artifact_ref", `${path}.artifact_ref`);
   if (draft.artifact_ref !== "artifacts/technical-brief.md") errors.push({ path: `${path}.artifact_ref`, message: "must equal artifacts/technical-brief.md" });
   requiredHash(errors, draft, "artifact_hash", `${path}.artifact_hash`);
+  validateDurableRef(errors, draft.artifact_ref, "artifacts", `${path}.artifact_ref`);
   requiredEnum(errors, draft, "parent_step_status", new Set(["rejected", "blocked"]), `${path}.parent_step_status`);
   boundedInteger(errors, draft, "parent_step_attempts", 0, Number.MAX_SAFE_INTEGER, `${path}.parent_step_attempts`);
   boundedInteger(errors, draft, "max_retries", 1, Number.MAX_SAFE_INTEGER, `${path}.max_retries`);
@@ -731,6 +864,17 @@ function validateContinuationPostPr(errors, value, path) {
   validatePostPrPolicy(errors, value.policy, `${path}.policy`);
   for (const key of ["post_pr_hash", "evidence_hash", "continuation_review_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
   for (const key of ["evidence_ref", "continuation_review_ref"]) requiredString(errors, value, key, `${path}.${key}`);
+  validateDurableRef(errors, value.evidence_ref, "evidence", `${path}.evidence_ref`);
+  validateDurableRef(errors, value.continuation_review_ref, "reviews", `${path}.continuation_review_ref`);
+  if (stringValue(value.pr_url)) {
+    try {
+      const parts = githubPrUrlParts(value.pr_url);
+      if (stringValue(value.repository) && value.repository !== parts.repository) errors.push({ path: `${path}.repository`, message: "must match pr_url repository" });
+      if (Number.isInteger(value.pr_number) && value.pr_number !== parts.number) errors.push({ path: `${path}.pr_number`, message: "must match pr_url number" });
+    } catch (error) {
+      errors.push({ path: `${path}.pr_url`, message: error.message });
+    }
+  }
 }
 
 function validatePostPr(errors, run, path) {
@@ -740,7 +884,7 @@ function validatePostPr(errors, run, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  allowedKeys(errors, value, new Set(["schema_version", "policy", "phase", "attempt", "observation", "remediation", "evidence_refs", "continuation_review", "terminal_fact"]), path);
+  allowedKeys(errors, value, new Set(["schema_version", "policy", "phase", "attempt", "observation", "remediation", "evidence_refs", "continuation_review", "terminal_fact", "pr_operation"]), path);
   requiredInteger(errors, value, "schema_version", `${path}.schema_version`);
   if (value.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
   validatePostPrPolicy(errors, value.policy, `${path}.policy`);
@@ -748,11 +892,15 @@ function validatePostPr(errors, run, path) {
   requiredInteger(errors, value, "attempt", `${path}.attempt`);
   if (Number.isInteger(value.attempt) && value.attempt < 0) errors.push({ path: `${path}.attempt`, message: "must be non-negative" });
   if (Number.isInteger(value.attempt) && Number.isInteger(run.max_retries) && value.attempt > run.max_retries) errors.push({ path: `${path}.attempt`, message: "must not exceed run.max_retries" });
+  for (const key of ["observation", "remediation", "evidence_refs", "continuation_review", "terminal_fact"]) {
+    if (!Object.hasOwn(value, key)) errors.push({ path: `${path}.${key}`, message: "is required, using null when unbound" });
+  }
   validatePostPrObservation(errors, value.observation, `${path}.observation`);
   validatePostPrRemediation(errors, value.remediation, `${path}.remediation`);
   validatePostPrRefHashArray(errors, value.evidence_refs, `${path}.evidence_refs`);
   validatePostPrRefHash(errors, value.continuation_review, `${path}.continuation_review`, { optional: true });
   validatePostPrTerminalFact(errors, run, value, `${path}.terminal_fact`);
+  validatePostPrOperation(errors, value.pr_operation, `${path}.pr_operation`);
 
   const enabled = value.policy?.enabled === true;
   if (!enabled && value.phase !== "disabled") errors.push({ path: `${path}.phase`, message: "disabled policy requires disabled phase" });
@@ -777,6 +925,25 @@ function validatePostPr(errors, run, path) {
   }
   if (isRecord(value.continuation_review) && !(value.phase === "blocked" && run.terminal_result?.reason === "post-pr-retry-exhausted")) errors.push({ path: `${path}.continuation_review`, message: "is allowed only for retry exhaustion" });
   validatePostPrTerminalConsistency(errors, run, value, path);
+}
+
+function validatePostPrOperation(errors, operation, path) {
+  if (operation === undefined || operation === null) return;
+  if (!isRecord(operation)) { errors.push({ path, message: "must be an object or null" }); return; }
+  allowedKeys(errors, operation, POST_PR_OPERATION_KEYS, path);
+  requiredPrOperationIdentity(errors, operation, path);
+  requiredTimestamp(errors, operation, "created_at", `${path}.created_at`);
+  requiredString(errors, operation, "pr_url", `${path}.pr_url`);
+  boundedInteger(errors, operation, "pr_number", 1, Number.MAX_SAFE_INTEGER, `${path}.pr_number`);
+  requiredString(errors, operation, "pr_node_id", `${path}.pr_node_id`);
+  if (stringValue(operation.pr_url)) {
+    try {
+      const parts = githubPrUrlParts(operation.pr_url);
+      if (parts.url !== operation.pr_url) errors.push({ path: `${path}.pr_url`, message: "must be a canonical GitHub PR URL" });
+      if (operation.repository !== parts.repository) errors.push({ path: `${path}.repository`, message: "must match pr_url repository" });
+      if (operation.pr_number !== parts.number) errors.push({ path: `${path}.pr_number`, message: "must match pr_url pull request number" });
+    } catch { errors.push({ path: `${path}.pr_url`, message: "must be a canonical GitHub PR URL" }); }
+  }
 }
 
 function validatePostPrTerminalFact(errors, run, postPr, path) {
@@ -936,10 +1103,11 @@ function validatePostPrObservation(errors, observation, path) {
   allowedKeys(errors, observation, new Set(["epoch", "expected_head_sha", "started_at", "deadline_at", "next_poll_at", "poll_count", "unchanged_count", "current_interval_ms", "consecutive_transient_errors", "last_observed_at", "last_fingerprint", "last_check_verdict", "last_review_verdict", "last_verdict", "last_error", "review_request", "snapshot"]), path);
   boundedInteger(errors, observation, "epoch", 1, Number.MAX_SAFE_INTEGER, `${path}.epoch`);
   requiredFullGitSha(errors, observation, "expected_head_sha", `${path}.expected_head_sha`);
-  for (const key of ["started_at", "deadline_at", "next_poll_at"]) requiredString(errors, observation, key, `${path}.${key}`);
+  for (const key of ["started_at", "deadline_at", "next_poll_at"]) requiredTimestamp(errors, observation, key, `${path}.${key}`);
   for (const key of ["poll_count", "unchanged_count", "consecutive_transient_errors"]) boundedInteger(errors, observation, key, 0, Number.MAX_SAFE_INTEGER, `${path}.${key}`);
   boundedInteger(errors, observation, "current_interval_ms", 1, 600_000, `${path}.current_interval_ms`);
-  for (const key of ["last_observed_at", "last_fingerprint"]) optionalNullableString(errors, observation, key, `${path}.${key}`);
+  optionalTimestamp(errors, observation, "last_observed_at", `${path}.last_observed_at`);
+  optionalNullableString(errors, observation, "last_fingerprint", `${path}.last_fingerprint`);
   requiredEnum(errors, observation, "last_check_verdict", new Set(["not_started", "not_applicable", "pending", "pass", "red", "indeterminate"]), `${path}.last_check_verdict`);
   requiredEnum(errors, observation, "last_review_verdict", new Set(["not_required", "pending", "pass", "red", "indeterminate", "deferred"]), `${path}.last_review_verdict`);
   requiredEnum(errors, observation, "last_verdict", new Set(["pending", "green", "red", "external-merge", "closed", "head-mismatch", "infrastructure"]), `${path}.last_verdict`);
@@ -959,8 +1127,8 @@ function validatePostPrLastError(errors, value, path) {
   allowedKeys(errors, value, new Set(["class", "exit_code", "occurred_at", "next_retry_at"]), path);
   requiredEnum(errors, value, "class", new Set(["timeout", "network", "rate-limit", "server", "account-auth", "permission", "not-found", "protocol", "command"]), `${path}.class`);
   if (value.exit_code !== undefined) optionalNullableInteger(errors, value, "exit_code", `${path}.exit_code`);
-  requiredString(errors, value, "occurred_at", `${path}.occurred_at`);
-  optionalNullableString(errors, value, "next_retry_at", `${path}.next_retry_at`);
+  requiredTimestamp(errors, value, "occurred_at", `${path}.occurred_at`);
+  optionalTimestamp(errors, value, "next_retry_at", `${path}.next_retry_at`);
 }
 
 function validatePostPrReviewRequest(errors, value, path) {
@@ -969,7 +1137,7 @@ function validatePostPrReviewRequest(errors, value, path) {
   allowedKeys(errors, value, new Set(["status", "attempts", "requested_at"]), path);
   requiredEnum(errors, value, "status", new Set(["pending", "requested"]), `${path}.status`);
   boundedInteger(errors, value, "attempts", 0, Number.MAX_SAFE_INTEGER, `${path}.attempts`);
-  optionalNullableString(errors, value, "requested_at", `${path}.requested_at`);
+  optionalTimestamp(errors, value, "requested_at", `${path}.requested_at`);
   if (value.status === "requested" && !stringValue(value.requested_at)) errors.push({ path: `${path}.requested_at`, message: "is required after reviewer request" });
 }
 
@@ -1012,7 +1180,7 @@ function validatePostPrRemediation(errors, remediation, path) {
   optionalNullableHash(errors, remediation, "remediation_evidence_hash", `${path}.remediation_evidence_hash`);
   if ((remediation.remediation_evidence_ref === null) !== (remediation.remediation_evidence_hash === null)) errors.push({ path, message: "remediation evidence ref/hash must be set together" });
   validatePostPrRevalidation(errors, remediation.revalidation, `${path}.revalidation`);
-  validatePostPrPush(errors, remediation.push, `${path}.push`);
+  validatePostPrPush(errors, remediation.push, `${path}.push`, remediation);
   if (stringValue(remediation.candidate_head_sha) && remediation.candidate_head_sha === remediation.failed_head_sha) errors.push({ path: `${path}.candidate_head_sha`, message: "must differ from failed_head_sha" });
   if (["validated", "push-pending", "remote-confirmed"].includes(remediation.stage)) validatePostPrValidated(errors, remediation, path);
   if (remediation.stage === "push-pending" && remediation.push?.local_head_sha !== remediation.candidate_head_sha) errors.push({ path: `${path}.push.local_head_sha`, message: "must equal candidate_head_sha while push is pending" });
@@ -1038,8 +1206,11 @@ function validatePostPrDispatch(errors, dispatch, path, remediation) {
   requiredEnum(errors, dispatch, "status", new Set(["planned", "running", "returned"]), `${path}.status`);
   requiredString(errors, dispatch, "role", `${path}.role`);
   requiredString(errors, dispatch, "subject", `${path}.subject`);
-  optionalNullableString(errors, dispatch, "started_at", `${path}.started_at`);
-  optionalNullableString(errors, dispatch, "returned_at", `${path}.returned_at`);
+  optionalTimestamp(errors, dispatch, "started_at", `${path}.started_at`);
+  optionalTimestamp(errors, dispatch, "returned_at", `${path}.returned_at`);
+  if (dispatch.status === "planned" && (dispatch.started_at !== null || dispatch.returned_at !== null)) errors.push({ path, message: "planned dispatch requires null start and return times" });
+  if (dispatch.status === "running" && (!isIsoTimestamp(dispatch.started_at) || dispatch.returned_at !== null)) errors.push({ path, message: "running dispatch requires a start time and null return time" });
+  if (dispatch.status === "returned" && (!isIsoTimestamp(dispatch.started_at) || !isIsoTimestamp(dispatch.returned_at))) errors.push({ path, message: "returned dispatch requires start and return times" });
   if (stringValue(remediation.route) && dispatch.role !== remediation.route) errors.push({ path: `${path}.role`, message: "must match remediation route" });
 }
 
@@ -1072,10 +1243,35 @@ function validatePostPrRevalidation(errors, value, path) {
     optionalNullableHash(errors, value, `${name}_hash`, `${path}.${name}_hash`);
     if ((value[`${name}_ref`] === null) !== (value[`${name}_hash`] === null)) errors.push({ path, message: `${name} ref/hash must be set together` });
   }
-  optionalNullableEnum(errors, value, "canonical_verdict", new Set(["pass", "fail"]), `${path}.canonical_verdict`);
+  optionalNullableEnum(errors, value, "canonical_verdict", new Set(["pass", "red", "fail"]), `${path}.canonical_verdict`);
   optionalNullableEnum(errors, value, "validator_verdict", VALIDATOR_VERDICTS, `${path}.validator_verdict`);
   optionalNullableEnum(errors, value, "security_verdict", SECURITY_VERDICTS, `${path}.security_verdict`);
-  if (value.jobs !== undefined) validatePostPrJobs(errors, value.jobs, `${path}.jobs`);
+  const tuples = {
+    canonical: ["canonical_evidence_ref", "canonical_evidence_hash", "canonical_verdict"],
+    validator: ["validator_review_ref", "validator_review_hash", "validator_verdict"],
+    security: ["security_review_ref", "security_review_hash", "security_verdict"],
+  };
+  for (const [activity, keys] of Object.entries(tuples)) {
+    const ownCount = keys.filter((key) => Object.hasOwn(value, key)).length;
+    const boundCount = keys.filter((key) => value[key] !== undefined && value[key] !== null).length;
+    if (ownCount !== 0 && ownCount !== keys.length) errors.push({ path: `${path}.${activity}_verdict`, message: `${activity} authority keys must be all absent or all present` });
+    if (boundCount !== 0 && boundCount !== keys.length) errors.push({ path: `${path}.${activity}_verdict`, message: `${activity} authority ref/hash/verdict must be a complete tuple` });
+  }
+  if (value.jobs !== undefined) {
+    validatePostPrJobs(errors, value.jobs, `${path}.jobs`);
+    const bindings = {
+      canonical: ["canonical_evidence_ref", "canonical_evidence_hash", "canonical_verdict"],
+      validator: ["validator_review_ref", "validator_review_hash", "validator_verdict"],
+      security: ["security_review_ref", "security_review_hash", "security_verdict"],
+    };
+    for (const [activity, [refKey, hashKey, verdictKey]] of Object.entries(bindings)) {
+      const job = value.jobs?.[activity];
+      if (!isRecord(job) || job.status !== "bound") continue;
+      for (const [jobKey, topLevelKey] of [["result_ref", refKey], ["result_hash", hashKey], ["verdict", verdictKey]]) {
+        if (job[jobKey] !== value[topLevelKey]) errors.push({ path: `${path}.jobs.${activity}.${jobKey}`, message: `must equal revalidation.${topLevelKey} for a bound ${activity} job` });
+      }
+    }
+  }
 }
 
 function validatePostPrJobs(errors, jobs, path) {
@@ -1090,22 +1286,27 @@ function validatePostPrJob(errors, job, path, activity) {
   requiredString(errors, job, "dispatch_id", `${path}.dispatch_id`);
   requiredEnum(errors, job, "status", new Set(["planned", "running", "retry-wait", "bound"]), `${path}.status`);
   for (const key of ["action_token", "started_at", "returned_at", "result_ref", "result_hash", "verdict", "next_retry_at", "last_error"]) if (job[key] !== null && job[key] !== undefined && typeof job[key] !== "string") errors.push({ path: `${path}.${key}`, message: "must be a string or null" });
+  for (const key of ["started_at", "returned_at", "next_retry_at"]) optionalTimestamp(errors, job, key, `${path}.${key}`);
   if (job.steering_generation !== null && job.steering_generation !== undefined && (!Number.isInteger(job.steering_generation) || job.steering_generation < 0)) errors.push({ path: `${path}.steering_generation`, message: "must be a non-negative integer or null" });
   boundedInteger(errors, job, "transient_error_count", 0, Number.MAX_SAFE_INTEGER, `${path}.transient_error_count`);
   if (job.status === "running" && (!stringValue(job.action_token) || !stringValue(job.started_at))) errors.push({ path, message: "running job requires action token and start time" });
   if (job.status === "bound" && (!stringValue(job.returned_at) || !stringValue(job.result_ref) || !stringValue(job.result_hash) || !stringValue(job.verdict))) errors.push({ path, message: "bound job requires return/ref/hash/verdict" });
+  if (job.status === "planned" && (job.action_token !== null || job.steering_generation !== null || job.started_at !== null)) errors.push({ path, message: "planned job must not carry started steering authority" });
   const vocabulary = activity === "canonical" ? new Set(["pass", "red"]) : activity === "validator" ? VALIDATOR_VERDICTS : SECURITY_VERDICTS;
   if (stringValue(job.verdict) && !vocabulary.has(job.verdict)) errors.push({ path: `${path}.verdict`, message: "is outside the activity verdict vocabulary" });
 }
 
-function validatePostPrPush(errors, push, path) {
+function validatePostPrPush(errors, push, path, remediation) {
   if (!isRecord(push)) { errors.push({ path, message: "must be an object" }); return; }
   allowedKeys(errors, push, new Set(["status", "remote_before_sha", "local_head_sha", "remote_after_sha", "consecutive_transient_errors", "next_retry_at", "pushed_at", "last_error"]), path);
   requiredEnum(errors, push, "status", new Set(["not-ready", "pending", "confirmed"]), `${path}.status`);
   for (const key of ["remote_before_sha", "local_head_sha", "remote_after_sha"]) optionalNullableFullGitSha(errors, push, key, `${path}.${key}`);
   boundedInteger(errors, push, "consecutive_transient_errors", 0, Number.MAX_SAFE_INTEGER, `${path}.consecutive_transient_errors`);
-  optionalNullableString(errors, push, "next_retry_at", `${path}.next_retry_at`);
-  optionalNullableString(errors, push, "pushed_at", `${path}.pushed_at`);
+  optionalTimestamp(errors, push, "next_retry_at", `${path}.next_retry_at`);
+  optionalTimestamp(errors, push, "pushed_at", `${path}.pushed_at`);
+  if (push.status === "not-ready" && [push.remote_before_sha, push.local_head_sha, push.remote_after_sha, push.pushed_at].some((value) => value !== null)) errors.push({ path, message: "not-ready push must not carry remote, local, or publication authority" });
+  if (push.status === "pending" && (!stringValue(push.remote_before_sha) || push.local_head_sha !== remediation.candidate_head_sha || push.remote_after_sha !== null || push.pushed_at !== null)) errors.push({ path, message: "pending push must bind remote_before and the current candidate only" });
+  if (push.status === "confirmed" && (!stringValue(push.remote_before_sha) || push.local_head_sha !== remediation.candidate_head_sha || push.remote_after_sha !== remediation.candidate_head_sha || !isIsoTimestamp(push.pushed_at))) errors.push({ path, message: "confirmed push must bind the published candidate and timestamp" });
   if (push.last_error !== undefined && push.last_error !== null) {
     const error = push.last_error;
     if (!isRecord(error)) errors.push({ path: `${path}.last_error`, message: "must be an object or null" });
@@ -1113,7 +1314,11 @@ function validatePostPrPush(errors, push, path) {
       allowedKeys(errors, error, new Set(["operation", "observed_at", "error_class", "exit_code", "classification", "error_count", "error_limit", "expected_remote_sha", "candidate_head_sha", "next_retry_at"]), `${path}.last_error`);
       requiredEnum(errors, error, "operation", new Set(["remote-head", "fast-forward-push", "remote-confirmation"]), `${path}.last_error.operation`);
       requiredEnum(errors, error, "classification", new Set(["transient", "permanent", "exhausted"]), `${path}.last_error.classification`);
+      optionalNullableInteger(errors, error, "exit_code", `${path}.last_error.exit_code`);
       requiredString(errors, error, "observed_at", `${path}.last_error.observed_at`);
+      requiredTimestamp(errors, error, "observed_at", `${path}.last_error.observed_at`);
+      if (error.candidate_head_sha !== remediation.candidate_head_sha) errors.push({ path: `${path}.last_error.candidate_head_sha`, message: "must equal remediation candidate_head_sha" });
+      if (error.next_retry_at !== push.next_retry_at) errors.push({ path: `${path}.last_error.next_retry_at`, message: "must equal push.next_retry_at" });
     }
   }
 }
@@ -1220,13 +1425,33 @@ function validateSteeringBoundary(errors, boundary, path, options = {}) {
     errors.push({ path, message: "must be an object or null" });
     return;
   }
+  allowedKeys(errors, boundary, options.fence ? STEERING_FENCE_KEYS : STEERING_BOUNDARY_KEYS, path);
   if (!options.fence) requiredEnum(errors, boundary, "kind", new Set(["gate", "dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]), `${path}.kind`);
   requiredString(errors, boundary, "token", `${path}.token`);
   if (stringValue(boundary.token) && !/^[A-Za-z0-9_-]{8,128}$/u.test(boundary.token)) errors.push({ path: `${path}.token`, message: "must use 8-128 safe characters" });
   requiredInteger(errors, boundary, "generation", `${path}.generation`);
   if (Number.isInteger(boundary.generation) && boundary.generation < 0) errors.push({ path: `${path}.generation`, message: "must be non-negative" });
   requiredHash(errors, boundary, "state_hash", `${path}.state_hash`);
-  requiredString(errors, boundary, "created_at", `${path}.created_at`);
+  requiredTimestamp(errors, boundary, "created_at", `${path}.created_at`);
+  if (options.fence) {
+    const identityOwnCount = PR_OPERATION_IDENTITY_KEYS.filter((key) => Object.hasOwn(boundary, key)).length;
+    if (identityOwnCount !== 0 && identityOwnCount !== PR_OPERATION_IDENTITY_KEYS.length) errors.push({ path, message: `${PR_OPERATION_IDENTITY_KEYS.join(", ")} must be all present or all absent` });
+    if (identityOwnCount !== 0) requiredPrOperationIdentity(errors, boundary, path);
+  }
+}
+
+function requiredPrOperationIdentity(errors, value, path) {
+  requiredString(errors, value, "operation_id", `${path}.operation_id`);
+  if (stringValue(value.operation_id) && !/^ffpr-v1-[0-9a-f]{64}$/u.test(value.operation_id)) errors.push({ path: `${path}.operation_id`, message: "must be an ffpr-v1 lowercase SHA-256 identity" });
+  requiredString(errors, value, "repository", `${path}.repository`);
+  if (stringValue(value.repository) && !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/u.test(value.repository)) errors.push({ path: `${path}.repository`, message: "must be a canonical lowercase owner/repository" });
+  for (const key of ["head_ref", "base_ref"]) {
+    requiredString(errors, value, key, `${path}.${key}`);
+    if (stringValue(value[key]) && (value[key].startsWith("refs/") || value[key].includes("..") || /[\s~^:?*[\\\x00-\x1f\x7f]/u.test(value[key]))) errors.push({ path: `${path}.${key}`, message: "must be a safe branch ref" });
+  }
+  requiredFullGitSha(errors, value, "head_sha", `${path}.head_sha`);
+  requiredFullGitSha(errors, value, "base_sha", `${path}.base_sha`);
+  requiredBoolean(errors, value, "draft", `${path}.draft`);
 }
 
 function validateSteeringAction(errors, action, path, options = {}) {
@@ -1235,15 +1460,16 @@ function validateSteeringAction(errors, action, path, options = {}) {
     errors.push({ path, message: "must be an object or null" });
     return;
   }
+  allowedKeys(errors, action, options.resolved ? STEERING_LAST_ACTION_KEYS : STEERING_ACTION_CLAIM_KEYS, path);
   requiredEnum(errors, action, "kind", new Set(["dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]), `${path}.kind`);
   requiredString(errors, action, "token", `${path}.token`);
   if (stringValue(action.token) && !/^[A-Za-z0-9_-]{8,128}$/u.test(action.token)) errors.push({ path: `${path}.token`, message: "must use 8-128 safe characters" });
   requiredInteger(errors, action, "generation", `${path}.generation`);
   if (Number.isInteger(action.generation) && action.generation < 0) errors.push({ path: `${path}.generation`, message: "must be non-negative" });
-  requiredString(errors, action, "claimed_at", `${path}.claimed_at`);
+  requiredTimestamp(errors, action, "claimed_at", `${path}.claimed_at`);
   if (options.resolved) {
     requiredEnum(errors, action, "outcome", new Set(["started", "aborted", "closed"]), `${path}.outcome`);
-    requiredString(errors, action, "resolved_at", `${path}.resolved_at`);
+    requiredTimestamp(errors, action, "resolved_at", `${path}.resolved_at`);
   }
 }
 
@@ -1252,13 +1478,17 @@ function validateContinuationParent(errors, parent, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, parent, CONTINUATION_PARENT_KEYS, path);
   requiredString(errors, parent, "run_id", `${path}.run_id`);
   requiredEnum(errors, parent, "status", BLOCKED_CONTINUATION_PARENT_STATUSES, `${path}.status`);
   requiredString(errors, parent, "run_ref", `${path}.run_ref`);
   requiredHash(errors, parent, "run_hash", `${path}.run_hash`);
   requiredString(errors, parent, "branch", `${path}.branch`);
-  requiredString(errors, parent, "commit", `${path}.commit`);
+  requiredFullGitSha(errors, parent, "commit", `${path}.commit`);
   requiredString(errors, parent, "worktree", `${path}.worktree`);
+  if (stringValue(parent.run_id) && stringValue(parent.run_ref) && parent.run_ref !== `.opencode/factory/${parent.run_id}/run.json`) {
+    errors.push({ path: `${path}.run_ref`, message: "must identify the parent run.json" });
+  }
 }
 
 function validateContinuationReview(errors, review, path) {
@@ -1266,8 +1496,10 @@ function validateContinuationReview(errors, review, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, review, CONTINUATION_REVIEW_KEYS, path);
   requiredString(errors, review, "ref", `${path}.ref`);
-  requiredString(errors, review, "kind", `${path}.kind`);
+  validateDurableRef(errors, review.ref, "reviews", `${path}.ref`);
+  requiredEnum(errors, review, "kind", CONTINUATION_REVIEW_KINDS, `${path}.kind`);
   optionalString(errors, review, "source", `${path}.source`);
   requiredHash(errors, review, "hash", `${path}.hash`);
   requiredString(errors, review, "subject", `${path}.subject`);
@@ -1284,14 +1516,16 @@ function validateContinuationTarget(errors, run, target, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, target, CONTINUATION_TARGET_KEYS, path);
   requiredString(errors, target, "run_id", `${path}.run_id`);
   requiredString(errors, target, "branch", `${path}.branch`);
   requiredString(errors, target, "worktree", `${path}.worktree`);
   requiredString(errors, target, "base_ref", `${path}.base_ref`);
-  requiredString(errors, target, "base_commit", `${path}.base_commit`);
+  requiredFullGitSha(errors, target, "base_commit", `${path}.base_commit`);
   if (stringValue(target.run_id) && stringValue(run.run_id) && target.run_id !== run.run_id) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
   if (stringValue(target.branch) && stringValue(run.branch) && target.branch !== run.branch) errors.push({ path: `${path}.branch`, message: "must match run.branch" });
   if (stringValue(target.worktree) && stringValue(run.worktree) && target.worktree !== run.worktree) errors.push({ path: `${path}.worktree`, message: "must match run.worktree" });
+  if (stringValue(target.run_id) && stringValue(run.continuation?.parent?.run_id) && target.run_id === run.continuation.parent.run_id) errors.push({ path: `${path}.run_id`, message: "must differ from continuation.parent.run_id" });
 }
 
 function validateContinuationRefHashArray(errors, items, path) {
@@ -1305,9 +1539,20 @@ function validateContinuationRefHashArray(errors, items, path) {
       errors.push({ path: itemPath, message: "must be an object" });
       continue;
     }
+    allowedKeys(errors, item, CONTINUATION_REF_HASH_KEYS, itemPath);
     requiredString(errors, item, "kind", `${itemPath}.kind`);
     requiredString(errors, item, "ref", `${itemPath}.ref`);
     requiredHash(errors, item, "hash", `${itemPath}.hash`);
+    if (path.endsWith(".parent_artifacts")) {
+      if (stringValue(item.kind) && !CONTINUATION_ARTIFACT_KINDS.has(item.kind)) errors.push({ path: `${itemPath}.kind`, message: `must be one of ${[...CONTINUATION_ARTIFACT_KINDS].join(", ")}` });
+      validateDurableRef(errors, item.ref, "artifacts", `${itemPath}.ref`);
+    } else if (path.endsWith(".parent_evidence")) {
+      if (item.kind !== "evidence") errors.push({ path: `${itemPath}.kind`, message: "must equal evidence" });
+      validateDurableRef(errors, item.ref, "evidence", `${itemPath}.ref`);
+    } else {
+      if (item.kind !== "review") errors.push({ path: `${itemPath}.kind`, message: "must equal review" });
+      validateDurableRef(errors, item.ref, "reviews", `${itemPath}.ref`);
+    }
   }
 }
 
@@ -1342,21 +1587,26 @@ function validateRedactedEnv(errors, value, path) {
   }
 }
 
-function validateGate(errors, gate, path, gateName) {
+function validateGate(errors, run, gate, path, gateName) {
   if (!isRecord(gate)) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, gate, GATE_KEYS, path);
   requiredEnum(errors, gate, "status", GATE_STATUSES, `${path}.status`);
   optionalString(errors, gate, "artifact", `${path}.artifact`);
   optionalString(errors, gate, "question_ref", `${path}.question_ref`);
   optionalString(errors, gate, "answer_ref", `${path}.answer_ref`);
-  optionalString(errors, gate, "answered_at", `${path}.answered_at`);
+  validateDurableRef(errors, gate.artifact, "artifacts", `${path}.artifact`);
+  validateDurableRef(errors, gate.question_ref, "gates", `${path}.question_ref`);
+  validateDurableRef(errors, gate.answer_ref, "gates", `${path}.answer_ref`);
+  optionalTimestamp(errors, gate, "answered_at", `${path}.answered_at`);
   optionalString(errors, gate, "answer", `${path}.answer`);
   optionalString(errors, gate, "decision_note", `${path}.decision_note`);
   optionalEnum(errors, gate, "approval_source", APPROVAL_SOURCES, `${path}.approval_source`);
   validatePendingSnapshot(errors, gate.pending_snapshot, `${path}.pending_snapshot`);
   validateGateHandoffReceipt(errors, gate.handoff_receipt, `${path}.handoff_receipt`, gateName);
+  validateGateRelationships(errors, run, gate, path);
 }
 
 function validateGateHandoffReceipt(errors, receipt, path, gateName) {
@@ -1365,6 +1615,7 @@ function validateGateHandoffReceipt(errors, receipt, path, gateName) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, receipt, HANDOFF_RECEIPT_KEYS, path);
   requiredInteger(errors, receipt, "schema_version", `${path}.schema_version`);
   if (Number.isInteger(receipt.schema_version) && receipt.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
   requiredString(errors, receipt, "kind", `${path}.kind`);
@@ -1376,7 +1627,7 @@ function validateGateHandoffReceipt(errors, receipt, path, gateName) {
   requiredHash(errors, receipt, "answer_hash", `${path}.answer_hash`);
   requiredInteger(errors, receipt, "steering_generation", `${path}.steering_generation`);
   if (Number.isInteger(receipt.steering_generation) && receipt.steering_generation < 0) errors.push({ path: `${path}.steering_generation`, message: "must be non-negative" });
-  requiredString(errors, receipt, "accepted_at", `${path}.accepted_at`);
+  requiredTimestamp(errors, receipt, "accepted_at", `${path}.accepted_at`);
 }
 
 function validatePendingSnapshot(errors, pendingSnapshot, path) {
@@ -1385,13 +1636,39 @@ function validatePendingSnapshot(errors, pendingSnapshot, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, pendingSnapshot, PENDING_SNAPSHOT_KEYS, path);
   requiredString(errors, pendingSnapshot, "question_ref", `${path}.question_ref`);
   requiredHash(errors, pendingSnapshot, "question_hash", `${path}.question_hash`);
   requiredString(errors, pendingSnapshot, "artifact_ref", `${path}.artifact_ref`);
   requiredHash(errors, pendingSnapshot, "artifact_hash", `${path}.artifact_hash`);
   optionalString(errors, pendingSnapshot, "answer_ref", `${path}.answer_ref`);
   optionalHash(errors, pendingSnapshot, "answer_hash", `${path}.answer_hash`);
-  requiredString(errors, pendingSnapshot, "created_at", `${path}.created_at`);
+  requiredTimestamp(errors, pendingSnapshot, "created_at", `${path}.created_at`);
+  validateDurableRef(errors, pendingSnapshot.question_ref, "gates", `${path}.question_ref`);
+  validateDurableRef(errors, pendingSnapshot.artifact_ref, "artifacts", `${path}.artifact_ref`);
+  if (pendingSnapshot.answer_ref !== undefined) validateDurableRef(errors, pendingSnapshot.answer_ref, "gates", `${path}.answer_ref`);
+}
+
+function validateGateRelationships(errors, run, gate, path) {
+  const snapshot = gate.pending_snapshot;
+  if (isRecord(snapshot)) {
+    if (stringValue(gate.artifact) && stringValue(snapshot.artifact_ref) && gate.artifact !== snapshot.artifact_ref) errors.push({ path: `${path}.artifact`, message: "must match pending_snapshot.artifact_ref" });
+    if (stringValue(gate.question_ref) && stringValue(snapshot.question_ref) && gate.question_ref !== snapshot.question_ref) errors.push({ path: `${path}.question_ref`, message: "must match pending_snapshot.question_ref" });
+  }
+  if (gate.status === "pending") {
+    for (const key of ["answer", "answered_at", "approval_source", "handoff_receipt"]) if (gate[key] !== undefined && gate[key] !== null) errors.push({ path: `${path}.${key}`, message: "is forbidden for a pending gate" });
+    if (stringValue(gate.answer_ref) && stringValue(snapshot?.answer_ref) && gate.answer_ref !== snapshot.answer_ref) errors.push({ path: `${path}.answer_ref`, message: "must match pending_snapshot.answer_ref while pending" });
+    return;
+  }
+  if (gate.answer !== undefined) requiredString(errors, gate, "answer", `${path}.answer`);
+  if (stringValue(gate.answer_ref) && stringValue(snapshot?.answer_ref) && !gate.answer_ref.startsWith(`${snapshot.answer_ref}.consumed-`)) errors.push({ path: `${path}.answer_ref`, message: "must be an archived form of pending_snapshot.answer_ref" });
+  const expectedAnswer = gate.status === "approved" ? "approve" : gate.status === "stopped" ? "stop" : null;
+  if (expectedAnswer && stringValue(gate.answer) && gate.answer !== expectedAnswer) errors.push({ path: `${path}.answer`, message: `must equal ${expectedAnswer} for ${gate.status}` });
+  if (gate.status === "changes_requested" && stringValue(gate.answer) && !(gate.answer.startsWith("changes:") && gate.answer.slice("changes:".length).trim())) errors.push({ path: `${path}.answer`, message: "must start with changes: and include a reason" });
+  const interactiveApproval = gate.status === "approved" && run.mode === "interactive";
+  if (interactiveApproval && !isRecord(gate.handoff_receipt)) errors.push({ path: `${path}.handoff_receipt`, message: "is required for an interactive approval" });
+  if (!interactiveApproval && gate.handoff_receipt !== undefined && gate.handoff_receipt !== null) errors.push({ path: `${path}.handoff_receipt`, message: "is forbidden for this gate variant" });
+  if (isRecord(gate.handoff_receipt) && stringValue(gate.answered_at) && gate.handoff_receipt.accepted_at !== gate.answered_at) errors.push({ path: `${path}.handoff_receipt.accepted_at`, message: "must match answered_at" });
 }
 
 function isPendingGate(gate) {
@@ -1413,17 +1690,43 @@ function validateRunSlice(errors, slice, path, ids) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, slice, SLICE_KEYS, path);
   requiredTerminalSafeString(errors, slice, "id", `${path}.id`);
   optionalString(errors, slice, "stack", `${path}.stack`);
   validateStringArray(errors, slice.depends_on, `${path}.depends_on`, { required: false, values: ids });
-  optionalEnum(errors, slice, "status", SLICE_STATUSES, `${path}.status`);
+  requiredEnum(errors, slice, "status", SLICE_STATUSES, `${path}.status`);
   optionalString(errors, slice, "branch", `${path}.branch`);
   optionalString(errors, slice, "worktree", `${path}.worktree`);
+  if (stringValue(slice.worktree) && !isAbsolute(slice.worktree)) {
+    const segments = slice.worktree.split("/");
+    if (slice.worktree.includes("\\") || segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+      errors.push({ path: `${path}.worktree`, message: "must be an absolute path or safe repository-relative path" });
+    }
+  }
   optionalInteger(errors, slice, "attempts", `${path}.attempts`);
   optionalString(errors, slice, "evidence_ref", `${path}.evidence_ref`);
+  optionalHash(errors, slice, "evidence_hash", `${path}.evidence_hash`);
   optionalString(errors, slice, "review_ref", `${path}.review_ref`);
+  optionalHash(errors, slice, "review_hash", `${path}.review_hash`);
+  if (slice.reviewed_commit !== undefined && slice.reviewed_commit !== null) requiredFullGitSha(errors, slice, "reviewed_commit", `${path}.reviewed_commit`);
   optionalString(errors, slice, "merge_commit", `${path}.merge_commit`);
   optionalString(errors, slice, "blocked_reason", `${path}.blocked_reason`);
+  optionalTimestamp(errors, slice, "updated_at", `${path}.updated_at`);
+  validateDurableRef(errors, slice.evidence_ref, "evidence", `${path}.evidence_ref`);
+  validateDurableRef(errors, slice.review_ref, "reviews", `${path}.review_ref`);
+  if (slice.status === "pending" && slice.attempts !== 0) errors.push({ path: `${path}.attempts`, message: "must equal 0 while pending" });
+  if (["running", "review", "merged"].includes(slice.status) && Number.isInteger(slice.attempts) && slice.attempts < 1) errors.push({ path: `${path}.attempts`, message: "must be positive once slice work starts" });
+  if (slice.status === "blocked" && !stringValue(slice.blocked_reason)) errors.push({ path: `${path}.blocked_reason`, message: "is required for blocked" });
+  const bindingCount = presentBindingCount(slice, SLICE_REVIEW_BINDING_KEYS);
+  if (["review", "merged"].includes(slice.status)) {
+    if (bindingCount !== 0 && bindingCount !== SLICE_REVIEW_BINDING_KEYS.length) errors.push({ path, message: "evidence_hash, review_hash, and reviewed_commit must be all present or all absent" });
+    if (bindingCount === SLICE_REVIEW_BINDING_KEYS.length) {
+      if (!stringValue(slice.evidence_ref)) errors.push({ path: `${path}.evidence_ref`, message: "is required by the successor review binding" });
+      if (!stringValue(slice.review_ref)) errors.push({ path: `${path}.review_ref`, message: "is required by the successor review binding" });
+    }
+  } else if (bindingCount !== 0) {
+    errors.push({ path, message: "evidence_hash, review_hash, and reviewed_commit are forbidden outside review or merged" });
+  }
 }
 
 function validatePlannedSlices(errors, slices, path, { enforceDependencyDepth }) {
@@ -1433,6 +1736,7 @@ function validatePlannedSlices(errors, slices, path, { enforceDependencyDepth })
       errors.push({ path: `${path}[${index}]`, message: "must be an object" });
       continue;
     }
+    allowedKeys(errors, slice, PLANNED_SLICE_KEYS, `${path}[${index}]`);
     requiredTerminalSafeString(errors, slice, "id", `${path}[${index}].id`);
     requiredString(errors, slice, "stack", `${path}[${index}].stack`);
     validateStringArray(errors, slice.paths, `${path}[${index}].paths`, { required: true, nonEmpty: true });
@@ -1502,7 +1806,8 @@ function validateDependencyDepth(errors, slices, path) {
   }
 }
 
-function validateSteps(errors, steps, path) {
+function validateSteps(errors, run, path) {
+  const steps = run.steps;
   if (steps === undefined || steps === null) return;
   if (!Array.isArray(steps)) {
     errors.push({ path, message: "must be an array" });
@@ -1513,14 +1818,19 @@ function validateSteps(errors, steps, path) {
       errors.push({ path: `${path}[${index}]`, message: "must be an object" });
       continue;
     }
+    allowedKeys(errors, step, STEP_KEYS, `${path}[${index}]`);
     requiredTerminalSafeString(errors, step, "agent", `${path}[${index}].agent`);
     requiredEnum(errors, step, "status", STEP_STATUSES, `${path}[${index}].status`);
     optionalInteger(errors, step, "attempts", `${path}[${index}].attempts`);
     optionalString(errors, step, "artifact_ref", `${path}[${index}].artifact_ref`);
     optionalString(errors, step, "review_ref", `${path}[${index}].review_ref`);
     optionalString(errors, step, "evidence_ref", `${path}[${index}].evidence_ref`);
+    validateDurableRef(errors, step.artifact_ref, "artifacts", `${path}[${index}].artifact_ref`);
+    validateDurableRef(errors, step.review_ref, "reviews", `${path}[${index}].review_ref`);
+    validateDurableRef(errors, step.evidence_ref, "evidence", `${path}[${index}].evidence_ref`);
     validateStepAcceptance(errors, step.acceptance, `${path}[${index}].acceptance`);
     validateStepInheritedAcceptance(errors, step.inherited_acceptance, `${path}[${index}].inherited_acceptance`);
+    validateStepRelationships(errors, run, step, `${path}[${index}]`);
   }
 }
 
@@ -1530,10 +1840,14 @@ function validateStepAcceptance(errors, acceptance, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, acceptance, STEP_ACCEPTANCE_KEYS, path);
   requiredString(errors, acceptance, "artifact_ref", `${path}.artifact_ref`);
   requiredHash(errors, acceptance, "artifact_hash", `${path}.artifact_hash`);
   optionalString(errors, acceptance, "review_ref", `${path}.review_ref`);
   if (acceptance.review_ref !== undefined && acceptance.review_ref !== null) requiredHash(errors, acceptance, "review_hash", `${path}.review_hash`);
+  if (acceptance.review_hash !== undefined && !stringValue(acceptance.review_ref)) errors.push({ path: `${path}.review_hash`, message: "requires review_ref" });
+  validateDurableRef(errors, acceptance.artifact_ref, "artifacts", `${path}.artifact_ref`);
+  if (acceptance.review_ref !== undefined) validateDurableRef(errors, acceptance.review_ref, "reviews", `${path}.review_ref`);
 }
 
 function validateStepInheritedAcceptance(errors, inherited, path) {
@@ -1542,10 +1856,42 @@ function validateStepInheritedAcceptance(errors, inherited, path) {
     errors.push({ path, message: "must be an object" });
     return;
   }
+  allowedKeys(errors, inherited, STEP_INHERITED_ACCEPTANCE_KEYS, path);
   requiredString(errors, inherited, "from_run_id", `${path}.from_run_id`);
   requiredString(errors, inherited, "parent_spec_review_ref", `${path}.parent_spec_review_ref`);
   requiredHash(errors, inherited, "artifact_hash", `${path}.artifact_hash`);
   requiredHash(errors, inherited, "review_hash", `${path}.review_hash`);
+  validateDurableRef(errors, inherited.parent_spec_review_ref, "reviews", `${path}.parent_spec_review_ref`);
+}
+
+function validateStepRelationships(errors, run, step, path) {
+  if (step.status !== "accepted") {
+    for (const key of ["acceptance", "inherited_acceptance"]) if (step[key] !== undefined && step[key] !== null) errors.push({ path: `${path}.${key}`, message: "is allowed only for an accepted step" });
+    return;
+  }
+  const acceptance = step.acceptance;
+  if (isRecord(acceptance)) {
+    if (stringValue(step.artifact_ref) && stringValue(acceptance.artifact_ref) && step.artifact_ref !== acceptance.artifact_ref) errors.push({ path: `${path}.acceptance.artifact_ref`, message: "must match step artifact_ref" });
+    if (stringValue(step.review_ref) && stringValue(acceptance.review_ref) && step.review_ref !== acceptance.review_ref) errors.push({ path: `${path}.acceptance.review_ref`, message: "must match step review_ref" });
+    if (!stringValue(step.artifact_ref)) errors.push({ path: `${path}.artifact_ref`, message: "is required when acceptance is present" });
+  }
+  const inherited = step.inherited_acceptance;
+  if (isRecord(inherited)) {
+    if (!isRecord(acceptance)) errors.push({ path: `${path}.acceptance`, message: "is required with inherited_acceptance" });
+    else {
+      if (inherited.artifact_hash !== acceptance.artifact_hash) errors.push({ path: `${path}.inherited_acceptance.artifact_hash`, message: "must match acceptance.artifact_hash" });
+      if (inherited.review_hash !== acceptance.review_hash) errors.push({ path: `${path}.inherited_acceptance.review_hash`, message: "must match acceptance.review_hash" });
+    }
+    const continuation = run.continuation;
+    const reuse = continuation?.planning_reuse;
+    if (isRecord(continuation) && reuse?.eligible !== true) errors.push({ path: `${path}.inherited_acceptance`, message: "requires reuse-eligible continuation metadata" });
+    else if (isRecord(continuation)) {
+      if (inherited.from_run_id !== continuation.parent?.run_id) errors.push({ path: `${path}.inherited_acceptance.from_run_id`, message: "must match continuation.parent.run_id" });
+      if (inherited.parent_spec_review_ref !== reuse.spec_review_ref) errors.push({ path: `${path}.inherited_acceptance.parent_spec_review_ref`, message: "must match continuation.planning_reuse.spec_review_ref" });
+      if (inherited.artifact_hash !== reuse.spec_artifact_hash) errors.push({ path: `${path}.inherited_acceptance.artifact_hash`, message: "must match continuation.planning_reuse.spec_artifact_hash" });
+      if (inherited.review_hash !== reuse.spec_review_hash) errors.push({ path: `${path}.inherited_acceptance.review_hash`, message: "must match continuation.planning_reuse.spec_review_hash" });
+    }
+  }
 }
 
 function validateVerdict(errors, value, path, allowed) {
@@ -1554,10 +1900,41 @@ function validateVerdict(errors, value, path, allowed) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  optionalEnum(errors, value, "verdict", allowed, `${path}.verdict`);
+  allowedKeys(errors, value, VERDICT_KEYS, path);
+  requiredEnum(errors, value, "verdict", allowed, `${path}.verdict`);
   optionalString(errors, value, "report", `${path}.report`);
+  optionalHash(errors, value, "report_hash", `${path}.report_hash`);
   optionalString(errors, value, "review_ref", `${path}.review_ref`);
+  optionalHash(errors, value, "review_hash", `${path}.review_hash`);
+  if (value.reviewed_head_sha !== undefined && value.reviewed_head_sha !== null) requiredFullGitSha(errors, value, "reviewed_head_sha", `${path}.reviewed_head_sha`);
   optionalInteger(errors, value, "loops", `${path}.loops`);
+  if (Number.isInteger(value.loops) && value.loops < 0) errors.push({ path: `${path}.loops`, message: "must be non-negative" });
+  validateDurableRef(errors, value.report, "artifacts", `${path}.report`);
+  validateDurableRef(errors, value.review_ref, "reviews", `${path}.review_ref`);
+  const bindingKeys = path.endsWith(".validator") ? VALIDATOR_BINDING_KEYS : SECURITY_BINDING_KEYS;
+  if (bindingKeys === SECURITY_BINDING_KEYS && value.report_hash !== undefined) errors.push({ path: `${path}.report_hash`, message: "is not allowed for security_review" });
+  const bindingCount = presentBindingCount(value, bindingKeys);
+  if (bindingCount !== 0 && bindingCount !== bindingKeys.length) errors.push({ path, message: `${bindingKeys.join(", ")} must be all present or all absent` });
+  if (bindingCount === bindingKeys.length) {
+    if (!stringValue(value.review_ref)) errors.push({ path: `${path}.review_ref`, message: "is required by the successor verdict binding" });
+    if (bindingKeys === VALIDATOR_BINDING_KEYS && !stringValue(value.report)) errors.push({ path: `${path}.report`, message: "is required by the successor verdict binding" });
+  }
+}
+
+function validatePanelBindingGeneration(errors, run) {
+  const validatorSuccessor = hasCompleteBinding(run.validator, VALIDATOR_BINDING_KEYS);
+  const securitySuccessor = hasCompleteBinding(run.security_review, SECURITY_BINDING_KEYS);
+  if (validatorSuccessor !== securitySuccessor) {
+    errors.push({ path: "run", message: "validator and security_review must both use successor reviewed-head bindings or both use legacy bindings" });
+  }
+}
+
+function presentBindingCount(value, keys) {
+  return keys.filter((key) => value?.[key] !== undefined && value?.[key] !== null).length;
+}
+
+function hasCompleteBinding(value, keys) {
+  return presentBindingCount(value, keys) === keys.length;
 }
 
 function validateTerminalResult(errors, run, path) {
@@ -1571,15 +1948,68 @@ function validateTerminalResult(errors, run, path) {
     errors.push({ path, message: "must be an object or null" });
     return;
   }
+  const allowed = run.terminal_result.status === "completed" ? TERMINAL_RESULT_COMPLETED_KEYS : TERMINAL_RESULT_COMMON_KEYS;
+  allowedKeys(errors, run.terminal_result, allowed, path);
   requiredEnum(errors, run.terminal_result, "status", TERMINAL_STATUSES, `${path}.status`);
   requiredString(errors, run.terminal_result, "run_id", `${path}.run_id`);
   optionalString(errors, run.terminal_result, "pr_url", `${path}.pr_url`);
   optionalString(errors, run.terminal_result, "reason", `${path}.reason`);
   optionalString(errors, run.terminal_result, "summary", `${path}.summary`);
-  validateStringMap(errors, run.terminal_result.artifacts, `${path}.artifacts`);
+  validateTerminalArtifactMap(errors, run.terminal_result.artifacts, `${path}.artifacts`, { allowPostPrBindings: run.terminal_result.reason === "post-pr-retry-exhausted" });
   if (run.terminal_result.status && run.terminal_result.status !== run.status) errors.push({ path: `${path}.status`, message: `must match run.status '${run.status}'` });
   if (run.terminal_result.run_id && run.terminal_result.run_id !== run.run_id) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
   if (["blocked", "partial", "needs-human"].includes(run.status) && !stringValue(run.terminal_result.reason)) errors.push({ path: `${path}.reason`, message: `is required for ${run.status}` });
+  if (run.terminal_result.status === "completed") validateCompletedTerminalPrTuple(errors, run, path);
+}
+
+function validateCompletedTerminalPrTuple(errors, run, path) {
+  const result = run.terminal_result;
+  requiredString(errors, result, "pr_url", `${path}.pr_url`);
+  optionalBoolean(errors, result, "draft", `${path}.draft`);
+  if (result.head_sha !== undefined && result.head_sha !== null) requiredFullGitSha(errors, result, "head_sha", `${path}.head_sha`);
+  const successorDiscriminators = ["operation_id", "pr_node_id", "head_ref", "base_ref", "base_sha"];
+  if (successorDiscriminators.some((key) => Object.hasOwn(result, key))) {
+    const successorKeys = ["pr_url", "pr_number", "pr_node_id", "repository", "operation_id", "head_ref", "head_sha", "base_ref", "base_sha", "draft"];
+    for (const key of successorKeys) if (!Object.hasOwn(result, key) || result[key] === undefined || result[key] === null) errors.push({ path: `${path}.${key}`, message: "is required by the successor PR tuple" });
+    requiredPrOperationIdentity(errors, result, path);
+    requiredString(errors, result, "pr_node_id", `${path}.pr_node_id`);
+  }
+  if (!stringValue(result.pr_url)) return;
+  try {
+    const parts = githubPrUrlParts(result.pr_url);
+    if (parts.url !== result.pr_url) errors.push({ path: `${path}.pr_url`, message: "must be a canonical GitHub PR URL" });
+    if (run.pr_url !== result.pr_url) errors.push({ path: "run.pr_url", message: "must match completed terminal_result.pr_url" });
+    const hasTupleDetails = result.repository !== undefined || result.pr_number !== undefined;
+    if (hasTupleDetails) {
+      requiredString(errors, result, "repository", `${path}.repository`);
+      boundedInteger(errors, result, "pr_number", 1, Number.MAX_SAFE_INTEGER, `${path}.pr_number`);
+      if (stringValue(result.repository) && result.repository !== parts.repository) errors.push({ path: `${path}.repository`, message: "must match pr_url repository" });
+      if (Number.isInteger(result.pr_number) && result.pr_number !== parts.number) errors.push({ path: `${path}.pr_number`, message: "must match pr_url pull request number" });
+    }
+  } catch {
+    errors.push({ path: `${path}.pr_url`, message: "must be a canonical GitHub PR URL" });
+  }
+}
+
+function validateTerminalArtifactMap(errors, value, path, { allowPostPrBindings = false } = {}) {
+  if (value === undefined || value === null) return;
+  if (!isRecord(value)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    const itemPath = `${path}.${key}`;
+    if (!stringValue(item)) {
+      errors.push({ path: itemPath, message: "must be a non-empty repository-relative artifact ref" });
+      continue;
+    }
+    const segments = item.split("/");
+    const disallowedDurableRoot = DURABLE_REF_ROOTS.has(segments[0]) && segments[0] !== "artifacts"
+      && !(allowPostPrBindings && ["evidence", "reviews"].includes(segments[0]));
+    if (isAbsolute(item) || item.includes("\\") || segments.some((segment) => segment === "" || segment === "." || segment === "..") || disallowedDurableRoot) {
+      errors.push({ path: itemPath, message: "must be a repository-relative ref under artifacts/" });
+    }
+  }
 }
 
 function validateCostAttribution(errors, attribution, path, run) {
@@ -1777,6 +2207,34 @@ function optionalString(errors, obj, key, path) {
   if (typeof obj[key] !== "string") errors.push({ path, message: "must be a string or null" });
 }
 
+function optionalTimestamp(errors, obj, key, path) {
+  if (obj[key] === undefined || obj[key] === null) return;
+  if (!isIsoTimestamp(obj[key])) errors.push({ path, message: "must be an ISO timestamp or null" });
+}
+
+function requiredTimestamp(errors, obj, key, path) {
+  if (!isIsoTimestamp(obj[key])) errors.push({ path, message: "must be an ISO timestamp" });
+}
+
+function isIsoTimestamp(value) {
+  return typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function validateDurableRef(errors, value, root, path) {
+  if (!stringValue(value)) return;
+  const prefix = `${root}/`;
+  if (!value.startsWith(prefix) || value.includes("\\") || value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    errors.push({ path, message: `must stay under ${root}/` });
+  }
+}
+
+function optionalAbsolutePath(errors, obj, key, path) {
+  if (obj[key] === undefined || obj[key] === null) return;
+  if (typeof obj[key] !== "string" || !isAbsolute(obj[key])) errors.push({ path, message: "must be an absolute path or null" });
+}
+
 function optionalCostCurrency(errors, obj, key, path) {
   if (obj[key] === undefined || obj[key] === null) return;
   if (typeof obj[key] === "string" && !isSafeCostCurrency(obj[key])) errors.push({ path, message: "must be an uppercase currency code (3-12 letters) with no control characters" });
@@ -1794,11 +2252,6 @@ function requiredEnum(errors, obj, key, values, path) {
 function optionalEnum(errors, obj, key, values, path) {
   if (obj[key] === undefined || obj[key] === null) return;
   requiredEnum(errors, obj, key, values, path);
-}
-
-function optionalNumber(errors, obj, key, path) {
-  if (obj[key] === undefined || obj[key] === null) return;
-  if (typeof obj[key] !== "number" || !Number.isFinite(obj[key])) errors.push({ path, message: "must be a number" });
 }
 
 function optionalInteger(errors, obj, key, path) {

@@ -2,9 +2,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { createPanelReviewRecord, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
+import { hashFile } from "../src/refs.js";
+import { git } from "../src/git.js";
+import { observePullRequestOperation, prOperationMarker } from "../src/github.js";
+import { deriveExpectedWorktreePath } from "../src/worktrees.js";
 import {
   persistFactoryRunCreatedEnv,
   persistFactoryRunResumeEnv,
@@ -148,7 +153,7 @@ describe("lock-protected steering boundaries", () => {
     const cases = [
       [gateFixture, () => transitionGateDecision(gateFixture.runDir, "story", gateFixture.approval, { boundaryToken: gateFixture.boundary.token, ...agedLiveLockOptions() })],
       [steeringFixture, () => transitionSteeringQueued(steeringFixture.runDir, "must not overwrite", { id: "aged-live", ...agedLiveLockOptions() })],
-      [fenceFixture, () => transitionPrePrFenceEstablished(fenceFixture.runDir, { token: "aged-live-fence-token", ...agedLiveLockOptions() })],
+      [fenceFixture, () => transitionPrePrFenceEstablished(fenceFixture.runDir, prOptions(fenceFixture, { token: "aged-live-fence-token", ...agedLiveLockOptions() }))],
     ];
     try {
       for (const [fixture, invoke] of cases) {
@@ -196,13 +201,13 @@ describe("lock-protected steering boundaries", () => {
       },
       {
         fixture: fenceFixture,
-        invoke: (hooks) => transitionPrePrFenceEstablished(fenceFixture.runDir, {
+        invoke: (hooks) => transitionPrePrFenceEstablished(fenceFixture.runDir, prOptions(fenceFixture, {
           token: "serialized-fence-token",
           timeoutMs: 5000,
           retryDelayMs: 1,
           processAliveFn: () => false,
           lockHooks: hooks,
-        }),
+        })),
         assertMutation: (run) => assert.equal(run.steering.pr_fence.token, "serialized-fence-token"),
       },
     ];
@@ -460,7 +465,7 @@ describe("lock-protected steering boundaries", () => {
       {
         name: "orphan recovery",
         setup: (fixture) => seedInactiveHeartbeat(fixture, NOW, 987654321, 60000),
-        options: { processAliveFn: () => false },
+        options: { processAliveFn: (pid) => pid !== 987654321 },
         invoke: (fixture, options) => transitionRecoverOrphan(fixture.runDir, "must not recover", { ...options, now: LATER }),
         rejected: /recover rejected: active pre-PR fence/u,
         absent: (fixture, run) => {
@@ -479,7 +484,7 @@ describe("lock-protected steering boundaries", () => {
       const holder = await acquireHolder(fixture.runDir);
       const fenceLane = lane(`${writer.name}-fence`);
       const siblingLane = lane(`${writer.name}-sibling`);
-      const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, laneOptions(fenceLane, { ...writer.options, token: `fence-${safeName(writer.name)}-token`, now: LATER })));
+      const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, laneOptions(fenceLane, { ...writer.options, token: `fence-${safeName(writer.name)}-token`, now: LATER }))));
       const sibling = tracked(writer.invoke(fixture, laneOptions(siblingLane, writer.options)));
       try {
         await allEntered(fenceLane, siblingLane);
@@ -521,7 +526,7 @@ describe("lock-protected steering boundaries", () => {
         timeoutMs: 5000,
         lockHooks: { onContended: () => { secondHookEntered.value = true; } },
       }));
-      const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, laneOptions(fenceLane, { token: "active-runtime-fence-token", now: LATER })));
+      const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, laneOptions(fenceLane, { token: "active-runtime-fence-token", now: LATER }))));
       race = [holder, tickLane, fenceLane, tick, secondTick, fence];
       await allEntered(tickLane, fenceLane);
       fenceLane.release.resolve();
@@ -550,7 +555,7 @@ describe("lock-protected steering boundaries", () => {
     const fixture = createReadyPrFixture("stop-heartbeat-exclusion");
     try {
       seedInactiveHeartbeat(fixture, NOW, process.pid, 60000);
-      const established = await transitionPrePrFenceEstablished(fixture.runDir, { token: "stop-exclusion-fence", now: LATER });
+      const established = await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "stop-exclusion-fence", now: LATER }));
       const runBeforeStop = bytes(fixture.runPath);
       const heartbeatBeforeStop = bytes(fixture.heartbeatPath);
       const stopped = await stopHeartbeat(fixture.runId, {}, { cwd: fixture.repo, now: "2026-07-10T12:11:00.000Z" });
@@ -567,15 +572,51 @@ describe("lock-protected steering boundaries", () => {
     }
   });
 
+  it("terminalizes a legacy identity-less fence on mutating resume-check while retaining it", async () => {
+    const fixture = createReadyPrFixture("legacy-fence-resume-check");
+    try {
+      const established = await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "legacy-resume-fence" }));
+      const run = readJson(fixture.runPath);
+      for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete run.steering.pr_fence[key];
+      writeJson(fixture.runPath, run);
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo, now: LATER });
+      const terminal = readJson(fixture.runPath);
+      assert.equal(result.ok, false);
+      assert.equal(terminal.status, "needs-human");
+      assert.equal(terminal.terminal_result.reason, "legacy-pr-fence-operation-identity-missing");
+      assert.equal(terminal.steering.pr_fence.token, established.fence.token);
+    } finally {
+      cleanupFixture(fixture);
+    }
+  });
+
+  it("terminalizes a legacy identity-less fence on recover while retaining it", async () => {
+    const fixture = createReadyPrFixture("legacy-fence-recover");
+    try {
+      const established = await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "legacy-recover-fence" }));
+      const run = readJson(fixture.runPath);
+      for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete run.steering.pr_fence[key];
+      writeJson(fixture.runPath, run);
+      const result = await transitionRecoverOrphan(fixture.runDir, "ignored", { now: LATER });
+      assert.equal(result.run.status, "needs-human");
+      assert.equal(result.run.terminal_result.reason, "legacy-pr-fence-operation-identity-missing");
+      assert.equal(result.run.steering.pr_fence.token, established.fence.token);
+    } finally {
+      cleanupFixture(fixture);
+    }
+  });
+
   it("fences the real disrupted-recovery worktree manifest update", async () => {
     const fixture = createRecoveryFixture("recovery-worktree-race", { omitWorktree: true });
     const holder = await acquireHolder(fixture.runDir);
     const fenceLane = lane("recovery-worktree-fence");
     const recoveryLane = lane("recovery-worktree-update");
-    const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, laneOptions(fenceLane, { token: "recovery-worktree-fence", now: LATER })));
+    const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, laneOptions(fenceLane, { token: "recovery-worktree-fence", now: LATER }))));
     const recovery = tracked(recoverDisruptedRun(fixture.runId, { ...laneOptions(recoveryLane), cwd: fixture.repo, now: LATER }));
     try {
       await allEntered(fenceLane, recoveryLane);
+      assert.equal(gitStdout(fixture.worktree, ["branch", "--show-current"]), fixture.runId);
+      assert.equal(deriveExpectedWorktreePath(fixture.repo, fixture.runId), fixture.worktree);
       fenceLane.release.resolve();
       holder.release.resolve();
       const established = await fence.promise;
@@ -595,13 +636,27 @@ describe("lock-protected steering boundaries", () => {
   });
 
   it("fences real disrupted-recovery terminalization before heartbeat cleanup", async () => {
-    const fixture = createRecoveryFixture("recovery-terminal-race", { deleteBranch: true });
+    const fixture = createRecoveryFixture("recovery-terminal-race");
+    runGit(fixture.repo, ["worktree", "add", fixture.worktree, fixture.runId]);
+    const run = readJson(fixture.runPath);
+    run.base_commit = "f".repeat(40);
+    writeJson(fixture.runPath, run);
     seedInactiveHeartbeat(fixture, NOW, 987654321, 60000);
     const holder = await acquireHolder(fixture.runDir);
     const fenceLane = lane("recovery-terminal-fence");
     const recoveryLane = lane("recovery-terminal-writer");
-    const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, laneOptions(fenceLane, { token: "recovery-terminal-fence", now: LATER, processAliveFn: () => false })));
-    const recovery = tracked(recoverDisruptedRun(fixture.runId, { ...laneOptions(recoveryLane), cwd: fixture.repo, now: LATER, processAliveFn: () => false }));
+    const liveness = { processAliveFn: (pid) => pid !== 987654321 };
+    const authority = prOptions(fixture);
+    const authorityGit = authority.gitFn;
+    const fence = tracked(transitionPrePrFenceEstablished(fixture.runDir, {
+      ...authority,
+      ...laneOptions(fenceLane, { token: "recovery-terminal-fence", now: LATER, ...liveness }),
+      gitFn(cwd, args) {
+        if (args[0] === "merge-base") return { ok: true, status: 0, stdout: "", stderr: "" };
+        return authorityGit(cwd, args);
+      },
+    }));
+    const recovery = tracked(recoverDisruptedRun(fixture.runId, { ...laneOptions(recoveryLane), cwd: fixture.repo, now: LATER, ...liveness }));
     try {
       await allEntered(fenceLane, recoveryLane);
       fenceLane.release.resolve();
@@ -614,10 +669,10 @@ describe("lock-protected steering boundaries", () => {
       await assert.rejects(recovery.promise, /recovery terminalization rejected: active pre-PR fence/u);
       assertBytes(fixture.runPath, runBeforeRecovery);
       assertBytes(fixture.heartbeatPath, heartbeatBeforeRecovery);
-      const run = readJson(fixture.runPath);
-      assert.equal(run.status, "running");
-      assert.equal(run.terminal_result, null);
-      assert.equal(run.steering.pr_fence.token, established.fence.token);
+      const persisted = readJson(fixture.runPath);
+      assert.equal(persisted.status, "running");
+      assert.equal(persisted.terminal_result, null);
+      assert.equal(persisted.steering.pr_fence.token, established.fence.token);
       assert.equal(readJson(fixture.heartbeatPath).pid, 987654321);
     } finally {
       await finishRace(fixture, holder, fenceLane, recoveryLane, fence, recovery);
@@ -629,10 +684,10 @@ describe("lock-protected steering boundaries", () => {
     const fixture = createReadyPrFixture("exact-fence-clear-race");
     let race = [];
     try {
-      const old = await transitionPrePrFenceEstablished(fixture.runDir, { token: "old-fence-token", now: NOW });
-      await transitionPrePrFenceCleared(fixture.runDir, old.fence.token, { now: "2026-07-10T12:01:00.000Z" });
+      const old = await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "old-fence-token", now: NOW }));
+      await transitionPrePrFenceCleared(fixture.runDir, old.fence.token, prOptions(fixture, { now: "2026-07-10T12:01:00.000Z", prDisposition: "absent" }));
       const staleHash = hashRunState(readJson(fixture.runPath));
-      const active = await transitionPrePrFenceEstablished(fixture.runDir, { token: "active-fence-token", now: "2026-07-10T12:02:00.000Z" });
+      const active = await transitionPrePrFenceEstablished(fixture.runDir, prOptions(fixture, { token: "active-fence-token", now: "2026-07-10T12:02:00.000Z" }));
       const holder = await acquireHolder(fixture.runDir);
       const specs = [
         { name: "missing", token: undefined, rejected: /boundary token must be a non-empty string/u },
@@ -643,7 +698,7 @@ describe("lock-protected steering boundaries", () => {
         { name: "duplicate", token: active.fence.token, rejected: /active pre-PR fence/u },
       ].map((spec) => {
         const contenderLane = lane(`fence-clear-${spec.name}`);
-        const contender = tracked(transitionPrePrFenceCleared(fixture.runDir, spec.token, laneOptions(contenderLane, { ...spec.options, now: LATER })));
+        const contender = tracked(transitionPrePrFenceCleared(fixture.runDir, spec.token, prOptions(fixture, laneOptions(contenderLane, { ...spec.options, now: LATER, prDisposition: "absent" }))));
         return { ...spec, lane: contenderLane, contender };
       });
       race = [holder, ...specs.flatMap((spec) => [spec.lane, spec.contender])];
@@ -681,21 +736,80 @@ describe("lock-protected steering boundaries", () => {
     }
   });
 
+  it("retains the fence when executable clear observes an invalid own marker or tuple", async () => {
+    const fixture = createReadyPrFixture("invalid-own-marker-clear");
+    try {
+      const authority = prOptions(fixture);
+      const established = await transitionPrePrFenceEstablished(fixture.runDir, { ...authority, token: "invalid-own-marker-fence" });
+      const marker = prOperationMarker(established.fence.operation_id);
+      const scenarios = [
+        operationApiPull(established.fence, { body: `${marker}\n${marker}` }),
+        operationApiPull(established.fence, { body: `prefix ${marker}` }),
+        operationApiPull(established.fence, { body: `${marker}\n<!-- opencode-feature-factory:pr-operation=malformed -->` }),
+        operationApiPull(established.fence, { body: marker, head: { ref: "other", sha: established.fence.head_sha, repo: { full_name: established.fence.repository } } }),
+      ];
+      for (const pull of scenarios) {
+        const before = bytes(fixture.runPath);
+        const result = await transitionPrePrFenceCleared(fixture.runDir, established.fence.token, {
+          ...authority,
+          observePrOperation: observePullRequestOperation,
+          observePrOperationPage: () => includedOperationPage([pull]),
+        });
+        assert.equal(result.updated, false);
+        assert.equal(result.disposition, "ambiguous");
+        assertBytes(fixture.runPath, before);
+        assert.equal(readJson(fixture.runPath).steering.pr_fence.token, established.fence.token);
+      }
+    } finally {
+      cleanupFixture(fixture);
+    }
+  });
+
+  it("retains the fence when executable clear sees incomplete or invalid pagination", async () => {
+    const cases = [
+      ["full-page-without-termination", ({ fence }) => includedOperationPage(Array.from({ length: 100 }, (_, index) => operationApiPull(fence, { number: index + 100, node_id: `PR_clear_${index}`, html_url: `https://github.com/acme/project/pull/${index + 100}`, body: "ordinary PR" })))],
+      ["foreign-last", () => includedOperationPage([], `<https://evil.example/repos/acme/project/pulls?state=all&head=acme%3Afeature&base=main&per_page=100&page=3>; rel="last"`)],
+      ["page-jump", ({ page }) => page === 1 ? includedOperationPage([], `<${operationPageUrl("acme/project", 3)}>; rel="next"`) : includedOperationPage([])],
+      ["omitted-announced-pages", ({ page }) => page === 1 ? includedOperationPage([], `<${operationPageUrl("acme/project", 2)}>; rel="next", <${operationPageUrl("acme/project", 4)}>; rel="last"`) : includedOperationPage([])],
+      ["repeated-next", () => includedOperationPage([], `<${operationPageUrl("acme/project", 2)}>; rel="next", <${operationPageUrl("acme/project", 3)}>; rel="next"`)],
+    ];
+    for (const [name, pageOutput] of cases) {
+      const fixture = createReadyPrFixture(`clear-${name}`);
+      try {
+        const authority = prOptions(fixture);
+        const established = await transitionPrePrFenceEstablished(fixture.runDir, { ...authority, token: `fence-${name}` });
+        const before = bytes(fixture.runPath);
+        const result = await transitionPrePrFenceCleared(fixture.runDir, established.fence.token, {
+          ...authority,
+          observePrOperation: observePullRequestOperation,
+          observePrOperationPage: ({ page }) => pageOutput({ page, fence: established.fence }),
+        });
+        assert.equal(result.updated, false, name);
+        assert.equal(result.disposition, "unknown", name);
+        assertBytes(fixture.runPath, before, name);
+        assert.equal(readJson(fixture.runPath).steering.pr_fence.token, established.fence.token, name);
+      } finally {
+        cleanupFixture(fixture);
+      }
+    }
+  });
+
   it("still requires a live exact fence for PR creation", async () => {
     const fixture = createReadyPrFixture("pr-fence-contract");
     try {
-      await assert.rejects(transitionPrCreated(fixture.runDir, prInput()), /active pre-PR fence/u);
-      const established = await transitionPrePrFenceEstablished(fixture.runDir, { token: "pr-create-fence" });
-      await assert.rejects(transitionPrCreated(fixture.runDir, prInput(), { fenceToken: "wrong-fence-token" }), /token mismatch/u);
+      await assert.rejects(transitionPrCreated(fixture.runDir, {}), /active pre-PR fence/u);
+      const options = prOptions(fixture);
+      const established = await transitionPrePrFenceEstablished(fixture.runDir, { ...options, token: "pr-create-fence" });
+      await assert.rejects(transitionPrCreated(fixture.runDir, {}, { ...options, fenceToken: "wrong-fence-token" }), /token mismatch/u);
       const stale = readJson(fixture.runPath);
       stale.steering.generation += 1;
       writeJson(fixture.runPath, stale);
       const staleBytes = bytes(fixture.runPath);
-      await assert.rejects(transitionPrCreated(fixture.runDir, prInput(), { fenceToken: established.fence.token }), /pre-PR fence is stale/u);
+      await assert.rejects(transitionPrCreated(fixture.runDir, {}, { ...options, fenceToken: established.fence.token }), /pre-PR fence is stale/u);
       assertBytes(fixture.runPath, staleBytes);
       stale.steering.generation -= 1;
       writeJson(fixture.runPath, stale);
-      const completed = await transitionPrCreated(fixture.runDir, prInput(), { fenceToken: established.fence.token });
+      const completed = await transitionPrCreated(fixture.runDir, {}, { ...options, fenceToken: established.fence.token });
       assert.equal(completed.run.status, "completed");
     } finally {
       cleanupFixture(fixture);
@@ -797,7 +911,12 @@ async function createPendingGateFixture(runId) {
     answer_ref: "gates/story.answer",
     approval_source: "external-driver",
   };
-  await transitionGateDecision(fixture.runDir, "story", { ...approval, status: "pending" }, { now: NOW });
+  await transitionGateDecision(fixture.runDir, "story", {
+    status: "pending",
+    artifact: approval.artifact,
+    question_ref: approval.question_ref,
+    answer_ref: approval.answer_ref,
+  }, { now: NOW });
   fixture.answerPath = join(fixture.runDir, "gates", "story.answer");
   writeFileSync(fixture.answerPath, "approve\n", "utf8");
   fixture.boundary = (await transitionSteeringBoundaryOpened(fixture.runDir, "gate", { token: "gate-approval-token" })).boundary;
@@ -822,25 +941,38 @@ function createFixture(runId) {
 
 function createReadyPrFixture(runId) {
   const fixture = createFixture(runId);
-  for (const dir of ["artifacts", "reviews"]) mkdirSync(join(fixture.runDir, dir), { recursive: true });
+  initGitRepo(fixture.repo);
+  runGit(fixture.repo, ["checkout", "-b", "feature"]);
+  const head = gitStdout(fixture.repo, ["rev-parse", "HEAD"]);
+  configureLocalGithubOrigin(fixture.repo, "https://github.com/acme/project.git");
+  writeAbsentOperationGh(fixture.repo);
+  for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(fixture.runDir, dir), { recursive: true });
   writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n", "utf8");
-  writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "feature", verdict: "GO" });
-  writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "feature", verdict: "PASS" });
-  writeJson(fixture.runPath, readyRun(runId));
+  writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+  writeJson(join(fixture.runDir, "reviews", "slice.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head }));
+  writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO" }));
+  writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "PASS" }));
+  writeJson(fixture.runPath, readyRun(runId, fixture, head));
   return fixture;
 }
 
-function readyRun(runId) {
+function readyRun(runId, fixture, head) {
   return {
     schema_version: 1,
     run_id: runId,
     status: "running",
+    base_ref: "main",
+    base_commit: head,
+    branch: "feature",
+    worktree: fixture.repo,
+    github_account: "acme",
+    pr_mode: "ready",
     pr_url: null,
     gates: { pre_pr: { status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md", answer: "approve", answered_at: NOW } },
     steps: [{ agent: "implementation", status: "running", attempts: 1 }],
-    slices: [{ id: "slice", status: "merged", attempts: 1, merge_commit: "abc123" }],
-    validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
-    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+    slices: [{ id: "slice", status: "merged", attempts: 1, evidence_ref: "evidence/slice.json", evidence_hash: hashFile(join(fixture.runDir, "evidence", "slice.json")), review_ref: "reviews/slice.json", review_hash: hashFile(join(fixture.runDir, "reviews", "slice.json")), reviewed_commit: head, merge_commit: head }],
+    validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFile(join(fixture.runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFile(join(fixture.runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
+    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFile(join(fixture.runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head },
     terminal_result: null,
   };
 }
@@ -853,21 +985,25 @@ function createRecoveryFixture(runId, { omitWorktree = false, deleteBranch = fal
   const runDir = join(repo, ".opencode", "factory", runId);
   const worktree = join(repo, ".opencode", "worktrees", runId);
   mkdirSync(runDir, { recursive: true });
-  for (const dir of ["artifacts", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
+  for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n", "utf8");
-  writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "feature", verdict: "GO" });
-  writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "feature", verdict: "PASS" });
+  writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: baseCommit });
+  writeJson(join(runDir, "reviews", "slice.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: baseCommit }));
+  writeJson(join(runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: runId, attempt: 1, reviewedHeadSha: baseCommit, verdict: "GO" }));
+  writeJson(join(runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: runId, attempt: 1, reviewedHeadSha: baseCommit, verdict: "PASS" }));
+  const readyFixture = fixturePaths({ repo, runDir, runId, worktree });
   const run = {
-    ...readyRun(runId),
+    ...readyRun(runId, readyFixture, baseCommit),
     base_ref: "main",
     base_commit: baseCommit,
     branch: runId,
-    slices: [{ id: "slice", status: "merged", attempts: 1, merge_commit: baseCommit }],
+    branch: runId,
   };
-  if (!omitWorktree) run.worktree = worktree;
+  if (omitWorktree) delete run.worktree;
+  else run.worktree = worktree;
   writeJson(join(runDir, "run.json"), run);
   if (deleteBranch) runGit(repo, ["branch", "-D", runId]);
-  return fixturePaths({ repo, runDir, runId, worktree });
+  return readyFixture;
 }
 
 function fixturePaths(fixture) {
@@ -909,6 +1045,36 @@ function laneOptions(contenderLane, overrides = {}) {
         await contenderLane.release.promise;
       },
     },
+  };
+}
+
+function prOptions(fixture, overrides = {}) {
+  const run = readJson(fixture.runPath);
+  const disposition = overrides.prDisposition || "open";
+  const options = { ...overrides };
+  delete options.prDisposition;
+  return {
+    ...options,
+    repoRoot: fixture.repo,
+    gitFn: options.gitFn || ((cwd, args) => {
+      if (args.join(" ") === "config --get remote.origin.url") return { ok: true, status: 0, stdout: "https://github.com/acme/project.git\n", stderr: "" };
+      if (args[0] === "ls-remote") {
+        const ref = args[3].slice("refs/heads/".length);
+        const local = ref === run.base_ref ? run.base_commit : gitStdout(fixture.repo, ["rev-parse", `refs/heads/${ref}`]);
+        return { ok: true, status: 0, stdout: `${local}\trefs/heads/${ref}\n`, stderr: "" };
+      }
+      return git(cwd, args);
+    }),
+    observePrOperation: options.observePrOperation || ((identity) => disposition === "absent" ? { disposition: "absent", reason: null, pull_request: null } : {
+      disposition,
+      reason: null,
+      pull_request: {
+        pr_url: PR_URL, pr_number: 77, pr_node_id: "PR_steering_test", repository: identity.repository, draft: identity.draft,
+        body: "", state: disposition, merged_at: disposition === "merged" ? LATER : null,
+        head_ref: identity.head_ref, head_sha: identity.head_sha, head_repository: identity.repository,
+        base_ref: identity.base_ref, base_sha: identity.base_sha, base_repository: identity.repository,
+      },
+    }),
   };
 }
 
@@ -1038,6 +1204,30 @@ function prInput() {
   return { pr_url: PR_URL, pr_number: 77, repository: "acme/project" };
 }
 
+function operationApiPull(fence, overrides = {}) {
+  return {
+    html_url: PR_URL,
+    number: 77,
+    node_id: "PR_steering_test",
+    draft: fence.draft,
+    body: prOperationMarker(fence.operation_id),
+    state: "open",
+    merged_at: null,
+    head: { ref: fence.head_ref, sha: fence.head_sha, repo: { full_name: fence.repository } },
+    base: { ref: fence.base_ref, sha: fence.base_sha, repo: { full_name: fence.repository } },
+    ...overrides,
+  };
+}
+
+function includedOperationPage(body, link = null) {
+  return `HTTP/2 200 OK\r\ncontent-type: application/json${link ? `\r\nlink: ${link}` : ""}\r\n\r\n${JSON.stringify(body)}`;
+}
+
+function operationPageUrl(repository, page) {
+  const query = new URLSearchParams({ state: "all", head: "acme:feature", base: "main", per_page: "100", page: String(page) });
+  return `https://api.github.com/repos/${repository}/pulls?${query.toString()}`;
+}
+
 function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
@@ -1057,7 +1247,28 @@ function cleanupRecoveryFixture(fixture) {
 }
 
 function runCli(repo, args) {
-  return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", timeout: 15000 });
+  return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", timeout: 15000, env: { ...process.env, PATH: `${join(repo, ".opencode", "fake-bin")}:${process.env.PATH}` } });
+}
+
+function configureLocalGithubOrigin(repo, url) {
+  runGit(repo, ["remote", "add", "origin", url]);
+  runGit(repo, ["config", `url.file://${repo}/.insteadOf`, url]);
+}
+
+function writeAbsentOperationGh(repo) {
+  const bin = join(repo, ".opencode", "fake-bin");
+  mkdirSync(bin, { recursive: true });
+  const executable = join(bin, "gh");
+  writeFileSync(executable, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "auth" && args[1] === "switch") process.exit(0);
+if (args[0] === "api") {
+  process.stdout.write("HTTP/2 200 OK\\r\\ncontent-type: application/json\\r\\n\\r\\n[]");
+  process.exit(0);
+}
+process.exit(2);
+`, "utf8");
+  chmodSync(executable, 0o755);
 }
 
 function initGitRepo(repo) {

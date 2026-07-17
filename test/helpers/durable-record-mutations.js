@@ -9,6 +9,7 @@ const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const SHA_C = "c".repeat(40);
 const NOW = "2026-07-16T12:00:00.000Z";
+const PR_OPERATION_ID = `ffpr-v1-${"d".repeat(64)}`;
 
 export const DURABLE_MUTATION_FAMILIES = Object.freeze([
   "missing-key",
@@ -23,6 +24,117 @@ export const DURABLE_MUTATION_FAMILIES = Object.freeze([
   "descriptor-key-shape-drift",
   "stale-identity",
   "cross-bound-identity",
+]);
+
+export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
+  "plan-slices-json",
+  "run-envelope-running",
+  "run-envelope-terminal",
+  "terminal-result-completed",
+  "terminal-result-blocked",
+  "terminal-result-partial",
+  "terminal-result-needs-human",
+  "gate-pending",
+  "gate-approved-without-receipt",
+  "gate-approved-interactive",
+  "gate-changes-requested",
+  "gate-stopped",
+  "step-running",
+  "step-rejected",
+  "step-blocked",
+  "step-accepted",
+  "step-inherited-acceptance",
+  "continuation-envelope",
+  "continuation-parent-binding",
+  "continuation-selected-review",
+  "continuation-target-binding",
+  "continuation-parent-artifact-sidecar",
+  "continuation-parent-evidence-sidecar",
+  "continuation-parent-review-sidecar",
+  "continuation-planning-reuse-ineligible",
+  "continuation-planning-reuse-eligible",
+  "continuation-draft-reuse",
+  "continuation-post-pr-binding",
+  "slice-pending",
+  "slice-running",
+  "slice-review",
+  "slice-merged",
+  "slice-blocked",
+  "validator-verdict-binding",
+  "security-verdict-binding",
+  "steering-boundary",
+  "steering-action-claim",
+  "steering-last-action",
+  "steering-pr-fence",
+  "pr-created-result",
+  "post-pr-phase-disabled",
+  "post-pr-phase-awaiting-pr",
+  "post-pr-phase-observing",
+  "post-pr-phase-failure-recording",
+  "post-pr-phase-remediation-planned",
+  "post-pr-phase-remediation-running",
+  "post-pr-phase-changes-observed",
+  "post-pr-phase-committed",
+  "post-pr-phase-revalidating",
+  "post-pr-phase-validated",
+  "post-pr-phase-push-pending",
+  "post-pr-phase-remote-confirmed",
+  "post-pr-phase-succeeded",
+  "post-pr-phase-blocked",
+  "post-pr-phase-needs-human",
+  "post-pr-policy-disabled",
+  "post-pr-policy-enabled",
+  "post-pr-observation-null",
+  "post-pr-observation-active",
+  "post-pr-observation-last-error",
+  "post-pr-observation-review-request",
+  "post-pr-observation-snapshot",
+  "post-pr-remediation-null",
+  "post-pr-remediation-active",
+  "post-pr-remediation-owner",
+  "post-pr-remediation-changes",
+  "post-pr-remediation-change-entry",
+  "post-pr-dispatch-planned",
+  "post-pr-dispatch-running",
+  "post-pr-dispatch-returned",
+  "post-pr-revalidation-empty",
+  "post-pr-revalidation-bound",
+  "post-pr-canonical-job-planned",
+  "post-pr-canonical-job-running",
+  "post-pr-canonical-job-retry-wait",
+  "post-pr-canonical-job-bound",
+  "post-pr-validator-job-planned",
+  "post-pr-validator-job-running",
+  "post-pr-validator-job-retry-wait",
+  "post-pr-validator-job-bound",
+  "post-pr-security-job-planned",
+  "post-pr-security-job-running",
+  "post-pr-security-job-retry-wait",
+  "post-pr-security-job-bound",
+  "post-pr-push-not-ready",
+  "post-pr-push-pending",
+  "post-pr-push-confirmed",
+  "post-pr-push-last-error",
+  "post-pr-evidence-sidecar",
+  "post-pr-continuation-review-null",
+  "post-pr-continuation-review-bound",
+  "post-pr-terminal-fact-null",
+  "post-pr-terminal-fact-account-switch-failed-github-auth",
+  "post-pr-terminal-fact-account-switch-failed-push",
+  "post-pr-terminal-fact-dispatch-start-unknown",
+  "post-pr-terminal-fact-path-lane-violation",
+  "post-pr-terminal-fact-remote-head-diverged",
+  "post-pr-terminal-fact-panel-runner-result-malformed",
+  "post-pr-terminal-fact-push-failed",
+  "post-pr-terminal-fact-panel-attribution-unsafe",
+  "repair-reported",
+  "repair-repairing",
+  "repair-review-approve",
+  "repair-review-reject",
+  "repair-merged",
+  "repair-blocked-from-reported",
+  "repair-blocked-from-repairing",
+  "repair-blocked-from-review",
 ]);
 
 const AUTHORITY_CLASSES = Object.freeze([
@@ -62,6 +174,15 @@ const CONTINUATION_EXTERNAL = Object.freeze({
   draft: { ref: "artifacts/technical-brief.md", bytes: "Unaccepted technical brief draft.\n" },
   postPrEvidence: { ref: "evidence/post-pr.json", bytes: "{\"kind\":\"post-pr-ci\",\"verdict\":\"red\"}\n" },
   postPrReview: { ref: "reviews/post-pr.json", bytes: "{\"kind\":\"post-pr-continuation\",\"verdict\":\"BLOCKED\"}\n" },
+});
+const SLICE_EXTERNAL = Object.freeze({
+  evidence: { ref: "evidence/backend.json", bytes: `{"subject":"backend","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_B}"}\n` },
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"APPROVE","required_fixes":[],"reviewed_commit":"${SHA_B}"}\n` },
+});
+const PANEL_EXTERNAL = Object.freeze({
+  report: { ref: "artifacts/validation-report.md", bytes: "GO\n" },
+  validator: { ref: "reviews/implementation-validator.json", bytes: `{"subject":"feature--catalog","attempt":1,"verdict":"GO","reviewed_head_sha":"${SHA_B}"}\n` },
+  security: { ref: "reviews/security-reviewer.json", bytes: `{"subject":"feature--catalog","attempt":1,"verdict":"PASS","reviewed_head_sha":"${SHA_B}"}\n` },
 });
 const REPAIR_PLAN_BYTES = `${JSON.stringify({
   slices: [
@@ -118,6 +239,7 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "steering-boundary",
     "steering-action-claim",
     "steering-last-action",
+    "steering-pr-fence",
     "pr-created-result",
   ],
   "continuation-planning-draft-reuse": [
@@ -232,14 +354,15 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "step-inherited-acceptance": "skt",
   "slice-pending": "sktrhbd",
   "slice-running": "skthbd",
-  "slice-review": "skthbd",
-  "slice-merged": "skhbd",
+  "slice-review": "sktd",
+  "slice-merged": "skd",
   "slice-blocked": "skthbd",
-  "validator-verdict-binding": "skthbd",
-  "security-verdict-binding": "skthbd",
+  "validator-verdict-binding": "sktd",
+  "security-verdict-binding": "sktd",
   "steering-boundary": "srb",
   "steering-action-claim": "srhb",
   "steering-last-action": "srhb",
+  "steering-pr-fence": "skb",
   "pr-created-result": "skthbd",
   "continuation-envelope": "rhbd",
   "continuation-parent-binding": "sktd",
@@ -329,7 +452,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
-  ["terminal-result-completed", "c0a32a3d9fb33de14b0bee740202376bae2508e9b5a7e746331dda28f1ca190b"],
+  ["terminal-result-completed", "624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c"],
   ["terminal-result-blocked", "681845bd946f1cb11d6f2d0a528946365756a79f2ce284179856360e3d9b631e"],
   ["terminal-result-partial", "6726223fbe9f4850a9d6815d78ccf5b5fbbdfdebcd6bf5c7611ace16569b9705"],
   ["terminal-result-needs-human", "8b7d4e6f6533c6072da2e83300c1f2503055905c0bcf5d69a54a91196f6c2eef"],
@@ -345,15 +468,16 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["step-inherited-acceptance", "c995fe9943a2898b6f9405e2a427f3de3b61d198f6d7b9d2edf46f177ff4f0f9"],
   ["slice-pending", "27d978f06a5d77e19f3293902f5ef98a674bd920b35b39a0a56519f48b40b586"],
   ["slice-running", "d5e779da2618570c2922ff58dc14927a60548dc770616322812912c6c4ada981"],
-  ["slice-review", "41720bafc18e26be8e3436847af90b7e5abebce5b03ca5ad586ddc99bb24882c"],
-  ["slice-merged", "701f657cad3c72f4b2b4294481e6c1d2d35131cf0ed5cff5b761cc4a218b37aa"],
+  ["slice-review", "8fd0fae00323e9bed95c0673fc1f4f22d345a0f886438fee4991e7a390b7e7b0"],
+  ["slice-merged", "785275ed7b23a9ecb8fd33d838e0e3a6acc2980d9e69e96ebd0f4cb6a9410707"],
   ["slice-blocked", "bfb537c4489fa0d6512d0470e5a28ab6fabeea5dfb2f86fb53ae11a6057fe954"],
-  ["validator-verdict-binding", "7d3b598a5ef8e1a6561ecf770a8a8ff1ea58b98ee8eaa2edbb3cf82f1d0cdea8"],
-  ["security-verdict-binding", "991f75d168c8b232dd78e556444f0446e150a697359ab3dc6ce334bd864a0fd2"],
+  ["validator-verdict-binding", "ce1205fb84feece303f45e9841916d68fe26431d3117636aecc4b0cdccc79e14"],
+  ["security-verdict-binding", "81cbb46158b44646aabf50e0152b80d5ed6dc423826337bf45fe6be7c24e5995"],
   ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
   ["steering-action-claim", "9a94c1f05fec7cad1d2930995c464530088b99175c8430f336fe4f00a76d7384"],
   ["steering-last-action", "986caa05859db8fa98077f1d3e0b08340be3922854cb5cd33a95415fd5b250b4"],
-  ["pr-created-result", "a349b22ed56c01c2b38203d74c65a8c9e65bae11108dcbf3407b02e1be842742"],
+  ["steering-pr-fence", "372be755ffb890bc4fdc9ae5913adad802c809e3d35c0e8c4746917c82e59b8a"],
+  ["pr-created-result", "3b863980fbc4b34d584f7ef02b57e5a16ca37858f2c8dc347addcdb02c8446a3"],
   ["continuation-envelope", "81191ae4a3a84c496f99bad916dc229a68a107eff211ac9d4739783531208fcb"],
   ["continuation-parent-binding", "be6e6abe6f58d7194d61d9527c40ce6424cf748cd0c38f2e446ac56066bb1380"],
   ["continuation-selected-review", "9e9a6c756313a6ab1f7e363bcef864def294b4247df06c6135514f6138ae52f8"],
@@ -440,11 +564,11 @@ const DURABLE_AUTHORITY_METADATA_BY_ID = new Map(DURABLE_AUTHORITY_METADATA_MANI
 // exclusions. The hash input is canonical JSON for { targets, exclusions }; it binds target
 // order and every family, path, value, from, to, key, sidecar, and label without reading RECORDS.
 export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
-  ["plan-slices-json", "af303fa79406e4a20cbe888a2ab4e6e9b1e66a0a6c6e9ca2f08bd81172ea7663"],
+  ["plan-slices-json", "3c923442fe75f188546037455e61dca6f3172bb766399c4df4289de2f1c6f726"],
   ["final-plan-descriptor", "b8ef8dbfe1f1e54cae98fb0960aa315fe4479e33533b63d0a9e0b88f0df959da"],
   ["run-envelope-running", "0dfdf9c52ba1ee909070da85617630bbb0cac990f109bdc3c7f25c4f686276dd"],
   ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
-  ["terminal-result-completed", "3d17906cce62941bf26a4817e5b9ccb8c31d1804878280f1a18b7b69632a98a0"],
+  ["terminal-result-completed", "8156685012bdcf0072fc38331dd34c2ee2f0ac59c94d14418a0cadc3f92b84be"],
   ["terminal-result-blocked", "9e2aac2293e6a2aa0ff69725ec484565d1ba598e4f921be01c44267eaab6d231"],
   ["terminal-result-partial", "c7c56d99562df246e6e5219fb7ca002924103fea7be86bc2cab1b8c04eada6f6"],
   ["terminal-result-needs-human", "f10e0e1b566924c9b223e63b30426d6004b3210b0be12d884c63ec42310af5b9"],
@@ -460,15 +584,16 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["step-inherited-acceptance", "1eb12c653d87652e1fd82b8bc0f7fa40810fb892616ee3327cbfeea3b32ca531"],
   ["slice-pending", "63b63efe898da669ae80a855536c52a7f00a0009a0465a2ec6cee66477b11f50"],
   ["slice-running", "e4d226476601e984b5b50f12ad36ce05f8a7e3ac3a49421218b72a94be54c962"],
-  ["slice-review", "15a385a34305ad1bd2b1b54a8bc9da5ef5643577757b42534b03b57163516a01"],
-  ["slice-merged", "69834bbeb702e60070896c61ef0389d5c4a3b8544fef1a82ce2b1548b2e78ace"],
+  ["slice-review", "1d0d4c6beaa40f3f3397a3d015ae7d682cd8eb4ed10e268998b59bf14d7c76ef"],
+  ["slice-merged", "d02186b0bac9122bd39058f4205cc5234e6a8da5bc82fd221c6b88ca76e6633f"],
   ["slice-blocked", "284ac69650ab3643fab2f8aece086a1a16c66f106449b29e3003848f9e53cd11"],
-  ["validator-verdict-binding", "a8bf0eeca21686570472e43a2fa667e385c132bda80d7082b18aa9d7a7a313fd"],
-  ["security-verdict-binding", "c3ae8bc0f5878b51663f5fe8ba71b67e393f01b03ac19ca9f3f36a6c44437d17"],
+  ["validator-verdict-binding", "d5663f22b888f878625141430a2602863730f8ab122a815359dd545d876b49cb"],
+  ["security-verdict-binding", "88c89ebb14e5f14121dc022da8f0c73dc1e5e9639d570337edcfb09cef5c17d7"],
   ["steering-boundary", "7842e29ee7d10b4465db99127739e4b602479aff47b848a5c7bb9d2e30ecf732"],
   ["steering-action-claim", "0acedda0cd1d2cf887d58482c179d90183e43650546d3e919b5f5cee92627b4f"],
   ["steering-last-action", "8d42d520ec811dad436e84cdc48b7ae6d2f13a442fdef2ba6397b13bdea16e67"],
-  ["pr-created-result", "e37d53a5fb2e8a6007aa845a0b6dd1d18534ef406cd66e899b9f6c5568b30dbb"],
+  ["steering-pr-fence", "aae0a3986f100717159038cc2b06cfd835b1313305e22fc7beeea4929db3d662"],
+  ["pr-created-result", "6b510aefac2fe46ad7ea3679ab0b023eda0ad0702139fdcfe62176b0404272bc"],
   ["continuation-envelope", "6bf3fb70f927af981715950d3e2d264bd72902599c95e07f82b01897fc4e05c9"],
   ["continuation-parent-binding", "8ae2a68c7eb75a5a179f6aee86a9e9cd85dfff2ee660073af2538bc59aaf1396"],
   ["continuation-selected-review", "c7cf99ee147100b49fab3bb71bf8457ec6eb0453d1e6810f98eb64968e3c4a14"],
@@ -563,7 +688,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
   ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
-  ["terminal-result-completed", "c03d548c3d23d7235c80a4037dea9c0da0b4c14e26fcebe8a4a0832b03febe2c"],
+  ["terminal-result-completed", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
   ["terminal-result-blocked", "2e50300aa3e14e8fd6c935f3dae3fa44dd388c6ff386091ecbc28109f82ad855"],
   ["terminal-result-partial", "b5808744bc1ae0146a9a59e9814be3d58712a04c0cfbaf6f5d1858ab698c7746"],
   ["terminal-result-needs-human", "4c5aee988d94853ac78432435d4b65f7ebe8720dfa0652b6c9eeb8ee30bd0581"],
@@ -579,15 +704,16 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["step-inherited-acceptance", "ba9a7a06a122aa68917e10675cf6b2ec97eab054ab7f40353904ef16ef226657"],
   ["slice-pending", "ae8061ad556cf202f28c06dad1d8dfaf84168512be57e8dae034984926ad766b"],
   ["slice-running", "c481d007f40269d98676cf2746db9a5ab4b15ffb1cafe92fc9d0569181cef758"],
-  ["slice-review", "31e86b5e7350fbd821b7b8610094a88c6466cf5f3118c764c93f91e106e9f45b"],
-  ["slice-merged", "9d7340108931879b7f6f6c9f4e17c3bdf02986512313cf1e4d2850ce50e79e7e"],
+  ["slice-review", "ac668a5340a0db81df8ad31e4d73302234dfd49da5933161e0f43d869e8a3262"],
+  ["slice-merged", "ad2674135456283cf415406224c7a04cf661565770b6a7270a00d673fe2d6869"],
   ["slice-blocked", "720be910a4201dab3958263b06f17510181df9c58c77f63eda5b9a91bb39da10"],
-  ["validator-verdict-binding", "020e2ed5ec2a49bc0842a0b066f249cd6a15d289a732d94fcb2d8aa84b59993c"],
-  ["security-verdict-binding", "f05baff5db20222f94b68cdfd6cdf8680af764c3497ea085d8631036b77eadba"],
+  ["validator-verdict-binding", "22c22e8e118609a58e29101a6f6a89dacc8ddfddcc92974c810fe4b51cc5fdc9"],
+  ["security-verdict-binding", "56e34d4427dc76cb46caee5a002856e4e97ef2dc870543fc489a750e384e6d99"],
   ["steering-boundary", "b3477a6967254d04f869b97b8d15d00ddb952673f00807ebec41f05afdbdacfc"],
   ["steering-action-claim", "00866d18d439d808d2829e6d0967675629175bf8c1f00bec2130fa2728b30a21"],
   ["steering-last-action", "4fc3088a51000b12aed4ca3216c8e60b74c5206d8d9e75e4dea319cb31c62820"],
-  ["pr-created-result", "1ccd84b1e137fc59a416a3b584680907c1541d9b5cfacd98f8a94d62cb9cee28"],
+  ["steering-pr-fence", "16fa47900dbcbd6618a6ebd0eed5cb705910a2ccfc8478bd1f554c7f8ebef406"],
+  ["pr-created-result", "619a77468645eec8923dec7f7e3c8b0d1aa11064aac4494e039b7aa282e6f9ea"],
   ["continuation-envelope", "5e10d284d461eb4758d11241f6b8ba67acb7eef34144eee4655080a8e620e2fe"],
   ["continuation-parent-binding", "ee8dabc5be43ce00230c86a075b90c23e978e3ee8a3cde8f3cb187676b0f0db5"],
   ["continuation-selected-review", "e2469d19e003e6f3b357f62d89f112fed91f40602db79a587a925bb1f071d26a"],
@@ -816,7 +942,7 @@ const RECORDS = [
     canonicalPath: ["plan/slices.json"], source: JSON.parse(PLAN_EXTERNAL.plan.bytes), externalSources: PLAN_EXTERNAL,
     facts: exactFacts(JSON.parse(PLAN_EXTERNAL.plan.bytes)),
     requiredPath: ["slices"], typePath: ["slices"],
-    targets: [drift(["slices", 1], "depends_on", "dependencies"), stale(["slices", 1, "id"], "stale-slice"), cross(["slices", 1, "depends_on", 0], "other-wave")],
+    targets: [drift(["slices", 1], "depends_on", "dependencies"), stale(["slices", 1, "depends_on", 0], "stale-slice"), cross(["slices", 1, "depends_on", 0], "other-wave")],
   }),
   recordEntry({
     authorityClassId: "plan-slices-graph", id: "final-plan-descriptor", record: "final.plan.json descriptor", variant: "required descriptor",
@@ -846,7 +972,7 @@ const RECORDS = [
     facts: exactFacts({ schema_version: 1, run_id: "catalog-run", status: "blocked", updated_at: NOW, terminal_result: { status: "blocked", run_id: "catalog-run", reason: "review-blocked" } }),
     requiredPath: ["terminal_result"], typePath: ["status"], targets: [schema(["schema_version"]), time(["updated_at"]), stale(["status"], "running"), cross(["terminal_result", "run_id"], "other-run")],
   }),
-  terminalResultEntry("terminal-result-completed", "completed", { pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo", draft: false, artifacts: { test_report: "artifacts/test-report.md" } }, [ref(["artifacts", "test_report"]), stale(["pr_number"], 6)]),
+  terminalResultEntry("terminal-result-completed", "completed", { pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, pr_node_id: "PR_catalog_operation", repository: "acme/repo", operation_id: PR_OPERATION_ID, head_ref: "feature--catalog", head_sha: SHA_B, base_ref: "main", base_sha: SHA_A, draft: false, artifacts: { test_report: "artifacts/test-report.md" } }, [ref(["artifacts", "test_report"]), stale(["head_sha"], SHA_A), cross(["operation_id"], `ffpr-v1-${"e".repeat(64)}`)]),
   terminalResultEntry("terminal-result-blocked", "blocked", { reason: "review-blocked", summary: "Review blocked." }),
   terminalResultEntry("terminal-result-partial", "partial", { reason: "partial-completion", summary: "Some work completed." }),
   terminalResultEntry("terminal-result-needs-human", "needs-human", { reason: "operator-reconciliation", summary: "Operator action required." }),
@@ -874,13 +1000,14 @@ const RECORDS = [
   steeringEntry("steering-boundary", "boundary"),
   steeringEntry("steering-action-claim", "action_claim"),
   steeringEntry("steering-last-action", "last_action"),
+  prFenceEntry(),
   recordEntry({
     authorityClassId: "validator-security-pr-result", id: "pr-created-result", record: "PR-created terminal_result", variant: "completed external PR",
     writer: "transitionPrCreated after fenced external PR creation/re-observation",
     readers: ["validateRun terminal consistency", "resumeFactory terminal reader", "cleanup eligibility", "post-PR initialization and continuation admission"],
-    canonicalPath: ["terminal_result"], source: { status: "completed", run_id: "catalog-run", pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo", draft: false, head_sha: SHA_B },
-    facts: exactFacts({ status: "completed", run_id: "catalog-run", pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, repository: "acme/repo", draft: false, head_sha: SHA_B }),
-    requiredPath: ["pr_url"], typePath: ["pr_number"], targets: [ref(["pr_url"]), stale(["head_sha"], SHA_A), cross(["repository"], "other/repo")],
+    canonicalPath: ["terminal_result"], source: { status: "completed", run_id: "catalog-run", pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, pr_node_id: "PR_catalog_operation", repository: "acme/repo", operation_id: PR_OPERATION_ID, head_ref: "feature--catalog", head_sha: SHA_B, base_ref: "main", base_sha: SHA_A, draft: false },
+    facts: exactFacts({ status: "completed", run_id: "catalog-run", pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, pr_node_id: "PR_catalog_operation", repository: "acme/repo", operation_id: PR_OPERATION_ID, head_ref: "feature--catalog", head_sha: SHA_B, base_ref: "main", base_sha: SHA_A, draft: false }),
+    requiredPath: ["operation_id"], typePath: ["pr_number"], targets: [ref(["pr_url"]), stale(["head_sha"], SHA_A), cross(["operation_id"], `ffpr-v1-${"e".repeat(64)}`)],
   }),
 
   continuationEnvelopeEntry(),
@@ -1212,9 +1339,17 @@ function sliceEntry(id, variant) {
     targets.push(ref(["worktree"]));
   }
   if (["review", "merged"].includes(variant)) {
-    source.evidence_ref = "evidence/backend.json";
-    source.review_ref = "reviews/backend.json";
-    targets.push(ref(["evidence_ref"]), ref(["review_ref"]));
+    source.evidence_ref = SLICE_EXTERNAL.evidence.ref;
+    source.evidence_hash = hashBytes(SLICE_EXTERNAL.evidence.bytes);
+    source.review_ref = SLICE_EXTERNAL.review.ref;
+    source.review_hash = hashBytes(SLICE_EXTERNAL.review.bytes);
+    source.reviewed_commit = SHA_B;
+    targets.push(
+      ...externalSidecarTargets("evidence", ["evidence_ref"], ["evidence_hash"]),
+      ...externalSidecarTargets("review", ["review_ref"], ["review_hash"]),
+      stale(["reviewed_commit"], SHA_A, "stale reviewed head"),
+      cross(["reviewed_commit"], SHA_C, "cross-bound reviewed head"),
+    );
   }
   if (variant === "merged") {
     source.merge_commit = SHA_B;
@@ -1225,12 +1360,22 @@ function sliceEntry(id, variant) {
   return recordEntry({
     authorityClassId: "slices-review-evidence-bindings", id, record: "run.json.slices[]", variant,
     writer: variant === "merged" ? "transitionSliceMerged checked transition" : variant === "pending" ? "factory slices-seed checked transition" : "transitionRunSlice checked transition",
-    readers: ["validateRun slice validation", "builder-wave dependency scheduler", "transitionSliceMerged", "PR readiness and repair admission readers"],
+    readers: source.reviewed_commit
+      ? ["validateRun slice validation", "builder-wave dependency scheduler", "transitionSliceMerged exact merge proof", "PR readiness ref/hash re-observation", "repair admission readers"]
+      : ["validateRun slice validation", "builder-wave dependency scheduler", "transitionSliceMerged", "PR readiness and repair admission readers"],
     canonicalPath: ["slices", 0], source,
+    ...(source.reviewed_commit ? {
+      externalSources: SLICE_EXTERNAL,
+      sidecars: [externalSidecar("evidence", ["evidence_ref"], ["evidence_hash"]), externalSidecar("review", ["review_ref"], ["review_hash"])],
+      observations: [
+        { name: "evidence-head", source: "evidence", path: ["head_sha"], expected: SHA_B, consumer: "transitionRunSlice and PR readiness" },
+        { name: "reviewed-commit", source: "review", path: ["reviewed_commit"], expected: SHA_B, consumer: "transitionRunSlice, transitionSliceMerged, and PR readiness" },
+      ],
+    } : {}),
     facts: [
       fact(["id"], "backend"), fact(["stack"], "backend"), fact(["depends_on"], []), fact(["status"], variant), fact(["attempts"], source.attempts),
       ...(source.branch ? [fact(["branch"], source.branch), fact(["worktree"], source.worktree)] : []),
-      ...(source.evidence_ref ? [fact(["evidence_ref"], source.evidence_ref), fact(["review_ref"], source.review_ref)] : []),
+      ...(source.evidence_ref ? [fact(["evidence_ref"], source.evidence_ref), fact(["evidence_hash"], source.evidence_hash), fact(["review_ref"], source.review_ref), fact(["review_hash"], source.review_hash), fact(["reviewed_commit"], source.reviewed_commit)] : []),
       ...(source.merge_commit ? [fact(["merge_commit"], source.merge_commit), fact(["updated_at"], source.updated_at)] : []),
       ...(source.blocked_reason ? [fact(["blocked_reason"], source.blocked_reason)] : []),
     ],
@@ -1250,18 +1395,31 @@ function sidecarRecord(authorityClassId, id, record, variant, writer, readers, r
 }
 
 function panelEntry(id, record, key, source) {
+  const externalName = key === "validator" ? "validator" : "security";
+  const externalSources = key === "validator"
+    ? { report: PANEL_EXTERNAL.report, review: PANEL_EXTERNAL.validator }
+    : { review: PANEL_EXTERNAL.security };
+  source = {
+    ...source,
+    ...(key === "validator" ? { report_hash: hashBytes(PANEL_EXTERNAL.report.bytes) } : {}),
+    review_hash: hashBytes(externalSources.review.bytes),
+    reviewed_head_sha: SHA_B,
+  };
   const targets = [
-    ref(["review_ref"]),
+    ...externalSidecarTargets("review", ["review_ref"], ["review_hash"]),
     stale(["verdict"], key === "validator" ? "NO-GO" : "BLOCK"),
-    cross(["review_ref"], key === "validator" ? "reviews/security-reviewer.json" : "reviews/implementation-validator.json"),
+    stale(["reviewed_head_sha"], SHA_A, "stale reviewed integration head"),
+    cross(["reviewed_head_sha"], SHA_C, "cross-bound reviewed integration head"),
   ];
-  if (source.report) targets.push(ref(["report"]));
+  if (source.report) targets.push(...externalSidecarTargets("report", ["report"], ["report_hash"]));
   return recordEntry({
-    authorityClassId: "validator-security-pr-result", id, record, variant: `${source.verdict} persisted keys`,
+    authorityClassId: "validator-security-pr-result", id, record, variant: `${source.verdict} successor byte/head binding`,
     writer: "factory verdicts checked transition",
-    readers: ["validateRun verdict validation", "assertPrCreatedReadiness", "post-PR revalidation", "terminal/panel remediation routing"],
-    canonicalPath: [key], source,
-    facts: [fact(["verdict"], source.verdict), ...(source.report ? [fact(["report"], source.report)] : []), fact(["review_ref"], source.review_ref)],
+    readers: ["validateRun verdict validation", "transitionPanelVerdicts atomic publication", "assertPrCreatedReadiness ref/hash/head re-observation", "post-PR revalidation", "terminal/panel remediation routing"],
+    canonicalPath: [key], source, externalSources,
+    sidecars: [...(source.report ? [externalSidecar("report", ["report"], ["report_hash"])] : []), externalSidecar("review", ["review_ref"], ["review_hash"])],
+    observations: [{ name: `${externalName}-reviewed-head`, source: "review", path: ["reviewed_head_sha"], expected: SHA_B, consumer: "transitionPanelVerdicts and PR readiness" }],
+    facts: [fact(["verdict"], source.verdict), ...(source.report ? [fact(["report"], source.report), fact(["report_hash"], source.report_hash)] : []), fact(["review_ref"], source.review_ref), fact(["review_hash"], source.review_hash), fact(["reviewed_head_sha"], source.reviewed_head_sha)],
     requiredPath: ["verdict"], typePath: ["verdict"], targets,
   });
 }
@@ -1293,6 +1451,30 @@ function steeringEntry(id, key) {
       ...(source.outcome ? [fact(["outcome"], source.outcome), fact(["resolved_at"], source.resolved_at)] : []),
     ],
     requiredPath: ["token"], typePath: ["generation"], targets,
+  });
+}
+
+function prFenceEntry() {
+  const source = {
+    token: "pr-fence-token-1",
+    generation: 2,
+    state_hash: HASH_A,
+    created_at: NOW,
+    operation_id: PR_OPERATION_ID,
+    repository: "acme/repo",
+    head_ref: "feature--catalog",
+    head_sha: SHA_B,
+    base_ref: "main",
+    base_sha: SHA_A,
+    draft: false,
+  };
+  return recordEntry({
+    authorityClassId: "validator-security-pr-result", id: "steering-pr-fence", record: "run.json.steering.pr_fence", variant: "successor PR operation fence",
+    writer: "transitionPrePrFenceEstablished from checked local/worktree/origin Git authority",
+    readers: ["validateSteering successor fence validation", "transitionPrCreated and transitionPrePrFenceCleared checked GitHub reconciliation", "resume/recover legacy fence terminalization"],
+    canonicalPath: ["steering", "pr_fence"], source, facts: exactFacts(source),
+    requiredPath: ["operation_id"], typePath: ["draft"],
+    targets: [time(["created_at"]), ref(["repository"]), hash(["state_hash"]), drift([], "operation_id", "operation"), stale(["head_sha"], SHA_A), cross(["operation_id"], `ffpr-v1-${"e".repeat(64)}`)],
   });
 }
 
@@ -1750,6 +1932,8 @@ function canonicalRunFixture(record) {
     status: "running",
     gates: {},
   };
+  if (record.id === "validator-verdict-binding") run.security_review = canonicalSecurityVerdictBinding();
+  if (record.id === "security-verdict-binding") run.validator = canonicalValidatorVerdictBinding();
   if (record.canonicalPath[0] === "steering") {
     run.steering = {
       schema_version: 1,
@@ -1771,6 +1955,26 @@ function canonicalRunFixture(record) {
   }
   container[record.canonicalPath.at(-1)] = structuredClone(record.source);
   return run;
+}
+
+function canonicalValidatorVerdictBinding() {
+  return {
+    verdict: "GO",
+    report: PANEL_EXTERNAL.report.ref,
+    report_hash: hashBytes(PANEL_EXTERNAL.report.bytes),
+    review_ref: PANEL_EXTERNAL.validator.ref,
+    review_hash: hashBytes(PANEL_EXTERNAL.validator.bytes),
+    reviewed_head_sha: SHA_B,
+  };
+}
+
+function canonicalSecurityVerdictBinding() {
+  return {
+    verdict: "PASS",
+    review_ref: PANEL_EXTERNAL.security.ref,
+    review_hash: hashBytes(PANEL_EXTERNAL.security.bytes),
+    reviewed_head_sha: SHA_B,
+  };
 }
 
 function postPrCatalogFixture(id) {
@@ -2184,10 +2388,10 @@ function rejectSyntheticCanonicalKeys(record, path) {
     for (const key of ["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"]) forbidden.add(key);
   }
   if (record.authorityClassId === "slices-review-evidence-bindings") {
-    for (const key of ["review_binding", "attempt_reviews", "reviewed_commit", "review_hash", "evidence_hash"]) forbidden.add(key);
+    for (const key of ["review_binding", "attempt_reviews"]) forbidden.add(key);
   }
   if (["validator-verdict-binding", "security-verdict-binding"].includes(record.id)) {
-    for (const key of ["subject", "attempt", "report_ref", "review_hash", "reviewed_commit"]) forbidden.add(key);
+    for (const key of ["subject", "attempt", "report_ref", "reviewed_commit"]) forbidden.add(key);
   }
   if (record.authorityClassId === "gates-snapshot-handoff" && Object.hasOwn(record.source, "gate")) {
     throw new TypeError(`${path}.source.gate is synthetic; gate identity belongs to the gates map key`);

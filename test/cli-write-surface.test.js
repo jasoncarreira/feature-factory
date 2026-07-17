@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
+import { DURABLE_AUTHORITY_CATALOG, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const RUN_ID = "cli-write-surface";
@@ -102,7 +103,19 @@ describe("cli write surface", () => {
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
     try {
       initGitRepo(repo, ["slice-branch"]);
+      const baseCommit = gitOutput(repo, ["rev-parse", "HEAD"]).trim();
+      runGit(repo, ["remote", "add", "origin", "https://github.com/jasoncarreira/opencode-feature-factory.git"]);
+      runGit(repo, ["config", `url.file://${repo}/.insteadOf`, "https://github.com/jasoncarreira/opencode-feature-factory.git"]);
+      const sliceWorktree = join(repo, ".opencode", "worktrees", "slice");
+      mkdirSync(join(repo, ".opencode", "worktrees"), { recursive: true });
+      runGit(repo, ["worktree", "add", sliceWorktree, "slice-branch"]);
+      writeFileSync(join(sliceWorktree, "slice.txt"), "slice bytes\n");
+      runGit(sliceWorktree, ["add", "slice.txt"]);
+      runGit(sliceWorktree, ["commit", "-m", "slice bytes"]);
+      const reviewedHead = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]).trim();
+      runGit(repo, ["checkout", "-b", "feature-branch"]);
       seedRun(runDir);
+      writeJson(join(runDir, "run.json"), { ...readJson(join(runDir, "run.json")), base_ref: "main", base_commit: baseCommit, branch: "feature-branch", github_account: "jasoncarreira", pr_mode: "ready" });
 
       const steered = JSON.parse(runFactory(repo, ["steer", RUN_ID, "--message", "operator steering", "--json"]).stdout);
       assert.equal(steered.steering.message_chars, 17);
@@ -125,11 +138,13 @@ describe("cli write surface", () => {
       validateFactory(repo);
       assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]).stderr, /refuses to replace non-pending slice progress/u);
       assert.match(runFactoryFail(repo, ["slice-status", RUN_ID, "typo", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/typo", "--attempts", "1", "--json"]).stderr, /slice 'typo' not found/u);
-      writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true });
-      writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", verdict: "APPROVE", required_fixes: [] });
+      writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedHead });
+      writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", verdict: "APPROVE", required_fixes: [], attempt: 1, reviewed_commit: reviewedHead });
       runFactory(repo, ["slice-status", RUN_ID, "slice", "review", "--evidence-ref", "evidence/slice.json", "--review-ref", "reviews/slice.json", "--json"]);
       validateFactory(repo);
-      runFactory(repo, ["slice-merged", RUN_ID, "slice", "--merge-commit", "abc123", "--json"]);
+      runGit(repo, ["merge", "--no-ff", "slice-branch", "-m", "merge slice"]);
+      const integrationHead = gitOutput(repo, ["rev-parse", "HEAD"]).trim();
+      runFactory(repo, ["slice-merged", RUN_ID, "slice", "--merge-commit", integrationHead, "--json"]);
       validateFactory(repo);
 
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
@@ -138,8 +153,8 @@ describe("cli write surface", () => {
       assert.match(runFactoryFail(repo, ["step", RUN_ID, "unknown-agent", "running", "--attempts", "1", "--json"]).stderr, /step 'unknown-agent' not found/u);
 
       writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n", "utf8");
-      writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", verdict: "GO" });
-      writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", verdict: "PASS" });
+      writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", verdict: "GO", attempt: 1, reviewed_head_sha: integrationHead });
+      writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", verdict: "PASS", attempt: 1, reviewed_head_sha: integrationHead });
       runFactory(repo, ["verdicts", RUN_ID, "--validator", "GO", "--report", "artifacts/validation-report.md", "--security", "PASS", "--review-ref", "reviews/security-reviewer.json", "--json"]);
       validateFactory(repo);
 
@@ -151,13 +166,45 @@ describe("cli write surface", () => {
       runFactory(repo, ["gate-decision", RUN_ID, "pre_pr", "approved", "--artifact", "artifacts/validation-report.md", "--question-ref", "gates/pre_pr.question.md", "--answer-ref", "gates/pre_pr.answer", "--approval-source", "external-driver", "--boundary-token", gateBoundary.token, "--json"]);
       validateFactory(repo);
 
+      writeFakeGhForPrOperation(repo);
       const fence = JSON.parse(runFactory(repo, ["pr-fence", RUN_ID, "--json"]).stdout).fence;
-      const completed = JSON.parse(runFactory(repo, ["pr-created", RUN_ID, "--pr-url", "https://github.com/jasoncarreira/opencode-feature-factory/pull/123", "--pr-number", "123", "--repository", "jasoncarreira/opencode-feature-factory", "--fence-token", fence.token, "--json"]).stdout);
+      const completed = JSON.parse(runFactory(repo, ["pr-created", RUN_ID, "--fence-token", fence.token, "--json"]).stdout);
       const validation = JSON.parse(runFactory(repo, ["validate", RUN_ID]).stdout);
 
       assert.equal(completed.status, "completed");
       assert.equal(validation.ok, true, JSON.stringify(validation, null, 2));
       assert.equal(readJson(join(runDir, "run.json")).status, "completed");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects every generated plan mutation through slicesSeed and preserves the checked seed/reseed guard", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-plan-mutations-"));
+    const runDir = join(repo, ".opencode", "factory", RUN_ID);
+    try {
+      seedRun(runDir);
+      const record = DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).find(({ id }) => id === "plan-slices-json");
+      const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+      assert.equal(cases.length, 6);
+      for (const mutationCase of cases) {
+        writeJson(join(runDir, "plan", "slices.json"), mutationCase.record);
+        const before = readFileSync(join(runDir, "run.json"), "utf8");
+        const rejected = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+        assert.match(rejected.stderr, /plan\.|dependency/u, mutationCase.name);
+        assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before, mutationCase.name);
+      }
+
+      writeJson(join(runDir, "plan", "slices.json"), record.source);
+      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+      const seededBytes = readFileSync(join(runDir, "run.json"), "utf8");
+      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), seededBytes, "byte-identical pending reseed is a checked no-op");
+      runFactory(repo, ["slice-status", RUN_ID, "B0.2", "running", "--attempts", "1", "--json"]);
+      const startedBytes = readFileSync(join(runDir, "run.json"), "utf8");
+      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]).stderr, /refuses to replace non-pending slice progress/u);
+      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--force", "--json"]).stderr, /refuses to replace non-pending slice progress/u);
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), startedBytes, "post-start reseed rejection must not mutate run.json");
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -214,7 +261,7 @@ function seedRun(runDir) {
   mkdirSync(join(runDir, "evidence"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   mkdirSync(join(runDir, "gates"), { recursive: true });
-  writeJson(join(runDir, "run.json"), { schema_version: 1, run_id: RUN_ID, status: "running", gates: {}, slices: [], steps: [{ agent: "spec-writer", status: "running", attempts: 0 }] });
+  writeJson(join(runDir, "run.json"), { schema_version: 1, run_id: RUN_ID, status: "running", branch: "main", worktree: resolve(runDir, "../../.."), gates: {}, slices: [], steps: [{ agent: "spec-writer", status: "running", attempts: 0 }] });
   writeJson(join(runDir, "plan", "slices.json"), {
     slices: [{ id: "slice", stack: "backend", paths: ["src/example.js"], depends_on: [], acceptance: ["works"], test_plan: ["unit"] }],
   });
@@ -256,13 +303,31 @@ function runFactoryFrom(cwd, args) {
 function spawnFactory(repo, args) {
   const commandArgs = args[0] === "answer"
     ? [CLI, "factory", "answer", "--repo", repo, ...args.slice(1)]
+    : args[0] === "pr-created"
+      ? [CLI, "factory", ...args]
     : [CLI, "factory", ...args, "--repo", repo];
   return spawnSync(process.execPath, commandArgs, {
     cwd: repo,
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", PATH: `${join(repo, ".opencode", "fake-bin")}:${process.env.PATH || ""}` },
     timeout: 15000,
   });
+}
+
+function writeFakeGhForPrOperation(repo) {
+  const bin = join(repo, ".opencode", "fake-bin");
+  mkdirSync(bin, { recursive: true });
+  const script = join(bin, "gh");
+  writeFileSync(script, `#!/usr/bin/env node
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+if (process.argv[2] === "auth") process.exit(0);
+const run = JSON.parse(readFileSync(join(process.cwd(), ".opencode", "factory", ${JSON.stringify(RUN_ID)}, "run.json"), "utf8"));
+const fence = run.steering.pr_fence;
+const pr = { html_url: "https://github.com/jasoncarreira/opencode-feature-factory/pull/123", number: 123, node_id: "PR_cli_write_surface", draft: fence.draft, body: "<!-- opencode-feature-factory:pr-operation=" + fence.operation_id + " -->", state: "open", merged_at: null, head: { ref: fence.head_ref, sha: fence.head_sha, repo: { full_name: fence.repository } }, base: { ref: fence.base_ref, sha: fence.base_sha, repo: { full_name: fence.repository } } };
+process.stdout.write("HTTP/2 200 OK\\r\\ncontent-type: application/json\\r\\n\\r\\n" + JSON.stringify([pr]));
+`, "utf8");
+  chmodSync(script, 0o755);
 }
 
 function spawnFactoryStart(repo, args, bin, capture) {

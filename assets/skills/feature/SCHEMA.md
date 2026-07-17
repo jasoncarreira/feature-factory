@@ -148,7 +148,7 @@ feature-factory factory terminal <run-id> blocked --reason TEXT --boundary-token
 feature-factory factory slice-merged <run-id> <slice-id> --merge-commit SHA --json
 feature-factory factory repair <run-id> reported --owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref evidence/<file> --json
 feature-factory factory repair <run-id> <repairing|review|merged|blocked> [--attempts N] [--review-ref reviews/<file> --evidence-ref evidence/<file> --commit SHA] [--merge-commit SHA --verification-ref evidence/<file>] [--reason TEXT] --json
-feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN --json
+feature-factory factory pr-created <run-id> --fence-token TOKEN --json
 ```
 
 Process-sidecar write command, not a semantic `run.json` write:
@@ -564,9 +564,9 @@ Absent context adds no field. The IDs do not prove that an attribution entry, ag
 
 ## Durable Authority Integrity Catalog
 
-Integrity coverage for durable semantic workflow authority is closed-world inventory work. A durable authority record, sibling record, nested binding, or consequential state variant cannot claim integrity coverage until it is registered in the finite matrix as its own catalog entry with its production writer or checked transition, every decision-making consumer or reader, applicable adversarial mutation families, reasoned record-specific exclusions, and a named test. Registration, mutation emission, and catalog completeness are necessary but not sufficient for a production-integrity-coverage claim: every applicable emitted mutation case for that row must also be asserted rejected through the row's named production validator, consistency checker, or checked transition. Adding a durable record to prose or a validator without registering it does not extend the coverage claim. A mutation generated for one aggregate authority class, record, or variant never covers a sibling entry. The remaining B0M production-seam enforcement is tracked in [issue #82](https://github.com/jasoncarreira/opencode-feature-factory/issues/82); until that work lands, this test/docs catalog does not claim production integrity coverage merely because inventory, emission, or completeness checks pass.
+Integrity coverage for durable semantic workflow authority is closed-world inventory work. A durable authority record, sibling record, nested binding, or consequential state variant cannot claim integrity coverage until it is registered in the finite matrix as its own catalog entry with its production writer or checked transition, every decision-making consumer or reader, applicable adversarial mutation families, reasoned record-specific exclusions, and a named test. Registration, mutation emission, and catalog completeness are necessary but not sufficient for a production-integrity-coverage claim: every applicable emitted mutation case for that row must also be asserted rejected through the row's named production validator, consistency checker, or checked transition. Adding a durable record to prose or a validator without registering it does not extend the coverage claim. A mutation generated for one aggregate authority class, record, or variant never covers a sibling entry. B0M.1 production adoption for [issue #82](https://github.com/jasoncarreira/opencode-feature-factory/issues/82) covers exactly `plan-slices-json`, `run-envelope-running`, `run-envelope-terminal`, `terminal-result-completed`, `terminal-result-blocked`, `terminal-result-partial`, and `terminal-result-needs-human`. Every applicable emitted mutation for those seven rows is rejected through its named production seam. No other catalog row gains production-integrity coverage from B0M.1.
 
-The shared adversarial mutation families are: missing and unknown keys; wrong schema, kind, time, and type; wrong ref, hash, and bytes; descriptor key-shape drift; and stale and cross-bound identity. For every individual record/variant entry, every family has a concrete target or is excluded with a non-empty record-specific reason. Every target-or-exclusion disposition is explicitly authored; absent targets never receive automatic exclusions. Ref text, its recorded hash, and the referenced sidecar bytes are independent mutation targets; a wrong ref does not count as wrong bytes. The deterministic test catalog and mutation helper live in the owned `test/helpers/durable-record-mutations.js` and `test/durable-record-mutations.test.js` lane; they deep-clone source records, name every generated case, and reject completeness unless every required per-record entry passes. Independently authored closed manifests are not generated from or derived from the catalog under test: for every required entry the metadata manifest binds the exact writer, all readers, named tests, authority facts, and complete sidecar descriptors, while the descriptor manifest independently binds all twelve target-or-exclusion dispositions and every complete target definition. The canonical-source manifest independently binds every catalog row's authority class, id, record, variant, real run path, exact persisted source shape, path-plus-expected-value authority facts, and separately modeled external bytes. It rejects source deletion or substitution, record/variant relocation, fact deletion/relocation/value contradiction, and synthetic keys. A target definition includes its family and path plus every applicable value, from, to, key, sidecar, and label. Omission or substitution at the source boundary fails completeness, as do target deletion, target-to-exclusion and exclusion-to-target substitution, and mutation of any bound target field. Each current run-state source is inserted at its real path in an internally consistent run accepted by its exported production validator or checked consumer; the future-only `final.plan` descriptor instead passes its named descriptor contract without claiming current `validateRun` support. Every referenced post-PR external byte fixture is written separately and checked by `checkRunConsistency`.
+The shared adversarial mutation families are: missing and unknown keys; wrong schema, kind, time, and type; wrong ref, hash, and bytes; descriptor key-shape drift; and stale and cross-bound identity. For every individual record/variant entry, every family has a concrete target or is excluded with a non-empty record-specific reason. Every target-or-exclusion disposition is explicitly authored; absent targets never receive automatic exclusions. Ref text, its recorded hash, and the referenced sidecar bytes are independent mutation targets; a wrong ref does not count as wrong bytes. The deterministic test catalog and mutation helper live in the owned `test/helpers/durable-record-mutations.js` and `test/durable-record-mutations.test.js` lane; they deep-clone source records, name every generated case, and reject completeness unless every required per-record entry passes. Independently authored closed manifests are not generated from or derived from the catalog under test: for every required entry the metadata manifest binds the exact writer, all readers, named tests, authority facts, and complete sidecar descriptors, while the descriptor manifest independently binds all twelve target-or-exclusion dispositions and every complete target definition. The canonical-source manifest independently binds every catalog row's authority class, id, record, variant, real run path, exact persisted source shape, path-plus-expected-value authority facts, and separately modeled external bytes. It rejects source deletion or substitution, record/variant relocation, fact deletion/relocation/value contradiction, and synthetic keys. A target definition includes its family and path plus every applicable value, from, to, key, sidecar, and label. Omission or substitution at the source boundary fails completeness, as do target deletion, target-to-exclusion and exclusion-to-target substitution, and mutation of any bound target field. Rows with established production coverage are inserted at their real path in an internally consistent run and exercised through their exported production validator or checked consumer; catalog inventory alone makes no such claim. The future-only `final.plan` descriptor instead passes its named descriptor contract without claiming current `validateRun` support. Every referenced post-PR external byte fixture is written separately and checked by `checkRunConsistency`.
 
 ### Oracle-manifest update procedure
 
@@ -577,7 +577,7 @@ Changes to `DURABLE_AUTHORITY_METADATA_MANIFEST`, `DURABLE_AUTHORITY_DESCRIPTOR_
 3. Have that readable old/new value diff independently reviewed for the intended writer/readers/tests/facts/sidecars, complete target/exclusion definitions, and canonical source/path/external bytes. Opaque hash churn alone is not review evidence.
 4. Only after the value diff is independently reviewed may the corresponding literal digest be deliberately updated. The reviewer then checks that the digest-only change matches exactly the reviewed rows and that all independent-oracle rejection tests remain intact.
 
-The canonical-source manifest covers all 108 catalog rows. That includes plan/slices, the future-only `final.plan` descriptor, running and terminal run envelopes, every terminal-result variant, the PR-created result, all continuation rows and parent sidecars, all post-PR rows, and all PR79 repair rows. Current persisted rows pass their actual exported `validateRun`, `validateSlicesPlan`, `checkRunConsistency`, or named checked consumer. `final.plan` is explicitly a descriptor contract: its descriptor kind/ref/hash and external plan bytes are tested without claiming that current `validateRun` consumes it. Final-plan and continuation artifact/evidence/review bytes are external fixture sources, never persisted `sidecar_bytes`.
+The canonical-source manifest covers all 109 catalog rows, with 108 production-covered rows and sole future row `final-plan-descriptor`. That includes plan/slices, the future-only `final.plan` descriptor, running and terminal run envelopes, every terminal-result variant, `steering-pr-fence`, the PR-created result, all continuation rows and parent sidecars, all post-PR rows, and all PR79 repair rows. The manifest remains an inventory oracle rather than an automatic production-coverage claim. The seven B0M.1 rows above pass their named exported validator or checked transition for every applicable generated mutation. B0MR.1 additionally gives production-consumer coverage to exactly `slice-review`, `slice-merged`, `validator-verdict-binding`, and `security-verdict-binding`. B0MR.2 amends the universal completed/PR-created tuple and registers the successor PR fence through its checked transition. `final.plan` remains explicitly future-only and descriptor-only: its descriptor kind/ref/hash and external plan bytes are tested without claiming production coverage or claiming that current `validateRun` consumes it. Final-plan and continuation artifact/evidence/review bytes are external fixture sources, never persisted `sidecar_bytes`.
 
 Post-PR `changes-observed`, `committed`, `revalidating`, `validated`, `push-pending`, and `remote-confirmed` phase rows each bind five independent authority targets: remediation-evidence ref drift, hash drift, actual file-byte drift, stale candidate-head identity, and cross-bound candidate-head identity. `checkRunConsistency` consumes the ref/hash/file bindings, while exported `transitionPostPrState` consumes the candidate identity and once-bound remediation bindings. Completeness rejects deletion or substitution of any target, so none of those phases can pass with an unbound `candidate_head_sha`, `remediation_evidence_ref`, `remediation_evidence_hash`, or remediation-evidence file.
 
@@ -587,17 +587,17 @@ Post-PR `changes-observed`, `committed`, `revalidating`, `validated`, `push-pend
 | Run envelope and terminal result | `run-envelope-running`; `run-envelope-terminal`; `terminal-result-completed`; `terminal-result-blocked`; `terminal-result-partial`; `terminal-result-needs-human` | Run identity, lifecycle status, terminal outcome, and PR result consistency |
 | Gates, pending snapshot, and handoff receipt | `gate-pending`; `gate-approved-without-receipt`; `gate-approved-interactive`; `gate-changes-requested`; `gate-stopped` | Exact persisted status, answer, approval source, pending snapshot, interactive handoff receipt, and separately modeled artifact/question/answer bytes; gate identity comes from the map key |
 | Steps and acceptance inheritance | `step-running`; `step-rejected`; `step-blocked`; `step-accepted`; `step-inherited-acceptance` | Separate statuses, exact nested acceptance artifact/review ref-plus-hash rules, and inherited acceptance nested in the real accepted step |
-| Slices and review/evidence bindings | `slice-pending`; `slice-running`; `slice-review`; `slice-merged`; `slice-blocked` | Only actual durable slice keys; evidence and review are refs-only where production persists refs only |
-| Validator, security, and PR-created result | `validator-verdict-binding`; `security-verdict-binding`; `steering-boundary`; `steering-action-claim`; `steering-last-action`; `pr-created-result` | Actual panel keys, operation-token identity at the three real steering paths, and the exact completed PR outcome |
+| Slices and review/evidence bindings | `slice-pending`; `slice-running`; `slice-review`; `slice-merged`; `slice-blocked` | Actual durable slice keys; successor review/merged rows bind evidence/review refs, exact byte hashes, and reviewed commit |
+| Validator, security, and PR-created result | `validator-verdict-binding`; `security-verdict-binding`; `steering-boundary`; `steering-action-claim`; `steering-last-action`; `steering-pr-fence`; `pr-created-result` | Actual panel refs/hashes and common reviewed integration head, operation-token identity at the three real steering paths, deterministic PR operation fence, and universal completed PR tuple |
 | Continuation and planning/draft reuse | `continuation-envelope`; `continuation-parent-binding`; `continuation-selected-review`; `continuation-target-binding`; separate parent artifact/evidence/review sidecars; ineligible and eligible planning reuse; `continuation-draft-reuse`; `continuation-post-pr-binding` | Parent/child identity, accepted planning reuse, and unaccepted draft byte/retry binding |
 | Post-PR nested records | Every phase; policy disabled/enabled; observation null/active plus `last_error`, `review_request`, and `snapshot`; remediation null/active plus owner, changes, and each change entry; dispatch planned/running/returned; revalidation empty/bound plus every canonical/validator/security job state; push not-ready/pending/confirmed plus `last_error`; evidence and continuation-review bindings; terminal-fact null plus all eight fact forms | Observation epoch, remediation attempt, exact evidence/review bytes, dispatch/job state, push identity, and terminal disposition |
 | PR79 merged slice repair | `repair-reported`; `repair-repairing`; `repair-review-approve`; `repair-review-reject`; `repair-merged`; `repair-blocked-from-reported`; `repair-blocked-from-repairing`; `repair-blocked-from-review` | Exact persisted incident/status/attempt fields; external plan/evidence/review/verification bytes; externally consumed verdict; retained-field blocked origin; and re-observed owner lane, quiescence, and reviewed/merge tree equality |
 
 Core source rows mirror `src/validate.js` and the writers in `src/run-state.js`. `run.json.gates.story` does not persist a `gate` field; `story` is map-key metadata. Only the interactive approved gate has the exact nested `handoff_receipt`. Gate artifact, question, and answer bytes are kept in separate external-source declarations rather than a `sidecar_bytes` member of the gate. Accepted-step `acceptance` always binds `artifact_ref` plus `artifact_hash`; when `review_ref` exists it also binds `review_hash`. `inherited_acceptance` is cataloged only inside the real accepted step that carries it. No step variant joins `rejected` and `blocked`.
 
-Slice sources are the five persisted variants and contain no synthetic `review_binding`, `attempt_reviews`, or slice-level `reviewed_commit`; review and evidence remain the actual `review_ref` and `evidence_ref` keys, with no invented hash/byte wrapper. The validator source is exactly `{verdict, report, review_ref}` and the security source exactly `{verdict, review_ref}`. External-operation identity lives in `run.steering.boundary`, `run.steering.action_claim`, and `run.steering.last_action`, each with its real token/kind/generation/time fields (plus boundary state hash or last-action outcome as applicable). Post-PR revalidation jobs retain the production `action_token` field required by running jobs; no token is invented at the `post_pr` root, remediation container, dispatch, or push.
+Slice sources are the five persisted variants and contain no synthetic `review_binding` or `attempt_reviews`. Successor `slice-review` and `slice-merged` use the actual top-level all-or-none `{evidence_hash, review_hash, reviewed_commit}` fields beside `evidence_ref` and `review_ref`; pending/running/blocked forbid that tuple. The successor validator source is exactly `{verdict, report, report_hash, review_ref, review_hash, reviewed_head_sha}` and the successor security source exactly `{verdict, review_ref, review_hash, reviewed_head_sha}`. Both panel rows use successor tuples or both remain legacy. External-operation identity lives in `run.steering.boundary`, `run.steering.action_claim`, and `run.steering.last_action`, each with its real token/kind/generation/time fields (plus boundary state hash or last-action outcome as applicable). Post-PR revalidation jobs retain the production `action_token` field required by running jobs; no token is invented at the `post_pr` root, remediation container, dispatch, or push.
 
-The persisted `post_pr` root is closed to exactly `schema_version`, `policy`, `phase`, `attempt`, `observation`, `remediation`, `evidence_refs`, `continuation_review`, and `terminal_fact`. It never persists synthetic `run_status` or `sidecar_bytes`. All fifteen phase rows are complete enclosing records whose enabled/disabled policy, attempt, observation/remediation presence, stage, run status, PR URL, terminal result, and terminal reason form an internally consistent `validateRun` fixture. Policy is the exact closed `enabled`, timing/retry, and nested review object. Observation is null or the exact closed epoch/head/timing/counters/verdicts/`last_error`/`review_request`/sanitized-`snapshot` object.
+The persisted `post_pr` root is closed to exactly `schema_version`, `policy`, `phase`, `attempt`, optional successor `pr_operation`, `observation`, `remediation`, `evidence_refs`, `continuation_review`, and `terminal_fact`. `pr_operation` retains the stable operation identity and exact initial PR tuple through remediation so post-PR completion can re-observe the same operation while recording the latest remediation head. It never persists synthetic `run_status` or `sidecar_bytes`. All fifteen phase rows are complete enclosing records whose enabled/disabled policy, attempt, observation/remediation presence, stage, run status, PR URL, terminal result, and terminal reason form an internally consistent `validateRun` fixture. Policy is the exact closed `enabled`, timing/retry, and nested review object. Observation is null or the exact closed epoch/head/timing/counters/verdicts/`last_error`/`review_request`/sanitized-`snapshot` object.
 
 Remediation uses exactly `schema_version`, attempt and reason, failure fingerprint/head/evidence ref-plus-hash, complete owner, route, lane, stage, baseline head, dispatch, changes and change entries, candidate head, remediation evidence ref-plus-hash, revalidation, and push. Planned/running/returned dispatches and their times are separate variants. Empty revalidation persists all null top-level result bindings plus `jobs: {}`; bound revalidation persists canonical evidence, validator review, and security review ref-plus-hash/verdict bindings. Canonical, validator, and security jobs each register planned, running, retry-wait, and bound closed objects: running requires `action_token` and `started_at`; bound requires `returned_at`, result ref/hash, and an activity-valid verdict. `retry-wait` is a schema-valid intermediate consumed only by the checked post-PR job transition/retry path, not an independently writable phase.
 
@@ -625,9 +625,9 @@ This catalog and its completeness manifests are test/docs-only, non-enforcing co
 The finite retain/re-observe/consolidate decision for every class is recorded in
 [`DURABLE-AUTHORITY-LEDGER.md`](https://github.com/jasoncarreira/opencode-feature-factory/blob/main/DURABLE-AUTHORITY-LEDGER.md). That ledger
 preserves exact Git/test/review/merge and external-effect boundary controls, requires
-named canonical replacements for duplicate internal attestations, keeps persisted
-legacy records on their original schema, and introduces no production or schema-shape
-change.
+named canonical replacements for duplicate internal attestations, and keeps persisted
+legacy records on their original shape except for B0MR.1's narrow exact checked-replay
+upgrade to the reviewed-code successor tuples.
 
 ## run.json
 
@@ -635,7 +635,6 @@ change.
 {
   "schema_version": 1,
   "run_id": "app-123",
-  "external_ref": "APP-123",
   "base_ref": "main",
   "base_commit": "0123456789abcdef",
   "branch": "app-123-short-slug",
@@ -787,20 +786,27 @@ change.
       "worktree": ".opencode/worktrees/app-123-short-slug--be-api",
       "attempts": 1,
       "evidence_ref": "evidence/be-api.json",
+      "evidence_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "review_ref": "reviews/be-api.json",
-      "merge_commit": "abc1234",
+      "review_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewed_commit": "1111111111111111111111111111111111111111",
+      "merge_commit": "2222222222222222222222222222222222222222",
       "blocked_reason": null
     }
   ],
   "validator": {
     "verdict": "GO",
     "report": "artifacts/validation-report.md",
-    "summary": "All acceptance criteria covered."
+    "report_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "review_ref": "reviews/implementation-validator.json",
+    "review_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "reviewed_head_sha": "2222222222222222222222222222222222222222"
   },
   "security_review": {
     "verdict": "PASS",
     "review_ref": "reviews/security-reviewer.json",
-    "summary": "No blocking findings."
+    "review_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "reviewed_head_sha": "2222222222222222222222222222222222222222"
   },
   "pr_url": null,
   "terminal_result": null
@@ -808,6 +814,10 @@ change.
 ```
 
 Top-level `status` values are `running`, `completed`, `blocked`, `partial`, and `needs-human`. Terminal statuses are `completed`, `blocked`, `partial`, and `needs-human`.
+
+The `run.json` root is closed to exactly `schema_version`, `run_id`, `mode`, `status`, `created_at`, `updated_at`, `heartbeat_at`, `base_ref`, `base_commit`, `branch`, `worktree`, `github_account`, `pr_mode`, `pr_url`, `max_parallel_slices`, `max_retries`, `review_tier`, `debug_snapshot`, `provenance`, `merged_slice_repair`, `continuation`, `steering`, `post_pr`, `gates`, `slices`, `cost_attribution`, `steps`, `validator`, `security_review`, and `terminal_result`. Unknown root keys have no legacy fallback. `schema_version` is required and equals `1`. This slice validates the three top-level timestamps as timestamps and requires top-level `worktree`, when present, to be absolute.
+
+Ordinary checked `run.json` transitions keep `run_id`, `base_commit`, `branch`, and `worktree` immutable. `recoverDisruptedRun` is the sole worktree-rebinding exception: after its existing branch, Git ancestry, target path, no-overwrite, final worktree identity, HEAD, ownership, and fence checks, its lock-held manifest write may change only top-level `worktree`.
 
 Top-level `run.json.review_tier` is an optional opaque display string. It may contain labels such as `light`, `standard`, or `strict`, but it does not change gates, agents, PR behavior, validation behavior, or workflow control. It does not change `schema_version`; it remains `1`.
 
@@ -826,6 +836,14 @@ Gate status values are `pending`, `approved`, `changes_requested`, and `stopped`
 Validator verdicts are `GO`, `GO-WITH-NITS`, and `NO-GO`. Security verdicts are `PASS` and `BLOCK`.
 
 Slice status values are `pending`, `running`, `review`, `merged`, and `blocked`. Step status values are `running`, `accepted`, `rejected`, and `blocked`.
+
+For slice `review` and `merged`, `evidence_hash`, `review_hash`, and `reviewed_commit` are all present or all absent; no other slice status may carry them. For validator, `report_hash`, `review_hash`, and `reviewed_head_sha` are all present or all absent. For security, `review_hash` and `reviewed_head_sha` are all present or all absent. Validator and security must both use their successor tuples or both use the legacy ref-only form.
+
+Checked slice review publication reads exact regular-file bytes, requires evidence/review subjects and positive attempts to equal the slice, requires evidence `head_sha` and review `reviewed_commit` to be the same full 40-character lowercase SHA, and requires that SHA to equal the clean slice branch and worktree HEAD. Checked panel publication similarly requires both review subjects to equal the integration branch, equal positive attempts, both `reviewed_head_sha` values to equal the same clean integration branch/worktree HEAD, and then atomically binds report/review hashes and that head.
+
+Checked slice merge admission re-hashes the bound sidecars and requires a merge commit with exactly ordered parents `P1,R`, where `R` is `reviewed_commit`. The unique full `git merge-base --all P1 R` result `B` must be ancestor of both. NUL-delimited, rename-disabled path sets for `B..R` and `P1..merge_commit` must match, and every path must have identical absence or Git mode/type/object identity in `R` and the merge. Every earlier merged slice commit must already be an ancestor of `P1`.
+
+Compatibility is fail-closed. Exact checked replays may upgrade only unchanged legacy in-flight slice review, exact same-merge legacy merged, or exact dual-panel verdict rows. Partial successor tuples reject; successor merged rows are immutable; failed legacy merged upgrades preserve the original bytes and report `legacy merged slice authority upgrade failed`; legacy completed runs are read-only. Pre-PR fence establishment and PR admission re-hash all bound slice/panel sidecars and require both panel heads to equal the current clean integration HEAD.
 
 Terminal result shape:
 
@@ -849,6 +867,8 @@ Terminal result shape:
 }
 ```
 
+Every terminal result is closed to common keys `status`, `run_id`, `pr_url`, `reason`, `summary`, and `artifacts`. A completed result may additionally contain `pr_number`, `pr_node_id`, `repository`, `operation_id`, `head_ref`, `head_sha`, `base_ref`, `base_sha`, and `draft`; no other key is accepted. Legacy completed tuples remain readable. Any successor-only field requires `operation_id`, and its complete tuple is `{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft}`. Top-level `run.pr_url` must match. Each `artifacts` value uses the repository-relative durable artifact-ref grammar and cannot be absolute, traverse with `.` or `..`, use backslashes, or select another durable root.
+
 ## Evidence And Review Files
 
 Builder claim blocks are not accepted directly as durable truth. The orchestrator translates builder claim `status: pass|blocked` into observed evidence fields: `status` records the observed outcome, and `review_ready` is true only when the orchestrator observed the diff and required checks itself.
@@ -865,7 +885,7 @@ Slice evidence shape:
   "attempt": 2,
   "status": "pass",
   "review_ready": true,
-  "head": "abc1234",
+  "head_sha": "1111111111111111111111111111111111111111",
   "commands": [
     {"command": "npm test -- api", "status": "pass"}
   ]
@@ -877,7 +897,9 @@ Slice review shape:
 ```json
 {
   "subject": "be-api",
+  "attempt": 2,
   "verdict": "APPROVE",
+  "reviewed_commit": "1111111111111111111111111111111111111111",
   "required_fixes": []
 }
 ```
@@ -887,8 +909,9 @@ Slice review shape:
 ```json
 {
   "subject": "app-123-short-slug",
+  "attempt": 1,
   "verdict": "GO",
-  "summary": "All acceptance criteria are covered.",
+  "reviewed_head_sha": "2222222222222222222222222222222222222222",
   "required_fixes": []
 }
 ```
@@ -900,8 +923,9 @@ Allowed implementation-validator verdicts are `GO`, `GO-WITH-NITS`, and `NO-GO`.
 ```json
 {
   "subject": "app-123-short-slug",
+  "attempt": 1,
   "verdict": "PASS",
-  "summary": "No blocking security findings.",
+  "reviewed_head_sha": "2222222222222222222222222222222222222222",
   "required_fixes": []
 }
 ```
@@ -976,12 +1000,12 @@ The normal CLI surface is:
 ```sh
 feature-factory factory pr-fence <run-id> --json
 gh pr create ...
-feature-factory factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN [--draft|--no-draft] [--json]
+feature-factory factory pr-created <run-id> --fence-token TOKEN [--json]
 ```
 
 Preconditions:
 
-- A lock-established `steering.pr_fence` exists, its token matches `--fence-token`, its steering generation and state hash are still current, and it does not coexist with pending, uncheckpointed, boundary, or action-claim steering state.
+- A lock-established `steering.pr_fence` exists, its token matches `--fence-token`, its steering generation and state hash are still current, and it does not coexist with pending, uncheckpointed, boundary, or action-claim steering state. Its successor identity `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}` is all present or all absent; partial identity rejects.
 - `gates.pre_pr.status` is `approved`.
 - `validator.verdict` is `GO` or `GO-WITH-NITS`.
 - `validator.report` resolves under `artifacts/`.
@@ -991,7 +1015,7 @@ Preconditions:
 - `pr_url` is a canonical GitHub PR URL.
 - `pr_number` matches the canonical GitHub PR URL.
 
-Create the fence only after the final steering checkpoint, Gate 3 approval, push, and metadata preparation. Fence creation revalidates the canonical PR readiness preconditions under `run-json.lock/`, rejects pending/uncheckpointed/action-claim steering and an active heartbeat, and prevents new steering or any other `run.json` write until PR recording or explicit fence clear. Run `gh pr create` only after the fence exists. Before a PR exists, or after external creation definitively fails without creating one, clear the exact-token fence with `factory pr-fence --clear --fence-token TOKEN`; this may recover a legacy fence whose state hash was made stale, but never accepts a mismatched token. After a PR exists, do not clear it: `pr-created` revalidates the fence and canonical PR rules, then writes `run.pr_url`, `status: "completed"`, and `terminal_result.pr_url` atomically with the completed terminal result and clears the fence.
+Create the fence only after the final steering checkpoint, Gate 3 approval, and push. Fence creation revalidates readiness under `run-json.lock/`, derives canonical origin plus exact clean local/worktree/remote head, exact remote base/ancestry, and persisted PR mode, then stores successor identity `{operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}` all-or-none. `operation_id` is `ffpr-v1-` plus lowercase SHA-256 of canonical UTF-8 JSON `{"base_commit","branch","created_at","repository","run_id"}` in lexical key order. Append exactly one standalone `<!-- opencode-feature-factory:pr-operation=<id> -->` marker to the PR body before `gh pr create`. `pr-created` accepts no caller PR fields; it derives the universal tuple from bounded checked GitHub observation.
 
 ## plan/slices.json
 
@@ -1009,6 +1033,8 @@ Create the fence only after the final steering checkpoint, Gate 3 approval, push
   ]
 }
 ```
+
+The plan root is closed to the single key `slices`. Every planned slice is closed to exactly `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`; unknown keys have no legacy fallback. A stale or non-existent `depends_on` identity is invalid.
 
 Rules:
 
@@ -1073,7 +1099,7 @@ Rules:
 
 Steering files are untrusted operator data/config. `feature-factory factory steer <run-id> --message TEXT --json` writes `$RUN/steering/pending-<timestamp>-<id>.json`; `run.json.steering` stores metadata only. Schema version remains `1`: the backward-compatible optional fields are `generation`, `uncheckpointed`, `boundary`, `action_claim`, `last_action`, and `pr_fence`, plus audit `history`. Older manifests with none of those fields remain valid and are normalized on the next steering transition.
 
-`pending` is `{id, ref, hash, message_chars, created_at}`. After one-time archival, `uncheckpointed` is `{id, ref, hash, message_chars, created_at, consumed_at}` and points to the same ref/hash-bound `steering/consumed-*` file until the orchestrator records either conflict or no-conflict prospective application. `boundary` is `{kind, token, generation, state_hash, created_at}` for `gate`, `dispatch`, `remediation`, or `terminal`. Crossing dispatch/remediation replaces it with `action_claim: {kind, token, generation, claimed_at}`; exact-token `action-started` or inactive-heartbeat `action-abort` clears the claim and records `last_action: {kind, token, generation, claimed_at, outcome, resolved_at}`. `pr_fence` is `{token, generation, state_hash, created_at}`. Raw steering text is never copied into these fields.
+`pending` is `{id, ref, hash, message_chars, created_at}`. After one-time archival, `uncheckpointed` is `{id, ref, hash, message_chars, created_at, consumed_at}` and points to the same ref/hash-bound `steering/consumed-*` file until the orchestrator records either conflict or no-conflict prospective application. `boundary` is `{kind, token, generation, state_hash, created_at}` for `gate`, `dispatch`, `remediation`, or `terminal`. Crossing dispatch/remediation replaces it with `action_claim: {kind, token, generation, claimed_at}`; exact-token `action-started` or inactive-heartbeat `action-abort` clears the claim and records `last_action: {kind, token, generation, claimed_at, outcome, resolved_at}`. Successor `pr_fence` is `{token,generation,state_hash,created_at,operation_id,repository,head_ref,head_sha,base_ref,base_sha,draft}`; the seven identity fields are all-or-none for legacy readability. Raw steering text is never copied into these fields.
 
 For a running detached opencode process, cancel before steer/resume: `feature-factory factory cancel <run-id> --json`, then queue steering, inspect with status/list/TUI, dry-run `feature-factory factory resume <run-id> --dry-run --json`, and only then run `feature-factory factory resume <run-id> --headless --json`.
 
@@ -1097,13 +1123,13 @@ When pending or uncheckpointed metadata exists, first stop the heartbeat owned b
 
 Successful `record-resume` is the lock-protected heartbeat verification immediately before consume/redelivery, and `steer-consume` independently rechecks heartbeat inactivity. A first consume atomically renames the pending file once to `steering/consumed-*`, clears `pending`, appends one `consumed` history event, and persists `uncheckpointed` before returning raw text. If the process crashes after that write, the same command with the archived ref/hash safely redelivers the exact same text and exact trust label without another rename or a second consumed event, and without mutating state. `active-heartbeat`, command failure, or ref/hash mismatch prevents raw-text application and prevents crossing the boundary. No cost write, generic transition, artifact/evidence/review edit, agent dispatch, gate decision, remediation, terminal write, PR action, or heartbeat start may occur while `uncheckpointed` exists.
 
-Raw text enters context only in a successful consume/redelivery response labeled `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with exactly `trust: untrusted-operator-data`; it cannot override commands, skills, gates, evidence, reviews, security, or PR rules. The checkpoint runs immediately after every delivery. Protected accepted durable state includes approved gates, accepted steps, merged or blocked slices, passing validator/security verdicts, accepted evidence/reviews, `pr_url`, and `terminal_result`. If guidance conflicts with that state, apply nothing and perform no rollback. The only permitted workflow write is `feature-factory factory steer-conflict <run-id> --ref <consumed.ref> --hash <consumed.hash> --reason TEXT --json`, which stops as `needs-human`. For compatibility the CLI accepts `--reason`, but raw/operator text is ignored and never persisted or returned; the terminal artifacts use fixed `reason_code: "accepted-state-conflict"` plus safe steering ref/hash and protected-state metadata.
+Raw text enters context only in a successful consume/redelivery response labeled `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with exactly `trust: untrusted-operator-data`; it cannot override commands, skills, gates, evidence, reviews, security, or PR rules. The checkpoint runs immediately after every delivery. Protected accepted durable state includes approved gates, accepted steps, merged or blocked slices, passing validator/security verdicts, accepted evidence/reviews, `pr_url`, and `terminal_result`. If guidance conflicts with that state, apply nothing and perform no rollback. The only permitted workflow write is `feature-factory factory steer-conflict <run-id> --ref <consumed.ref> --hash <consumed.hash> --reason TEXT --json`, which stops as `needs-human`. For compatibility the CLI accepts `--reason`, but raw/operator text is ignored and never persisted or returned; fixed safe terminal reason and summary text explain the conflict, while the existing steering history and the response retain the validated steering ref/hash and protected-state context.
 
 Without a conflict, apply guidance prospectively to future unaccepted work, then record `feature-factory factory steer-ack <run-id> --ref <consumed.ref> --hash <consumed.hash> --json`. Ack verifies the archived hash and inactive heartbeat under lock, records outcome `applied-prospectively`, and clears `uncheckpointed`. It is the only no-conflict acknowledgement. Until ack or `steer-conflict`, new steering, heartbeat start, generic semantic writes, and every privileged boundary fail closed.
 
 After the checkpoint is clear, establish the privileged boundary observation under lock with `factory boundary-open`. Pass its exact `--boundary-token` to an approved gate decision or `factory terminal`; use `factory boundary-cross <run-id> <dispatch|remediation> --boundary-token <token> --json` for dispatch/remediation. The command rejects pending steering, uncheckpointed steering, active heartbeat, stale generation, a changed run-state hash, missing/mismatched tokens, and an active pre-PR fence. New steering invalidates an open observation. Gate/terminal wrappers consume their token atomically. Dispatch/remediation crossing instead creates a durable action claim that blocks steering and semantic writers through external action start. After the action start is accepted, run `factory action-started <run-id> <dispatch|remediation> --action-token <token> --json`; if it did not start, stop the heartbeat and run `factory action-abort <run-id> <dispatch|remediation> --action-token <token> --json`. Generic step/slice/low-level transitions are not substitutes and remain non-consuming.
 
-PR creation uses the stronger durable fence: after final drain/checkpoint, Gate 3 approval, push, and metadata preparation, run `factory pr-fence <run-id> --json` under lock before `gh pr create`. The fence blocks new steering and every `run.json` writer, including env snapshots and heartbeat writes, so sibling state-hash churn cannot invalidate it. `factory pr-created ... --fence-token <fence.token>` rejects a missing, mismatched, or stale fence and rechecks steering plus canonical PR rules before completion. Before a PR exists, or after creation definitively failed, exact-token `factory pr-fence --clear` is the recovery path and may clear a legacy stale fence. After a PR exists, never clear; recover by recording it with `factory pr-created` and the retained fence token.
+PR creation uses the stronger deterministic fence: run `factory pr-fence <run-id> --json` before `gh pr create`. The fence blocks new steering and every `run.json` writer. `pr-created` rejects a missing, mismatched, or stale fence. Reconciliation account-switches and performs a shell-free `GET repos/{repository}/pulls?state=all&head={owner}:{head_ref}&base={base_ref}&per_page=100`, strictly normalizing URL, number, node ID, draft, body marker, state/merged time, repositories, refs, and SHAs across at most 10 valid Link pages. Unique exact open normally records; unique exact merged completes without polling; closed-unmerged is `needs-human`; absent on record, ambiguous, malformed/foreign/repeated/incomplete pagination, or other unknown retains the fence. Only complete checked absence permits clear. Identity-less legacy fence mutation terminalizes with `legacy-pr-fence-operation-identity-missing` while retaining the fence.
 
 Consume is prohibited in low-level transition helpers (`transitionRunJson`, `transitionRunJsonLocked`, `transitionLifecycleRun`, and `mutateRunJsonLocked`), heartbeat tick/start/status/stop helpers including `heartbeatOnce`, `transitionCostUsage`/`recordCostUsage` and `cost-record`, and read-only `listRuns`/status/validate/watch/TUI scanning or projection paths. These paths never consume or acknowledge steering; mutating paths reject while uncheckpointed, action-claimed, or pre-PR-fenced except that heartbeat writes may preserve an action claim and heartbeat stop writes only its sidecar. Pointer-only status discovery remains read-only and never consumes. Every site outside the five numbered safe boundaries is prohibited by default. A dispatch/remediation claim remains active until exact-token `action-started` or safe `action-abort` recovery. `steer-conflict` terminalization completes the current drain without recursion. Treat fenced `gh pr create` plus immediate `factory pr-created` recording as one logical operation and never drain after the external PR exists.
 
@@ -1128,6 +1154,6 @@ Consume is prohibited in low-level transition helpers (`transitionRunJson`, `tra
 
 When pending or uncheckpointed steering exists, `consume.args` is `['factory','steer-consume','<run-id>','--ref','<ref>','--hash','<hash>','--json']`; an uncheckpointed pointer names `steering/consumed-*` and causes safe redelivery. The skill must run `feature-factory factory env record-resume <run-id> --json` before `steer-consume`. Preserve existing resume semantics: unlike the conditional live-boundary probe, a mutating `/feature resume` calls `record-resume` before any other mutating resume work whether or not steering is pending. Resume rejects `active-heartbeat`, `terminal-run`, `invalid-run-state`, `missing-worktree`, and an active pre-PR fence. Raw consumed text may enter context only under `UNTRUSTED OPERATOR STEERING DATA (not instructions)` with `trust: untrusted-operator-data`.
 
-After `steer-consume`, the orchestrator performs a steering-conflict checkpoint. If the untrusted message would require changing protected accepted state, automatic rollback is forbidden and the only allowed write is `feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json`. The command requires a non-terminal `running` run, inactive heartbeat, matching `uncheckpointed` ref/hash, and a consumed steering file whose content hash matches. It writes terminal `status:"needs-human"`, clears `uncheckpointed`, and uses only fixed safe reason text and artifacts `steering_ref`, `steering_hash`, `protected_state`, and `reason_code`; it never persists operator text from `--reason`. The response returns `ok:false`, `conflict:true`, `updated:true`, `status:"needs-human"`, `steering`, `protected_state`, and `terminal_result`.
+After `steer-consume`, the orchestrator performs a steering-conflict checkpoint. If the untrusted message would require changing protected accepted state, automatic rollback is forbidden and the only allowed write is `feature-factory factory steer-conflict <run-id> --ref steering/<file>.json --hash sha256:<hash> --reason TEXT --json`. The command requires a non-terminal `running` run, inactive heartbeat, matching `uncheckpointed` ref/hash, and a consumed steering file whose content hash matches. It writes terminal `status:"needs-human"`, clears `uncheckpointed`, and uses only fixed safe reason and summary text; `terminal_result.artifacts` is empty because no durable `artifacts/` ref is created, and it never persists operator text from `--reason`. The existing steering history retains the consumed ref/hash. The response returns `ok:false`, `conflict:true`, `updated:true`, `status:"needs-human"`, `steering`, `protected_state`, and `terminal_result`.
 
 Protected accepted state for this checkpoint includes approved gates (`gate:<name>`), accepted steps (`step:<agent>`), merged or blocked slices (`slice:<id>`), passing validator/security verdicts (`validator:GO`, `validator:GO-WITH-NITS`, `security_review:PASS`), `pr_url`, and `terminal_result`. Do not reset gates, unmerge slices, rewrite evidence/reviews, remove PR URLs, or continue from stale accepted artifacts to satisfy steering automatically.

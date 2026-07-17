@@ -117,7 +117,7 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
     let postPrPolicy = null;
     if (payload.resume.post_pr_policy !== undefined && payload.resume.post_pr_policy !== null) {
       try {
-        validateRun({ schema_version: 1, run_id: runId, status: "running", max_retries: 3, gates: {}, post_pr: { schema_version: 1, policy: payload.resume.post_pr_policy, phase: payload.resume.post_pr_policy.enabled === true ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null } });
+        validateRun({ schema_version: 1, run_id: runId, status: "running", max_retries: 3, gates: {}, post_pr: { schema_version: 1, policy: payload.resume.post_pr_policy, phase: payload.resume.post_pr_policy.enabled === true ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null } });
         postPrPolicy = cloneJson(payload.resume.post_pr_policy);
       } catch {
         return { ok: false, reason: "invalid-resume-post-pr-policy" };

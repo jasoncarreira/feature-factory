@@ -44,7 +44,7 @@ describe("steering consume crash recovery", () => {
 describe("slice merge transition guard", () => {
   it("rejects direct status merged writes through transitionRunSlice", async () => {
     const runDir = createRunDir("slice-merged-guard", {
-      slices: [{ id: "s1", status: "running", attempts: 0 }],
+      slices: [{ id: "s1", status: "running", attempts: 1 }],
     });
     try {
       await assert.rejects(
@@ -65,7 +65,7 @@ describe("slice merge transition guard", () => {
       for (const status of ["running", "review", "blocked"]) {
         await assert.rejects(
           transitionRunSlice(runDir, "s1", { status }, { mustExist: true }),
-          /already merged; merged slices are immutable/u,
+          new RegExp(`slice 's1' cannot transition from merged to ${status}`, "u"),
           `status=${status}`,
         );
       }

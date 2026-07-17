@@ -35,6 +35,79 @@ describe("run schema and consistency", () => {
     assert.deepEqual(review.required_fixes, []);
   });
 
+  it("enforces the closed plan and planned-slice shapes", () => {
+    const plan = slicesPlan([plannedSlice("slice")]);
+    assert.equal(validateSlicesPlan(plan), plan);
+    assert.deepEqual(Object.keys(plan), ["slices"]);
+    assert.deepEqual(Object.keys(plan.slices[0]), ["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
+    assert.throws(
+      () => validateSlicesPlan({ ...plan, legacy_plan: true }),
+      (error) => error instanceof ValidationError && error.message.includes("plan.legacy_plan: is not allowed"),
+    );
+    assert.throws(
+      () => validateSlicesPlan({ slices: [{ ...plan.slices[0], dependencies: [] }] }),
+      (error) => error instanceof ValidationError && error.message.includes("plan.slices[0].dependencies: is not allowed"),
+    );
+    assert.throws(
+      () => validateSlicesPlan({ slices: [plannedSlice("root"), plannedSlice("leaf", ["stale-slice"])] }),
+      (error) => error instanceof ValidationError && error.message.includes("unknown dependency 'stale-slice'"),
+    );
+  });
+
+  it("enforces the closed versioned run envelope, top-level timestamps, and absolute worktree", () => {
+    const allowedRunKeys = ["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"];
+    const canonical = { ...runningRun(), created_at: "2026-07-08T11:00:00.000Z", updated_at: "2026-07-08T11:30:00.000Z", heartbeat_at: "2026-07-08T11:59:00.000Z", worktree: "/tmp/run" };
+    assert.equal(validateRun(canonical), canonical);
+    assert.deepEqual(allowedRunKeys.filter((key) => Object.hasOwn(canonical, key)).sort(), Object.keys(canonical).sort());
+    for (const run of [
+      { run_id: "run", status: "running", gates: {} },
+      { ...runningRun(), schema_version: 2 },
+      { ...runningRun(), legacy_status: "running" },
+    ]) assert.throws(() => validateRun(run), ValidationError);
+    for (const key of ["created_at", "updated_at", "heartbeat_at"]) {
+      assert.throws(
+        () => validateRun({ ...runningRun(), [key]: "not-a-time" }),
+        (error) => error instanceof ValidationError && error.message.includes(`run.${key}: must be an ISO timestamp or null`),
+      );
+    }
+    assert.throws(
+      () => validateRun({ ...runningRun(), worktree: ".opencode/worktrees/run" }),
+      (error) => error instanceof ValidationError && error.message.includes("run.worktree: must be an absolute path or null"),
+    );
+  });
+
+  it("enforces closed terminal variants, durable artifact refs, and canonical completed PR tuples", () => {
+    const commonKeys = ["status", "run_id", "pr_url", "reason", "summary", "artifacts"];
+    for (const status of ["blocked", "partial", "needs-human"]) {
+      const terminalResult = { status, run_id: "run", pr_url: null, reason: `${status}-reason`, summary: `${status} summary`, artifacts: { report: "artifacts/report.md" } };
+      const run = { ...runningRun(), status, terminal_result: terminalResult };
+      assert.equal(validateRun(run), run);
+      assert.deepEqual(Object.keys(terminalResult), commonKeys);
+      assert.throws(() => validateRun({ ...run, terminal_result: { ...terminalResult, legacy_result: true } }), ValidationError);
+    }
+
+    const prUrl = "https://github.com/acme/repo/pull/7";
+    const completed = {
+      ...runningRun(),
+      status: "completed",
+      pr_url: prUrl,
+      terminal_result: { status: "completed", run_id: "run", pr_url: prUrl, reason: null, summary: "PR created.", artifacts: { test_report: "artifacts/test-report.md" }, pr_number: 7, repository: "acme/repo", draft: false },
+    };
+    assert.equal(validateRun(completed), completed);
+    assert.deepEqual(Object.keys(completed.terminal_result), [...commonKeys, "pr_number", "repository", "draft"]);
+    const withHead = { ...completed, terminal_result: { ...completed.terminal_result, head_sha: "a".repeat(40) } };
+    assert.equal(validateRun(withHead), withHead);
+    for (const head_sha of ["abc123", "A".repeat(40), "a".repeat(39)]) {
+      assert.throws(() => validateRun({ ...completed, terminal_result: { ...completed.terminal_result, head_sha } }), /head_sha: must be a full 40-character lowercase git SHA/u);
+    }
+    assert.throws(() => validateRun({ ...completed, terminal_result: { ...completed.terminal_result, pr_number: 8 } }), /pr_number: must match pr_url pull request number/u);
+    assert.throws(() => validateRun({ ...completed, terminal_result: { ...completed.terminal_result, repository: "other/repo" } }), /repository: must match pr_url repository/u);
+    assert.throws(() => validateRun({ ...completed, pr_url: "https://github.com/acme/repo/pull/8" }), /run\.pr_url: must match completed terminal_result\.pr_url/u);
+    for (const artifact of ["../outside.md", "/tmp/report.md", "reviews/report.json", "artifacts/../report.md", "artifacts\\report.md"]) {
+      assert.throws(() => validateRun({ ...completed, terminal_result: { ...completed.terminal_result, artifacts: { report: artifact } } }), /run\.terminal_result\.artifacts\.report/u);
+    }
+  });
+
   it("preserves exact legacy semantic literals when fixtures are specialized", () => {
     const runOverrides = {
       run_id: "repair-run",
@@ -368,6 +441,78 @@ describe("run schema and consistency", () => {
     assert.deepEqual(run.continuation.parent_artifacts, [
       { kind: "validation_report", ref: "artifacts/validation-report.md", hash: HASH },
     ]);
+    assert.equal(run.continuation.planning_reuse, undefined, "existing v1 continuations may omit reuse metadata");
+    assert.equal(run.continuation.post_pr, undefined, "existing v1 continuations may omit post-PR metadata");
+  });
+
+  it("closes persisted gate, snapshot, receipt, step, acceptance, and continuation nested shapes", () => {
+    const snapshot = {
+      question_ref: "gates/story.question.md", question_hash: HASH,
+      artifact_ref: "artifacts/story.md", artifact_hash: HASH,
+      answer_ref: "gates/story.answer", created_at: "2026-07-08T12:00:00.000Z",
+    };
+    const interactive = {
+      ...runningRun("closed-gate"),
+      mode: "interactive",
+      gates: { story: {
+        status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md",
+        answer_ref: "gates/story.answer.consumed-1", answer: "approve", approval_source: "external-driver",
+        answered_at: "2026-07-08T12:00:00.000Z", pending_snapshot: snapshot,
+        handoff_receipt: {
+          schema_version: 1, kind: "interactive-approval-handoff", gate: "story",
+          approval_fingerprint: HASH, pending_snapshot_hash: HASH, answer_hash: HASH,
+          steering_generation: 0, accepted_at: "2026-07-08T12:00:00.000Z",
+        },
+      } },
+    };
+    assert.equal(validateRun(interactive).gates.story.status, "approved");
+    for (const [label, mutate, expected] of [
+      ["gate", (run) => { run.gates.story.extra = true; }, /run\.gates\.story\.extra: is not allowed/u],
+      ["snapshot", (run) => { run.gates.story.pending_snapshot.extra = true; }, /pending_snapshot\.extra: is not allowed/u],
+      ["receipt", (run) => { run.gates.story.handoff_receipt.extra = true; }, /handoff_receipt\.extra: is not allowed/u],
+      ["receipt time", (run) => { run.gates.story.handoff_receipt.accepted_at = "not-time"; }, /accepted_at: must be an ISO timestamp/u],
+    ]) {
+      const malformed = structuredClone(interactive); mutate(malformed);
+      assert.throws(() => validateRun(malformed), expected, label);
+    }
+
+    const acceptedStep = {
+      agent: "spec-writer", status: "accepted", attempts: 1,
+      artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
+      acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: HASH, review_ref: "reviews/spec-writer.json", review_hash: HASH },
+    };
+    assert.equal(validateRun({ ...runningRun(), steps: [{ agent: "legacy", status: "accepted", attempts: 1 }] }).steps[0].acceptance, undefined);
+    for (const [label, mutate, expected] of [
+      ["step", (step) => { step.extra = true; }, /run\.steps\[0\]\.extra: is not allowed/u],
+      ["acceptance", (step) => { step.acceptance.extra = true; }, /acceptance\.extra: is not allowed/u],
+      ["binding", (step) => { step.acceptance.artifact_ref = "artifacts/other.md"; }, /must match step artifact_ref/u],
+    ]) {
+      const step = structuredClone(acceptedStep); mutate(step);
+      assert.throws(() => validateRun({ ...runningRun(), steps: [step] }), expected, label);
+    }
+
+    const continuation = continuationMetadata();
+    continuation.extra = true;
+    assert.throws(() => validateRun({ ...runningRun(), continuation }), /run\.continuation\.extra: is not allowed/u);
+    delete continuation.extra;
+    continuation.parent.extra = true;
+    assert.throws(() => validateRun({ ...runningRun(), continuation }), /run\.continuation\.parent\.extra: is not allowed/u);
+  });
+
+  it("requires receipts only for interactive approved gates and forbids them on other variants", () => {
+    const approved = {
+      status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md",
+      answer_ref: "gates/story.answer.consumed-1", answer: "approve", approval_source: "autonomous",
+      answered_at: "2026-07-08T12:00:00.000Z",
+      pending_snapshot: { question_ref: "gates/story.question.md", question_hash: HASH, artifact_ref: "artifacts/story.md", artifact_hash: HASH, answer_ref: "gates/story.answer", created_at: "2026-07-08T12:00:00.000Z" },
+    };
+    assert.equal(validateRun({ ...runningRun(), mode: "autonomous", gates: { story: approved } }).gates.story.handoff_receipt, undefined);
+    assert.throws(() => validateRun({ ...runningRun(), mode: "interactive", gates: { story: approved } }), /handoff_receipt: is required for an interactive approval/u);
+    const pending = { ...structuredClone(approved), status: "pending" };
+    delete pending.answer; delete pending.answered_at; delete pending.approval_source;
+    pending.answer_ref = pending.pending_snapshot.answer_ref;
+    pending.handoff_receipt = { schema_version: 1, kind: "interactive-approval-handoff", gate: "story", approval_fingerprint: HASH, pending_snapshot_hash: HASH, answer_hash: HASH, steering_generation: 0, accepted_at: "2026-07-08T12:00:00.000Z" };
+    assert.throws(() => validateRun({ ...runningRun(), mode: "interactive", gates: { story: pending } }), /handoff_receipt: is forbidden for a pending gate/u);
   });
 
   it("accepts steering metadata without bumping run schema and checks pending hash", () => {
@@ -391,6 +536,106 @@ describe("run schema and consistency", () => {
     } finally {
       cleanup(repo);
     }
+  });
+
+  it("accepts legacy slice/panel rows while closing successor and steering authority records", () => {
+    const slice = { id: "slice", stack: "backend", depends_on: [], status: "running", attempts: 1, branch: "feature--slice", worktree: "/tmp/slice" };
+    const steering = {
+      schema_version: 1,
+      generation: 2,
+      boundary: { kind: "dispatch", token: "dispatch-token", generation: 2, state_hash: HASH, created_at: "2026-07-08T12:00:00.000Z" },
+      action_claim: null,
+      last_action: { kind: "dispatch", token: "prior-token", generation: 2, outcome: "closed", claimed_at: "2026-07-08T11:00:00.000Z", resolved_at: "2026-07-08T11:01:00.000Z" },
+      history: [],
+    };
+    const run = {
+      ...runningRun(),
+      slices: [slice],
+      validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json", loops: 1 },
+      security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", loops: 1 },
+      steering,
+    };
+    assert.equal(validateRun(run), run);
+    for (const [label, mutate] of [
+      ["slice", (value) => { value.slices[0].reviewed_commit = "a".repeat(40); }],
+      ["validator", (value) => { value.validator.subject = "feature"; }],
+      ["security", (value) => { value.security_review.review_hash = HASH; }],
+      ["boundary", (value) => { value.steering.boundary.operation_token = "other"; }],
+      ["last action", (value) => { value.steering.last_action.subject = "dispatch"; }],
+    ]) {
+      const changed = structuredClone(run);
+      mutate(changed);
+      assert.throws(() => validateRun(changed), /is not allowed|all present or all absent|forbidden outside/u, label);
+    }
+  });
+
+  it("treats null own successor fence and completed-result fields as partial tuples", () => {
+    const legacyFence = { token: "legacy-fence", generation: 2, state_hash: HASH, created_at: "2026-07-08T12:00:00.000Z" };
+    const steering = {
+      schema_version: 1,
+      generation: 2,
+      pending: null,
+      uncheckpointed: null,
+      boundary: null,
+      action_claim: null,
+      last_action: null,
+      pr_fence: legacyFence,
+      history: [],
+    };
+    assert.equal(validateRun({ ...runningRun(), steering }).steering.pr_fence, legacyFence);
+    for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) {
+      assert.throws(() => validateRun({ ...runningRun(), steering: { ...steering, pr_fence: { ...legacyFence, [key]: null } } }), /all present or all absent|must be/u, `fence ${key}=null`);
+    }
+
+    const prUrl = "https://github.com/acme/repo/pull/7";
+    const legacyResult = { status: "completed", run_id: "run", pr_url: prUrl, pr_number: 7, repository: "acme/repo", head_sha: "a".repeat(40), draft: false, reason: null, summary: "PR created.", artifacts: {} };
+    const completed = { ...runningRun(), status: "completed", pr_url: prUrl, terminal_result: legacyResult };
+    assert.equal(validateRun(completed).terminal_result, legacyResult);
+    for (const key of ["operation_id", "pr_node_id", "head_ref", "base_ref", "base_sha"]) {
+      assert.throws(() => validateRun({ ...completed, terminal_result: { ...legacyResult, [key]: null } }), /successor PR tuple|must be/u, `completed ${key}=null`);
+    }
+  });
+
+  it("enforces every slice and dual-panel successor binding as all-or-none", () => {
+    const sha = "a".repeat(40);
+    const sliceBinding = { evidence_hash: HASH, review_hash: HASH, reviewed_commit: sha };
+    const reviewSlice = { id: "slice", status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" };
+    for (let mask = 1; mask < 7; mask += 1) {
+      const partial = { ...reviewSlice };
+      Object.entries(sliceBinding).forEach(([key, value], index) => { if (mask & (1 << index)) partial[key] = value; });
+      assert.throws(() => validateRun({ ...runningRun(), slices: [partial] }), /all present or all absent/u, `slice mask ${mask}`);
+    }
+    const completeSlice = { ...reviewSlice, ...sliceBinding };
+    assert.equal(validateRun({ ...runningRun(), slices: [completeSlice] }).slices[0].reviewed_commit, sha);
+    assert.throws(() => validateRun({ ...runningRun(), slices: [{ ...completeSlice, status: "running" }] }), /forbidden outside review or merged/u);
+
+    const validatorBase = { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" };
+    const securityBase = { verdict: "PASS", review_ref: "reviews/security-reviewer.json" };
+    const validatorBinding = { report_hash: HASH, review_hash: HASH, reviewed_head_sha: sha };
+    const securityBinding = { review_hash: HASH, reviewed_head_sha: sha };
+    for (let mask = 1; mask < 7; mask += 1) {
+      const validator = { ...validatorBase };
+      Object.entries(validatorBinding).forEach(([key, value], index) => { if (mask & (1 << index)) validator[key] = value; });
+      assert.throws(() => validateRun({ ...runningRun(), validator, security_review: securityBase }), /all present or all absent|both use successor/u, `validator mask ${mask}`);
+    }
+    for (let mask = 1; mask < 3; mask += 1) {
+      const security = { ...securityBase };
+      Object.entries(securityBinding).forEach(([key, value], index) => { if (mask & (1 << index)) security[key] = value; });
+      assert.throws(() => validateRun({ ...runningRun(), validator: validatorBase, security_review: security }), /all present or all absent/u, `security mask ${mask}`);
+    }
+    for (const [label, validator, security_review] of [
+      ["validator successor/security absent", { ...validatorBase, ...validatorBinding }, undefined],
+      ["validator successor/security null", { ...validatorBase, ...validatorBinding }, null],
+      ["validator successor/security legacy", { ...validatorBase, ...validatorBinding }, securityBase],
+      ["security successor/validator absent", undefined, { ...securityBase, ...securityBinding }],
+      ["security successor/validator null", null, { ...securityBase, ...securityBinding }],
+      ["security successor/validator legacy", validatorBase, { ...securityBase, ...securityBinding }],
+    ]) {
+      assert.throws(() => validateRun({ ...runningRun(), validator, security_review }), /both use successor reviewed-head bindings/u, label);
+    }
+    const successor = validateRun({ ...runningRun(), validator: { ...validatorBase, ...validatorBinding }, security_review: { ...securityBase, ...securityBinding } });
+    assert.equal(successor.validator.reviewed_head_sha, sha);
+    assert.equal(successor.security_review.review_hash, HASH);
   });
 
   it("accepts continuation reviews with summary or required fixes", () => {
@@ -638,10 +883,10 @@ function continuationMetadata(targetRunId = "run") {
     parent: {
       run_id: "parent-run",
       status: "blocked",
-      run_ref: "runs/parent-run/run.json",
+      run_ref: ".opencode/factory/parent-run/run.json",
       run_hash: HASH,
       branch: "parent-branch",
-      commit: "abc123",
+      commit: "a".repeat(40),
       worktree: "/tmp/parent-worktree",
     },
     review: {
@@ -658,7 +903,7 @@ function continuationMetadata(targetRunId = "run") {
       branch: "continuation-branch",
       worktree: "/tmp/continuation-worktree",
       base_ref: "main",
-      base_commit: "def456",
+      base_commit: "b".repeat(40),
     },
     parent_artifacts: [
       { kind: "validation_report", ref: "artifacts/validation-report.md", hash: HASH },

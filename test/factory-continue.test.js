@@ -10,6 +10,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { adoptContinuation, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
+import { transitionContinuationAdoption } from "../src/run-state.js";
+import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, createDurableCatalogBaseline, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
@@ -151,7 +153,7 @@ describe("factory continue", () => {
         reviewRef: "reviews/api-slice-review.json",
         review: createReviewRecord({ subject: "api-slice", verdict: undefined, required_fixes: undefined, summary: "slice review blocks continuation" }),
         patchRun(run) {
-          run.slices = [{ id: "api-slice", status: "blocked", review_ref: "reviews/api-slice-review.json" }];
+          run.slices = [{ id: "api-slice", status: "blocked", review_ref: "reviews/api-slice-review.json", blocked_reason: "slice review blocks continuation" }];
         },
         expected: { kind: "slice", source: "run.slices.api-slice.review_ref", subject: "api-slice" },
         expectedReviews: ["reviews/api-slice-review.json", "reviews/reviewer.json"],
@@ -185,7 +187,7 @@ describe("factory continue", () => {
       writeJson(join(fixture.runDir, "evidence", "a-slice.json"), { ok: false, source: "slice" });
       updateRun(fixture, (run) => {
         run.steps = [{ agent: "spec-writer", status: "blocked", evidence_ref: "evidence/z-step.json" }];
-        run.slices = [{ id: "api-slice", status: "blocked", evidence_ref: "evidence/a-slice.json" }];
+        run.slices = [{ id: "api-slice", status: "blocked", evidence_ref: "evidence/a-slice.json", blocked_reason: "slice evidence blocks continuation" }];
       });
 
       const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "parent-evidence-next", dryRun: true });
@@ -752,7 +754,7 @@ describe("continuation planning-artifact reuse", () => {
       rmSync(join(fixture.runDir, "artifacts", "research-map.md"), { force: true });
       assert.throws(
         () => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation),
-        /missing or not a regular file/u,
+        /missing or not a regular file|parent_artifacts bindings changed/u,
       );
       // fail closed: nothing published (not even the entries validated before the missing one)
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "reuse-missing-next", "artifacts")), false, "no partial child artifacts/ may survive");
@@ -827,7 +829,7 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
-  it("clears the acceptance binding on non-accepted and failed re-acceptance transitions (no stale provenance)", () => {
+  it("preserves accepted -> rejected -> accepted with a fresh binding and atomic failed re-acceptance", () => {
     const fixture = createFixture("bind-clear");
     try {
       writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief\n", "utf8");
@@ -841,19 +843,23 @@ describe("continuation planning-artifact reuse", () => {
 
       // accepted(A) → binds
       assert.equal(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "accepted", "--artifact-ref", "artifacts/technical-brief.md", "--review-ref", "reviews/spec-writer.json", "--json"]).status, 0);
-      assert.ok(readStep().acceptance, "accept must bind the acceptance");
+      const firstHash = readStep().acceptance.artifact_hash;
 
       // rejected → the prior binding must be cleared (no stale provenance on a non-accepted step)
       assert.equal(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "rejected", "--json"]).status, 0);
       assert.equal(readStep().acceptance, undefined, "a non-accepted transition must clear the binding");
+      assert.equal(readStep().inherited_acceptance, undefined, "a non-accepted transition must clear inherited acceptance");
 
-      // accepted(missing B) → status flips to accepted but the transition cannot bind, so it must
-      // NOT re-attach the prior A binding (the manifest must not claim an acceptance never established)
-      assert.equal(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "accepted", "--artifact-ref", "artifacts/missing.md", "--json"]).status, 0);
-      const stale = readStep();
-      assert.equal(stale.status, "accepted");
-      assert.equal(stale.artifact_ref, "artifacts/missing.md");
-      assert.equal(stale.acceptance, undefined, "a failed re-acceptance must not carry the prior binding");
+      writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "brief revised\n", "utf8");
+      assert.equal(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "accepted", "--artifact-ref", "artifacts/technical-brief.md", "--review-ref", "reviews/spec-writer.json", "--json"]).status, 0);
+      assert.equal(readStep().status, "accepted");
+      assert.notEqual(readStep().acceptance.artifact_hash, firstHash, "re-acceptance must bind the current artifact bytes");
+      assert.equal(readStep().acceptance.artifact_hash, hashFile(join(fixture.runDir, "artifacts", "technical-brief.md")));
+
+      assert.equal(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "rejected", "--json"]).status, 0);
+      const beforeFailed = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      assert.notEqual(runCli(fixture.repo, ["factory", "step", fixture.runId, "spec-writer", "accepted", "--artifact-ref", "artifacts/missing.md", "--json"]).status, 0);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeFailed, "failed acceptance must leave run.json unchanged");
     } finally {
       cleanup(fixture.repo);
     }
@@ -870,6 +876,94 @@ describe("continuation planning-artifact reuse", () => {
       assert.equal(result.step.acceptance.artifact_hash, child.continuation.planning_reuse.spec_artifact_hash);
       assert.equal(result.step.inherited_acceptance.from_run_id, fixture.runId);
       assert.equal(result.step.inherited_acceptance.review_hash, child.continuation.planning_reuse.spec_review_hash);
+      assert.equal(runCli(fixture.repo, ["factory", "step", "adopt-ok-next", "spec-writer", "rejected", "--json"]).status, 0);
+      const rejected = JSON.parse(readFileSync(join(child.childRunDir, "run.json"), "utf8")).steps[0];
+      assert.equal(rejected.acceptance, undefined);
+      assert.equal(rejected.inherited_acceptance, undefined);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("adopts factory-canonicalized review whitespace without weakening byte or semantic bindings", async () => {
+    const runId = "adopt-canonical-review-whitespace";
+    const fixture = createFixture(runId, {
+      review: createReviewRecord({
+        subject: `  ${runId}  `,
+        verdict: "  BLOCK  ",
+        summary: "  needs canonical continuation  ",
+        required_fixes: ["  preserve exact authority bytes  "],
+      }),
+      spec: { status: "accepted", subject: "  spec-writer  ", verdict: "  APPROVE  " },
+    });
+    try {
+      const canonicalRepo = gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]);
+      const direct = seedChildForAdopt(fixture, `${runId}-direct`);
+      assert.equal(direct.continuation.review.subject, runId);
+      assert.equal(direct.continuation.review.summary, "needs canonical continuation");
+      assert.equal(direct.continuation.review.verdict, "BLOCK");
+      assert.deepEqual(direct.continuation.review.required_fixes, ["preserve exact authority bytes"]);
+      const directResult = await transitionContinuationAdoption(direct.childRunDir, { repoRoot: canonicalRepo });
+      assert.equal(directResult.step.status, "accepted");
+
+      const wrapped = seedChildForAdopt(fixture, `${runId}-wrapped`);
+      const wrappedResult = await adoptContinuation(`${runId}-wrapped`, { cwd: fixture.repo });
+      assert.equal(wrappedResult.status, "adopted");
+      assert.equal(wrappedResult.step.status, "accepted");
+
+      const semanticDrift = seedChildForAdopt(fixture, `${runId}-semantic-drift`);
+      const semanticRunFile = join(semanticDrift.childRunDir, "run.json");
+      const semanticRun = JSON.parse(readFileSync(semanticRunFile, "utf8"));
+      semanticRun.continuation.review.summary = "different canonical meaning";
+      writeJson(semanticRunFile, semanticRun);
+      await assert.rejects(
+        transitionContinuationAdoption(semanticDrift.childRunDir, { repoRoot: canonicalRepo }),
+        /selected review summary is stale|selected review identity is stale/u,
+      );
+
+      const byteDrift = seedChildForAdopt(fixture, `${runId}-byte-drift`);
+      const selectedReviewFile = join(fixture.runDir, "reviews", "reviewer.json");
+      writeFileSync(selectedReviewFile, `${readFileSync(selectedReviewFile, "utf8")} `, "utf8");
+      await assert.rejects(
+        transitionContinuationAdoption(byteDrift.childRunDir, { repoRoot: canonicalRepo }),
+        /selected review hash mismatch/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects direct continuation adoption when parent authority disappeared without changing child run.json", async () => {
+    const fixture = createFixture("adopt-direct-stale-parent", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      const child = seedChildForAdopt(fixture, "adopt-direct-stale-parent-next");
+      const childRunFile = join(child.childRunDir, "run.json");
+      const before = readFileSync(childRunFile, "utf8");
+      rmSync(join(fixture.runDir, "run.json"), { force: true });
+
+      await assert.rejects(
+        transitionContinuationAdoption(child.childRunDir),
+        /parent run\.json|continuation parent/u,
+      );
+      assert.equal(readFileSync(childRunFile, "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects direct continuation adoption when selected parent review bytes are stale", async () => {
+    const fixture = createFixture("adopt-direct-stale-review", { spec: { status: "accepted", verdict: "APPROVE" } });
+    try {
+      const child = seedChildForAdopt(fixture, "adopt-direct-stale-review-next");
+      const childRunFile = join(child.childRunDir, "run.json");
+      const before = readFileSync(childRunFile, "utf8");
+      writeJson(join(fixture.runDir, "reviews", "reviewer.json"), createReviewRecord({ subject: fixture.runId, verdict: undefined, required_fixes: undefined, summary: "changed after observation" }));
+
+      await assert.rejects(
+        transitionContinuationAdoption(child.childRunDir),
+        /selected review hash mismatch|parent_reviews binding is stale/u,
+      );
+      assert.equal(readFileSync(childRunFile, "utf8"), before);
     } finally {
       cleanup(fixture.repo);
     }
@@ -961,6 +1055,124 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
+  it("re-observes all eleven continuation catalog authorities before seed effects", () => {
+    const cases = [
+      {
+        id: "continuation-envelope", setup: () => createFixture("authority-envelope"),
+        mutate: ({ continuation }) => { continuation.operator_summary = "other run"; }, match: /operator_summary/u,
+      },
+      {
+        id: "continuation-parent-binding", setup: () => createFixture("authority-parent"),
+        mutate: ({ fixture }) => updateRun(fixture, (run) => { run.updated_at = "2026-07-08T12:01:00.000Z"; }), match: /parent run\.json changed/u,
+      },
+      {
+        id: "continuation-selected-review", setup: () => createFixture("authority-selected-review"),
+        mutate: ({ fixture }) => writeJson(join(fixture.runDir, "reviews", "reviewer.json"), createReviewRecord({ subject: fixture.runId, verdict: undefined, required_fixes: undefined, summary: "changed" })), match: /selected review changed/u,
+      },
+      {
+        id: "continuation-target-binding", setup: () => createFixture("authority-target"),
+        mutate: ({ continuation }) => { continuation.target.base_commit = "f".repeat(40); }, match: /target base binding/u,
+      },
+      {
+        id: "continuation-parent-artifact-sidecar", setup: () => createFixture("authority-artifact"),
+        mutate: ({ fixture }) => writeFileSync(join(fixture.runDir, "artifacts", "story.md"), "changed story\n"), match: /parent_artifacts bindings changed/u,
+      },
+      {
+        id: "continuation-parent-evidence-sidecar",
+        setup: () => {
+          const fixture = createFixture("authority-evidence");
+          mkdirSync(join(fixture.runDir, "evidence"));
+          writeJson(join(fixture.runDir, "evidence", "spec.json"), { subject: "spec-writer", status: "fail" });
+          updateRun(fixture, (run) => { run.steps = [{ agent: "spec-writer", status: "blocked", attempts: 1, evidence_ref: "evidence/spec.json" }]; });
+          return fixture;
+        },
+        mutate: ({ fixture }) => writeJson(join(fixture.runDir, "evidence", "spec.json"), { subject: "spec-writer", status: "changed" }), match: /parent_evidence bindings changed/u,
+      },
+      {
+        id: "continuation-parent-review-sidecar",
+        setup: () => {
+          const fixture = createFixture("authority-parent-review");
+          writeJson(join(fixture.runDir, "reviews", "security.json"), createReviewRecord({ subject: fixture.runId, verdict: "BLOCK", summary: "blocked", required_fixes: [] }));
+          updateRun(fixture, (run) => { run.security_review = { verdict: "BLOCK", review_ref: "reviews/security.json" }; });
+          return fixture;
+        },
+        mutate: ({ fixture }) => writeJson(join(fixture.runDir, "reviews", "security.json"), createReviewRecord({ subject: fixture.runId, verdict: "BLOCK", summary: "changed", required_fixes: [] })), match: /parent_reviews bindings changed/u,
+      },
+      {
+        id: "continuation-planning-reuse-ineligible", setup: () => createFixture("authority-ineligible"),
+        mutate: ({ continuation }) => { continuation.planning_reuse.eligible = true; }, match: /spec_review_ref|planning_reuse/u,
+      },
+      {
+        id: "continuation-planning-reuse-eligible", setup: () => createFixture("authority-eligible", { spec: { status: "accepted", verdict: "APPROVE" } }),
+        mutate: ({ continuation }) => { continuation.planning_reuse.spec_artifact_hash = `sha256:${"0".repeat(64)}`; }, match: /planning_reuse binding/u,
+      },
+      {
+        id: "continuation-draft-reuse", setup: () => createFixture("authority-draft", { spec: { status: "rejected", verdict: "REJECT" } }),
+        mutate: ({ continuation }) => { continuation.draft_spec_reuse.artifact_hash = `sha256:${"0".repeat(64)}`; }, match: /draft_spec_reuse binding/u,
+      },
+      {
+        id: "continuation-post-pr-binding", setup: () => createFixture("authority-post-pr"),
+        mutate: ({ continuation }) => { continuation.post_pr = structuredClone(catalogRecord("continuation-post-pr-binding").source); }, match: /post_pr binding/u,
+      },
+    ];
+    assert.deepEqual(cases.map(({ id }) => id), DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "continuation-planning-draft-reuse").records.map(({ id }) => id));
+    for (const testCase of cases) {
+      const fixture = testCase.setup();
+      try {
+        const childRunId = `${fixture.runId}-next`;
+        const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, dryRun: true });
+        const continuation = structuredClone(payload.continuation);
+        testCase.mutate({ fixture, continuation });
+        assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, continuation), testCase.match, testCase.id);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false, `${testCase.id} failure must leave child seed absent`);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("rejects every generated continuation mutation that requires checked byte or identity re-observation", () => {
+    const records = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "continuation-planning-draft-reuse").records;
+    let checkedCases = 0;
+    for (const record of records) {
+      for (const target of record.descriptor.targets) {
+        const exclusions = Object.fromEntries(DURABLE_MUTATION_FAMILIES.filter((family) => family !== target.family).map((family) => [family, "isolated target emission"]));
+        const mutationCase = emitDurableRecordMutations(record.source, { ...record.descriptor, targets: [target], exclusions }, record.externalSources)[0];
+        const catalogFixture = createDurableCatalogBaseline(record);
+        const catalogRun = replaceCatalogContinuationRecord(catalogFixture.run, record.canonicalPath, mutationCase.record);
+        try {
+          validateRun(catalogRun);
+          // Structural mutations stop at validateRun; only the cases that remain
+          // well-shaped reach the checked seed consumer below.
+        } catch {
+          continue;
+        }
+
+        checkedCases += 1;
+        const fixture = createContinuationAuthorityFixture(record.id, checkedCases);
+        try {
+          const childRunId = `${fixture.runId}-next`;
+          const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, dryRun: true });
+          const continuation = structuredClone(payload.continuation);
+          if (record.id === "continuation-post-pr-binding") continuation.post_pr = structuredClone(record.source);
+          const actualRecord = continuationRecordAt(continuation, record.canonicalPath);
+          if (mutationCase.family === "wrong-bytes") mutateContinuationAuthorityBytes(fixture, continuation, record.id, actualRecord, target);
+          else applyCatalogTargetValue(actualRecord, target, mutationCase.record);
+
+          assert.throws(
+            () => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, continuation),
+            /continuation|ValidationError|must|binding|changed|stale|cross-bound|hash|review|target/u,
+            mutationCase.name,
+          );
+          assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false, `${mutationCase.name} must leave child seed absent`);
+        } finally {
+          cleanup(fixture.repo);
+        }
+      }
+    }
+    assert.equal(checkedCases, 31, "all 31 structurally valid continuation authority mutations must reach the checked seed consumer");
+  });
+
   function seedChildForAdopt(fixture, childRunId) {
     const { payload } = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, dryRun: true });
     const seeded = seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, payload.continuation);
@@ -991,7 +1203,7 @@ function createFixture(runId, { status = "blocked", createBranch = true, review,
   if (maxRetries !== undefined) run.max_retries = maxRetries;
   if (spec) {
     writeFileSync(join(runDir, "artifacts", "technical-brief.md"), spec.brief ?? "brief\n", "utf8");
-    writeJson(join(runDir, "reviews", "spec-writer.json"), createReviewRecord({ subject: "spec-writer", verdict: spec.verdict, summary: "spec review", required_fixes: [] }));
+    writeJson(join(runDir, "reviews", "spec-writer.json"), createReviewRecord({ subject: spec.subject ?? "spec-writer", verdict: spec.verdict, summary: spec.summary ?? "spec review", required_fixes: [] }));
     const step = { agent: "spec-writer", status: spec.status, attempts: spec.attempts ?? 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json" };
     if (spec.status === "accepted" && spec.bind !== false) {
       step.acceptance = {
@@ -1075,6 +1287,72 @@ function childRunFromPayload(continuation) {
     ...(continuation.draft_spec_reuse ? { max_retries: continuation.draft_spec_reuse.max_retries } : {}),
     continuation,
   });
+}
+
+function catalogRecord(id) {
+  return DURABLE_AUTHORITY_CATALOG.flatMap((authorityClass) => authorityClass.records).find((record) => record.id === id);
+}
+
+function createContinuationAuthorityFixture(recordId, index) {
+  const spec = recordId === "continuation-draft-reuse"
+    ? { status: "rejected", verdict: "REJECT" }
+    : recordId === "continuation-planning-reuse-ineligible" || recordId === "continuation-post-pr-binding"
+      ? undefined
+      : { status: "accepted", verdict: "APPROVE" };
+  const fixture = createFixture(`catalog-consumer-${index}`, { spec });
+  mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+  writeJson(join(fixture.runDir, "evidence", "context.json"), { subject: "spec-writer", status: "fail" });
+  writeJson(join(fixture.runDir, "reviews", "security.json"), createReviewRecord({ subject: fixture.runId, verdict: "BLOCK", summary: "blocked", required_fixes: [] }));
+  updateRun(fixture, (run) => {
+    run.security_review = { verdict: "BLOCK", review_ref: "reviews/security.json" };
+    if (run.steps?.[0]) run.steps[0].evidence_ref = "evidence/context.json";
+    else run.steps = [{ agent: "context-reader", status: "blocked", attempts: 1, evidence_ref: "evidence/context.json" }];
+  });
+  return fixture;
+}
+
+function replaceCatalogContinuationRecord(run, canonicalPath, value) {
+  const next = structuredClone(run);
+  let owner = next;
+  for (const segment of canonicalPath.slice(0, -1)) owner = owner[segment];
+  owner[canonicalPath.at(-1)] = structuredClone(value);
+  return next;
+}
+
+function continuationRecordAt(continuation, canonicalPath) {
+  if (canonicalPath.length === 1) return continuation;
+  let value = continuation;
+  for (const segment of canonicalPath.slice(1)) value = value[segment];
+  return value;
+}
+
+function applyCatalogTargetValue(actualRecord, target, mutatedCatalogRecord) {
+  const value = valueAtPath(mutatedCatalogRecord, target.path);
+  let owner = actualRecord;
+  for (const segment of target.path.slice(0, -1)) owner = owner[segment];
+  owner[target.path.at(-1)] = structuredClone(value);
+}
+
+function valueAtPath(value, path) {
+  let current = value;
+  for (const segment of path) current = current[segment];
+  return current;
+}
+
+function mutateContinuationAuthorityBytes(fixture, continuation, recordId, actualRecord, target) {
+  let ref;
+  if (target.sidecar === "parent-run") {
+    const file = join(fixture.runDir, "run.json");
+    writeFileSync(file, `${readFileSync(file, "utf8")} `, "utf8");
+    return;
+  }
+  if (target.sidecar === "selected-review") ref = continuation.review.ref;
+  else if (recordId === "continuation-planning-reuse-eligible" && target.sidecar === "review") ref = continuation.planning_reuse.spec_review_ref;
+  else if (recordId === "continuation-planning-reuse-eligible" && target.sidecar === "artifact") ref = continuation.planning_reuse.spec_artifact_ref;
+  else if (recordId === "continuation-draft-reuse") ref = continuation.draft_spec_reuse.artifact_ref;
+  else ref = actualRecord?.ref;
+  if (!ref || recordId === "continuation-post-pr-binding") return;
+  writeFileSync(join(fixture.runDir, ref), "tampered-sidecar-bytes", "utf8");
 }
 
 function writeJson(file, value) {

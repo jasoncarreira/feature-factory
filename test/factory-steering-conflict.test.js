@@ -59,12 +59,10 @@ describe("factory steering conflict transition", () => {
       assert.equal(afterRun.terminal_result.pr_url, "https://github.com/acme/project/pull/123");
       assert.equal(afterRun.terminal_result.reason, `operator steering conflicts with accepted durable state: steering=${consumed.steering.ref}; protected=gate:story,gate:pre_pr,step:spec-writer,step:test-verifier,slice:be-api,slice:be-docs,validator:GO-WITH-NITS,security_review:PASS,pr_url; automatic rollback is forbidden`);
       assert.equal(afterRun.terminal_result.summary, "Consumed untrusted steering would require changing accepted durable state; human reconciliation is required.");
-      assert.deepEqual(afterRun.terminal_result.artifacts, {
-        steering_ref: consumed.steering.ref,
-        steering_hash: consumed.steering.hash,
-        protected_state: "gate:story,gate:pre_pr,step:spec-writer,step:test-verifier,slice:be-api,slice:be-docs,validator:GO-WITH-NITS,security_review:PASS,pr_url",
-        reason_code: "accepted-state-conflict",
-      });
+      assert.deepEqual(afterRun.terminal_result.artifacts, {});
+      assert.deepEqual(result.steering, { ref: consumed.steering.ref, hash: consumed.steering.hash });
+      assert.equal(afterRun.steering.history.at(-1).ref, consumed.steering.ref);
+      assert.equal(afterRun.steering.history.at(-1).hash, consumed.steering.hash);
 
       assert.deepEqual(afterRun, {
         ...beforeRun,
@@ -73,7 +71,8 @@ describe("factory steering conflict transition", () => {
         terminal_result: afterRun.terminal_result,
       });
       assert.deepEqual(snapshotDurableFiles(fixture.runDir), durableFilesBefore);
-      assert.equal(validateRunDir(fixture.runDir).ok, true);
+      const validation = validateRunDir(fixture.runDir);
+      assert.equal(validation.ok, true, JSON.stringify(validation.checks.filter((check) => !check.ok)));
     } finally {
       cleanup(fixture.repo);
     }
@@ -191,6 +190,7 @@ function writeDurableFilesAndRun(runDir, runId) {
   writeFileSync(join(runDir, "artifacts", "pre-pr.md"), "pre-pr\n", "utf8");
   writeFileSync(join(runDir, "artifacts", "validator.md"), "validator report\n", "utf8");
   writeFileSync(join(runDir, "gates", "story.question.md"), "approve story?\n", "utf8");
+  writeFileSync(join(runDir, "gates", "story.answer"), "approve\n", "utf8");
   writeFileSync(join(runDir, "gates", "story.answer.consumed-1"), "approve\n", "utf8");
   writeFileSync(join(runDir, "gates", "pre_pr.question.md"), "approve pre-pr?\n", "utf8");
   writeJson(join(runDir, "evidence", "spec.json"), { subject: "spec-writer", status: "pass" });
@@ -215,14 +215,15 @@ function writeDurableFilesAndRun(runDir, runId) {
         artifact: "artifacts/story.md",
         question_ref: "gates/story.question.md",
         answer_ref: "gates/story.answer.consumed-1",
+        answer: "approve",
         answered_at: "2026-07-09T11:00:00.000Z",
         pending_snapshot: {
           question_ref: "gates/story.question.md",
           question_hash: hashFile(join(runDir, "gates", "story.question.md"), { mode: "raw" }),
           artifact_ref: "artifacts/story.md",
           artifact_hash: hashFile(join(runDir, "artifacts", "story.md"), { mode: "raw" }),
-          answer_ref: "gates/story.answer.consumed-1",
-          answer_hash: hashFile(join(runDir, "gates", "story.answer.consumed-1"), { mode: "raw" }),
+          answer_ref: "gates/story.answer",
+          answer_hash: hashFile(join(runDir, "gates", "story.answer"), { mode: "raw" }),
           created_at: "2026-07-09T10:59:00.000Z",
         },
       },

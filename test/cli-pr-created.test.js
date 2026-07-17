@@ -1,169 +1,144 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "./helpers/git-fixture.js";
 
 const CLI = new URL("../src/cli.js", import.meta.url).pathname;
 const PR_URL = "https://github.com/jasoncarreira/opencode-feature-factory/pull/99";
-const HASH = `sha256:${"a".repeat(64)}`;
 
 describe("cli pr-created", () => {
-  it("records completed PR state through checked transition", () => {
+  it("records the universal successor tuple using only run id and fence token", () => {
     const fixture = createFixture("cli-pr-created");
     try {
-      const proc = runFencedPrCli(fixture, ["--json"]);
-      assert.equal(proc.status, 0, proc.stderr);
-      const output = JSON.parse(proc.stdout);
-      const run = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(output.pr_url, PR_URL);
+      const result = establishAndRecord(fixture);
+      assert.equal(result.proc.status, 0, result.proc.stderr);
+      const run = readJson(fixture.runPath);
       assert.equal(run.status, "completed");
-      assert.equal(run.terminal_result.pr_url, PR_URL);
-      assert.equal(run.terminal_result.draft, false);
-      assert.equal(run.terminal_result.summary, "PR created.");
-    } finally {
-      cleanup(fixture.repo);
+      assert.deepEqual(pick(run.terminal_result, ["pr_url", "pr_number", "pr_node_id", "repository", "operation_id", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]), {
+        pr_url: PR_URL, pr_number: 99, pr_node_id: "PR_cli_operation", repository: "jasoncarreira/opencode-feature-factory",
+        operation_id: result.fence.operation_id, head_ref: "feature-branch", head_sha: fixture.head, base_ref: "main", base_sha: fixture.base, draft: false,
+      });
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rejects every removed caller PR metadata flag", () => {
+    for (const [flag, value] of [["--pr-url", PR_URL], ["--pr-number", "99"], ["--repository", "jasoncarreira/opencode-feature-factory"], ["--head-sha", "a".repeat(40)], ["--draft", null], ["--no-draft", null]]) {
+      const args = ["factory", "pr-created", "run", "--fence-token", "safe-token"];
+      args.push(flag); if (value !== null) args.push(value);
+      const proc = runCli(process.cwd(), args);
+      assert.notEqual(proc.status, 0, flag);
+      assert.match(proc.stderr, new RegExp(`does not support ${flag}`), flag);
     }
   });
 
-  it("rejects removed pr-created flags as unknown", () => {
-    const fixture = createFixture("cli-pr-unknown-flag");
+  it("retains the fence for absent, ambiguous, unknown, and closed-unmerged observations", () => {
+    for (const [disposition, reason] of [["absent", null], ["ambiguous", null], ["unknown", null], ["closed", "pr-operation-closed-unmerged"]]) {
+      const fixture = createFixture(`cli-${disposition}`, disposition);
+      try {
+        const fence = establish(fixture);
+        const proc = record(fixture, fence.token);
+        assert.notEqual(proc.status, 0, disposition);
+        const run = readJson(fixture.runPath);
+        assert.equal(run.steering.pr_fence.token, fence.token);
+        assert.equal(run.terminal_result?.reason ?? null, reason);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("records a found PR during clear and clears only complete absence", () => {
+    const found = createFixture("clear-found", "open");
     try {
-      const proc = runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--pr-url", PR_URL, "--pr-number", "99", "--repository", "jasoncarreira/opencode-feature-factory", "--head-commit", "abc123"]);
+      const fence = establish(found);
+      const proc = runCli(found.repo, ["factory", "pr-fence", found.runId, "--clear", "--fence-token", fence.token, "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.equal(readJson(found.runPath).status, "completed");
+    } finally { cleanup(found.repo); }
+
+    const absent = createFixture("clear-absent", "absent");
+    try {
+      const fence = establish(absent);
+      const proc = runCli(absent.repo, ["factory", "pr-fence", absent.runId, "--clear", "--fence-token", fence.token, "--json"]);
+      assert.equal(proc.status, 0, proc.stderr);
+      assert.equal(readJson(absent.runPath).steering.pr_fence, null);
+    } finally { cleanup(absent.repo); }
+  });
+
+  it("rejects local/worktree/origin movement after fencing without consuming the fence", () => {
+    const fixture = createFixture("stale-head");
+    try {
+      const fence = establish(fixture);
+      writeFileSync(join(fixture.repo, "README.md"), "changed\n");
+      runGit(fixture.repo, ["add", "README.md"]); runGit(fixture.repo, ["commit", "-m", "move head"]);
+      const proc = record(fixture, fence.token);
       assert.notEqual(proc.status, 0);
-      assert.match(proc.stderr, /unknown option: --head-commit/u);
-    } finally {
-      cleanup(fixture.repo);
-    }
+      assert.match(proc.stderr, /reviewed_head_sha values must equal the current integration head|local, worktree, and origin head equality/u);
+      assert.equal(readJson(fixture.runPath).steering.pr_fence.token, fence.token);
+    } finally { cleanup(fixture.repo); }
   });
 
-  it("records env snapshots through the env command and keeps the legacy alias", () => {
-    const fixture = createFixture("cli-env");
-    try {
-      for (const command of ["env", "provenance"]) {
-        const proc = runCli(fixture.repo, ["factory", command, "record-created", fixture.runId, "--json"]);
-        assert.equal(proc.status, 0, proc.stderr);
-        const run = readJson(join(fixture.runDir, "run.json"));
-        assert.equal(run.debug_snapshot.created_with.diagnostic_only, true);
-        assert.equal(typeof run.debug_snapshot.created_with.env, "object");
-      }
-    } finally {
-      cleanup(fixture.repo);
+  it("terminalizes legacy identity-less fences through pr-created and clear", () => {
+    for (const command of ["pr-created", "clear"]) {
+      const fixture = createFixture(`legacy-${command}`);
+      try {
+        const fence = establish(fixture);
+        const run = readJson(fixture.runPath);
+        for (const key of ["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]) delete run.steering.pr_fence[key];
+        writeJson(fixture.runPath, run);
+        const args = command === "clear" ? ["factory", "pr-fence", fixture.runId, "--clear", "--fence-token", fence.token, "--json"] : ["factory", "pr-created", fixture.runId, "--fence-token", fence.token, "--json"];
+        const proc = runCli(fixture.repo, args);
+        assert.notEqual(proc.status, 0);
+        const terminal = readJson(fixture.runPath);
+        assert.equal(terminal.terminal_result.reason, "legacy-pr-fence-operation-identity-missing");
+        assert.equal(terminal.steering.pr_fence.token, fence.token);
+      } finally { cleanup(fixture.repo); }
     }
   });
 });
 
-function createFixture(runId, { ready = true, continuation = false, ghIsDraft = false, postPr = false } = {}) {
-  const repo = mkdtempSync(join(tmpdir(), "cli-pr-simplified-"));
-  writeFakeGh(repo, { isDraft: ghIsDraft, expectedRepository: "jasoncarreira/opencode-feature-factory", expectedNumber: "99" });
-  const runDir = join(repo, ".opencode", "factory", runId);
-  mkdirSync(join(runDir, "artifacts"), { recursive: true });
-  mkdirSync(join(runDir, "reviews"), { recursive: true });
-  writeFileSync(join(runDir, "artifacts", "validation-report.md"), "ok\n");
-  writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", verdict: "GO" });
-  writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", verdict: "PASS" });
-  const run = {
-    schema_version: 1,
-    run_id: runId,
-    status: "running",
-    branch: continuation ? "continuation-branch" : undefined,
-    worktree: continuation ? "/tmp/continuation-worktree" : undefined,
-    gates: ready ? { pre_pr: { status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md", answer: "approve", answered_at: "2026-07-08T12:00:00.000Z" } } : {},
-    slices: ready ? [{ id: "slice", status: "merged", attempts: 1, merge_commit: "abc123" }] : [],
-    validator: ready ? { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" } : null,
-    security_review: ready ? { verdict: "PASS", review_ref: "reviews/security-reviewer.json" } : null,
-    continuation: continuation ? continuationMetadata(runId) : undefined,
-    post_pr: postPr ? {
-      schema_version: 1,
-      policy: { enabled: true, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } },
-      phase: "awaiting-pr", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null,
-    } : undefined,
-  };
-  writeJson(join(runDir, "run.json"), run);
-  return { repo, runDir, runId };
+function createFixture(runId, disposition = "open") {
+  const repo = mkdtempSync(join(tmpdir(), "cli-pr-operation-"));
+  initGit(repo);
+  const base = gitOutput(repo, ["rev-parse", "HEAD"]);
+  runGit(repo, ["checkout", "-b", "feature-branch"]);
+  const head = gitOutput(repo, ["rev-parse", "HEAD"]);
+  runGit(repo, ["remote", "add", "origin", "https://github.com/jasoncarreira/opencode-feature-factory.git"]);
+  runGit(repo, ["config", `url.file://${repo}/.insteadOf`, "https://github.com/jasoncarreira/opencode-feature-factory.git"]);
+  const runDir = join(repo, ".opencode", "factory", runId); const runPath = join(runDir, "run.json");
+  for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
+  writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
+  writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", required_fixes: [], reviewed_commit: head });
+  writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", attempt: 1, verdict: "GO", reviewed_head_sha: head });
+  writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", attempt: 1, verdict: "PASS", reviewed_head_sha: head });
+  writeJson(runPath, { schema_version: 1, run_id: runId, status: "running", base_ref: "main", base_commit: base, branch: "feature-branch", worktree: repo, github_account: "jasoncarreira", pr_mode: "ready", pr_url: null,
+    gates: { pre_pr: { status: "approved" } }, slices: [{ id: "slice", status: "merged", attempts: 1, evidence_ref: "evidence/slice.json", evidence_hash: hashFile(join(runDir, "evidence", "slice.json")), review_ref: "reviews/slice.json", review_hash: hashFile(join(runDir, "reviews", "slice.json")), reviewed_commit: head, merge_commit: head }],
+    validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFile(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFile(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
+    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFile(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head }, terminal_result: null });
+  writeFakeGh(repo, disposition);
+  return { repo, runDir, runPath, runId, base, head };
 }
 
-function continuationMetadata(targetRunId) {
-  return {
-    schema_version: 1,
-    kind: "blocked-run-continuation",
-    parent: {
-      run_id: "parent-run",
-      status: "blocked",
-      run_ref: "runs/parent-run/run.json",
-      run_hash: HASH,
-      branch: "parent-branch",
-      commit: "abc123",
-      worktree: "/tmp/parent-worktree",
-    },
-    review: {
-      kind: "validator",
-      ref: "reviews/implementation-validator.json",
-      hash: HASH,
-      subject: "parent-run",
-      summary: "Validator required fixes before PR creation.",
-      required_fixes: ["address validation failure"],
-      source: "run.validator.review_ref",
-    },
-    target: {
-      run_id: targetRunId,
-      branch: "continuation-branch",
-      worktree: "/tmp/continuation-worktree",
-      base_ref: "main",
-      base_commit: "def456",
-    },
-    created_at: "2026-07-08T12:00:00.000Z",
-    operator_summary: "Continue blocked parent run from implementation-validator review.",
-    parent_artifacts: [{ kind: "validation_report", ref: "artifacts/validation-report.md", hash: HASH }],
-    parent_evidence: [],
-    parent_reviews: [{ kind: "review", ref: "reviews/implementation-validator.json", hash: HASH }],
-  };
-}
-
-function runCli(repo, args) {
-  return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, PATH: `${join(repo, "bin")}:${process.env.PATH}` } });
-}
-
-function runFencedPrCli(fixture, extras = [], options = {}) {
-  const fenceProc = runCli(fixture.repo, ["factory", "pr-fence", fixture.runId, "--json"]);
-  if (fenceProc.status !== 0) return fenceProc;
-  const fence = JSON.parse(fenceProc.stdout).fence;
-  const repositoryArgs = options.replaceRepository ? [] : ["--repository", "jasoncarreira/opencode-feature-factory"];
-  return runCli(fixture.repo, [
-    "factory", "pr-created", fixture.runId,
-    "--pr-url", PR_URL,
-    "--pr-number", "99",
-    ...repositoryArgs,
-    "--fence-token", fence.token,
-    ...extras,
-  ]);
-}
-
-function writeFakeGh(repo, { isDraft, expectedRepository, expectedNumber }) {
-  const bin = join(repo, "bin");
-  mkdirSync(bin, { recursive: true });
-  const gh = join(bin, "gh");
+function writeFakeGh(repo, disposition) {
+  const bin = join(repo, ".opencode", "fake-bin"); mkdirSync(bin, { recursive: true }); const gh = join(bin, "gh");
   writeFileSync(gh, `#!/usr/bin/env node
-const args = process.argv.slice(2);
-const repoIndex = args.indexOf("--repo");
-if (args[0] !== "pr" || args[1] !== "view" || args[2] !== ${JSON.stringify(expectedNumber)} || repoIndex < 0 || args[repoIndex + 1] !== ${JSON.stringify(expectedRepository)}) {
-  process.stderr.write("unexpected gh args\\n");
-  process.exit(2);
-}
-process.stdout.write(${JSON.stringify(JSON.stringify({ isDraft }) + "\n")});
-`, "utf8");
-  chmodSync(gh, 0o755);
+const fs=require("node:fs"),path=require("node:path"); const args=process.argv.slice(2); if(args[0]==="auth")process.exit(0); if(args[0]!=="api")process.exit(2);
+const root=path.join(process.cwd(),".opencode","factory"); const name=fs.readdirSync(root).find(n=>fs.existsSync(path.join(root,n,"run.json"))); const run=JSON.parse(fs.readFileSync(path.join(root,name,"run.json"),"utf8")); const f=run.steering.pr_fence;
+if(${JSON.stringify(disposition)}==="unknown"){process.stdout.write("malformed");process.exit(0);} const p={html_url:${JSON.stringify(PR_URL)},number:99,node_id:"PR_cli_operation",draft:f.draft,body:"<!-- opencode-feature-factory:pr-operation="+f.operation_id+" -->",state:${JSON.stringify(disposition)}==="closed"?"closed":"open",merged_at:null,head:{ref:f.head_ref,sha:f.head_sha,repo:{full_name:f.repository}},base:{ref:f.base_ref,sha:f.base_sha,repo:{full_name:f.repository}}}; const body=${JSON.stringify(disposition)}==="absent"?[]:${JSON.stringify(disposition)}==="ambiguous"?[p,{...p,html_url:"https://github.com/jasoncarreira/opencode-feature-factory/pull/100",number:100,node_id:"PR_other"}]:[p]; process.stdout.write("HTTP/2 200 OK\\r\\ncontent-type: application/json\\r\\n\\r\\n"+JSON.stringify(body));
+`); chmodSync(gh, 0o755);
 }
 
-function readJson(file) {
-  return JSON.parse(readFileSync(file, "utf8"));
-}
-
-function writeJson(file, value) {
-  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-}
-
-function cleanup(repo) {
-  rmSync(repo, { recursive: true, force: true });
-}
+function establish(fixture) { const proc = runCli(fixture.repo, ["factory", "pr-fence", fixture.runId, "--json"]); assert.equal(proc.status, 0, proc.stderr); return readJson(fixture.runPath).steering.pr_fence; }
+function record(fixture, token) { return runCli(fixture.repo, ["factory", "pr-created", fixture.runId, "--fence-token", token, "--json"]); }
+function establishAndRecord(fixture) { const fence = establish(fixture); return { fence, proc: record(fixture, fence.token) }; }
+function runCli(repo, args) { return spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, PATH: `${join(repo, ".opencode", "fake-bin")}:${process.env.PATH}` } }); }
+function initGit(repo) { runGit(repo, ["init", "-b", "main"]); runGit(repo, ["config", "user.email", "test@example.com"]); runGit(repo, ["config", "user.name", "Test"]); writeFileSync(join(repo, ".gitignore"), ".opencode/\n"); writeFileSync(join(repo, "README.md"), "test\n"); runGit(repo, ["add", ".gitignore", "README.md"]); runGit(repo, ["commit", "-m", "init"]); }
+function runGit(repo, args) { const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }); assert.equal(proc.status, 0, proc.stderr || proc.stdout); }
+function gitOutput(repo, args) { const proc = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }); assert.equal(proc.status, 0, proc.stderr || proc.stdout); return proc.stdout.trim(); }
+function hashFile(file) { return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`; }
+function readJson(file) { return JSON.parse(readFileSync(file, "utf8")); }
+function writeJson(file, value) { writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`); }
+function pick(value, keys) { return Object.fromEntries(keys.map((key) => [key, value[key]])); }
+function cleanup(repo) { rmSync(repo, { recursive: true, force: true }); }

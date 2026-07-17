@@ -38,14 +38,8 @@ export function formatSteeringConflictReason(ref, protectedState) {
 
 export function buildSteeringConflictTerminalResult(run, steering, protectedState, input = {}) {
   const ref = requireNonEmptyString(steering?.ref, "steering ref");
-  const hash = requireNonEmptyString(steering?.hash, "steering hash");
+  requireNonEmptyString(steering?.hash, "steering hash");
   const normalizedProtectedState = normalizeProtectedState(protectedState);
-  const artifacts = {
-    steering_ref: ref,
-    steering_hash: hash,
-    protected_state: normalizedProtectedState.join(","),
-    reason_code: "accepted-state-conflict",
-  };
   void input;
 
   return {
@@ -54,7 +48,7 @@ export function buildSteeringConflictTerminalResult(run, steering, protectedStat
     pr_url: stringValue(run?.pr_url) ? run.pr_url : null,
     reason: formatSteeringConflictReason(ref, normalizedProtectedState),
     summary: STEERING_CONFLICT_SUMMARY,
-    artifacts,
+    artifacts: {},
   };
 }
 

@@ -5,15 +5,14 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { canonicalizeGithubPrUrl } from "./refs.js";
-import { normalizePrNumber as normalizeTransitionPrNumber, transitionPrCreated, transitionRecoverOrphan, mergedSliceRepairFence, transitionMergedSliceRepair, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
-import { HEARTBEAT_PROTECTED_GATES, validateRun, validateSlicesPlan } from "./validate.js";
+import { transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSlicesSeed, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { validateRun, validateSlicesPlan } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { printCliResult, projectCliData, projectCostReport, renderCliPath } from "./cli-output.js";
@@ -25,9 +24,6 @@ import { executeCleanupSweep, previewCleanupSweep } from "./cleanup-sweep.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
-const HEARTBEAT_PROTECTED_GATE_SET = new Set(HEARTBEAT_PROTECTED_GATES);
-const HEARTBEAT_STEP_IN_FLIGHT_STATUSES = new Set(["running"]);
-const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--new-pr"]);
@@ -90,7 +86,7 @@ Commands:
   factory verdicts <run-id> --validator GO|GO-WITH-NITS|NO-GO --report artifacts/validation-report.md --security PASS|BLOCK --review-ref reviews/security-reviewer.json
   factory terminal <run-id> <blocked|partial|needs-human> --reason TEXT --boundary-token TOKEN
   factory slice-merged <run-id> <slice-id> --merge-commit SHA [--json]
-  factory pr-created <run-id> --pr-url URL --pr-number N --repository OWNER/REPO --fence-token TOKEN [--head-sha SHA] [--draft|--no-draft] [--json]
+  factory pr-created <run-id> --fence-token TOKEN [--json]
   factory post-pr-observe <run-id> [--json]
   factory post-pr-remediation <run-id> <attempt> running [--json]
   factory post-pr-remediation <run-id> <attempt> revalidating --remediation-evidence-ref REF [--json]
@@ -363,7 +359,12 @@ async function prFence(args) {
   const positional = positionals(args);
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory pr-fence requires exactly one <run-id>");
-  if (opts.clear) return print(await clearPrePrFence(runId, requiredOption(opts.fenceToken, "--fence-token", "factory pr-fence --clear"), opts), opts);
+  if (opts.clear) {
+    const result = await clearPrePrFence(runId, requiredOption(opts.fenceToken, "--fence-token", "factory pr-fence --clear"), opts);
+    print(result, opts);
+    if (result?.ok === false) process.exitCode = 1;
+    return;
+  }
   if (opts.fenceToken) throw staticCliError("factory pr-fence accepts --fence-token only with --clear");
   return print(await establishPrePrFence(runId, opts), opts);
 }
@@ -745,12 +746,7 @@ async function slicesSeed(args) {
     status: "pending",
     attempts: 0,
   }));
-  return print(await transitionRunJson(runDir, (run) => {
-    if (!opts.force && Array.isArray(run.slices) && run.slices.some((slice) => slice?.status && slice.status !== "pending")) {
-      throw new Error("factory slices-seed refuses to replace non-pending slice progress without --force");
-    }
-    run.slices = slices;
-  }, opts), opts);
+  return print(await transitionSlicesSeed(runDir, slices, opts), opts);
 }
 
 async function sliceStatus(args) {
@@ -829,10 +825,9 @@ async function verdicts(args) {
   const security = normalizeSecurityVerdict(requiredOption(opts.security, "--security", "factory verdicts"));
   const report = assertRefUnder(requiredOption(opts.report, "--report", "factory verdicts"), "artifacts/", "--report");
   const reviewRef = assertRefUnder(requiredOption(opts.reviewRef, "--review-ref", "factory verdicts"), "reviews/", "--review-ref");
-  return print(await transitionRunJson(resolveRunDir(runId, opts), (run) => {
-    if (mergedSliceRepairFence(run)) throw new Error("panel verdicts are fenced while a merged-slice repair is unresolved");
-    run.validator = { verdict: validator, report, review_ref: "reviews/implementation-validator.json" };
-    run.security_review = { verdict: security, review_ref: reviewRef };
+  return print(await transitionPanelVerdicts(resolveRunDir(runId, opts), {
+    validator: { verdict: validator, report, review_ref: "reviews/implementation-validator.json" },
+    security_review: { verdict: security, review_ref: reviewRef },
   }, opts), opts);
 }
 
@@ -850,23 +845,17 @@ async function terminal(args) {
 }
 
 async function prCreated(args) {
+  assertOnlyCommandOptions(args, new Set(["--fence-token", "--json"]), "factory pr-created");
   const opts = options(args);
   const positional = positionals(args);
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) {
     throw new Error("factory pr-created requires exactly one <run-id>");
   }
-  if (opts.draft === true && opts.noDraft === true) throw new Error("factory pr-created accepts only one of --draft or --no-draft");
-
-  const request = {
-    pr_url: canonicalizeGithubPrUrl(requiredOption(opts.prUrl, "--pr-url")),
-    pr_number: normalizeCliPrNumber(requiredOption(opts.prNumber, "--pr-number")),
-    repository: requiredOption(opts.repository, "--repository"),
-    draft: opts.draft === true,
-  };
-  if (stringValue(opts.headSha)) request.head_sha = opts.headSha;
   opts.fenceToken = requiredOption(opts.fenceToken, "--fence-token", "factory pr-created");
-  return print(await transitionPrCreated(resolveRunDir(runId, opts), request, opts), opts);
+  const result = await transitionPrCreated(resolveRunDir(runId, opts), {}, opts);
+  print(result, opts);
+  if (result?.ok === false) process.exitCode = 1;
 }
 
 async function sliceMerged(args) {
@@ -880,11 +869,12 @@ async function sliceMerged(args) {
   return print(await transitionSliceMerged(resolveRunDir(runId, opts), sliceId, request, opts), opts);
 }
 
-function normalizeCliPrNumber(value) {
-  try {
-    return normalizeTransitionPrNumber(value);
-  } catch {
-    throw new Error("factory pr-created requires --pr-number to be a positive integer");
+function assertOnlyCommandOptions(args, allowed, command) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith("--")) continue;
+    if (!allowed.has(arg)) throw staticCliError(`${command} does not support ${arg}`);
+    if (VALUE_FLAGS.has(arg)) index += 1;
   }
 }
 
@@ -1047,18 +1037,8 @@ async function startHeartbeatProcess(runId, opts) {
   if (current.status === "invalid") {
     throw new Error(current.error || "run diagnostics failed closed");
   }
-  if (current.status !== "running") {
-    throw new Error(`run '${current.run_id}' must be running to start a heartbeat`);
-  }
-  if (current.steering?.pending) throw new Error(`run '${current.run_id}' has pending steering; drain it before starting a heartbeat`);
-  if (current.steering?.uncheckpointed) throw new Error(`run '${current.run_id}' has consumed steering awaiting acknowledgement`);
-  if (current.steering?.pr_fence) throw new Error(`run '${current.run_id}' has an active pre-PR fence`);
-  if (HEARTBEAT_PROTECTED_GATE_SET.has(current.pending_gate)) {
-    throw new Error(`run '${current.run_id}' is waiting at protected gate '${current.pending_gate}'`);
-  }
-  if (!hasInFlightHeartbeatWork(run)) {
-    throw new Error(`run '${current.run_id}' has no in-flight factory work for heartbeat`);
-  }
+  // Advisory only; the foreground child repeats this assertion under run-json.lock.
+  assertHeartbeatStartable(run);
   const childArgs = [cliPath, "factory", "heartbeat", runId, "--foreground", "--phase", config.phase];
   if (config.intervalMs !== undefined) childArgs.push("--interval", String(config.intervalMs));
 
@@ -1127,18 +1107,6 @@ function publicHeartbeatStatus(runId, opts = {}) {
 
 function readHeartbeatStartRun(runDir) {
   return validateRun(JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")));
-}
-
-function hasInFlightHeartbeatWork(run) {
-  if (run?.status === "running" && run?.post_pr?.policy?.enabled === true && ["observing", "remediation-running", "revalidating"].includes(run.post_pr.phase)) return true;
-  if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) {
-    return true;
-  }
-  if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) {
-    return true;
-  }
-  if (["repairing", "review"].includes(run?.merged_slice_repair?.status)) return true;
-  return false;
 }
 
 function normalizeHeartbeatRunId(runId) {
