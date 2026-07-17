@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import plugin, { mergeFactoryPermission, parseFrontmatter } from "../src/plugin.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadValue } from "../src/feature-command-payload.js";
+import { validateRun } from "../src/validate.js";
 
 const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
 const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
@@ -133,7 +134,7 @@ describe("feature command payload parsing", () => {
     assert.match(token, /^ffpayload-v1:[A-Za-z0-9_-]+$/u);
     assert.doesNotMatch(token, /[\s@!`'"$\\/]/u);
     const decoded = decodeFeatureCommandPayload(token);
-    assert.equal(decoded.ok, true);
+    assert.equal(decoded.ok, true, JSON.stringify(decoded));
     assert.match(decoded.payload.operator_request, /@secret/u);
   });
 
@@ -176,7 +177,7 @@ describe("feature command payload parsing", () => {
     });
 
     const decoded = decodeFeatureCommandPayload(token);
-    assert.equal(decoded.ok, true);
+    assert.equal(decoded.ok, true, JSON.stringify(decoded));
     assert.deepEqual(decoded.payload.steering.consume.args, args);
 
     const forged = decodeFeatureCommandPayload(encodeFeatureCommandPayload({
@@ -220,6 +221,42 @@ describe("feature command payload parsing", () => {
     const output = { parts: [{ type: "text", text: `command\n\nUNTRUSTED_OPERATOR_PAYLOAD_START\n${continuationToken(continuation)}` }] };
     await instance["command.execute.before"]({ command: "feature", sessionID: "session", arguments: continuationToken(continuation) }, output);
     assert.match(output.parts[0].text, /PLUGIN_PARSED_OPERATOR_PAYLOAD_START\nparse_status: valid/u);
+  });
+
+  it("accepts canonical v2 carry-forward payloads and rejects version/shape/partition forgeries", () => {
+    const continuation = validContinuation();
+    continuation.schema_version = 2;
+    continuation.parent.commit = "e".repeat(40);
+    continuation.target.base_ref = "refs/remotes/origin/main";
+    continuation.carry_forward = {
+      scope: "full-remaining-plan",
+      plan_ref: "plan/slices.json",
+      plan_hash: `sha256:${"1".repeat(64)}`,
+      start_commit: continuation.parent.commit,
+      accepted_slices: [{
+        id: "A", attempts: 2,
+        evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`,
+        review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`,
+        reviewed_commit: "4".repeat(40), merge_commit: "5".repeat(40),
+      }],
+      remaining_slice_ids: ["B"],
+    };
+    assert.doesNotThrow(() => validateRun({ schema_version: 1, run_id: continuation.target.run_id, branch: continuation.target.branch, worktree: continuation.target.worktree, status: "running", gates: {}, continuation }));
+    const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
+    assert.equal(decoded.ok, true, JSON.stringify(decoded));
+    assert.deepEqual(decoded.payload.continuation.carry_forward, continuation.carry_forward);
+
+    for (const [label, mutate] of [
+      ["unknown carry field", (value) => { value.carry_forward.status = "ready"; }],
+      ["unknown accepted field", (value) => { value.carry_forward.accepted_slices[0].branch = "A"; }],
+      ["duplicate partition", (value) => { value.carry_forward.remaining_slice_ids = ["A"]; }],
+      ["v1 authority claim", (value) => { value.schema_version = 1; }],
+      ["v2 missing authority", (value) => { delete value.carry_forward; }],
+    ]) {
+      const forged = structuredClone(continuation);
+      mutate(forged);
+      assert.equal(decodeFeatureCommandPayload(continuationToken(forged), { repo: process.cwd() }).ok, false, label);
+    }
   });
 
   it("binds post-PR continuation review, evidence, state hash, PR identity, and inherited policy", () => {

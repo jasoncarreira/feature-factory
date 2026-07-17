@@ -2961,7 +2961,7 @@ function assertPrCreatedSliceState(runDir, run) {
   });
 }
 
-function assertPassingVerdictArtifacts(runDir, run) {
+export function assertPassingVerdictArtifacts(runDir, run) {
   if (!stringValue(runDir)) throw new Error("pr-created requires run directory context");
   if (!hasCompleteBinding(run.validator, VALIDATOR_BINDING_KEYS) || !hasCompleteBinding(run.security_review, SECURITY_BINDING_KEYS)) {
     throw new Error("pr-created requires successor validator and security reviewed-head bindings");
@@ -3173,7 +3173,7 @@ function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slic
   return current;
 }
 
-function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
+export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
   const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
   if (!hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) throw new Error(`slice '${sliceId}' successor review binding is missing`);
   if (!Number.isInteger(slice.attempts) || slice.attempts < 1 || observed.evidence.attempt !== slice.attempts || observed.review.attempt !== slice.attempts) {
@@ -3205,6 +3205,23 @@ function observeSliceHeadAuthority(runDir, run, sliceId, slice, options = {}) {
 }
 
 function observeExactSliceMergeProof(repository, run, sliceId, mergeCommit, reviewedCommit, options = {}) {
+  const proof = observeReviewedMergeProof(repository, sliceId, mergeCommit, reviewedCommit, options);
+  const firstParent = proof.first_parent;
+  for (const prior of Array.isArray(run.slices) ? run.slices : []) {
+    if (prior?.id === sliceId || prior?.status !== "merged") continue;
+    const priorMerge = requireNonEmptyString(prior.merge_commit, `prior merged slice '${prior?.id || "unknown"}' merge_commit`);
+    if (!authorityGit(options, repository, ["merge-base", "--is-ancestor", priorMerge, firstParent]).ok) {
+      throw new Error(`prior merged slice '${prior.id}' must be an ancestor of the new merge first parent`);
+    }
+  }
+  return proof;
+}
+
+// Shared B0MR proof used by continuation carry-forward. The ordinary merge
+// transition adds its own "all previously merged slices are ancestors" rule;
+// carry-forward instead validates the already-recorded first-parent chain, whose
+// actual merge order is intentionally independent of PLAN order.
+export function observeReviewedMergeProof(repository, sliceId, mergeCommit, reviewedCommit, options = {}) {
   const parentsResult = authorityGit(options, repository, ["rev-list", "--parents", "-n", "1", mergeCommit]);
   if (!parentsResult.ok) throw new Error(`slice '${sliceId}' merge parents cannot be observed`);
   const parents = parentsResult.stdout.trim().split(/\s+/u);
@@ -3236,13 +3253,6 @@ function observeExactSliceMergeProof(repository, run, sliceId, mergeCommit, revi
     if (reviewedEntry.stdout !== mergedEntry.stdout) throw new Error(`slice '${sliceId}' merged path '${path}' differs in presence, mode, type, or object identity`);
   }
 
-  for (const prior of Array.isArray(run.slices) ? run.slices : []) {
-    if (prior?.id === sliceId || prior?.status !== "merged") continue;
-    const priorMerge = requireNonEmptyString(prior.merge_commit, `prior merged slice '${prior?.id || "unknown"}' merge_commit`);
-    if (!authorityGit(options, repository, ["merge-base", "--is-ancestor", priorMerge, firstParent]).ok) {
-      throw new Error(`prior merged slice '${prior.id}' must be an ancestor of the new merge first parent`);
-    }
-  }
   return { first_parent: firstParent, second_parent: secondParent, merge_base: base, paths: [...reviewedPaths].sort() };
 }
 
