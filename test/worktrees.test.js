@@ -181,10 +181,11 @@ describe("safe continuation worktree creation and recovery", () => {
     let published;
     try {
       assert.throws(() => createOrRecoverWorktree(inodeFixture.repo, inodeTarget, { branch: "child", head: inodeFixture.head, claim: "1".repeat(40) }, {
-        afterReserve(state) { published = state; throw new Error("pause for inode replacement"); },
-      }), /pause for inode replacement/u);
-      rmSync(published.reservation.staging, { recursive: true, force: true });
-      mkdirSync(published.reservation.staging);
+        afterReserve(state) { published = state; throw new Error("pause for inode mismatch"); },
+      }), /pause for inode mismatch/u);
+      const marker = JSON.parse(readFileSync(published.reservationPath, "utf8"));
+      marker.staging_ino = String(BigInt(marker.staging_ino) + 1n);
+      writeFileSync(published.reservationPath, JSON.stringify(marker));
       assert.throws(
         () => createOrRecoverWorktree(inodeFixture.repo, inodeTarget, { branch: "child", head: inodeFixture.head, claim: "1".repeat(40) }),
         /wrong filesystem identity/u,
