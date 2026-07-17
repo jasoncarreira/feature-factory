@@ -7,6 +7,7 @@ export const MAX_GIT_TIMEOUT_MS = 30_000;
 export const DEFAULT_GIT_MAX_BUFFER = 1024 * 1024;
 export const MAX_GIT_MAX_BUFFER = 8 * 1024 * 1024;
 const repoRootCache = new Map();
+const ZERO_OID = "0".repeat(40);
 
 export function git(cwd, args, options = {}) {
   const resolvedCwd = resolve(requireNonEmptyString(cwd, "cwd"));
@@ -36,6 +37,7 @@ export function git(cwd, args, options = {}) {
       cwd: resolvedCwd,
       encoding: "utf8",
       env,
+      ...(options.input === undefined ? {} : { input: options.input }),
       shell: false,
       timeout,
       maxBuffer,
@@ -64,6 +66,19 @@ export function git(cwd, args, options = {}) {
   }
 }
 
+export function createTwoRefsAtomicallyNoReplace(cwd, first, second, options = {}) {
+  const updates = [normalizeCreateRef(first, "first"), normalizeCreateRef(second, "second")];
+  if (updates[0].ref === updates[1].ref) throw new Error("atomic ref creation requires two distinct refs");
+  const input = [
+    "start",
+    ...updates.map(({ ref, oid }) => `update ${ref} ${oid} ${ZERO_OID}`),
+    "prepare",
+    "commit",
+    "",
+  ].join("\n");
+  return git(cwd, ["update-ref", "--no-deref", "--stdin"], { ...options, input });
+}
+
 export function repoRoot(cwd = process.cwd(), options = {}) {
   const key = resolve(requireNonEmptyString(cwd, "cwd"));
   if (!options.noCache && repoRootCache.has(key)) return repoRootCache.get(key);
@@ -80,6 +95,18 @@ function normalizeArgs(args) {
     if (arg.includes("\0")) throw new Error(`git args[${index}] must not contain NUL bytes`);
     return arg;
   });
+}
+
+function normalizeCreateRef(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} atomic ref update must be an object`);
+  const ref = requireNonEmptyString(value.ref, `${label} atomic ref`);
+  const oid = requireNonEmptyString(value.oid, `${label} atomic ref oid`);
+  if (!ref.startsWith("refs/") || /[\u0000-\u0020\u007f~^:?*[\]]/u.test(ref) || ref.includes("\\") || ref.includes("..") || ref.includes("@{")
+    || ref.includes("//") || ref.endsWith("/") || ref.endsWith(".") || ref.endsWith(".lock")) {
+    throw new Error(`${label} atomic ref must be a full safe ref name`);
+  }
+  if (!/^[a-f0-9]{40}$/u.test(oid) || oid === ZERO_OID) throw new Error(`${label} atomic ref oid must be a nonzero full lowercase object id`);
+  return { ref, oid };
 }
 
 function clampPositiveInteger(value, fallback, maximum) {

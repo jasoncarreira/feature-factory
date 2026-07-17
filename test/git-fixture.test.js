@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ChildProcess, execFileSync, runFixtureGit, spawn, spawnSync } from "./helpers/git-fixture.js";
+import { createTwoRefsAtomicallyNoReplace } from "../src/git.js";
 
 describe("fixture Git harness", () => {
   it("exports the native process API shapes used by fixtures", () => {
@@ -102,6 +103,39 @@ describe("fixture Git harness", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("atomic no-replace ref transaction", () => {
+  it("uses one update-ref stdin transaction with an all-zero old OID for both refs", () => {
+    const calls = [];
+    const firstOid = "a".repeat(40);
+    const secondOid = "b".repeat(40);
+    const zero = "0".repeat(40);
+    const result = createTwoRefsAtomicallyNoReplace("/tmp", {
+      ref: "refs/opencode/continuations/abc",
+      oid: firstOid,
+    }, {
+      ref: "refs/heads/child",
+      oid: secondOid,
+    }, {
+      spawnSync(file, args, options) {
+        calls.push({ file, args: [...args], input: options.input });
+        return { status: 0, stdout: "start: ok\nprepare: ok\ncommit: ok\n", stderr: "" };
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args, ["update-ref", "--no-deref", "--stdin"]);
+    assert.equal(calls[0].input, [
+      "start",
+      `update refs/opencode/continuations/abc ${firstOid} ${zero}`,
+      `update refs/heads/child ${secondOid} ${zero}`,
+      "prepare",
+      "commit",
+      "",
+    ].join("\n"));
   });
 });
 
