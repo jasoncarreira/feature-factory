@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, statSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { git } from "./git.js";
 import { physicalPath, requireNonEmptyString } from "./utils.js";
@@ -48,33 +48,62 @@ export function createOrRecoverWorktree(repo, worktree, expected = {}, options =
   const target = resolve(requireNonEmptyString(worktree, "worktree"));
   const branch = requireNonEmptyString(expected.branch, "expected branch");
   const head = requireNonEmptyString(expected.head, "expected head");
+  const claimOid = requireNonEmptyString(expected.claim, "expected claim oid");
   if (!/^[a-f0-9]{40}$/u.test(head)) throw new Error("expected worktree head must be a full lowercase commit id");
+  if (!/^[a-f0-9]{40}$/u.test(claimOid)) throw new Error("expected worktree claim oid must be a full lowercase object id");
   const root = resolve(repository, ".opencode", "worktrees");
   const targetRelative = relative(root, target);
   if (!targetRelative || targetRelative === ".." || targetRelative.startsWith("../") || isAbsolute(targetRelative)) {
     throw new Error(`continuation worktree must stay under ${root}`);
   }
 
-  const existing = inspectTarget(target);
-  if (existing.exists) return exactWorktreeOrThrow(repository, target, branch, head, options, true);
-
   mkdirSync(root, { recursive: true });
   const rootEntry = lstatSync(root);
   if (rootEntry.isSymbolicLink() || !rootEntry.isDirectory()) throw new Error(`continuation worktree root is unsafe: ${root}`);
+  const reservationPath = `${target}.continuation-reservation`;
+  const expectedReservation = { root, target, branch, head, claimOid, reservationPath };
+  const existing = inspectTarget(target);
+  if (existing.exists) {
+    const exact = exactWorktreeOrThrow(repository, target, branch, head, options, true);
+    const reservation = readReservationIfPresent(expectedReservation, { ownedPath: target });
+    if (reservation) removeOwnedReservation(reservation);
+    return exact;
+  }
+
+  const reservation = acquireReservation(expectedReservation);
+  if (typeof options.afterReserve === "function") options.afterReserve({ reservationPath, reservation: reservation.record });
   if (typeof options.beforeAdd === "function") options.beforeAdd({ repo: repository, worktree: target, branch, head });
-  try {
-    mkdirSync(target, { recursive: false });
-  } catch (error) {
-    if (error?.code === "EEXIST") return exactWorktreeOrThrow(repository, target, branch, head, options, true);
-    throw new Error(`continuation worktree path could not be reserved without overwrite: ${error.message}`);
+  if (inspectTarget(target).exists) {
+    releaseUnusedReservation(repository, reservation, options);
+    throw new Error(`continuation worktree target appeared after reservation and will not be adopted: ${target}`);
   }
-  const added = git(repository, ["worktree", "add", target, branch], { timeout: 30000, ...options });
-  if (!added.ok) {
-    const raced = inspectTarget(target);
-    if (raced.exists) return exactWorktreeOrThrow(repository, target, branch, head, options, true);
-    throw new Error(`continuation worktree add failed: ${(added.stderr || added.stdout || "unknown git error").trim()}`);
+
+  let stagingIdentity = checkWorktreeIdentity(repository, reservation.record.staging, { branch, head }, options);
+  if (!stagingIdentity.ok) {
+    if (stagingIdentity.reason !== "not-a-registered-worktree") {
+      throw new Error(`continuation reserved staging worktree conflicts with expected branch/head: ${stagingIdentity.reason}`);
+    }
+    assertReservationOwnedPath(reservation, reservation.record.staging);
+    const added = git(repository, ["worktree", "add", reservation.record.staging, branch], { timeout: 30000, ...options });
+    if (!added.ok) throw new Error(`continuation worktree add failed: ${(added.stderr || added.stdout || "unknown git error").trim()}`);
+    stagingIdentity = checkWorktreeIdentity(repository, reservation.record.staging, { branch, head }, options);
+    if (!stagingIdentity.ok) throw new Error(`continuation worktree add produced an invalid registered staging worktree: ${stagingIdentity.reason}`);
+    if (typeof options.afterAdd === "function") options.afterAdd({ reservationPath, reservation: reservation.record });
   }
-  return exactWorktreeOrThrow(repository, target, branch, head, options, false);
+
+  if (inspectTarget(target).exists) throw new Error(`continuation worktree target exists and will not be overwritten: ${target}`);
+  if (typeof options.beforeMove === "function") options.beforeMove({ reservationPath, reservation: reservation.record });
+  const moved = git(repository, ["worktree", "move", reservation.record.staging, target], { timeout: 30000, ...options });
+  if (!moved.ok) {
+    const racedTarget = inspectTarget(target);
+    if (!racedTarget.exists) throw new Error(`continuation worktree move failed: ${(moved.stderr || moved.stdout || "unknown git error").trim()}`);
+    exactWorktreeOrThrow(repository, target, branch, head, options, true);
+  }
+  if (typeof options.afterMove === "function") options.afterMove({ reservationPath, reservation: reservation.record });
+  const final = exactWorktreeOrThrow(repository, target, branch, head, options, reservation.created === false);
+  assertReservationOwnedPath(reservation, target);
+  removeOwnedReservation(reservation);
+  return final;
 }
 
 export function deriveExpectedWorktreePath(repo, branch) {
@@ -111,4 +140,115 @@ function exactWorktreeOrThrow(repo, target, branch, head, options, recovered) {
     throw new Error("continuation worktree HEAD does not equal the registered start commit");
   }
   return { worktree: identity.worktree, recovered, entry: identity.entry };
+}
+
+function acquireReservation(expected) {
+  const existing = readReservationIfPresent(expected);
+  if (existing) return { ...existing, created: false };
+
+  const staging = mkdtempSync(join(expected.root, `.continuation-stage-${shortHash(`${expected.target}\0${expected.claimOid}`)}-`));
+  const stagingEntry = lstatSync(staging);
+  if (stagingEntry.isSymbolicLink() || !stagingEntry.isDirectory()) throw new Error("continuation reservation staging path is unsafe");
+  const record = {
+    schema_version: 1,
+    kind: "continuation-worktree-reservation",
+    claim_oid: expected.claimOid,
+    target: expected.target,
+    branch: expected.branch,
+    head: expected.head,
+    staging,
+    staging_dev: String(stagingEntry.dev),
+    staging_ino: String(stagingEntry.ino),
+  };
+  const bytes = canonicalJson(record);
+  const temporary = `${expected.reservationPath}.tmp-${randomUUID()}`;
+  writeFileSync(temporary, bytes, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  try {
+    linkSync(temporary, expected.reservationPath);
+  } catch (error) {
+    unlinkSync(temporary);
+    rmdirSync(staging);
+    if (error?.code === "EEXIST") {
+      const winner = readReservationIfPresent(expected);
+      if (winner) return { ...winner, created: false };
+    }
+    throw new Error(`continuation reservation could not be published without overwrite: ${error.message}`);
+  }
+  unlinkSync(temporary);
+  const markerEntry = lstatSync(expected.reservationPath);
+  return { record, bytes, marker_dev: String(markerEntry.dev), marker_ino: String(markerEntry.ino), path: expected.reservationPath, created: true };
+}
+
+function readReservationIfPresent(expected, options = {}) {
+  let markerEntry;
+  try {
+    markerEntry = lstatSync(expected.reservationPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (markerEntry.isSymbolicLink() || !markerEntry.isFile()) throw new Error(`continuation reservation path is foreign or unsafe: ${expected.reservationPath}`);
+  const bytes = readFileSync(expected.reservationPath, "utf8");
+  let record;
+  try {
+    record = JSON.parse(bytes);
+  } catch (error) {
+    throw new Error(`continuation reservation is invalid JSON: ${error.message}`);
+  }
+  const keys = ["branch", "claim_oid", "head", "kind", "schema_version", "staging", "staging_dev", "staging_ino", "target"];
+  if (!record || typeof record !== "object" || Array.isArray(record) || Object.keys(record).sort().join("\0") !== keys.join("\0")
+    || bytes !== canonicalJson(record) || record.schema_version !== 1 || record.kind !== "continuation-worktree-reservation"
+    || record.claim_oid !== expected.claimOid || record.target !== expected.target || record.branch !== expected.branch || record.head !== expected.head) {
+    throw new Error("continuation reservation does not exactly match the claim-bound target identity");
+  }
+  const staging = resolve(record.staging);
+  const stagingRelative = relative(expected.root, staging);
+  if (!stagingRelative || stagingRelative === ".." || stagingRelative.startsWith("../") || isAbsolute(stagingRelative)
+    || !stagingRelative.startsWith(".continuation-stage-") || !/^\d+$/u.test(record.staging_dev) || !/^\d+$/u.test(record.staging_ino)) {
+    throw new Error("continuation reservation staging identity is unsafe");
+  }
+  const reservation = { record: { ...record, staging }, bytes, marker_dev: String(markerEntry.dev), marker_ino: String(markerEntry.ino), path: expected.reservationPath };
+  assertReservationOwnedPath(reservation, options.ownedPath || staging);
+  return reservation;
+}
+
+function assertReservationOwnedPath(reservation, path) {
+  let entry;
+  try {
+    entry = lstatSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error(`continuation reservation owned path is missing: ${path}`);
+    throw error;
+  }
+  if (entry.isSymbolicLink() || !entry.isDirectory()
+    || String(entry.dev) !== reservation.record.staging_dev || String(entry.ino) !== reservation.record.staging_ino) {
+    throw new Error(`continuation reservation owned path has the wrong filesystem identity: ${path}`);
+  }
+}
+
+function removeOwnedReservation(reservation) {
+  const markerEntry = lstatSync(reservation.path);
+  if (markerEntry.isSymbolicLink() || !markerEntry.isFile() || String(markerEntry.dev) !== reservation.marker_dev
+    || String(markerEntry.ino) !== reservation.marker_ino || readFileSync(reservation.path, "utf8") !== reservation.bytes) {
+    throw new Error("continuation reservation cleanup refused a changed or foreign marker");
+  }
+  unlinkSync(reservation.path);
+}
+
+function releaseUnusedReservation(repo, reservation, options) {
+  const identity = checkWorktreeIdentity(repo, reservation.record.staging, {}, options);
+  if (identity.reason !== "not-a-registered-worktree") {
+    throw new Error("continuation reservation cleanup refused a registered or foreign staging worktree");
+  }
+  assertReservationOwnedPath(reservation, reservation.record.staging);
+  rmdirSync(reservation.record.staging);
+  removeOwnedReservation(reservation);
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }

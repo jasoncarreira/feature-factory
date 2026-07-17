@@ -1606,6 +1606,7 @@ describe("continuation planning-artifact reuse", () => {
       assert.deepEqual(transactions[0].args, ["update-ref", "--no-deref", "--stdin"]);
       assert.equal(transactions[0].input, [
         "start",
+        `verify ${expected.parentIdentity.parent_branch_ref} ${result.start_commit}`,
         `update ${result.claim_ref} ${result.claim_oid} ${zero}`,
         `update ${result.child_branch_ref} ${result.start_commit} ${zero}`,
         "prepare",
@@ -1646,6 +1647,34 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
+  it("atomically rejects a parent branch move after final recheck and before the ref transaction executes", () => {
+    const fixture = createV2Fixture("allocation-parent-transaction-race", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "allocation-parent-transaction-race-next";
+    const parentRef = `refs/heads/${fixture.runId}`;
+    let raced = false;
+    try {
+      assert.throws(() => continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        refTransactionSpawnSync(file, args, options) {
+          if (!raced) {
+            raced = true;
+            updateRef(fixture.repo, parentRef, fixture.baseCommit);
+          }
+          return spawnSync(file, args, options);
+        },
+      }), /parent|transaction|verify|conflict/u);
+      assert.equal(raced, true);
+      assert.equal(refOid(fixture.repo, parentRef), fixture.baseCommit);
+      assert.equal(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "");
+      assert.equal(refOid(fixture.repo, `refs/heads/${childRunId}`), null);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", childRunId)), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
+    } finally { cleanup(fixture.repo); }
+  });
+
   it("leaves neither ref on a pre-transaction crash and exact-replays both refs after a post-transaction crash", () => {
     const before = createV2Fixture("allocation-crash-before", { accepted: ["A"], mergeOrder: ["A"] });
     try {
@@ -1680,6 +1709,36 @@ describe("continuation planning-artifact reuse", () => {
       assert.equal(gitStdout(replay.worktree, ["rev-parse", "HEAD"]), committed.startCommit);
       assert.equal(existsSync(join(after.repo, ".opencode", "factory", childRunId)), false);
     } finally { cleanup(after.repo); }
+  });
+
+  it("exact-replays committed refs after interruption of claim-bound worktree reservation", () => {
+    const fixture = createV2Fixture("allocation-worktree-reservation-crash", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "allocation-worktree-reservation-crash-next";
+    let reservation;
+    try {
+      assert.throws(() => continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        afterWorktreeReserve(state) {
+          reservation = state;
+          throw new Error("interrupted after claim-bound worktree reservation");
+        },
+      }), /interrupted after claim-bound worktree reservation/u);
+      assert.equal(existsSync(reservation.reservationPath), true);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", childRunId)), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
+      assert.equal(refOid(fixture.repo, `refs/heads/${childRunId}`), fixture.mergeCommits.A);
+      assert.notEqual(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "");
+
+      const recovered = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true });
+      assert.equal(recovered.replayed, true);
+      assert.equal(recovered.worktree_recovered, true);
+      assert.equal(gitStdout(recovered.worktree, ["rev-parse", "HEAD"]), fixture.mergeCommits.A);
+      assert.equal(existsSync(reservation.reservationPath), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
+    } finally { cleanup(fixture.repo); }
   });
 
   it("rejects half states and every non-exact replay without overwriting or repair", () => {

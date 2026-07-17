@@ -2768,6 +2768,7 @@ function allocateCarryForwardResources(repo, continuation, options = {}) {
     });
     const transaction = createTwoRefsAtomicallyNoReplace(
       repo,
+      { ref: parentIdentity.parent_branch_ref, oid: parentIdentity.start_commit },
       { ref: claimRef, oid: claimOid },
       { ref: childBranchRef, oid: startCommit },
       typeof options.refTransactionSpawnSync === "function" ? { spawnSync: options.refTransactionSpawnSync } : {},
@@ -2790,8 +2791,12 @@ function allocateCarryForwardResources(repo, continuation, options = {}) {
   const worktree = createOrRecoverWorktree(repo, continuation.target.worktree, {
     branch: continuation.target.branch,
     head: startCommit,
+    claim: claimOid,
   }, {
     ...(typeof options.beforeWorktreeAdd === "function" ? { beforeAdd: options.beforeWorktreeAdd } : {}),
+    ...(typeof options.afterWorktreeReserve === "function" ? { afterReserve: options.afterWorktreeReserve } : {}),
+    ...(typeof options.afterWorktreeAdd === "function" ? { afterAdd: options.afterWorktreeAdd } : {}),
+    ...(typeof options.afterWorktreeMove === "function" ? { afterMove: options.afterWorktreeMove } : {}),
     ...(typeof options.worktreeSpawnSync === "function" ? { spawnSync: options.worktreeSpawnSync } : {}),
   });
   if (inspectCarryForwardRefs(repo, { claimRef, claimOid, claimBytes, childBranchRef, startCommit }) !== "exact") {

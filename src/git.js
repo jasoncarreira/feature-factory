@@ -66,11 +66,15 @@ export function git(cwd, args, options = {}) {
   }
 }
 
-export function createTwoRefsAtomicallyNoReplace(cwd, first, second, options = {}) {
-  const updates = [normalizeCreateRef(first, "first"), normalizeCreateRef(second, "second")];
-  if (updates[0].ref === updates[1].ref) throw new Error("atomic ref creation requires two distinct refs");
+export function createTwoRefsAtomicallyNoReplace(cwd, verify, first, second, options = {}) {
+  const required = normalizeRefOid(verify, "required verify ref");
+  const updates = [normalizeRefOid(first, "first create ref"), normalizeRefOid(second, "second create ref")];
+  if (new Set([required.ref, ...updates.map((update) => update.ref)]).size !== 3) {
+    throw new Error("atomic ref transaction requires three distinct direct refs");
+  }
   const input = [
     "start",
+    `verify ${required.ref} ${required.oid}`,
     ...updates.map(({ ref, oid }) => `update ${ref} ${oid} ${ZERO_OID}`),
     "prepare",
     "commit",
@@ -97,15 +101,15 @@ function normalizeArgs(args) {
   });
 }
 
-function normalizeCreateRef(value, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} atomic ref update must be an object`);
-  const ref = requireNonEmptyString(value.ref, `${label} atomic ref`);
-  const oid = requireNonEmptyString(value.oid, `${label} atomic ref oid`);
+function normalizeRefOid(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const ref = requireNonEmptyString(value.ref, label);
+  const oid = requireNonEmptyString(value.oid, `${label} oid`);
   if (!ref.startsWith("refs/") || /[\u0000-\u0020\u007f~^:?*[\]]/u.test(ref) || ref.includes("\\") || ref.includes("..") || ref.includes("@{")
     || ref.includes("//") || ref.endsWith("/") || ref.endsWith(".") || ref.endsWith(".lock")) {
-    throw new Error(`${label} atomic ref must be a full safe ref name`);
+    throw new Error(`${label} must be a full safe direct ref name`);
   }
-  if (!/^[a-f0-9]{40}$/u.test(oid) || oid === ZERO_OID) throw new Error(`${label} atomic ref oid must be a nonzero full lowercase object id`);
+  if (!/^[a-f0-9]{40}$/u.test(oid) || oid === ZERO_OID) throw new Error(`${label} oid must be a nonzero full lowercase object id`);
   return { ref, oid };
 }
 

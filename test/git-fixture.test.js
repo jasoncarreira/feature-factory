@@ -113,6 +113,9 @@ describe("atomic no-replace ref transaction", () => {
     const secondOid = "b".repeat(40);
     const zero = "0".repeat(40);
     const result = createTwoRefsAtomicallyNoReplace("/tmp", {
+      ref: "refs/heads/parent",
+      oid: "c".repeat(40),
+    }, {
       ref: "refs/opencode/continuations/abc",
       oid: firstOid,
     }, {
@@ -130,12 +133,30 @@ describe("atomic no-replace ref transaction", () => {
     assert.deepEqual(calls[0].args, ["update-ref", "--no-deref", "--stdin"]);
     assert.equal(calls[0].input, [
       "start",
+      `verify refs/heads/parent ${"c".repeat(40)}`,
       `update refs/opencode/continuations/abc ${firstOid} ${zero}`,
       `update refs/heads/child ${secondOid} ${zero}`,
       "prepare",
       "commit",
       "",
     ].join("\n"));
+  });
+
+  it("requires three distinct direct refs with full nonzero object ids", () => {
+    const oid = "a".repeat(40);
+    const options = { spawnSync: () => ({ status: 0, stdout: "", stderr: "" }) };
+    assert.throws(
+      () => createTwoRefsAtomicallyNoReplace("/tmp", { ref: "refs/heads/parent", oid }, { ref: "refs/heads/parent", oid }, { ref: "refs/heads/child", oid }, options),
+      /three distinct direct refs/u,
+    );
+    assert.throws(
+      () => createTwoRefsAtomicallyNoReplace("/tmp", { ref: "HEAD", oid }, { ref: "refs/claims/one", oid }, { ref: "refs/heads/child", oid }, options),
+      /full safe direct ref name/u,
+    );
+    assert.throws(
+      () => createTwoRefsAtomicallyNoReplace("/tmp", { ref: "refs/heads/parent", oid: "a" }, { ref: "refs/claims/one", oid }, { ref: "refs/heads/child", oid }, options),
+      /nonzero full lowercase object id/u,
+    );
   });
 });
 
