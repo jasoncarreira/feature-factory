@@ -629,6 +629,83 @@ named canonical replacements for duplicate internal attestations, and keeps pers
 legacy records on their original shape except for B0MR.1's narrow exact checked-replay
 upgrade to the reviewed-code successor tuples.
 
+## Planned continuation schema v2 (future-only; not implemented)
+
+This section records the approved Option A(a) / D design. V2 is **planned and not implemented**. It is not accepted by current validators or writers, is not a current production or package behavior promise, and adds no row or production-integrity-coverage claim to the Durable Authority Integrity Catalog above. The current v1 continuation schema below remains authoritative, narrow to `continuation.review.required_fixes`, and readable; current v1 post-PR continuation is unchanged.
+
+V2 will add a closed `continuation.carry_forward` object:
+
+```json
+{
+  "carry_forward": {
+    "scope": "full-remaining-plan",
+    "plan_ref": "plan/slices.json",
+    "plan_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "start_commit": "1111111111111111111111111111111111111111",
+    "accepted_slices": [
+      {
+        "id": "B0MR",
+        "attempts": 1,
+        "evidence_ref": "evidence/B0MR.json",
+        "evidence_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "review_ref": "reviews/B0MR.json",
+        "review_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "reviewed_commit": "4444444444444444444444444444444444444444",
+        "merge_commit": "5555555555555555555555555555555555555555"
+      }
+    ],
+    "remaining_slice_ids": ["B1.1", "B1.2", "B1.3", "B1.4"]
+  }
+}
+```
+
+The future object is closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted_slices`, and `remaining_slice_ids`, with `scope: "full-remaining-plan"`. Each `accepted_slices` entry is closed to exactly `id`, `attempts`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`; `remaining_slice_ids` contains IDs only. `plan_ref` is parent-relative and `plan_hash` binds exact regular-file bytes. `accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order. `remaining_slice_ids` contains every nonmerged slice ID, in PLAN order. IDs are unique within each array, the arrays are disjoint, and their set union is exactly the bound plan's complete `slices[].id` set. They need not form a prefix/suffix split: for PLAN order `[A, B, C]`, merged `A` and `C` yields `accepted_slices: [A, C]` and `remaining_slice_ids: [B]`, which is valid. Remaining rows inherit only plan identity/dependencies, never status, attempts, evidence, review, commit, merge, test, or panel authority.
+
+Eligibility is pre-PR blocked only: parent status is exactly `blocked`, with no PR URL/PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation. Current v1 post-PR continuation does not use this schema. Each accepted entry must match an exact parent `merged` slice with positive attempts and complete unchanged B0MR evidence/review/reviewed-commit/merge bindings. Actual integration merge order may differ from PLAN and dependency-execution order. The Git first-parent range from `target.base_commit` exclusive through `start_commit` inclusive contains exactly once the set of `accepted_slices[].merge_commit` values, contains no extra commit, and has length exactly `accepted_slices.length`. Each first-parent commit maps by `merge_commit` to one accepted entry and passes that entry's exact B0MR two-parent/merge-base/path/object proof. `start_commit` is parent branch HEAD and the last actual merge, or equals `target.base_commit` when `accepted_slices` is empty. This does not require `accepted_slices` order to equal first-parent chain order: PLAN-ordered `accepted_slices: [A, C]` and actual first-parent chain `[C, A]` is valid. Optional parent validator/security evidence is all-or-none complete B0MR successor binding with both `reviewed_head_sha` values exactly `start_commit`; it is never inherited, and the child always runs a fresh final panel.
+
+The authoritative origin-base outcomes are evaluated in this exact order: `unchanged` may continue; `contains start` stops as `rebaseline-required`; another `moved` tip stops as `stale-parent-base-moved`; `unavailable` fails closed as `origin-base-unavailable`. Candidate build, resource publication, and semantic adoption/activation each re-read and recheck the complete eligibility, bytes, PLAN-order merged/nonmerged classification, accepted merge set and actual first-parent chain, panels, start commit, and origin outcome.
+
+The claim suffix binds this closed parent identity, with no additional fields:
+
+```json
+{
+  "schema_version": 2,
+  "kind": "blocked-run-continuation-parent",
+  "parent_run_id": "parent-run",
+  "parent_run_ref": ".opencode/factory/parent-run/run.json",
+  "parent_run_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  "parent_branch_ref": "refs/heads/parent-run",
+  "target_base_ref": "refs/remotes/origin/main",
+  "target_base_commit": "7777777777777777777777777777777777777777",
+  "plan_ref": "plan/slices.json",
+  "plan_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "start_commit": "1111111111111111111111111111111111111111"
+}
+```
+
+The parent identity is closed to exactly `schema_version`, `kind`, `parent_run_id`, `parent_run_ref`, `parent_run_hash`, `parent_branch_ref`, `target_base_ref`, `target_base_commit`, `plan_ref`, `plan_hash`, and `start_commit`. Recursively sort every object's keys lexicographically, preserve array order, and encode canonical UTF-8 JSON with no insignificant whitespace and no trailing newline. The literal claim ref is `refs/opencode/continuations/<64hex>`, where `<64hex>` is exactly the 64-character lowercase hexadecimal SHA-256 suffix of those bytes (without `sha256:`).
+
+The claim ref points to a canonical JSON Git blob closed to exactly `schema_version`, `kind`, `parent_identity`, `child_run_id`, `child_branch_ref`, and `start_commit`:
+
+```json
+{
+  "schema_version": 2,
+  "kind": "blocked-run-continuation-claim",
+  "parent_identity": { "...": "the exact closed parent identity" },
+  "child_run_id": "parent-run-continuation",
+  "child_branch_ref": "refs/heads/parent-run-continuation",
+  "start_commit": "1111111111111111111111111111111111111111"
+}
+```
+
+The blob contains no self data: no claim ref/digest/hash, blob OID, transaction ID, worktree, mutable status, or timestamp. Its branch ref is full and its start commit equals `parent_identity.start_commit`.
+
+After publication rechecks, one atomic no-replace `git update-ref --stdin` transaction creates the claim ref pointing to that blob and `child_branch_ref` pointing to `start_commit`, each with an all-zero old OID. Only exact replay is idempotent: both refs, exact blob type and canonical bytes, full child ref, and branch target must already match. Any mismatch or half-state is conflict, never overwrite or repair. Worktree creation follows only transaction success/exact replay and performs no-overwrite plus final branch/HEAD checks.
+
+The claim is a permanent tombstone. Crash before transaction commit leaves neither ref; crash after leaves both and permits exact same-child worktree recovery. A one-ref half-state is external damage and fails closed. Competing/different children and pre-existing branches conflict. Child failure, terminalization, cleanup, and success never delete or reuse the claim; same-child recovery remains limited to exact replay.
+
+Delivery ownership is exact: B1.1 changes only `CONTINUATION-SCOPE-DESIGN.md`, `README.md`, `assets/skills/feature/SCHEMA.md`, and `test/docs-contract.test.js` and creates no runtime behavior/current promise. B1.2 builds/rechecks without resources. B1.3 creates only the atomic claim, child branch, and afterward worktree, with no child manifest, carry-forward/plan/adoption/panel publication, activation, or other semantic publication. B1.4 rechecks again, atomically publishes child/full plan, adopts every accepted slice without rerunning it, initializes remaining rows without inherited authority, keeps child panels fresh, and then activates remaining work by normal dependency readiness.
+
 ## run.json
 
 ```json

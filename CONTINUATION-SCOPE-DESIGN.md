@@ -1,79 +1,121 @@
-Status — design question, 2026-07-12: an open decision, not the current contract. `README.md` is current authority. This documents a structural tension observed in dogfood runs and frames the choice; it does not change behavior.
+Status — approved v2 design, 2026-07-17: Option A(a) / D is the decision. The v2 reviewed-carry-forward contract below is **planned and not implemented**. It does not change the current v1 `factory continue` contract or runtime behavior; `README.md` remains the authority for current behavior.
 
-# Continuation Scope vs. Whole-Story Gates
+# Continuation Scope and Reviewed Carry-Forward
 
-## The question
+## Decision
 
-When a blocked run's remaining work is resumed as **several narrowly-scoped continuations**, each continuation's branch carries only a subset of the story's slices — but the pre-PR panel judges **whole-story** completeness against that branch. A narrowly-scoped continuation is therefore structurally unable to reach GO no matter how good its own work is. Do we fix the continuation model (one continuation owns the whole remaining plan) or make the pre-PR gate scope-aware?
+A blocked feature has one continuation, not one continuation per remaining concern. The child owns the parent's complete remaining plan, starts from the parent's validated integration HEAD, and re-adopts exactly every parent slice that is already reviewed and merged. Remaining slices run as normal dependency waves inside that one child. The whole-story pre-PR gate remains unchanged.
 
-## Evidence
+This approves Option A(a) (branch from the validated integration HEAD and durably re-adopt accepted slices) and Option D (do not fragment one blocked run into sibling continuations). Scope-aware partial PR gates, cross-continuation joins, replaying already accepted slices, and independent sibling continuations are rejected.
 
-Parent run `cleanup-conservative-sweep` blocked with four of seven slices merged. Its remaining work was resumed as **three separate continuations** off the same parent:
+## Current v1 boundary
 
-- `cleanup-command-output-continuation` → **completed**
-- `cleanup-eligibility-continuation` → **blocked**
-- `cleanup-conservative-sweep-continuation` → **needs-human** (unrelated: steering conflict)
+The shipped v1 continuation remains current, narrow, and readable. It decomposes only `continuation.review.required_fixes`, inherits accepted planning only through the existing checked adoption path, and otherwise runs the current gates. Existing v1 post-PR continuation behavior is unchanged. Nothing in this document makes v2 input valid, creates a v2 claim, publishes v2 authority, changes eligibility, or changes current production/catalog coverage.
 
-`cleanup-eligibility-continuation` did its job correctly — the four selected eligibility fixes are closed and its own test-verifier and security reviews passed. It blocked only at the holistic pre-PR panel, whose `implementation-validator` returned NO-GO:
+## Planned v2 carry-forward schema
 
-> "The four selected eligibility fixes are closed, but the integrated branch does not deliver the accepted repository-wide cleanup feature: production orchestration, exact CLI grammar, digest execution, rendering, and required execution/docs coverage remain absent."
+V2 adds one closed `continuation.carry_forward` object:
 
-Those absent surfaces are owned by *sibling* continuations, not by this one. The validator is correct — the branch it sees is not a shippable feature — and the continuation is also correct — it completed its declared scope. Both are right; the run still dead-ends.
+```json
+{
+  "scope": "full-remaining-plan",
+  "plan_ref": "plan/slices.json",
+  "plan_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "start_commit": "1111111111111111111111111111111111111111",
+  "accepted_slices": [
+    {
+      "id": "B0MR",
+      "attempts": 1,
+      "evidence_ref": "evidence/B0MR.json",
+      "evidence_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "review_ref": "reviews/B0MR.json",
+      "review_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "reviewed_commit": "4444444444444444444444444444444444444444",
+      "merge_commit": "5555555555555555555555555555555555555555"
+    }
+  ],
+  "remaining_slice_ids": ["B1.1", "B1.2", "B1.3", "B1.4"]
+}
+```
 
-## Why it happens (the structural tension)
+The `carry_forward` object is closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted_slices`, and `remaining_slice_ids`; `scope` is exactly `full-remaining-plan`. Every `accepted_slices` entry is closed to exactly `id`, `attempts`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`. `remaining_slice_ids` contains slice IDs only. Unknown, missing, duplicate, null, abbreviated, or synthetic fields fail closed.
 
-Two mechanisms that are individually sound collide:
+`plan_ref` is the parent-relative `plan/slices.json`, and `plan_hash` binds its exact regular-file bytes. `accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order. `remaining_slice_ids` contains every nonmerged slice ID, in PLAN order. IDs are unique within each array, the arrays are disjoint, and their set union is exactly the bound plan's complete `slices[].id` set, with no omission or extra ID. They are ordered filtered subsequences, not a prefix/suffix split: for plan order `[A, B, C]`, merged `A` and `C` produces `accepted_slices: [A, C]` and `remaining_slice_ids: [B]`, which is valid. Remaining rows inherit identity and plan dependencies only: they inherit no status, attempts, evidence, review, reviewed commit, merge commit, test result, panel verdict, or other authority from the parent.
 
-1. **Narrow remediation** (PR #44). `factory continue` reuses the parent's durably-accepted plan and scopes decomposition to `continuation.review.required_fixes` — deliberately *not* re-decomposing the whole brief, so a targeted fix converges within the bounded remediation budget. Good for fixing one blocking review.
+## Planned v2 eligibility and integration proof
 
-2. **Whole-story pre-PR gate.** The `implementation-validator` is holistic by design: it judges every acceptance criterion → code → test across the *integrated* branch. A PR should not ship a partially-implemented feature.
+V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. A parent with a PR, active post-PR state, a non-`blocked` status, no nonmerged slice, or ambiguous state is ineligible for v2. Current v1 post-PR continuation remains unchanged and is not routed through v2 carry-forward.
 
-### Two independent axes
+Each accepted row must match the same-ID parent slice with positive `attempts`, status exactly `merged`, the complete B0MR successor tuple, and unchanged exact evidence/review bytes. Actual integration merge order may differ from PLAN and dependency-execution order. The Git first-parent range from `target.base_commit` exclusive through `start_commit` inclusive must contain exactly once the set of `accepted_slices[].merge_commit` values and no extra commit; its chain length equals `accepted_slices.length`. Every first-parent commit is associated by its `merge_commit` value with exactly one accepted entry and is revalidated with that entry's B0MR proof: exactly two ordered parents `P1, reviewed_commit`, a unique full `git merge-base --all`, equal NUL-delimited rename-disabled changed-path sets, and per-path absence or mode/type/object identity. `start_commit` is the parent branch HEAD and the last actual merge in that first-parent range, or equals `target.base_commit` when `accepted_slices` is empty. This does not require `accepted_slices` order to equal first-parent chain order: for PLAN-ordered `accepted_slices: [A, C]`, an actual first-parent chain `[C, A]` is valid when both mapped merges pass B0MR. Missing, duplicate, squash, linear, manual, or unrecorded commits fail closed.
 
-The failure is a combination of two axes that must not be conflated:
+Parent panel bindings are optional evidence only. If either parent panel binding is present, both validator and security bindings must be complete B0MR successor tuples, their exact sidecars must still hash correctly, and both `reviewed_head_sha` values must equal `start_commit`. Parent panels are never inherited as child verdict authority: the child always runs and publishes a fresh validator/security panel at its final child HEAD.
 
-- **Work scope** — which slices a continuation is responsible for producing/decomposing. Today `factory continue` scopes this narrowly (`continuation.review.required_fixes`, `assets/command/feature.md`, `assets/skills/feature/SKILL.md`).
-- **Integration ancestry** — what already-completed implementation is physically present in the branch the child is built from. Today `factory continue` derives the child `target.base_commit` from the *parent's recorded base commit* (falling back to the base ref) and reuses only accepted planning **provenance** (story/research/brief artifacts + spec-review), **not the parent's merged slice code** (`src/factory.js` continuation build). So a child does not automatically inherit its parent's merged implementation.
+## Planned v2 origin-base outcomes
 
-The observed dead-end needs *both*: **independent sibling continuations, each branched from a base that lacks the others' required implementation.** A narrow continuation whose base already contains the prerequisite work can pass the gate; a full-scope continuation can still fail if the completed parent slices are absent from its base. The precise failure topology — not an absolute rule — is: *sibling continuations from a shared base missing each other's implementation cannot individually satisfy the whole-story gate.*
+After an authoritative fetch/observation of the configured target base, evaluate exactly these outcomes in order:
 
-This also interacts with the decomposition-depth cap: splitting to avoid a god-slice (or to keep remediation bounded) pushes work toward multiple continuations, which then hit the whole-story gate. Depth cap ↔ slice size ↔ continuation scope ↔ integration ancestry are the interacting axes.
+1. **unchanged** — the observed origin base tip equals the parent's recorded target base commit; carry-forward may continue.
+2. **contains start** — the tip differs and contains `start_commit`; stop with `rebaseline-required` because current origin already contains the integrated parent work.
+3. **moved** — the tip differs and does not contain `start_commit`; stop with `stale-parent-base-moved` rather than building on stale ancestry.
+4. **unavailable** — the origin/base cannot be fetched or observed unambiguously; fail closed as `origin-base-unavailable`.
 
-## Options
+The candidate build, resource publication, and semantic adoption/activation stages each re-read and recheck parent identity, parent status, pre-PR eligibility, exact plan bytes/hash/classification, accepted sidecar bytes and B0MR merge set/actual first-parent chain, `start_commit`, optional panel completeness, and the ordered origin-base outcome. A prior observation or caller-supplied boolean is never mutation authority.
 
-**A. Continuation carries the full remaining plan *and* an explicit ancestry rule (recommended).** A blocked run is continued as *one* run that owns the whole remaining plan and resumes at the first incomplete slice, remaining slices running as normal dependency waves. But "full remaining plan" is only the *work-scope* half — it does not by itself make the final branch whole-story-complete, because today's continuation does not inherit the parent's merged implementation. Option A must therefore also pick an **integration-ancestry** rule for the already-completed slices:
-- **(a) Branch the child from the parent's validated integration HEAD** and preserve merged-slice state. Cleanest whole-story ancestry; requires `factory continue` to base the child on the parent's integrated worktree HEAD (not its base commit) and to durably re-adopt those slices as accepted.
-- **(b) Rebaseline on current `main`** and reconcile parent work as read-only evidence — appropriate once sibling PRs have landed on `main` (the existing README recovery/rebaseline contract). Risk: stale base if sibling work has *not* landed.
-- **(c) Replay/rebuild completed slices** in the child. Safe ancestry but duplicates already-reviewed work and re-spends budget; generally the worst option.
-- Pro: keeps the pre-PR gate as the correctness anchor; option (a) matches the original single-run resume model; parallelism across remaining slices is preserved as waves.
-- Con: needs a real change to how `factory continue` establishes the child base (it currently does none of (a)/(c)); a continuation is as large as the remaining work.
+## Planned v2 claim and branch transaction
 
-**B. Scope-aware pre-PR gate.** A continuation declares itself scope-partial; the panel evaluates only in-scope acceptance criteria, and PR creation is gated on a separate "all sibling continuations merged" join condition.
-- Pro: keeps per-concern continuations.
-- Con: adds a durable partial-completion state and a cross-continuation join — more machinery, and it risks shipping a whole-story-incomplete PR unless the join is rigorously enforced. This is the heaviest option.
+The claim-ref suffix is derived from this closed parent-identity object and no other fields:
 
-**C. Strictly sequential (chained) continuations.** Continuations are serialized, each starting from the prior's reviewed handoff branch, so the last one carries the fully integrated tree and faces the whole-story gate legitimately. Historical serialized-epic guidance prescribed this for some epics. Note this is primarily an **integration-ancestry** fix, not merely a parallelism tradeoff: chaining changes each child's base to include the prior's implementation, so it can succeed precisely where independent siblings from a shared base cannot — it resolves the same ancestry gap as Option A(a), by branch topology rather than by a `factory continue` change.
-- Pro: reuses the existing branch model; no new state.
-- Con: no parallel remediation across slices; a mid-chain block strands the rest.
+```json
+{
+  "schema_version": 2,
+  "kind": "blocked-run-continuation-parent",
+  "parent_run_id": "parent-run",
+  "parent_run_ref": ".opencode/factory/parent-run/run.json",
+  "parent_run_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  "parent_branch_ref": "refs/heads/parent-run",
+  "target_base_ref": "refs/remotes/origin/main",
+  "target_base_commit": "7777777777777777777777777777777777777777",
+  "plan_ref": "plan/slices.json",
+  "plan_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "start_commit": "1111111111111111111111111111111111111111"
+}
+```
 
-**D. Don't fragment at all.** The observed failure is that one blocked feature was split into three named sibling continuations. Treat that as the anti-pattern: a blocked run has one continuation.
-- This is essentially Option A stated as a rule rather than a mechanism change.
+The parent identity is closed to exactly `schema_version`, `kind`, `parent_run_id`, `parent_run_ref`, `parent_run_hash`, `parent_branch_ref`, `target_base_ref`, `target_base_commit`, `plan_ref`, `plan_hash`, and `start_commit`. Canonicalization is recursively lexicographic by object key at every depth, emits canonical UTF-8 JSON with no insignificant whitespace and no trailing newline, and preserves array order. The suffix is the 64-character lowercase hexadecimal SHA-256 of those exact canonical bytes. The claim ref is literally `refs/opencode/continuations/<64hex>`; no other prefix, abbreviation, or `sha256:` text is accepted in the ref name.
 
-## Recommendation
+The claim blob is decoded as JSON and closed to exactly `schema_version`, `kind`, `parent_identity`, `child_run_id`, `child_branch_ref`, and `start_commit`:
 
-**The fragmentation is the anti-pattern, not the gate.** The pre-PR panel's whole-story judgment is a feature — it is what prevents shipping a half-built feature — and should not be weakened to per-slice (Option B's failure mode). Prefer **Option A / D**: a blocked run is continued as a single run that owns the whole remaining plan and resumes at the first incomplete point; if parallel remediation is wanted, that is waves within the one continuation, not separate runs.
+```json
+{
+  "schema_version": 2,
+  "kind": "blocked-run-continuation-claim",
+  "parent_identity": { "...": "the exact closed parent identity above" },
+  "child_run_id": "parent-run-continuation",
+  "child_branch_ref": "refs/heads/parent-run-continuation",
+  "start_commit": "1111111111111111111111111111111111111111"
+}
+```
 
-But work-scope alone is insufficient: Option A must also fix **integration ancestry**, because today's `factory continue` bases the child on the parent's recorded base commit and reuses only planning provenance — it does not carry the parent's merged slice code. The recommended ancestry rule is **A(a): branch the child from the parent's validated integration HEAD and durably re-adopt those slices**, falling back to **A(b): rebaseline on `main`** once sibling PRs have landed. Chaining (Option C) achieves the same ancestry outcome by branch topology and is a reasonable interim path for serialized epics. Whichever is chosen, the two axes must be decided together — a full-scope continuation on a base missing the completed slices still fails the gate.
+The claim blob uses the same canonicalization. It contains no self data: no `claim_ref`, claim digest/hash, blob OID, transaction ID, worktree path, mutable status, or timestamp. `child_branch_ref` is a full literal `refs/heads/...` ref, and the blob's `start_commit` must equal the parent identity's `start_commit`.
 
-## Decision needed
+After the final publication recheck, one atomic `git update-ref --stdin` transaction uses create/no-replace semantics to create both `refs/opencode/continuations/<64hex>` pointing to the claim blob and `child_branch_ref` pointing to `start_commit`; both commands require the all-zero old OID. A precheck is not authority, neither ref may be force-updated, and no fallback sequence may create them independently.
 
-For `factory continue`, both axes must be decided together:
+Only an exact replay succeeds: both refs already exist, the claim ref resolves to a blob with byte-for-byte canonical claim content for the same parent and child, and the same `child_branch_ref` points exactly to `start_commit`. Any different child, blob, branch target, object type, or extra/missing field is a conflict. The child worktree is created only after a successful transaction or exact replay, with normal no-overwrite path and final branch/HEAD identity checks.
 
-1. **(Recommended — work scope)** Require a continuation to carry the full remaining plan — and add guidance/guardrails so a blocked run is not fragmented into per-slice sibling continuations. Keep the whole-story pre-PR gate unchanged.
-2. **(Recommended — integration ancestry)** Give the child a base that contains the parent's completed slices: base it on the parent's validated integration HEAD and durably re-adopt those slices (A(a)), or rebaseline on `main` once sibling PRs land (A(b)). Today it does neither, so this is a real `factory continue` change, not just guidance.
-3. Alternatively, grow a scope-partial continuation state plus a cross-continuation PR-join condition (Option B) — only if per-concern parallel continuations are a hard requirement. This is the heaviest path and weakens the whole-story anchor.
+Claim lifecycle is monotonic. A crash before transaction commit leaves neither ref; a crash after commit leaves both refs and same-child recovery may exact-replay and create or recover the worktree. A half-state with only one ref is impossible from the transaction and is treated as external damage/conflict, never repaired by filling in the other half. A losing concurrent child or pre-existing child branch is a conflict. The claim ref is a permanent tombstone for the parent identity and is not deleted by child failure, terminalization, branch/worktree cleanup, or successful completion; it prevents a different later child. Same-child recovery is permitted only by the exact replay rule and never converts the tombstone into reusable capacity.
+
+## Slice ownership and semantic-publication boundary
+
+- **B1.1 (this slice):** documentation and documentation tests only, owned exactly by `CONTINUATION-SCOPE-DESIGN.md`, `README.md`, `assets/skills/feature/SCHEMA.md`, and `test/docs-contract.test.js`. It creates no runtime behavior, resource, current promise, schema acceptance, or catalog coverage.
+- **B1.2:** builds and rechecks the v2 candidate but creates no claim ref, branch, worktree, child run directory, or other resource.
+- **B1.3:** implements the atomic claim-ref/child-branch transaction and post-transaction worktree creation/recovery. Those resources are allocation only: B1.3 publishes no child manifest, `carry_forward`, plan, adopted slice state, panel verdict, or executable semantic workflow authority.
+- **B1.4:** after another full recheck, atomically publishes the child plus the complete hash-bound plan, adopts every `accepted_slices` entry without rerunning it, initializes every `remaining_slice_ids` entry without inherited authority, leaves child validator/security panels fresh and unbound, and only then activates remaining work by normal dependency readiness.
+
+Until B1.4 lands, a B1.3 claim, branch, or worktree is not a runnable continuation and no reader may infer semantic adoption from its existence.
 
 ## Non-goals
 
-- Do not build a cross-run merge-train / join orchestrator (heavy; Swarm-style infrastructure this project has deliberately avoided).
-- Do not weaken the pre-PR panel to evaluate less than whole-story coverage as the default path.
+- Do not weaken the whole-story pre-PR gate.
+- Do not build a cross-run merge train or sibling-continuation join.
+- Do not replay already reviewed accepted slices.
+- Do not change or remove the current v1 narrow or post-PR continuation paths in this docs-only slice.

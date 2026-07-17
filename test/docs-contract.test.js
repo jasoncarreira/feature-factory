@@ -14,6 +14,7 @@ const SKILL = readDoc("../assets/skills/feature/SKILL.md");
 const SCHEMA = readDoc("../assets/skills/feature/SCHEMA.md");
 const COMMAND = readDoc("../assets/command/feature.md");
 const README = readDoc("../README.md");
+const CONTINUATION_SCOPE_DESIGN = readDoc("../CONTINUATION-SCOPE-DESIGN.md");
 const SPEC = readDoc("../SPEC.md");
 const CONTRIBUTING = readDoc("../CONTRIBUTING.md");
 const RELEASING = readDoc("../RELEASING.md");
@@ -1633,6 +1634,120 @@ describe("blocked-run continuation docs contract", () => {
     }
   });
 
+});
+
+describe("planned v2 reviewed carry-forward docs contract", () => {
+  const futureDocs = Object.freeze({ CONTINUATION_SCOPE_DESIGN, README, SCHEMA });
+  const design = CONTINUATION_SCOPE_DESIGN;
+  const futureSchema = markdownSection(SCHEMA, "Planned continuation schema v2 (future-only; not implemented)");
+
+  it("records A(a)/D as decided while preserving current readable v1 and post-PR behavior", () => {
+    for (const [name, text] of documentEntries(futureDocs)) {
+      assert.match(text, /Option A\(a\) \/ D|A\(a\).*Option D|A\(a\) \/ D/i, `${name} must record the approved A(a)/D decision`);
+      assert.match(text, /planned and not implemented/i, `${name} must label v2 future-only`);
+      assert.match(text, /current v1[\s\S]*narrow|v1[\s\S]*current[\s\S]*narrow/i, `${name} must preserve current narrow v1`);
+      assert.match(text, /v1 post-PR continuation[^.]*unchanged|post-PR continuation behavior[^.]*unchanged/i, `${name} must preserve current post-PR continuation`);
+    }
+    assert.match(design, /Status — approved v2 design/i);
+    assert.doesNotMatch(design, /Decision needed|open decision/i);
+    assert.match(README, /creates no current runtime promise/i);
+    assert.match(futureSchema, /not accepted by current validators or writers/i);
+    assert.match(futureSchema, /adds no row or production-integrity-coverage claim/i);
+  });
+
+  it("closes carry_forward and classifies every plan slice exactly once in plan order", () => {
+    for (const text of [design, futureSchema]) {
+      assert.match(text, /closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted_slices`, and `remaining_slice_ids`/i);
+      assert.match(text, /`scope` is exactly `full-remaining-plan`|`scope: "full-remaining-plan"`/i);
+      assert.match(text, /closed to exactly `id`, `attempts`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`/i);
+      assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order/i);
+      assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order/i);
+      assert.match(text, /unique[\s\S]*disjoint[\s\S]*set union[\s\S]*exactly[\s\S]*(?:complete `slices\[\]\.id` set|full plan)/i);
+      assert.match(text, /remaining[\s\S]*inherit[^.]*no|Remaining rows inherit only[\s\S]*never status/i);
+      assert.doesNotMatch(text, /accepted (?:is|slices are)[^.]*exact prefix|remaining[^.]*non-empty suffix/i);
+    }
+  });
+
+  it("permits non-prefix accepted slices and out-of-plan-order integration merges", () => {
+    for (const text of [design, futureSchema, README]) {
+      assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order/i);
+      assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order/i);
+      assert.match(text, /PLAN order `\[A, B, C\]`[\s\S]*merged `A` and `C`[\s\S]*`accepted_slices: \[A, C\]`[\s\S]*`remaining_slice_ids: \[B\]`[\s\S]*valid/i);
+      assert.match(text, /actual integration merge order may differ from PLAN and dependency-execution order/i);
+      assert.match(text, /does not require `accepted_slices` order to equal first-parent chain order/i);
+      assert.match(text, /`accepted_slices: \[A, C\]`[\s\S]*first-parent chain `\[C, A\]`[\s\S]*valid/i);
+      assert.doesNotMatch(text, /first-parent chain in PLAN order|accepted merge commits[^.]*in PLAN order/i);
+    }
+  });
+
+  it("limits v2 to pre-PR blocked parents and proves the exact accepted integration chain", () => {
+    for (const text of [design, futureSchema]) {
+      assert.match(text, /pre-PR[\s\S]*status is exactly `blocked`/i);
+      assert.match(text, /no PR[\s\S]*no active post-PR/i);
+      assert.match(text, /complete B0MR successor tuple|complete unchanged B0MR/i);
+      assert.match(text, /first-parent range from `target\.base_commit` exclusive through `start_commit` inclusive/i);
+      assert.match(text, /exactly once[\s\S]*set of `accepted_slices\[\]\.merge_commit` values/i);
+      assert.match(text, /no extra commit/i);
+      assert.match(text, /chain length equals `accepted_slices\.length`|length exactly `accepted_slices\.length`/i);
+      assert.match(text, /each first-parent commit|Every first-parent commit/i);
+      assert.match(text, /`start_commit` is (?:the )?parent branch HEAD[\s\S]*last actual merge[\s\S]*`target\.base_commit` when `accepted_slices` is empty/i);
+      assert.match(text, /parent panel[\s\S]*optional[\s\S]*`reviewed_head_sha`[\s\S]*`start_commit`|optional parent[\s\S]*`reviewed_head_sha`[\s\S]*`start_commit`/i);
+      assert.match(text, /never inherited[\s\S]*fresh (?:validator\/security |final )?panel/i);
+    }
+  });
+
+  it("defines the four ordered origin-base outcomes and all three recheck boundaries", () => {
+    for (const text of [design, futureSchema]) {
+      assert.match(text, orderedPattern(["unchanged", "contains start", "moved", "unavailable"]));
+      assert.match(text, /contains start[\s\S]*rebaseline-required/i);
+      assert.match(text, /moved[\s\S]*stale-parent-base-moved/i);
+      assert.match(text, /unavailable[\s\S]*fail/i);
+      assert.match(text, /candidate build[\s\S]*(?:resource )?publication[\s\S]*(?:semantic )?adoption\/activation[\s\S]*(?:re-read and )?recheck/i);
+    }
+  });
+
+  it("defines closed deterministic parent identity and claim blob bytes", () => {
+    for (const text of [design, futureSchema]) {
+      assert.match(text, /parent identity is closed to exactly `schema_version`, `kind`, `parent_run_id`, `parent_run_ref`, `parent_run_hash`, `parent_branch_ref`, `target_base_ref`, `target_base_commit`, `plan_ref`, `plan_hash`, and `start_commit`/i);
+      assert.match(text, /recursively[\s\S]*lexicographic[\s\S]*canonical UTF-8 JSON[\s\S]*no (?:insignificant )?whitespace[\s\S]*no trailing newline/i);
+      assert.match(text, /literal claim ref is|claim ref is literally/i);
+      assert.match(text, /refs\/opencode\/continuations\/<64hex>/i);
+      assert.match(text, /64-character lowercase[\s\S]*SHA-256/i);
+      assert.match(text, /claim[\s\S]{0,100}blob/i);
+      assert.match(text, /closed to exactly `schema_version`, `kind`, `parent_identity`, `child_run_id`, `child_branch_ref`, and `start_commit`/i);
+      assert.match(text, /no self data[\s\S]*no (?:`)?claim_ref|no self data[\s\S]*no claim ref/i);
+    }
+  });
+
+  it("requires one zero-old transaction, exact replay, post-transaction worktree, and monotonic tombstone recovery", () => {
+    for (const text of [design, futureSchema]) {
+      assert.match(text, /one atomic[\s\S]*`?git update-ref --stdin`? transaction/i);
+      assert.match(text, /claim ref[\s\S]*child_branch_ref|claim ref[\s\S]*child branch/i);
+      assert.match(text, /both|each[\s\S]*all-zero old OID|zero old OIDs/i);
+      assert.match(text, /Only (?:an )?exact replay/i);
+      assert.match(text, /worktree[\s\S]*(?:after|follows only)/i);
+      assert.match(text, /crash before[\s\S]*neither ref[\s\S]*crash after[\s\S]*both/i);
+      assert.match(text, /half-state[\s\S]*(?:conflict|fails closed)/i);
+      assert.match(text, /different child|different children/i);
+      assert.match(text, /permanent tombstone/i);
+      assert.match(text, /same-child recovery[\s\S]*exact replay|exact same-child[\s\S]*recovery/i);
+    }
+  });
+
+  it("keeps delivery ownership exact and withholds semantics until B1.4", () => {
+    const ownedPaths = [
+      "CONTINUATION-SCOPE-DESIGN.md",
+      "README.md",
+      "assets/skills/feature/SCHEMA.md",
+      "test/docs-contract.test.js",
+    ];
+    const ownership = markdownSection(design, "Slice ownership and semantic-publication boundary");
+    for (const path of ownedPaths) assert.match(ownership, literalPattern(`\`${path}\``), `B1.1 ownership must name ${path}`);
+    assert.match(ownership, /B1\.1[\s\S]*documentation and documentation tests only[\s\S]*no runtime behavior, resource, current promise, schema acceptance, or catalog coverage/i);
+    assert.match(ownership, /B1\.2[\s\S]*builds and rechecks[\s\S]*creates no claim ref, branch, worktree, child run directory, or other resource/i);
+    assert.match(ownership, /B1\.3[\s\S]*claim-ref\/child-branch transaction[\s\S]*worktree[\s\S]*publishes no child manifest[\s\S]*semantic workflow authority/i);
+    assert.match(ownership, /B1\.4[\s\S]*atomically publishes the child[\s\S]*complete hash-bound plan[\s\S]*adopts every `accepted_slices` entry without rerunning it[\s\S]*remaining_slice_ids[\s\S]*without inherited authority[\s\S]*panels fresh[\s\S]*normal dependency readiness/i);
+  });
 });
 
 describe("blocked-work restart pattern docs contract", () => {
