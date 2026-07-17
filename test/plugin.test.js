@@ -133,7 +133,7 @@ describe("feature command payload parsing", () => {
     assert.match(token, /^ffpayload-v1:[A-Za-z0-9_-]+$/u);
     assert.doesNotMatch(token, /[\s@!`'"$\\/]/u);
     const decoded = decodeFeatureCommandPayload(token);
-    assert.equal(decoded.ok, true);
+    assert.equal(decoded.ok, true, JSON.stringify(decoded));
     assert.match(decoded.payload.operator_request, /@secret/u);
   });
 
@@ -176,7 +176,7 @@ describe("feature command payload parsing", () => {
     });
 
     const decoded = decodeFeatureCommandPayload(token);
-    assert.equal(decoded.ok, true);
+    assert.equal(decoded.ok, true, JSON.stringify(decoded));
     assert.deepEqual(decoded.payload.steering.consume.args, args);
 
     const forged = decodeFeatureCommandPayload(encodeFeatureCommandPayload({
@@ -220,6 +220,40 @@ describe("feature command payload parsing", () => {
     const output = { parts: [{ type: "text", text: `command\n\nUNTRUSTED_OPERATOR_PAYLOAD_START\n${continuationToken(continuation)}` }] };
     await instance["command.execute.before"]({ command: "feature", sessionID: "session", arguments: continuationToken(continuation) }, output);
     assert.match(output.parts[0].text, /PLUGIN_PARSED_OPERATOR_PAYLOAD_START\nparse_status: valid/u);
+  });
+
+  it("rejects schema-v2 carry-forward payloads before B1.4", () => {
+    const continuation = validContinuation();
+    continuation.schema_version = 2;
+    continuation.parent.commit = "e".repeat(40);
+    continuation.target.base_ref = "refs/remotes/origin/main";
+    continuation.carry_forward = {
+      scope: "full-remaining-plan",
+      plan_ref: "plan/slices.json",
+      plan_hash: `sha256:${"1".repeat(64)}`,
+      start_commit: continuation.parent.commit,
+      accepted_slices: [{
+        id: "A", attempts: 2,
+        evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`,
+        review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`,
+        reviewed_commit: "4".repeat(40), merge_commit: "5".repeat(40),
+      }],
+      remaining_slice_ids: ["B"],
+    };
+    const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
+    assert.deepEqual(decoded, { ok: false, reason: "invalid-continuation" });
+
+    for (const [label, mutate] of [
+      ["unknown carry field", (value) => { value.carry_forward.status = "ready"; }],
+      ["unknown accepted field", (value) => { value.carry_forward.accepted_slices[0].branch = "A"; }],
+      ["duplicate partition", (value) => { value.carry_forward.remaining_slice_ids = ["A"]; }],
+      ["v1 authority claim", (value) => { value.schema_version = 1; }],
+      ["v2 missing authority", (value) => { delete value.carry_forward; }],
+    ]) {
+      const forged = structuredClone(continuation);
+      mutate(forged);
+      assert.equal(decodeFeatureCommandPayload(continuationToken(forged), { repo: process.cwd() }).ok, false, label);
+    }
   });
 
   it("binds post-PR continuation review, evidence, state hash, PR identity, and inherited policy", () => {

@@ -676,7 +676,7 @@ describe("run schema and consistency", () => {
 
   it("rejects invalid blocked-run continuation metadata", () => {
     const invalidVersion = continuationMetadata();
-    invalidVersion.schema_version = 2;
+    invalidVersion.schema_version = 3;
     assert.throws(
       () => validateRun({ ...runningRun(), continuation: invalidVersion }),
       (error) => error instanceof ValidationError && error.message.includes("run.continuation.schema_version: must equal 1"),
@@ -723,6 +723,21 @@ describe("run schema and consistency", () => {
       () => validateRun({ ...runningRun(), continuation: invalidArtifactShape }),
       (error) => error instanceof ValidationError && error.message.includes("run.continuation.parent_artifacts: must be an array"),
     );
+  });
+
+  it("keeps durable continuation validation strictly v1 before B1.4", () => {
+    const v1 = continuationMetadata();
+    assert.equal(validateRun({ ...runningRun(), continuation: v1 }).continuation.carry_forward, undefined);
+    const invalidV1 = structuredClone(v1);
+    invalidV1.carry_forward = carryForwardMetadata();
+    assert.throws(() => validateRun({ ...runningRun(), continuation: invalidV1 }), /carry_forward: is not allowed/u);
+
+    const v2 = continuationMetadata();
+    v2.schema_version = 2;
+    v2.carry_forward = carryForwardMetadata();
+    v2.parent.commit = v2.carry_forward.start_commit;
+    v2.target.base_ref = "refs/remotes/origin/main";
+    assert.throws(() => validateRun({ ...runningRun(), continuation: v2 }), /schema_version: must equal 1|carry_forward: is not allowed/u);
   });
 
   it("reports advisory consistency failures for missing refs and merged slices", () => {
@@ -940,6 +955,26 @@ function continuationMetadata(targetRunId = "run") {
     parent_reviews: [
       { kind: "review", ref: "reviews/implementation-validator.json", hash: HASH },
     ],
+  };
+}
+
+function carryForwardMetadata() {
+  return {
+    scope: "full-remaining-plan",
+    plan_ref: "plan/slices.json",
+    plan_hash: HASH,
+    start_commit: "c".repeat(40),
+    accepted_slices: [{
+      id: "A",
+      attempts: 1,
+      evidence_ref: "evidence/A.json",
+      evidence_hash: HASH,
+      review_ref: "reviews/A.json",
+      review_hash: HASH,
+      reviewed_commit: "a".repeat(40),
+      merge_commit: "b".repeat(40),
+    }],
+    remaining_slice_ids: ["B"],
   };
 }
 
