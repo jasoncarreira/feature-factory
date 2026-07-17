@@ -7,7 +7,7 @@ const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
 const DRIVER_KEYS = new Set(["mode", "ready", "pr_mode", "reviewer", "github_account", "run_id", "post_pr_ci"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "carry_forward"]);
+const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr"]);
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CONTINUATION_DRAFT_SPEC_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
@@ -16,8 +16,6 @@ const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_ha
 const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "summary", "required_fixes", "source", "verdict"]);
 const CONTINUATION_TARGET_KEYS = new Set(["run_id", "branch", "worktree", "base_ref", "base_commit"]);
 const CONTINUATION_REF_KEYS = new Set(["kind", "ref", "hash"]);
-const CONTINUATION_CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
-const CONTINUATION_ACCEPTED_SLICE_KEYS = new Set(["id", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 const STEERING_KEYS = new Set(["schema_version", "kind", "run_id", "pending", "uncheckpointed", "consume", "raw_message_included"]);
 const STEERING_PENDING_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at"]);
 const STEERING_UNCHECKPOINTED_KEYS = new Set(["id", "ref", "hash", "message_chars", "created_at", "consumed_at"]);
@@ -191,7 +189,6 @@ function normalizeSteering(steering, runId) {
 
 function normalizeContinuation(continuation, operatorRequest, repo) {
   if (!plainObject(continuation) || !hasOnlyKeys(continuation, CONTINUATION_KEYS)) return { ok: false, reason: "invalid-continuation" };
-  if (![1, 2].includes(continuation.schema_version)) return { ok: false, reason: "invalid-continuation" };
   const { parent, review, target } = continuation;
   if (!plainObject(parent) || !hasOnlyKeys(parent, CONTINUATION_PARENT_KEYS)
     || !plainObject(review) || !hasOnlyKeys(review, CONTINUATION_REVIEW_KEYS)
@@ -233,17 +230,6 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       || planningReuse?.eligible === true) {
       return { ok: false, reason: "invalid-continuation-draft-spec-reuse" };
     }
-  }
-
-  const carryForward = continuation.carry_forward;
-  if (continuation.schema_version === 1 && carryForward !== undefined) return { ok: false, reason: "invalid-continuation-carry-forward" };
-  if (continuation.schema_version === 2) {
-    if (!plainObject(carryForward) || !hasOnlyKeys(carryForward, CONTINUATION_CARRY_FORWARD_KEYS)
-      || !Array.isArray(carryForward.accepted_slices)
-      || carryForward.accepted_slices.some((item) => !plainObject(item) || !hasOnlyKeys(item, CONTINUATION_ACCEPTED_SLICE_KEYS))
-      || !Array.isArray(carryForward.remaining_slice_ids)
-      || !nonEmptyString(target?.base_ref) || !target.base_ref.startsWith("refs/remotes/origin/")
-      || continuation.post_pr !== undefined) return { ok: false, reason: "invalid-continuation-carry-forward" };
   }
 
   try {
@@ -294,7 +280,7 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
     ok: true,
     value: {
       kind: "blocked-run-continuation",
-      schema_version: continuation.schema_version,
+      schema_version: 1,
       created_at: continuation.created_at,
       operator_summary: continuation.operator_summary,
       parent: {
@@ -329,7 +315,6 @@ function normalizeContinuation(continuation, operatorRequest, repo) {
       ...(planningReuse === undefined ? {} : { planning_reuse: normalizedPlanningReuse(planningReuse) }),
       ...(draftSpecReuse === undefined ? {} : { draft_spec_reuse: cloneJson(draftSpecReuse) }),
       ...(continuation.post_pr === undefined ? {} : { post_pr: cloneJson(continuation.post_pr) }),
-      ...(carryForward === undefined ? {} : { carry_forward: cloneJson(carryForward) }),
     },
   };
 }

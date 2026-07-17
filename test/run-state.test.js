@@ -7,6 +7,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertSliceReviewBindingCurrent,
   heartbeatOnce,
   inspectApprovalHandoffReceipt,
   mutateRunJsonLocked,
@@ -28,6 +29,7 @@ import {
   transitionSteeringQueued,
   transitionTerminalResult,
   transitionSliceMerged,
+  observeReviewedMergeProof,
   RunJsonLockContendedError,
   withRunJsonLock,
 } from "../src/run-state.js";
@@ -822,6 +824,35 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("shares canonical B0MR review/merge proof without changing merge transition semantics", async () => {
+    const valid = createFixture("shared-b0mr-proof-valid");
+    try {
+      initGitRepo(valid.repo, ["slice-branch"]);
+      const prepared = prepareSliceMergeState(valid);
+      const run = JSON.parse(readFileSync(join(valid.runDir, "run.json"), "utf8"));
+      const slice = run.slices.find((entry) => entry.id === "slice");
+      const reviewAuthority = assertSliceReviewBindingCurrent(valid.runDir, "slice", slice);
+      const proof = observeReviewedMergeProof(valid.repo, "slice", prepared.mergeCommit, prepared.reviewedCommit);
+      assert.equal(reviewAuthority.review.verdict, "APPROVE");
+      assert.equal(proof.second_parent, prepared.reviewedCommit);
+      assert.equal(proof.first_parent, gitOutput(valid.repo, ["rev-parse", `${prepared.mergeCommit}^1`]));
+
+      const merged = await transitionSliceMerged(valid.runDir, "slice", { merge_commit: prepared.mergeCommit });
+      assert.equal(merged.slice.merge_commit, prepared.mergeCommit);
+    } finally { cleanup(valid.repo); }
+
+    const tampered = createFixture("shared-b0mr-proof-tampered");
+    try {
+      initGitRepo(tampered.repo, ["slice-branch"]);
+      const prepared = prepareSliceMergeState(tampered);
+      const tamperedMerge = rewriteMergeTree(tampered.repo, prepared, (repo) => writeFileSync(join(repo, "slice.txt"), "unreviewed\n"));
+      const before = readFileSync(join(tampered.runDir, "run.json"), "utf8");
+      assert.throws(() => observeReviewedMergeProof(tampered.repo, "slice", tamperedMerge, prepared.reviewedCommit), /path set|object identity/u);
+      await assert.rejects(transitionSliceMerged(tampered.runDir, "slice", { merge_commit: tamperedMerge }), /path set|object identity/u);
+      assert.equal(readFileSync(join(tampered.runDir, "run.json"), "utf8"), before);
+    } finally { cleanup(tampered.repo); }
+  });
+
   it("rejects a redundant reviewed parent while accepting both valid merge-base shapes", async () => {
     const redundant = createFixture("merge-redundant-reviewed-parent");
     try {
@@ -1027,6 +1058,26 @@ describe("simplified run-state transitions", () => {
     } finally {
       cleanup(fixture.repo);
     }
+  });
+
+  it("generic run.json writers reject schema-v2 continuation authority without mutation", async () => {
+    const fixture = createFixture("generic-writer-v2-continuation");
+    try {
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunJson(fixture.runDir, (run) => {
+          const continuation = continuationMetadata(run.run_id);
+          continuation.schema_version = 2;
+          continuation.carry_forward = {
+            scope: "full-remaining-plan", plan_ref: "plan/slices.json", plan_hash: HASH,
+            start_commit: continuation.parent.commit, accepted_slices: [], remaining_slice_ids: ["slice"],
+          };
+          run.continuation = continuation;
+        }),
+        /schema_version: must equal 1|carry_forward: is not allowed/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally { cleanup(fixture.repo); }
   });
 
   it("allows default ready PR creation for blocked-run continuations", async () => {

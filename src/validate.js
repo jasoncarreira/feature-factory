@@ -81,7 +81,7 @@ const STEERING_FENCE_KEYS = new Set([...STEERING_FENCE_CONTROL_KEYS, ...PR_OPERA
 const POST_PR_OPERATION_KEYS = new Set(["operation_id", "repository", "created_at", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "pr_url", "pr_number", "pr_node_id"]);
 const STEERING_ACTION_CLAIM_KEYS = new Set(["kind", "token", "generation", "claimed_at"]);
 const STEERING_LAST_ACTION_KEYS = new Set(["kind", "token", "generation", "outcome", "claimed_at", "resolved_at"]);
-const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "carry_forward"]);
+const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr"]);
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
 const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "verdict", "summary", "required_fixes", "source"]);
 const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice", "post_pr"]);
@@ -90,8 +90,6 @@ const CONTINUATION_REF_HASH_KEYS = new Set(["kind", "ref", "hash"]);
 const CONTINUATION_ARTIFACT_KINDS = new Set(["artifact", "story", "research_map", "design_brief", "technical_brief", "test_report", "validation_report", "pr_body"]);
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CONTINUATION_DRAFT_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
-const CONTINUATION_CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
-const CONTINUATION_ACCEPTED_SLICE_KEYS = new Set(["id", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -788,7 +786,7 @@ function validateContinuation(errors, run, path) {
 
   allowedKeys(errors, continuation, CONTINUATION_KEYS, path);
   requiredInteger(errors, continuation, "schema_version", `${path}.schema_version`);
-  if (Number.isInteger(continuation.schema_version) && ![1, 2].includes(continuation.schema_version)) errors.push({ path: `${path}.schema_version`, message: "must equal 1 or 2" });
+  if (Number.isInteger(continuation.schema_version) && continuation.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
   requiredEnum(errors, continuation, "kind", CONTINUATION_KINDS, `${path}.kind`);
   requiredTimestamp(errors, continuation, "created_at", `${path}.created_at`);
   requiredString(errors, continuation, "operator_summary", `${path}.operator_summary`);
@@ -805,62 +803,6 @@ function validateContinuation(errors, run, path) {
     errors.push({ path, message: "cannot combine accepted planning reuse with draft spec reuse" });
   }
   validateContinuationPostPr(errors, continuation.post_pr, `${path}.post_pr`);
-  if (continuation.schema_version === 1) {
-    if (continuation.carry_forward !== undefined) errors.push({ path: `${path}.carry_forward`, message: "is allowed only for schema_version 2" });
-  } else if (continuation.schema_version === 2) {
-    if (continuation.post_pr !== undefined) errors.push({ path: `${path}.post_pr`, message: "is forbidden for a v2 pre-PR carry-forward" });
-    if (!stringValue(continuation.target?.base_ref) || !continuation.target.base_ref.startsWith("refs/remotes/origin/")) {
-      errors.push({ path: `${path}.target.base_ref`, message: "must identify the configured refs/remotes/origin branch" });
-    }
-    validateContinuationCarryForward(errors, continuation, `${path}.carry_forward`);
-  }
-}
-
-function validateContinuationCarryForward(errors, continuation, path) {
-  const carry = continuation.carry_forward;
-  if (!isRecord(carry)) { errors.push({ path, message: "must be an object" }); return; }
-  allowedKeys(errors, carry, CONTINUATION_CARRY_FORWARD_KEYS, path);
-  requiredEnum(errors, carry, "scope", new Set(["full-remaining-plan"]), `${path}.scope`);
-  requiredString(errors, carry, "plan_ref", `${path}.plan_ref`);
-  if (carry.plan_ref !== "plan/slices.json") errors.push({ path: `${path}.plan_ref`, message: "must equal plan/slices.json" });
-  requiredHash(errors, carry, "plan_hash", `${path}.plan_hash`);
-  requiredFullGitSha(errors, carry, "start_commit", `${path}.start_commit`);
-  if (stringValue(carry.start_commit) && stringValue(continuation.parent?.commit) && carry.start_commit !== continuation.parent.commit) {
-    errors.push({ path: `${path}.start_commit`, message: "must equal continuation.parent.commit" });
-  }
-
-  const acceptedIds = new Set();
-  if (!Array.isArray(carry.accepted_slices)) errors.push({ path: `${path}.accepted_slices`, message: "must be an array" });
-  else for (const [index, accepted] of carry.accepted_slices.entries()) {
-    const itemPath = `${path}.accepted_slices[${index}]`;
-    if (!isRecord(accepted)) { errors.push({ path: itemPath, message: "must be an object" }); continue; }
-    allowedKeys(errors, accepted, CONTINUATION_ACCEPTED_SLICE_KEYS, itemPath);
-    requiredTerminalSafeString(errors, accepted, "id", `${itemPath}.id`);
-    boundedInteger(errors, accepted, "attempts", 1, Number.MAX_SAFE_INTEGER, `${itemPath}.attempts`);
-    for (const key of ["evidence_ref", "review_ref"]) requiredString(errors, accepted, key, `${itemPath}.${key}`);
-    validateDurableRef(errors, accepted.evidence_ref, "evidence", `${itemPath}.evidence_ref`);
-    validateDurableRef(errors, accepted.review_ref, "reviews", `${itemPath}.review_ref`);
-    for (const key of ["evidence_hash", "review_hash"]) requiredHash(errors, accepted, key, `${itemPath}.${key}`);
-    for (const key of ["reviewed_commit", "merge_commit"]) requiredFullGitSha(errors, accepted, key, `${itemPath}.${key}`);
-    if (stringValue(accepted.id)) {
-      if (acceptedIds.has(accepted.id)) errors.push({ path: `${itemPath}.id`, message: "duplicate accepted slice id" });
-      acceptedIds.add(accepted.id);
-    }
-  }
-
-  const remainingIds = new Set();
-  if (!Array.isArray(carry.remaining_slice_ids)) errors.push({ path: `${path}.remaining_slice_ids`, message: "must be an array" });
-  else {
-    if (carry.remaining_slice_ids.length === 0) errors.push({ path: `${path}.remaining_slice_ids`, message: "must contain at least one slice id" });
-    for (const [index, id] of carry.remaining_slice_ids.entries()) {
-      const itemPath = `${path}.remaining_slice_ids[${index}]`;
-      if (!stringValue(id)) { errors.push({ path: itemPath, message: "must be a non-empty string" }); continue; }
-      if (hasTerminalControl(id)) errors.push({ path: itemPath, message: "must not contain control characters" });
-      if (remainingIds.has(id)) errors.push({ path: itemPath, message: "duplicate remaining slice id" });
-      if (acceptedIds.has(id)) errors.push({ path: itemPath, message: "must be disjoint from accepted_slices" });
-      remainingIds.add(id);
-    }
-  }
 }
 
 function validateContinuationPlanningReuse(errors, reuse, path) {

@@ -679,7 +679,7 @@ describe("run schema and consistency", () => {
     invalidVersion.schema_version = 3;
     assert.throws(
       () => validateRun({ ...runningRun(), continuation: invalidVersion }),
-      (error) => error instanceof ValidationError && error.message.includes("run.continuation.schema_version: must equal 1 or 2"),
+      (error) => error instanceof ValidationError && error.message.includes("run.continuation.schema_version: must equal 1"),
     );
 
     const invalidParentStatus = continuationMetadata();
@@ -725,35 +725,19 @@ describe("run schema and consistency", () => {
     );
   });
 
-  it("accepts only the closed v2 carry-forward shape while keeping v1 readable and non-authoritative", () => {
+  it("keeps durable continuation validation strictly v1 before B1.4", () => {
     const v1 = continuationMetadata();
     assert.equal(validateRun({ ...runningRun(), continuation: v1 }).continuation.carry_forward, undefined);
     const invalidV1 = structuredClone(v1);
     invalidV1.carry_forward = carryForwardMetadata();
-    assert.throws(() => validateRun({ ...runningRun(), continuation: invalidV1 }), /allowed only for schema_version 2/u);
+    assert.throws(() => validateRun({ ...runningRun(), continuation: invalidV1 }), /carry_forward: is not allowed/u);
 
     const v2 = continuationMetadata();
     v2.schema_version = 2;
     v2.carry_forward = carryForwardMetadata();
     v2.parent.commit = v2.carry_forward.start_commit;
     v2.target.base_ref = "refs/remotes/origin/main";
-    assert.deepEqual(validateRun({ ...runningRun(), continuation: v2 }).continuation.carry_forward.remaining_slice_ids, ["B"]);
-
-    for (const [label, mutate, expected] of [
-      ["outer unknown", (value) => { value.carry_forward.extra = true; }, /carry_forward\.extra: is not allowed/u],
-      ["accepted unknown", (value) => { value.carry_forward.accepted_slices[0].status = "merged"; }, /accepted_slices\[0\]\.status: is not allowed/u],
-      ["missing plan hash", (value) => { delete value.carry_forward.plan_hash; }, /plan_hash: must be a sha256 hash/u],
-      ["duplicate accepted", (value) => { value.carry_forward.accepted_slices.push(structuredClone(value.carry_forward.accepted_slices[0])); }, /duplicate accepted slice id/u],
-      ["duplicate remaining", (value) => { value.carry_forward.remaining_slice_ids.push("B"); }, /duplicate remaining slice id/u],
-      ["partition overlap", (value) => { value.carry_forward.remaining_slice_ids = ["A"]; }, /disjoint from accepted_slices/u],
-      ["empty remaining", (value) => { value.carry_forward.remaining_slice_ids = []; }, /must contain at least one slice id/u],
-      ["wrong plan ref", (value) => { value.carry_forward.plan_ref = "plan/other.json"; }, /must equal plan\/slices\.json/u],
-      ["start mismatch", (value) => { value.carry_forward.start_commit = "d".repeat(40); }, /must equal continuation\.parent\.commit/u],
-    ]) {
-      const malformed = structuredClone(v2);
-      mutate(malformed);
-      assert.throws(() => validateRun({ ...runningRun(), continuation: malformed }), expected, label);
-    }
+    assert.throws(() => validateRun({ ...runningRun(), continuation: v2 }), /schema_version: must equal 1|carry_forward: is not allowed/u);
   });
 
   it("reports advisory consistency failures for missing refs and merged slices", () => {

@@ -2944,7 +2944,7 @@ function assertPrCreatedReadiness(runDir, run) {
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
   return {
     slices: assertPrCreatedSliceState(runDir, run),
-    panels: assertPassingVerdictArtifacts(runDir, run),
+    panels: assertPanelReviewBindingsCurrent(runDir, run),
   };
 }
 
@@ -2961,7 +2961,7 @@ function assertPrCreatedSliceState(runDir, run) {
   });
 }
 
-export function assertPassingVerdictArtifacts(runDir, run) {
+export function assertPanelReviewBindingsCurrent(runDir, run) {
   if (!stringValue(runDir)) throw new Error("pr-created requires run directory context");
   if (!hasCompleteBinding(run.validator, VALIDATOR_BINDING_KEYS) || !hasCompleteBinding(run.security_review, SECURITY_BINDING_KEYS)) {
     throw new Error("pr-created requires successor validator and security reviewed-head bindings");

@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { assertPassingVerdictArtifacts, assertRunJsonWriterAllowed, assertSliceReviewBindingCurrent, hashRunState, hasInFlightHeartbeatWork, mergedSliceRepairFence, inspectApprovalHandoffReceipt, observeReviewedMergeProof, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertPanelReviewBindingsCurrent, assertRunJsonWriterAllowed, assertSliceReviewBindingCurrent, hashRunState, hasInFlightHeartbeatWork, mergedSliceRepairFence, inspectApprovalHandoffReceipt, observeReviewedMergeProof, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -36,6 +36,10 @@ const FAIL_CLOSED_DIAGNOSTIC_CONDITIONS = new Set(["invalid-run-state"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
+const CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
+const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+const CARRY_FORWARD_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
+const FULL_COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
 const CONTINUATION_PARENT_ARTIFACT_REFS = [
   { kind: "story", ref: "artifacts/story.md" },
   { kind: "research_map", ref: "artifacts/research-map.md" },
@@ -634,13 +638,14 @@ export function continueFactory(parentRunId, opts = {}) {
   const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo });
   const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
 
+  if (continuation.schema_version === 2) {
+    if (!opts.dryRun) throw new Error("v2 carry-forward candidate is non-launchable before the B1.3 resource transaction");
+    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false, beforeOriginFetch: opts.beforeOriginFetch, originSpawnSync: opts.originSpawnSync });
+    return { status: "dry-run", launchable: false, candidate: continuation };
+  }
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
   const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
   const launchEnv = factoryLaunchEnv(opts);
-  if (continuation.schema_version === 2) {
-    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
-    return { status: opts.dryRun ? "dry-run" : "candidate", payload, carry_forward: continuation.carry_forward };
-  }
   if (opts.dryRun) return { status: "dry-run", payload, seed_plan: continuationSeedPlan(continuation) };
 
   assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
@@ -2548,6 +2553,7 @@ export function buildContinuation(parentRunId, opts = {}) {
   const postPrParent = stringValue(parentRun.pr_url);
   const carryForward = opts.carryForward === true;
   if (carryForward && postPrParent) throw new Error("v2 carry-forward is available only before PR creation");
+  if (carryForward) assertCarryForwardParentEligible(parentRun);
   if (postPrParent && opts.newPr !== true) throw new Error("factory continue for a blocked parent with pr_url requires --new-pr");
   if (!postPrParent && opts.newPr === true) throw new Error("factory continue --new-pr is accepted only for a blocked parent with pr_url");
   if (postPrParent) assertPostPrContinuationParent(parentRun);
@@ -2611,17 +2617,16 @@ export function buildContinuation(parentRunId, opts = {}) {
   if (draftSpecReuse) continuation.draft_spec_reuse = draftSpecReuse;
   if (postPrParent) continuation.post_pr = continuationPostPrBinding(parentRun, parentRunDir);
   if (carryForward) {
-    assertCarryForwardParentEligible(parentRun);
-    continuation.carry_forward = collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit);
+    continuation.carry_forward = collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, opts);
     if (typeof opts.beforeCarryForwardReturn === "function") opts.beforeCarryForwardReturn({ continuation, parentRunDir });
-    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
+    assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false, beforeOriginFetch: opts.beforeOriginFetch, originSpawnSync: opts.originSpawnSync });
   }
   return continuation;
 }
 
 export function assertContinuationBindingsCurrent(repo, parentRunDir, continuation, options = {}) {
   if (!continuation || continuation.kind !== "blocked-run-continuation") throw new Error("continuation binding check requires blocked-run-continuation metadata");
-  validateRun({
+  const candidateRun = {
     schema_version: 1,
     run_id: continuation.target?.run_id,
     status: "running",
@@ -2630,7 +2635,9 @@ export function assertContinuationBindingsCurrent(repo, parentRunDir, continuati
     max_retries: continuation.draft_spec_reuse?.max_retries ?? 3,
     gates: {},
     continuation,
-  });
+  };
+  if (continuation.schema_version === 2) validateCarryForwardCandidate(candidateRun);
+  else validateRun(candidateRun);
   const canonicalRepo = repoRoot(repo);
   const parentRoot = resolve(parentRunDir);
   const parentFile = join(parentRoot, "run.json");
@@ -2690,7 +2697,7 @@ export function assertContinuationBindingsCurrent(repo, parentRunDir, continuati
   if (continuation.schema_version === 2) {
     assertCarryForwardParentEligible(parentRun);
     if (target.base_ref !== continuationBaseRef(parentRun, { carryForward: true })) throw new Error("continuation target origin base ref binding is stale");
-    const currentCarryForward = collectCarryForwardAuthority(repo, parentRoot, parentRun, target.base_ref, target.base_commit);
+    const currentCarryForward = collectCarryForwardAuthority(repo, parentRoot, parentRun, target.base_ref, target.base_commit, options);
     if (!sameJsonValue(continuation.carry_forward, currentCarryForward)) throw new Error("continuation carry_forward authority changed since candidate build");
   }
   if (options.targetPublished) {
@@ -2750,6 +2757,7 @@ function assertCarryForwardParentEligible(parentRun) {
   const prTupleKeys = ["pr_url", "pr_number", "pr_node_id", "repository", "operation_id", "head_ref", "head_sha", "base_ref", "base_sha", "draft"];
   const postPr = parentRun.post_pr;
   const activePostPr = postPr != null && (!["disabled", "awaiting-pr"].includes(postPr.phase)
+    || postPr.attempt !== 0
     || postPr.observation != null || postPr.remediation != null || (Array.isArray(postPr.evidence_refs) && postPr.evidence_refs.length > 0)
     || postPr.continuation_review != null || postPr.terminal_fact != null || postPr.pr_operation != null);
   if (stringValue(parentRun.pr_url) || prTupleKeys.some((key) => parentRun.terminal_result?.[key] !== undefined && parentRun.terminal_result?.[key] !== null)
@@ -2758,7 +2766,60 @@ function assertCarryForwardParentEligible(parentRun) {
   }
 }
 
-function collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit) {
+function validateCarryForwardCandidate(run) {
+  const continuation = run?.continuation;
+  if (!continuation || continuation.schema_version !== 2 || continuation.kind !== "blocked-run-continuation") {
+    throw new Error("carry-forward candidate must be a schema-version 2 blocked-run-continuation");
+  }
+  if (continuation.post_pr !== undefined) throw new Error("carry-forward candidate cannot contain post_pr authority");
+  const legacyContinuation = { ...continuation, schema_version: 1 };
+  delete legacyContinuation.carry_forward;
+  validateRun({ ...run, continuation: legacyContinuation });
+  if (!continuation.target?.base_ref?.startsWith("refs/remotes/origin/")) throw new Error("carry-forward candidate target.base_ref must identify origin");
+
+  const carry = continuation.carry_forward;
+  assertExactCandidateKeys(carry, CARRY_FORWARD_KEYS, "carry_forward");
+  if (carry.scope !== "full-remaining-plan") throw new Error("carry_forward.scope must equal full-remaining-plan");
+  if (carry.plan_ref !== "plan/slices.json") throw new Error("carry_forward.plan_ref must equal plan/slices.json");
+  if (!CARRY_FORWARD_HASH_PATTERN.test(String(carry.plan_hash || ""))) throw new Error("carry_forward.plan_hash must be a sha256 hash");
+  if (!FULL_COMMIT_PATTERN.test(String(carry.start_commit || "")) || carry.start_commit !== continuation.parent?.commit) {
+    throw new Error("carry_forward.start_commit must equal continuation.parent.commit");
+  }
+  if (!Array.isArray(carry.accepted_slices)) throw new Error("carry_forward.accepted_slices must be an array");
+  if (!Array.isArray(carry.remaining_slice_ids) || carry.remaining_slice_ids.length === 0) throw new Error("carry_forward.remaining_slice_ids must contain at least one slice id");
+
+  const acceptedIds = new Set();
+  for (const [index, accepted] of carry.accepted_slices.entries()) {
+    const label = `carry_forward.accepted_slices[${index}]`;
+    assertExactCandidateKeys(accepted, CARRY_FORWARD_ACCEPTED_KEYS, label);
+    if (!stringValue(accepted.id) || acceptedIds.has(accepted.id)) throw new Error(`${label}.id must be a unique slice id`);
+    if (!Number.isInteger(accepted.attempts) || accepted.attempts < 1) throw new Error(`${label}.attempts must be positive`);
+    if (!canonicalCarryForwardRef(accepted.evidence_ref, "evidence") || !canonicalCarryForwardRef(accepted.review_ref, "reviews")) throw new Error(`${label} refs must be canonical JSON sidecars`);
+    if (!CARRY_FORWARD_HASH_PATTERN.test(String(accepted.evidence_hash || "")) || !CARRY_FORWARD_HASH_PATTERN.test(String(accepted.review_hash || ""))) throw new Error(`${label} hashes must be sha256 hashes`);
+    if (!FULL_COMMIT_PATTERN.test(String(accepted.reviewed_commit || "")) || !FULL_COMMIT_PATTERN.test(String(accepted.merge_commit || ""))) throw new Error(`${label} commits must be full Git SHAs`);
+    acceptedIds.add(accepted.id);
+  }
+  const remainingIds = new Set();
+  for (const id of carry.remaining_slice_ids) {
+    if (!stringValue(id) || remainingIds.has(id) || acceptedIds.has(id)) throw new Error("carry_forward slice partitions must contain unique disjoint ids");
+    remainingIds.add(id);
+  }
+  return continuation;
+}
+
+function assertExactCandidateKeys(value, expected, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const keys = Object.keys(value);
+  if (keys.length !== expected.size || keys.some((key) => !expected.has(key))) throw new Error(`${label} must have its exact closed shape`);
+}
+
+function canonicalCarryForwardRef(value, rootName) {
+  if (!stringValue(value) || !value.startsWith(`${rootName}/`) || !value.endsWith(".json") || value.includes("\\")) return false;
+  const segments = value.split("/");
+  return segments.length >= 2 && segments.every((segment) => segment && segment !== "." && segment !== "..");
+}
+
+function collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, options = {}) {
   const parentRoot = resolve(parentRunDir);
   const planRef = "plan/slices.json";
   const planPath = join(parentRoot, planRef);
@@ -2807,7 +2868,7 @@ function collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseR
   const startCommit = branchCommit(repo, parentRun.branch);
   assertCarryForwardIntegration(repo, targetBaseCommit, startCommit, acceptedSlices);
   assertOptionalCarryForwardPanels(parentRoot, parentRun, startCommit);
-  assertOriginBaseOutcome(repo, targetBaseRef, targetBaseCommit, startCommit);
+  assertOriginBaseOutcome(repo, targetBaseRef, targetBaseCommit, startCommit, options);
   return {
     scope: "full-remaining-plan",
     plan_ref: planRef,
@@ -2866,20 +2927,27 @@ function assertOptionalCarryForwardPanels(parentRunDir, parentRun, startCommit) 
   if (parentRun.validator.reviewed_head_sha !== startCommit || parentRun.security_review.reviewed_head_sha !== startCommit) {
     throw new Error("optional parent panel reviewed heads must equal carry_forward.start_commit");
   }
-  assertPassingVerdictArtifacts(parentRunDir, parentRun);
+  assertPanelReviewBindingsCurrent(parentRunDir, parentRun);
 }
 
-function assertOriginBaseOutcome(repo, targetBaseRef, targetBaseCommit, startCommit) {
+function assertOriginBaseOutcome(repo, targetBaseRef, targetBaseCommit, startCommit, options = {}) {
   const prefix = "refs/remotes/origin/";
   if (!targetBaseRef.startsWith(prefix) || targetBaseRef.length === prefix.length) {
     throw continuationOutcomeError("origin-base-invalid", "target.base_ref must identify one origin branch");
   }
   const branch = targetBaseRef.slice(prefix.length);
-  const fetched = git(repo, ["fetch", "--no-tags", "--quiet", "origin", `refs/heads/${branch}`], { timeout: 30000 });
-  if (!fetched.ok) throw continuationOutcomeError("origin-base-unavailable", "configured origin base could not be fetched");
-  const observed = git(repo, ["rev-parse", "--verify", "FETCH_HEAD^{commit}"]);
-  const tip = observed.ok ? observed.stdout.trim() : "";
-  if (!/^[0-9a-f]{40}$/u.test(tip)) throw continuationOutcomeError("origin-base-unavailable", "configured origin base could not be observed unambiguously");
+  const remoteRef = `refs/heads/${branch}`;
+  const gitOptions = { timeout: 30000, ...(typeof options.originSpawnSync === "function" ? { spawnSync: options.originSpawnSync } : {}) };
+  const observed = git(repo, ["ls-remote", "--exit-code", "origin", remoteRef], gitOptions);
+  const lines = observed.stdout.split(/\r?\n/u).filter(Boolean);
+  const match = observed.ok && lines.length === 1 ? /^([0-9a-f]{40})\t(.+)$/u.exec(lines[0]) : null;
+  if (!match || match[2] !== remoteRef) throw continuationOutcomeError("origin-base-unavailable", "configured origin base could not be observed unambiguously");
+  const tip = match[1];
+  if (typeof options.beforeOriginFetch === "function") options.beforeOriginFetch({ oid: tip, remote_ref: remoteRef });
+  const fetched = git(repo, ["fetch", "--no-tags", "--quiet", "--no-write-fetch-head", "origin", tip], gitOptions);
+  if (!fetched.ok) throw continuationOutcomeError("origin-base-unavailable", "captured origin base commit could not be fetched");
+  const fetchedCommit = git(repo, ["rev-parse", "--verify", `${tip}^{commit}`]);
+  if (!fetchedCommit.ok || fetchedCommit.stdout.trim() !== tip) throw continuationOutcomeError("origin-base-unavailable", "captured origin base commit is not an unambiguous commit");
   if (tip === targetBaseCommit) return "unchanged";
   const contains = git(repo, ["merge-base", "--is-ancestor", startCommit, tip]);
   if (contains.ok) throw continuationOutcomeError("rebaseline-required", "configured origin base already contains carry_forward.start_commit");
@@ -3232,12 +3300,14 @@ function sha256Buffer(bytes) {
 export async function adoptContinuation(childRunId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const childRunDir = resolveRunDir(childRunId, { ...opts, cwd: repo });
-  const run = readRunFile(join(childRunDir, "run.json"));
+  const childRunFile = join(childRunDir, "run.json");
+  const unvalidatedRun = JSON.parse(readFileSync(childRunFile, "utf8"));
+  if (unvalidatedRun?.continuation?.schema_version === 2) throw new Error("v2 carry-forward adoption is not available before B1.4 publication");
+  const run = validateRun(unvalidatedRun);
   const continuation = run?.continuation;
   if (!continuation || continuation.kind !== "blocked-run-continuation") {
     throw new Error(`run '${childRunId}' has no blocked-run-continuation metadata to adopt`);
   }
-  if (continuation.schema_version === 2) throw new Error("v2 carry-forward adoption is not available before B1.4 publication");
   const reuse = continuation.planning_reuse;
   if (!reuse || reuse.eligible !== true) {
     throw new Error(`continuation '${childRunId}' has no reuse-eligible parent acceptance to adopt${reuse?.reason ? ` (${reuse.reason})` : ""}`);

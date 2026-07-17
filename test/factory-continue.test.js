@@ -8,7 +8,7 @@ import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { adoptContinuation, buildContinuation, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
+import { adoptContinuation, assertContinuationBindingsCurrent, buildContinuation, continueFactory, resumeFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
 import { transitionContinuationAdoption } from "../src/run-state.js";
 import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, createDurableCatalogBaseline, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
@@ -1227,10 +1227,20 @@ describe("continuation planning-artifact reuse", () => {
   it("builds and rechecks one canonical v2 carry-forward in PLAN order without allocating resources", () => {
     const fixture = createV2Fixture("carry-interleaved", { accepted: ["A", "C"], mergeOrder: ["C", "A"] });
     try {
-      const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "carry-interleaved-next", carryForward: true });
-      const carry = result.payload.continuation.carry_forward;
-      assert.equal(result.status, "candidate");
-      assert.equal(result.payload.continuation.schema_version, 2);
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "carry-interleaved-launch", carryForward: true }),
+        /non-launchable|B1\.3/u,
+      );
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "carry-interleaved-launch")), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", "carry-interleaved-launch")), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature")), false);
+      assert.notEqual(spawnSync("git", ["show-ref", "--verify", "refs/heads/carry-interleaved-launch"], { cwd: fixture.repo }).status, 0);
+      const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "carry-interleaved-next", carryForward: true, dryRun: true });
+      const carry = result.candidate.carry_forward;
+      assert.equal(result.status, "dry-run");
+      assert.equal(result.launchable, false);
+      assert.equal(result.payload, undefined);
+      assert.equal(result.candidate.schema_version, 2);
       assert.deepEqual(carry, {
         scope: "full-remaining-plan",
         plan_ref: "plan/slices.json",
@@ -1244,7 +1254,7 @@ describe("continuation planning-artifact reuse", () => {
       assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", "carry-interleaved-next")), false);
       assert.notEqual(spawnSync("git", ["show-ref", "--verify", "refs/heads/carry-interleaved-next"], { cwd: fixture.repo }).status, 0);
       assert.equal(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "");
-      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, result.payload.continuation), /B1\.3 resource transaction/u);
+      assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, result.candidate), /B1\.3 resource transaction/u);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "carry-interleaved-next")), false);
     } finally {
       cleanup(fixture.repo);
@@ -1267,6 +1277,34 @@ describe("continuation planning-artifact reuse", () => {
       );
     } finally {
       cleanup(fixture.repo);
+    }
+  });
+
+  it("privately rejects every v2 closed-shape and partition forgery", () => {
+    const cases = [
+      ["outer unknown", (value) => { value.carry_forward.extra = true; }],
+      ["accepted unknown", (value) => { value.carry_forward.accepted_slices[0].status = "merged"; }],
+      ["missing plan hash", (value) => { delete value.carry_forward.plan_hash; }],
+      ["duplicate accepted", (value) => { value.carry_forward.accepted_slices.push(structuredClone(value.carry_forward.accepted_slices[0])); }],
+      ["duplicate remaining", (value) => { value.carry_forward.remaining_slice_ids.push("B"); }],
+      ["partition overlap", (value) => { value.carry_forward.remaining_slice_ids = ["A"]; }],
+      ["partition omission", (value) => { value.carry_forward.remaining_slice_ids = ["B"]; }],
+      ["partition unknown", (value) => { value.carry_forward.remaining_slice_ids = ["B", "unknown"]; }],
+      ["empty remaining", (value) => { value.carry_forward.remaining_slice_ids = []; }],
+      ["wrong plan ref", (value) => { value.carry_forward.plan_ref = "plan/other.json"; }],
+      ["start mismatch", (value) => { value.carry_forward.start_commit = "d".repeat(40); }],
+    ];
+    for (const [label, mutate] of cases) {
+      const fixture = createV2Fixture(`private-shape-${label.replaceAll(" ", "-")}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        const candidate = buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true });
+        mutate(candidate);
+        assert.throws(
+          () => assertContinuationBindingsCurrent(fixture.repo, fixture.runDir, candidate),
+          /carry_forward|partition|closed shape|candidate/u,
+          label,
+        );
+      } finally { cleanup(fixture.repo); }
     }
   });
 
@@ -1350,6 +1388,165 @@ describe("continuation planning-artifact reuse", () => {
       runGit(unavailable.repo, ["remote", "remove", "origin"]);
       assert.throws(() => buildContinuation(unavailable.runId, { cwd: unavailable.repo, review: "reviewer.json", runId: "origin-unavailable-next", carryForward: true }), (error) => error.code === "origin-base-unavailable");
     } finally { cleanup(unavailable.repo); }
+  });
+
+  it("does not mutate process-global FETCH_HEAD while observing origin", () => {
+    const fixture = createV2Fixture("origin-fetch-head", { accepted: ["A"], mergeOrder: ["A"] });
+    const fetchHead = join(fixture.repo, ".git", "FETCH_HEAD");
+    try {
+      writeFileSync(fetchHead, "sentinel fetch head\n");
+      const commands = [];
+      buildContinuation(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: "origin-fetch-head-next", carryForward: true,
+        originSpawnSync(file, args, options) {
+          commands.push([...args]);
+          return spawnSync(file, args, options);
+        },
+      });
+      assert.equal(readFileSync(fetchHead, "utf8"), "sentinel fetch head\n");
+      const fetches = commands.filter((args) => args[0] === "fetch");
+      assert.equal(fetches.length, 2);
+      for (const args of fetches) {
+        assert.equal(args.includes("--no-write-fetch-head"), true);
+        assert.match(args.at(-1), /^[0-9a-f]{40}$/u);
+      }
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("fails closed for malformed, missing, multiple, and unfetchable origin observations", () => {
+    const cases = [
+      ["malformed", () => ({ status: 0, stdout: "not-an-oid\trefs/heads/main\n", stderr: "" })],
+      ["missing", () => ({ status: 2, stdout: "", stderr: "missing" })],
+      ["multiple", () => ({ status: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n${"b".repeat(40)}\trefs/heads/main\n`, stderr: "" })],
+      ["unfetchable", (file, args, options) => args[0] === "fetch" ? { status: 1, stdout: "", stderr: "unfetchable" } : spawnSync(file, args, options)],
+    ];
+    for (const [label, originSpawnSync] of cases) {
+      const fixture = createV2Fixture(`origin-${label}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        assert.throws(
+          () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true, originSpawnSync }),
+          (error) => error.code === "origin-base-unavailable",
+          label,
+        );
+      } finally { cleanup(fixture.repo); }
+    }
+
+    const invalid = createV2Fixture("origin-invalid-ref", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      updateRun(invalid, (run) => { run.base_ref = "refs/remotes/upstream/main"; });
+      assert.throws(
+        () => buildContinuation(invalid.runId, { cwd: invalid.repo, review: "reviewer.json", runId: "origin-invalid-ref-next", carryForward: true }),
+        (error) => error.code === "origin-base-invalid",
+      );
+    } finally { cleanup(invalid.repo); }
+  });
+
+  it("re-observes origin after a deterministic remote race before returning", () => {
+    const fixture = createV2Fixture("origin-recheck-race", { accepted: ["A"], mergeOrder: ["A"] });
+    let observations = 0;
+    try {
+      assert.throws(
+        () => buildContinuation(fixture.runId, {
+          cwd: fixture.repo, review: "reviewer.json", runId: "origin-recheck-race-next", carryForward: true,
+          beforeOriginFetch() {
+            observations += 1;
+            if (observations === 1) runGit(fixture.repo, ["push", "origin", `${fixture.runId}:main`]);
+          },
+        }),
+        (error) => error.code === "rebaseline-required",
+      );
+      assert.equal(observations, 2);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rejects nonzero post-PR attempts even in otherwise eligible pre-PR phases", () => {
+    for (const phase of ["disabled", "awaiting-pr"]) {
+      const fixture = createV2Fixture(`eligibility-${phase}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        updateRun(fixture, (run) => { run.post_pr = continuationEligibilityPostPr(phase, 1); });
+        assert.throws(
+          () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true }),
+          /attempt.*zero|pre-PR/u,
+        );
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("enforces the complete pre-PR carry-forward eligibility boundary without mutation", () => {
+    const cases = [
+      ["root pr_url", (run) => { run.pr_url = "https://github.com/acme/repo/pull/7"; }],
+      ["terminal pr_url", (run) => { run.terminal_result.pr_url = "https://github.com/acme/repo/pull/7"; }],
+      ["steering pr_fence", (run) => { run.steering = continuationEligibilitySteeringFence(); }],
+      ["post-pr phase", (run) => { run.post_pr = { ...continuationEligibilityPostPr("awaiting-pr"), phase: "observing" }; }],
+      ["disabled nonzero attempt", (run) => { run.post_pr = continuationEligibilityPostPr("disabled", 1); }],
+      ["awaiting-pr nonzero attempt", (run) => { run.post_pr = continuationEligibilityPostPr("awaiting-pr", 1); }],
+      ["observation", (run) => { run.post_pr = { ...continuationEligibilityPostPr("disabled"), observation: {} }; }],
+      ["remediation", (run) => { run.post_pr = { ...continuationEligibilityPostPr("disabled"), remediation: {} }; }],
+      ["continuation review", (run) => { run.post_pr = { ...continuationEligibilityPostPr("disabled"), continuation_review: {} }; }],
+      ["terminal fact", (run) => { run.post_pr = { ...continuationEligibilityPostPr("disabled"), terminal_fact: {} }; }],
+      ["PR operation", (run) => { run.post_pr = { ...continuationEligibilityPostPr("disabled"), pr_operation: {} }; }],
+      ["evidence refs", (run) => { run.post_pr = { ...continuationEligibilityPostPr("disabled"), evidence_refs: [{ ref: "evidence/post-pr.json", hash: `sha256:${"a".repeat(64)}` }] }; }],
+      ["malformed post-pr", (run) => { run.post_pr = { phase: "disabled", attempt: 0 }; }],
+    ];
+    for (const [label, mutate] of cases) {
+      const fixture = createV2Fixture(`eligibility-${label.replaceAll(" ", "-")}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        updateRun(fixture, mutate);
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        assert.throws(
+          () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true }),
+          /pre-PR|post-PR|before PR|ValidationError|requires --new-pr|must|allowed only/u,
+          label,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, label);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", `${fixture.runId}-next`)), false, label);
+      } finally { cleanup(fixture.repo); }
+    }
+
+    for (const phase of ["disabled", "awaiting-pr"]) {
+      const fixture = createV2Fixture(`eligible-${phase}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        updateRun(fixture, (run) => { run.post_pr = continuationEligibilityPostPr(phase, 0); });
+        const candidate = buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true });
+        assert.equal(candidate.carry_forward.remaining_slice_ids.length, 2, phase);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("rejects an all-merged parent because no remaining slice exists", () => {
+    const fixture = createV2Fixture("eligibility-all-merged", { accepted: ["A", "B", "C"], mergeOrder: ["A", "B", "C"] });
+    try {
+      assert.throws(
+        () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "eligibility-all-merged-next", carryForward: true }),
+        /at least one nonmerged slice/u,
+      );
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("explicitly fences v2 adoption and resume without changing parent or child state", async () => {
+    const fixture = createV2Fixture("v2-consumer-fence", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "v2-consumer-fence-next";
+    try {
+      const candidate = buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      mkdirSync(childRunDir, { recursive: true });
+      writeJson(join(childRunDir, "run.json"), createRunRecord({
+        run_id: childRunId,
+        branch: childRunId,
+        worktree: candidate.target.worktree,
+        continuation: candidate,
+      }));
+      const parentBefore = readFileSync(join(fixture.runDir, "run.json"));
+      const childBefore = readFileSync(join(childRunDir, "run.json"));
+
+      await assert.rejects(adoptContinuation(childRunId, { cwd: fixture.repo }), /before B1\.4 publication/u);
+      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /schema_version: must equal 1|carry_forward: is not allowed/u);
+
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), parentBefore);
+      assert.deepEqual(readFileSync(join(childRunDir, "run.json")), childBefore);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", childRunId)), false);
+      assert.notEqual(spawnSync("git", ["show-ref", "--verify", `refs/heads/${childRunId}`], { cwd: fixture.repo }).status, 0);
+    } finally { cleanup(fixture.repo); }
   });
 
   it("rechecks optional panels and deterministic parent/plan/branch mutations before returning", () => {
@@ -1513,6 +1710,43 @@ function acceptedManifestRow(fixture, id) {
     evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
     review_ref: slice.review_ref, review_hash: slice.review_hash,
     reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit,
+  };
+}
+
+function continuationEligibilityPostPr(phase, attempt = 0) {
+  return {
+    schema_version: 1,
+    policy: {
+      enabled: phase !== "disabled",
+      wait_ms: 3_600_000,
+      initial_poll_ms: 30_000,
+      max_poll_ms: 120_000,
+      check_start_grace_ms: 300_000,
+      max_transient_errors: 12,
+      review: { required: false, reviewer_login: null, source: "none" },
+    },
+    phase,
+    attempt,
+    observation: null,
+    remediation: null,
+    evidence_refs: [],
+    continuation_review: null,
+    terminal_fact: null,
+    pr_operation: null,
+  };
+}
+
+function continuationEligibilitySteeringFence() {
+  return {
+    schema_version: 1,
+    generation: 0,
+    pending: null,
+    uncheckpointed: null,
+    boundary: null,
+    action_claim: null,
+    last_action: null,
+    pr_fence: { token: "pre-pr-token", generation: 0, state_hash: `sha256:${"a".repeat(64)}`, created_at: "2026-07-08T12:00:00.000Z" },
+    history: [],
   };
 }
 

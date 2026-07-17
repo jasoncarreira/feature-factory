@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import plugin, { mergeFactoryPermission, parseFrontmatter } from "../src/plugin.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadValue } from "../src/feature-command-payload.js";
-import { validateRun } from "../src/validate.js";
 
 const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
 const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
@@ -223,7 +222,7 @@ describe("feature command payload parsing", () => {
     assert.match(output.parts[0].text, /PLUGIN_PARSED_OPERATOR_PAYLOAD_START\nparse_status: valid/u);
   });
 
-  it("accepts canonical v2 carry-forward payloads and rejects version/shape/partition forgeries", () => {
+  it("rejects schema-v2 carry-forward payloads before B1.4", () => {
     const continuation = validContinuation();
     continuation.schema_version = 2;
     continuation.parent.commit = "e".repeat(40);
@@ -241,10 +240,8 @@ describe("feature command payload parsing", () => {
       }],
       remaining_slice_ids: ["B"],
     };
-    assert.doesNotThrow(() => validateRun({ schema_version: 1, run_id: continuation.target.run_id, branch: continuation.target.branch, worktree: continuation.target.worktree, status: "running", gates: {}, continuation }));
     const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
-    assert.equal(decoded.ok, true, JSON.stringify(decoded));
-    assert.deepEqual(decoded.payload.continuation.carry_forward, continuation.carry_forward);
+    assert.deepEqual(decoded, { ok: false, reason: "invalid-continuation" });
 
     for (const [label, mutate] of [
       ["unknown carry field", (value) => { value.carry_forward.status = "ready"; }],
