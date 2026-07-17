@@ -11,6 +11,8 @@ import { transitionGateDecision, transitionSteeringBoundaryOpened } from "../src
 describe("factory resume", () => {
   const behavioralCases = [
     { code: "matching-detached-shepherd-live", setup: (f) => writeRunningEvidence(f, "matching-live"), options: (f) => ({ inspectorFn: (pid) => ({ ok: true, inspector: "test-inspector", pid, start_marker: "test-start", command_name: "opencode", cwd: f.repo }) }) },
+    { code: "run-mode-not-interactive", setup: (f) => mutateRun(f, (run) => { run.mode = "headless"; }) },
+    { code: "approval-receipt-missing", setup: (f) => mutateRun(f, (run) => { delete run.gates.story.handoff_receipt; }) },
     { code: "protected-gate-pending", setup: async (f) => {
       writeFileSync(join(f.runDir, "artifacts", "brief.md"), "brief\n");
       writeFileSync(join(f.runDir, "gates", "brief.question.md"), "approve brief?\n");
@@ -229,6 +231,42 @@ describe("factory resume", () => {
       }
     });
   }
+
+  it("preflights start-resume before seeding skills and refuses without launching", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "factory-start-resume-preflight-"));
+    try {
+      const result = await startFactory(["resume missing-run"], { cwd: repo, headless: true, json: true });
+      assert.equal(result.ok, false);
+      assert.match(result.terminal_result.reason, /missing run\.json/i);
+      assert.equal(existsSync(join(repo, ".opencode", "skills", "feature", "SKILL.md")), false, "a refused start-resume must not seed skills");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("refuses start-resume against an active heartbeat without mutating durable state", async () => {
+    const fixture = createFixture("start-resume-active-heartbeat", { mode: "headless" });
+    try {
+      const runBytesBefore = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
+
+      const result = await startFactory([`resume ${fixture.runId}`], {
+        cwd: fixture.repo,
+        headless: true,
+        json: true,
+        foregroundLaunchFn: async () => { throw new Error("must not launch"); },
+        detachedLaunchFn: async () => { throw new Error("must not launch"); },
+      });
+
+      assert.equal(result.ok, false);
+      assert.match(result.reason, /resume ineligible/i);
+      assert.match(result.reason, /active-heartbeat/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), runBytesBefore, "a refused start-resume must not mutate run state");
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature", "SKILL.md")), false, "a refused start-resume must not seed skills");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
 
   it("builds an exact dry-run resume payload with steering pointers and no raw text", async () => {
     const fixture = createFixture("resume-pointer");
@@ -548,6 +586,8 @@ function fakeLaunchOptions(fixture, options = {}) {
 
 const BEHAVIOR_ROWS = {
   "matching-detached-shepherd-live": ["already-running", true, "A matching detached interactive shepherd is already running.", "watch"],
+  "run-mode-not-interactive": ["manual", false, "The durable run mode is not interactive; the external driver remains responsible for continuation.", "external-driver-continues"],
+  "approval-receipt-missing": ["recovery-required", false, "The accepted approval has no valid durable handoff receipt.", "run-resume-check"],
   "protected-gate-pending": ["paused-at-protected-gate", false, "The run is paused at a protected gate awaiting an explicit answer.", "answer-protected-gate"],
   "terminal-run": ["terminal", false, "The run is already terminal; inspect the durable terminal result.", "inspect-terminal-result"],
   "validated-cancelled": ["stopped", false, "Validated process evidence shows that the detached shepherd is cancelled.", "confirm-cancellation"],

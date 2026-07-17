@@ -86,6 +86,39 @@ describe("factory disrupted run recovery", () => {
     }
   });
 
+  it("refuses recovery on unsafe ownership and preserves claim, process, and heartbeat sidecars byte-for-byte", async () => {
+    const fixture = createRecoveryFixture("unsafe-ownership-run");
+    try {
+      rmSync(fixture.worktree, { recursive: true, force: true });
+      const claimDir = join(fixture.runDir, "process-launch.lock");
+      mkdirSync(claimDir, { recursive: true });
+      const paths = {
+        claim: join(claimDir, "owner.json"),
+        process: join(fixture.runDir, "process.json"),
+        heartbeat: join(fixture.runDir, "heartbeat.json"),
+      };
+      writeFileSync(paths.claim, "{\"kind\":\"malformed-preserve-me\"}\n", "utf8");
+      writeFileSync(paths.process, "{\"kind\":\"malformed-process-preserve-me\"}\n", "utf8");
+      writeJson(paths.heartbeat, { schema_version: 1, run_id: fixture.runId, phase: "builder-wave", pid: process.pid, interval_ms: 30000, last_tick_at: new Date().toISOString() });
+      const before = Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, readFileSync(path, "utf8")]));
+      const runBefore = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      const result = await recoverDisruptedRun(fixture.runId, { cwd: fixture.repo });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.updated, false);
+      assert.equal(result.recovered, false);
+      assert.equal(result.recovery_required, true);
+      assert.equal(result.ownership.condition, "unsafe-ownership");
+      assert.equal(result.ownership.reason_code, "launch-claim-invalid");
+      for (const [key, path] of Object.entries(paths)) assert.equal(readFileSync(path, "utf8"), before[key], `${key} sidecar must be byte-identical`);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), runBefore, "unsafe ownership must not mutate run state");
+      assert.equal(existsSync(fixture.worktree), false, "unsafe ownership must not recover the worktree");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("blocks recovery when the durable branch is missing", async () => {
     const fixture = createRecoveryFixture("missing-branch-run");
     try {

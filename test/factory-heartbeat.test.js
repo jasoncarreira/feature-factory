@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { heartbeatStatus, startHeartbeat, stopHeartbeat } from "../src/factory.js";
@@ -40,6 +40,47 @@ describe("factory heartbeat lifecycle", () => {
       } finally {
         cleanup(repo);
       }
+    }
+  });
+
+  it("rejects symlinked run directories that resolve outside the factory root", async () => {
+    const repo = tempRepo();
+    const external = tempRepo();
+    const runDir = createRunDir(repo);
+    const escapedRun = join(external, "escaped-run");
+    mkdirSync(escapedRun, { recursive: true });
+    writeJson(join(escapedRun, "run.json"), runningRun());
+    rmSync(runDir, { recursive: true, force: true });
+    symlinkSync(escapedRun, runDir, "dir");
+
+    try {
+      assert.throws(() => heartbeatStatus(RUN_ID, { cwd: repo }), /inside \.opencode\/factory/i);
+      await assert.rejects(
+        startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 1000 }, { cwd: repo }),
+        /inside \.opencode\/factory/i,
+      );
+    } finally {
+      cleanup(repo);
+      cleanup(external);
+    }
+  });
+
+  it("starts for in-flight work when an approved gate lacks proof metadata", async () => {
+    const repo = tempRepo();
+    const runDir = createRunDir(repo);
+    writeJson(join(runDir, "run.json"), runningRun({
+      gates: { story: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer_ref: "gates/story.answer" } },
+    }));
+
+    try {
+      const started = await startHeartbeat(RUN_ID, { phase: "builder-wave", intervalMs: 1000 }, { cwd: repo });
+      assert.equal(started.phase, "builder-wave");
+      assert.equal(started.pid, process.pid);
+      const stopped = await stopHeartbeat(RUN_ID, {}, { cwd: repo });
+      assert.equal(stopped.pid, null);
+    } finally {
+      await stopIfActive(repo);
+      cleanup(repo);
     }
   });
 
