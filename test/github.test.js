@@ -276,6 +276,7 @@ test("classifies every malformed or conflicting own operation marker as ambiguou
   for (const body of [
     `${prOperationMarker(OPERATION_ID)}\n${prOperationMarker(OPERATION_ID)}`,
     `prefix ${prOperationMarker(OPERATION_ID)}`,
+    `<!-- opencode-feature-factory:pr-operation=${OPERATION_ID} --`,
     `${prOperationMarker(OPERATION_ID)}\n<!-- opencode-feature-factory:pr-operation=malformed -->`,
     `${prOperationMarker(OPERATION_ID)}\n<!-- opencode-feature-factory:pr-operation=ffpr-v1-${"2".repeat(64)} -->`,
   ]) {
@@ -299,6 +300,36 @@ test("classifies every malformed or conflicting own operation marker as ambiguou
   }
   const exact = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull()]) });
   assert.equal(exact.disposition, "open");
+});
+
+test("ignores unrelated nullable bodies before normalizing an exact marked pull request", async () => {
+  const unrelated = operationPull({
+    html_url: "https://github.com/acme/repo/pull/6",
+    number: 6,
+    node_id: "PR_unrelated_null_body",
+    body: null,
+  });
+  const result = await observePullRequestOperation({
+    ...operationIdentity(),
+    observePage: () => included([unrelated, operationPull()]),
+  });
+
+  assert.equal(result.disposition, "open");
+  assert.equal(result.pull_request.pr_number, 7);
+  assert.equal(result.records, 2);
+});
+
+test("classifies a complete query containing only an unrelated nullable body as absent", async () => {
+  const result = await observePullRequestOperation({
+    ...operationIdentity(),
+    observePage: () => included([operationPull({ body: null })]),
+  });
+
+  assert.equal(result.disposition, "absent");
+  assert.equal(result.reason, null);
+  assert.equal(result.pull_request, null);
+  assert.equal(result.pages, 1);
+  assert.equal(result.records, 1);
 });
 
 test("follows only same-host/path/filter Link pagination and rejects repeated, foreign, malformed, and capped traversal", async () => {
@@ -370,7 +401,7 @@ test("returns unknown for incomplete output, adapter failures, duplicate records
   const duplicate = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull(), operationPull()]) });
   assert.equal(duplicate.disposition, "unknown");
   for (const malformed of [
-    operationPull({ node_id: null }), operationPull({ number: "7" }), operationPull({ draft: "false" }), operationPull({ body: null }),
+    operationPull({ node_id: null }), operationPull({ number: "7" }), operationPull({ draft: "false" }),
     operationPull({ state: "OPEN" }), operationPull({ merged_at: "bad" }), operationPull({ head: { ...operationPull().head, sha: "short" } }),
     operationPull({ base: { ...operationPull().base, repo: { full_name: "other/repo" } } }),
   ]) {

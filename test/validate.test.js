@@ -445,6 +445,32 @@ describe("run schema and consistency", () => {
     assert.equal(run.continuation.post_pr, undefined, "existing v1 continuations may omit post-PR metadata");
   });
 
+  it("permits inherited acceptance only for reuse-eligible spec-writer continuations", () => {
+    const valid = inheritedAcceptanceRun();
+    assert.equal(validateRun(valid).steps[0].inherited_acceptance.from_run_id, "parent-run");
+
+    const absentContinuation = structuredClone(valid);
+    delete absentContinuation.continuation;
+    assert.throws(
+      () => validateRun(absentContinuation),
+      /inherited_acceptance.*requires a blocked-run continuation/u,
+    );
+
+    const nonSpecWriter = structuredClone(valid);
+    nonSpecWriter.steps[0].agent = "story-writer";
+    assert.throws(
+      () => validateRun(nonSpecWriter),
+      /inherited_acceptance.*allowed only for the spec-writer step/u,
+    );
+
+    const ineligible = structuredClone(valid);
+    ineligible.continuation.planning_reuse = { eligible: false, reason: "parent planning was not accepted" };
+    assert.throws(
+      () => validateRun(ineligible),
+      /inherited_acceptance.*requires reuse-eligible continuation metadata/u,
+    );
+  });
+
   it("closes persisted gate, snapshot, receipt, step, acceptance, and continuation nested shapes", () => {
     const snapshot = {
       question_ref: "gates/story.question.md", question_hash: HASH,
@@ -914,6 +940,43 @@ function continuationMetadata(targetRunId = "run") {
     parent_reviews: [
       { kind: "review", ref: "reviews/implementation-validator.json", hash: HASH },
     ],
+  };
+}
+
+function inheritedAcceptanceRun() {
+  const continuation = continuationMetadata("continuation-run");
+  continuation.planning_reuse = {
+    eligible: true,
+    spec_review_ref: "reviews/parent-spec-writer.json",
+    spec_review_hash: HASH,
+    spec_artifact_ref: "artifacts/technical-brief.md",
+    spec_artifact_hash: HASH,
+    child_spec_review_ref: "reviews/spec-writer.json",
+  };
+  return {
+    ...runningRun("continuation-run"),
+    branch: "continuation-branch",
+    worktree: "/tmp/continuation-worktree",
+    continuation,
+    steps: [{
+      agent: "spec-writer",
+      status: "accepted",
+      attempts: 1,
+      artifact_ref: "artifacts/technical-brief.md",
+      review_ref: "reviews/spec-writer.json",
+      acceptance: {
+        artifact_ref: "artifacts/technical-brief.md",
+        artifact_hash: HASH,
+        review_ref: "reviews/spec-writer.json",
+        review_hash: HASH,
+      },
+      inherited_acceptance: {
+        from_run_id: "parent-run",
+        parent_spec_review_ref: "reviews/parent-spec-writer.json",
+        artifact_hash: HASH,
+        review_hash: HASH,
+      },
+    }],
   };
 }
 

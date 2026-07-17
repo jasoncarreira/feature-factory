@@ -1954,6 +1954,21 @@ function canonicalRunFixture(record) {
     container = container[segment];
   }
   container[record.canonicalPath.at(-1)] = structuredClone(record.source);
+  if (record.id === "step-inherited-acceptance") {
+    const continuation = structuredClone(continuationCatalogFixture("continuation-planning-reuse-eligible").run.continuation);
+    run.branch = "catalog-child";
+    run.worktree = "/tmp/catalog-child";
+    continuation.target = { ...continuation.target, run_id: run.run_id, branch: run.branch, worktree: run.worktree };
+    continuation.planning_reuse = {
+      eligible: true,
+      spec_review_ref: record.source.inherited_acceptance.parent_spec_review_ref,
+      spec_review_hash: record.source.inherited_acceptance.review_hash,
+      spec_artifact_ref: record.source.acceptance.artifact_ref,
+      spec_artifact_hash: record.source.inherited_acceptance.artifact_hash,
+      child_spec_review_ref: record.source.review_ref,
+    };
+    run.continuation = continuation;
+  }
   return run;
 }
 

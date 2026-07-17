@@ -1273,11 +1273,12 @@ export async function transitionRunStep(runDir, stepSelector, updater, options =
 
 export async function transitionContinuationAdoption(runDir, options = {}) {
   let stepIndex = -1;
+  let adoptionAuthority = null;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft) => {
-    assertContinuationAuthorityCurrent(runDir, draft, options);
     const continuation = draft.continuation;
     const reuse = continuation?.planning_reuse;
     if (continuation?.kind !== "blocked-run-continuation" || reuse?.eligible !== true) throw new Error("checked continuation adoption requires reuse-eligible continuation metadata");
+    adoptionAuthority = observeContinuationAdoptionAuthority(runDir, draft, options);
     const hadSteps = Array.isArray(draft.steps);
     const steps = hadSteps ? draft.steps : [];
     const priorIndex = selectCollectionItemIndex(steps, "spec-writer", "step selector", "agent");
@@ -1307,7 +1308,11 @@ export async function transitionContinuationAdoption(runDir, options = {}) {
     assertStepIdentityAndAttempts("spec-writer", priorStep, steps[stepIndex]);
     prepareStepAcceptanceAuthority(priorStep, steps[stepIndex], { allowInheritedAcceptance: true });
     bindStepAcceptance(runDir, steps[stepIndex]);
-  }, options, { authorizedStep: "spec-writer", allowInheritedAcceptance: true }), options);
+  }, options, {
+    authorizedStep: "spec-writer",
+    allowInheritedAcceptance: true,
+    beforeReplace: (_next, current) => assertContinuationAdoptionAuthorityCurrent(runDir, current, options, adoptionAuthority),
+  }), options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
 }
 
@@ -1350,7 +1355,51 @@ export function assertContinuationAuthorityCurrent(runDir, run, options = {}) {
   assertContinuationPlanningReuse(parentFile, parentRun, continuation);
   assertContinuationPostPr(parentFile, parentRun, continuation);
   assertContinuationTarget(repo, run, parentRun, continuation);
-  return { parentRun, repo };
+  return { parentRun, repo, parentFile };
+}
+
+function observeContinuationAdoptionAuthority(runDir, run, options) {
+  const first = assertContinuationAuthorityCurrent(runDir, run, options);
+  const firstSnapshot = continuationAdoptionAuthoritySnapshot(runDir, run, first);
+  const second = assertContinuationAuthorityCurrent(runDir, run, options);
+  const secondSnapshot = continuationAdoptionAuthoritySnapshot(runDir, run, second);
+  if (!sameJson(firstSnapshot, secondSnapshot)) throw new Error("continuation adoption authority changed during observation");
+  return secondSnapshot;
+}
+
+function assertContinuationAdoptionAuthorityCurrent(runDir, run, options, observed) {
+  if (!observed) throw new Error("continuation adoption authority was not observed");
+  const current = observeContinuationAdoptionAuthority(runDir, run, options);
+  if (!sameJson(current, observed)) throw new Error("continuation adoption authority changed before run.json replacement");
+}
+
+function continuationAdoptionAuthoritySnapshot(runDir, run, authority) {
+  const continuation = run.continuation;
+  const parentDir = parentRunDir(authority.parentFile);
+  const reuse = continuation.planning_reuse;
+  const branch = git(authority.repo, ["rev-parse", "--verify", `refs/heads/${continuation.parent.branch}^{commit}`]);
+  if (!branch.ok) throw new Error("continuation parent branch/commit binding is stale");
+  return {
+    parent_manifest: { ref: continuation.parent.run_ref, hash: hashFile(authority.parentFile) },
+    parent_branch_commit: branch.stdout.trim(),
+    selected_review: hashContinuationRef(parentDir, continuation.review.ref, resolveReviewRef),
+    parent_artifacts: hashContinuationRefs(parentDir, continuation.parent_artifacts, resolveArtifactRef),
+    parent_evidence: hashContinuationRefs(parentDir, continuation.parent_evidence, resolveEvidenceRef),
+    parent_reviews: hashContinuationRefs(parentDir, continuation.parent_reviews, resolveReviewRef),
+    planning_artifact: hashContinuationRef(parentDir, reuse.spec_artifact_ref, resolveArtifactRef),
+    planning_review: hashContinuationRef(parentDir, reuse.spec_review_ref, resolveReviewRef),
+    child_artifact: hashContinuationRef(runDir, "artifacts/technical-brief.md", resolveArtifactRef),
+    child_review: hashContinuationRef(runDir, "reviews/spec-writer.json", resolveReviewRef),
+  };
+}
+
+function hashContinuationRefs(runDir, bindings, resolver) {
+  return bindings.map(({ ref }) => hashContinuationRef(runDir, ref, resolver));
+}
+
+function hashContinuationRef(runDir, ref, resolver) {
+  const resolved = resolver(runDir, ref);
+  return { ref: resolved.ref, hash: hashFile(resolved.path) };
 }
 
 function parentRunDir(parentFile) {

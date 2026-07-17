@@ -134,7 +134,7 @@ export async function observePullRequestOperation(input) {
         if (announcedLastPage !== null && announcedLastPage !== links.last) return unknownObservation("pagination-last-page-changed");
         announcedLastPage = links.last;
       }
-      for (const item of included.body) records.push(normalizePrOperationPullRequest(item));
+      for (const item of included.body) records.push(item);
       if (links.next === null) {
         if (announcedLastPage !== null && announcedLastPage !== page) return unknownObservation("pagination-omitted-pages");
         if (included.body.length === 100 && announcedLastPage !== page) return unknownObservation("pagination-incomplete");
@@ -287,7 +287,7 @@ function normalizePrOperationPullRequest(value) {
   const number = normalizePullRequestNumber(response.number);
   const nodeId = requireNonEmptyString(response.node_id, "GitHub PR operation node_id");
   if (typeof response.draft !== "boolean") throw new Error("GitHub PR operation draft must be a boolean");
-  if (typeof response.body !== "string" || response.body.includes("\0")) throw new Error("GitHub PR operation body must be a string");
+  if (typeof response.body !== "string" || response.body.includes("\0")) throw new Error("GitHub marked PR operation body must be a NUL-free string");
   if (response.state !== "open" && response.state !== "closed") throw new Error("GitHub PR operation state is invalid");
   const mergedAt = response.merged_at;
   if (mergedAt !== null && !isCanonicalUtcTimestamp(mergedAt)) throw new Error("GitHub PR operation merged_at is invalid");
@@ -328,13 +328,14 @@ function classifyPrOperationRecords(records, identity, pages) {
   const exact = [];
   const seen = new Set();
   const marker = prOperationMarker(identity.operation_id);
-  for (const record of records) {
+  for (const value of records) {
+    const markerState = inspectOperationMarkerBody(value, marker);
+    if (markerState === "other") continue;
+    if (markerState !== "exact") return { disposition: "ambiguous", reason: "own-operation-marker-protocol-invalid", pull_request: null, pages, records: records.length };
+    const record = normalizePrOperationPullRequest(value);
     const key = `${record.pr_node_id}\0${record.pr_url}`;
     if (seen.has(key)) return unknownObservation("repeated-pull-request-record");
     seen.add(key);
-    const markerState = inspectOperationMarker(record.body, marker);
-    if (markerState === "other") continue;
-    if (markerState !== "exact") return { disposition: "ambiguous", reason: "own-operation-marker-protocol-invalid", pull_request: null, pages, records: records.length };
     if (record.repository !== identity.repository || record.head_repository !== identity.repository || record.base_repository !== identity.repository
       || record.head_ref !== identity.head_ref || record.head_sha !== identity.head_sha || record.base_ref !== identity.base_ref
       || record.base_sha !== identity.base_sha || record.draft !== identity.draft) {
@@ -347,12 +348,22 @@ function classifyPrOperationRecords(records, identity, pages) {
   return { disposition: exact[0].state, reason: null, pull_request: exact[0], pages, records: records.length };
 }
 
+function inspectOperationMarkerBody(value, marker) {
+  const record = requireRecord(value, "GitHub PR operation response");
+  if (record.body === null) return "other";
+  if (typeof record.body !== "string") throw new Error("GitHub PR operation body must be a string or null");
+  return inspectOperationMarker(record.body, marker);
+}
+
 function inspectOperationMarker(body, marker) {
-  const ownOccurrences = body.split(marker).length - 1;
+  const ownIdentity = marker.slice(0, -4);
+  const ownOccurrences = body.split(ownIdentity).length - 1;
   if (ownOccurrences === 0) return "other";
+  if (body.includes("\0")) return "invalid";
+  const exactOccurrences = body.split(marker).length - 1;
   const standalone = body.split(/\r?\n/u).filter((line) => line === marker).length;
   const markerLike = body.split("<!-- opencode-feature-factory:pr-operation=").length - 1;
-  return ownOccurrences === 1 && standalone === 1 && markerLike === 1 ? "exact" : "invalid";
+  return ownOccurrences === 1 && exactOccurrences === 1 && standalone === 1 && markerLike === 1 ? "exact" : "invalid";
 }
 
 function unknownObservation(reason, error) {

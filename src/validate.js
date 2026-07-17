@@ -1877,6 +1877,7 @@ function validateStepRelationships(errors, run, step, path) {
   }
   const inherited = step.inherited_acceptance;
   if (isRecord(inherited)) {
+    if (step.agent !== "spec-writer") errors.push({ path: `${path}.inherited_acceptance`, message: "is allowed only for the spec-writer step" });
     if (!isRecord(acceptance)) errors.push({ path: `${path}.acceptance`, message: "is required with inherited_acceptance" });
     else {
       if (inherited.artifact_hash !== acceptance.artifact_hash) errors.push({ path: `${path}.inherited_acceptance.artifact_hash`, message: "must match acceptance.artifact_hash" });
@@ -1884,8 +1885,9 @@ function validateStepRelationships(errors, run, step, path) {
     }
     const continuation = run.continuation;
     const reuse = continuation?.planning_reuse;
-    if (isRecord(continuation) && reuse?.eligible !== true) errors.push({ path: `${path}.inherited_acceptance`, message: "requires reuse-eligible continuation metadata" });
-    else if (isRecord(continuation)) {
+    if (!isRecord(continuation) || continuation.kind !== "blocked-run-continuation") errors.push({ path: `${path}.inherited_acceptance`, message: "requires a blocked-run continuation" });
+    else if (reuse?.eligible !== true) errors.push({ path: `${path}.inherited_acceptance`, message: "requires reuse-eligible continuation metadata" });
+    else {
       if (inherited.from_run_id !== continuation.parent?.run_id) errors.push({ path: `${path}.inherited_acceptance.from_run_id`, message: "must match continuation.parent.run_id" });
       if (inherited.parent_spec_review_ref !== reuse.spec_review_ref) errors.push({ path: `${path}.inherited_acceptance.parent_spec_review_ref`, message: "must match continuation.planning_reuse.spec_review_ref" });
       if (inherited.artifact_hash !== reuse.spec_artifact_hash) errors.push({ path: `${path}.inherited_acceptance.artifact_hash`, message: "must match continuation.planning_reuse.spec_artifact_hash" });

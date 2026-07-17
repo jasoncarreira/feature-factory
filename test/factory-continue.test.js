@@ -885,6 +885,45 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
+  it("rechecks parent and seeded-child adoption authority immediately before run replacement", async () => {
+    const cases = [
+      ["parent manifest", (fixture) => join(fixture.runDir, "run.json")],
+      ["selected parent review", (fixture) => join(fixture.runDir, "reviews", "reviewer.json")],
+      ["seeded child artifact", (_fixture, child) => join(child.childRunDir, "artifacts", "technical-brief.md")],
+      ["seeded child review", (_fixture, child) => join(child.childRunDir, "reviews", "spec-writer.json")],
+    ];
+
+    for (const [name, targetFile] of cases) {
+      const fixture = createFixture(`adopt-authority-race-${name.replaceAll(" ", "-")}`, { spec: { status: "accepted", verdict: "APPROVE" } });
+      try {
+        const child = seedChildForAdopt(fixture, `${fixture.runId}-next`);
+        const childRunFile = join(child.childRunDir, "run.json");
+        const childArtifactFile = join(child.childRunDir, "artifacts", "technical-brief.md");
+        const childReviewFile = join(child.childRunDir, "reviews", "spec-writer.json");
+        const beforeRun = readFileSync(childRunFile, "utf8");
+        const beforeArtifact = readFileSync(childArtifactFile, "utf8");
+        const beforeReview = readFileSync(childReviewFile, "utf8");
+        const target = targetFile(fixture, child);
+        const racedBytes = `${readFileSync(target, "utf8")} `;
+
+        await assert.rejects(
+          transitionContinuationAdoption(child.childRunDir, {
+            repoRoot: gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]),
+            atomicWriteHooks: { beforeCommit: () => writeFileSync(target, racedBytes, "utf8") },
+          }),
+          /continuation adoption authority changed|continuation parent|selected review|parent_reviews binding|protected file commit failed/u,
+          name,
+        );
+        assert.equal(readFileSync(childRunFile, "utf8"), beforeRun, `${name} must not publish inherited acceptance`);
+        assert.equal(readFileSync(target, "utf8"), racedBytes, `${name} mutation must not be silently rolled back`);
+        if (target !== childArtifactFile) assert.equal(readFileSync(childArtifactFile, "utf8"), beforeArtifact, `${name} must preserve seeded artifact bytes`);
+        if (target !== childReviewFile) assert.equal(readFileSync(childReviewFile, "utf8"), beforeReview, `${name} must preserve seeded review bytes`);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
   it("adopts factory-canonicalized review whitespace without weakening byte or semantic bindings", async () => {
     const runId = "adopt-canonical-review-whitespace";
     const fixture = createFixture(runId, {
