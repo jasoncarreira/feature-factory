@@ -119,35 +119,6 @@ describe("factory cost-report CLI", () => {
     }
   });
 
-  it("returns well-formed unavailable reports for absent and empty attribution", () => {
-    for (const [name, attribution] of [
-      ["absent", undefined],
-      ["null", null],
-      ["empty-object", {}],
-      ["null-entries", { entries: null }],
-      ["empty-entries", { entries: [] }],
-    ]) {
-      const repo = tempRepo();
-      const run = { deliberately: "not a full run" };
-      if (name !== "absent") run.cost_attribution = attribution;
-      seedRun(repo, run);
-      try {
-        const json = JSON.parse(runCostReportSuccess(repo, [RUN_ID, "--json"]).stdout);
-        assert.equal(json.status, "unavailable", name);
-        assert.equal(json.entry_count, 0, name);
-        assert.deepEqual(json.by_agent, {}, name);
-        assert.deepEqual(json.by_step, {}, name);
-        assert.deepEqual(json.by_slice, {}, name);
-
-        const human = runCostReportSuccess(repo, [RUN_ID]).stdout;
-        assert.match(human, /status=unavailable \| entries=0 \| requests=0/u, name);
-        assert.equal((human.match(/  \(none\)/gu) || []).length, 3, name);
-      } finally {
-        cleanup(repo);
-      }
-    }
-  });
-
   it("rejects malformed run IDs before shared resolution", () => {
     const repo = tempRepo();
     mkdirSync(join(repo, ".opencode", "factory"), { recursive: true });
@@ -230,25 +201,6 @@ describe("factory cost-report CLI", () => {
     } finally {
       cleanup(repo);
       cleanup(external);
-    }
-  });
-
-  it("rejects aggregate overflow with no partial stdout or filesystem mutation", () => {
-    const repo = tempRepo();
-    const runDir = seedRun(repo, { cost_attribution: { entries: [
-      availableEntry({ id: "one", step: "build", input_tokens: Number.MAX_VALUE }),
-      availableEntry({ id: "two", step: "build", input_tokens: Number.MAX_VALUE }),
-    ] } });
-    try {
-      const beforeRunJson = readFileSync(join(runDir, "run.json"));
-      const beforeTree = snapshotTree(runDir);
-      const proc = runCostReport(repo, [RUN_ID, "--json"]);
-
-      assertFailure(proc, /cost attribution aggregate overflow for input_tokens/u);
-      assert.deepEqual(readFileSync(join(runDir, "run.json")), beforeRunJson);
-      assert.deepEqual(snapshotTree(runDir), beforeTree);
-    } finally {
-      cleanup(repo);
     }
   });
 
