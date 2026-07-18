@@ -152,6 +152,24 @@ describe("slice remediation task context", () => {
     }
   });
 
+  it("rejects each closed-schema and canonical-path violation at its exact field", () => {
+    const cases = [
+      ["extra remediation context key", (review) => { review.remediation_context.extra = true; }, "review.remediation_context.extra", /is not allowed/u],
+      ["extra v2 fix key", (review) => { review.remediation_context.fixes[0].extra = true; }, "review.remediation_context.fixes[0].extra", /is not allowed/u],
+      ["unknown scope_effect", (review) => { review.remediation_context.fixes[0].scope_effect = "adjacent"; }, "review.remediation_context.fixes[0].scope_effect", /must be one of/u],
+      ["non-NFC likely path", (review) => { review.remediation_context.fixes[0].likely_paths = ["src/cafe\u0301.js"]; }, "review.remediation_context.fixes[0].likely_paths[0]", /canonical concrete repository path/u],
+      ["backslash likely path", (review) => { review.remediation_context.fixes[0].likely_paths = ["src\\fix.js"]; }, "review.remediation_context.fixes[0].likely_paths[0]", /canonical concrete repository path/u],
+    ];
+    for (const [name, mutate, expectedPath, expectedMessage] of cases) {
+      const review = classifiedReview(["narrow-correction"]);
+      mutate(review);
+      assert.throws(() => validateSliceReviewResult(review), (error) => {
+        assert.equal(error.errors.some((item) => item.path === expectedPath && expectedMessage.test(item.message)), true, name);
+        return true;
+      });
+    }
+  });
+
   it("mechanically accepts each unambiguous plan-aware scope forecast", () => {
     const plan = feasibilityPlan();
     for (const [scopeEffect, likelyPaths, fixOwner] of [

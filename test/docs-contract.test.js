@@ -2010,6 +2010,7 @@ describe("remediation context reuse docs contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /`likely_paths` is a nonempty unique list of canonical concrete repository paths[\s\S]*without globs/i);
     assert.match(WORK_REVIEWER_PROMPT, /`fix_owner` must equal an existing current-plan slice id/i);
     assert.match(WORK_REVIEWER_PROMPT, /version 1 is compatibility data only and grants no lane-feasibility authority/i);
+    assert.match(WORK_REVIEWER_PROMPT, /compatibility eligibility is derived only from that persisted transition state, never from caller options/i);
     assert.match(WORK_REVIEWER_PROMPT, /do not authorize editing, extend a builder lane, create durable effective paths/i);
     assert.match(WORK_REVIEWER_PROMPT, /Do not request or introduce another agent call/i);
     assert.match(SKILL, /exact hash-bound review must classify every required fix as `narrow-correction`/i);

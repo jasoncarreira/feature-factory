@@ -39,6 +39,7 @@ const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "terminal", "p
 const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
 const POST_PR_TERMINAL_PHASE = Object.freeze({ completed: "succeeded", blocked: "blocked", "needs-human": "needs-human" });
 const MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY = Symbol("merged-slice-repair-transition-authority");
+const LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY = Symbol("legacy-slice-review-compatibility-authority");
 const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
 const SLICE_DISPATCH_BINDING_KEYS = Object.freeze(["dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
 const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
@@ -2344,18 +2345,19 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     if (!update.changed) {
       if (priorSlice.status !== "review") return;
       if (hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)) {
-        observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
+        priorDispatchAuthority = observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
         assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
         if (TERMINAL_RUN_STATUSES.has(current.status)) return;
         const currentHistory = priorSlice.attempt_reviews?.find((entry) => entry?.attempt === priorSlice.attempts);
         if (currentHistory) return;
-        nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, { ...options, allowLegacyReview: true });
+        nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
         appendSliceAttemptReview(slices[priorIndex], nextReviewAuthority);
         sliceIndex = priorIndex;
         return;
       }
       if (TERMINAL_RUN_STATUSES.has(current.status)) return;
-      nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, { ...options, allowLegacyReview: true });
+      priorDispatchAuthority = observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
+      nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
       Object.assign(slices[priorIndex], nextReviewAuthority.binding);
       if (nextReviewAuthority.history_entry) appendSliceAttemptReview(slices[priorIndex], nextReviewAuthority);
       sliceIndex = priorIndex;
@@ -2451,9 +2453,9 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
           const currentHistory = currentSlice.attempt_reviews?.find((entry) => entry?.attempt === currentSlice.attempts);
           if (!currentHistory) {
             legacyUpgrade = true;
-            const reviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, sliceId, currentSlice, { ...options, allowLegacyMergedUpgrade: true });
+            const reviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, sliceId, currentSlice, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
             appendSliceAttemptReview(currentSlice, reviewAuthority);
-            mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, allowLegacyMergedUpgrade: true });
+            mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
             return;
           }
           observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, options);
@@ -2464,7 +2466,7 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
       if (request.merge_commit !== currentSlice.merge_commit) throw new Error(LEGACY_MERGED_UPGRADE_ERROR);
       legacyUpgrade = true;
       try {
-        mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, allowLegacyMergedUpgrade: true });
+        mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
       } catch (error) {
         throw new Error(LEGACY_MERGED_UPGRADE_ERROR, { cause: error });
       }
@@ -2488,7 +2490,10 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
     sliceTransition: true,
     beforeReplace: (next) => {
       try {
-        return assertSliceMergeAuthorityCurrent(runDir, next, sliceId, next.slices[sliceIndex], mergeAuthority, { ...options, allowLegacyMergedUpgrade: legacyUpgrade });
+        return assertSliceMergeAuthorityCurrent(runDir, next, sliceId, next.slices[sliceIndex], mergeAuthority, {
+          ...options,
+          legacyCompatibilityAuthority: legacyUpgrade ? LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY : undefined,
+        });
       } catch (error) {
         if (legacyUpgrade) throw new Error(LEGACY_MERGED_UPGRADE_ERROR, { cause: error });
         throw error;
@@ -4213,7 +4218,7 @@ function normalizeSliceMergedInput(input) {
 }
 
 function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, options = {}) {
-  const legacyUpgrade = options.allowLegacyMergedUpgrade === true;
+  const legacyUpgrade = options.legacyCompatibilityAuthority === LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY;
   if (!legacyUpgrade && !hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) {
     throw new Error(`slice '${sliceId}' merge requires a successor review binding; replay the legacy review first`);
   }
@@ -4304,9 +4309,9 @@ function assertSliceReviewAuthorityCurrent(runDir, sliceId, slice, expected) {
 
 function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options = {}) {
   const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
-  const legacyReview = (options.allowLegacyReview === true || options.allowLegacyMergedUpgrade === true)
+  const compatibilityReplay = options.legacyCompatibilityAuthority === LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY;
+  const legacyReview = compatibilityReplay
     && ["convergence", "remaining_fix_count", "remediation_context"].every((key) => observed.review[key] === undefined);
-  const compatibilityReplay = options.allowLegacyReview === true || options.allowLegacyMergedUpgrade === true;
   const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: slice.dispatch_required === true || !compatibilityReplay });
   const result = legacyReview
     ? { verdict: observed.review.verdict, legacy_unclassified: true }
@@ -4343,7 +4348,12 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
 }
 
 function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, options = {}) {
-  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, { ...options, allowLegacyReview: expected?.history_entry?.legacy_unclassified === true });
+  const compatibilityReplay = expected?.history_entry?.legacy_unclassified === true
+    || expected?.review?.remediation_context?.schema_version === 1;
+  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, {
+    ...options,
+    legacyCompatibilityAuthority: compatibilityReplay ? LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY : undefined,
+  });
   if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' review authority changed before publication`);
   return current;
 }
