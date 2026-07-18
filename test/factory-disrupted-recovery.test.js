@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
@@ -385,6 +386,49 @@ describe("factory disrupted run recovery", () => {
     }
   });
 
+  it("does not replace pending slice nonconvergence with a disrupted-recovery terminal", async () => {
+    const fixture = createRecoveryFixture("nonconvergent-recovery-run", { worktree: join(tmpdir(), "outside-nonconvergent-recovery") });
+    try {
+      const head = gitStdout(fixture.repo, ["rev-parse", `${fixture.runId}^{commit}`]);
+      const evidenceRef = "evidence/backend.attempt-1.json";
+      const reviewRef = "reviews/backend.attempt-1.json";
+      mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+      mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+      writeJson(join(fixture.runDir, evidenceRef), { subject: "backend", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+      writeJson(join(fixture.runDir, reviewRef), {
+        subject: "backend", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
+        remaining_fix_count: 1, required_fixes: ["missed category"],
+        remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "nonconvergent" }] },
+      });
+      const source = {
+        attempt: 1,
+        evidence_ref: evidenceRef,
+        evidence_hash: fileHash(join(fixture.runDir, evidenceRef)),
+        review_ref: reviewRef,
+        review_hash: fileHash(join(fixture.runDir, reviewRef)),
+        reviewed_commit: head,
+        verdict: "REJECT",
+        convergence: "nonconvergent",
+        remaining_fix_count: 1,
+      };
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.slices = [{
+        id: "backend", stack: "backend", depends_on: [], status: "review", branch: fixture.runId,
+        worktree: fixture.worktree, attempts: 1, attempt_reviews: [source], evidence_ref: evidenceRef,
+        evidence_hash: source.evidence_hash, review_ref: reviewRef, review_hash: source.review_hash, reviewed_commit: head,
+      }];
+      writeJson(join(fixture.runDir, "run.json"), run);
+
+      await assert.rejects(
+        recoverDisruptedRun(fixture.runId, { cwd: fixture.repo }),
+        /current nonconvergent review must terminalize through the checked next-attempt transition/u,
+      );
+      assert.equal(readJson(join(fixture.runDir, "run.json")).status, "running");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("keeps status, listRuns, and validateState read-only for missing manifests and worktrees", () => {
     const fixture = createRecoveryFixture("read-only-state-run");
     const runFile = join(fixture.runDir, "run.json");
@@ -481,6 +525,10 @@ function readDoc(relativePath) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function fileHash(file) {
+  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
 }
 
 function escapeRegExp(value) {

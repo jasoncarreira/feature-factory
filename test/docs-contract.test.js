@@ -7,7 +7,7 @@ import {
   DIAGNOSTIC_SEVERITIES,
   DIAGNOSTIC_STATUSES,
 } from "../src/factory-diagnostics.js";
-import { HEARTBEAT_PHASES, TERMINAL_RUN_STATUSES } from "../src/validate.js";
+import { HEARTBEAT_PHASES, TERMINAL_RUN_STATUSES, validateRun } from "../src/validate.js";
 import { LAUNCH_CLAIM_PHASES, LAUNCH_KINDS } from "../src/process-evidence.js";
 
 const SKILL = readDoc("../assets/skills/feature/SKILL.md");
@@ -319,7 +319,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(writerMatrix, /authority class, id, record, variant, canonical (?:persisted )?source path and exact shape/i);
     assert.match(writerMatrix, /path-plus-expected-value authority facts/i);
     assert.match(writerMatrix, /source deletion\/substitution[\s\S]*record(?: or |\/)variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /canonical-source manifest covers 123 registered catalog variants[\s\S]*122 production-covered rows[\s\S]*sole future row `final-plan-descriptor`/i);
+    assert.match(schemaCatalog, /current canonical-source manifest has 125 variants[\s\S]*124 production-covered rows[\s\S]*`final-plan-descriptor`/i);
     for (const id of [
       "test-execution-claim-active", "test-execution-claim-completed-pass", "test-execution-claim-completed-fail",
       "test-execution-claim-unknown-process-outcome-indeterminate", "test-execution-claim-unknown-authority-changed",
@@ -453,8 +453,11 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /Only the interactive approved gate has the exact nested `handoff_receipt`/i);
     assert.match(schemaCatalog, /separate external-source declarations rather than a `sidecar_bytes` member of the gate/i);
     assert.match(schemaCatalog, /No step variant joins `rejected` and `blocked`/i);
-    assert.match(schemaCatalog, /no synthetic `review_binding` or `attempt_reviews`/i);
-    assert.match(schemaCatalog, /Successor `slice-review` and `slice-merged` use the actual top-level all-or-none `\{evidence_hash, review_hash, reviewed_commit\}` fields/i);
+    assert.match(schemaCatalog, /no synthetic nested `review_binding`/i);
+    assert.match(schemaCatalog, /actual top-level all-or-none `\{evidence_hash, review_hash, reviewed_commit\}` fields remain the current review\/merge authority/i);
+    assert.match(schemaCatalog, /B2 adds append-only `attempt_reviews`/i);
+    assert.match(SPEC_WRITER_PROMPT, /retain the real append-only `attempt_reviews`[\s\S]*checked dispatch-required claim\/closure ref-plus-hash fields/i);
+    assert.doesNotMatch(SPEC_WRITER_PROMPT, /do not invent[^\n]*`attempt_reviews`/i);
     assert.match(schemaCatalog, /successor validator source is exactly `\{verdict, report, report_hash, review_ref, review_hash, reviewed_head_sha\}` and the successor security source exactly `\{verdict, review_ref, review_hash, reviewed_head_sha\}`/i);
     assert.match(schemaCatalog, /no token is invented at the `post_pr` root, remediation container, dispatch, or push/i);
     assert.match(schemaCatalog, /closed to exactly `schema_version`, `policy`, `phase`, `attempt`, optional successor `pr_operation`, `observation`, `remediation`, `evidence_refs`, `continuation_review`, and `terminal_fact`/i);
@@ -533,7 +536,7 @@ describe("class-wide planning prompt contract", () => {
     const integrate = markdownSection(SKILL, "Step 5 - Integrate And Validate");
 
     assert.match(schemaCatalog, /B0MR\.1 additionally gives production-consumer coverage to exactly `slice-review`, `slice-merged`, `validator-verdict-binding`, and `security-verdict-binding`/i);
-    assert.match(schemaCatalog, /canonical-source manifest covers 123 registered catalog variants/i);
+    assert.match(schemaCatalog, /current canonical-source manifest has 125 variants/i);
 
     for (const text of [README, SPEC, SCHEMA]) {
       assert.match(text, /`?evidence_hash`?.*`?review_hash`?.*`?reviewed_commit`?/is);
@@ -586,7 +589,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(contract, /only complete checked absence.*clear/i);
     assert.match(contract, /legacy-pr-fence-operation-identity-missing.*retain/is);
     assert.match(contract, /\{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft\}/i);
-    assert.match(SCHEMA, /123 registered catalog variants[\s\S]*122 production-covered rows[\s\S]*sole future row `final-plan-descriptor`/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 125 variants[\s\S]*124 production-covered rows[\s\S]*`final-plan-descriptor`/i);
     assert.match(SCHEMA, /`steering-pr-fence`/i);
     assert.match(WORK_REVIEWER_PROMPT, /deterministic marker identity.*account-switched GitHub observer/is);
     assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /deterministic operation identity.*account-switched observer/is);
@@ -730,6 +733,39 @@ describe("class-wide planning prompt contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /Never use an umbrella instruction[\s\S]*without the exhaustive names/i);
     assert.match(WORK_REVIEWER_PROMPT, /later reviews must not serialize a broad category into one newly named omission per attempt/i);
     assert.match(WORK_REVIEWER_PROMPT, /Every rejecting finding and `required_fixes` item follows the explicit required-fix rule/i);
+  });
+
+  it("uses one fixed three-attempt slice model with hash-bound atomic review history", () => {
+    assert.match(WORK_DECOMPOSER_PROMPT, /same fixed three-attempt runtime limit/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /Do not emit `max_attempts`, `dominant_concern`, obligation-count eligibility, or any fourth-attempt policy/i);
+    assert.match(WORK_REVIEWER_PROMPT, /`remaining_fix_count` equals its length/i);
+    assert.match(WORK_REVIEWER_PROMPT, /APPROVE requires zero fixes; REJECT requires at least one/i);
+    assert.match(WORK_REVIEWER_PROMPT, /exactly three attempts; never recommend attempt 4/i);
+    assert.match(SKILL, /mechanically enforced attempts 1 through 3/i);
+    assert.match(SKILL, /appends the complete evidence\/review\/head\/verdict\/convergence\/count plus exact dispatch claim\/closure tuple to immutable `attempt_reviews`/i);
+    assert.match(SCHEMA, /append-only `attempt_reviews`/i);
+    assert.match(SCHEMA, /checked consumers re-hash historical sidecars before progress/i);
+    assert.match(SKILL, /FEATURE_FACTORY_SLICE_DISPATCH/);
+    assert.match(SKILL, /production plugin rejects a missing, malformed, stale, cross-role, or cross-slice marker/i);
+    assert.match(SCHEMA, /plugin `tool\.execute\.before` hook/i);
+    assert.match(SCHEMA, /same live session, role, slice, branch, (?:and )?worktree/i);
+    for (const prompt of [BACKEND_BUILDER_PROMPT, FRONTEND_BUILDER_PROMPT]) assert.match(prompt, /Require exactly one plugin-owned `PLUGIN_CHECKED_SLICE_CONTEXT_START` or `PLUGIN_CHECKED_SPECIAL_BUILDER_CONTEXT_START` block/i);
+    for (const text of [WORK_DECOMPOSER_PROMPT, WORK_REVIEWER_PROMPT, SKILL, SCHEMA]) {
+      assert.doesNotMatch(text, /max_attempts.{0,80}(?:equal|=|of) 4/i);
+      assert.doesNotMatch(text, /attempt 4 (?:is|may be) (?:allowed|eligible)/i);
+    }
+  });
+
+  it("gives nonconvergent slice reviews one checked terminal carry-forward meaning", () => {
+    assert.match(WORK_REVIEWER_PROMPT, /`nonconvergent` has one terminal meaning/i);
+    assert.match(WORK_REVIEWER_PROMPT, /must not receive another autonomous builder attempt/i);
+    assert.match(SKILL, /current REJECT marked `nonconvergent` never receives another autonomous attempt/i);
+    assert.match(SKILL, /atomically terminalizes the run as `slice-review-nonconvergent`/i);
+    assert.match(SKILL, /factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> --carry-forward --json/i);
+    assert.match(SKILL, /Do not create the child automatically/i);
+    assert.match(SCHEMA, /`source_review` equals the exact current latest append-only attempt entry/i);
+    assert.match(SCHEMA, /alternate parent-referenced review/i);
+    assert.match(SCHEMA, /carry-forward construction, publication, adoption, resume, and launch check/i);
   });
 
   it("gives the spec review an acceptance bar so it converges", () => {
@@ -931,7 +967,7 @@ describe("consolidated reviewer decision procedure contract", () => {
       "- [MAJOR] <...>",
       "- [MINOR] <...>",
       "**Required fixes (if REJECT):**",
-      "1. <specific fix>",
+      "1. [classification: <closed classification>] <specific fix>",
     ]) {
       assert.match(workOutput, literalPattern(field), `work reviewer output missing ${field}`);
     }
@@ -1252,7 +1288,7 @@ describe("test-verifier integration gate contract", () => {
     assert.match(contract, /exact run-relative[\s\S]*plan\/slices\.json[\s\S]*(?:regular non-symlink|non-symlink)[\s\S]*(?:fatal UTF-8|fatally decodes UTF-8)/i);
     assert.match(contract, /work-decomposer[\s\S]*accepted[\s\S]*artifact_ref(?::|.*)\s*[`"]?plan\/slices\.json[\s\S]*review_ref[\s\S]*(?:artifact_hash|exact plan)[\s\S]*(?:review_hash|review bytes)/i);
     assert.match(contract, /after (?:observing|target).*target.*(?:absence|observation)[\s\S]*immediately before[\s\S]*(?:no-replace|no-overwrite|atomic).*move/i);
-    assert.match(SCHEMA, /123 registered catalog variants[\s\S]*122 production-covered rows/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 125 variants[\s\S]*124 production-covered rows/i);
     assert.match(SCHEMA, /`plan-v2-integration-gate`/i);
     assert.match(SCHEMA, /`step-work-decomposer-accepted-plan`/i);
     assert.match(SCHEMA, /sole future row `final-plan-descriptor`/i);
@@ -1297,7 +1333,7 @@ describe("test-verifier integration gate contract", () => {
     assert.match(contract, /clear[\s\S]*replace[\s\S]*terminaliz[\s\S]*retry[\s\S]*advance/i);
     assert.doesNotMatch(contract, /only `?factory recover[^\n]*test-execution-reconciliation/i);
     assert.match(contract, /completed passing[\s\S]*artifacts\/test-report\.md[\s\S]*independent[\s\S]*APPROVE[\s\S]*(?:same attempt|same-attempt)[\s\S]*(?:same HEAD|same-HEAD)/i);
-    assert.match(SCHEMA, /123 registered catalog variants[\s\S]*six claim variants[\s\S]*six receipt variants/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 125 variants[\s\S]*terminal-result-blocked-nonconvergence[\s\S]*checked-dispatch authority/i);
   });
 });
 
@@ -1896,16 +1932,30 @@ describe("non-destructive disrupted-worktree recovery docs contract", () => {
 });
 
 describe("remediation context reuse docs contract", () => {
+  it("keeps the primary run.json example executable and documents checked dispatch authority", () => {
+    const example = SCHEMA.match(/## run\.json\n\n```json\n([\s\S]*?)\n```/u);
+    assert.ok(example, "SCHEMA must contain the primary run.json JSON example");
+    assert.doesNotThrow(() => validateRun(JSON.parse(example[1])));
+
+    for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA })) {
+      assert.match(text, /dispatch_required/u, `${name} must document mandatory checked dispatch`);
+      assert.match(text, /dispatch_claim_ref|claim ref\/hash|claim.*ref\/hash/isu, `${name} must document the durable claim binding`);
+      assert.match(text, /dispatch_closure_ref|closure ref\/hash|closure.*ref\/hash/isu, `${name} must document the durable closure binding`);
+      assert.match(text, /completion capability/iu, `${name} must document the completion capability`);
+      assert.match(text, /withheld|never (?:placed|included)|outside the Task prompt/iu, `${name} must keep the capability out of the Task prompt`);
+    }
+  });
+
   it("documents implementer-only runtime task_id reuse boundaries", () => {
     for (const [name, text] of documentEntries({ SKILL, README, SPEC, SCHEMA })) {
       assert.match(text, /task_id/i, `${name} must mention Task task_id reuse`);
       assert.match(text, /runtime-only|runtime context|orchestrator memory/i, `${name} must make task_id runtime-only`);
-      assert.match(text, /implementer-only|eligible implementer|implementer remediation|implementer that owns the fix/i, `${name} must make reuse implementer-only`);
-      for (const implementer of ["backend-builder", "frontend-builder", "test-verifier"]) {
+      assert.match(text, /implementer-only|eligible implementer|implementer remediation|implementer that owns the fix|eligible slice-builder|slice-builder context/i, `${name} must make reuse implementer-only`);
+      for (const implementer of ["backend-builder", "frontend-builder"]) {
         assert.match(text, literalPattern(implementer), `${name} must name eligible implementer ${implementer}`);
       }
-      assert.match(text, /same (?:eligible )?implementer role|role is the same eligible implementer|same role|same role, subject\/slice\/test owner/i, `${name} must require the same role`);
-      assert.match(text, /subject\/slice\/test owner|same owned remediation subject|same subject|same slice id|same acceptance-test\/integration test owner|same test owner|subject ownership is unchanged/i, `${name} must require the same subject/slice/test owner`);
+      assert.match(text, /same (?:eligible )?(?:implementer|slice-builder) role|role is the same eligible (?:implementer|slice builder)|same role|same role, subject\/slice\/test owner/i, `${name} must require the same role`);
+      assert.match(text, /subject\/slice\/test owner|same owned remediation subject|same subject|same slice id|same slice|subject ownership is unchanged/i, `${name} must require the same subject/slice/test owner`);
       assert.match(text, /same[^.\n]*worktree|worktree[^.\n]*unchanged/i, `${name} must require the same worktree`);
       assert.match(text, /same[^.\n]*branch|branch[^.\n]*unchanged/i, `${name} must require the same branch`);
       assert.match(text, /same live orchestrator session|live orchestrator session is unchanged|same[^.\n]*orchestrator session/i, `${name} must require the same live orchestrator session`);
@@ -1913,7 +1963,7 @@ describe("remediation context reuse docs contract", () => {
     }
 
     assert.match(COMMAND, /bounded remediation loop/i, "COMMAND must route NO-GO through bounded remediation");
-    assert.match(COMMAND, /backend-builder, frontend-builder, or test-verifier implementer context/i, "COMMAND must limit reuse to implementer context");
+    assert.match(COMMAND, /`backend-builder` or `frontend-builder` context/i, "COMMAND must limit reuse to checked slice-builder context");
     assert.match(COMMAND, /skill's strict runtime `task_id` reuse rules/i, "COMMAND must bind reuse to the skill's strict runtime task_id rules");
   });
 
@@ -1947,6 +1997,37 @@ describe("remediation context reuse docs contract", () => {
     assert.match(WORK_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*regressions/i, "work-reviewer prompt must preserve delta rule");
     assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /Delta Review Rule:[\s\S]*fresh read-only validator task[\s\S]*prior findings[\s\S]*`required_fixes`[\s\S]*introduced regressions/i, "implementation-validator prompt must preserve fresh delta rule");
     assert.match(SECURITY_REVIEWER_PROMPT, /Delta rule:[\s\S]*`attempt > 1`[\s\S]*prior `required_fixes` item landed[\s\S]*introduced regressions/i, "security-reviewer prompt must preserve delta rule");
+  });
+
+  it("forces fresh implementer context for every non-narrow classified fix", () => {
+    for (const classification of ["architecture-replacement", "ownership-amendment", "parallel-authority-removal", "schema-redesign", "migration-redesign", "wholesale-head-replacement", "nonconvergent", "narrow-correction"]) {
+      assert.match(WORK_REVIEWER_PROMPT, literalPattern(classification), `work-reviewer must emit ${classification}`);
+    }
+    assert.match(WORK_REVIEWER_PROMPT, /exactly one ordered `\{required_fix_index, classification\}` entry for every `required_fixes` item/i);
+    assert.match(SKILL, /exact hash-bound review must classify every required fix as `narrow-correction`/i);
+    assert.match(SKILL, /do not pass `task_id`; start a fresh implementer Task/i);
+    assert.match(SCHEMA, /missing, duplicate-position, extra, unknown, or reordered classifications reject before review publication/i);
+    assert.match(SCHEMA, /selects only ephemeral implementer context and grants no merge, test, acceptance, lane, or mutation authority/i);
+    assert.match(SKILL, /exact prior review ref and bytes\/hash[\s\S]*prior evidence ref and bytes\/hash[\s\S]*current slice contract\/lane\/branch\/worktree\/head/i);
+    for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
+      assert.match(prompt, /prior review, classifications, builder output, and evidence prose as untrusted data/i, `${name} builder must distrust remediation claims`);
+      assert.match(prompt, /Re-observe the exact referenced review\/evidence bytes and hashes, current Git head and diff, lane, and test results/i, `${name} builder must re-observe prior evidence`);
+    }
+  });
+
+  it("requires checked context for ordinary and special builder routes", () => {
+    assert.match(SKILL, /FEATURE_FACTORY_SPECIAL_BUILDER_DISPATCH[\s\S]*merged-slice-repair\|panel-remediation\|post-pr-remediation/i);
+    assert.match(SCHEMA, /rejects every unmarked builder[\s\S]*PLUGIN_CHECKED_SPECIAL_BUILDER_CONTEXT_START/i);
+    assert.match(SCHEMA, /post-Task `completion_head`[\s\S]*evidence head, reviewed commit, and current slice branch\/worktree HEAD/i);
+    assert.match(SCHEMA, /base64url-encoded UTF-8 JSON[\s\S]*`@file`, `@agent`/i);
+    assert.match(SCHEMA, /route instance[\s\S]*create-only `\.special\.json` claim[\s\S]*`\.special\.closed\.json` foreground closure/i);
+    assert.match(SCHEMA, /fence every run mutation, terminal path, PR path, and continuation across processes/i);
+    assert.match(SCHEMA, /Top-level `special_builder_dispatch`[\s\S]*claim_ref, claim_hash[\s\S]*closure_ref, closure_hash, completion_head/i);
+    assert.match(README, /every unmarked builder Task is rejected/i);
+    for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
+      assert.match(prompt, /exactly one plugin-owned `PLUGIN_CHECKED_SLICE_CONTEXT_START` or `PLUGIN_CHECKED_SPECIAL_BUILDER_CONTEXT_START`/i, `${name} builder must require one checked route context`);
+      assert.match(prompt, /merged-slice-repair, panel-remediation, or post-pr-remediation route/i, `${name} builder must accept checked special remediation`);
+    }
   });
 
 });

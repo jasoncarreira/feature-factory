@@ -10,8 +10,10 @@ import { computePrOperationId } from "../src/github.js";
 import { git } from "../src/git.js";
 import {
   createPostPrState,
+  completeSpecialBuilderTaskDispatch,
   hashRunState,
   hasInFlightHeartbeatWork,
+  prepareSpecialBuilderTaskDispatch,
   transitionPostPrFailure,
   transitionPostPrState,
   transitionPostPrTerminal,
@@ -501,7 +503,7 @@ describe("checked post-PR transitions", () => {
     try {
       const next = initialChangesObservedState(fixture, "f".repeat(40));
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionPostPrState(fixture.runDir, next, { worktree: fixture.repo }), /candidate|authority|Git/u);
+      await assert.rejects(transitionPostPrState(fixture.runDir, next, { worktree: fixture.repo }), /candidate|authority|Git|another HEAD/u);
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
@@ -714,10 +716,6 @@ async function prepareInitialCandidateTransition(runId) {
   fixtureGit(fixture.repo, ["add", "candidate.txt"]);
   fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "baseline"]);
   fixture.baseline = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
-  writeFileSync(join(fixture.repo, "candidate.txt"), "candidate\n");
-  fixtureGit(fixture.repo, ["add", "candidate.txt"]);
-  fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "candidate"]);
-  fixture.candidate = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
   const run = readJson(join(fixture.runDir, "run.json"));
   run.worktree = fixture.repo;
   run.branch = "main";
@@ -735,6 +733,23 @@ async function prepareInitialCandidateTransition(runId) {
   current.post_pr.remediation.stage = "running";
   Object.assign(current.post_pr.remediation.dispatch, { status: "running", started_at: NOW });
   writeJson(join(fixture.runDir, "run.json"), current);
+  const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: fixture.runId,
+    route: "post-pr-remediation",
+    agent: current.post_pr.remediation.route,
+  }, { claimDispatch: true, completionToken: "post-pr-state-completion-token" });
+  writeFileSync(join(fixture.repo, "candidate.txt"), "candidate\n");
+  fixtureGit(fixture.repo, ["add", "candidate.txt"]);
+  fixtureGit(fixture.repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "candidate"]);
+  fixture.candidate = fixtureGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
+  await completeSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: fixture.runId,
+    route: "post-pr-remediation",
+    agent: current.post_pr.remediation.route,
+    claim_ref: context.dispatch_claim.ref,
+    claim_hash: context.dispatch_claim.hash,
+    completion_token: "post-pr-state-completion-token",
+  });
   return fixture;
 }
 

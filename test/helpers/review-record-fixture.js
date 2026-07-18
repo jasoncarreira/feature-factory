@@ -7,8 +7,21 @@ export function createReviewRecord(overrides = {}) {
   };
 }
 
-export function createSliceReviewRecord({ subject = "fixture-subject", attempt = 1, reviewedCommit, verdict = "APPROVE", requiredFixes = [] } = {}) {
-  return createReviewRecord({ subject, attempt, reviewed_commit: reviewedCommit, verdict, required_fixes: requiredFixes });
+export function createSliceReviewRecord({ subject = "fixture-subject", attempt = 1, reviewedCommit, verdict = "APPROVE", requiredFixes = [], convergence = "converging", fixClassifications } = {}) {
+  const classifications = fixClassifications || requiredFixes.map(() => convergence === "nonconvergent" ? "nonconvergent" : "narrow-correction");
+  return createReviewRecord({
+    subject,
+    attempt,
+    reviewed_commit: reviewedCommit,
+    verdict,
+    convergence,
+    remaining_fix_count: requiredFixes.length,
+    required_fixes: requiredFixes,
+    remediation_context: {
+      schema_version: 1,
+      fixes: classifications.map((classification, required_fix_index) => ({ required_fix_index, classification })),
+    },
+  });
 }
 
 export function createPanelReviewRecord({ subject = "fixture-branch", attempt = 1, reviewedHeadSha, verdict = "GO", requiredFixes = [] } = {}) {

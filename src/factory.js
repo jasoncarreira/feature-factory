@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertNoUnreconciledTestExecution, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -214,6 +214,7 @@ export async function recoverDisruptedRun(runId, opts = {}) {
 
   const run = readResult.run;
   assertRunClaimRoute(repo, run);
+  assertNoPendingSpecialBuilderDispatches(target.runDir, run);
   if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, target.runDir, run, opts);
   await opts.recoveryHooks?.beforeLegacyFenceMutation?.({ runDir: target.runDir, run });
   assertRecoveryV2Authority(repo, target.runDir, run, opts);
@@ -619,6 +620,8 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
       runDir,
       reason: current.terminal_result?.reason || reason,
     });
+    assertNoCurrentSliceNonconvergence(runDir, current);
+    assertNoUnresolvedSliceDispatches(runDir, current);
     if (current.steering?.pending) throw new Error("recovery terminalization rejected: pending steering");
     if (current.steering?.uncheckpointed) throw new Error("recovery terminalization rejected: consumed steering acknowledgement is pending");
     if (current.steering?.action_claim) throw new Error("recovery terminalization rejected: action start acknowledgement is pending");
@@ -628,6 +631,7 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, { ...opts, repoRoot: factoryRepoFromRunDir(runDir) });
     bestEffortStopHeartbeatForTerminal(runDir, opts);
     assertV2LocalPublishedAuthority(runDir, current, { ...opts, repoRoot: factoryRepoFromRunDir(runDir) }, v2Authority);
+    assertNoUnresolvedSliceDispatches(runDir, current);
     const next = validateRun({
       ...current,
       status: statusValue,
@@ -729,6 +733,7 @@ export async function resumeFactory(runId, opts = {}) {
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const beforeRecovery = readRunFile(join(runDir, "run.json"));
   assertRunClaimRoute(repo, beforeRecovery);
+  assertNoPendingSpecialBuilderDispatches(runDir, beforeRecovery);
   assertResumeConfiguration(beforeRecovery, opts);
   if (beforeRecovery.continuation?.schema_version === 2) {
     const checked = assertCarryForwardResumeAuthority(repo, runDir, beforeRecovery, opts);
@@ -1354,7 +1359,6 @@ async function markPostPrRemediationRunning(runDir, run, opts) {
 }
 
 async function markPostPrRevalidating(runDir, run, opts) {
-  const action = await claimPostPrAction(runDir, "remediation", opts);
   const ref = requiredStringOption(opts.remediationEvidenceRef, "--remediation-evidence-ref");
   const evidence = readBoundRunJson(runDir, ref, "evidence");
   const head = git(run.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
@@ -1368,13 +1372,13 @@ async function markPostPrRevalidating(runDir, run, opts) {
   const plan = acceptedSlicesPlan(runDir, run);
   const slice = run.post_pr.remediation.owner.kind === "slice" ? plan.slices.find((item) => item.id === run.post_pr.remediation.owner.slice_id) : null;
   const lane = validateLane({ lane: run.post_pr.remediation.lane, slice, paths, changes: evidence.value.changes });
-  assertPostPrActionFresh(runDir, action);
-  if (!lane.ok) return terminalLaneViolation(runDir, run, { ...opts, expectedCurrentHash: action.state_hash }, lane.reason, paths);
   let next = cloneJson(run.post_pr);
   next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.dispatch.status = "returned"; next.remediation.dispatch.returned_at = timestamp(opts.now);
   next.remediation.changes = { paths, entries: actualDiff.changes, tree_hash: hashJson(actualDiff.changes) }; next.remediation.candidate_head_sha = candidate; next.remediation.remediation_evidence_ref = ref; next.remediation.remediation_evidence_hash = evidence.hash;
-  const observed = await transitionPostPrState(runDir, next, { ...opts, expectedCurrentHash: action.state_hash });
-  next.phase = "committed"; next.remediation.stage = "committed"; const committed = await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree, expectedCurrentHash: hashRunState(observed.run) });
+  const observed = await transitionPostPrState(runDir, next, { ...opts, expectedCurrentHash: hashRunState(run) });
+  if (!lane.ok) return terminalLaneViolation(runDir, observed.run, { ...opts, expectedCurrentHash: hashRunState(observed.run) }, lane.reason, paths);
+  const action = await claimPostPrAction(runDir, "remediation", { ...opts, expectedCurrentHash: hashRunState(observed.run) });
+  next.phase = "committed"; next.remediation.stage = "committed"; const committed = await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree, expectedCurrentHash: action.state_hash });
   next.phase = "revalidating"; next.remediation.stage = "revalidating"; next.remediation.revalidation.jobs ||= {}; next.remediation.revalidation.jobs.canonical ||= newPostPrJob("canonical", next.remediation.attempt);
   await transitionPostPrState(runDir, next, { ...opts, worktree: run.worktree, expectedCurrentHash: hashRunState(committed.run) });
   return { run_id: run.run_id, action: "revalidating", candidate_head_sha: next.remediation.candidate_head_sha, route: next.remediation.route };
@@ -1382,10 +1386,13 @@ async function markPostPrRevalidating(runDir, run, opts) {
 
 async function terminalLaneViolation(runDir, run, opts, reason, paths) {
   const path = paths[0] || "unknown";
-  const next = cloneJson(run.post_pr);
-  next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.changes = { paths: paths.length ? paths : [path], tree_hash: null };
-  const persisted = await transitionPostPrState(runDir, next, opts);
-  const current = persisted.run;
+  let current = run;
+  if (run.post_pr?.phase !== "changes-observed") {
+    const next = cloneJson(run.post_pr);
+    next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.changes = { paths: paths.length ? paths : [path], tree_hash: null };
+    const persisted = await transitionPostPrState(runDir, next, opts);
+    current = persisted.run;
+  }
   return postPrTerminal(runDir, current, "needs-human", "post-pr-path-lane-violation", { ...withoutExpectedHash(opts), expectedCurrentHash: hashRunState(current) }, {}, { schema_version: 1, kind: "path-lane-violation", observed_at: timestamp(opts.now), attempt: current.post_pr.attempt, lane: current.post_pr.remediation.lane, source: "remediation-diff", violation: reason === "unsafe-change-kind" ? "unsafe-change-kind" : "outside-lane", path_b64url: Buffer.from(path).toString("base64url"), changes_hash: hashJson(current.post_pr.remediation.changes) });
 }
 
@@ -1750,6 +1757,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 
   await withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
+    assertNoPendingSpecialBuilderDispatches(runDir, run);
     assertHeartbeatStartable(run);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, opts);
     const current = tryReadHeartbeatFile(heartbeatFile);
@@ -2057,6 +2065,7 @@ export async function cleanupRun(runId, opts = {}) {
   return withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
     assertNoUnreconciledTestExecution(run);
+    assertNoPendingSpecialBuilderDispatches(runDir, run);
     if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
       throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
     }
@@ -2098,6 +2107,7 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
   }
   const durableRun = readRunFile(join(runDir, "run.json"));
   assertNoUnreconciledTestExecution(durableRun);
+  assertNoPendingSpecialBuilderDispatches(runDir, durableRun);
   const targets = collectCleanupTargets(run);
   if (opts.mode !== "single-run") return cleanupSweepTargetsLocked(repo, runDir, targets, opts);
 
@@ -2113,10 +2123,19 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
     run_dir: runDir,
   };
 
-  for (const worktree of targets.worktrees) removeWorktree(repo, worktree, result, opts);
-  for (const branch of targets.branches) deleteBranch(repo, branch, result, opts);
+  for (const worktree of targets.worktrees) {
+    assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    removeWorktree(repo, worktree, result, opts);
+  }
+  for (const branch of targets.branches) {
+    assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    deleteBranch(repo, branch, result, opts);
+  }
 
-  if (!opts.dryRun) rmSync(runDir, { recursive: true, force: true });
+  if (!opts.dryRun) {
+    assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    rmSync(runDir, { recursive: true, force: true });
+  }
   result.removed_run_dir = !opts.dryRun;
   return result;
 }
@@ -2659,15 +2678,22 @@ export function buildContinuation(parentRunId, opts = {}) {
   const parentRunFile = join(parentRunDir, "run.json");
   lstatRequiredNoSymlinks(repo, parentRunFile, "parent run.json", "parent run.json must not contain symlinks");
   const parentRun = readRunFile(parentRunFile);
+  assertNoUnresolvedSliceDispatches(parentRunDir, parentRun);
+  assertNoPendingSpecialBuilderDispatches(parentRunDir, parentRun);
   if (parentRun.status !== "blocked") {
     throw new Error(`parent run '${parentRun.run_id}' must have status blocked`);
   }
   const postPrParent = stringValue(parentRun.pr_url);
   const carryForward = opts.carryForward === true;
+  const nonconvergenceSource = terminalNonconvergenceReviewSource(parentRun);
+  if (nonconvergenceSource && !carryForward) throw new Error("terminal slice-review nonconvergence requires --carry-forward schema v2");
   const carryForwardConfig = carryForward ? opts.carryForwardConfig || resolveCarryForwardConfiguration(repo, opts) : null;
   if (carryForward && opts.newPr === true) throw new Error("factory continue --carry-forward is mutually exclusive with --new-pr");
   if (carryForward && postPrParent) throw new Error("v2 carry-forward is available only before PR creation");
-  if (carryForward) assertCarryForwardParentEligible(parentRun);
+  if (carryForward) {
+    assertCarryForwardParentEligible(parentRun);
+    for (const slice of parentRun.slices || []) assertSliceAttemptHistoryCurrent(parentRunDir, slice.id, slice);
+  }
   if (postPrParent && opts.newPr !== true) throw new Error("factory continue for a blocked parent with pr_url requires --new-pr");
   if (!postPrParent && opts.newPr === true) throw new Error("factory continue --new-pr is accepted only for a blocked parent with pr_url");
   if (postPrParent) assertPostPrContinuationParent(parentRun);
@@ -2693,6 +2719,7 @@ export function buildContinuation(parentRunId, opts = {}) {
     if (failed.length) throw new Error("post-PR continuation parent has invalid evidence/review bindings");
   }
   const reviewSource = resolveContinuationReviewSource(parentRun, review.ref);
+  if (reviewSource.hash && sha256File(review.path) !== reviewSource.hash) throw new Error("terminal nonconvergence continuation must consume the exact source review bytes");
   const reviewMetadata = validateContinuationReview(readReviewJson(review.path), review.ref, reviewSource, parentRunDir);
   const targetBaseRef = continuationBaseRef(parentRun, { carryForward });
   if (carryForward && !/^[0-9a-f]{40}$/u.test(String(parentRun.base_commit || ""))) {
@@ -2781,6 +2808,8 @@ export function assertContinuationBindingsCurrent(repo, parentRunDir, continuati
   if (continuation.parent?.run_ref !== expectedParentRef) throw new Error("continuation parent run_ref no longer identifies the selected parent");
   if (sha256File(parentFile) !== continuation.parent.run_hash) throw new Error("continuation parent run.json changed since payload build");
   const parentRun = readRunFile(parentFile);
+  assertNoUnresolvedSliceDispatches(parentRoot, parentRun);
+  assertNoPendingSpecialBuilderDispatches(parentRoot, parentRun);
   for (const [key, actual] of [
     ["run_id", parentRun.run_id],
     ["status", parentRun.status],
@@ -2796,6 +2825,7 @@ export function assertContinuationBindingsCurrent(repo, parentRunDir, continuati
   const review = resolveContinuationReview(parentRoot, continuation.review?.ref);
   if (sha256File(review.path) !== continuation.review.hash) throw new Error("continuation selected review changed since payload build");
   const reviewSource = resolveContinuationReviewSource(parentRun, review.ref);
+  if (reviewSource.hash && sha256File(review.path) !== reviewSource.hash) throw new Error("continuation selected terminal review differs from its exact source binding");
   const currentReview = {
     kind: reviewSource.kind,
     ref: review.ref,
@@ -3557,9 +3587,40 @@ function validateContinuationReviewRefs(review, parentRunDir, reviewRef) {
 }
 
 function resolveContinuationReviewSource(parentRun, reviewRef) {
+  const terminalSource = terminalNonconvergenceReviewSource(parentRun);
+  if (terminalSource) {
+    if (terminalSource.ref !== reviewRef) throw new Error(`review '${reviewRef}' must equal run.terminal_result.nonconvergence.source_review.review_ref`);
+    return terminalSource;
+  }
   const candidates = continuationReviewSources(parentRun).filter((candidate) => candidate.ref === reviewRef);
   if (!candidates.length) throw new Error(`review '${reviewRef}' must be referenced by parent run state`);
   return candidates[0];
+}
+
+function terminalNonconvergenceReviewSource(parentRun) {
+  const candidates = (parentRun.slices || []).flatMap((slice) => {
+    const current = Array.isArray(slice?.attempt_reviews) ? slice.attempt_reviews.at(-1) : null;
+    return current && Number.isInteger(slice?.attempts) && current.attempt === slice.attempts && current.verdict === "REJECT" && current.convergence === "nonconvergent" ? [{ slice, current }] : [];
+  });
+  const terminalReason = parentRun.terminal_result?.reason === "slice-review-nonconvergent";
+  if (candidates.length === 0) {
+    if (terminalReason) throw new Error("terminal nonconvergence source review has no current nonconvergent slice attempt");
+    return null;
+  }
+  if (candidates.length !== 1) throw new Error("continuation has multiple current nonconvergent slice reviews");
+  const [{ slice, current }] = candidates;
+  const terminal = parentRun.terminal_result?.nonconvergence;
+  const source = terminalReason ? terminal?.source_review : current;
+  if (terminalReason && (terminal?.slice_id !== slice.id || source?.attempt !== slice.attempts || !sameJsonValue(source, current))) {
+    throw new Error("terminal nonconvergence source review must equal the current latest slice attempt");
+  }
+  return {
+    kind: "slice",
+    source: "run.terminal_result.nonconvergence.source_review.review_ref",
+    ref: normalizeParentRef(source.review_ref, "reviews"),
+    hash: source.review_hash,
+    expected_subjects: new Set([String(slice.id).trim()]),
+  };
 }
 
 function continuationReviewSources(parentRun) {
@@ -3865,13 +3926,15 @@ function collectContinuationParentEvidence(parentRunDir, parentRun) {
   const refs = [];
   for (const step of Array.isArray(parentRun.steps) ? parentRun.steps : []) if (stringValue(step?.evidence_ref)) refs.push(step.evidence_ref);
   for (const slice of Array.isArray(parentRun.slices) ? parentRun.slices : []) if (stringValue(slice?.evidence_ref)) refs.push(slice.evidence_ref);
+  for (const slice of Array.isArray(parentRun.slices) ? parentRun.slices : []) for (const review of slice?.attempt_reviews || []) if (stringValue(review?.evidence_ref)) refs.push(review.evidence_ref);
   if (stringValue(parentRun.post_pr?.remediation?.failure_evidence_ref)) refs.push(parentRun.post_pr.remediation.failure_evidence_ref);
   for (const binding of Array.isArray(parentRun.post_pr?.evidence_refs) ? parentRun.post_pr.evidence_refs : []) if (stringValue(binding?.ref)) refs.push(binding.ref);
   return hashUniqueParentRefs(parentRunDir, refs, "evidence", "evidence");
 }
 
 function collectContinuationParentReviews(parentRunDir, parentRun) {
-  return hashUniqueParentRefs(parentRunDir, continuationReviewSources(parentRun).map((source) => source.ref), "reviews", "review");
+  const historyRefs = (parentRun.slices || []).flatMap((slice) => (slice?.attempt_reviews || []).map((review) => review?.review_ref));
+  return hashUniqueParentRefs(parentRunDir, [...continuationReviewSources(parentRun).map((source) => source.ref), ...historyRefs], "reviews", "review");
 }
 
 function hashUniqueParentRefs(parentRunDir, refs, rootName, kind) {
@@ -4549,6 +4612,8 @@ function resumeEligibility(runDir, run, opts = {}) {
   else if (heartbeat.value && heartbeatBlocksReplacement(heartbeat.value, timestamp(opts.now), opts)) reasons.push("active-heartbeat");
   if (run.steering?.action_claim) reasons.push("action-start-pending");
   if (run.steering?.pr_fence) reasons.push("pre-pr-fence-active");
+  try { assertNoPendingSpecialBuilderDispatches(runDir, run); }
+  catch { reasons.push("special-builder-dispatch-pending"); }
   return {
     eligible: reasons.length === 0,
     reasons: [...new Set(reasons)],
@@ -4800,6 +4865,7 @@ async function heartbeatTick(runtime, lockOptions = {}) {
       }
 
       const run = runResult.value;
+      assertNoPendingSpecialBuilderDispatches(runtime.runDir, run);
       if (run.steering?.pr_fence) return { continue: false, reason: "pre-pr-fence-active" };
       if (TERMINAL_STATUSES.has(run.status)) {
         writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
@@ -5024,6 +5090,7 @@ async function reconcilePostPrCrash(runDir, opts = {}) {
   const heartbeat = tryReadHeartbeatFile(heartbeatPath(runDir));
   if (heartbeat.error || heartbeat.value && heartbeatBlocksReplacement(heartbeat.value, timestamp(opts.now), opts)) return { action: "heartbeat-active" };
   const remediation = run.post_pr.remediation;
+  if (!run.special_builder_dispatch) return terminalDispatchUnknown(runDir, run, opts);
   if (!stringValue(run.worktree)) return terminalDispatchUnknown(runDir, run, opts);
   const statusResult = git(run.worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
   if (!statusResult.ok) return terminalDispatchUnknown(runDir, run, opts);
@@ -5773,9 +5840,14 @@ function writeJsonAtomic(file, value, options = {}) {
 }
 
 function writeSemanticRunJsonAtomic(runDir, file, value, options = {}, expected = null) {
+  const assertSpecialDispatch = () => assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(file));
+  assertSpecialDispatch();
   const authority = assertV2LocalPublishedAuthority(runDir, value, options, expected);
   writeJsonAtomic(file, value, {
-    beforeReplace: authority ? () => assertV2LocalPublishedAuthority(runDir, value, options, authority) : null,
+    beforeReplace: () => {
+      assertSpecialDispatch();
+      if (authority) assertV2LocalPublishedAuthority(runDir, value, options, authority);
+    },
   });
 }
 

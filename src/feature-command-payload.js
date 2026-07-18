@@ -272,6 +272,9 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
 
   try {
     const v2 = continuation.schema_version === 2;
+    if (review.source === "run.terminal_result.nonconvergence.source_review.review_ref" && !v2) {
+      return { ok: false, reason: "invalid-continuation-carry-forward-route" };
+    }
     const policy = v2 ? { ...driver.post_pr_ci, review: driver.reviewer ? { required: true, reviewer_login: driver.reviewer, source: "driver" } : { required: false, reviewer_login: null, source: "none" } } : null;
     validateRun({
       schema_version: 1,
@@ -452,7 +455,8 @@ function validContinuationReviewSource(kind, source) {
   if (kind === "validator") return source === "run.validator.review_ref";
   if (kind === "security_review") return source === "run.security_review.review_ref";
   if (kind === "step") return source.startsWith("run.steps.") && source.endsWith(".review_ref") && source.length > "run.steps..review_ref".length;
-  if (kind === "slice") return source.startsWith("run.slices.") && source.endsWith(".review_ref") && source.length > "run.slices..review_ref".length;
+  if (kind === "slice") return source === "run.terminal_result.nonconvergence.source_review.review_ref"
+    || source.startsWith("run.slices.") && source.endsWith(".review_ref") && source.length > "run.slices..review_ref".length;
   if (kind === "post_pr") return source === "run.post_pr.continuation_review.ref";
   return false;
 }

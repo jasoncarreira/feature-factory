@@ -23,6 +23,7 @@ import {
 } from "../src/run-state.js";
 import { validateRun, validateTestExecutionReceipt, TEST_EXECUTION_STREAM_LIMIT_BYTES } from "../src/validate.js";
 import { runFixtureGit, spawnSync } from "./helpers/git-fixture.js";
+import { publishSyntheticV2Parent } from "./helpers/v2-parent-fixture.js";
 
 const NOW = "2026-07-17T12:00:00.000Z";
 const LATER = "2026-07-17T12:00:01.000Z";
@@ -298,6 +299,7 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
       { agent: "test-verifier", status: "running", attempts: 1 },
     ],
   };
+  publishSyntheticV2Parent(runDir, continuation);
   writeJson(join(runDir, "run.json"), validateRun(run));
   return { repo, runDir, runId, head };
 }
