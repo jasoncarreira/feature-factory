@@ -1,7 +1,7 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
@@ -2021,13 +2021,32 @@ function continuationEligibilitySteeringFence() {
   };
 }
 
+// Every fixture (createFixture and createV2Fixture) starts from the identical
+// init + config + README-commit repo, so it is built once per process and
+// copied per fixture; five git subprocesses per fixture become one recursive
+// copy. The copied .git carries the committed identity forward, so later
+// commits in a fixture use the same author. The template is never handed to a
+// test and is removed at process end.
+let gitRepoTemplate = null;
+
+function gitRepoTemplate_() {
+  if (!gitRepoTemplate) {
+    const repo = mkdtempSync(join(tmpdir(), "factory-continue-template-"));
+    runGit(repo, ["init", "-b", "main"]);
+    runGit(repo, ["config", "user.email", "test@example.com"]);
+    runGit(repo, ["config", "user.name", "Test"]);
+    writeFileSync(join(repo, "README.md"), "test\n", "utf8");
+    runGit(repo, ["add", "README.md"]);
+    runGit(repo, ["commit", "-m", "init"]);
+    gitRepoTemplate = repo;
+  }
+  return gitRepoTemplate;
+}
+
+after(() => { if (gitRepoTemplate) rmSync(gitRepoTemplate, { recursive: true, force: true }); });
+
 function initGitRepo(repo) {
-  runGit(repo, ["init", "-b", "main"]);
-  runGit(repo, ["config", "user.email", "test@example.com"]);
-  runGit(repo, ["config", "user.name", "Test"]);
-  writeFileSync(join(repo, "README.md"), "test\n", "utf8");
-  runGit(repo, ["add", "README.md"]);
-  runGit(repo, ["commit", "-m", "init"]);
+  cpSync(gitRepoTemplate_(), repo, { recursive: true });
 }
 
 function runCli(repo, args) {
