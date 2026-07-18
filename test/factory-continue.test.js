@@ -1,6 +1,7 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
@@ -8,10 +9,13 @@ import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { adoptContinuation, assertContinuationBindingsCurrent, buildContinuation, continueFactory, resumeFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
+import { PassThrough } from "node:stream";
+import { adoptContinuation, assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, seedContinuationPlanningArtifacts, startFactory } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
-import { transitionContinuationAdoption } from "../src/run-state.js";
+import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice } from "../src/run-state.js";
 import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, createDurableCatalogBaseline, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
+import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
+import { executeCheckedTestExecution } from "../src/test-execution.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
@@ -1241,6 +1245,9 @@ describe("continuation planning-artifact reuse", () => {
         accepted_slices: [acceptedManifestRow(fixture, "A"), acceptedManifestRow(fixture, "C")],
         remaining_slice_ids: ["B"],
       });
+      assert.deepEqual(JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8")).integration_gate.required_commands, [
+        { program: "npm", args: ["run", "check"] },
+      ]);
       assert.deepEqual(fixture.actualMergeOrder, [fixture.mergeCommits.C, fixture.mergeCommits.A]);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "carry-interleaved-next")), false);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", "carry-interleaved-next")), false);
@@ -1249,8 +1256,84 @@ describe("continuation planning-artifact reuse", () => {
       assert.equal(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "");
       assert.throws(() => seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, result.candidate), /B1\.3 resource transaction/u);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "carry-interleaved-next")), false);
+      const cli = runCli(fixture.repo, ["factory", "continue", fixture.runId, "--review", "reviewer.json", "--run-id", "carry-interleaved-cli", "--carry-forward", "--dry-run", "--json"]);
+      assert.equal(cli.status, 0, cli.stderr);
+      const cliResult = JSON.parse(cli.stdout);
+      assert.equal(cliResult.candidate.schema_version, 2);
+      assert.equal(cliResult.launchable, false);
+      assert.deepEqual(cliResult.candidate.configuration, {
+        mode: "interactive", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3,
+        post_pr_policy: continuationEligibilityPostPr("disabled", 0).policy,
+      });
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "carry-interleaved-cli")), false);
     } finally {
       cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects a legacy plan without integration_gate at v2 carry-forward construction", () => {
+    const fixture = createV2Fixture("carry-legacy-plan", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      const planPath = join(fixture.runDir, "plan", "slices.json");
+      const plan = JSON.parse(readFileSync(planPath, "utf8"));
+      delete plan.integration_gate;
+      writeJson(planPath, plan);
+
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "carry-legacy-plan-next", carryForward: true, dryRun: true }),
+        /plan\.integration_gate: is required for newly produced and schema-v2 plans/u,
+      );
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "carry-legacy-plan-next")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("requires current accepted work-decomposer plan and review authority for v2 construction", () => {
+    const fixture = createV2Fixture("carry-unaccepted-decomposition", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      const runPath = join(fixture.runDir, "run.json");
+      const run = JSON.parse(readFileSync(runPath, "utf8"));
+      run.steps = run.steps.filter((step) => step.agent !== "work-decomposer");
+      writeJson(runPath, run);
+      assert.throws(
+        () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "carry-unaccepted-decomposition-next", carryForward: true, dryRun: true }),
+        /accepted work-decomposer plan authority/u,
+      );
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "carry-unaccepted-decomposition-next")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+
+    const cases = [
+      ["plan-ref", (fixture, run) => { run.steps.find((step) => step.agent === "work-decomposer").artifact_ref = "artifacts/plan.json"; }],
+      ["plan-hash", (fixture, run) => { run.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = `sha256:${"0".repeat(64)}`; }],
+      ["plan-bytes", (fixture) => {
+        const path = join(fixture.runDir, "plan", "slices.json");
+        const plan = JSON.parse(readFileSync(path, "utf8"));
+        plan.slices[0].acceptance = ["substituted acceptance"];
+        writeJson(path, plan);
+      }],
+      ["review-ref", (_fixture, run) => { run.steps.find((step) => step.agent === "work-decomposer").acceptance.review_ref = "reviews/other.json"; }],
+      ["review-hash", (_fixture, run) => { run.steps.find((step) => step.agent === "work-decomposer").acceptance.review_hash = `sha256:${"1".repeat(64)}`; }],
+      ["review-bytes", (fixture) => writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "REJECT" })],
+    ];
+    for (const [label, mutate] of cases) {
+      const fixture = createV2Fixture(`carry-decomposition-${label}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        const runPath = join(fixture.runDir, "run.json");
+        const run = JSON.parse(readFileSync(runPath, "utf8"));
+        mutate(fixture, run);
+        writeJson(runPath, run);
+        assert.throws(
+          () => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true, dryRun: true }),
+          /accepted work-decomposer plan authority|bound plan|work-decomposer review|acceptance/u,
+          label,
+        );
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", `${fixture.runId}-next`)), false, label);
+      } finally {
+        cleanup(fixture.repo);
+      }
     }
   });
 
@@ -1516,7 +1599,21 @@ describe("continuation planning-artifact reuse", () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  it("explicitly fences v2 adoption and resume without changing parent or child state", async () => {
+  it("requires accepted unchanged planning and forbids draft carry-forward before allocation", () => {
+    for (const [label, mutate] of [
+      ["unaccepted", (fixture) => updateRun(fixture, (run) => { run.steps[0].status = "rejected"; delete run.steps[0].acceptance; })],
+      ["changed", (fixture) => writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "changed after acceptance\n")],
+    ]) {
+      const fixture = createV2Fixture(`planning-${label}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        mutate(fixture);
+        assert.throws(() => continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${fixture.runId}-next`, carryForward: true }), /accepted unchanged planning|planning_reuse|draft_spec_reuse/u, label);
+        assert.equal(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "", label);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("rejects caller-scaffolded v2 children without changing parent or child state", async () => {
     const fixture = createV2Fixture("v2-consumer-fence", { accepted: ["A"], mergeOrder: ["A"] });
     const childRunId = "v2-consumer-fence-next";
     try {
@@ -1532,8 +1629,8 @@ describe("continuation planning-artifact reuse", () => {
       const parentBefore = readFileSync(join(fixture.runDir, "run.json"));
       const childBefore = readFileSync(join(childRunDir, "run.json"));
 
-      await assert.rejects(adoptContinuation(childRunId, { cwd: fixture.repo }), /before B1\.4 publication/u);
-      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /schema_version: must equal 1|carry_forward: is not allowed/u);
+      await assert.rejects(adoptContinuation(childRunId, { cwd: fixture.repo }), /closed mode\/pr configuration|publication/u);
+      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /closed mode\/pr configuration|published carry-forward/u);
 
       assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), parentBefore);
       assert.deepEqual(readFileSync(join(childRunDir, "run.json")), childBefore);
@@ -1566,55 +1663,95 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
-  it("atomically allocates the canonical claim, child branch, and exact worktree without semantic publication", async () => {
+  it("atomically publishes and launches the complete canonical child after exact allocation", async () => {
     const fixture = createV2Fixture("allocation-happy", { accepted: ["A", "C"], mergeOrder: ["C", "A"] });
     const childRunId = "allocation-happy-next";
     const transactions = [];
     try {
-      const result = continueFactory(fixture.runId, {
+      let launched;
+      const result = await continueFactory(fixture.runId, {
         cwd: fixture.repo,
         review: "reviewer.json",
         runId: childRunId,
         carryForward: true,
+        foregroundLaunchFn: async (repo, args) => { launched = { repo, args }; return { status: "started", run_id: childRunId }; },
         refTransactionSpawnSync(file, args, options) {
           transactions.push({ file, args: [...args], input: String(options.input) });
           return spawnSync(file, args, options);
         },
       });
-      const expected = expectedClaim(result.candidate);
+      const expected = expectedClaim(result.payload.continuation);
       const expectedBytes = canonicalJson(expected.claim);
       const expectedDigest = createHash("sha256").update(canonicalJson(expected.parentIdentity)).digest("hex");
       const zero = "0".repeat(40);
 
-      assert.equal(result.status, "allocated");
-      assert.equal(result.launchable, false);
-      assert.equal(result.payload, undefined);
-      assert.equal(result.claim_ref, `refs/opencode/continuations/${expectedDigest}`);
-      assert.equal(result.child_branch_ref, `refs/heads/${childRunId}`);
-      assert.equal(result.start_commit, result.candidate.carry_forward.start_commit);
-      assert.equal(result.replayed, false);
-      assert.equal(result.worktree_recovered, false);
-      assert.equal(gitStdout(fixture.repo, ["cat-file", "-t", result.claim_ref]), "blob");
-      assert.equal(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", result.claim_ref]), expectedBytes);
+      const claimRef = `refs/opencode/continuations/${expectedDigest}`;
+      assert.equal(result.status, "started", JSON.stringify(result));
+      assert.deepEqual(result.publication, { published: true, replayed: false });
+      assert.equal(result.payload.driver.ready, true);
+      assert.equal(result.payload.driver.pr_mode, "ready");
+      assert.equal(result.payload.driver.mode, "interactive");
+      assert.equal(result.payload.driver.github_account, null);
+      assert.equal(gitStdout(fixture.repo, ["cat-file", "-t", claimRef]), "blob");
+      assert.equal(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", claimRef]), expectedBytes);
       assert.deepEqual(JSON.parse(expectedBytes), expected.claim);
-      assert.equal(gitStdout(fixture.repo, ["show-ref", "--verify", "--hash", result.child_branch_ref]), result.start_commit);
-      assert.equal(gitStdout(result.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]), result.start_commit);
-      assert.equal(gitStdout(result.worktree, ["symbolic-ref", "HEAD"]), result.child_branch_ref);
-      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
-      assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature")), false);
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+      assert.equal(gitStdout(fixture.repo, ["show-ref", "--verify", "--hash", expected.claim.child_branch_ref]), result.payload.continuation.carry_forward.start_commit);
+      assert.equal(gitStdout(result.payload.continuation.target.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]), result.payload.continuation.carry_forward.start_commit);
+      assert.equal(gitStdout(result.payload.continuation.target.worktree, ["symbolic-ref", "HEAD"]), expected.claim.child_branch_ref);
+      assert.equal(child.continuation.schema_version, 2);
+      assert.equal(child.schema_version, 1);
+      assert.equal(child.max_parallel_slices, 3);
+      assert.equal(child.max_retries, 3);
+      assert.equal(Object.hasOwn(child, "review_tier"), false);
+      assert.deepEqual(child.post_pr, continuationEligibilityPostPr("disabled", 0));
+      assert.deepEqual(child.gates, {});
+      assert.deepEqual(child.slices.map(({ id, status, attempts }) => ({ id, status, attempts })), [
+        { id: "A", status: "merged", attempts: 1 }, { id: "B", status: "pending", attempts: 0 }, { id: "C", status: "merged", attempts: 1 },
+      ]);
+      assert.equal(child.steps[0].attempts, 0);
+      assert.equal(child.steps[0].status, "accepted");
+      assert.deepEqual(child.steps[1], {
+        agent: "work-decomposer", status: "accepted", attempts: 1,
+        artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+        acceptance: {
+          artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(childRunDir, "plan", "slices.json")),
+          review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(childRunDir, "reviews", "work-decomposer.json")),
+        },
+      });
+      assert.deepEqual(child.steps[2], { agent: "test-verifier", status: "blocked", attempts: 0 });
+      assert.equal(child.steps.length, 3);
+      assert.equal(child.validator, null);
+      assert.equal(child.security_review, null);
+      assert.equal(child.pr_url, null);
+      for (const ref of ["artifacts/test-report.md", "artifacts/validation-report.md", "artifacts/pr-body.md", "artifacts/plan.md"]) {
+        assert.equal(existsSync(join(childRunDir, ref)), false, ref);
+      }
+      assert.deepEqual(readFileSync(join(childRunDir, "reviews", "work-decomposer.json")), readFileSync(join(fixture.runDir, "reviews", "work-decomposer.json")));
+      assert.deepEqual(readFileSync(join(childRunDir, "plan", "slices.json")), readFileSync(join(fixture.runDir, "plan", "slices.json")));
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature", "SKILL.md")), true);
+      assert.equal(launched.repo, gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]));
+      assert.match(launched.args.at(-1), /^ffpayload-v1:/u);
+      assertPublishedCarryForwardRun(launched.repo, result.payload.continuation, { driver: result.payload.driver });
+      const decoded = decodeFeatureCommandPayload(launched.args.at(-1), { repo: launched.repo });
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
+      assert.deepEqual(decoded.payload.driver, result.payload.driver);
+      const mismatch = structuredClone(result.payload);
+      mismatch.driver.ready = false;
+      assert.deepEqual(decodeFeatureCommandPayload(`ffpayload-v1:${Buffer.from(JSON.stringify(mismatch)).toString("base64url")}`, { repo: launched.repo }), { ok: false, reason: "unpublished-or-mismatched-carry-forward" });
       assert.equal(transactions.length, 1);
       assert.deepEqual(transactions[0].args, ["update-ref", "--no-deref", "--stdin"]);
       assert.equal(transactions[0].input, [
         "start",
-        `verify ${expected.parentIdentity.parent_branch_ref} ${result.start_commit}`,
-        `update ${result.claim_ref} ${result.claim_oid} ${zero}`,
-        `update ${result.child_branch_ref} ${result.start_commit} ${zero}`,
+        `verify ${expected.parentIdentity.parent_branch_ref} ${expected.claim.start_commit}`,
+        `update ${claimRef} ${refOid(fixture.repo, claimRef)} ${zero}`,
+        `update ${expected.claim.child_branch_ref} ${expected.claim.start_commit} ${zero}`,
         "prepare",
         "commit",
         "",
       ].join("\n"));
-      await assert.rejects(adoptContinuation(childRunId, { cwd: fixture.repo }), /run not found/u);
-      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /run not found/u);
+      await assert.rejects(adoptContinuation(childRunId, { cwd: fixture.repo }), /before B1\.4 publication|not available/u);
     } finally { cleanup(fixture.repo); }
   });
 
@@ -1675,7 +1812,7 @@ describe("continuation planning-artifact reuse", () => {
     } finally { cleanup(fixture.repo); }
   });
 
-  it("leaves neither ref on a pre-transaction crash and exact-replays both refs after a post-transaction crash", () => {
+  it("leaves no child before allocation and exact-replays publication after allocation crashes", async () => {
     const before = createV2Fixture("allocation-crash-before", { accepted: ["A"], mergeOrder: ["A"] });
     try {
       assert.throws(() => continueFactory(before.runId, {
@@ -1698,20 +1835,19 @@ describe("continuation planning-artifact reuse", () => {
       assert.equal(refOid(after.repo, committed.childBranchRef), committed.startCommit);
       assert.equal(existsSync(join(after.repo, ".opencode", "worktrees", childRunId)), false);
 
-      const recovered = continueFactory(after.runId, { cwd: after.repo, review: "reviewer.json", runId: childRunId, carryForward: true });
-      assert.equal(recovered.replayed, true);
-      assert.equal(recovered.worktree_recovered, false);
-      const replay = continueFactory(after.runId, { cwd: after.repo, review: "reviewer.json", runId: childRunId, carryForward: true });
-      assert.equal(replay.replayed, true);
-      assert.equal(replay.worktree_recovered, true);
+      const launch = async () => ({ status: "started", run_id: childRunId });
+      const recovered = await continueFactory(after.runId, { cwd: after.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: launch });
+      assert.deepEqual(recovered.publication, { published: true, replayed: false });
+      const replay = await continueFactory(after.runId, { cwd: after.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: launch });
+      assert.deepEqual(replay.publication, { published: true, replayed: true });
       assert.equal(refOid(after.repo, committed.claimRef), committed.claimOid);
       assert.equal(refOid(after.repo, committed.childBranchRef), committed.startCommit);
-      assert.equal(gitStdout(replay.worktree, ["rev-parse", "HEAD"]), committed.startCommit);
-      assert.equal(existsSync(join(after.repo, ".opencode", "factory", childRunId)), false);
+      assert.equal(gitStdout(join(after.repo, ".opencode", "worktrees", childRunId), ["rev-parse", "HEAD"]), committed.startCommit);
+      assert.equal(existsSync(join(after.repo, ".opencode", "factory", childRunId, "run.json")), true);
     } finally { cleanup(after.repo); }
   });
 
-  it("exact-replays committed refs after interruption of claim-bound worktree reservation", () => {
+  it("exact-replays committed refs after interruption of claim-bound worktree reservation", async () => {
     const fixture = createV2Fixture("allocation-worktree-reservation-crash", { accepted: ["A"], mergeOrder: ["A"] });
     const childRunId = "allocation-worktree-reservation-crash-next";
     let reservation;
@@ -1732,12 +1868,11 @@ describe("continuation planning-artifact reuse", () => {
       assert.equal(refOid(fixture.repo, `refs/heads/${childRunId}`), fixture.mergeCommits.A);
       assert.notEqual(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "");
 
-      const recovered = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true });
-      assert.equal(recovered.replayed, true);
-      assert.equal(recovered.worktree_recovered, true);
-      assert.equal(gitStdout(recovered.worktree, ["rev-parse", "HEAD"]), fixture.mergeCommits.A);
+      const recovered = await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }) });
+      assert.deepEqual(recovered.publication, { published: true, replayed: false });
+      assert.equal(gitStdout(join(fixture.repo, ".opencode", "worktrees", childRunId), ["rev-parse", "HEAD"]), fixture.mergeCommits.A);
       assert.equal(existsSync(reservation.reservationPath), false);
-      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json")), true);
     } finally { cleanup(fixture.repo); }
   });
 
@@ -1841,6 +1976,818 @@ describe("continuation planning-artifact reuse", () => {
       assert.equal(refOid(fixture.repo, expected.claimRef), writeBlob(fixture.repo, canonicalJson(expected.claim)));
       assert.equal(refOid(fixture.repo, expected.claim.child_branch_ref), candidate.carry_forward.start_commit);
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rechecks every publication authority and configuration after staging without partial visibility", async () => {
+    const cases = [
+      ["parent", (fixture) => writeFileSync(join(fixture.runDir, "run.json"), `${readFileSync(join(fixture.runDir, "run.json"), "utf8")} `)],
+      ["plan", (fixture) => writeFileSync(join(fixture.runDir, "plan", "slices.json"), "{\"slices\":[]}")],
+      ["sidecar", (fixture) => writeFileSync(join(fixture.runDir, "evidence", "A.json"), "{}\n")],
+      ["parent branch", (fixture) => runGit(fixture.repo, ["commit", "--allow-empty", "-m", "publication parent race"])],
+      ["origin", (fixture) => {
+        runGit(fixture.repo, ["checkout", "main"]); runGit(fixture.repo, ["commit", "--allow-empty", "-m", "publication origin race"]);
+        runGit(fixture.repo, ["push", "origin", "main:main"]); runGit(fixture.repo, ["checkout", fixture.runId]);
+      }],
+      ["claim", (fixture, state) => updateRef(fixture.repo, state.allocation.claim_ref, writeBlob(fixture.repo, "{}"))],
+      ["worktree", (fixture, state) => runGit(state.continuation.target.worktree, ["checkout", "--detach", fixture.baseCommit])],
+      ["config", (_fixture, state) => { state.configuration.pr_mode = "draft"; }],
+    ];
+    for (const [label, mutate] of cases) {
+      const fixture = createV2Fixture(`publication-race-${label.replaceAll(" ", "-")}`, { accepted: ["A"], mergeOrder: ["A"] });
+      const childRunId = `${fixture.runId}-next`;
+      const options = {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      };
+      try {
+        await assert.rejects(continueFactory(fixture.runId, {
+          ...options,
+          beforeCarryForwardPublish(state) {
+            assert.equal(existsSync(state.targetRunDir), false, `${label}: child invisible before publication`);
+            assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature")), false, `${label}: skill not seeded before publication`);
+            mutate(fixture, state);
+          },
+        }), /carry-forward|continuation|parent|plan|sidecar|branch|origin|claim|worktree|configuration|stale|changed/u, label);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false, label);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("never overwrites a publication-race winner and leaves no staged partial child", async () => {
+    const fixture = createV2Fixture("publication-target-race", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "publication-target-race-next";
+    const target = join(fixture.repo, ".opencode", "factory", childRunId);
+    try {
+      await assert.rejects(continueFactory(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+        beforeCarryForwardRename() { mkdirSync(target, { recursive: true }); writeFileSync(join(target, "foreign.txt"), "foreign\n"); },
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      }), /already exists|factory run directory/u);
+      assert.equal(readFileSync(join(target, "foreign.txt"), "utf8"), "foreign\n");
+      assert.equal(existsSync(join(target, "run.json")), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature")), false);
+    } finally { cleanup(fixture.repo); }
+
+    const linked = createV2Fixture("publication-symlink-race", { accepted: ["A"], mergeOrder: ["A"] });
+    const linkedRunId = "publication-symlink-race-next";
+    const outside = join(linked.repo, "outside-child");
+    try {
+      mkdirSync(outside);
+      await assert.rejects(continueFactory(linked.runId, {
+        cwd: linked.repo, review: "reviewer.json", runId: linkedRunId, carryForward: true,
+        beforeCarryForwardRename({ targetRunDir }) { symlinkSync(outside, targetRunDir, "dir"); },
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      }), /already exists|factory run directory/u);
+      assert.equal(existsSync(join(outside, "run.json")), false);
+      assert.equal(readFileSync(join(linked.runDir, "run.json"), "utf8").includes(linked.runId), true);
+    } finally { cleanup(linked.repo); }
+
+    const empty = createV2Fixture("publication-empty-race", { accepted: ["A"], mergeOrder: ["A"] });
+    const emptyRunId = "publication-empty-race-next";
+    const emptyTarget = join(empty.repo, ".opencode", "factory", emptyRunId);
+    try {
+      await assert.rejects(continueFactory(empty.runId, {
+        cwd: empty.repo, review: "reviewer.json", runId: emptyRunId, carryForward: true,
+        afterCarryForwardTargetObservation() { mkdirSync(emptyTarget); },
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      }), /already exists|will not be overwritten|factory run directory/u);
+      assert.equal(existsSync(emptyTarget), true);
+      assert.equal(existsSync(join(emptyTarget, "run.json")), false);
+      assert.equal(existsSync(join(empty.repo, ".opencode", "skills", "feature")), false);
+    } finally { cleanup(empty.repo); }
+  });
+
+  it("revalidates parent commands and accepted decomposition after target observation before child rename", async () => {
+    const fixture = createV2Fixture("publication-command-race", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "publication-command-race-next";
+    const planPath = join(fixture.runDir, "plan", "slices.json");
+    const plan = JSON.parse(readFileSync(planPath, "utf8"));
+    plan.integration_gate.required_commands.unshift({ program: "node", args: ["--test", "test/acceptance.test.js"] });
+    writeJson(planPath, plan);
+    const parentRunPath = join(fixture.runDir, "run.json");
+    const parentRun = JSON.parse(readFileSync(parentRunPath, "utf8"));
+    parentRun.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+    writeJson(parentRunPath, parentRun);
+    let launches = 0;
+    try {
+      await assert.rejects(continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        afterCarryForwardTargetObservation() {
+          const changed = JSON.parse(readFileSync(planPath, "utf8"));
+          changed.integration_gate.required_commands[0].args[1] = "test/other.test.js";
+          writeJson(planPath, changed);
+        },
+        foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
+      }), /plan|decomposition|authority|changed/u);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
+      assert.equal(launches, 0);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("recovers exact publication across both atomic rename crash boundaries", async () => {
+    const before = createV2Fixture("publication-crash-before", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      await assert.rejects(continueFactory(before.runId, {
+        cwd: before.repo, review: "reviewer.json", runId: "publication-crash-before-next", carryForward: true,
+        beforeCarryForwardRename() { throw new Error("crash before publication rename"); },
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      }), /crash before publication rename/u);
+      assert.equal(existsSync(join(before.repo, ".opencode", "factory", "publication-crash-before-next")), false);
+      const retried = await continueFactory(before.runId, { cwd: before.repo, review: "reviewer.json", runId: "publication-crash-before-next", carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+      assert.deepEqual(retried.publication, { published: true, replayed: false });
+    } finally { cleanup(before.repo); }
+
+    const after = createV2Fixture("publication-crash-after", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "publication-crash-after-next";
+    try {
+      await assert.rejects(continueFactory(after.runId, {
+        cwd: after.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+        afterCarryForwardPublish() { throw new Error("crash after publication rename"); },
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      }), /crash after publication rename/u);
+      const published = validateRun(JSON.parse(readFileSync(join(after.repo, ".opencode", "factory", childRunId, "run.json"), "utf8")));
+      assert.equal(published.run_id, childRunId);
+      const replay = await continueFactory(after.runId, { cwd: after.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+      assert.deepEqual(replay.publication, { published: true, replayed: true });
+    } finally { cleanup(after.repo); }
+  });
+
+  it("closes carry-forward configuration defaults, overrides, conflicts, and replay", async () => {
+    const fixture = createV2Fixture("carry-config", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-config-next";
+    try {
+      const result = await continueFactory(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, headless: true,
+        ghAccount: "octo-org", draft: true, postPrCi: true, reviewer: "reviewer-login", postPrPollSeconds: 45,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      });
+      const child = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json"), "utf8"));
+      assert.equal(child.mode, "headless");
+      assert.equal(child.github_account, "octo-org");
+      assert.equal(child.pr_mode, "draft");
+      assert.equal(child.post_pr.policy.enabled, true);
+      assert.equal(child.post_pr.policy.initial_poll_ms, 45_000);
+      assert.deepEqual(child.post_pr.policy.review, { required: true, reviewer_login: "reviewer-login", source: "driver" });
+      assert.equal(result.payload.driver.ready, false);
+      assert.equal(result.payload.driver.post_pr_ci.initial_poll_ms, 45_000);
+      const equalResume = await resumeFactory(childRunId, {
+        cwd: fixture.repo,
+        dryRun: true,
+        headless: true,
+        ghAccount: "octo-org",
+        draft: true,
+        postPrCi: true,
+        reviewer: "reviewer-login",
+        postPrPollSeconds: 45,
+      });
+      assert.equal(equalResume.status, "dry-run");
+      const beforeResumeConflict = readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json"));
+      for (const [label, conflict] of [
+        ["mode", { autonomous: true }],
+        ["account", { ghAccount: "different" }],
+        ["PR", { ready: true }],
+        ["post-PR", { noPostPrCi: true }],
+        ["reviewer", { postPrCi: true, reviewer: "different-reviewer" }],
+      ]) {
+        await assert.rejects(
+          resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true, ...conflict }),
+          /conflicts with published immutable configuration/u,
+          label,
+        );
+      }
+      await assert.rejects(
+        startFactory([`resume ${childRunId}`], { cwd: fixture.repo, autonomous: true }),
+        /mode conflicts with published immutable configuration/u,
+      );
+      assert.deepEqual(readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json")), beforeResumeConflict);
+      await assert.rejects(async () => continueFactory(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, headless: true,
+        ghAccount: "different", draft: true, postPrCi: true, reviewer: "reviewer-login", postPrPollSeconds: 45,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      }), /conflicts with published immutable configuration/u);
+      assert.equal(JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json"), "utf8")).github_account, "octo-org");
+    } finally { cleanup(fixture.repo); }
+
+    for (const row of [
+      {
+        label: "defaults",
+        options: {},
+        expected: { mode: "interactive", github_account: null, pr_mode: "ready", postPrEnabled: false, phase: "disabled", ready: true },
+      },
+      {
+        label: "autonomous ready enabled",
+        options: { autonomous: true, ready: true, postPrCi: true },
+        expected: { mode: "autonomous", github_account: null, pr_mode: "ready", postPrEnabled: true, phase: "awaiting-pr", ready: true },
+      },
+      {
+        label: "detached no-draft",
+        options: { detached: true, noDraft: true, ghAccount: "explicit-owner" },
+        expected: { mode: "headless", github_account: "explicit-owner", pr_mode: "ready", postPrEnabled: false, phase: "disabled", ready: true },
+      },
+    ]) {
+      const matrix = createV2Fixture(`carry-config-${row.label.replaceAll(" ", "-")}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        const runId = `${matrix.runId}-next`;
+        const published = await continueFactory(matrix.runId, {
+          cwd: matrix.repo,
+          review: "reviewer.json",
+          runId,
+          carryForward: true,
+          ...row.options,
+          foregroundLaunchFn: async () => ({ status: "started" }),
+          detachedLaunchFn: async () => ({ status: "started" }),
+        });
+        const child = JSON.parse(readFileSync(join(matrix.repo, ".opencode", "factory", runId, "run.json"), "utf8"));
+        assert.equal(child.mode, row.expected.mode, row.label);
+        assert.equal(child.github_account, row.expected.github_account, row.label);
+        assert.equal(child.pr_mode, row.expected.pr_mode, row.label);
+        assert.equal(child.post_pr.policy.enabled, row.expected.postPrEnabled, row.label);
+        assert.equal(child.post_pr.phase, row.expected.phase, row.label);
+        assert.equal(child.post_pr.attempt, 0, row.label);
+        assert.deepEqual(child.post_pr.evidence_refs, [], row.label);
+        assert.equal(published.payload.driver.ready, row.expected.ready, row.label);
+      } finally { cleanup(matrix.repo); }
+    }
+
+    const remoteAccount = createV2Fixture("carry-config-remote-account", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      const localOrigin = gitStdout(remoteAccount.repo, ["config", "--get", "remote.origin.url"]);
+      const githubOrigin = "https://github.com/remote-owner/example.git";
+      runGit(remoteAccount.repo, ["config", `url.${localOrigin}.insteadOf`, githubOrigin]);
+      runGit(remoteAccount.repo, ["remote", "set-url", "origin", githubOrigin]);
+      const runId = `${remoteAccount.runId}-next`;
+      await continueFactory(remoteAccount.runId, {
+        cwd: remoteAccount.repo,
+        review: "reviewer.json",
+        runId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      });
+      const child = JSON.parse(readFileSync(join(remoteAccount.repo, ".opencode", "factory", runId, "run.json"), "utf8"));
+      assert.equal(child.github_account, "remote-owner");
+    } finally { cleanup(remoteAccount.repo); }
+
+    for (const [label, opts] of [
+      ["mode", { autonomous: true, headless: true }], ["PR", { draft: true, ready: true }], ["post-PR", { postPrCi: true, noPostPrCi: true }],
+      ["account", { ghAccount: "one", ghAccountOccurrences: 2 }], ["new PR", { newPr: true }],
+    ]) {
+      const conflict = createV2Fixture(`carry-config-conflict-${label.replaceAll(" ", "-")}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        assert.throws(() => continueFactory(conflict.runId, { cwd: conflict.repo, review: "reviewer.json", runId: `${conflict.runId}-next`, carryForward: true, ...opts }), /conflict|only one|only once|mutually exclusive/u, label);
+        assert.equal(gitStdout(conflict.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "", label);
+      } finally { cleanup(conflict.repo); }
+    }
+  });
+
+  it("preserves progressed remaining slices and returns terminal children without relaunch", async () => {
+    const fixture = createV2Fixture("carry-progress", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-progress-next";
+    let launches = 0;
+    const launch = async () => { launches += 1; return { status: "started" }; };
+    try {
+      await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: launch });
+      const childDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const beforeAcceptedMutation = readFileSync(join(childDir, "run.json"));
+      await assert.rejects(transitionRunSlice(childDir, "A", (slice) => { slice.status = "running"; slice.attempts += 1; }), /cannot transition from merged|immutable/u);
+      assert.deepEqual(readFileSync(join(childDir, "run.json")), beforeAcceptedMutation);
+      await transitionRunSlice(childDir, "B", (slice) => { slice.status = "running"; slice.branch = `${childRunId}--B`; slice.worktree = ".opencode/worktrees/B"; slice.attempts = 1; });
+      const progressedBytes = readFileSync(join(childDir, "run.json"));
+      const resumed = await resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true });
+      assert.equal(resumed.payload.resume.schema_version, 2);
+      assert.equal(resumed.payload.driver.mode, "interactive");
+      assert.equal(resumed.payload.driver.ready, true);
+      assertPublishedCarryForwardRun(fixture.repo, JSON.parse(progressedBytes.toString("utf8")).continuation, { driver: resumed.payload.driver });
+      const decodedResume = decodeFeatureCommandPayload(`ffpayload-v1:${Buffer.from(JSON.stringify(resumed.payload)).toString("base64url")}`, { repo: fixture.repo });
+      assert.equal(decodedResume.ok, true, JSON.stringify(decodedResume));
+      assert.equal(Object.hasOwn(decodedResume.payload.driver, "run_id"), false);
+      assert.deepEqual(decodedResume.payload.driver, resumed.payload.driver);
+      assert.deepEqual(readFileSync(join(childDir, "run.json")), progressedBytes);
+      const replay = await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: launch });
+      assert.deepEqual(replay.publication, { published: true, replayed: true });
+      assert.deepEqual(readFileSync(join(childDir, "run.json")), progressedBytes);
+      const terminal = JSON.parse(progressedBytes.toString("utf8"));
+      terminal.status = "blocked";
+      terminal.terminal_result = { status: "blocked", run_id: childRunId, pr_url: null, reason: "remaining work blocked", summary: "blocked", artifacts: {} };
+      writeJson(join(childDir, "run.json"), terminal);
+      const terminalReplay = await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: launch });
+      assert.equal(terminalReplay.status, "blocked");
+      assert.equal(terminalReplay.launched, false);
+      assert.equal(launches, 2);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("reproduces the missing public test-verifier placeholder on a published v2 child", async () => {
+    const fixture = createV2Fixture("carry-public-test-verifier", { accepted: ["A", "C"], mergeOrder: ["C", "A"] });
+    const childRunId = "carry-public-test-verifier-next";
+    try {
+      await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+      const beforeMerged = runCli(fixture.repo, ["factory", "step", childRunId, "test-verifier", "running", "--attempts", "1", "--json"]);
+      assert.notEqual(beforeMerged.status, 0);
+      assert.match(beforeMerged.stderr, /test-verifier integration gate requires all slices merged: B/u);
+
+      const childFile = join(fixture.repo, ".opencode", "factory", childRunId, "run.json");
+      const child = JSON.parse(readFileSync(childFile, "utf8"));
+      Object.assign(child.slices.find((slice) => slice.id === "B"), {
+        status: "merged", attempts: 1, evidence_ref: "evidence/A.json", review_ref: "reviews/A.json", merge_commit: child.continuation.carry_forward.start_commit,
+      });
+      writeJson(childFile, child);
+      const afterMerged = runCli(fixture.repo, ["factory", "step", childRunId, "test-verifier", "running", "--attempts", "1", "--json"]);
+      assert.equal(afterMerged.status, 0, afterMerged.stderr);
+      assert.equal(JSON.parse(afterMerged.stdout).step.status, "running");
+      const childDir = dirname(childFile);
+      const head = gitStdout(fixture.repo, ["rev-parse", `refs/heads/${childRunId}^{commit}`]);
+      writeFileSync(join(childDir, "artifacts", "test-report.md"), "canonical integration pass\n");
+      writeJson(join(childDir, "evidence", "test-verifier.attempt-1.json"), {
+        subject: "test-verifier", attempt: 1, status: "pass", review_ready: true, head_sha: head,
+        commands: JSON.parse(readFileSync(join(childDir, "plan", "slices.json"), "utf8")).integration_gate.required_commands.map((command) => ({ ...command, status: "pass" })),
+      });
+      writeJson(join(childDir, "reviews", "test-verifier.attempt-1.json"), {
+        subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [],
+      });
+      const beforeCallerEvidence = readFileSync(childFile);
+      const accepted = runCli(fixture.repo, [
+        "factory", "step", childRunId, "test-verifier", "accepted", "--attempts", "1",
+        "--artifact-ref", "artifacts/test-report.md", "--evidence-ref", "evidence/test-verifier.attempt-1.json",
+        "--review-ref", "reviews/test-verifier.attempt-1.json", "--json",
+      ]);
+      assert.notEqual(accepted.status, 0, "caller-authored evidence must not create schema-v2 acceptance authority");
+      assert.deepEqual(readFileSync(childFile), beforeCallerEvidence);
+      rmSync(join(childDir, "evidence", "test-verifier.attempt-1.json"));
+      const checked = await executeCheckedTestExecution(childDir, {
+        env: { PATH: "/fixture/bin" }, now: "2026-07-17T12:00:00.000Z",
+        spawnFn() {
+          const childProcess = new EventEmitter();
+          childProcess.stdout = new PassThrough();
+          childProcess.stderr = new PassThrough();
+          childProcess.kill = () => true;
+          queueMicrotask(() => childProcess.emit("close", 0, null));
+          return childProcess;
+        },
+      });
+      assert.equal(checked.status, "pass");
+      assert.equal(checked.receipt_ref, "evidence/test-verifier.attempt-1.json");
+      const acceptedChecked = runCli(fixture.repo, [
+        "factory", "step", childRunId, "test-verifier", "accepted", "--attempts", "1",
+        "--artifact-ref", "artifacts/test-report.md", "--evidence-ref", checked.receipt_ref,
+        "--review-ref", "reviews/test-verifier.attempt-1.json", "--json",
+      ]);
+      assert.equal(acceptedChecked.status, 0, acceptedChecked.stderr);
+      const acceptedStep = JSON.parse(acceptedChecked.stdout).step;
+      assert.equal(acceptedStep.execution_claim.state, "completed");
+      assert.equal(acceptedStep.execution_claim.status, "pass");
+      assert.match(acceptedStep.execution_claim_hash, /^sha256:[0-9a-f]{64}$/u);
+      assert.deepEqual(Object.keys(acceptedStep.acceptance).sort(), ["artifact_hash", "artifact_ref", "evidence_hash", "evidence_ref", "review_hash", "review_ref", "reviewed_head_sha"]);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("reproduces schema downgrade and resume-policy override ingress", async () => {
+    const fixture = createV2Fixture("carry-schema-ingress", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-schema-ingress-next";
+    try {
+      const published = await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+      const downgraded = structuredClone(published.payload);
+      downgraded.continuation.schema_version = 1;
+      delete downgraded.continuation.carry_forward;
+      const decodedDowngrade = decodeFeatureCommandPayload(`ffpayload-v1:${Buffer.from(JSON.stringify(downgraded)).toString("base64url")}`, { repo: fixture.repo });
+      assert.deepEqual(decodedDowngrade, { ok: false, reason: "continuation-schema-route-mismatch" });
+
+      const resumed = await resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true });
+      const downgradedResume = structuredClone(resumed.payload);
+      downgradedResume.resume.schema_version = 1;
+      delete downgradedResume.driver.post_pr_ci;
+      const decodedResume = decodeFeatureCommandPayload(`ffpayload-v1:${Buffer.from(JSON.stringify(downgradedResume)).toString("base64url")}`, { repo: fixture.repo });
+      assert.deepEqual(decodedResume, { ok: false, reason: "resume-schema-route-mismatch" });
+
+      const policyOverride = structuredClone(resumed.payload);
+      policyOverride.resume.post_pr_policy.enabled = true;
+      const decodedPolicy = decodeFeatureCommandPayload(`ffpayload-v1:${Buffer.from(JSON.stringify(policyOverride)).toString("base64url")}`, { repo: fixture.repo });
+      assert.deepEqual(decodedPolicy, { ok: false, reason: "resume-policy-route-mismatch" });
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rejects schema-v1 fallback when a permanent v2 claim already allocates the target", async () => {
+    const fixture = createFixture("claim-only-v2-parent");
+    const targetRunId = "claim-only-v2-child";
+    try {
+      const legacyContinuation = buildContinuation(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: targetRunId,
+      });
+      const claim = {
+        schema_version: 2,
+        kind: "blocked-run-continuation-claim",
+        parent_identity: { schema_version: 2, kind: "blocked-run-continuation-parent" },
+        child_run_id: targetRunId,
+        child_branch_ref: `refs/heads/${targetRunId}`,
+        start_commit: gitStdout(fixture.repo, ["rev-parse", "HEAD"]),
+      };
+      const oid = writeBlob(fixture.repo, canonicalJson(claim));
+      updateRef(fixture.repo, `refs/opencode/continuations/${"a".repeat(64)}`, oid);
+
+      assert.throws(() => buildContinuation(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: targetRunId,
+      }), /continuation-schema-route-mismatch/u);
+      const encodedContinuation = `ffpayload-v1:${Buffer.from(JSON.stringify({
+        operator_request: "forged continuation",
+        driver: {},
+        continuation: legacyContinuation,
+      })).toString("base64url")}`;
+      assert.deepEqual(decodeFeatureCommandPayload(encodedContinuation, { repo: fixture.repo }), { ok: false, reason: "continuation-schema-route-mismatch" });
+      const encodedResume = `ffpayload-v1:${Buffer.from(JSON.stringify({
+        operator_request: `resume ${targetRunId}`,
+        driver: {},
+        resume: { schema_version: 1, kind: "existing-run-resume", run_id: targetRunId },
+        steering: { schema_version: 1, kind: "operator-steering-pointer", run_id: targetRunId, pending: null, uncheckpointed: null, consume: null, raw_message_included: false },
+      })).toString("base64url")}`;
+      assert.deepEqual(decodeFeatureCommandPayload(encodedResume, { repo: fixture.repo }), { ok: false, reason: "resume-schema-route-mismatch" });
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", targetRunId)), false);
+      assert.equal(refOid(fixture.repo, `refs/heads/${targetRunId}`), null);
+
+      const targetRunDir = join(fixture.repo, ".opencode", "factory", targetRunId);
+      const targetWorktree = join(fixture.repo, ".opencode", "worktrees", targetRunId);
+      mkdirSync(targetRunDir, { recursive: true });
+      mkdirSync(targetWorktree, { recursive: true });
+      writeJson(join(targetRunDir, "run.json"), createRunRecord({
+        run_id: targetRunId,
+        status: "running",
+        branch: targetRunId,
+        worktree: targetWorktree,
+        slices: [{ id: "slice", status: "running", attempts: 1 }],
+      }));
+      const before = readFileSync(join(targetRunDir, "run.json"));
+      for (const [label, invoke] of [
+        ["direct resume", () => resumeFactory(targetRunId, { cwd: fixture.repo, dryRun: true })],
+        ["start resume", () => startFactory([`resume ${targetRunId}`], { cwd: fixture.repo })],
+        ["resume check", () => recoverDisruptedRun(targetRunId, { cwd: fixture.repo })],
+      ]) {
+        await assert.rejects(invoke, /resume-schema-route-mismatch/u, label);
+        assert.deepEqual(readFileSync(join(targetRunDir, "run.json")), before, label);
+      }
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects a foreign claim targeting an absent v2 child before allocation side effects", () => {
+    const fixture = createV2Fixture("carry-foreign-child-claim", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-foreign-child-claim-next";
+    try {
+      const candidate = buildContinuation(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+      });
+      const foreign = expectedClaim(candidate).claim;
+      foreign.parent_identity.parent_run_hash = `sha256:${"f".repeat(64)}`;
+      const foreignBytes = canonicalJson(foreign);
+      const foreignRef = `refs/opencode/continuations/${createHash("sha256").update(canonicalJson(foreign.parent_identity)).digest("hex")}`;
+      updateRef(fixture.repo, foreignRef, writeBlob(fixture.repo, foreignBytes));
+
+      assert.throws(() => continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+      }), /foreign schema-v2 claim/u);
+      assert.equal(refOid(fixture.repo, `refs/heads/${childRunId}`), null);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", childRunId)), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
+      assert.deepEqual(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]).split("\n"), [foreignRef]);
+      assert.equal(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuation-targets"]), "");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("serializes schema-v1 seed publication against schema-v2 allocation for one target", () => {
+    const fixture = createV2Fixture("carry-cross-schema-race", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-cross-schema-race-next";
+    try {
+      assert.throws(() => continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        beforeContinuationSeedPublish() {
+          const sameSchema = buildContinuation(fixture.runId, {
+            cwd: fixture.repo,
+            review: "reviewer.json",
+            runId: childRunId,
+          });
+          sameSchema.created_at = "2026-07-18T23:59:59.000Z";
+          assert.throws(() => assertContinuationReservationAuthority(fixture.repo, sameSchema), /continuation-schema-route-mismatch/u);
+          assert.throws(() => continueFactory(fixture.runId, {
+            cwd: fixture.repo,
+            review: "reviewer.json",
+            runId: childRunId,
+            carryForward: true,
+          }), /already reserved by a conflicting schema or authority/u);
+          throw new Error("stop after cross-schema race proof");
+        },
+      }), /stop after cross-schema race proof/u);
+
+      assert.equal(gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "");
+      assert.equal(refOid(fixture.repo, `refs/heads/${childRunId}`), null);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", childRunId)), false);
+      assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId)), false);
+      const reservations = gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuation-targets"]);
+      assert.match(reservations, /^refs\/opencode\/continuation-targets\/[a-f0-9]{64}$/u);
+      assert.throws(() => continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        beforeContinuationSeedPublish() { throw new Error("exact schema-v1 reservation replay reached publication"); },
+      }), /exact schema-v1 reservation replay reached publication/u);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("reproduces post-publication and recovery authority gaps without launching or writing", async () => {
+    for (const [label, mutate, fixtureOptions = {}] of [
+      ["parent", (fixture) => writeFileSync(join(fixture.runDir, "run.json"), `${readFileSync(join(fixture.runDir, "run.json"), "utf8")} `)],
+      ["plan", (fixture) => writeFileSync(join(fixture.runDir, "plan", "slices.json"), "{\"slices\":[]}")],
+      ["sidecar", (fixture) => writeFileSync(join(fixture.runDir, "reviews", "A.json"), "{}\n")],
+      ["parent-branch", (fixture) => runGit(fixture.repo, ["commit", "--allow-empty", "-m", "post-publication parent branch race"])],
+      ["panel", (fixture) => writeFileSync(join(fixture.runDir, "reviews", "security.json"), "{}\n"), { panels: true }],
+      ["origin", (fixture) => {
+        runGit(fixture.repo, ["checkout", "main"]); runGit(fixture.repo, ["commit", "--allow-empty", "-m", "post-publication origin race"]);
+        runGit(fixture.repo, ["push", "origin", "main:main"]); runGit(fixture.repo, ["checkout", fixture.runId]);
+      }],
+      ["claim", (fixture, state) => updateRef(fixture.repo, state.allocation.claim_ref, writeBlob(fixture.repo, "{}"))],
+      ["child-branch", (fixture, state) => updateRef(fixture.repo, state.allocation.child_branch_ref, fixture.baseCommit)],
+      ["worktree", (fixture, state) => runGit(state.continuation.target.worktree, ["checkout", "--detach", fixture.baseCommit])],
+    ]) {
+      const fixture = createV2Fixture(`carry-post-publication-${label}`, { accepted: ["A"], mergeOrder: ["A"], ...fixtureOptions });
+      const childRunId = `${fixture.runId}-next`;
+      let launches = 0;
+      try {
+        await assert.rejects(continueFactory(fixture.runId, {
+          cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+          afterCarryForwardPublish(state) { mutate(fixture, state); },
+          foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
+        }), /carry_forward authority changed|origin-base|stale-parent-base|bound plan|parent plan|parent run|branch|panel|claim|worktree|sidecar|review/u, label);
+        assert.equal(launches, 0, label);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json")), true, label);
+      } finally { cleanup(fixture.repo); }
+    }
+
+    const recovery = createV2Fixture("carry-recovery-authority", { accepted: ["A"], mergeOrder: ["A"] });
+    const recoveryChild = "carry-recovery-authority-next";
+    try {
+      await continueFactory(recovery.runId, { cwd: recovery.repo, review: "reviewer.json", runId: recoveryChild, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+      const childFile = join(recovery.repo, ".opencode", "factory", recoveryChild, "run.json");
+      const before = readFileSync(childFile);
+      writeFileSync(join(recovery.runDir, "plan", "slices.json"), "{\"slices\":[]}");
+      await assert.rejects(recoverDisruptedRun(recoveryChild, { cwd: recovery.repo }), /carry_forward authority changed|bound plan/u);
+      assert.deepEqual(readFileSync(childFile), before);
+    } finally { cleanup(recovery.repo); }
+  });
+
+  it("rejects resume and semantic writes after merged child history is reset", async () => {
+    const fixture = createV2Fixture("carry-merged-history-reset", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-merged-history-reset-next";
+    try {
+      await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      });
+      const childDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const childFile = join(childDir, "run.json");
+      const child = JSON.parse(readFileSync(childFile, "utf8"));
+      const worktree = child.worktree;
+      runGit(worktree, ["commit", "--allow-empty", "-m", "merge remaining B"]);
+      const mergedCommit = gitStdout(worktree, ["rev-parse", "HEAD"]);
+      Object.assign(child.slices.find((slice) => slice.id === "B"), {
+        status: "merged",
+        attempts: 1,
+        evidence_ref: "evidence/A.json",
+        review_ref: "reviews/A.json",
+        merge_commit: mergedCommit,
+      });
+      writeJson(childFile, child);
+      runGit(worktree, ["reset", "--hard", child.continuation.carry_forward.start_commit]);
+      const before = readFileSync(childFile);
+
+      await assert.rejects(
+        transitionRunSlice(childDir, "C", (slice) => { slice.status = "running"; slice.attempts = 1; }),
+        /merged slice 'B'.*not an ancestor of exact clean child HEAD/u,
+      );
+      await assert.rejects(
+        resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }),
+        /merged slice 'B'.*not an ancestor of exact clean child HEAD/u,
+      );
+      assert.deepEqual(readFileSync(childFile), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("binds one exact clean child HEAD snapshot through semantic run replacement", async () => {
+    const fixture = createV2Fixture("carry-semantic-head-race", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-semantic-head-race-next";
+    try {
+      await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      });
+      const childDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const childFile = join(childDir, "run.json");
+      const worktree = JSON.parse(readFileSync(childFile, "utf8")).worktree;
+      const before = readFileSync(childFile);
+
+      await assert.rejects(
+        transitionRunSlice(childDir, "C", (slice) => { slice.status = "running"; slice.attempts = 1; }, {
+          atomicWriteHooks: { beforeCommit: () => runGit(worktree, ["commit", "--allow-empty", "-m", "race semantic publication"]) },
+        }),
+        (error) => error?.cause?.message === "schema-v2 local publication authority changed before mutation",
+      );
+      assert.deepEqual(readFileSync(childFile), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects multiple permanent claims for one published schema-v2 child", async () => {
+    const fixture = createV2Fixture("carry-multiple-claims", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-multiple-claims-next";
+    try {
+      await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started" }),
+      });
+      const existingRef = gitStdout(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]);
+      const existingOid = refOid(fixture.repo, existingRef);
+      const duplicate = JSON.parse(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", existingOid]));
+      duplicate.parent_identity.parent_run_hash = `sha256:${"f".repeat(64)}`;
+      const duplicateOid = writeBlob(fixture.repo, canonicalJson(duplicate));
+      updateRef(fixture.repo, `refs/opencode/continuations/${"f".repeat(64)}`, duplicateOid);
+
+      await assert.rejects(
+        resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }),
+        /multiple permanent continuation claims target run/u,
+      );
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("reproduces internal schema-v2 adoption acceptance", async () => {
+    const fixture = createV2Fixture("carry-internal-adoption", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-internal-adoption-next";
+    try {
+      await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+      const childDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const before = readFileSync(join(childDir, "run.json"));
+      await assert.rejects(transitionContinuationAdoption(childDir, { repoRoot: gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]) }), /schema-v2 carry-forward spec adoption is already canonical and immutable/u);
+      assert.deepEqual(readFileSync(join(childDir, "run.json")), before);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("keeps every copied planning byte immutable across v2 mutation, downstream, resume, and launch entry points", async () => {
+    const fixture = createV2Fixture("carry-planning-immutable", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-planning-immutable-next";
+    let launches = 0;
+    try {
+      await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; } });
+      const childDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const runFile = join(childDir, "run.json");
+      const cases = [
+        ["artifacts/story.md", () => transitionRunSlice(childDir, "B", (slice) => { slice.status = "running"; slice.attempts = 1; slice.branch = `${childRunId}--B`; slice.worktree = ".opencode/worktrees/B"; })],
+        ["artifacts/research-map.md", () => transitionPanelVerdicts(childDir, { validator: { verdict: "GO", report: "artifacts/story.md", review_ref: "reviews/implementation-validator.json" }, security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" } }, { repoRoot: fixture.repo })],
+        ["artifacts/design-brief.md", () => transitionPrePrFenceEstablished(childDir, {})],
+        ["artifacts/technical-brief.md", () => transitionPrCreated(childDir, {}, { fenceToken: "missing-fence" })],
+        ["reviews/spec-writer.json", () => resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true })],
+        ["plan/slices.json", () => transitionRunSlice(childDir, "B", (slice) => { slice.status = "running"; slice.attempts = 1; })],
+        ["reviews/work-decomposer.json", () => resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true })],
+      ];
+      for (const [ref, invoke] of cases) {
+        const path = join(childDir, ref);
+        const original = readFileSync(path);
+        const before = readFileSync(runFile);
+        writeFileSync(path, `${original.toString("utf8")}drift\n`);
+        await assert.rejects(async () => invoke(), /published inherited planning bytes changed|published inherited spec review bytes changed|published carry-forward plan bytes do not match|published carry-forward child directory is invalid/u, ref);
+        assert.deepEqual(readFileSync(runFile), before, ref);
+        writeFileSync(path, original);
+      }
+
+      const storyPath = join(childDir, "artifacts", "story.md");
+      const story = readFileSync(storyPath);
+      writeFileSync(storyPath, `${story.toString("utf8")}launch drift\n`);
+      await assert.rejects(continueFactory(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+        foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
+      }), /published inherited planning bytes changed/u);
+      assert.equal(launches, 1);
+      writeFileSync(storyPath, story);
+
+      const designPath = join(childDir, "artifacts", "design-brief.md");
+      const design = readFileSync(designPath);
+      const beforeEnv = readFileSync(runFile);
+      await assert.rejects(persistFactoryRunResumeEnv(childRunId, {
+        cwd: fixture.repo,
+        resumeEnvHooks: { beforeWrite: () => writeFileSync(designPath, `${design.toString("utf8")}resume env race\n`) },
+      }), /published inherited planning bytes changed/u);
+      assert.deepEqual(readFileSync(runFile), beforeEnv);
+      writeFileSync(designPath, design);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rechecks complete v2 authority after launch ownership acquisition", async () => {
+    for (const kind of ["parent", "origin"]) {
+      const fixture = createV2Fixture(`carry-launch-race-${kind}`, { accepted: ["A"], mergeOrder: ["A"] });
+      const childRunId = `${fixture.runId}-next`;
+      let launches = 0;
+      try {
+        await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; } });
+        await assert.rejects(continueFactory(fixture.runId, {
+          cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+          launchHooks: { afterClaimAcquired() {
+            if (kind === "parent") writeFileSync(join(fixture.runDir, "run.json"), `${readFileSync(join(fixture.runDir, "run.json"), "utf8")} `);
+            else {
+              runGit(fixture.repo, ["checkout", "main"]); runGit(fixture.repo, ["commit", "--allow-empty", "-m", "launch origin race"]);
+              runGit(fixture.repo, ["push", "origin", "main:main"]); runGit(fixture.repo, ["checkout", fixture.runId]);
+            }
+          } },
+          foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
+        }), /parent run\.json changed|origin-base|stale-parent-base/u, kind);
+        assert.equal(launches, 1, kind);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId, "process-launch.lock", "owner.json")), false, kind);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("rechecks complete v2 authority between recovery entry and the first mutation seam", async () => {
+    for (const kind of ["origin", "plan", "planning"]) {
+      const fixture = createV2Fixture(`carry-recovery-race-${kind}`, { accepted: ["A"], mergeOrder: ["A"] });
+      const childRunId = `${fixture.runId}-next`;
+      try {
+        await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+        const childDir = join(fixture.repo, ".opencode", "factory", childRunId);
+        const childFile = join(childDir, "run.json");
+        const before = readFileSync(childFile);
+        await assert.rejects(recoverDisruptedRun(childRunId, {
+          cwd: fixture.repo,
+          recoveryHooks: { beforeLegacyFenceMutation() {
+            if (kind === "plan") writeFileSync(join(fixture.runDir, "plan", "slices.json"), "{\"slices\":[]}");
+            else if (kind === "planning") writeFileSync(join(childDir, "artifacts", "research-map.md"), "drift\n");
+            else {
+              runGit(fixture.repo, ["checkout", "main"]); runGit(fixture.repo, ["commit", "--allow-empty", "-m", "recovery origin race"]);
+              runGit(fixture.repo, ["push", "origin", "main:main"]); runGit(fixture.repo, ["checkout", fixture.runId]);
+            }
+          } },
+        }), /bound plan|published inherited planning bytes changed|origin-base|stale-parent-base/u, kind);
+        assert.deepEqual(readFileSync(childFile), before, kind);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("starts only dependency-ready remaining rows and never consumes adopted attempts", async () => {
+    const fixture = createV2Fixture("carry-dependencies", { accepted: ["C"], mergeOrder: ["C"] });
+    const childRunId = "carry-dependencies-next";
+    try {
+      await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+      const childDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const before = JSON.parse(readFileSync(join(childDir, "run.json"), "utf8"));
+      assert.deepEqual(before.slices.map(({ id, status, attempts }) => ({ id, status, attempts })), [
+        { id: "A", status: "pending", attempts: 0 }, { id: "B", status: "pending", attempts: 0 }, { id: "C", status: "merged", attempts: 1 },
+      ]);
+      await assert.rejects(transitionRunSlice(childDir, "B", (slice) => { slice.status = "running"; slice.attempts = 1; }), /not dependency-ready: A/u);
+      const after = JSON.parse(readFileSync(join(childDir, "run.json"), "utf8"));
+      assert.equal(after.slices[1].attempts, 0);
+      assert.equal(after.slices[2].attempts, 1);
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("rechecks parent origin authority before schema-v2 resume mutation", async () => {
+    const fixture = createV2Fixture("carry-resume-origin", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "carry-resume-origin-next";
+    try {
+      await continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true, foregroundLaunchFn: async () => ({ status: "started" }) });
+      const childFile = join(fixture.repo, ".opencode", "factory", childRunId, "run.json");
+      const before = readFileSync(childFile);
+      runGit(fixture.repo, ["checkout", "main"]); runGit(fixture.repo, ["commit", "--allow-empty", "-m", "resume origin moved"]);
+      runGit(fixture.repo, ["push", "origin", "main:main"]); runGit(fixture.repo, ["checkout", fixture.runId]);
+      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /stale-parent-base-moved|rebaseline-required/u);
+      assert.deepEqual(readFileSync(childFile), before);
     } finally { cleanup(fixture.repo); }
   });
 
@@ -1955,8 +2902,13 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   mkdirSync(join(runDir, "plan"), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "story.md"), "story\n");
+  writeFileSync(join(runDir, "artifacts", "research-map.md"), "research\n");
+  writeFileSync(join(runDir, "artifacts", "design-brief.md"), "design\n");
+  writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted brief\n");
+  writeJson(join(runDir, "reviews", "spec-writer.json"), createReviewRecord({ subject: "spec-writer", verdict: "APPROVE", required_fixes: [], summary: "accepted planning" }));
   writeJson(join(runDir, "reviews", "reviewer.json"), createReviewRecord({ subject: runId, verdict: undefined, required_fixes: undefined, summary: "needs continuation" }));
   const plan = {
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [
       { id: "A", stack: "backend", paths: ["A.txt"], depends_on: [], acceptance: ["A accepted"], test_plan: ["test A"] },
       { id: "B", stack: "backend", paths: ["B.txt"], depends_on: ["A"], acceptance: ["B accepted"], test_plan: ["test B"] },
@@ -1964,6 +2916,7 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
     ],
   };
   writeJson(join(runDir, "plan", "slices.json"), plan);
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), createReviewRecord({ subject: "work-decomposer", verdict: "APPROVE", required_fixes: [], summary: "accepted decomposition" }));
 
   const slices = plan.slices.map((planned) => {
     if (!accepted.includes(planned.id)) return { id: planned.id, stack: planned.stack, depends_on: planned.depends_on, status: "pending", attempts: 0 };
@@ -1986,6 +2939,22 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
     branch: runId,
     worktree: repo,
     slices,
+    steps: [
+      {
+        agent: "spec-writer", status: "accepted", attempts: 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
+        acceptance: {
+          artifact_ref: "artifacts/technical-brief.md", artifact_hash: hashFile(join(runDir, "artifacts", "technical-brief.md")),
+          review_ref: "reviews/spec-writer.json", review_hash: hashFile(join(runDir, "reviews", "spec-writer.json")),
+        },
+      },
+      {
+        agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+        acceptance: {
+          artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(runDir, "plan", "slices.json")),
+          review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(runDir, "reviews", "work-decomposer.json")),
+        },
+      },
+    ],
     validator: { verdict: "NO-GO", review_ref: "reviews/reviewer.json" },
     terminal_result: { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} },
   });

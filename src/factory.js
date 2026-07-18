@@ -2,10 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
-import { assertPanelReviewBindingsCurrent, assertRunJsonWriterAllowed, assertSliceReviewBindingCurrent, hashRunState, hasInFlightHeartbeatWork, mergedSliceRepairFence, inspectApprovalHandoffReceipt, observeReviewedMergeProof, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
+import { assertNoUnreconciledTestExecution, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
-import { pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { createTwoRefsAtomicallyNoReplace, git, repoRoot } from "./git.js";
@@ -21,6 +21,7 @@ import { publicLivenessBoolean, probeLegacyBooleanLiveness, probeProcessLiveness
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyOwnership, decideObservationSchedule, decideTransientSchedule, emitAffectedJson, fetchChangedFiles, inspectPanelRunnerReturn, isPollDue, normalizePullRequestResponse, normalizeRepositoryPath, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane, PostPrCiError } from "./post-pr-ci.js";
 import { hashValue } from "./refs.js";
+import { resolvePostPrCiPolicy } from "./config.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -38,6 +39,8 @@ const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
 const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+const CARRY_FORWARD_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy"]);
+const CARRY_FORWARD_MODES = new Set(["interactive", "headless", "autonomous"]);
 const CARRY_FORWARD_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const FULL_COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
 const CONTINUATION_PARENT_ARTIFACT_REFS = [
@@ -59,10 +62,12 @@ const REPO_SEEDED_SKILL_FILES = ["SKILL.md", "SCHEMA.md"];
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const PACKAGED_SEED_HASHES = {
   "SKILL.md": new Set([
+    "0330a3c3dd91745c560a162878a78dcf7668bfc4273af478bbfe31be4b312322",
     "0c17edd488d75547808af2021a5059de04220d092882391e57d42963d9da29b0",
     "22c12f49b06efd905c7e444519d14f096ba9ff0d744b3386d992bc21645d16c4",
     "252a80229a69089a58bc2762050d368074859b1c790e71a00aad332495a203aa",
     "3b7e1f956db2708b321a7a57155f907f83b84e3f4ff00c5e3590113ffd28718d",
+    "b898fac500980778773fbd502a7ec912997c30715b64d550078c642583a4d45a",
     "684b651019b5cc75ae55451a7b63e268787906e085f8404986154b9d0c6a64a7",
     "720e2df21e629d65c347f1f2b5902a35c72f1c85930af67274a08a7ef7dcc657",
     "896eb046aff2af328d62dc05d847bad2c9dada7574171570ed384c87ca3df1c1",
@@ -85,6 +90,7 @@ const PACKAGED_SEED_HASHES = {
     "0082c43c4f4f82e0e274eac2808d5631795e1473ab215572df1dbd21dfd8843d",
     "0564971a8faedb937507e8b9e4b01238534befa43b74bffc4aed36d3ad76cb35",
     "0c1997431d0c6db1b59fee2d59ca7bec2bd1d3944e2afc6e58e823576829c7e6",
+    "13c2d54ebf56b8d63b3ef472ec1293c3ee1228888222c10c5a687f7bb4bad3d2",
     "1494f72ab398b1582e8e723e82e178388f181a43b24c30e48bc332e640086928",
     "1d965abebe23b81725b4f6155e51925847362db1f35f3f60dead08da4dc6b702",
     "34b82f5f9d4a8eb8bbcf861fe4d9533a5e9945df8a068f88b96f1e162df41893",
@@ -103,6 +109,7 @@ const PACKAGED_SEED_HASHES = {
     "f4b5150ccfdb22fbe0f6424e231fa533e394b85163f0c51e0771b2477ac1d00b",
     "f921e5dbe4adab07c0e719a675223cc57a19cfe2f17aa4c3525a2dff786c33b6",
     "fe12fe525e1808b8da85f6e5b420826db7e918049f9a86a3c46b1beefe3d77e3",
+    "ff1a0efb02e46c14a944850e506c0dec7b7b49678fb026fd792738f2f54ec2b0",
   ]),
 };
 const activeHeartbeatLoops = new Map();
@@ -140,7 +147,7 @@ export async function startFactory(args, opts = {}) {
   const resumeRunId = resumePromptRunId(args, opts);
   if (resumeRunId) assertPostPrCliOptions(opts, { command: "factory start resume", resume: true });
   const requestedRunId = normalizeRequestedStartRunId(opts.runId);
-  assertPostPrCliOptions(opts, { command: "factory start" });
+  if (!resumeRunId) assertPostPrCliOptions(opts, { command: "factory start" });
   if (resumeRunId && requestedRunId) throw new Error("factory start --run-id is only for new runs; use resume <run-id> to resume existing runs");
   if (requestedRunId) assertStartRunIdAvailable(repo, requestedRunId);
   const detachedRunId = opts.detached && !resumeRunId
@@ -153,6 +160,8 @@ export async function startFactory(args, opts = {}) {
     if (!ownershipTarget.error) {
       const ownershipRead = readDurableRecoveryRun(repo, ownershipTarget.runDir, ownershipTarget.runFile);
       if (!ownershipRead.error) {
+        assertRunClaimRoute(repo, ownershipRead.run);
+        assertResumeConfiguration(ownershipRead.run, opts);
         const ownership = await existingRunOwnershipOutcome(ownershipTarget.runDir, ownershipRead.run, { ...opts, repo });
         if (ownership) return ownership;
       }
@@ -166,12 +175,16 @@ export async function startFactory(args, opts = {}) {
     if (!eligibility.ok) return eligibility;
     resumedRunDir = preflight.run_dir;
     resumedRun = readRunFile(preflight.run_file || join(resumedRunDir, "run.json"));
+    assertRunClaimRoute(repo, resumedRun);
+    assertResumeConfiguration(resumedRun, opts);
   }
   const launchEnv = factoryLaunchEnv(opts);
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
-  commandArgs.push(formatPrompt(args.join(" "), { ...opts, repo, requestedRunId: detachedRunId || requestedRunId }));
+  commandArgs.push(resumedRun
+    ? encodeFeatureCommandPayload(buildResumePayload(resumedRun, { ...opts, repo }))
+    : formatPrompt(args.join(" "), { ...opts, repo, requestedRunId: detachedRunId || requestedRunId }));
   if (resumedRun) {
     return coordinateExistingRunLaunch(resumedRunDir, resumedRun, {
       ...opts,
@@ -191,6 +204,7 @@ export async function startFactory(args, opts = {}) {
 
 export async function recoverDisruptedRun(runId, opts = {}) {
   assertPostPrCliOptions(opts, { command: "factory resume-check", resume: true });
+  if (hasExplicitPostPrOptions(opts)) throw new Error("factory resume-check rejects post-PR policy flags; the persisted policy is authoritative");
   const repo = repoRoot(opts.cwd || process.cwd());
   const target = resolveRecoveryRunTarget(runId, { ...opts, cwd: repo });
   if (target.error) return syntheticDisruptedTerminal(runId, target.runDir, target.runFile, target.error, opts);
@@ -199,6 +213,10 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   if (readResult.error) return syntheticDisruptedTerminal(target.runId, target.runDir, target.runFile, readResult.error, opts);
 
   const run = readResult.run;
+  assertRunClaimRoute(repo, run);
+  if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, target.runDir, run, opts);
+  await opts.recoveryHooks?.beforeLegacyFenceMutation?.({ runDir: target.runDir, run });
+  assertRecoveryV2Authority(repo, target.runDir, run, opts);
   const legacyFence = await transitionLegacyPrFenceNeedsHuman(target.runDir, opts);
   if (legacyFence) return recoveryEnvelope(legacyFence.run, {
     ok: false,
@@ -240,6 +258,8 @@ export async function recoverDisruptedRun(runId, opts = {}) {
 
   const current = checkExistingRecoveryWorktree(repo, worktree.path, run.branch);
   if (current.status === "healthy") {
+    await opts.recoveryHooks?.beforePostPrReconcile?.({ runDir: target.runDir, run });
+    assertRecoveryV2Authority(repo, target.runDir, run, opts);
     const reconciliation = await reconcilePostPrCrash(target.runDir, { ...opts, cwd: repo });
     const reconciledRun = readRunFile(target.runFile);
     return recoveryEnvelope(reconciledRun, {
@@ -257,7 +277,8 @@ export async function recoverDisruptedRun(runId, opts = {}) {
     return persistRecoveryTerminal(target.runDir, run, "needs-human", current.reason, opts);
   }
 
-  const addResult = addRecoveryWorktree(repo, worktree.path, run.branch);
+  await opts.recoveryHooks?.beforeWorktreeAdd?.({ runDir: target.runDir, run, worktree: worktree.path });
+  const addResult = addRecoveryWorktree(repo, worktree.path, run.branch, () => assertRecoveryV2Authority(repo, target.runDir, run, opts));
   if (!addResult.ok) {
     return persistRecoveryTerminal(target.runDir, run, "blocked", addResult.reason, opts);
   }
@@ -283,8 +304,11 @@ export async function recoverDisruptedRun(runId, opts = {}) {
       const currentRun = readRunFile(target.runFile);
       assertRunJsonWriterAllowed(currentRun, "recovery worktree update");
       if (hashRunState(currentRun) !== expectedRunHash) throw new Error("recovery worktree update rejected: run manifest changed after recovery checks");
+      await opts.recoveryHooks?.beforeRunWrite?.({ runDir: target.runDir, run: currentRun });
+      assertRecoveryV2Authority(repo, target.runDir, currentRun, opts);
+      const v2Authority = assertV2LocalPublishedAuthority(target.runDir, currentRun, { ...opts, repoRoot: repo });
       const next = validateRun({ ...currentRun, worktree: worktree.path });
-      writeJsonAtomic(target.runFile, next);
+      writeSemanticRunJsonAtomic(target.runDir, target.runFile, next, { ...opts, repoRoot: repo }, v2Authority);
       return next;
     }, opts);
     updated = true;
@@ -302,7 +326,6 @@ export async function recoverDisruptedRun(runId, opts = {}) {
 }
 
 function resumePromptRunId(args, opts = {}) {
-  if (!opts.headless && !opts.autonomous) return null;
   const prompt = args.join(" ").trim();
   const match = /^resume\s+([^\s]+)$/iu.exec(prompt);
   return match ? match[1] : null;
@@ -571,12 +594,14 @@ function checkExistingRecoveryWorktree(repo, worktree, branch) {
   return { status: "healthy", worktree: identity.worktree };
 }
 
-function addRecoveryWorktree(repo, worktree, branch) {
+function addRecoveryWorktree(repo, worktree, branch, beforeMutation = null) {
   const safety = verifyRecoveryWorktreePath(repo, worktree);
   if (!safety.ok) return safety;
+  if (beforeMutation) beforeMutation("mkdir");
   mkdirSync(resolve(repo, ".opencode", "worktrees"), { recursive: true });
   const postMkdirSafety = verifyRecoveryWorktreePath(repo, worktree);
   if (!postMkdirSafety.ok) return postMkdirSafety;
+  if (beforeMutation) beforeMutation("git-worktree-add");
   const proc = git(repo, ["worktree", "add", worktree, branch], { timeout: 30000 });
   if (!proc.ok) return { ok: false, reason: `git worktree add failed for disrupted run recovery: ${(proc.stderr || proc.stdout || "unknown git error").trim()}` };
   return { ok: true };
@@ -598,14 +623,18 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
     if (current.steering?.uncheckpointed) throw new Error("recovery terminalization rejected: consumed steering acknowledgement is pending");
     if (current.steering?.action_claim) throw new Error("recovery terminalization rejected: action start acknowledgement is pending");
     if (current.steering?.pr_fence) throw new Error("recovery terminalization rejected: active pre-PR fence");
+    await opts.recoveryHooks?.beforeTerminalWrite?.({ runDir, run: current });
+    assertRecoveryV2Authority(factoryRepoFromRunDir(runDir), runDir, current, opts);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, { ...opts, repoRoot: factoryRepoFromRunDir(runDir) });
     bestEffortStopHeartbeatForTerminal(runDir, opts);
+    assertV2LocalPublishedAuthority(runDir, current, { ...opts, repoRoot: factoryRepoFromRunDir(runDir) }, v2Authority);
     const next = validateRun({
       ...current,
       status: statusValue,
       updated_at: timestamp(opts.now),
       terminal_result: terminalResult(current.run_id || priorRun.run_id, statusValue, reason),
     });
-    writeJsonAtomic(runPath, next);
+    writeSemanticRunJsonAtomic(runDir, runPath, next, { ...opts, repoRoot: factoryRepoFromRunDir(runDir) }, v2Authority);
     return recoveryEnvelope(next, {
       ok: false,
       durable: true,
@@ -615,6 +644,13 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
       reason,
     });
   }, opts);
+}
+
+function assertRecoveryV2Authority(repo, runDir, expectedRun, opts = {}) {
+  const current = readRunFile(join(runDir, "run.json"));
+  if (expectedRun?.continuation?.schema_version !== 2 && current.continuation?.schema_version !== 2) return current;
+  if (current.continuation?.schema_version !== 2 || !sameJsonValue(current.continuation, expectedRun.continuation)) throw new Error("schema-v2 recovery authority changed before mutation");
+  return assertCarryForwardResumeAuthority(repo, runDir, current, opts);
 }
 
 function terminalResult(runId, statusValue, reason) {
@@ -636,22 +672,36 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 export function continueFactory(parentRunId, opts = {}) {
   assertPostPrCliOptions(opts, { command: "factory continue" });
   const repo = repoRoot(opts.cwd || process.cwd());
+  const carryForwardConfig = opts.carryForward === true ? resolveCarryForwardConfiguration(repo, opts) : null;
   const allocationReplay = opts.carryForward === true && !opts.dryRun;
-  const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
+  const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo, carryForwardConfig, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
   const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
+  if (!opts.dryRun) acquireContinuationTargetReservation(repo, continuation);
 
   if (continuation.schema_version === 2) {
     if (opts.dryRun) {
       assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false, beforeOriginFetch: opts.beforeOriginFetch, originSpawnSync: opts.originSpawnSync });
       return { status: "dry-run", launchable: false, candidate: continuation };
     }
+    const publishedRunDir = join(factoryRoot(repo), continuation.target.run_id);
+    const targetPublished = pathExistsNoFollow(join(publishedRunDir, "run.json"));
+    if (targetPublished) {
+      const published = readRunFile(join(publishedRunDir, "run.json"));
+      if (!sameJsonValue(published.continuation?.configuration, continuation.configuration)) {
+        throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+      }
+    }
     assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
-      targetPublished: false,
+      targetPublished,
+      ...(targetPublished ? { childRunDir: publishedRunDir } : {}),
       beforeOriginFetch: opts.beforeOriginFetch,
       originSpawnSync: opts.originSpawnSync,
-      [CARRY_FORWARD_ALLOCATION_REPLAY]: true,
+      ...(!targetPublished ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}),
     });
-    return allocateCarryForwardResources(repo, continuation, opts);
+    const allocation = targetPublished
+      ? inspectPublishedCarryForwardAllocation(repo, continuation)
+      : allocateCarryForwardResources(repo, continuation, { ...opts, carryForwardConfig });
+    return publishAndLaunchCarryForward(repo, parentRunDir, continuation, carryForwardConfig, allocation, opts);
   }
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
   const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
@@ -663,7 +713,9 @@ export function continueFactory(parentRunId, opts = {}) {
   // Seed the accepted parent planning artifacts into the child run up front so the
   // orchestrator reuses the approved brief/research/story instead of regenerating
   // them (the dominant wall-clock cost of a continuation).
-  seedContinuationPlanningArtifacts(repo, parentRunDir, continuation);
+  seedContinuationPlanningArtifacts(repo, parentRunDir, continuation, {
+    ...(typeof opts.beforeContinuationSeedPublish === "function" ? { beforePublish: opts.beforeContinuationSeedPublish } : {}),
+  });
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(encodeFeatureCommandPayload(payload));
@@ -675,8 +727,18 @@ export async function resumeFactory(runId, opts = {}) {
   assertPostPrCliOptions(opts, { command: "factory resume", resume: true });
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
+  const beforeRecovery = readRunFile(join(runDir, "run.json"));
+  assertRunClaimRoute(repo, beforeRecovery);
+  assertResumeConfiguration(beforeRecovery, opts);
+  if (beforeRecovery.continuation?.schema_version === 2) {
+    const checked = assertCarryForwardResumeAuthority(repo, runDir, beforeRecovery, opts);
+    if (TERMINAL_STATUSES.has(checked.status)) return { status: checked.status, run_id: checked.run_id, terminal_result: checked.terminal_result, launched: false };
+  }
   await reconcilePostPrCrash(runDir, opts);
   const run = readRunFile(join(runDir, "run.json"));
+  assertRunClaimRoute(repo, run);
+  assertResumeConfiguration(run, opts);
+  if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, runDir, run, opts);
   if (!opts.dryRun) {
     const ownership = await existingRunOwnershipOutcome(runDir, run, { ...opts, repo });
     if (ownership) return ownership;
@@ -700,6 +762,19 @@ export async function resumeFactory(runId, opts = {}) {
       : (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env }),
     launchEnv,
   });
+}
+
+function assertCarryForwardResumeAuthority(repo, runDir, run, options = {}) {
+  const checked = assertPublishedCarryForwardRun(repo, run.continuation, options);
+  assertV2LocalPublishedAuthority(runDir, checked, { ...options, repoRoot: repo });
+  const parentRunDir = resolve(repo, dirname(run.continuation.parent.run_ref));
+  assertContinuationBindingsCurrent(repo, parentRunDir, run.continuation, {
+    targetPublished: true,
+    childRunDir: runDir,
+    beforeOriginFetch: options.beforeOriginFetch,
+    originSpawnSync: options.originSpawnSync,
+  });
+  return checked;
 }
 
 async function existingRunOwnershipOutcome(runDir, run, opts = {}) {
@@ -730,6 +805,8 @@ async function existingRunOwnershipOutcome(runDir, run, opts = {}) {
 }
 
 async function coordinateExistingRunLaunch(runDir, run, opts) {
+  const repo = opts.repo || factoryRepoFromRunDir(runDir);
+  assertRunClaimRoute(repo, run);
   const ownership = await existingRunOwnershipOutcome(runDir, run, opts);
   if (ownership) return ownership;
   const claimFns = launchClaimFunctions(opts);
@@ -759,6 +836,16 @@ async function coordinateExistingRunLaunch(runDir, run, opts) {
   }
   const token = acquired.token;
   const env = { ...(opts.launchEnv || factoryLaunchEnv(opts)), [FACTORY_LAUNCH_CLAIM_ENV]: token };
+  try {
+    await opts.launchHooks?.afterClaimAcquired?.({ runDir, run, claim: acquired.claim });
+    const current = readRunFile(join(runDir, "run.json"));
+    assertRunClaimRoute(repo, current);
+    if (current.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(opts.repo, runDir, current, opts);
+  } catch (error) {
+    const current = claimFns.inspect(runDir, { ...opts, runId: run.run_id });
+    if (current.ok && current.claim.nonce === token) claimFns.release(runDir, token, { ...opts, expectedPhase: detached ? "spawning" : "foreground-live", runId: run.run_id });
+    throw error;
+  }
   try {
     const result = await opts.launch({ env, executionId });
     if (detached) {
@@ -888,19 +975,28 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
   }
 
   let started;
+  let launchAttempted = false;
   try {
+    await opts.launchHooks?.afterClaimAcquired?.({ runDir, run, claim: claim.claim });
+    if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(opts.repo, runDir, readRunFile(join(runDir, "run.json")), opts);
     const payload = buildResumePayload(run, { ...opts, repo: opts.repo, headless: false, autonomous: false });
     const commandArgs = ["run", "--dir", opts.repo, "--command", "feature", "--agent", "feature-factory"];
     if (opts.model) commandArgs.push("--model", opts.model);
     commandArgs.push(encodeFeatureCommandPayload(payload));
     const launch = typeof opts.detachedLaunchFn === "function" ? opts.detachedLaunchFn : startDetached;
+    launchAttempted = true;
     started = await launch(opts.repo, commandArgs, {
       ...detachedProcessOptions(opts.repo, { ...opts, runId, runDir, executionId: claim.claim.execution_id }),
       env: factoryLaunchEnv(opts),
     });
   } catch (error) {
+    let preservedClaim = launchAttempted;
+    if (!launchAttempted) {
+      try { preservedClaim = !claimFunctions.release(runDir, token, { ...opts, expectedPhase: "spawning", runId }); }
+      catch { preservedClaim = true; }
+    }
     const code = /readiness|timed out|disconnect|before readiness/iu.test(String(error?.message)) ? "launch-readiness-failed" : "launch-spawn-failed";
-    return handoffEnvelope(runId, gateName, code, { claim: true });
+    return handoffEnvelope(runId, gateName, code, { claim: preservedClaim });
   }
 
   const readiness = await waitForPublishedLaunchEvidence(runDir, runId, claim.claim.execution_id, started?.pid, opts);
@@ -1655,6 +1751,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
   await withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
     assertHeartbeatStartable(run);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, run, opts);
     const current = tryReadHeartbeatFile(heartbeatFile);
     if (current.error) throw new Error(`invalid heartbeat at ${heartbeatFile}: ${current.error}`);
     if (current.value && heartbeatBlocksReplacement(current.value, startedAt, opts)) {
@@ -1670,8 +1767,9 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
       last_tick_at: startedAt,
       interval_ms: intervalMs,
     });
+    assertV2LocalPublishedAuthority(runDir, run, opts, v2Authority);
     writeHeartbeatFile(heartbeatFile, heartbeat);
-    writeJsonAtomic(join(runDir, "run.json"), validateRun({ ...run, heartbeat_at: startedAt }));
+    writeSemanticRunJsonAtomic(runDir, join(runDir, "run.json"), validateRun({ ...run, heartbeat_at: startedAt }), opts, v2Authority);
   }, opts);
 
   const runtime = createHeartbeatRuntime(runDir, heartbeat, opts);
@@ -1759,6 +1857,7 @@ export async function recordReviewDispatchProvenance(runId, input, opts = {}) {
     const runPath = join(runDir, "run.json");
     const current = readRunFile(runPath);
     assertRunJsonWriterAllowed(current, "provenance review-dispatch");
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, opts);
     const event = await collectEffectiveProvenance({
       repo: factoryRepoFromRunDir(runDir),
       gitCwd: provenanceGitCwd(factoryRepoFromRunDir(runDir), current.worktree),
@@ -1783,7 +1882,7 @@ export async function recordReviewDispatchProvenance(runId, input, opts = {}) {
         review_dispatches: [...reviewDispatches, event],
       },
     });
-    writeJsonAtomic(runPath, next);
+    writeSemanticRunJsonAtomic(runDir, runPath, next, opts, v2Authority);
     return event;
   }, opts);
 }
@@ -1957,6 +2056,7 @@ export async function cleanupRun(runId, opts = {}) {
   }
   return withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
+    assertNoUnreconciledTestExecution(run);
     if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
       throw new Error(`run '${run.run_id}' is ${run.status}; cleanup requires terminal status or --force`);
     }
@@ -1996,6 +2096,8 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
   if (!insideFactoryRoot(repo, runDir)) {
     throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
   }
+  const durableRun = readRunFile(join(runDir, "run.json"));
+  assertNoUnreconciledTestExecution(durableRun);
   const targets = collectCleanupTargets(run);
   if (opts.mode !== "single-run") return cleanupSweepTargetsLocked(repo, runDir, targets, opts);
 
@@ -2562,6 +2664,8 @@ export function buildContinuation(parentRunId, opts = {}) {
   }
   const postPrParent = stringValue(parentRun.pr_url);
   const carryForward = opts.carryForward === true;
+  const carryForwardConfig = carryForward ? opts.carryForwardConfig || resolveCarryForwardConfiguration(repo, opts) : null;
+  if (carryForward && opts.newPr === true) throw new Error("factory continue --carry-forward is mutually exclusive with --new-pr");
   if (carryForward && postPrParent) throw new Error("v2 carry-forward is available only before PR creation");
   if (carryForward) assertCarryForwardParentEligible(parentRun);
   if (postPrParent && opts.newPr !== true) throw new Error("factory continue for a blocked parent with pr_url requires --new-pr");
@@ -2575,8 +2679,12 @@ export function buildContinuation(parentRunId, opts = {}) {
   }
 
   const targetRunId = normalizeContinuationTargetRunId(opts.runId, parentRun.run_id);
-  if (opts[CARRY_FORWARD_ALLOCATION_REPLAY]) assertContinuationSemanticTargetAbsent(repo, targetRunId);
-  else assertContinuationTargetAvailable(repo, targetRunId);
+  const reservedTarget = observeContinuationTargetReservation(repo, targetRunId);
+  const requestedSchema = carryForward ? 2 : 1;
+  if (reservedTarget && reservedTarget.route_schema !== requestedSchema) throw new Error(`continuation target '${targetRunId}' is already reserved by a conflicting schema or authority`);
+  const publishedReplay = opts[CARRY_FORWARD_ALLOCATION_REPLAY] && carryForward && continuationPublishedCreatedAt(repo, targetRunId);
+  if (opts[CARRY_FORWARD_ALLOCATION_REPLAY] && !publishedReplay) assertContinuationSemanticTargetAbsent(repo, targetRunId);
+  else if (!publishedReplay) assertContinuationTargetAvailable(repo, targetRunId);
   const review = resolveContinuationReview(parentRunDir, requiredContinuationReview(opts.review));
   if (postPrParent) {
     if (review.ref !== parentRun.post_pr.continuation_review.ref) throw new Error("post-PR continuation must select run.post_pr.continuation_review.ref");
@@ -2595,7 +2703,7 @@ export function buildContinuation(parentRunId, opts = {}) {
   const continuation = {
     kind: "blocked-run-continuation",
     schema_version: carryForward ? 2 : 1,
-    created_at: timestamp(opts.now),
+    created_at: publishedReplay || reservedTarget?.created_at || timestamp(opts.now),
     operator_summary: `Continue blocked run '${parentRun.run_id}' from ${review.ref}.`,
     parent: {
       run_id: parentRun.run_id,
@@ -2628,13 +2736,24 @@ export function buildContinuation(parentRunId, opts = {}) {
   if (draftSpecReuse) continuation.draft_spec_reuse = draftSpecReuse;
   if (postPrParent) continuation.post_pr = continuationPostPrBinding(parentRun, parentRunDir);
   if (carryForward) {
+    if (continuation.planning_reuse?.eligible !== true || continuation.draft_spec_reuse !== undefined) {
+      throw new Error("v2 carry-forward requires durably accepted unchanged planning and no draft_spec_reuse");
+    }
+    continuation.configuration = carryForwardConfigurationBinding(carryForwardConfig);
+    if (publishedReplay) {
+      const published = readRunFile(join(factoryRoot(repo), targetRunId, "run.json"));
+      if (!sameJsonValue(published.continuation?.configuration, continuation.configuration)) {
+        throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+      }
+    }
     continuation.carry_forward = collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, opts);
     if (typeof opts.beforeCarryForwardReturn === "function") opts.beforeCarryForwardReturn({ continuation, parentRunDir });
     assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
       targetPublished: false,
       beforeOriginFetch: opts.beforeOriginFetch,
       originSpawnSync: opts.originSpawnSync,
-      ...(opts[CARRY_FORWARD_ALLOCATION_REPLAY] ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}),
+      ...(opts[CARRY_FORWARD_ALLOCATION_REPLAY] && !publishedReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}),
+      ...(publishedReplay ? { targetPublished: true, childRunDir: join(factoryRoot(repo), targetRunId) } : {}),
     });
   }
   return continuation;
@@ -2744,16 +2863,16 @@ function allocateCarryForwardResources(repo, continuation, options = {}) {
     start_commit: startCommit,
   };
   const claimBytes = canonicalJsonBytes(claim);
+  const claimOid = createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${claimBytes.length}\0`), claimBytes])).digest("hex");
+  let refState = inspectCarryForwardRefs(repo, { claimRef, claimOid, claimBytes, childBranchRef, startCommit });
   const written = git(repo, ["hash-object", "-w", "--stdin"], {
     input: claimBytes,
     ...(typeof options.claimBlobSpawnSync === "function" ? { spawnSync: options.claimBlobSpawnSync } : {}),
   });
-  const claimOid = written.stdout.trim();
-  if (!written.ok || !FULL_COMMIT_PATTERN.test(claimOid)) {
+  if (!written.ok || written.stdout.trim() !== claimOid) {
     throw new Error(`continuation claim blob could not be written: ${(written.stderr || written.stdout || "unknown git error").trim()}`);
   }
 
-  let refState = inspectCarryForwardRefs(repo, { claimRef, claimOid, claimBytes, childBranchRef, startCommit });
   let replayed = refState === "exact";
   if (refState === "absent") {
     if (typeof options.beforeRefTransaction === "function") {
@@ -2821,6 +2940,313 @@ function allocateCarryForwardResources(repo, continuation, options = {}) {
   };
 }
 
+function acquireContinuationTargetReservation(repo, continuation) {
+  const runId = continuation.target.run_id;
+  const claims = observePermanentContinuationClaims(repo, runId);
+  if (continuation.schema_version === 1 && claims.length > 0) throw new Error(`continuation target '${runId}' has schema-v2 claim authority`);
+  if (continuation.schema_version === 2 && claims.length === 1) {
+    const expected = carryForwardRegistration(continuation);
+    if (claims[0].ref !== expected.claimRef || claims[0].oid !== expected.claimOid || claims[0].bytes !== expected.claimBytes.toString("utf8")) {
+      throw new Error(`continuation target '${runId}' has a foreign schema-v2 claim`);
+    }
+  }
+  const reservation = {
+    schema_version: 1,
+    kind: "continuation-target-reservation",
+    child_run_id: runId,
+    route_schema: continuation.schema_version,
+    created_at: continuation.created_at,
+    authority_hash: hashValue(continuation),
+  };
+  const bytes = canonicalJsonBytes(reservation);
+  const written = git(repo, ["hash-object", "-w", "--stdin"], { input: bytes });
+  const oid = written.stdout.trim();
+  if (!written.ok || !FULL_COMMIT_PATTERN.test(oid)) throw new Error("continuation target reservation blob could not be written");
+  const ref = `refs/opencode/continuation-targets/${createHash("sha256").update(runId, "utf8").digest("hex")}`;
+  const created = git(repo, ["update-ref", ref, oid, "0".repeat(40)]);
+  if (created.ok) return { ref, oid, ...reservation, replayed: false };
+  const observed = observeContinuationTargetReservation(repo, runId);
+  if (!observed || observed.ref !== ref || observed.oid !== oid || observed.route_schema !== continuation.schema_version || observed.authority_hash !== reservation.authority_hash) {
+    throw new Error(`continuation target '${runId}' is already reserved by a conflicting schema or authority`);
+  }
+  return { ...observed, replayed: true };
+}
+
+function inspectPublishedCarryForwardAllocation(repo, continuation) {
+  const expected = carryForwardRegistration(continuation);
+  assertCarryForwardClaimExact(repo, expected);
+  return {
+    status: "published",
+    launchable: true,
+    candidate: continuation,
+    claim_ref: expected.claimRef,
+    claim_oid: expected.claimOid,
+    child_branch_ref: expected.childBranchRef,
+    start_commit: expected.startCommit,
+    worktree: continuation.target.worktree,
+    replayed: true,
+    worktree_recovered: true,
+    published: true,
+  };
+}
+
+async function publishAndLaunchCarryForward(repo, parentRunDir, continuation, configuration, allocation, options = {}) {
+  const childRunDir = join(factoryRoot(repo), continuation.target.run_id);
+  let publication;
+  if (pathExistsNoFollow(childRunDir)) {
+    const run = assertPublishedCarryForwardRun(repo, continuation, { ...options, expectedConfiguration: configuration });
+    publication = { published: true, replayed: true, run };
+  } else {
+    publication = await publishCarryForwardChild(repo, parentRunDir, continuation, configuration, allocation, options);
+  }
+  const run = assertPublishedCarryForwardRun(repo, continuation, { ...options, expectedConfiguration: configuration });
+  if (TERMINAL_STATUSES.has(run.status)) {
+    return { status: run.status, run_id: run.run_id, terminal_result: run.terminal_result, replayed: true, launched: false };
+  }
+
+  const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
+  const payload = { operator_request: prompt, driver: carryForwardDriver(run), continuation: cloneJson(continuation) };
+  assertPublishedCarryForwardRun(repo, continuation, { ...options, driver: payload.driver, expectedConfiguration: configuration });
+  seedRepoSkill(repo);
+  const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
+  if (options.model) commandArgs.push("--model", options.model);
+  commandArgs.push(encodeFeatureCommandPayload(payload));
+  const launchEnv = factoryLaunchEnv(options);
+  assertPublishedCarryForwardRun(repo, continuation, { ...options, driver: payload.driver, expectedConfiguration: configuration });
+  const launched = await coordinateExistingRunLaunch(childRunDir, run, {
+    ...options,
+    repo,
+    launchKind: options.detached ? "resume-detached" : "resume-foreground",
+    launch: ({ env, executionId }) => options.detached
+      ? (options.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...options, runId: run.run_id, runDir: childRunDir, executionId }), env })
+      : (options.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...options, env }),
+    launchEnv,
+  });
+  if (launched && typeof launched === "object") return { ...launched, publication: { published: publication.published, replayed: publication.replayed }, payload };
+  return launched;
+}
+
+async function publishCarryForwardChild(repo, parentRunDir, continuation, configuration, allocation, options = {}) {
+  assertCarryForwardPublicationBoundary(repo, parentRunDir, continuation, configuration, allocation, options);
+  if (typeof options.beforeCarryForwardStage === "function") options.beforeCarryForwardStage({ continuation, allocation });
+  assertCarryForwardPublicationBoundary(repo, parentRunDir, continuation, configuration, allocation, options);
+  const inputs = collectCarryForwardPublicationInputs(parentRunDir, continuation);
+  const plan = parseSlicesPlanBytes(inputs.plan.bytes, { label: "carry-forward plan/slices.json", requireIntegrationGate: true });
+  const childRun = initialCarryForwardRun(continuation, configuration, plan, inputs.decomposition);
+  const stagingParent = dirname(factoryRoot(repo));
+  const stagingContainer = join(stagingParent, `.carry-forward-stage-${continuation.target.run_id}-${randomUUID()}`);
+  const stagingRoot = join(stagingContainer, continuation.target.run_id);
+  const targetRunDir = join(factoryRoot(repo), continuation.target.run_id);
+  try {
+    mkdirSync(stagingContainer, { recursive: false });
+    mkdirSync(stagingRoot, { recursive: false });
+    writeFileSync(join(stagingRoot, "run.json"), `${JSON.stringify(childRun, null, 2)}\n`, { flag: "wx" });
+    for (const input of inputs.files) {
+      const destination = resolve(stagingRoot, input.ref);
+      if (!isLogicalContainedPath(stagingRoot, destination, { allowEqual: false })) throw new Error(`carry-forward staged ref escapes child: ${input.ref}`);
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(destination, input.bytes, { flag: "wx" });
+    }
+    const stagedValidation = validateRunDir(stagingRoot);
+    if (!stagedValidation.ok) throw new Error(`staged carry-forward child is invalid: ${formatValidationChecks(stagedValidation.checks)}`);
+    if (typeof options.beforeCarryForwardPublish === "function") options.beforeCarryForwardPublish({ stagingRoot, targetRunDir, continuation, allocation, configuration });
+    assertCarryForwardPublicationBoundary(repo, parentRunDir, continuation, configuration, allocation, options);
+    assertStagedCarryForwardBytes(stagingRoot, childRun, inputs);
+
+    const publicationLockRoot = join(stagingParent, `.carry-forward-publication-${createHash("sha256").update(continuation.target.run_id).digest("hex")}`);
+    mkdirSync(publicationLockRoot, { recursive: true });
+    await withRunJsonLock(publicationLockRoot, async () => {
+      if (typeof options.beforeCarryForwardRename === "function") options.beforeCarryForwardRename({ stagingRoot, targetRunDir, continuation, allocation, configuration });
+      assertCarryForwardPublicationBoundary(repo, parentRunDir, continuation, configuration, allocation, options);
+      assertStagedCarryForwardBytes(stagingRoot, childRun, inputs);
+      if (pathExistsNoFollow(targetRunDir)) throw new Error(`carry-forward publication target already exists and will not be overwritten: ${targetRunDir}`);
+      if (typeof options.afterCarryForwardTargetObservation === "function") options.afterCarryForwardTargetObservation({ stagingRoot, targetRunDir, continuation, allocation, configuration });
+      assertCarryForwardPublicationBoundary(repo, parentRunDir, continuation, configuration, allocation, options);
+      assertStagedCarryForwardBytes(stagingRoot, childRun, inputs);
+      moveDirectoryNoReplace(stagingRoot, targetRunDir, options);
+      if (typeof options.afterCarryForwardPublish === "function") options.afterCarryForwardPublish({ targetRunDir, continuation, allocation, configuration });
+    }, options.publicationLockOptions || {});
+  } finally {
+    if (pathExistsNoFollow(stagingContainer)) rmSync(stagingContainer, { recursive: true, force: true });
+  }
+  const run = assertPublishedCarryForwardRun(repo, continuation, { ...options, expectedConfiguration: configuration });
+  return { published: true, replayed: false, run };
+}
+
+function moveDirectoryNoReplace(stagingRoot, targetRunDir, options = {}) {
+  if (basename(stagingRoot) !== basename(targetRunDir)) throw new Error("carry-forward publication source and target identities differ");
+  const move = typeof options.publicationMoveSpawnSync === "function" ? options.publicationMoveSpawnSync : defaultSpawnSync;
+  const result = move("mv", ["-n", "--", stagingRoot, dirname(targetRunDir)], { encoding: "utf8" });
+  if (result?.error || result?.status !== 0) throw new Error("carry-forward atomic no-overwrite directory move failed");
+  if (pathExistsNoFollow(stagingRoot)) throw new Error(`carry-forward publication target already exists and will not be overwritten: ${targetRunDir}`);
+  if (!pathExistsNoFollow(targetRunDir)) throw new Error("carry-forward atomic no-overwrite directory move did not publish the child");
+}
+
+function initialCarryForwardRun(continuation, configuration, plan, decomposition) {
+  const accepted = new Map(continuation.carry_forward.accepted_slices.map((slice) => [slice.id, slice]));
+  const slices = plan.slices.map((planned) => {
+    const adopted = accepted.get(planned.id);
+    return adopted ? {
+      id: planned.id,
+      stack: planned.stack,
+      depends_on: cloneJson(planned.depends_on),
+      status: "merged",
+      attempts: adopted.attempts,
+      evidence_ref: adopted.evidence_ref,
+      evidence_hash: adopted.evidence_hash,
+      review_ref: adopted.review_ref,
+      review_hash: adopted.review_hash,
+      reviewed_commit: adopted.reviewed_commit,
+      merge_commit: adopted.merge_commit,
+    } : { id: planned.id, stack: planned.stack, depends_on: cloneJson(planned.depends_on), status: "pending", attempts: 0 };
+  });
+  const reuse = continuation.planning_reuse;
+  const createdAt = continuation.created_at;
+  return validateRun({
+    schema_version: 1,
+    run_id: continuation.target.run_id,
+    mode: configuration.mode,
+    status: "running",
+    created_at: createdAt,
+    updated_at: createdAt,
+    heartbeat_at: null,
+    base_ref: continuation.target.base_ref,
+    base_commit: continuation.target.base_commit,
+    branch: continuation.target.branch,
+    worktree: continuation.target.worktree,
+    github_account: configuration.github_account,
+    pr_mode: configuration.pr_mode,
+    pr_url: null,
+    max_parallel_slices: 3,
+    max_retries: 3,
+    continuation: cloneJson(continuation),
+    steering: { schema_version: 1, generation: 0, pending: null, uncheckpointed: null, boundary: null, action_claim: null, last_action: null, pr_fence: null, history: [] },
+    post_pr: cloneJson(configuration.post_pr),
+    gates: {},
+    slices,
+    steps: [{
+      agent: "spec-writer",
+      status: "accepted",
+      attempts: 0,
+      artifact_ref: "artifacts/technical-brief.md",
+      review_ref: "reviews/spec-writer.json",
+      acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: reuse.spec_artifact_hash, review_ref: "reviews/spec-writer.json", review_hash: reuse.spec_review_hash },
+      inherited_acceptance: { from_run_id: continuation.parent.run_id, parent_spec_review_ref: reuse.spec_review_ref, artifact_hash: reuse.spec_artifact_hash, review_hash: reuse.spec_review_hash },
+    }, {
+      agent: "work-decomposer",
+      status: "accepted",
+      attempts: decomposition.attempts,
+      artifact_ref: "plan/slices.json",
+      review_ref: decomposition.review_ref,
+      acceptance: {
+        artifact_ref: "plan/slices.json",
+        artifact_hash: decomposition.plan_hash,
+        review_ref: decomposition.review_ref,
+        review_hash: decomposition.review_hash,
+      },
+    }, { agent: "test-verifier", status: "blocked", attempts: 0 }],
+    validator: null,
+    security_review: null,
+    terminal_result: null,
+  });
+}
+
+function collectCarryForwardPublicationInputs(parentRunDir, continuation) {
+  const files = [];
+  const destinations = new Set();
+  const add = (ref, bytes) => {
+    if (destinations.has(ref)) throw new Error(`carry-forward publication destination is duplicated: ${ref}`);
+    destinations.add(ref);
+    files.push({ ref, bytes });
+  };
+  const planPath = join(parentRunDir, continuation.carry_forward.plan_ref);
+  const planBytes = readFileSync(planPath);
+  if (sha256Buffer(planBytes) !== continuation.carry_forward.plan_hash) throw new Error("carry-forward bound plan bytes changed before publication staging");
+  add("plan/slices.json", planBytes);
+  const parentRun = validateRun(JSON.parse(readFileSync(join(parentRunDir, "run.json"), "utf8")));
+  const decomposition = observeAcceptedDecompositionAuthority(parentRunDir, parentRun, { requireIntegrationGate: true });
+  if (decomposition.plan_hash !== continuation.carry_forward.plan_hash) throw new Error("accepted work-decomposer plan binding changed before publication staging");
+  add(decomposition.review_ref, readExactCarryForwardFile(parentRunDir, decomposition.review_ref, decomposition.review_hash));
+  const inheritedArtifacts = continuation.parent_artifacts.filter((item) => CONTINUATION_SEED_ARTIFACT_KINDS.has(item.kind));
+  if (!inheritedArtifacts.some((item) => item.ref === "artifacts/technical-brief.md" && item.hash === continuation.planning_reuse.spec_artifact_hash)) {
+    throw new Error("carry-forward publication requires the accepted technical brief in parent_artifacts");
+  }
+  for (const item of inheritedArtifacts) add(item.ref, readExactCarryForwardFile(parentRunDir, item.ref, item.hash));
+  add("reviews/spec-writer.json", readExactCarryForwardFile(parentRunDir, continuation.planning_reuse.spec_review_ref, continuation.planning_reuse.spec_review_hash));
+  for (const slice of continuation.carry_forward.accepted_slices) {
+    add(slice.evidence_ref, readExactCarryForwardFile(parentRunDir, slice.evidence_ref, slice.evidence_hash));
+    add(slice.review_ref, readExactCarryForwardFile(parentRunDir, slice.review_ref, slice.review_hash));
+  }
+  return { plan: { bytes: planBytes }, decomposition, files };
+}
+
+function readExactCarryForwardFile(parentRunDir, ref, hash) {
+  const path = resolve(parentRunDir, ref);
+  const entry = lstatRequiredNoSymlinks(parentRunDir, path, `carry-forward source '${ref}'`, `carry-forward source '${ref}' must not contain symlinks`);
+  if (!entry.isFile()) throw new Error(`carry-forward source '${ref}' must be a regular file`);
+  const bytes = readFileSync(path);
+  if (sha256Buffer(bytes) !== hash) throw new Error(`carry-forward source '${ref}' changed before publication staging`);
+  return bytes;
+}
+
+function assertStagedCarryForwardBytes(stagingRoot, childRun, inputs) {
+  const runBytes = readFileSync(join(stagingRoot, "run.json"), "utf8");
+  if (!sameJsonValue(JSON.parse(runBytes), childRun)) throw new Error("staged carry-forward run.json changed before publication");
+  for (const input of inputs.files) {
+    const path = resolve(stagingRoot, input.ref);
+    const entry = lstatRequiredNoSymlinks(stagingRoot, path, `staged '${input.ref}'`, `staged '${input.ref}' must not contain symlinks`);
+    if (!entry.isFile() || !readFileSync(path).equals(input.bytes)) throw new Error(`staged carry-forward '${input.ref}' changed before publication`);
+  }
+  const validation = validateRunDir(stagingRoot);
+  if (!validation.ok) throw new Error(`staged carry-forward child became invalid: ${formatValidationChecks(validation.checks)}`);
+}
+
+function assertCarryForwardPublicationBoundary(repo, parentRunDir, continuation, configuration, allocation, options) {
+  if (!sameJsonValue(resolveCarryForwardConfiguration(repo, options), configuration)) throw new Error("carry-forward configuration changed before publication");
+  assertContinuationBindingsCurrent(repo, parentRunDir, continuation, {
+    targetPublished: false,
+    beforeOriginFetch: options.beforeOriginFetch,
+    originSpawnSync: options.originSpawnSync,
+    [CARRY_FORWARD_ALLOCATION_REPLAY]: true,
+  });
+  const registration = carryForwardRegistration(continuation);
+  if (allocation.claim_ref !== registration.claimRef || allocation.claim_oid !== registration.claimOid || allocation.child_branch_ref !== registration.childBranchRef) {
+    throw new Error("carry-forward allocation identity changed before publication");
+  }
+  if (inspectCarryForwardRefs(repo, registration) !== "exact") throw new Error("carry-forward registered claim/branch changed before publication");
+  const worktree = checkWorktreeIdentity(repo, continuation.target.worktree, { branch: continuation.target.branch, head: registration.startCommit });
+  if (!worktree.ok) throw new Error(`carry-forward worktree changed before publication: ${worktree.reason}`);
+}
+
+function carryForwardRegistration(continuation) {
+  const parentIdentity = carryForwardParentIdentity(continuation);
+  const claimBytes = canonicalJsonBytes({
+    schema_version: 2,
+    kind: "blocked-run-continuation-claim",
+    parent_identity: parentIdentity,
+    child_run_id: continuation.target.run_id,
+    child_branch_ref: `refs/heads/${continuation.target.branch}`,
+    start_commit: continuation.carry_forward.start_commit,
+  });
+  const claimOid = createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${claimBytes.length}\0`), claimBytes])).digest("hex");
+  return {
+    claimRef: `refs/opencode/continuations/${createHash("sha256").update(canonicalJsonBytes(parentIdentity)).digest("hex")}`,
+    claimOid,
+    claimBytes,
+    childBranchRef: `refs/heads/${continuation.target.branch}`,
+    startCommit: continuation.carry_forward.start_commit,
+  };
+}
+
+function assertCarryForwardClaimExact(repo, expected) {
+  const oid = readExactRefOid(repo, expected.claimRef);
+  if (oid !== expected.claimOid) throw new Error("carry-forward permanent claim does not contain the exact registered bytes");
+  const type = git(repo, ["cat-file", "-t", oid]);
+  const bytes = git(repo, ["cat-file", "blob", oid]);
+  if (!type.ok || type.stdout.trim() !== "blob" || !bytes.ok || bytes.stdout !== expected.claimBytes.toString("utf8")) throw new Error("carry-forward permanent claim is invalid");
+}
+
+
 function carryForwardParentIdentity(continuation) {
   return {
     schema_version: 2,
@@ -2848,6 +3274,10 @@ function sortCanonicalJson(value) {
 }
 
 function inspectCarryForwardRefs(repo, expected) {
+  const targetClaims = observePermanentContinuationClaims(repo, expected.claim?.child_run_id || expected.childRunId || claimTargetRunId(expected.claimBytes));
+  if (targetClaims.length === 1 && (targetClaims[0].ref !== expected.claimRef || targetClaims[0].oid !== expected.claimOid || targetClaims[0].bytes !== expected.claimBytes.toString("utf8"))) {
+    throw new Error("continuation claim conflict: another permanent claim already targets the child run");
+  }
   const claimOid = readExactRefOid(repo, expected.claimRef);
   const branchOid = readExactRefOid(repo, expected.childBranchRef);
   if (claimOid === null && branchOid === null) return "absent";
@@ -2864,6 +3294,14 @@ function inspectCarryForwardRefs(repo, expected) {
   }
   if (branchOid !== expected.startCommit) throw new Error("continuation child branch conflict: target is not start_commit");
   return "exact";
+}
+
+function claimTargetRunId(claimBytes) {
+  try {
+    return JSON.parse(claimBytes.toString("utf8")).child_run_id;
+  } catch {
+    throw new Error("continuation claim bytes are invalid");
+  }
 }
 
 function readExactRefOid(repo, ref) {
@@ -2927,6 +3365,9 @@ function assertCarryForwardParentEligible(parentRun) {
     || parentRun.steering?.pr_fence != null || activePostPr) {
     throw new Error("v2 carry-forward requires a pre-PR blocked parent with no PR or post-PR state");
   }
+  if (parentRun.continuation?.draft_spec_reuse !== undefined) {
+    throw new Error("v2 carry-forward requires accepted planning and forbids draft_spec_reuse");
+  }
 }
 
 function validateCarryForwardCandidate(run) {
@@ -2937,8 +3378,16 @@ function validateCarryForwardCandidate(run) {
   if (continuation.post_pr !== undefined) throw new Error("carry-forward candidate cannot contain post_pr authority");
   const legacyContinuation = { ...continuation, schema_version: 1 };
   delete legacyContinuation.carry_forward;
+  delete legacyContinuation.configuration;
   validateRun({ ...run, continuation: legacyContinuation });
   if (!continuation.target?.base_ref?.startsWith("refs/remotes/origin/")) throw new Error("carry-forward candidate target.base_ref must identify origin");
+  assertExactCandidateKeys(continuation.configuration, CARRY_FORWARD_CONFIGURATION_KEYS, "continuation.configuration");
+  if (!CARRY_FORWARD_MODES.has(continuation.configuration.mode) || !["draft", "ready"].includes(continuation.configuration.pr_mode)
+    || continuation.configuration.max_parallel_slices !== 3 || continuation.configuration.max_retries !== 3
+    || continuation.configuration.github_account !== null && !stringValue(continuation.configuration.github_account)
+    || !continuation.configuration.post_pr_policy || typeof continuation.configuration.post_pr_policy !== "object" || Array.isArray(continuation.configuration.post_pr_policy)) {
+    throw new Error("continuation.configuration is invalid");
+  }
 
   const carry = continuation.carry_forward;
   assertExactCandidateKeys(carry, CARRY_FORWARD_KEYS, "carry_forward");
@@ -2983,139 +3432,7 @@ function canonicalCarryForwardRef(value, rootName) {
 }
 
 function collectCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, options = {}) {
-  const parentRoot = resolve(parentRunDir);
-  const planRef = "plan/slices.json";
-  const planPath = join(parentRoot, planRef);
-  const planEntry = lstatRequiredNoSymlinks(parentRoot, planPath, "parent plan/slices.json", "parent plan/slices.json must not contain symlinks");
-  if (!planEntry.isFile()) throw new Error("parent plan/slices.json must be a regular file");
-  const planBytes = readFileSync(planPath);
-  let plan;
-  try {
-    plan = validateSlicesPlan(JSON.parse(planBytes.toString("utf8")));
-  } catch (error) {
-    throw new Error(`parent plan/slices.json is invalid: ${error.message}`);
-  }
-
-  const runSlices = Array.isArray(parentRun.slices) ? parentRun.slices : [];
-  const runById = new Map(runSlices.map((slice) => [slice?.id, slice]));
-  if (runById.size !== runSlices.length || runSlices.length !== plan.slices.length) {
-    throw new Error("parent run slices must exactly classify the bound plan");
-  }
-  const acceptedSlices = [];
-  const remainingSliceIds = [];
-  for (const planned of plan.slices) {
-    const slice = runById.get(planned.id);
-    if (!slice || slice.stack !== planned.stack || !sameJsonValue(slice.depends_on, planned.depends_on)) {
-      throw new Error(`parent slice '${planned.id}' identity/dependencies do not match the bound plan`);
-    }
-    if (slice.status !== "merged") {
-      remainingSliceIds.push(planned.id);
-      continue;
-    }
-    if (!Number.isInteger(slice.attempts) || slice.attempts < 1) throw new Error(`accepted slice '${planned.id}' attempts must be positive`);
-    const observed = assertSliceReviewBindingCurrent(parentRoot, planned.id, slice);
-    if (observed.review.verdict !== "APPROVE") throw new Error(`accepted slice '${planned.id}' requires APPROVE review`);
-    acceptedSlices.push({
-      id: planned.id,
-      attempts: slice.attempts,
-      evidence_ref: slice.evidence_ref,
-      evidence_hash: slice.evidence_hash,
-      review_ref: slice.review_ref,
-      review_hash: slice.review_hash,
-      reviewed_commit: slice.reviewed_commit,
-      merge_commit: slice.merge_commit,
-    });
-  }
-  if (remainingSliceIds.length === 0) throw new Error("v2 carry-forward requires at least one nonmerged slice");
-
-  const startCommit = branchCommit(repo, parentRun.branch);
-  assertCarryForwardIntegration(repo, targetBaseCommit, startCommit, acceptedSlices);
-  assertOptionalCarryForwardPanels(parentRoot, parentRun, startCommit);
-  assertOriginBaseOutcome(repo, targetBaseRef, targetBaseCommit, startCommit, options);
-  return {
-    scope: "full-remaining-plan",
-    plan_ref: planRef,
-    plan_hash: sha256Buffer(planBytes),
-    start_commit: startCommit,
-    accepted_slices: acceptedSlices,
-    remaining_slice_ids: remainingSliceIds,
-  };
-}
-
-function assertCarryForwardIntegration(repo, baseCommit, startCommit, acceptedSlices) {
-  const ancestry = git(repo, ["merge-base", "--is-ancestor", baseCommit, startCommit]);
-  if (!ancestry.ok) throw new Error("v2 carry-forward start_commit must descend from target.base_commit");
-  if (acceptedSlices.length === 0) {
-    if (startCommit !== baseCommit) throw new Error("v2 carry-forward with zero accepted slices requires start_commit equal target.base_commit");
-    return;
-  }
-  if (startCommit === baseCommit) throw new Error("v2 carry-forward accepted merge chain is missing");
-
-  const chainResult = git(repo, ["rev-list", "--first-parent", "--reverse", `${baseCommit}..${startCommit}`]);
-  if (!chainResult.ok) throw new Error("v2 carry-forward first-parent merge chain cannot be observed");
-  const chain = chainResult.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean);
-  if (chain.some((commit) => !/^[0-9a-f]{40}$/u.test(commit)) || chain.length !== new Set(chain).size) {
-    throw new Error("v2 carry-forward first-parent merge chain is malformed");
-  }
-  const acceptedByMerge = new Map();
-  for (const accepted of acceptedSlices) {
-    if (!/^[0-9a-f]{40}$/u.test(String(accepted.merge_commit || "")) || acceptedByMerge.has(accepted.merge_commit)) {
-      throw new Error("v2 carry-forward accepted merge commits must be unique full commits");
-    }
-    acceptedByMerge.set(accepted.merge_commit, accepted);
-  }
-  if (chain.length !== acceptedSlices.length || chain.some((commit) => !acceptedByMerge.has(commit))) {
-    throw new Error("v2 carry-forward first-parent range must contain all and only accepted merge commits exactly once");
-  }
-  for (const [index, mergeCommit] of chain.entries()) {
-    const accepted = acceptedByMerge.get(mergeCommit);
-    const proof = observeReviewedMergeProof(repo, accepted.id, mergeCommit, accepted.reviewed_commit);
-    const expectedFirstParent = index === 0 ? baseCommit : chain[index - 1];
-    if (proof.first_parent !== expectedFirstParent) {
-      throw new Error(`accepted slice '${accepted.id}' merge first parent does not match the actual first-parent chain`);
-    }
-  }
-}
-
-function assertOptionalCarryForwardPanels(parentRunDir, parentRun, startCommit) {
-  const bindingKeys = ["report_hash", "review_hash", "reviewed_head_sha"];
-  const securityKeys = ["review_hash", "reviewed_head_sha"];
-  const anyBinding = bindingKeys.some((key) => parentRun.validator?.[key] !== undefined)
-    || securityKeys.some((key) => parentRun.security_review?.[key] !== undefined);
-  if (!anyBinding) return;
-  if (!bindingKeys.every((key) => parentRun.validator?.[key] !== undefined && parentRun.validator?.[key] !== null)
-    || !securityKeys.every((key) => parentRun.security_review?.[key] !== undefined && parentRun.security_review?.[key] !== null)) {
-    throw new Error("optional parent validator/security successor bindings must be all-or-none complete");
-  }
-  if (parentRun.validator.reviewed_head_sha !== startCommit || parentRun.security_review.reviewed_head_sha !== startCommit) {
-    throw new Error("optional parent panel reviewed heads must equal carry_forward.start_commit");
-  }
-  assertPanelReviewBindingsCurrent(parentRunDir, parentRun);
-}
-
-function assertOriginBaseOutcome(repo, targetBaseRef, targetBaseCommit, startCommit, options = {}) {
-  const prefix = "refs/remotes/origin/";
-  if (!targetBaseRef.startsWith(prefix) || targetBaseRef.length === prefix.length) {
-    throw continuationOutcomeError("origin-base-invalid", "target.base_ref must identify one origin branch");
-  }
-  const branch = targetBaseRef.slice(prefix.length);
-  const remoteRef = `refs/heads/${branch}`;
-  const gitOptions = { timeout: 30000, ...(typeof options.originSpawnSync === "function" ? { spawnSync: options.originSpawnSync } : {}) };
-  const observed = git(repo, ["ls-remote", "--exit-code", "origin", remoteRef], gitOptions);
-  const lines = observed.stdout.split(/\r?\n/u).filter(Boolean);
-  const match = observed.ok && lines.length === 1 ? /^([0-9a-f]{40})\t(.+)$/u.exec(lines[0]) : null;
-  if (!match || match[2] !== remoteRef) throw continuationOutcomeError("origin-base-unavailable", "configured origin base could not be observed unambiguously");
-  const tip = match[1];
-  if (typeof options.beforeOriginFetch === "function") options.beforeOriginFetch({ oid: tip, remote_ref: remoteRef });
-  const fetched = git(repo, ["fetch", "--no-tags", "--quiet", "--no-write-fetch-head", "origin", tip], gitOptions);
-  if (!fetched.ok) throw continuationOutcomeError("origin-base-unavailable", "captured origin base commit could not be fetched");
-  const fetchedCommit = git(repo, ["rev-parse", "--verify", `${tip}^{commit}`]);
-  if (!fetchedCommit.ok || fetchedCommit.stdout.trim() !== tip) throw continuationOutcomeError("origin-base-unavailable", "captured origin base commit is not an unambiguous commit");
-  if (tip === targetBaseCommit) return "unchanged";
-  const contains = git(repo, ["merge-base", "--is-ancestor", startCommit, tip]);
-  if (contains.ok) throw continuationOutcomeError("rebaseline-required", "configured origin base already contains carry_forward.start_commit");
-  if (contains.status === 1) throw continuationOutcomeError("stale-parent-base-moved", "configured origin base moved without containing carry_forward.start_commit");
-  throw continuationOutcomeError("origin-base-unavailable", "configured origin base ancestry could not be observed");
+  return observeCarryForwardAuthority(repo, parentRunDir, parentRun, targetBaseRef, targetBaseCommit, options);
 }
 
 function continuationOutcomeError(code, message) {
@@ -3137,6 +3454,7 @@ function normalizeContinuationTargetRunId(runId, parentRunId) {
 function assertContinuationTargetAvailable(repo, targetRunId) {
   const targetRunFile = join(factoryRoot(repo), targetRunId, "run.json");
   if (existsSync(targetRunFile)) throw new Error(`target run already exists: ${targetRunId}`);
+  inspectContinuationRouteSchema(repo, targetRunId, 1, { route: "continuation" });
   if (branchExists(repo, targetRunId)) throw new Error(`target branch already exists: ${targetRunId}`);
   const targetWorktree = resolve(repo, ".opencode", "worktrees", targetRunId);
   if (existsSync(targetWorktree)) throw new Error(`target worktree already exists: ${targetWorktree}`);
@@ -3146,8 +3464,29 @@ function assertContinuationSemanticTargetAbsent(repo, targetRunId) {
   const roots = new Set([...factoryRootsForLookup(repo), factoryRoot(repo)]);
   for (const rootPath of roots) {
     const targetRunDir = resolve(rootPath, targetRunId);
-    if (existsSync(targetRunDir)) throw new Error(`v2 allocation conflicts with existing child factory run directory: ${targetRunDir}`);
+    if (pathExistsNoFollow(targetRunDir)) throw new Error(`v2 allocation conflicts with existing child factory run directory: ${targetRunDir}`);
   }
+}
+
+function continuationPublishedCreatedAt(repo, targetRunId) {
+  const root = factoryRoot(repo);
+  const runDir = join(root, targetRunId);
+  const runFile = join(runDir, "run.json");
+  if (!pathExistsNoFollow(runDir)) return null;
+  try {
+    const entry = lstatRequiredNoSymlinks(root, runFile, "published carry-forward run.json", "published carry-forward run path must not contain symlinks");
+    if (!entry.isFile()) return null;
+    const value = JSON.parse(readFileSync(runFile, "utf8"));
+    return value?.run_id === targetRunId && value?.continuation?.schema_version === 2 && Number.isFinite(Date.parse(value.continuation.created_at || ""))
+      ? value.continuation.created_at
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function pathExistsNoFollow(path) {
+  try { lstatSync(path); return true; } catch (error) { if (error?.code === "ENOENT") return false; throw error; }
 }
 
 function requiredContinuationReview(value) {
@@ -4103,7 +4442,7 @@ function formatPrompt(prompt, opts) {
 }
 
 export function validateSlices(plan) {
-  return validateSlicesPlan(plan);
+  return validateSlicesPlan(plan, { requireIntegrationGate: true });
 }
 
 function buildResumePayload(run, opts) {
@@ -4130,20 +4469,68 @@ function buildResumePayload(run, opts) {
   return {
     operator_request: `resume ${run.run_id}`,
     driver: {
-      mode: opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
-      ready: false,
+      mode: run.continuation?.schema_version === 2 ? run.mode : opts.autonomous ? "autonomous" : opts.headless ? "headless" : "interactive",
+      ready: run.continuation?.schema_version === 2 ? run.pr_mode === "ready" : false,
       pr_mode: run.pr_mode || null,
-      reviewer: null,
-      github_account: resolveGithubAccount(opts),
+      reviewer: run.continuation?.schema_version === 2 && run.post_pr?.policy?.review?.required ? run.post_pr.policy.review.reviewer_login : null,
+      github_account: run.continuation?.schema_version === 2 ? run.github_account ?? null : resolveGithubAccount(opts),
+      ...(run.continuation?.schema_version === 2 ? { post_pr_ci: Object.fromEntries(Object.entries(cloneJson(run.post_pr.policy)).filter(([key]) => key !== "review")) } : {}),
     },
     resume: {
-      schema_version: 1,
+      schema_version: run.continuation?.schema_version === 2 ? 2 : 1,
       kind: "existing-run-resume",
       run_id: run.run_id,
       ...(run.post_pr?.policy ? { post_pr_policy: cloneJson(run.post_pr.policy) } : {}),
     },
     steering,
   };
+}
+
+function assertRunClaimRoute(repo, run) {
+  const schema = run.continuation?.schema_version === 2 ? 2 : 1;
+  inspectContinuationRouteSchema(repo, run.run_id, schema, {
+    route: "resume",
+    ordinaryResumeSchema: 1,
+    postPrPolicy: run.post_pr?.policy,
+  });
+  return run;
+}
+
+function assertResumeConfiguration(run, opts = {}) {
+  const postPrExplicit = hasExplicitPostPrOptions(opts);
+  if (run.continuation?.schema_version !== 2) {
+    if (postPrExplicit) throw new Error("factory resume rejects post-PR policy flags; the persisted policy is authoritative");
+    return;
+  }
+
+  const explicitModes = Array.isArray(opts.modeFlags) && opts.modeFlags.length > 0
+    ? opts.modeFlags.map((flag) => flag === "--autonomous" ? "autonomous" : ["--headless", "--detached"].includes(flag) ? "headless" : "interactive")
+    : [opts.autonomous === true ? "autonomous" : null, opts.headless === true || opts.detached === true ? "headless" : null].filter(Boolean);
+  const modes = new Set(explicitModes);
+  if (modes.size > 1) throw new Error("schema-v2 resume has conflicting explicit modes");
+  if (modes.size === 1 && !modes.has(run.mode)) throw new Error("schema-v2 resume mode conflicts with published immutable configuration");
+
+  if ((opts.ghAccountOccurrences || 0) > 1) throw new Error("schema-v2 resume accepts --gh-account only once");
+  if ((opts.ghAccountOccurrences || 0) > 0 || opts.ghAccount !== undefined) {
+    const account = normalizeGithubAccount(opts.ghAccount);
+    if (!account) throw new Error("--gh-account must be a valid GitHub account name");
+    if (account !== (run.github_account ?? null)) throw new Error("schema-v2 resume GitHub account conflicts with published immutable configuration");
+  }
+
+  if (opts.draft === true && (opts.noDraft === true || opts.ready === true)) throw new Error("schema-v2 resume has conflicting PR mode flags");
+  const prMode = opts.draft === true ? "draft" : opts.noDraft === true || opts.ready === true ? "ready" : null;
+  if (prMode && prMode !== run.pr_mode) throw new Error("schema-v2 resume PR mode conflicts with published immutable configuration");
+
+  if (postPrExplicit) {
+    const policy = resolvePostPrCiPolicy({ driver: postPrDriverOverride(opts), reviewer: opts.reviewer });
+    if (!sameJsonValue(policy, run.post_pr?.policy)) throw new Error("schema-v2 resume post-PR policy conflicts with published immutable configuration");
+  }
+}
+
+function hasExplicitPostPrOptions(opts = {}) {
+  return opts.postPrCi === true || opts.noPostPrCi === true || opts.reviewer !== undefined
+    || [opts.postPrWaitMinutes, opts.postPrPollSeconds, opts.postPrMaxPollSeconds, opts.postPrCheckStartGraceSeconds, opts.postPrMaxTransientErrors]
+      .some((value) => value !== undefined);
 }
 
 function resumeEligibility(runDir, run, opts = {}) {
@@ -4262,6 +4649,71 @@ function featureCommandPayload(prompt, opts) {
   return payload;
 }
 
+function resolveCarryForwardConfiguration(repo, opts = {}) {
+  if (opts.newPr === true) throw new Error("factory continue --carry-forward is mutually exclusive with --new-pr");
+  if (opts.autonomous === true && (opts.headless === true || opts.detached === true)) {
+    throw new Error("factory continue --carry-forward accepts only one execution mode");
+  }
+  if (Array.isArray(opts.modeFlags)) {
+    const effective = new Set(opts.modeFlags.map((flag) => ["--headless", "--detached"].includes(flag) ? "headless" : flag));
+    if (effective.size > 1) throw new Error("factory continue --carry-forward accepts only one execution mode");
+  }
+  if (opts.draft === true && (opts.noDraft === true || opts.ready === true)) {
+    throw new Error("factory continue --carry-forward has conflicting PR mode flags");
+  }
+  if (Number.isInteger(opts.ghAccountOccurrences) && opts.ghAccountOccurrences > 1) {
+    throw new Error("factory continue --carry-forward accepts --gh-account only once");
+  }
+  const mode = opts.autonomous === true ? "autonomous" : opts.headless === true || opts.detached === true ? "headless" : "interactive";
+  const githubAccount = opts.ghAccount !== undefined && opts.ghAccount !== null
+    ? normalizeGithubAccount(opts.ghAccount)
+    : detectGithubRemoteOwner(repo);
+  if (opts.ghAccount !== undefined && opts.ghAccount !== null && !githubAccount) throw new Error("--gh-account must be a valid GitHub account name");
+  const prMode = opts.draft === true ? "draft" : "ready";
+  const policy = resolvePostPrCiPolicy({ driver: postPrDriverOverride(opts), reviewer: opts.reviewer });
+  return {
+    mode,
+    github_account: githubAccount,
+    pr_mode: prMode,
+    max_parallel_slices: 3,
+    max_retries: 3,
+    post_pr: {
+      schema_version: 1,
+      policy,
+      phase: policy.enabled ? "awaiting-pr" : "disabled",
+      attempt: 0,
+      observation: null,
+      remediation: null,
+      evidence_refs: [],
+      continuation_review: null,
+      terminal_fact: null,
+      pr_operation: null,
+    },
+  };
+}
+
+function carryForwardConfigurationBinding(configuration) {
+  return {
+    mode: configuration.mode,
+    github_account: configuration.github_account ?? null,
+    pr_mode: configuration.pr_mode,
+    max_parallel_slices: 3,
+    max_retries: 3,
+    post_pr_policy: cloneJson(configuration.post_pr.policy),
+  };
+}
+
+function carryForwardDriver(run) {
+  return {
+    mode: run.mode,
+    ready: run.pr_mode === "ready",
+    pr_mode: run.pr_mode,
+    reviewer: run.post_pr?.policy?.review?.required === true ? run.post_pr.policy.review.reviewer_login : null,
+    github_account: run.github_account ?? null,
+    post_pr_ci: Object.fromEntries(Object.entries(cloneJson(run.post_pr.policy)).filter(([key]) => key !== "review")),
+  };
+}
+
 function runPrModeOverride(opts = {}) {
   if (opts.draft === true) return "draft";
   if (opts.noDraft === true || opts.ready === true) return "ready";
@@ -4365,8 +4817,10 @@ async function heartbeatTick(runtime, lockOptions = {}) {
 
       const nextHeartbeat = validateHeartbeatState({ ...heartbeat.value, pid: process.pid, last_tick_at: now });
       const nextRun = validateRun({ ...run, heartbeat_at: now });
+      const v2Authority = assertV2LocalPublishedAuthority(runtime.runDir, run, lockOptions);
+      assertV2LocalPublishedAuthority(runtime.runDir, run, lockOptions, v2Authority);
       writeHeartbeatFile(heartbeatPath(runtime.runDir), nextHeartbeat);
-      writeJsonAtomic(runPath, nextRun);
+      writeSemanticRunJsonAtomic(runtime.runDir, runPath, nextRun, lockOptions, v2Authority);
       runtime.lockTimeouts = 0;
       return { continue: true, reason: null };
     }, heartbeatTickLockOptions(runtime, lockOptions));
@@ -4466,7 +4920,6 @@ function heartbeatLiveness(heartbeat, now, opts = {}) {
 function assertPostPrCliOptions(opts, { command, resume = false } = {}) {
   if (opts.postPrCi && opts.noPostPrCi) throw new Error(`${command} accepts only one of --post-pr-ci or --no-post-pr-ci`);
   const timing = [opts.postPrWaitMinutes, opts.postPrPollSeconds, opts.postPrMaxPollSeconds, opts.postPrCheckStartGraceSeconds, opts.postPrMaxTransientErrors];
-  if (resume && (opts.postPrCi || opts.noPostPrCi || timing.some((value) => value !== undefined))) throw new Error("factory resume rejects post-PR policy flags; the persisted policy is authoritative");
   if (!resume && timing.some((value) => value !== undefined) && !opts.postPrCi) throw new Error(`${command} post-PR timing flags require --post-pr-ci`);
   postPrDriverOverride(opts);
 }
@@ -5087,7 +5540,7 @@ function durableErrorClass(value) {
 
 function acceptedSlicesPlan(runDir, run) {
   const file = join(runDir, "plan", "slices.json");
-  if (existsSync(file)) return validateSlicesPlan(JSON.parse(readFileSync(file, "utf8")));
+  if (existsSync(file)) return parseSlicesPlanBytes(readFileSync(file), { label: "accepted plan/slices.json" });
   const slices = (Array.isArray(run.slices) ? run.slices : []).filter((slice) => stringValue(slice?.id) && Array.isArray(slice.paths)).map((slice) => ({ id: slice.id, stack: slice.stack, paths: slice.paths }));
   return { slices };
 }
@@ -5308,14 +5761,22 @@ function assertFactoryStateHash(runDir, expected) {
   if (!stringValue(expected) || hashRunState(readRunFile(join(runDir, "run.json"))) !== expected) throw new Error("post-PR state changed during evidence publication");
 }
 
-function writeJsonAtomic(file, value) {
+function writeJsonAtomic(file, value, options = {}) {
   const temp = `${file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   try {
     writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    options.beforeReplace?.();
     renameSync(temp, file);
   } finally {
     if (existsSync(temp)) rmSync(temp, { force: true });
   }
+}
+
+function writeSemanticRunJsonAtomic(runDir, file, value, options = {}, expected = null) {
+  const authority = assertV2LocalPublishedAuthority(runDir, value, options, expected);
+  writeJsonAtomic(file, value, {
+    beforeReplace: authority ? () => assertV2LocalPublishedAuthority(runDir, value, options, authority) : null,
+  });
 }
 
 async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
@@ -5333,6 +5794,7 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
     const current = readRunFile(runPath);
     assertRunJsonWriterAllowed(current, `env ${eventKind}`, { allowUncheckpointed: eventKind === "resume" });
     if (eventKind === "resume") assertResumeMutationAllowed(runDir, current, opts);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, opts);
     const provenance = await collectEffectiveProvenance({
       repo: factoryRepoFromRunDir(runDir),
       gitCwd: provenanceGitCwd(factoryRepoFromRunDir(runDir), current.worktree),
@@ -5345,7 +5807,11 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
       debug_snapshot: nextDebugSnapshot(current.debug_snapshot, snapshot, eventKind),
       provenance: nextProvenance(current.provenance, provenance, eventKind),
     });
-    writeJsonAtomic(runPath, next);
+    if (eventKind === "resume") {
+      await opts.resumeEnvHooks?.beforeWrite?.({ runDir, run: current });
+      if (current.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(factoryRepoFromRunDir(runDir), runDir, current, opts);
+    }
+    writeSemanticRunJsonAtomic(runDir, runPath, next, opts, v2Authority);
     return next.debug_snapshot;
   }, opts);
 }

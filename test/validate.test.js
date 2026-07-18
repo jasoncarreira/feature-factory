@@ -8,7 +8,8 @@ import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
-import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSlicesPlan } from "../src/validate.js";
+import { hashValue } from "../src/refs.js";
+import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
@@ -541,6 +542,61 @@ describe("run schema and consistency", () => {
     assert.throws(() => validateRun({ ...runningRun(), mode: "interactive", gates: { story: pending } }), /handoff_receipt: is forbidden for a pending gate/u);
   });
 
+  it("closes checked execution claim and receipt variants with exact outcome nullability", () => {
+    const claim = {
+      schema_version: 1, kind: "checked-test-execution-claim", state: "active", nonce: "123e4567-e89b-42d3-a456-426614174000",
+      run_id: "checked", attempt: 1, plan_ref: "plan/slices.json", plan_hash: HASH, head_sha: "a".repeat(40),
+      receipt_ref: "evidence/test-verifier.attempt-1.json", claimed_at: "2026-07-17T12:00:00.000Z",
+    };
+    const claimStep = (executionClaim, status = "running") => ({
+      agent: "test-verifier", status, attempts: 1, execution_claim: executionClaim, execution_claim_hash: hashValue(executionClaim),
+    });
+    assert.equal(validateRun({ ...runningRun("checked"), steps: [claimStep(claim)] }).steps[0].execution_claim.state, "active");
+    assert.throws(
+      () => validateRun({ ...runningRun("checked"), steps: [{ agent: "test-verifier", status: "running", attempts: 1, execution_claim: claim }] }),
+      /execution_claim_hash: must be present exactly when execution_claim is present/u,
+    );
+    assert.throws(
+      () => validateRun({ ...runningRun("checked"), steps: [{ agent: "test-verifier", status: "running", attempts: 1, execution_claim_hash: hashValue(claim) }] }),
+      /execution_claim_hash: must be present exactly when execution_claim is present/u,
+    );
+    assert.throws(
+      () => validateRun({ ...runningRun("checked"), steps: [{ ...claimStep(claim), execution_claim_hash: HASH }] }),
+      /execution_claim_hash: must equal the canonical execution_claim hash/u,
+    );
+    for (const [label, mutate, expected] of [
+      ["unknown key", (value) => { value.extra = true; }, /execution_claim\.extra: is not allowed/u],
+      ["attempt binding", (value) => { value.attempt = 2; value.receipt_ref = "evidence/test-verifier.attempt-2.json"; }, /must match step attempts/u],
+      ["fixed ref", (value) => { value.receipt_ref = "evidence/other.json"; }, /must equal the fixed attempt receipt ref/u],
+    ]) {
+      const malformed = structuredClone(claim); mutate(malformed);
+      assert.throws(() => validateRun({ ...runningRun("checked"), steps: [claimStep(malformed)] }), expected, label);
+    }
+    const unknown = { ...claim, state: "unknown", failed_at: "2026-07-17T12:01:00.000Z", reason: "authority-changed" };
+    assert.equal(validateRun({ ...runningRun("checked"), steps: [claimStep(unknown)] }).steps[0].execution_claim.reason, "authority-changed");
+    const completed = { ...claim, state: "completed", completed_at: "2026-07-17T12:01:00.000Z", status: "fail", receipt_hash: HASH };
+    assert.equal(validateRun({ ...runningRun("checked"), steps: [{ ...claimStep(completed, "rejected"), evidence_ref: claim.receipt_ref }] }).steps[0].status, "rejected");
+
+    const stream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false };
+    const receipt = {
+      schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: "checked", attempt: 1,
+      claim_nonce: claim.nonce, plan_ref: claim.plan_ref, plan_hash: HASH, head_sha: "a".repeat(40),
+      started_at: "2026-07-17T12:00:00.000Z", completed_at: "2026-07-17T12:01:00.000Z", duration_ms: 60_000,
+      status: "pass", review_ready: true,
+      commands: [{ index: 0, program: "npm", args: ["run", "check"], outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 1, stdout: stream, stderr: stream }],
+    };
+    assert.equal(validateTestExecutionReceipt(receipt).status, "pass");
+    for (const [label, mutate, expected] of [
+      ["unknown key", (value) => { value.commands[0].extra = true; }, /commands\[0\]\.extra: is not allowed/u],
+      ["exited nullability", (value) => { value.commands[0].signal = "SIGTERM"; }, /exited requires an exit code and null signal/u],
+      ["aggregate", (value) => { value.status = "fail"; value.review_ready = false; }, /aggregate command result status/u],
+      ["output limit", (value) => { Object.assign(value.commands[0], { outcome: "output-limit", status: "fail", exit_code: null, signal: "SIGKILL" }); value.status = "fail"; value.review_ready = false; }, /output-limit requires a truncated stream/u],
+    ]) {
+      const malformed = structuredClone(receipt); mutate(malformed);
+      assert.throws(() => validateTestExecutionReceipt(malformed), expected, label);
+    }
+  });
+
   it("accepts steering metadata without bumping run schema and checks pending hash", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo, "steering-valid");
@@ -725,19 +781,87 @@ describe("run schema and consistency", () => {
     );
   });
 
-  it("keeps durable continuation validation strictly v1 before B1.4", () => {
+  it("preserves v1 while accepting only the closed schema-v2 carry-forward projection", () => {
     const v1 = continuationMetadata();
     assert.equal(validateRun({ ...runningRun(), continuation: v1 }).continuation.carry_forward, undefined);
     const invalidV1 = structuredClone(v1);
     invalidV1.carry_forward = carryForwardMetadata();
     assert.throws(() => validateRun({ ...runningRun(), continuation: invalidV1 }), /carry_forward: is not allowed/u);
 
-    const v2 = continuationMetadata();
+    const v2 = continuationMetadata("continuation-run");
     v2.schema_version = 2;
     v2.carry_forward = carryForwardMetadata();
     v2.parent.commit = v2.carry_forward.start_commit;
     v2.target.base_ref = "refs/remotes/origin/main";
-    assert.throws(() => validateRun({ ...runningRun(), continuation: v2 }), /schema_version: must equal 1|carry_forward: is not allowed/u);
+    v2.planning_reuse = {
+      eligible: true, spec_review_ref: "reviews/spec-writer.json", spec_review_hash: HASH,
+      spec_artifact_ref: "artifacts/technical-brief.md", spec_artifact_hash: HASH, child_spec_review_ref: "reviews/spec-writer.json",
+    };
+    const policy = { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } };
+    v2.configuration = { mode: "headless", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, post_pr_policy: policy };
+    const run = {
+      ...runningRun("continuation-run"), mode: "headless", branch: v2.target.branch, worktree: v2.target.worktree, github_account: null, pr_mode: "ready",
+      max_parallel_slices: 3, max_retries: 3, continuation: v2,
+      post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
+      slices: [
+        { id: "A", stack: "backend", depends_on: [], status: "merged", attempts: 1, evidence_ref: "evidence/A.json", evidence_hash: HASH, review_ref: "reviews/A.json", review_hash: HASH, reviewed_commit: "a".repeat(40), merge_commit: "b".repeat(40) },
+        { id: "B", stack: "backend", depends_on: ["A"], status: "pending", attempts: 0 },
+      ],
+    };
+    assert.equal(validateRun(run).continuation.schema_version, 2);
+    const acceptedVerifier = structuredClone(run);
+    acceptedVerifier.steps = [{
+      agent: "test-verifier", status: "accepted", attempts: 1,
+      artifact_ref: "artifacts/test-report.md", evidence_ref: "evidence/test-verifier.attempt-1.json", review_ref: "reviews/test-verifier.attempt-1.json",
+      execution_claim: {
+        schema_version: 1, kind: "checked-test-execution-claim", state: "completed", nonce: "123e4567-e89b-42d3-a456-426614174000",
+        run_id: "continuation-run", attempt: 1, plan_ref: "plan/slices.json", plan_hash: HASH, head_sha: "a".repeat(40),
+        receipt_ref: "evidence/test-verifier.attempt-1.json", claimed_at: "2026-07-17T12:00:00.000Z",
+        completed_at: "2026-07-17T12:01:00.000Z", status: "pass", receipt_hash: HASH,
+      },
+      acceptance: {
+        artifact_ref: "artifacts/test-report.md", artifact_hash: HASH,
+        evidence_ref: "evidence/test-verifier.attempt-1.json", evidence_hash: HASH,
+        review_ref: "reviews/test-verifier.attempt-1.json", review_hash: HASH, reviewed_head_sha: "a".repeat(40),
+      },
+    }];
+    acceptedVerifier.steps[0].execution_claim_hash = hashValue(acceptedVerifier.steps[0].execution_claim);
+    assert.equal(validateRun(acceptedVerifier).steps[0].acceptance.evidence_hash, HASH);
+    assert.equal(validateRun(acceptedVerifier).steps[0].execution_claim.status, "pass");
+    const missingVerifierEvidence = structuredClone(acceptedVerifier);
+    delete missingVerifierEvidence.steps[0].acceptance.evidence_hash;
+    assert.throws(() => validateRun(missingVerifierEvidence), /acceptance\.evidence_hash: is required for accepted schema-v2 test-verifier/u);
+    const invalidV1Configuration = structuredClone(v1);
+    invalidV1Configuration.configuration = structuredClone(v2.configuration);
+    assert.throws(() => validateRun({ ...runningRun(), continuation: invalidV1Configuration }), /configuration: is not allowed for schema_version 1/u);
+    for (const [label, mutate, expected] of [
+      ["extra", (candidate) => { candidate.continuation.configuration.extra = true; }, /configuration\.extra: is not allowed/u],
+      ["mode", (candidate) => { candidate.continuation.configuration.mode = "legacy"; }, /configuration\.mode: must be one of/u],
+      ["github_account", (candidate) => { candidate.continuation.configuration.github_account = ""; }, /configuration\.github_account: must be null or a non-empty string/u],
+      ["pr_mode", (candidate) => { candidate.continuation.configuration.pr_mode = "prompt"; }, /configuration\.pr_mode: must be one of/u],
+      ["max_parallel_slices", (candidate) => { candidate.continuation.configuration.max_parallel_slices = 2; }, /configuration\.max_parallel_slices: must be an integer from 3 to 3/u],
+      ["max_retries", (candidate) => { candidate.continuation.configuration.max_retries = 4; }, /configuration\.max_retries: must be an integer from 3 to 3/u],
+      ["post_pr_policy", (candidate) => { candidate.continuation.configuration.post_pr_policy.enabled = "no"; }, /configuration\.post_pr_policy\.enabled: must be a boolean/u],
+    ]) {
+      const candidate = structuredClone(run);
+      mutate(candidate);
+      assert.throws(() => validateRun(candidate), expected, label);
+    }
+    for (const [label, mutate] of [
+      ["mode", (candidate) => { candidate.mode = "autonomous"; }],
+      ["github_account", (candidate) => { candidate.github_account = "octo-org"; }],
+      ["pr_mode", (candidate) => { candidate.pr_mode = "draft"; }],
+      ["max_parallel_slices", (candidate) => { candidate.max_parallel_slices = 2; }],
+      ["max_retries", (candidate) => { candidate.max_retries = 2; }],
+      ["post_pr_policy", (candidate) => { candidate.post_pr.policy = { ...candidate.post_pr.policy, wait_ms: 7_200_000 }; }],
+    ]) {
+      const candidate = structuredClone(run);
+      mutate(candidate);
+      assert.throws(() => validateRun(candidate), /must exactly match immutable schema-v2 continuation configuration/u, label);
+    }
+    const rewrittenAccepted = structuredClone(run);
+    rewrittenAccepted.slices[0].attempts = 2;
+    assert.throws(() => validateRun(rewrittenAccepted), /adopted carry-forward row is immutable/u);
   });
 
   it("reports advisory consistency failures for missing refs and merged slices", () => {
