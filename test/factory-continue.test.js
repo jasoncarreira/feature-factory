@@ -1892,30 +1892,62 @@ function createFixture(runId, { status = "blocked", createBranch = true, review,
   return { repo, runDir, runId };
 }
 
-function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panels = false } = {}) {
-  const repo = mkdtempSync(join(tmpdir(), "factory-carry-forward-"));
-  initGitRepo(repo);
-  const origin = join(repo, ".git", "test-origin.git");
-  runGit(repo, ["init", "--bare", origin]);
-  runGit(repo, ["remote", "add", "origin", origin]);
-  runGit(repo, ["push", "origin", "main:main"]);
-  const baseCommit = gitStdout(repo, ["rev-parse", "main^{commit}"]);
-  runGit(repo, ["checkout", "-b", runId, baseCommit]);
+// The carry-forward git topology (bare origin, per-slice reviewed commits,
+// first-parent merges) depends only on (accepted, mergeOrder), not on runId or
+// panels. It is the expensive part — ~13 git subprocesses per fixture — and the
+// loop tests rebuild it many times with constant params. Build it once per
+// (accepted, mergeOrder) key under a placeholder runId, then clone and rebind
+// branches to the caller's runId. Commit SHAs are captured from the template
+// and preserved by the copy, so the cloned repo is internally consistent and
+// the runDir/run.json (written afterward, unchanged) references real commits.
+const V2_TEMPLATE_RUN = "v2template";
+const v2Templates = new Map();
+const v2TemplateDirs = [];
 
+function v2GitTemplate(accepted, mergeOrder) {
+  const key = JSON.stringify([accepted, mergeOrder]);
+  const cached = v2Templates.get(key);
+  if (cached) return cached;
+  const dir = mkdtempSync(join(tmpdir(), "factory-carry-template-"));
+  v2TemplateDirs.push(dir);
+  initGitRepo(dir);
+  runGit(dir, ["init", "--bare", join(dir, ".git", "test-origin.git")]);
+  runGit(dir, ["remote", "add", "origin", join(dir, ".git", "test-origin.git")]);
+  runGit(dir, ["push", "origin", "main:main"]);
+  const baseCommit = gitStdout(dir, ["rev-parse", "main^{commit}"]);
+  runGit(dir, ["checkout", "-b", V2_TEMPLATE_RUN, baseCommit]);
   const reviewedCommits = {};
   const mergeCommits = {};
   for (const id of accepted) {
-    runGit(repo, ["checkout", "-b", `${runId}--${id}`, baseCommit]);
-    writeFileSync(join(repo, `${id}.txt`), `${id}\n`);
-    runGit(repo, ["add", `${id}.txt`]);
-    runGit(repo, ["commit", "-m", `reviewed ${id}`]);
-    reviewedCommits[id] = gitStdout(repo, ["rev-parse", "HEAD"]);
+    runGit(dir, ["checkout", "-b", `${V2_TEMPLATE_RUN}--${id}`, baseCommit]);
+    writeFileSync(join(dir, `${id}.txt`), `${id}\n`);
+    runGit(dir, ["add", `${id}.txt`]);
+    runGit(dir, ["commit", "-m", `reviewed ${id}`]);
+    reviewedCommits[id] = gitStdout(dir, ["rev-parse", "HEAD"]);
   }
-  runGit(repo, ["checkout", runId]);
+  runGit(dir, ["checkout", V2_TEMPLATE_RUN]);
   for (const id of mergeOrder) {
-    runGit(repo, ["merge", "--no-ff", "--no-edit", `${runId}--${id}`]);
-    mergeCommits[id] = gitStdout(repo, ["rev-parse", "HEAD"]);
+    runGit(dir, ["merge", "--no-ff", "--no-edit", `${V2_TEMPLATE_RUN}--${id}`]);
+    mergeCommits[id] = gitStdout(dir, ["rev-parse", "HEAD"]);
   }
+  const template = { dir, baseCommit, reviewedCommits, mergeCommits };
+  v2Templates.set(key, template);
+  return template;
+}
+
+function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panels = false } = {}) {
+  const repo = mkdtempSync(join(tmpdir(), "factory-carry-forward-"));
+  const template = v2GitTemplate(accepted, mergeOrder);
+  cpSync(template.dir, repo, { recursive: true });
+  // Repoint the copied bare origin at this repo's copy, not the template's.
+  runGit(repo, ["remote", "set-url", "origin", join(repo, ".git", "test-origin.git")]);
+  const { baseCommit, reviewedCommits, mergeCommits } = template;
+  // Recreate the runId-named branches at the captured SHAs, then remove the
+  // placeholder branches so no template-named refs linger.
+  for (const id of accepted) runGit(repo, ["branch", `${runId}--${id}`, reviewedCommits[id]]);
+  const tip = mergeOrder.length ? mergeCommits[mergeOrder[mergeOrder.length - 1]] : baseCommit;
+  runGit(repo, ["checkout", "-b", runId, tip]);
+  runGit(repo, ["branch", "-D", V2_TEMPLATE_RUN, ...accepted.map((id) => `${V2_TEMPLATE_RUN}--${id}`)]);
 
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
@@ -2043,7 +2075,10 @@ function gitRepoTemplate_() {
   return gitRepoTemplate;
 }
 
-after(() => { if (gitRepoTemplate) rmSync(gitRepoTemplate, { recursive: true, force: true }); });
+after(() => {
+  if (gitRepoTemplate) rmSync(gitRepoTemplate, { recursive: true, force: true });
+  for (const dir of v2TemplateDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 function initGitRepo(repo) {
   cpSync(gitRepoTemplate_(), repo, { recursive: true });
