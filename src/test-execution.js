@@ -95,7 +95,6 @@ async function executeCommand(command, index, cwd, env, options) {
       killReason = reason;
       indeterminate = cause;
       closeTimeout = setTimeout(() => finish(reject, new Error("process did not close within 10 seconds after SIGKILL")), closeTimeoutMs(options));
-      closeTimeout.unref?.();
       let sent;
       try { sent = child.kill("SIGKILL"); }
       catch (error) { finish(reject, new Error(`SIGKILL failed: ${error.message}`)); return; }
@@ -129,7 +128,6 @@ async function executeCommand(command, index, cwd, env, options) {
       finish(reject, new Error("process closed without a decided exit code or signal"));
     });
     timeout = setTimeout(() => kill("timeout"), commandTimeoutMs(options));
-    timeout.unref?.();
   });
 }
 
