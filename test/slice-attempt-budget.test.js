@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { validateRun, validateSlicesPlan } from "../src/validate.js";
 import { spawnSync } from "./helpers/git-fixture.js";
@@ -673,14 +673,30 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
   };
 }
 
+// Every fixture rebuilds the identical init + config + README-commit base on
+// the slice-branch. Build it once per process and cpSync per fixture (five git
+// subprocesses become one copy); later per-attempt commits are unaffected.
+let sliceBaseTemplate = null;
+
+function sliceBaseTemplate_() {
+  if (!sliceBaseTemplate) {
+    const repo = mkdtempSync(join(tmpdir(), "slice-attempt-budget-template-"));
+    git(repo, ["init", "-b", "slice-branch"]);
+    git(repo, ["config", "user.email", "test@example.com"]);
+    git(repo, ["config", "user.name", "Test"]);
+    writeFileSync(join(repo, "README.md"), "fixture\n", "utf8");
+    git(repo, ["add", "README.md"]);
+    git(repo, ["commit", "-m", "fixture"]);
+    sliceBaseTemplate = repo;
+  }
+  return sliceBaseTemplate;
+}
+
+after(() => { if (sliceBaseTemplate) rmSync(sliceBaseTemplate, { recursive: true, force: true }); });
+
 function createFixture(name) {
   const repo = mkdtempSync(join(tmpdir(), `slice-attempt-budget-${name}-`));
-  git(repo, ["init", "-b", "slice-branch"]);
-  git(repo, ["config", "user.email", "test@example.com"]);
-  git(repo, ["config", "user.name", "Test"]);
-  writeFileSync(join(repo, "README.md"), "fixture\n", "utf8");
-  git(repo, ["add", "README.md"]);
-  git(repo, ["commit", "-m", "fixture"]);
+  cpSync(sliceBaseTemplate_(), repo, { recursive: true });
   const runDir = join(repo, ".opencode", "factory", "run");
   mkdirSync(join(runDir, "evidence"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });

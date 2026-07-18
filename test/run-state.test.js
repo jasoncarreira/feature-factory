@@ -1,11 +1,11 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { createPanelReviewRecord, createReviewRecord, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { publishSyntheticV2Parent } from "./helpers/v2-parent-fixture.js";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -3615,13 +3615,31 @@ function makeSyntheticV2Run(runDir, input, { accepted = [], remaining = [] } = {
   return run;
 }
 
+// The init + config + README-commit base is identical across all ~40 callers;
+// only `branches` vary. Build it once per process and cpSync per repo, then add
+// the (cheap) per-call branches. The copied .git carries the committed identity
+// forward, so later commits in a fixture are unchanged and the base commit is
+// byte-identical to a fresh init.
+let runStateGitBase = null;
+
+function runStateGitBase_() {
+  if (!runStateGitBase) {
+    const repo = mkdtempSync(join(tmpdir(), "run-state-git-template-"));
+    runGit(repo, ["init", "-b", "main"]);
+    runGit(repo, ["config", "user.email", "test@example.com"]);
+    runGit(repo, ["config", "user.name", "Test"]);
+    writeFileSync(join(repo, "README.md"), "test\n");
+    runGit(repo, ["add", "README.md"]);
+    runGit(repo, ["commit", "-m", "init"]);
+    runStateGitBase = repo;
+  }
+  return runStateGitBase;
+}
+
+after(() => { if (runStateGitBase) rmSync(runStateGitBase, { recursive: true, force: true }); });
+
 function initGitRepo(repo, branches = []) {
-  runGit(repo, ["init", "-b", "main"]);
-  runGit(repo, ["config", "user.email", "test@example.com"]);
-  runGit(repo, ["config", "user.name", "Test"]);
-  writeFileSync(join(repo, "README.md"), "test\n");
-  runGit(repo, ["add", "README.md"]);
-  runGit(repo, ["commit", "-m", "init"]);
+  cpSync(runStateGitBase_(), repo, { recursive: true });
   for (const branch of branches) runGit(repo, ["branch", branch]);
 }
 
