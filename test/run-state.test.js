@@ -1049,7 +1049,7 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("retains exact legacy REJECT evidence for a fresh checked retry", async () => {
+  it("retains exact legacy REJECT evidence without granting lane-feasibility retry authority", async () => {
     const fixture = createFixture("legacy-reject-retry");
     try {
       initGitRepo(fixture.repo, ["slice-branch"]);
@@ -1065,14 +1065,13 @@ describe("simplified run-state transitions", () => {
       });
       assert.equal(upgraded.slice.attempt_reviews[0].legacy_unclassified, true);
       assert.equal(upgraded.slice.attempt_reviews[0].verdict, "REJECT");
-      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 });
-      const context = await prepareSliceBuilderTaskDispatch(fixture.repo, {
-        run_id: fixture.runId, slice_id: "slice", attempt: 2, agent: "backend-builder",
-      });
-      assert.equal(context.task_context, "fresh");
-      assert.equal(context.prior.binding.legacy_unclassified, true);
-      assert.equal(Buffer.from(context.prior.review.bytes, "base64").equals(readFileSync(join(fixture.runDir, "reviews", "slice.json"))), true);
-      assert.equal(Buffer.from(context.prior.evidence.bytes, "base64").equals(readFileSync(join(fixture.runDir, "evidence", "slice.json"))), true);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 }),
+        /grants no lane-feasibility authority/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).slices[0].attempts, 1);
     } finally {
       cleanup(fixture.repo);
     }
@@ -1698,7 +1697,7 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: attemptOneHead });
-      writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: attemptOneHead, verdict: "REJECT", requiredFixes: ["adjust implementation"] }));
+      writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: attemptOneHead, verdict: "REJECT", requiredFixes: ["adjust implementation"] }));
       await transitionRunSlice(fixture.runDir, "slice", {
         status: "review",
         attempts: 1,
@@ -1720,7 +1719,7 @@ describe("simplified run-state transitions", () => {
       assert.notEqual(attemptTwoHead, attemptOneHead);
 
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-2.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 2, head_sha: attemptTwoHead, previous_head: attemptOneHead });
-      writeJson(join(fixture.runDir, "reviews", "slice.attempt-2.json"), createSliceReviewRecord({ subject: "slice", attempt: 2, reviewedCommit: attemptTwoHead }));
+      writeJson(join(fixture.runDir, "reviews", "slice.attempt-2.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 2, reviewedCommit: attemptTwoHead }));
       await transitionRunSlice(fixture.runDir, "slice", {
         status: "review",
         attempts: 2,
@@ -2008,7 +2007,7 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(slice.runDir, "evidence"), { recursive: true });
       mkdirSync(join(slice.runDir, "reviews"), { recursive: true });
       const evidence = { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: sliceHead };
-      const review = createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: sliceHead });
+      const review = createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: sliceHead });
       writeJson(join(slice.runDir, "evidence", "slice.json"), evidence);
       writeJson(join(slice.runDir, "reviews", "slice.json"), review);
       const before = readFileSync(join(slice.runDir, "run.json"), "utf8");
@@ -2080,6 +2079,13 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
       writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head, verdict: "REJECT", requiredFixes: ["fix the rejected slice"] }));
+      const beforeV1Publication = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice-1.json", review_ref: "reviews/slice-1.json" }),
+        /must equal 2 for newly published reviews/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeV1Publication);
+      writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head, verdict: "REJECT", requiredFixes: ["fix the rejected slice"] }));
       await transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice-1.json", review_ref: "reviews/slice-1.json" });
       await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1 }), /advance exactly to attempt 2/u);
       const retry = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 });
@@ -2087,13 +2093,78 @@ describe("simplified run-state transitions", () => {
       assert.equal(Object.hasOwn(retry.slice, "review_ref"), false);
       await closeBuilderDispatch(fixture, 2);
       writeJson(join(fixture.runDir, "evidence", "slice-2.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 2, head_sha: head });
-      writeJson(join(fixture.runDir, "reviews", "slice-2.json"), createSliceReviewRecord({ subject: "slice", attempt: 2, reviewedCommit: head }));
+      writeJson(join(fixture.runDir, "reviews", "slice-2.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 2, reviewedCommit: head }));
       await transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 2, evidence_ref: "evidence/slice-2.json", review_ref: "reviews/slice-2.json" });
       await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "" }), /blocked_reason/u);
       await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "blocked", review_ref: "reviews/other.json" }), /cannot create or change retained review_ref/u);
       const blocked = await transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "review rejected" });
       assert.equal(blocked.slice.review_ref, "reviews/slice-2.json");
       await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 3 }), /cannot transition from blocked/u);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("routes a sibling-owned fix before consuming or dispatching the reviewed slice's next attempt", async () => {
+    const fixture = createFixture("slice-sibling-fix-route");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      runGit(fixture.repo, ["checkout", "slice-branch"]);
+      const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId),
+        branch: "slice-branch",
+        worktree: fixture.repo,
+        slices: [{ id: "slice", stack: "backend", depends_on: [], status: "pending", attempts: 0 }],
+      });
+      seedBuilderDispatchAuthority(fixture);
+      const planPath = join(fixture.runDir, "plan", "slices.json");
+      const plan = readJson(planPath);
+      plan.slices.push({ id: "sibling", stack: "backend", paths: ["test/**"], depends_on: [], acceptance: ["sibling works"], test_plan: ["test sibling"] });
+      writeJson(planPath, plan);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.slices.push({ id: "sibling", stack: "backend", depends_on: [], status: "pending", attempts: 0 });
+      run.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+      writeJson(join(fixture.runDir, "run.json"), run);
+
+      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+      await closeBuilderDispatch(fixture, 1);
+      mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+      writeJson(join(fixture.runDir, "evidence", "slice-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
+      writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({
+        subject: "slice",
+        attempt: 1,
+        reviewedCommit: head,
+        verdict: "REJECT",
+        requiredFixes: ["repair the sibling-owned test contract"],
+        scopeEffect: "sibling-owned",
+        likelyPaths: ["test/sibling.test.js"],
+        fixOwner: "sibling",
+      }));
+      await transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice-1.json", review_ref: "reviews/slice-1.json" });
+
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 }),
+        /cannot consume another attempt[\s\S]*0:sibling-owned:sibling/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).slices.find((slice) => slice.id === "slice").attempts, 1);
+
+      // Simulate a pre-B3 caller having already advanced durable state. The
+      // checked dispatch seam must independently reject the same reviewed route.
+      const forced = readJson(join(fixture.runDir, "run.json"));
+      const forcedSlice = forced.slices.find((slice) => slice.id === "slice");
+      forcedSlice.status = "running";
+      forcedSlice.attempts = 2;
+      for (const key of ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]) delete forcedSlice[key];
+      writeJson(join(fixture.runDir, "run.json"), forced);
+      const dispatchFilesBefore = readdirSync(join(fixture.runDir, "dispatch")).sort();
+      await assert.rejects(
+        prepareSliceBuilderTaskDispatch(fixture.repo, { run_id: fixture.runId, slice_id: "slice", attempt: 2, agent: "backend-builder" }),
+        /cannot consume another attempt[\s\S]*0:sibling-owned:sibling/u,
+      );
+      assert.deepEqual(readdirSync(join(fixture.runDir, "dispatch")).sort(), dispatchFilesBefore);
     } finally {
       cleanup(fixture.repo);
     }
@@ -3144,6 +3215,20 @@ function seedBuilderDispatchAuthority(fixture) {
   writeJson(join(fixture.runDir, "run.json"), run);
 }
 
+function createV2SliceReviewRecord({ scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice", ...input } = {}) {
+  const review = createSliceReviewRecord(input);
+  review.remediation_context = {
+    schema_version: 2,
+    fixes: review.remediation_context.fixes.map((fix) => ({
+      ...fix,
+      scope_effect: scopeEffect,
+      likely_paths: [...likelyPaths],
+      fix_owner: fixOwner,
+    })),
+  };
+  return review;
+}
+
 async function closeBuilderDispatch(fixture, attempt, taskWork = () => {}) {
   const completionToken = `run-state-completion-${attempt}`;
   const context = await prepareSliceBuilderTaskDispatch(fixture.repo, {
@@ -3172,7 +3257,7 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
   runGit(sliceWorktree, ["commit", "-m", "reviewed slice"]);
   const reviewedCommit = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
   writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
-  writeJson(join(fixture.runDir, "reviews", "slice.json"), createSliceReviewRecord({ subject, verdict, attempt: 1, reviewedCommit }));
+  writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject, verdict, attempt: 1, reviewedCommit }));
   const slices = [{
     id: "slice", status: "review", attempts: 1, branch: "slice-branch", worktree: sliceWorktree,
     evidence_ref: "evidence/slice.json", evidence_hash: hashFile(join(fixture.runDir, "evidence", "slice.json")),
@@ -3312,7 +3397,7 @@ function writeReadyPrRun(fixture, overrides = {}) {
   mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
   mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
   writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
-  writeJson(join(fixture.runDir, "reviews", "slice.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head }));
+  writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head }));
   writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: branch, attempt: 1, reviewedHeadSha: head, verdict: overrides.validator?.verdict || "GO" }));
   writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: branch, attempt: 1, reviewedHeadSha: head, verdict: overrides.security_review?.verdict || "PASS" }));
   const validator = {

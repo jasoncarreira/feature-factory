@@ -109,8 +109,11 @@ export const SLICE_FIX_CLASSIFICATIONS = Object.freeze([
   "narrow-correction",
 ]);
 const SLICE_FIX_CLASSIFICATION_SET = new Set(SLICE_FIX_CLASSIFICATIONS);
+export const SLICE_FIX_SCOPE_EFFECTS = Object.freeze(["in-lane", "unowned-extension", "sibling-owned", "contract-change"]);
+const SLICE_FIX_SCOPE_EFFECT_SET = new Set(SLICE_FIX_SCOPE_EFFECTS);
 const SLICE_REMEDIATION_CONTEXT_KEYS = new Set(["schema_version", "fixes"]);
-const SLICE_REMEDIATION_FIX_KEYS = new Set(["required_fix_index", "classification"]);
+const SLICE_REMEDIATION_V1_FIX_KEYS = new Set(["required_fix_index", "classification"]);
+const SLICE_REMEDIATION_V2_FIX_KEYS = new Set(["required_fix_index", "classification", "scope_effect", "likely_paths", "fix_owner"]);
 const VERDICT_KEYS = new Set(["verdict", "report", "report_hash", "review_ref", "review_hash", "reviewed_head_sha", "loops"]);
 const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
 const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
@@ -148,7 +151,7 @@ export class ValidationError extends Error {
   }
 }
 
-export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
+export function validateSliceReviewResult(review, { sliceId = "slice", requireV2 = false } = {}) {
   const errors = [];
   const path = "review";
   if (!isRecord(review)) fail([{ path, message: "must be an object" }]);
@@ -171,7 +174,8 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
   } else {
     allowedKeys(errors, context, SLICE_REMEDIATION_CONTEXT_KEYS, `${path}.remediation_context`);
     requiredInteger(errors, context, "schema_version", `${path}.remediation_context.schema_version`);
-    if (context.schema_version !== 1) errors.push({ path: `${path}.remediation_context.schema_version`, message: "must equal 1" });
+    if (![1, 2].includes(context.schema_version)) errors.push({ path: `${path}.remediation_context.schema_version`, message: "must equal 1 or 2" });
+    if (requireV2 && context.schema_version !== 2) errors.push({ path: `${path}.remediation_context.schema_version`, message: "must equal 2 for newly published reviews" });
     if (!Array.isArray(context.fixes)) {
       errors.push({ path: `${path}.remediation_context.fixes`, message: "must be an array" });
     } else {
@@ -182,10 +186,16 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
           errors.push({ path: fixPath, message: "must be an object" });
           continue;
         }
-        allowedKeys(errors, classification, SLICE_REMEDIATION_FIX_KEYS, fixPath);
+        const v2 = context.schema_version === 2;
+        allowedKeys(errors, classification, v2 ? SLICE_REMEDIATION_V2_FIX_KEYS : SLICE_REMEDIATION_V1_FIX_KEYS, fixPath);
         boundedInteger(errors, classification, "required_fix_index", 0, Math.max(0, fixes.length - 1), `${fixPath}.required_fix_index`);
         if (classification.required_fix_index !== index) errors.push({ path: `${fixPath}.required_fix_index`, message: "must equal its required_fixes position" });
         requiredEnum(errors, classification, "classification", SLICE_FIX_CLASSIFICATION_SET, `${fixPath}.classification`);
+        if (v2) {
+          requiredEnum(errors, classification, "scope_effect", SLICE_FIX_SCOPE_EFFECT_SET, `${fixPath}.scope_effect`);
+          requiredTerminalSafeString(errors, classification, "fix_owner", `${fixPath}.fix_owner`);
+          validateLikelyRepositoryPaths(errors, classification.likely_paths, `${fixPath}.likely_paths`);
+        }
       }
       const hasNonconvergent = context.fixes.some((fix) => fix?.classification === "nonconvergent");
       if ((review.convergence === "nonconvergent") !== hasNonconvergent) {
@@ -205,6 +215,111 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
 
 export function sliceReviewTaskContext(review, options = {}) {
   return validateSliceReviewResult(review, options).task_context;
+}
+
+export function validateSliceReviewFeasibility(review, plan, { sliceId = "slice" } = {}) {
+  const preVersionReview = isRecord(review)
+    && ["convergence", "remaining_fix_count", "remediation_context"].every((key) => review[key] === undefined);
+  if (preVersionReview) {
+    fail([{ path: "review.remediation_context", message: `pre-version review grants no lane-feasibility authority for slice '${sliceId}'` }]);
+  }
+  validateSliceReviewResult(review, { sliceId });
+  if (review.remediation_context.schema_version !== 2) {
+    fail([{ path: "review.remediation_context.schema_version", message: `schema version 1 grants no lane-feasibility authority for slice '${sliceId}'` }]);
+  }
+  validateSlicesPlan(plan, { enforceDependencyDepth: false });
+  const byId = new Map(plan.slices.map((slice) => [slice.id, slice]));
+  if (!byId.has(sliceId)) {
+    fail([{ path: "review.subject", message: `reviewed slice '${sliceId}' must exist in the current plan` }]);
+  }
+  const planLaneErrors = [];
+  const ownershipPlan = plan.slices.map((slice, sliceIndex) => ({
+    id: slice.id,
+    lanes: slice.paths.map((lane, laneIndex) => canonicalPlanOwnershipLane(lane, planLaneErrors, `plan.slices[${sliceIndex}].paths[${laneIndex}]`)),
+  }));
+  if (planLaneErrors.length) fail(planLaneErrors);
+
+  const errors = [];
+  for (const [index, fix] of review.remediation_context.fixes.entries()) {
+    const fixPath = `review.remediation_context.fixes[${index}]`;
+    if (!byId.has(fix.fix_owner)) {
+      errors.push({ path: `${fixPath}.fix_owner`, message: `must equal an existing current-plan slice id for slice '${sliceId}'` });
+      continue;
+    }
+    if (fix.scope_effect === "contract-change") continue;
+    const ownerSets = fix.likely_paths.map((likelyPath) => ownershipPlan
+      .filter((planned) => planned.lanes.some((lane) => planLaneOwnsConcretePath(lane, likelyPath)))
+      .map((planned) => planned.id));
+    if (fix.scope_effect === "in-lane") {
+      if (fix.fix_owner !== sliceId) errors.push({ path: `${fixPath}.fix_owner`, message: `in-lane must be owned by reviewed slice '${sliceId}'` });
+      if (ownerSets.some((owners) => owners.length !== 1 || owners[0] !== fix.fix_owner)) {
+        errors.push({ path: `${fixPath}.likely_paths`, message: "in-lane paths must each have exactly the reviewed slice as their sole plan owner" });
+      }
+    } else if (fix.scope_effect === "unowned-extension") {
+      if (fix.fix_owner !== sliceId) errors.push({ path: `${fixPath}.fix_owner`, message: `unowned-extension must be owned by reviewed slice '${sliceId}'` });
+      if (ownerSets.some((owners) => owners.length !== 0)) {
+        errors.push({ path: `${fixPath}.likely_paths`, message: "unowned-extension paths must each have zero plan owners" });
+      }
+    } else if (fix.scope_effect === "sibling-owned") {
+      if (fix.fix_owner === sliceId) errors.push({ path: `${fixPath}.fix_owner`, message: "sibling-owned fix_owner must differ from the reviewed slice" });
+      if (ownerSets.some((owners) => owners.length !== 1 || owners[0] !== fix.fix_owner)) {
+        errors.push({ path: `${fixPath}.likely_paths`, message: "sibling-owned paths must each have fix_owner as their sole plan owner" });
+      }
+    }
+  }
+  if (errors.length) fail(errors);
+  return {
+    schema_version: 2,
+    slice_id: sliceId,
+    fixes: review.remediation_context.fixes.map((fix) => ({
+      required_fix_index: fix.required_fix_index,
+      classification: fix.classification,
+      scope_effect: fix.scope_effect,
+      likely_paths: [...fix.likely_paths],
+      fix_owner: fix.fix_owner,
+    })),
+  };
+}
+
+function validateLikelyRepositoryPaths(errors, paths, path) {
+  if (!Array.isArray(paths) || paths.length < 1) {
+    errors.push({ path, message: "must be a nonempty array of unique canonical concrete repository paths" });
+    return;
+  }
+  const canonical = [];
+  for (const [index, value] of paths.entries()) {
+    if (!isCanonicalConcreteRepositoryPath(value)) {
+      errors.push({ path: `${path}[${index}]`, message: "must be a canonical concrete repository path without globs" });
+    } else {
+      canonical.push(value);
+    }
+  }
+  if (new Set(canonical).size !== canonical.length) errors.push({ path, message: "must contain unique paths" });
+}
+
+function isCanonicalConcreteRepositoryPath(value) {
+  if (typeof value !== "string" || value === "" || value !== value.trim() || value !== value.normalize("NFC") || Buffer.byteLength(value, "utf8") > 1024) return false;
+  if (value.startsWith("/") || /^[A-Za-z]:/u.test(value) || value.includes("\\") || /[\0-\x1f\x7f*?[\]{}]/u.test(value)) return false;
+  const segments = value.split("/");
+  return segments.length <= 64 && segments.every((part) => part !== "" && part !== "." && part !== ".." && Buffer.byteLength(part, "utf8") <= 255);
+}
+
+function canonicalPlanOwnershipLane(value, errors, path) {
+  if (typeof value !== "string") {
+    errors.push({ path, message: "must be a canonical concrete or recursive ownership lane" });
+    return null;
+  }
+  const recursive = value.endsWith("/**");
+  const base = recursive ? value.slice(0, -3) : value;
+  if (!isCanonicalConcreteRepositoryPath(base)) {
+    errors.push({ path, message: `invalid or ambiguous ownership lane '${safeValidationIdentifier(value)}'` });
+    return null;
+  }
+  return { base, recursive };
+}
+
+function planLaneOwnsConcretePath(lane, concretePath) {
+  return lane.recursive ? concretePath.startsWith(`${lane.base}/`) : concretePath === lane.base;
 }
 
 export function validateRun(run) {

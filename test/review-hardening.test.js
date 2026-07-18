@@ -10,19 +10,23 @@ import { normalizeCostAttribution } from "../src/cost-attribution.js";
 import { runAttributes, sanitizeOtlpEnv, validateTracestate } from "../src/telemetry.js";
 import { collectProtectedSteeringState } from "../src/steering-conflicts.js";
 import { cancelFactoryRun, cleanupRun, continueFactory, recordCostUsage, startFactory } from "../src/factory.js";
-import { SLICE_FIX_CLASSIFICATIONS, sliceReviewTaskContext, validateSliceReviewResult } from "../src/validate.js";
+import { SLICE_FIX_CLASSIFICATIONS, SLICE_FIX_SCOPE_EFFECTS, sliceReviewTaskContext, validateSliceReviewFeasibility, validateSliceReviewResult } from "../src/validate.js";
 
 const NOW = "2026-07-09T15:00:00.000Z";
 
-function classifiedReview(classifications, { convergence = "converging" } = {}) {
+function classifiedReview(classifications, { convergence = "converging", schemaVersion = 2, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice" } = {}) {
   return {
     verdict: "REJECT",
     convergence,
     required_fixes: classifications.map((_, index) => `fix-${index + 1}`),
     remaining_fix_count: classifications.length,
     remediation_context: {
-      schema_version: 1,
-      fixes: classifications.map((classification, required_fix_index) => ({ required_fix_index, classification })),
+      schema_version: schemaVersion,
+      fixes: classifications.map((classification, required_fix_index) => ({
+        required_fix_index,
+        classification,
+        ...(schemaVersion === 2 ? { scope_effect: scopeEffect, likely_paths: likelyPaths, fix_owner: fixOwner } : {}),
+      })),
     },
   };
 }
@@ -120,7 +124,74 @@ describe("slice remediation task context", () => {
     assert.throws(() => validateSliceReviewResult(classifiedReview(["nonconvergent"])), /classify nonconvergent exactly when review convergence is nonconvergent/u);
     assert.throws(() => validateSliceReviewResult(classifiedReview(["narrow-correction"], { convergence: "nonconvergent" })), /classify nonconvergent exactly when review convergence is nonconvergent/u);
   });
+
+  it("preserves v1 validation and task-context compatibility without granting feasibility authority", () => {
+    const legacy = classifiedReview(["narrow-correction"], { schemaVersion: 1 });
+    assert.equal(validateSliceReviewResult(legacy).task_context, "reuse");
+    assert.equal(sliceReviewTaskContext(legacy), "reuse");
+    assert.throws(() => validateSliceReviewResult(legacy, { requireV2: true }), /must equal 2 for newly published reviews/u);
+    assert.throws(
+      () => validateSliceReviewFeasibility(legacy, feasibilityPlan(), { sliceId: "slice" }),
+      /schema version 1 grants no lane-feasibility authority/u,
+    );
+  });
+
+  it("requires every v2 positional fix to carry closed canonical feasibility fields", () => {
+    for (const field of ["scope_effect", "likely_paths", "fix_owner"]) {
+      const review = classifiedReview(["narrow-correction"]);
+      delete review.remediation_context.fixes[0][field];
+      assert.throws(() => validateSliceReviewResult(review), new RegExp(field, "u"), field);
+    }
+    for (const scopeEffect of SLICE_FIX_SCOPE_EFFECTS) {
+      const review = classifiedReview(["narrow-correction"], { scopeEffect });
+      assert.equal(validateSliceReviewResult(review).task_context, "reuse", scopeEffect);
+    }
+    for (const likelyPaths of [[], ["src/*.js"], ["/src/fix.js"], ["src/../fix.js"], ["src/fix.js", "src/fix.js"]]) {
+      const review = classifiedReview(["narrow-correction"], { likelyPaths });
+      assert.throws(() => validateSliceReviewResult(review), /likely_paths|canonical concrete|unique paths/u, JSON.stringify(likelyPaths));
+    }
+  });
+
+  it("mechanically accepts each unambiguous plan-aware scope forecast", () => {
+    const plan = feasibilityPlan();
+    for (const [scopeEffect, likelyPaths, fixOwner] of [
+      ["in-lane", ["src/fix.js"], "slice"],
+      ["unowned-extension", ["docs/fix.md"], "slice"],
+      ["sibling-owned", ["test/fix.test.js"], "sibling"],
+      ["contract-change", ["src/public-contract.js"], "sibling"],
+    ]) {
+      const review = classifiedReview(["narrow-correction"], { scopeEffect, likelyPaths, fixOwner });
+      assert.deepEqual(validateSliceReviewFeasibility(review, plan, { sliceId: "slice" }), {
+        schema_version: 2,
+        slice_id: "slice",
+        fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: scopeEffect, likely_paths: likelyPaths, fix_owner: fixOwner }],
+      }, scopeEffect);
+    }
+  });
+
+  it("fails closed for ambiguous, overlapping, mixed, missing-owner, and mismatched forecasts", () => {
+    const cases = [
+      ["overlap", classifiedReview(["narrow-correction"]), feasibilityPlan({ overlap: true }), /sole plan owner/u],
+      ["mixed sibling ownership", classifiedReview(["narrow-correction"], { scopeEffect: "sibling-owned", likelyPaths: ["test/a.js", "src/a.js"], fixOwner: "sibling" }), feasibilityPlan(), /sole plan owner/u],
+      ["owned extension", classifiedReview(["narrow-correction"], { scopeEffect: "unowned-extension", likelyPaths: ["src/a.js"] }), feasibilityPlan(), /zero plan owners/u],
+      ["missing owner", classifiedReview(["narrow-correction"], { fixOwner: "missing" }), feasibilityPlan(), /existing current-plan slice id/u],
+      ["same-slice sibling", classifiedReview(["narrow-correction"], { scopeEffect: "sibling-owned" }), feasibilityPlan(), /must differ from the reviewed slice/u],
+      ["invalid plan lane", classifiedReview(["narrow-correction"]), { ...feasibilityPlan(), slices: [{ ...feasibilityPlan().slices[0], paths: ["src/*"] }, feasibilityPlan().slices[1]] }, /invalid or ambiguous ownership lane/u],
+    ];
+    for (const [name, review, plan, expected] of cases) {
+      assert.throws(() => validateSliceReviewFeasibility(review, plan, { sliceId: "slice" }), expected, name);
+    }
+  });
 });
+
+function feasibilityPlan({ overlap = false } = {}) {
+  return {
+    slices: [
+      { id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["slice works"], test_plan: ["test slice"] },
+      { id: "sibling", stack: "backend", paths: ["test/**", ...(overlap ? ["src/**"] : [])], depends_on: [], acceptance: ["sibling works"], test_plan: ["test sibling"] },
+    ],
+  };
+}
 
 describe("cost attribution hardening", () => {
   const base = { run_id: "run-1", agent: "backend-builder" };

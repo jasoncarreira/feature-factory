@@ -967,7 +967,7 @@ describe("consolidated reviewer decision procedure contract", () => {
       "- [MAJOR] <...>",
       "- [MINOR] <...>",
       "**Required fixes (if REJECT):**",
-      "1. [classification: <closed classification>] <specific fix>",
+      "1. [classification: <closed classification>] [scope_effect: <in-lane | unowned-extension | sibling-owned | contract-change>] [likely_paths: <canonical concrete repository paths>] [fix_owner: <existing plan slice id>] <specific fix>",
     ]) {
       assert.match(workOutput, literalPattern(field), `work reviewer output missing ${field}`);
     }
@@ -2003,7 +2003,15 @@ describe("remediation context reuse docs contract", () => {
     for (const classification of ["architecture-replacement", "ownership-amendment", "parallel-authority-removal", "schema-redesign", "migration-redesign", "wholesale-head-replacement", "nonconvergent", "narrow-correction"]) {
       assert.match(WORK_REVIEWER_PROMPT, literalPattern(classification), `work-reviewer must emit ${classification}`);
     }
-    assert.match(WORK_REVIEWER_PROMPT, /exactly one ordered `\{required_fix_index, classification\}` entry for every `required_fixes` item/i);
+    assert.match(WORK_REVIEWER_PROMPT, /schema_version: 2[\s\S]*exactly one ordered `\{required_fix_index, classification, scope_effect, likely_paths, fix_owner\}` entry for every `required_fixes` item/i);
+    for (const scopeEffect of ["in-lane", "unowned-extension", "sibling-owned", "contract-change"]) {
+      assert.match(WORK_REVIEWER_PROMPT, literalPattern(`\`${scopeEffect}\``), `work-reviewer must emit ${scopeEffect}`);
+    }
+    assert.match(WORK_REVIEWER_PROMPT, /`likely_paths` is a nonempty unique list of canonical concrete repository paths[\s\S]*without globs/i);
+    assert.match(WORK_REVIEWER_PROMPT, /`fix_owner` must equal an existing current-plan slice id/i);
+    assert.match(WORK_REVIEWER_PROMPT, /version 1 is compatibility data only and grants no lane-feasibility authority/i);
+    assert.match(WORK_REVIEWER_PROMPT, /do not authorize editing, extend a builder lane, create durable effective paths/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Do not request or introduce another agent call/i);
     assert.match(SKILL, /exact hash-bound review must classify every required fix as `narrow-correction`/i);
     assert.match(SKILL, /do not pass `task_id`; start a fresh implementer Task/i);
     assert.match(SCHEMA, /missing, duplicate-position, extra, unknown, or reordered classifications reject before review publication/i);

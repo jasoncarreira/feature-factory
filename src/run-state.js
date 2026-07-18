@@ -11,7 +11,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
@@ -2333,6 +2333,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
   let priorReviewAuthority = null;
   let nextReviewAuthority = null;
   let priorDispatchAuthority = null;
+  let reviewPlanAuthority = null;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft, { current }) => {
     const slices = Array.isArray(draft.slices) ? draft.slices : [];
     if (!collectionHasItem(slices, sliceId, "id")) throw new Error(`slice '${formatSelector(sliceId)}' not found`);
@@ -2379,6 +2380,11 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
             terminalizeSliceNonconvergence(draft, priorSlice, sliceIndex, options);
             return;
           }
+          if (slices[sliceIndex].status === "running") {
+            reviewPlanAuthority = observeAcceptedDecompositionAuthority(runDir, current, { ...options, requireIntegrationGate: true });
+            validateSliceReviewFeasibility(priorReviewAuthority.review, reviewPlanAuthority.plan, { sliceId: priorSlice.id });
+            assertReviewedSliceRetryRoute(priorReviewAuthority.review, priorSlice.id);
+          }
         }
         normalizeSliceTransition(priorSlice, slices[sliceIndex]);
         const priorAttempts = Number.isInteger(priorSlice.attempts) ? priorSlice.attempts : 0;
@@ -2399,6 +2405,8 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
           if (priorSlice.status === "review") throw new Error(`slice '${priorSlice.id}' review binding is write-once; return to running before publishing another review`);
           assertNoBindingFields(slices[sliceIndex], SLICE_REVIEW_BINDING_KEYS, `slice '${priorSlice.id}' review binding`);
           nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], options);
+          reviewPlanAuthority = observeAcceptedDecompositionAuthority(runDir, draft, { ...options, requireIntegrationGate: true });
+          validateSliceReviewFeasibility(nextReviewAuthority.review, reviewPlanAuthority.plan, { sliceId: slices[sliceIndex].id });
           Object.assign(slices[sliceIndex], nextReviewAuthority.binding);
           if (nextReviewAuthority.history_entry) appendSliceAttemptReview(slices[sliceIndex], nextReviewAuthority);
         }
@@ -2418,6 +2426,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
       }
       if (priorReviewAuthority) assertSliceReviewAuthorityCurrent(runDir, prior.id, prior, priorReviewAuthority);
       if (nextReviewAuthority) assertSliceReviewPublicationAuthorityCurrent(runDir, next, slice.id, slice, nextReviewAuthority, options);
+      if (reviewPlanAuthority) assertAcceptedDecompositionAuthorityCurrent(runDir, next, reviewPlanAuthority);
     },
   }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
@@ -4282,8 +4291,8 @@ function observeSliceReviewSidecars(runDir, sliceId, slice) {
   };
 }
 
-function observeAttemptReviewResult(sliceId, review) {
-  const { task_context: _taskContext, ...result } = validateSliceReviewResult(review, { sliceId });
+function observeAttemptReviewResult(sliceId, review, options = {}) {
+  const { task_context: _taskContext, ...result } = validateSliceReviewResult(review, { sliceId, requireV2: options.requireV2 === true });
   return result;
 }
 
@@ -4301,7 +4310,7 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
   const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: slice.dispatch_required === true || !compatibilityReplay });
   const result = legacyReview
     ? { verdict: observed.review.verdict, legacy_unclassified: true }
-    : observeAttemptReviewResult(sliceId, observed.review);
+    : observeAttemptReviewResult(sliceId, observed.review, { requireV2: !compatibilityReplay });
   const attempt = slice.attempts;
   if (!Number.isInteger(attempt) || attempt < 1 || observed.evidence.attempt !== attempt || observed.review.attempt !== attempt) {
     throw new Error(`slice '${sliceId}' successor evidence and review attempts must equal the positive slice attempt`);
@@ -4434,6 +4443,8 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
       taskContext = previous.legacy_unclassified === true
         ? "fresh"
         : validateSliceReviewResult(observed.review, { sliceId: slice.id }).task_context;
+      validateSliceReviewFeasibility(observed.review, plan, { sliceId: slice.id });
+      assertReviewedSliceRetryRoute(observed.review, slice.id);
       prior = {
         binding: cloneJson(previous),
         evidence: { encoding: "base64", bytes: observed.evidence_bytes },
@@ -5059,6 +5070,8 @@ function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expect
       review_hash: previous.review_hash,
       reviewed_commit: previous.reviewed_commit,
     });
+    validateSliceReviewFeasibility(observed.review, decomposition.plan, { sliceId: slice.id });
+    assertReviewedSliceRetryRoute(observed.review, slice.id);
     prior = {
       binding: cloneJson(previous),
       evidence: { encoding: "base64", bytes: observed.evidence_bytes },
@@ -5079,6 +5092,13 @@ function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expect
 
 function sliceDispatchClaimName(runId, sliceId, attempt) {
   return `${createHash("sha256").update(`${runId}\0${sliceId}\0${attempt}`, "utf8").digest("hex")}.json`;
+}
+
+function assertReviewedSliceRetryRoute(review, sliceId) {
+  const rerouted = review.remediation_context.fixes.filter((fix) => fix.scope_effect !== "in-lane");
+  if (rerouted.length === 0) return;
+  const routes = rerouted.map((fix) => `${fix.required_fix_index}:${fix.scope_effect}:${fix.fix_owner}`).join(", ");
+  throw new Error(`slice '${sliceId}' retry cannot consume another attempt until non-lane fixes are routed (${routes})`);
 }
 
 function assertPriorSliceDispatchesClosed(runDir, runId, slice, attempt, includeCurrent) {
