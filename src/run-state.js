@@ -11,7 +11,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
@@ -46,6 +46,10 @@ const SECURITY_BINDING_KEYS = Object.freeze(["review_hash", "reviewed_head_sha"]
 const PR_FENCE_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
 const CARRY_FORWARD_PLANNING_KINDS = new Set(["story", "research_map", "design_brief", "technical_brief"]);
 const SLICE_BUILDER_AGENTS = new Set(["backend-builder", "frontend-builder"]);
+const RATIFICATION_CONTRACT_PATHS = new Set([
+  "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+  ".nvmrc", ".node-version", ".npmrc", ".yarnrc", ".yarnrc.yml", "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+]);
 const SAFE_TASK_DISPATCH_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const CONTINUATION_PARENT_ARTIFACTS = Object.freeze([
   ["story", "artifacts/story.md"],
@@ -1575,12 +1579,14 @@ export function observeCarryForwardAuthority(repoInput, parentRunDirInput, paren
   for (const planned of plan.slices) {
     const slice = runById.get(planned.id);
     if (!slice || slice.stack !== planned.stack || !sameJson(slice.depends_on, planned.depends_on)) throw new Error(`parent slice '${planned.id}' identity/dependencies do not match the bound plan`);
+    if (!sameJson(slice.declared_paths, planned.paths)) throw new Error(`parent slice '${planned.id}' declared_paths do not match the bound plan`);
     if (slice.status !== "merged") { remainingSliceIds.push(planned.id); continue; }
     if (!Number.isInteger(slice.attempts) || slice.attempts < 1) throw new Error(`accepted slice '${planned.id}' attempts must be positive`);
     const observed = assertSliceReviewBindingCurrent(parentRunDir, planned.id, slice);
     if (observed.review.verdict !== "APPROVE") throw new Error(`accepted slice '${planned.id}' requires APPROVE review`);
     acceptedSlices.push({
-      id: planned.id, attempts: slice.attempts, evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
+      id: planned.id, declared_paths: cloneJson(slice.declared_paths), effective_paths: cloneJson(slice.effective_paths),
+      attempts: slice.attempts, evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
       review_ref: slice.review_ref, review_hash: slice.review_hash, reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit,
       attempt_reviews: cloneJson(slice.attempt_reviews),
     });
@@ -1838,7 +1844,8 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
     const adopted = accepted.get(row.id);
     if (!adopted) continue;
     const expected = {
-      id: row.id, stack: row.stack, depends_on: row.depends_on, status: "merged", attempts: adopted.attempts,
+      id: row.id, stack: row.stack, depends_on: row.depends_on, declared_paths: adopted.declared_paths, effective_paths: adopted.effective_paths,
+      status: "merged", attempts: adopted.attempts,
       evidence_ref: adopted.evidence_ref, evidence_hash: adopted.evidence_hash, review_ref: adopted.review_ref, review_hash: adopted.review_hash,
       reviewed_commit: adopted.reviewed_commit, merge_commit: adopted.merge_commit, attempt_reviews: adopted.attempt_reviews,
     };
@@ -2384,10 +2391,11 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
         if (slices[sliceIndex].status === "review") {
           if (priorSlice.status === "review") throw new Error(`slice '${priorSlice.id}' review binding is write-once; return to running before publishing another review`);
           assertNoBindingFields(slices[sliceIndex], SLICE_REVIEW_BINDING_KEYS, `slice '${priorSlice.id}' review binding`);
-          nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], options);
           reviewPlanAuthority = observeAcceptedDecompositionAuthority(runDir, draft, { ...options, requireIntegrationGate: true });
+          nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], reviewPlanAuthority, options);
           validateSliceReviewFeasibility(nextReviewAuthority.review, reviewPlanAuthority.plan, { sliceId: slices[sliceIndex].id });
           Object.assign(slices[sliceIndex], nextReviewAuthority.binding);
+          slices[sliceIndex].effective_paths = cloneJson(nextReviewAuthority.ownership.effective_paths);
           if (nextReviewAuthority.history_entry) appendSliceAttemptReview(slices[sliceIndex], nextReviewAuthority);
         }
       }
@@ -2405,7 +2413,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
         if (!sameJson(currentDispatch, priorDispatchAuthority)) throw new Error(`slice '${prior.id}' dispatch authority changed before publication`);
       }
       if (priorReviewAuthority) assertSliceReviewAuthorityCurrent(runDir, prior.id, prior, priorReviewAuthority);
-      if (nextReviewAuthority) assertSliceReviewPublicationAuthorityCurrent(runDir, next, slice.id, slice, nextReviewAuthority, options);
+      if (nextReviewAuthority) assertSliceReviewPublicationAuthorityCurrent(runDir, next, slice.id, slice, nextReviewAuthority, reviewPlanAuthority, options);
       if (reviewPlanAuthority) assertAcceptedDecompositionAuthorityCurrent(runDir, next, reviewPlanAuthority);
     },
   }), options);
@@ -2449,10 +2457,15 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
 }
 
 export async function transitionSlicesSeed(runDir, slices, options = {}) {
-  const projection = normalizePendingSliceProjection(slices);
-  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, projection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
+  const requestedProjection = normalizePendingSliceProjection(slices);
+  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, requestedProjection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
+  const projection = requestedProjection.map((slice, index) => ({
+    ...slice,
+    declared_paths: cloneJson(seedPlanAuthority.plan.slices[index].paths),
+    effective_paths: cloneJson(seedPlanAuthority.plan.slices[index].paths),
+  }));
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
-    assertSeedPlanAuthorityCurrent(runDir, projection, options, seedPlanAuthority);
+    assertSeedPlanAuthorityCurrent(runDir, requestedProjection, options, seedPlanAuthority);
     const existing = Array.isArray(current.slices) ? current.slices : [];
     if (sameJson(existing, projection)) return;
     if (existing.some(hasSliceProgress)) {
@@ -2461,7 +2474,7 @@ export async function transitionSlicesSeed(runDir, slices, options = {}) {
     draft.slices = cloneJson(projection);
   }, options, {
     slicesSeed: true,
-    beforeReplace: () => assertSeedPlanAuthorityCurrent(runDir, projection, options, seedPlanAuthority),
+    beforeReplace: () => assertSeedPlanAuthorityCurrent(runDir, requestedProjection, options, seedPlanAuthority),
   }), options);
 }
 
@@ -2525,7 +2538,8 @@ function assertPlanSlicesMatch(plan, slices, { requirePendingProjection = false 
   if (!Array.isArray(slices) || slices.length !== plan.slices.length) throw new Error("parent run slices must exactly classify the bound plan");
   for (const [index, planned] of plan.slices.entries()) {
     const slice = slices[index];
-    if (!slice || slice.id !== planned.id || slice.stack !== planned.stack || !sameJson(slice.depends_on, planned.depends_on)) {
+    if (!slice || slice.id !== planned.id || slice.stack !== planned.stack || !sameJson(slice.depends_on, planned.depends_on)
+      || (slice.declared_paths !== undefined && !sameJson(slice.declared_paths, planned.paths))) {
       throw new Error("parent run slices must exactly classify the bound plan");
     }
     if (requirePendingProjection && (slice.status !== "pending" || slice.attempts !== 0 || hasSliceProgress(slice))) {
@@ -4187,6 +4201,9 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
   const cleanliness = authorityGit(options, worktree, gitCleanlinessArgs());
   if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error(`slice '${sliceId}' merge requires a clean integration worktree`);
   const reviewedCommit = observed.binding.reviewed_commit;
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+  const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, sliceGit, decomposition, options);
+  if (!sameJson(slice.effective_paths, ownership.effective_paths)) throw new Error(`slice '${sliceId}' effective ownership changed after review`);
   const proof = observeExactSliceMergeProof(repository, run, sliceId, canonicalCommit, reviewedCommit, options);
   return {
     merge_commit: canonicalCommit,
@@ -4197,6 +4214,7 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
     slice_branch: slice.branch,
     slice_branch_head: reviewedCommit,
     proof,
+    ownership,
     dispatch,
     review_authority: { ...observed, git: sliceGit },
   };
@@ -4247,7 +4265,7 @@ function assertSliceReviewAuthorityCurrent(runDir, sliceId, slice, expected) {
   return current;
 }
 
-function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options = {}) {
+function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, decomposition, options = {}) {
   const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
   const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: true });
   const result = observeAttemptReviewResult(sliceId, observed.review);
@@ -4259,6 +4277,7 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
   if (observed.evidence.head_sha !== gitAuthority.head) throw new Error(`slice '${sliceId}' evidence head_sha must equal the current slice head`);
   if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
   if (dispatch && dispatch.completion_head !== gitAuthority.head) throw new Error(`slice '${sliceId}' reviewed head must equal the checked Task completion head`);
+  const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, gitAuthority, decomposition, options);
   return {
     ...observed,
     binding: { ...observed.binding, reviewed_commit: gitAuthority.head },
@@ -4269,6 +4288,8 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
       review_ref: slice.review_ref,
       review_hash: observed.binding.review_hash,
       reviewed_commit: gitAuthority.head,
+      diff_base_commit: ownership.diff_base_commit,
+      ratified_paths: ownership.ratified_paths,
       ...result,
       ...(dispatch ? {
         dispatch_claim_ref: dispatch.claim_ref,
@@ -4279,13 +4300,76 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
     },
     git: gitAuthority,
     dispatch,
+    ownership,
   };
 }
 
-function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, options = {}) {
-  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options);
+function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, decomposition, options = {}) {
+  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, decomposition, options);
   if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' review authority changed before publication`);
   return current;
+}
+
+function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, gitAuthority, decomposition, options = {}) {
+  const planned = decomposition?.plan?.slices?.find((candidate) => candidate?.id === sliceId);
+  if (!planned || !sameJson(slice.declared_paths, planned.paths)) throw new Error(`slice '${sliceId}' declared_paths must equal the exact accepted plan paths`);
+  const claim = observeSliceDispatchClaim(runDir, run.run_id, slice, slice.attempts, { requireRunBinding: true });
+  if (!claim) throw new Error(`slice '${sliceId}' ownership review requires the exact checked dispatch baseline`);
+  const history = Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : [];
+  const diffBaseCommit = history[0]?.diff_base_commit || claim.claim.head;
+  if (!/^[0-9a-f]{40}$/u.test(diffBaseCommit)) throw new Error(`slice '${sliceId}' first checked dispatch baseline is invalid`);
+  if (history.length > 0) {
+    const first = history[0];
+    const boundFirst = { ...slice, attempts: first.attempt, dispatch_required: true, ...pickBinding(first, SLICE_DISPATCH_BINDING_KEYS) };
+    const firstClaim = observeSliceDispatchClaim(runDir, run.run_id, boundFirst, first.attempt, { requireRunBinding: true });
+    if (!firstClaim || firstClaim.claim.head !== diffBaseCommit) throw new Error(`slice '${sliceId}' stored diff baseline must equal the first checked dispatch commit`);
+  }
+  if (!authorityGit(options, gitAuthority.repository, ["merge-base", "--is-ancestor", diffBaseCommit, gitAuthority.head]).ok) {
+    throw new Error(`slice '${sliceId}' reviewed commit must descend from the first checked dispatch baseline`);
+  }
+  const changedPaths = [...observeNoRenamePathSet(gitAuthority.repository, diffBaseCommit, gitAuthority.head, options, `slice '${sliceId}' full reviewed diff`)].sort();
+  for (const path of changedPaths) {
+    if (normalizeRepositoryPath(path) !== path || path.normalize("NFC") !== path || !isCanonicalConcreteRepositoryPath(path)) {
+      throw new Error(`slice '${sliceId}' full reviewed diff contains an invalid ownership path`);
+    }
+  }
+  const declaredLanes = planned.paths.map(ownershipLane);
+  const unexpected = changedPaths.filter((path) => !declaredLanes.some((lane) => ownershipLaneContains(lane, path)));
+  const { ratified_paths: ratifiedPaths, verdict } = validateSliceReviewResult(review, { sliceId });
+  const expectedRatified = verdict === "APPROVE" ? unexpected : [];
+  if (!sameJson(ratifiedPaths, expectedRatified)) {
+    throw new Error(`slice '${sliceId}' ownership ratification must exactly equal every changed path outside declared ownership`);
+  }
+  if (verdict === "APPROVE") {
+    const planLanes = decomposition.plan.slices.map((candidate) => ({ id: candidate.id, lanes: candidate.paths.map(ownershipLane) }));
+    for (const path of ratifiedPaths) {
+      if (isRatificationContractPath(path)) throw new Error(`slice '${sliceId}' cannot ratify unsafe contract path '${path}'`);
+      const owners = planLanes.filter((candidate) => candidate.lanes.some((lane) => ownershipLaneContains(lane, path))).map((candidate) => candidate.id);
+      if (owners.length !== 0) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has declared plan ownership`);
+    }
+  }
+  return {
+    diff_base_commit: diffBaseCommit,
+    ratified_paths: [...ratifiedPaths],
+    effective_paths: [...slice.declared_paths, ...ratifiedPaths],
+    changed_paths: changedPaths,
+    plan_hash: decomposition.plan_hash,
+  };
+}
+
+function ownershipLane(path) {
+  const canonical = validatePlanPath(path);
+  if (canonical !== path) throw new Error("accepted plan contains an invalid ownership lane");
+  return canonical.endsWith("/**") ? { base: canonical.slice(0, -3), recursive: true } : { base: canonical, recursive: false };
+}
+
+function ownershipLaneContains(lane, path) {
+  return lane.recursive ? path.startsWith(`${lane.base}/`) : path === lane.base;
+}
+
+function isRatificationContractPath(path) {
+  return RATIFICATION_CONTRACT_PATHS.has(path) || path.startsWith(".yarn/") || path.startsWith("node_modules/")
+    || (!path.includes("/") && (/^(?:tsconfig(?:\.[^.]+)?\.json|(?:eslint|prettier|babel|webpack|vite|vitest|jest)\.config\.[A-Za-z0-9]+)$/u.test(path) || /^\.env(?:\.|$)/u.test(path)));
 }
 
 export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
@@ -4314,6 +4398,8 @@ export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
     review_ref: slice.review_ref,
     review_hash: slice.review_hash,
     reviewed_commit: slice.reviewed_commit,
+    diff_base_commit: current.diff_base_commit,
+    ratified_paths: result.ratified_paths,
     ...result,
     ...dispatch,
   };
@@ -5299,6 +5385,8 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
       review_ref: entry.review_ref,
       review_hash: observed.binding.review_hash,
       reviewed_commit: observed.review.reviewed_commit,
+      diff_base_commit: entry.diff_base_commit,
+      ratified_paths: result.ratified_paths,
       ...result,
       ...dispatch,
     };
@@ -5411,9 +5499,10 @@ function sameStringSet(left, right) {
 
 function assertSliceTransition(runDir, prior, next) {
   assertSliceAttemptHistoryCurrent(runDir, prior.id, prior);
-  for (const key of ["id", "stack", "depends_on"]) {
+  for (const key of ["id", "stack", "depends_on", "declared_paths"]) {
     if (!sameJson(prior?.[key], next?.[key])) throw new Error(`slice ${key} is immutable`);
   }
+  if (!sameJson(prior.effective_paths, next.effective_paths)) throw new Error(`slice '${prior.id}' effective_paths is managed by checked review publication`);
   const transitions = {
     pending: new Set(["running", "blocked"]),
     running: new Set(["running", "review", "blocked"]),
@@ -5515,6 +5604,7 @@ function terminalizeSliceNonconvergence(run, slice, sliceIndex, options = {}) {
 
 function normalizeSliceTransition(prior, next) {
   if (next.status === "running") {
+    next.effective_paths = cloneJson(next.declared_paths);
     delete next.evidence_ref;
     delete next.evidence_hash;
     delete next.review_ref;
@@ -5529,6 +5619,7 @@ function normalizeSliceTransition(prior, next) {
     delete next.blocked_reason;
     delete next.updated_at;
   } else if (next.status === "blocked") {
+    next.effective_paths = cloneJson(next.declared_paths);
     delete next.merge_commit;
     delete next.evidence_hash;
     delete next.review_hash;

@@ -33,7 +33,7 @@ const CONTINUATION_ARTIFACT_KINDS = new Map([
 ]);
 const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu;
 const CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
-const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "declared_paths", "effective_paths", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 
 export function encodeFeatureCommandPayload(payload) {
   return `${PREFIX}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
@@ -383,6 +383,7 @@ function normalizeCarryForward(continuation) {
   const accepted = new Set();
   for (const row of value.accepted_slices) {
     if (!plainObject(row) || !hasOnlyKeys(row, CARRY_FORWARD_ACCEPTED_KEYS) || !nonEmptyString(row.id) || accepted.has(row.id)
+      || !validOwnershipPaths(row.declared_paths) || !validOwnershipPaths(row.effective_paths)
       || !Number.isInteger(row.attempts) || row.attempts < 1 || !canonicalJsonRef(row.evidence_ref, "evidence/") || !canonicalJsonRef(row.review_ref, "reviews/")
       || !SHA256_PATTERN.test(row.evidence_hash || "") || !SHA256_PATTERN.test(row.review_hash || "") || !COMMIT_PATTERN.test(row.reviewed_commit || "") || !COMMIT_PATTERN.test(row.merge_commit || "")
       || !validAcceptedAttemptHistory(row)) {
@@ -396,6 +397,10 @@ function normalizeCarryForward(continuation) {
     remaining.add(id);
   }
   return { ok: true, value: cloneJson(value) };
+}
+
+function validOwnershipPaths(paths) {
+  return Array.isArray(paths) && paths.length > 0 && paths.every((path) => nonEmptyString(path)) && new Set(paths).size === paths.length;
 }
 
 function validAcceptedAttemptHistory(row) {

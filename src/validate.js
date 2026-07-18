@@ -94,8 +94,8 @@ const TEST_EXECUTION_STREAM_KEYS = new Set(["captured_bytes", "sha256", "truncat
 const TEST_EXECUTION_OUTCOMES = new Set(["exited", "signaled", "timeout", "output-limit", "launch-error"]);
 const TEST_EXECUTION_STATUSES = new Set(["pass", "fail"]);
 const SIGNAL_PATTERN = /^SIG[A-Z0-9]{1,31}$/u;
-const SLICE_KEYS = new Set(["id", "stack", "depends_on", "status", "branch", "worktree", "attempts", "attempt_reviews", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "blocked_reason", "updated_at"]);
-const SLICE_ATTEMPT_REVIEW_KEYS = new Set(["attempt", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "verdict", "convergence", "remaining_fix_count", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
+const SLICE_KEYS = new Set(["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "branch", "worktree", "attempts", "attempt_reviews", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "blocked_reason", "updated_at"]);
+const SLICE_ATTEMPT_REVIEW_KEYS = new Set(["attempt", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "diff_base_commit", "ratified_paths", "verdict", "convergence", "remaining_fix_count", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
 const SLICE_REVIEW_VERDICTS = new Set(["APPROVE", "REJECT"]);
 const SLICE_REVIEW_CONVERGENCE = new Set(["converging", "nonconvergent"]);
 const SLICE_MAX_ATTEMPTS = 3;
@@ -114,6 +114,7 @@ export const SLICE_FIX_SCOPE_EFFECTS = Object.freeze(["in-lane", "unowned-extens
 const SLICE_FIX_SCOPE_EFFECT_SET = new Set(SLICE_FIX_SCOPE_EFFECTS);
 const SLICE_REMEDIATION_CONTEXT_KEYS = new Set(["schema_version", "fixes"]);
 const SLICE_REMEDIATION_V2_FIX_KEYS = new Set(["required_fix_index", "classification", "scope_effect", "likely_paths", "fix_owner"]);
+const SLICE_OWNERSHIP_RATIFICATION_KEYS = new Set(["schema_version", "paths"]);
 const VERDICT_KEYS = new Set(["verdict", "report", "report_hash", "review_ref", "review_hash", "reviewed_head_sha", "loops"]);
 const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
 const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
@@ -135,7 +136,7 @@ const CONTINUATION_ARTIFACT_KINDS = new Set(["artifact", "story", "research_map"
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CONTINUATION_DRAFT_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
-const CONTINUATION_CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+const CONTINUATION_CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "declared_paths", "effective_paths", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 const CONTINUATION_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy"]);
 
 export class ValidationError extends Error {
@@ -167,6 +168,18 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
   if (review.remaining_fix_count !== fixes.length) errors.push({ path: `${path}.remaining_fix_count`, message: "must equal required_fixes length" });
   if (review.verdict === "APPROVE" && fixes.length !== 0) errors.push({ path: `${path}.required_fixes`, message: "APPROVE review requires zero remaining fixes" });
   if (review.verdict === "REJECT" && fixes.length < 1) errors.push({ path: `${path}.required_fixes`, message: "REJECT review requires at least one remaining fix" });
+  const ratification = review.ownership_ratification;
+  if (!isRecord(ratification)) {
+    errors.push({ path: `${path}.ownership_ratification`, message: "is required and must be an object" });
+  } else {
+    allowedKeys(errors, ratification, SLICE_OWNERSHIP_RATIFICATION_KEYS, `${path}.ownership_ratification`);
+    requiredInteger(errors, ratification, "schema_version", `${path}.ownership_ratification.schema_version`);
+    if (ratification.schema_version !== 1) errors.push({ path: `${path}.ownership_ratification.schema_version`, message: "must equal 1" });
+    validateCanonicalConcretePathSet(errors, ratification.paths, `${path}.ownership_ratification.paths`, { allowEmpty: true, sorted: true });
+    if (review.verdict === "REJECT" && Array.isArray(ratification.paths) && ratification.paths.length !== 0) {
+      errors.push({ path: `${path}.ownership_ratification.paths`, message: "must be empty for REJECT" });
+    }
+  }
 
   const context = review.remediation_context;
   if (!isRecord(context)) {
@@ -205,6 +218,7 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
     verdict: review.verdict,
     convergence: review.convergence,
     remaining_fix_count: review.remaining_fix_count,
+    ratified_paths: [...ratification.paths],
     task_context: classifications.length > 0 && classifications.every((classification) => classification === "narrow-correction") ? "reuse" : "fresh",
   };
 }
@@ -270,23 +284,27 @@ export function validateSliceReviewFeasibility(review, plan, { sliceId = "slice"
 }
 
 function validateLikelyRepositoryPaths(errors, paths, path) {
-  if (!Array.isArray(paths) || paths.length < 1) {
-    errors.push({ path, message: "must be a nonempty array of unique canonical concrete repository paths" });
+  validateCanonicalConcretePathSet(errors, paths, path, { allowEmpty: false, sorted: false });
+}
+
+export function isCanonicalConcreteRepositoryPath(value) {
+  return validatePlanPath(value) === value && !value.endsWith("/**");
+}
+
+function validateCanonicalConcretePathSet(errors, paths, path, { allowEmpty, sorted }) {
+  if (!Array.isArray(paths) || (!allowEmpty && paths.length < 1)) {
+    errors.push({ path, message: `${allowEmpty ? "must be an array" : "must be a nonempty array"} of unique canonical concrete repository paths` });
     return;
   }
   const canonical = [];
   for (const [index, value] of paths.entries()) {
-    if (!isCanonicalConcreteRepositoryPath(value)) {
-      errors.push({ path: `${path}[${index}]`, message: "must be a canonical concrete repository path without globs" });
-    } else {
-      canonical.push(value);
-    }
+    if (!isCanonicalConcreteRepositoryPath(value)) errors.push({ path: `${path}[${index}]`, message: "must be a canonical concrete repository path without globs" });
+    else canonical.push(value);
   }
   if (new Set(canonical).size !== canonical.length) errors.push({ path, message: "must contain unique paths" });
-}
-
-function isCanonicalConcreteRepositoryPath(value) {
-  return validatePlanPath(value) === value && !value.endsWith("/**");
+  if (sorted && canonical.some((value, index) => index > 0 && canonical[index - 1] >= value)) {
+    errors.push({ path, message: "must be sorted by canonical repository path" });
+  }
 }
 
 function canonicalPlanOwnershipLane(value, errors, path) {
@@ -1293,6 +1311,8 @@ function validateContinuationCarryForward(errors, run, continuation, path) {
     requiredString(errors, accepted, "id", `${itemPath}.id`);
     if (acceptedIds.has(accepted.id)) errors.push({ path: `${itemPath}.id`, message: "must be unique" });
     acceptedIds.add(accepted.id);
+    validateDurableOwnershipPaths(errors, accepted.declared_paths, `${itemPath}.declared_paths`, { concreteOnly: false });
+    validateDurableOwnershipPaths(errors, accepted.effective_paths, `${itemPath}.effective_paths`, { concreteOnly: false });
     boundedInteger(errors, accepted, "attempts", 1, Number.MAX_SAFE_INTEGER, `${itemPath}.attempts`);
     for (const [key, root] of [["evidence_ref", "evidence"], ["review_ref", "reviews"]]) {
       requiredString(errors, accepted, key, `${itemPath}.${key}`);
@@ -1301,6 +1321,7 @@ function validateContinuationCarryForward(errors, run, continuation, path) {
     for (const key of ["evidence_hash", "review_hash"]) requiredHash(errors, accepted, key, `${itemPath}.${key}`);
     for (const key of ["reviewed_commit", "merge_commit"]) requiredFullGitSha(errors, accepted, key, `${itemPath}.${key}`);
     validateSliceAttemptReviews(errors, { ...accepted, status: "merged" }, itemPath);
+    validateSliceEffectiveOwnership(errors, { ...accepted, status: "merged" }, itemPath);
   }
   const remainingIds = new Set();
   if (!Array.isArray(carry.remaining_slice_ids) || carry.remaining_slice_ids.length === 0) errors.push({ path: `${path}.remaining_slice_ids`, message: "must contain at least one id" });
@@ -1318,8 +1339,9 @@ function validateContinuationCarryForward(errors, run, continuation, path) {
       if (acceptedIds.has(slice?.id)) {
         if (carry.accepted_slices[acceptedIndex++]?.id !== slice.id) errors.push({ path: "run.slices", message: "accepted carry-forward rows must remain in PLAN order" });
         const adopted = carry.accepted_slices.find((entry) => entry.id === slice.id);
-        const allowed = new Set(["id", "stack", "depends_on", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+        const allowed = new Set(["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
         if (Object.keys(slice).some((key) => !allowed.has(key)) || slice.status !== "merged" || slice.attempts !== adopted.attempts
+          || JSON.stringify(slice.declared_paths) !== JSON.stringify(adopted.declared_paths) || JSON.stringify(slice.effective_paths) !== JSON.stringify(adopted.effective_paths)
           || slice.evidence_ref !== adopted.evidence_ref || slice.evidence_hash !== adopted.evidence_hash || slice.review_ref !== adopted.review_ref
           || slice.review_hash !== adopted.review_hash || slice.reviewed_commit !== adopted.reviewed_commit || slice.merge_commit !== adopted.merge_commit
           || JSON.stringify(slice.attempt_reviews) !== JSON.stringify(adopted.attempt_reviews)) {
@@ -2227,6 +2249,8 @@ function validateRunSlice(errors, slice, path, ids) {
   requiredTerminalSafeString(errors, slice, "id", `${path}.id`);
   optionalString(errors, slice, "stack", `${path}.stack`);
   validateStringArray(errors, slice.depends_on, `${path}.depends_on`, { required: false, values: ids });
+  validateDurableOwnershipPaths(errors, slice.declared_paths, `${path}.declared_paths`, { concreteOnly: false });
+  validateDurableOwnershipPaths(errors, slice.effective_paths, `${path}.effective_paths`, { concreteOnly: false });
   requiredEnum(errors, slice, "status", SLICE_STATUSES, `${path}.status`);
   optionalString(errors, slice, "branch", `${path}.branch`);
   optionalString(errors, slice, "worktree", `${path}.worktree`);
@@ -2276,6 +2300,7 @@ function validateRunSlice(errors, slice, path, ids) {
   } else if (bindingCount !== 0) {
     errors.push({ path, message: "evidence_hash, review_hash, and reviewed_commit are forbidden outside review or merged" });
   }
+  validateSliceEffectiveOwnership(errors, slice, path);
 }
 
 function validateSliceAttemptReviews(errors, slice, path) {
@@ -2288,6 +2313,7 @@ function validateSliceAttemptReviews(errors, slice, path) {
     return;
   }
   let priorAttempt = 0;
+  let diffBaseCommit = null;
   for (const [index, review] of slice.attempt_reviews.entries()) {
     const reviewPath = `${path}.attempt_reviews[${index}]`;
     if (!isRecord(review)) {
@@ -2301,6 +2327,8 @@ function validateSliceAttemptReviews(errors, slice, path) {
     requiredString(errors, review, "review_ref", `${reviewPath}.review_ref`);
     requiredHash(errors, review, "review_hash", `${reviewPath}.review_hash`);
     requiredFullGitSha(errors, review, "reviewed_commit", `${reviewPath}.reviewed_commit`);
+    requiredFullGitSha(errors, review, "diff_base_commit", `${reviewPath}.diff_base_commit`);
+    validateCanonicalConcretePathSet(errors, review.ratified_paths, `${reviewPath}.ratified_paths`, { allowEmpty: true, sorted: true });
     requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${reviewPath}.verdict`);
     requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${reviewPath}.convergence`);
     boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${reviewPath}.remaining_fix_count`);
@@ -2322,6 +2350,11 @@ function validateSliceAttemptReviews(errors, slice, path) {
     }
     if (review.verdict === "APPROVE" && review.remaining_fix_count !== 0) errors.push({ path: `${reviewPath}.remaining_fix_count`, message: "must equal 0 for APPROVE" });
     if (review.verdict === "REJECT" && Number.isInteger(review.remaining_fix_count) && review.remaining_fix_count < 1) errors.push({ path: `${reviewPath}.remaining_fix_count`, message: "must be positive for REJECT" });
+    if (review.verdict === "REJECT" && Array.isArray(review.ratified_paths) && review.ratified_paths.length !== 0) errors.push({ path: `${reviewPath}.ratified_paths`, message: "must be empty for REJECT" });
+    if (FULL_GIT_SHA_PATTERN.test(String(review.diff_base_commit || ""))) {
+      if (diffBaseCommit === null) diffBaseCommit = review.diff_base_commit;
+      else if (review.diff_base_commit !== diffBaseCommit) errors.push({ path: `${reviewPath}.diff_base_commit`, message: "must equal the first checked dispatch baseline for every attempt" });
+    }
   }
   const current = slice.attempt_reviews.at(-1);
   if (["review", "merged"].includes(slice.status)) {
@@ -2332,6 +2365,32 @@ function validateSliceAttemptReviews(errors, slice, path) {
         if (slice[key] !== current[key]) errors.push({ path: `${path}.${key}`, message: `must equal the current attempt_reviews ${key}` });
       }
     }
+  }
+}
+
+function validateDurableOwnershipPaths(errors, paths, path, { concreteOnly }) {
+  if (!Array.isArray(paths) || paths.length < 1) {
+    errors.push({ path, message: "must be a nonempty array of unique canonical ownership paths" });
+    return;
+  }
+  const valid = [];
+  for (const [index, value] of paths.entries()) {
+    const canonical = concreteOnly ? isCanonicalConcreteRepositoryPath(value) : validatePlanPath(value) === value;
+    if (!canonical) errors.push({ path: `${path}[${index}]`, message: "must be a canonical ownership path" });
+    else valid.push(value);
+  }
+  if (new Set(valid).size !== valid.length) errors.push({ path, message: "must contain unique paths" });
+}
+
+function validateSliceEffectiveOwnership(errors, slice, path) {
+  if (!Array.isArray(slice.declared_paths) || !Array.isArray(slice.effective_paths)) return;
+  const current = Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews.at(-1) : null;
+  const ratified = ["review", "merged"].includes(slice.status) && current?.attempt === slice.attempts && current.verdict === "APPROVE" && Array.isArray(current.ratified_paths)
+    ? current.ratified_paths
+    : [];
+  const expected = [...slice.declared_paths, ...ratified];
+  if (JSON.stringify(slice.effective_paths) !== JSON.stringify(expected)) {
+    errors.push({ path: `${path}.effective_paths`, message: "must equal declared_paths plus only the current APPROVE review ratified_paths" });
   }
 }
 
@@ -2348,6 +2407,7 @@ function validatePlannedSlices(errors, slices, path, { enforceDependencyDepth })
     validateStringArray(errors, slice.paths, `${path}[${index}].paths`, { required: true, nonEmpty: true });
     if (Array.isArray(slice.paths)) {
       for (const [laneIndex, lane] of slice.paths.entries()) canonicalPlanOwnershipLane(lane, errors, `${path}[${index}].paths[${laneIndex}]`);
+      if (new Set(slice.paths).size !== slice.paths.length) errors.push({ path: `${path}[${index}].paths`, message: "must contain unique declared ownership lanes" });
     }
     validateStringArray(errors, slice.depends_on, `${path}[${index}].depends_on`, { required: true, values: ids });
     validateStringArray(errors, slice.acceptance, `${path}[${index}].acceptance`, { required: true, nonEmpty: true });

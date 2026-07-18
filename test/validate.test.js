@@ -4,12 +4,12 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createReviewRecord, createSliceAttemptReview } from "./helpers/review-record-fixture.js";
+import { createReviewRecord, createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 import { hashValue } from "../src/refs.js";
-import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
+import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
@@ -69,6 +69,41 @@ describe("run schema and consistency", () => {
         lane,
       );
     }
+  });
+
+  it("requires canonical review ratification and forbids REJECT ownership", () => {
+    const approved = createSliceReviewRecord({ ratifiedPaths: ["docs/a.md", "docs/z.md"] });
+    assert.deepEqual(validateSliceReviewResult(approved).ratified_paths, ["docs/a.md", "docs/z.md"]);
+
+    const missing = structuredClone(approved);
+    delete missing.ownership_ratification;
+    assert.throws(() => validateSliceReviewResult(missing), /ownership_ratification: is required/u);
+
+    const unsorted = createSliceReviewRecord({ ratifiedPaths: ["docs/z.md", "docs/a.md"] });
+    assert.throws(() => validateSliceReviewResult(unsorted), /must be sorted by canonical repository path/u);
+
+    const rejected = createSliceReviewRecord({ verdict: "REJECT", requiredFixes: ["fix"], ratifiedPaths: ["docs/a.md"] });
+    assert.throws(() => validateSliceReviewResult(rejected), /must be empty for REJECT/u);
+  });
+
+  it("requires durable ownership and derives effective paths only from the current APPROVE", () => {
+    const sha = "a".repeat(40);
+    const first = createSliceAttemptReview({ attempt: 1, evidenceRef: "evidence/one.json", evidenceHash: HASH, reviewRef: "reviews/one.json", reviewHash: HASH, reviewedCommit: sha, verdict: "REJECT" });
+    const current = createSliceAttemptReview({ attempt: 2, evidenceRef: "evidence/two.json", evidenceHash: HASH, reviewRef: "reviews/two.json", reviewHash: HASH, reviewedCommit: sha, ratifiedPaths: ["docs/adjacent.md"] });
+    const slice = {
+      id: "slice", status: "review", attempts: 2, declared_paths: ["src/**"], effective_paths: ["src/**", "docs/adjacent.md"],
+      evidence_ref: current.evidence_ref, evidence_hash: current.evidence_hash, review_ref: current.review_ref, review_hash: current.review_hash,
+      reviewed_commit: sha, attempt_reviews: [first, current],
+    };
+    assert.deepEqual(validateRun({ ...runningRun(), slices: [slice] }).slices[0].effective_paths, ["src/**", "docs/adjacent.md"]);
+
+    assert.throws(() => validateRun({ ...runningRun(), slices: [{ ...slice, effective_paths: ["src/**", "docs/prior.md", "docs/adjacent.md"] }] }), /plus only the current APPROVE/u);
+    const missing = structuredClone(slice);
+    delete missing.declared_paths;
+    assert.throws(() => validateRun({ ...runningRun(), slices: [missing] }), /declared_paths: must be a nonempty array/u);
+
+    const running = durableSlice({ id: "slice", status: "running", attempts: 2, attempt_reviews: [first] }, ["src/**"]);
+    assert.deepEqual(validateRun({ ...runningRun(), slices: [running] }).slices[0].effective_paths, ["src/**"]);
   });
 
   it("enforces the closed versioned run envelope, top-level timestamps, and absolute worktree", () => {
@@ -178,7 +213,7 @@ describe("run schema and consistency", () => {
       { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "backend-builder", slice_id: "slice", provider: "opencode", model: "gpt-5.5", input_tokens: 10, output_tokens: 5, total_tokens: 15, cost_total: 0.02, cost_currency: "USD" },
     ] }, { now: "2026-07-08T12:00:01.000Z" });
 
-    const run = validateRun({ ...runningRun(), slices: [{ id: "slice", status: "running" }], cost_attribution: costAttribution });
+    const run = validateRun({ ...runningRun(), slices: [durableSlice({ id: "slice", status: "running" })], cost_attribution: costAttribution });
 
     assert.equal(run.cost_attribution.schema_version, 1);
     assert.equal(run.cost_attribution.status, "available");
@@ -190,7 +225,7 @@ describe("run schema and consistency", () => {
       { id: "cost-1", recorded_at: "2026-07-08T12:00:00.000Z", run_id: "run", agent: "__proto__", slice_id: "__proto__", provider: "opencode", model: "gpt-5.5", input_tokens: 10, cost_total: 0.02, cost_currency: "USD" },
     ] }, { now: "2026-07-08T12:00:01.000Z" });
 
-    const run = validateRun({ ...runningRun(), slices: [{ id: "__proto__", status: "running" }], cost_attribution: costAttribution });
+    const run = validateRun({ ...runningRun(), slices: [durableSlice({ id: "__proto__", status: "running" })], cost_attribution: costAttribution });
 
     assert.equal(run.cost_attribution.by_agent["__proto__"].entry_count, 1);
     assert.equal(run.cost_attribution.by_slice["__proto__"].cost_total, 0.02);
@@ -637,7 +672,7 @@ describe("run schema and consistency", () => {
   });
 
   it("accepts unbound running slices and panel rows while closing successor and steering authority records", () => {
-    const slice = { id: "slice", stack: "backend", depends_on: [], status: "running", attempts: 1, branch: "feature--slice", worktree: "/tmp/slice" };
+    const slice = durableSlice({ id: "slice", stack: "backend", depends_on: [], status: "running", attempts: 1, branch: "feature--slice", worktree: "/tmp/slice" });
     const steering = {
       schema_version: 1,
       generation: 2,
@@ -697,7 +732,7 @@ describe("run schema and consistency", () => {
   it("requires complete current slice review authority and dual-panel successor bindings", () => {
     const sha = "a".repeat(40);
     const sliceBinding = { evidence_hash: HASH, review_hash: HASH, reviewed_commit: sha };
-    const reviewSlice = { id: "slice", status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" };
+    const reviewSlice = durableSlice({ id: "slice", status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" });
     for (let mask = 0; mask < 8; mask += 1) {
       const partial = { ...reviewSlice };
       Object.entries(sliceBinding).forEach(([key, value], index) => { if (mask & (1 << index)) partial[key] = value; });
@@ -822,8 +857,8 @@ describe("run schema and consistency", () => {
       max_parallel_slices: 3, max_retries: 3, continuation: v2,
       post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
       slices: [
-        { id: "A", stack: "backend", depends_on: [], status: "merged", ...v2.carry_forward.accepted_slices[0] },
-        { id: "B", stack: "backend", depends_on: ["A"], status: "pending", attempts: 0 },
+        durableSlice({ id: "A", stack: "backend", depends_on: [], status: "merged", ...v2.carry_forward.accepted_slices[0] }, ["src/A.js"]),
+        durableSlice({ id: "B", stack: "backend", depends_on: ["A"], status: "pending", attempts: 0 }, ["src/B.js"]),
       ],
     };
     assert.equal(validateRun(run).continuation.schema_version, 2);
@@ -941,7 +976,7 @@ describe("run schema and consistency", () => {
 
       writeJson(join(runDir, "run.json"), {
         ...runningRun("legacy-depth"),
-        slices: plan.slices.map(({ id, stack, depends_on }) => ({ id, stack, depends_on, status: "pending", attempts: 0 })),
+        slices: plan.slices.map(({ id, stack, paths, depends_on }) => durableSlice({ id, stack, depends_on, status: "pending", attempts: 0 }, paths)),
       });
       assert.equal(validateRunDir(runDir).ok, true, "existing seeded plans remain readable");
     } finally {
@@ -979,11 +1014,11 @@ describe("run schema and consistency", () => {
       assert.equal(validateRunDir(runDir).ok, false, "an unrelated run.slices must not grandfather the plan");
 
       // same ids but a different dependency graph is still a mismatch
-      writeJson(join(runDir, "run.json"), withSlices(plan.slices.map(({ id, stack }) => ({ id, stack, depends_on: [], status: "pending", attempts: 0 }))));
+      writeJson(join(runDir, "run.json"), withSlices(plan.slices.map(({ id, stack, paths }) => durableSlice({ id, stack, depends_on: [], status: "pending", attempts: 0 }, paths))));
       assert.equal(validateRunDir(runDir).ok, false, "same ids with a different dependency graph must not grandfather the plan");
 
       // the exact durable form of this plan does grandfather it
-      writeJson(join(runDir, "run.json"), withSlices(plan.slices.map(({ id, stack, depends_on }) => ({ id, stack, depends_on, status: "pending", attempts: 0 }))));
+      writeJson(join(runDir, "run.json"), withSlices(plan.slices.map(({ id, stack, paths, depends_on }) => durableSlice({ id, stack, depends_on, status: "pending", attempts: 0 }, paths))));
       assert.equal(validateRunDir(runDir).ok, true, "the exact durable form of the plan remains grandfathered");
     } finally {
       cleanup(repo);
@@ -1110,6 +1145,8 @@ function carryForwardMetadata() {
     start_commit: "c".repeat(40),
     accepted_slices: [{
       id: "A",
+      declared_paths: ["src/A.js"],
+      effective_paths: ["src/A.js"],
       attempts: 1,
       attempt_reviews: [attemptReview],
       evidence_ref: "evidence/A.json",
@@ -1185,6 +1222,10 @@ function processEvidence(runId = "run", overrides = {}) {
 
 function plannedSlice(id, dependsOn = []) {
   return { id, stack: "backend", paths: [`src/${id}.js`], depends_on: dependsOn, acceptance: [id], test_plan: ["node --test"] };
+}
+
+function durableSlice(slice, declaredPaths = [`src/${slice.id}.js`]) {
+  return { ...slice, declared_paths: [...declaredPaths], effective_paths: [...declaredPaths] };
 }
 
 function slicesPlan(slices) {

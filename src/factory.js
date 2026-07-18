@@ -38,7 +38,7 @@ const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
-const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "declared_paths", "effective_paths", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 const CARRY_FORWARD_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy"]);
 const CARRY_FORWARD_MODES = new Set(["interactive", "headless", "autonomous"]);
 const CARRY_FORWARD_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -3120,6 +3120,8 @@ function initialCarryForwardRun(continuation, configuration, plan, decomposition
       id: planned.id,
       stack: planned.stack,
       depends_on: cloneJson(planned.depends_on),
+      declared_paths: cloneJson(adopted.declared_paths),
+      effective_paths: cloneJson(adopted.effective_paths),
       status: "merged",
       attempts: adopted.attempts,
       evidence_ref: adopted.evidence_ref,
@@ -3129,7 +3131,7 @@ function initialCarryForwardRun(continuation, configuration, plan, decomposition
       reviewed_commit: adopted.reviewed_commit,
       merge_commit: adopted.merge_commit,
       attempt_reviews: cloneJson(adopted.attempt_reviews),
-    } : { id: planned.id, stack: planned.stack, depends_on: cloneJson(planned.depends_on), status: "pending", attempts: 0 };
+    } : { id: planned.id, stack: planned.stack, depends_on: cloneJson(planned.depends_on), declared_paths: cloneJson(planned.paths), effective_paths: cloneJson(planned.paths), status: "pending", attempts: 0 };
   });
   const reuse = continuation.planning_reuse;
   const createdAt = continuation.created_at;
