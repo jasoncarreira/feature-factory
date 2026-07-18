@@ -1,4 +1,4 @@
-Status — approved v2 design, 2026-07-17: Option A(a) / D is the decision. The v2 reviewed-carry-forward contract below is **planned and not implemented**. It does not change the current v1 `factory continue` contract or runtime behavior; `README.md` remains the authority for current behavior.
+Status — implemented v2 reviewed carry-forward, 2026-07-17. Option A(a) / D is selected only by explicit pre-PR `factory continue ... --carry-forward`. Unflagged and post-PR continuation remain schema v1.
 
 # Continuation Scope and Reviewed Carry-Forward
 
@@ -10,9 +10,9 @@ This approves Option A(a) (branch from the validated integration HEAD and durabl
 
 ## Current v1 boundary
 
-The shipped v1 continuation remains current, narrow, and readable. It decomposes only `continuation.review.required_fixes`, inherits accepted planning only through the existing checked adoption path, and otherwise runs the current gates. Existing v1 post-PR continuation behavior is unchanged. Nothing in this document makes v2 input valid, creates a v2 claim, publishes v2 authority, changes eligibility, or changes current production/catalog coverage.
+The shipped v1 continuation remains current, narrow, and readable. It decomposes only `continuation.review.required_fixes`, inherits accepted planning only through the existing checked adoption path, and otherwise runs the current gates. Existing v1 post-PR continuation behavior is unchanged. V2 requires the explicit selector; a v2 payload is admissible only when it exactly matches a checked, published child.
 
-## Planned v2 carry-forward schema
+## Implemented v2 carry-forward schema
 
 V2 adds one closed `continuation.carry_forward` object:
 
@@ -42,15 +42,19 @@ The `carry_forward` object is closed to exactly `scope`, `plan_ref`, `plan_hash`
 
 `plan_ref` is the parent-relative `plan/slices.json`, and `plan_hash` binds its exact regular-file bytes. `accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order. `remaining_slice_ids` contains every nonmerged slice ID, in PLAN order. IDs are unique within each array, the arrays are disjoint, and their set union is exactly the bound plan's complete `slices[].id` set, with no omission or extra ID. They are ordered filtered subsequences, not a prefix/suffix split: for plan order `[A, B, C]`, merged `A` and `C` produces `accepted_slices: [A, C]` and `remaining_slice_ids: [B]`, which is valid. Remaining rows inherit identity and plan dependencies only: they inherit no status, attempts, evidence, review, reviewed commit, merge commit, test result, panel verdict, or other authority from the parent.
 
-## Planned v2 eligibility and integration proof
+Schema-v2 eligibility also requires root `plan.integration_gate.required_commands`. It is the closed ordered structured-argv contract: 1-32 exact `{program,args}` entries, no shell text, bounded UTF-8 program/args/list sizes, and exact `{program:"npm",args:["run","check"]}` once and last. The parent work-decomposer accepted step must bind exact `plan/slices.json` and its review through the existing closed `acceptance` ref/hash shape. Construction, staged publication, adoption, local authority checks, replay, resume, test dispatch, and downstream transitions rehash the accepted files and reject missing/malformed/drifted authority. Publication copies plan and review bytes unchanged; after observing target absence it repeats parent binding and staged-byte checks immediately before the no-replace move. Compatibility reads keep legacy v1 plans/accepted steps valid, but they cannot become v2 carry-forward authority.
 
-V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. A parent with a PR, active post-PR state, a non-`blocked` status, no nonmerged slice, or ambiguous state is ineligible for v2. Current v1 post-PR continuation remains unchanged and is not routed through v2 carry-forward.
+After every child row is merged, only `factory test-execute <run-id> --json` may execute that command authority. The locked active claim binds nonce, run/attempt, exact plan hash, clean child HEAD, and fixed receipt ref before process creation. The shell-free executor uses exact child cwd, reduced environment, sequential bounded commands, captured-prefix hashes instead of raw output, and fail-closed unknown states for process, authority, or receipt-publication uncertainty. Finalization rechecks every merged commit remains ancestral to exact clean HEAD before create-only receipt publication. A completed pass remains running for independent test-report review; a decided failure rejects the same attempt. Active/unknown state has no supported retry, clear, replacement, terminal, steering-conflict, step-advance, or recovery path. Caller/model reason text grants no authority. B1R requires trusted out-of-band operator/process reconciliation and intentionally exposes no autonomous command or authority flag.
+
+## V2 eligibility and integration proof
+
+V2 carry-forward is eligible only for a valid parent whose status is exactly `blocked` before PR creation. The parent has no PR URL or PR-created tuple and no active post-PR observation, remediation, revalidation, push, or continuation state. It must also have `planning_reuse.eligible === true` from durably accepted unchanged planning and no `draft_spec_reuse`. A parent with a PR, active post-PR state, a non-`blocked` status, no nonmerged slice, draft/unaccepted planning, or ambiguous state is ineligible for v2. Current v1 post-PR continuation remains unchanged and is not routed through v2 carry-forward.
 
 Each accepted row must match the same-ID parent slice with positive `attempts`, status exactly `merged`, the complete B0MR successor tuple, and unchanged exact evidence/review bytes. Actual integration merge order may differ from PLAN and dependency-execution order. The Git first-parent range from `target.base_commit` exclusive through `start_commit` inclusive must contain exactly once the set of `accepted_slices[].merge_commit` values and no extra commit; its chain length equals `accepted_slices.length`. Every first-parent commit is associated by its `merge_commit` value with exactly one accepted entry and is revalidated with that entry's B0MR proof: exactly two ordered parents `P1, reviewed_commit`, a unique full `git merge-base --all`, equal NUL-delimited rename-disabled changed-path sets, and per-path absence or mode/type/object identity. `start_commit` is the parent branch HEAD and the last actual merge in that first-parent range, or equals `target.base_commit` when `accepted_slices` is empty. This does not require `accepted_slices` order to equal first-parent chain order: for PLAN-ordered `accepted_slices: [A, C]`, an actual first-parent chain `[C, A]` is valid when both mapped merges pass B0MR. Missing, duplicate, squash, linear, manual, or unrecorded commits fail closed.
 
 Parent panel bindings are optional evidence only. If either parent panel binding is present, both validator and security bindings must be complete B0MR successor tuples, their exact sidecars must still hash correctly, and both `reviewed_head_sha` values must equal `start_commit`. Parent panels are never inherited as child verdict authority: the child always runs and publishes a fresh validator/security panel at its final child HEAD.
 
-## Planned v2 origin-base outcomes
+## V2 origin-base outcomes
 
 After an authoritative fetch/observation of the configured target base, evaluate exactly these outcomes in order:
 
@@ -61,7 +65,7 @@ After an authoritative fetch/observation of the configured target base, evaluate
 
 The candidate build, resource publication, and semantic adoption/activation stages each re-read and recheck parent identity, parent status, pre-PR eligibility, exact plan bytes/hash/classification, accepted sidecar bytes and B0MR merge set/actual first-parent chain, `start_commit`, optional panel completeness, and the ordered origin-base outcome. A prior observation or caller-supplied boolean is never mutation authority.
 
-## Planned v2 claim and branch transaction
+## V2 claim and branch transaction
 
 The claim-ref suffix is derived from this closed parent-identity object and no other fields:
 
@@ -104,18 +108,26 @@ Only an exact replay succeeds: both refs already exist, the claim ref resolves t
 
 Claim lifecycle is monotonic. A crash before transaction commit leaves neither ref; a crash after commit leaves both refs and same-child recovery may exact-replay and create or recover the worktree. A half-state with only one ref is impossible from the transaction and is treated as external damage/conflict, never repaired by filling in the other half. A losing concurrent child or pre-existing child branch is a conflict. The claim ref is a permanent tombstone for the parent identity and is not deleted by child failure, terminalization, branch/worktree cleanup, or successful completion; it prevents a different later child. Same-child recovery is permitted only by the exact replay rule and never converts the tombstone into reusable capacity.
 
-## Slice ownership and semantic-publication boundary
+## Atomic semantic publication and activation
 
-- **B1.1 (this slice):** documentation and documentation tests only, owned exactly by `CONTINUATION-SCOPE-DESIGN.md`, `README.md`, `assets/skills/feature/SCHEMA.md`, and `test/docs-contract.test.js`. It creates no runtime behavior, resource, current promise, schema acceptance, or catalog coverage.
+- **B1.1:** records the reviewed design without runtime behavior.
 - **B1.2:** builds and rechecks the v2 candidate but creates no claim ref, branch, worktree, child run directory, or other resource.
 - **B1.3:** implements the atomic claim-ref/child-branch transaction and post-transaction worktree creation/recovery. Those resources are allocation only: B1.3 publishes no child manifest, `carry_forward`, plan, adopted slice state, panel verdict, or executable semantic workflow authority.
-- **B1.4:** after another full recheck, atomically publishes the child plus the complete hash-bound plan, adopts every `accepted_slices` entry without rerunning it, initializes every `remaining_slice_ids` entry without inherited authority, leaves child validator/security panels fresh and unbound, and only then activates remaining work by normal dependency readiness.
+- **B1.4 (implemented):** after another full recheck, atomically publishes the child plus the complete hash-bound plan, adopts every `accepted_slices` entry without rerunning it, initializes every `remaining_slice_ids` entry without inherited authority, leaves child validator/security panels fresh and unbound, and only then activates remaining work by normal dependency readiness.
 
-Until B1.4 lands, a B1.3 claim, branch, or worktree is not a runnable continuation and no reader may infer semantic adoption from its existence.
+A complete child directory is staged on the same filesystem outside factory run discovery. Before rename, no v2 payload, skill seed, or launch exists. The staged tree contains `run.json`, byte-identical `plan/slices.json`, accepted planning/spec review, and exact accepted slice evidence/review sidecars. It is validated before a commit-boundary recheck of parent, plan, sidecars, Git/origin, claim, branch, worktree/start HEAD, and invocation configuration, followed by one no-overwrite atomic directory rename. A crash before rename leaves no semantic child; a crash after rename leaves one complete valid child. Foreign, partial, symlinked, escaped, or conflicting targets are never filled, replaced, or rolled back.
+
+The child root remains `schema_version: 1`; only `continuation.schema_version` is 2. Closed configuration is resolved before allocation and persists mode (`autonomous`, else headless for headless/detached, else interactive), account (explicit, canonical origin owner, or `null`), PR mode (explicit draft/ready else built-in ready), post-PR policy (current-invocation flags over built-in disabled defaults), limits and retries of 3, and no review tier. Conflicts reject before allocation. Replay recomputes these immutable values and rejects a mismatch without rewriting progress.
+
+Initial child state contains exact accepted planning/spec acceptance at attempt zero, PLAN-ordered mixed merged/pending rows, fresh steering, empty gates, null validator/security, and no inherited test/panel/PR/outcome authority. Adopted rows and sidecars are immutable. Pending rows start at attempt zero and become runnable only when all dependencies are merged. Fresh execution skips bootstrap/story/research/spec/decomposition and enters normal remaining-slice execution; only after every full-plan row is merged may fresh test-verifier attempt one, validator, security, and whole-story pre-PR authority run.
+
+Schema-v1 publication and schema-v2 allocation share one create-only target reservation at `refs/opencode/continuation-targets/<sha256-child-run-id>`. The canonical reservation binds route schema, crash-stable creation time, and the complete continuation hash, so concurrent cross-schema retries cannot both acquire authority and only exact replay can continue after a crash.
+
+The transport remains `ffpayload-v1:`. Candidate, claim, branch, worktree, or caller payload alone is never authority. A reservation alone is likewise insufficient: parsing checks the exact reservation-bound continuation, and v2 additionally checks the exact published child and persisted driver projection. Resume/replay rechecks immutable adoption and parent/origin/reservation/claim/branch/worktree/plan authority. Replay preserves progressed remaining-slice, gate, panel, and post-PR state. Terminal replay returns current terminal state without launching, and the permanent allocation records survive cleanup and terminalization.
 
 ## Non-goals
 
 - Do not weaken the whole-story pre-PR gate.
 - Do not build a cross-run merge train or sibling-continuation join.
 - Do not replay already reviewed accepted slices.
-- Do not change or remove the current v1 narrow or post-PR continuation paths in this docs-only slice.
+- Do not change or remove the current v1 narrow or post-PR continuation paths.

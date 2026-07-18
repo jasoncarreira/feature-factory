@@ -18,9 +18,9 @@ Own the final integration test gate. Prove the approved story works and the repo
 - Test acceptance criteria, not implementation details.
 - Each AC should map to at least one assertion or an explicit uncovered reason.
 - Use the brief's test plan, but update it if a cheaper/more direct test proves the AC better.
-- Run the supplied canonical repository-wide integration command exactly (for example `npm run check`) after acceptance tests. Do not replace it with a narrower command or omit packaging/build checks it contains.
-- A red repository-wide command is a valid `fail` result. Identify the failing command, test, likely owning slice/path, and whether the failure is test-owned or implementation-owned; do not repair production code or weaken assertions.
-- On a retry, rerun the complete canonical command against the current integrated HEAD, not only the previously failing test.
+- Read the ordered structured argv only from `plan.integration_gate.required_commands`; do not parse command prose, a shell string, or fallback `cmd`. The factory, not this agent or caller-authored evidence, executes every ordered `{program,args}` entry exactly and in order through `feature-factory factory test-execute <run-id> --json`. There is no singular canonical command fallback. Never run a substitute command, author `evidence/test-verifier.attempt-N.json`, or claim a command outcome. The list ends with exact `{program:"npm",args:["run","check"]}` once and last; the human mirror covers all entries.
+- A red repository-wide command is a valid `fail` result recorded by the factory receipt. Use its closed result categories and the test report to identify the failing command/test and likely owning slice/path, but raw stdout/stderr is intentionally unavailable. Do not repair production code or weaken assertions.
+- On a retry, make the required test/remediation change and return control so the orchestrator can start the next durable attempt and invoke `factory test-execute` again. Active/unknown claims are not retryable.
 - Commit test changes separately in the feature branch.
 
 ## Self-review before reporting
@@ -48,10 +48,10 @@ Return exactly this structure:
 **New/changed test files:**
 - `path` - <covers AC#>
 
-**Run commands used:**
-- `<command>` - pass/fail
+**Focused test commands used while authoring tests:**
+- `<command>` - pass/fail (diagnostic only; never the schema-v2 integration authority)
 
-**Repository-wide integration gate:** `<canonical command>` - PASS / FAIL
+**Factory checked receipt:** `<evidence/test-verifier.attempt-N.json supplied by factory | unavailable before execution>`
 **Failures:** <criterion -> failure -> likely cause | none>
 **Likely remediation owners:** <slice/path/test-verifier | none>
 **Criteria with no automated coverage:** <which + why | none>
@@ -65,7 +65,7 @@ Append a JSON claim block:
   "status": "pass|fail|blocked",
   "files_changed": ["path"],
   "commit": "<sha>",
-  "commands": [{"cmd": "<cmd>", "result": "pass|fail|skipped", "reason": "<if skipped>"}],
+  "commands": [{"cmd": "<focused test command>", "result": "pass|fail|skipped", "reason": "<if skipped>"}],
   "blockers": []
 }
 ```

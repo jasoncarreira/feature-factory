@@ -11,8 +11,8 @@ import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSlicesSeed, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
-import { validateRun, validateSlicesPlan } from "./validate.js";
+import { readSlicesSeedPlan, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSlicesSeed, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { validateRun } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
 import { printCliResult, projectCliData, projectCostReport, renderCliPath } from "./cli-output.js";
@@ -21,12 +21,13 @@ import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 import { runCleanupSweepCommand } from "./cleanup-sweep-command.js";
 import { renderCleanupSweepReport } from "./cleanup-sweep-output.js";
 import { executeCleanupSweep, previewCleanupSweep } from "./cleanup-sweep.js";
+import { executeCheckedTestExecution } from "./test-execution.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
-const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--new-pr"]);
+const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--new-pr", "--carry-forward"]);
 const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--commit", "--owner-slice", "--consumer-slice", "--defect-path", "--verification-ref", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--subject", "--prompt-bytes", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
 const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
 const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
@@ -53,7 +54,7 @@ Commands:
   doctor [--local] [--profiles] [--telemetry] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
-  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--new-pr] [--post-pr-ci|--no-post-pr-ci] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
+  factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--carry-forward|--new-pr] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory cancel <run-id> [--json]
   factory steer <run-id> --message TEXT [--json]
   factory steer-consume <run-id> --ref steering/<file>.json --hash sha256:<hash> [--json]
@@ -74,6 +75,7 @@ Commands:
   factory heartbeat <run-id> --status [--json]
   factory validate [run-id]     Validate run.json and plan/slices.json
   factory recover <run-id> [--reason TEXT]  Mark orphaned/stale running run as needs-human
+  factory test-execute <run-id> --json  Execute the exact accepted integration gate and publish its checked receipt
   factory cleanup <run-id> [--dry-run] [--force] [--repo PATH] [--json]
   factory cleanup --all --dry-run [--repo PATH] [--json]
   factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> [--repo PATH] [--json]
@@ -185,6 +187,7 @@ async function doctor(args) {
 async function factory(args, dependencies = {}) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
+  if (sub === "test-execute") return testExecute(rest, dependencies);
   if (sub === "cost-report") return costReport(rest);
   if (sub === "cleanup" && rest.some((argument) => argument === "--all" || argument === "--digest" || argument.startsWith("--all=") || argument.startsWith("--digest="))) return cleanupSweep(rest);
   const opts = { ...options(rest), ...(dependencies.factoryOptions || {}) };
@@ -264,6 +267,31 @@ async function factory(args, dependencies = {}) {
   ]).trim());
   usage(console.error);
   process.exitCode = 1;
+}
+
+async function testExecute(args, dependencies = {}) {
+  try {
+    if (args.length !== 2 || args.filter((value) => value === "--json").length !== 1) {
+      throw staticCliError("factory test-execute requires exactly <run-id> --json");
+    }
+    const runId = args.find((value) => value !== "--json");
+    if (!stringValue(runId) || String(runId).startsWith("--")) throw staticCliError("factory test-execute requires exactly <run-id> --json");
+    const result = await executeCheckedTestExecution(resolveRunDir(runId), dependencies.testExecutionOptions || {});
+    console.log(serializeTerminalJson(result, { space: 2 }));
+    if (result.status !== "pass") process.exitCode = 1;
+    return result;
+  } catch (error) {
+    const envelope = {
+      ok: false,
+      error: {
+        code: typeof error?.code === "string" && error.code.length > 0 ? error.code : "TEST_EXECUTION_ERROR",
+        message: renderErrorForTerminal(error),
+      },
+    };
+    console.log(serializeTerminalJson(envelope, { space: 2 }));
+    process.exitCode = 1;
+    return envelope;
+  }
 }
 
 async function cleanupSweep(args) {
@@ -504,6 +532,9 @@ function options(args) {
     postPrCi: args.includes("--post-pr-ci"),
     noPostPrCi: args.includes("--no-post-pr-ci"),
     newPr: args.includes("--new-pr"),
+    carryForward: args.includes("--carry-forward"),
+    modeFlags: ["--interactive", "--headless", "--autonomous", "--detached"].filter((flag) => args.includes(flag)),
+    ghAccountOccurrences: args.filter((argument) => argument === "--gh-account").length,
   };
   if (args.includes("--draft")) opts.draft = true;
   if (args.includes("--no-draft")) opts.noDraft = true;
@@ -738,7 +769,8 @@ async function slicesSeed(args) {
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory slices-seed requires exactly one <run-id>");
   const from = requiredOption(opts.from, "--from", "factory slices-seed");
   const runDir = resolveRunDir(runId, opts);
-  const plan = validateSlicesPlan(readJsonFile(resolve(opts.repoRoot || opts.cwd, from), "slices plan"));
+  if (from !== "plan/slices.json") throw new Error("factory slices-seed --from must be exactly plan/slices.json");
+  const plan = readSlicesSeedPlan(runDir, from, opts);
   const slices = plan.slices.map((slice) => ({
     id: slice.id,
     stack: slice.stack,

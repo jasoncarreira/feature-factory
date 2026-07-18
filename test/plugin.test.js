@@ -192,8 +192,7 @@ describe("feature command payload parsing", () => {
     const continuation = validContinuation();
     assert.deepEqual(decodeFeatureCommandPayload(continuationToken(continuation)), { ok: false, reason: "invalid-continuation-context" });
     const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
-    assert.equal(decoded.ok, true);
-    assert.deepEqual(decoded.payload.continuation, continuation);
+    assert.deepEqual(decoded, { ok: false, reason: "continuation-schema-route-mismatch" });
 
     const directoryReview = structuredClone(continuation);
     directoryReview.review.ref = "reviews/not-json.md";
@@ -219,10 +218,10 @@ describe("feature command payload parsing", () => {
     const instance = await plugin({ directory: process.cwd() });
     const output = { parts: [{ type: "text", text: `command\n\nUNTRUSTED_OPERATOR_PAYLOAD_START\n${continuationToken(continuation)}` }] };
     await instance["command.execute.before"]({ command: "feature", sessionID: "session", arguments: continuationToken(continuation) }, output);
-    assert.match(output.parts[0].text, /PLUGIN_PARSED_OPERATOR_PAYLOAD_START\nparse_status: valid/u);
+    assert.match(output.parts[0].text, /PLUGIN_PARSED_OPERATOR_PAYLOAD_START\nparse_status: invalid/u);
   });
 
-  it("rejects schema-v2 carry-forward payloads before B1.4", () => {
+  it("rejects candidate-only and malformed schema-v2 carry-forward payloads", () => {
     const continuation = validContinuation();
     continuation.schema_version = 2;
     continuation.parent.commit = "e".repeat(40);
@@ -240,8 +239,18 @@ describe("feature command payload parsing", () => {
       }],
       remaining_slice_ids: ["B"],
     };
+    continuation.planning_reuse = {
+      eligible: true, spec_review_ref: "reviews/spec-writer.json", spec_review_hash: `sha256:${"6".repeat(64)}`,
+      spec_artifact_ref: "artifacts/technical-brief.md", spec_artifact_hash: `sha256:${"7".repeat(64)}`, child_spec_review_ref: "reviews/spec-writer.json",
+    };
+    continuation.configuration = {
+      mode: "headless", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3,
+      post_pr_policy: { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } },
+    };
+    continuation.parent_artifacts.push({ kind: "technical_brief", ref: "artifacts/technical-brief.md", hash: continuation.planning_reuse.spec_artifact_hash });
+    continuation.parent_reviews.push({ kind: "review", ref: "reviews/spec-writer.json", hash: continuation.planning_reuse.spec_review_hash });
     const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
-    assert.deepEqual(decoded, { ok: false, reason: "invalid-continuation" });
+    assert.deepEqual(decoded, { ok: false, reason: "continuation-schema-route-mismatch" });
 
     for (const [label, mutate] of [
       ["unknown carry field", (value) => { value.carry_forward.status = "ready"; }],
@@ -256,7 +265,7 @@ describe("feature command payload parsing", () => {
     }
   });
 
-  it("binds post-PR continuation review, evidence, state hash, PR identity, and inherited policy", () => {
+  it("validates post-PR continuation bindings before reservation admission", () => {
     const continuation = validContinuation();
     const hash = `sha256:${"a".repeat(64)}`;
     const reviewRef = "reviews/post-pr-ci.attempt-3.json";
@@ -272,9 +281,7 @@ describe("feature command payload parsing", () => {
     };
 
     const decoded = decodeFeatureCommandPayload(continuationToken(continuation), { repo: process.cwd() });
-    assert.equal(decoded.ok, true);
-    assert.equal(decoded.payload.continuation.post_pr.disposition, "leave-unchanged");
-    assert.equal(decoded.payload.continuation.post_pr.policy.wait_ms, 3_600_000);
+    assert.deepEqual(decoded, { ok: false, reason: "continuation-schema-route-mismatch" });
 
     const forged = structuredClone(continuation);
     forged.post_pr.evidence_hash = `sha256:${"b".repeat(64)}`;
@@ -364,7 +371,10 @@ describe("review tier contract docs", () => {
 function continuationToken(continuation) {
   return encodeFeatureCommandPayload({
     operator_request: `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`,
-    driver: { mode: "headless" },
+    driver: continuation.schema_version === 2 ? {
+      mode: "headless", ready: true, pr_mode: "ready", reviewer: null, github_account: null,
+      post_pr_ci: { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12 },
+    } : { mode: "headless" },
     continuation,
   });
 }

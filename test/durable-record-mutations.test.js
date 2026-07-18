@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
@@ -23,18 +23,26 @@ import {
   emitDurableRecordMutations,
   renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
-import { checkRunConsistency, validateRun, validateSlicesPlan } from "../src/validate.js";
-import { continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
+import { checkRunConsistency, validateRun, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
+import { cleanupRun, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
+import { executeCheckedTestExecution } from "../src/test-execution.js";
+import { hashValue } from "../src/refs.js";
 import {
   assertContinuationAuthorityCurrent,
+  claimCheckedTestExecution,
+  completeCheckedTestExecution,
+  markCheckedTestExecutionUnknown,
+  observeAcceptedDecompositionAuthority,
   transitionMergedSliceRepair,
   mergedSliceRepairFence,
   transitionPanelVerdicts,
   transitionContinuationAdoption,
+  transitionGateDecision,
   transitionPostPrState,
   transitionPrCreated,
   transitionPrePrFenceCleared,
   transitionPrePrFenceEstablished,
+  transitionRecoverOrphan,
   transitionRunJson,
   transitionRunSlice,
   transitionRunStep,
@@ -57,6 +65,8 @@ const AUTHORITY_CLASS_IDS = Object.freeze([
   "post-pr-nested-records",
   "pr79-merged-slice-repair",
 ]);
+const CLAIM_NOW = "2026-07-16T12:00:00.000Z";
+const CLAIM_NONCE = "123e4567-e89b-42d3-a456-426614174000";
 
 const TARGET_FIELDS_BY_FAMILY = Object.freeze({
   "missing-key": ["path", "label"],
@@ -915,9 +925,14 @@ describe("finite durable-authority catalog", () => {
     duplicateDisposition.push(B0M4_EXACT_CASES[0]);
     assert.throws(() => exactB0m4DispositionMap(duplicateDisposition), /duplicate exact B0M\.4 case/u);
     assert.throws(() => exactB0m4DispositionMap([{ ...B0M4_EXACT_CASES[0], consumer: "" }]), /literal consumer|concrete consumer and rejector/u);
-    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 108);
-    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 109);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 122);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 123);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("plan-v2-integration-gate"), true);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
+    assert.deepEqual(
+      DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records.map(({ id }) => id)).filter((id) => !DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes(id)),
+      ["final-plan-descriptor"],
+    );
   });
 
   it("executes every one of the exact 579 B0M.4 cases once through its literal concrete consumer", async () => {
@@ -1013,7 +1028,322 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 109);
+    assert.equal(recordCount, 123);
+  });
+
+  it("registers all B1R claim and receipt variants separately", () => {
+    const ids = DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["steps-acceptance-inheritance"].filter((id) => id.startsWith("test-execution-"));
+    assert.deepEqual(ids, [
+      "test-execution-claim-active", "test-execution-claim-completed-pass", "test-execution-claim-completed-fail",
+      "test-execution-claim-unknown-process-outcome-indeterminate", "test-execution-claim-unknown-authority-changed",
+      "test-execution-claim-unknown-receipt-publication-indeterminate", "test-execution-receipt-pass",
+      "test-execution-receipt-failed-nonzero-exit", "test-execution-receipt-failed-signal",
+      "test-execution-receipt-failed-launch-error", "test-execution-receipt-failed-timeout", "test-execution-receipt-failed-output-limit",
+    ]);
+    for (const id of ids) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const baseline = createDurableCatalogBaseline(record);
+      if (id.startsWith("test-execution-receipt-")) {
+        assert.equal(baseline.consumer, "validateTestExecutionReceipt");
+        assert.equal(validateTestExecutionReceipt(baseline.receipt), baseline.receipt);
+      } else {
+        assert.equal(baseline.consumer, "validateRun");
+        assert.equal(validateRun(baseline.run), baseline.run);
+      }
+    }
+  });
+
+  it("executes every generated checked receipt mutation through production completion, replay, and applicable acceptance consumers", async () => {
+    const activeClaim = findRecord(DURABLE_AUTHORITY_CATALOG, "test-execution-claim-active");
+    const records = DURABLE_AUTHORITY_CATALOG
+      .flatMap(({ records: catalogRecords }) => catalogRecords)
+      .filter(({ id }) => id.startsWith("test-execution-receipt-"));
+    const expectedCases = records.flatMap((record) => emitDurableRecordMutations(record.source, record.descriptor, record.externalSources));
+    const executed = new Set();
+    const root = mkdtempSync(join(tmpdir(), "checked-receipt-catalog-"));
+    try {
+      for (const record of records) {
+        for (const [index, mutationCase] of emitDurableRecordMutations(record.source, record.descriptor, record.externalSources).entries()) {
+          const consumers = record.source.status === "pass" ? ["completion", "replay", "acceptance"] : ["completion", "replay"];
+          for (const consumer of consumers) {
+            const fixture = await createCheckedClaimMutationFixture(root, activeClaim, `${record.id}-${index}-${consumer}`);
+            const canonicalReceipt = bindCatalogReceiptToFixture(record.source, fixture);
+            const mutatedReceipt = structuredClone(canonicalReceipt);
+            applyMutationDifference(mutatedReceipt, record.source, mutationCase.record);
+            const beforeRun = readFileSync(fixture.runFile);
+
+            if (consumer === "completion") {
+              await assert.rejects(
+                completeCheckedTestExecution(fixture.runDir, fixture.claimed.claim, fixture.claimed.authority, mutatedReceipt, { now: CLAIM_NOW }),
+                undefined,
+                `${mutationCase.name} completion`,
+              );
+              assert.deepEqual(readFileSync(fixture.runFile), beforeRun, `${mutationCase.name} completion protected run bytes`);
+              assert.equal(existsSync(fixture.receiptPath), false, `${mutationCase.name} completion must not publish receipt bytes`);
+            } else {
+              await completeCheckedTestExecution(fixture.runDir, fixture.claimed.claim, fixture.claimed.authority, canonicalReceipt, { now: CLAIM_NOW });
+              writeJson(fixture.receiptPath, mutatedReceipt);
+              const completedRun = readFileSync(fixture.runFile);
+              const mutatedReceiptBytes = readFileSync(fixture.receiptPath);
+              const consume = consumer === "replay"
+                ? () => executeCheckedTestExecution(fixture.runDir, { spawnFn() { throw new Error("mutated replay must not spawn"); } })
+                : () => transitionRunStep(fixture.runDir, "test-verifier", {
+                    status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+                    evidence_ref: "evidence/test-verifier.attempt-1.json", review_ref: "reviews/test-verifier.attempt-1.json",
+                  }, { mustExist: true });
+              await assert.rejects(consume(), undefined, `${mutationCase.name} ${consumer}`);
+              assert.deepEqual(readFileSync(fixture.runFile), completedRun, `${mutationCase.name} ${consumer} protected run bytes`);
+              assert.deepEqual(readFileSync(fixture.receiptPath), mutatedReceiptBytes, `${mutationCase.name} ${consumer} protected receipt bytes`);
+            }
+            executed.add(`${mutationCase.name}:${consumer}`);
+          }
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    const expectedExecutionCount = expectedCases.reduce((total, mutationCase) => total + (mutationCase.record.status === "pass" ? 3 : 2), 0);
+    assert.equal(executed.size, expectedExecutionCount);
+    for (const mutationCase of expectedCases) {
+      const consumers = mutationCase.record.status === "pass" ? ["completion", "replay", "acceptance"] : ["completion", "replay"];
+      for (const consumer of consumers) assert.equal(executed.has(`${mutationCase.name}:${consumer}`), true);
+    }
+  });
+
+  it("executes every generated checked execution claim mutation through production consumers", async () => {
+    const records = DURABLE_AUTHORITY_CATALOG
+      .flatMap(({ records: catalogRecords }) => catalogRecords)
+      .filter(({ id }) => id.startsWith("test-execution-claim-"));
+    const generated = records.flatMap((record) => emitDurableRecordMutations(record.source, record.descriptor, record.externalSources));
+    const executed = new Set();
+    const recoveryExecuted = new Set();
+    const cleanupExecuted = new Set();
+    const consumers = new Set();
+    const root = mkdtempSync(join(tmpdir(), "checked-claim-catalog-"));
+    try {
+      for (const record of records) {
+        if (["active", "unknown"].includes(record.source.execution_claim.state)) {
+          const canonicalFixture = await createCheckedClaimMutationFixture(root, record, "canonical-cleanup");
+          const canonicalSnapshot = checkedClaimCleanupSnapshot(canonicalFixture);
+          await assert.rejects(
+            cleanupRun("catalog-run", { cwd: canonicalFixture.repo, force: true }),
+            (error) => error?.code === "TEST_EXECUTION_OPERATOR_RECONCILIATION_REQUIRED",
+            `${record.id} canonical cleanup refusal`,
+          );
+          assertCheckedClaimCleanupUnchanged(canonicalFixture, canonicalSnapshot, `${record.id} canonical cleanup`);
+          cleanupExecuted.add(`${record.id}:canonical`);
+          consumers.add("cleanup refusal");
+        }
+        const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+        for (const [index, mutationCase] of cases.entries()) {
+          const fixture = await createCheckedClaimMutationFixture(root, record, index);
+          const canonicalRun = JSON.parse(readFileSync(fixture.runFile, "utf8"));
+          const mutatedRun = structuredClone(canonicalRun);
+          const mutatedStep = mutatedRun.steps.find(({ agent }) => agent === "test-verifier");
+          applyMutationDifference(mutatedStep, record.source, mutationCase.record);
+          const recoveryBoundClaimMutation = fixture.state !== "unknown" || checkedRecoveryBindingChanged(record.source.execution_claim, mutationCase.record.execution_claim);
+          if (recoveryBoundClaimMutation && mutationCase.record.execution_claim_hash === record.source.execution_claim_hash && mutatedStep.execution_claim) {
+            mutatedStep.execution_claim_hash = hashValue(mutatedStep.execution_claim);
+          }
+          applyCheckedClaimExternalMutation(fixture, record, mutationCase);
+          writeJson(fixture.runFile, mutatedRun);
+          const beforeRun = readFileSync(fixture.runFile);
+          const beforeReceipt = fixture.receiptPath && existsSync(fixture.receiptPath) ? readFileSync(fixture.receiptPath) : null;
+
+          let schemaValid = true;
+          try {
+            validateRun(mutatedRun);
+          } catch (error) {
+            assert.equal(error?.name, "ValidationError", mutationCase.name);
+            consumers.add("validateRun");
+            schemaValid = false;
+          }
+
+          if (fixture.state === "completed" && schemaValid) {
+            const consistency = checkRunConsistency(fixture.runDir, mutatedRun);
+            if (!consistency.ok) consumers.add("checkRunConsistency");
+            await assert.rejects(
+              executeCheckedTestExecution(fixture.runDir, { env: { PATH: "/catalog/bin" }, spawnFn() { throw new Error("completed replay must not spawn"); } }),
+              undefined,
+              `${mutationCase.name} checked execution replay`,
+            );
+            consumers.add("checked execution replay");
+            if (record.id === "test-execution-claim-completed-pass") {
+              await assert.rejects(
+                transitionRunStep(fixture.runDir, "test-verifier", {
+                  status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+                  evidence_ref: "evidence/test-verifier.attempt-1.json", review_ref: "reviews/test-verifier.attempt-1.json",
+                }, { mustExist: true }),
+                undefined,
+                `${mutationCase.name} generic acceptance`,
+              );
+              consumers.add("generic test-verifier acceptance");
+            }
+          } else if (fixture.state === "active") {
+            await assert.rejects(
+              completeCheckedTestExecution(fixture.runDir, fixture.claimed.claim, fixture.claimed.authority, fixture.receipt, { now: CLAIM_NOW }),
+              undefined,
+              `${mutationCase.name} checked completion`,
+            );
+            consumers.add("checked execution completion");
+          }
+          if (["active", "unknown"].includes(fixture.state)) {
+            await assert.rejects(
+              transitionRecoverOrphan(fixture.runDir, "test-execution-reconciliation"),
+              undefined,
+              `${mutationCase.name} public recovery refusal`,
+            );
+            recoveryExecuted.add(mutationCase.name);
+            consumers.add("public recovery refusal");
+            const cleanupSnapshot = checkedClaimCleanupSnapshot(fixture);
+            await assert.rejects(
+              cleanupRun("catalog-run", { cwd: fixture.repo, force: true }),
+              undefined,
+              `${mutationCase.name} cleanup refusal`,
+            );
+            assertCheckedClaimCleanupUnchanged(fixture, cleanupSnapshot, `${mutationCase.name} cleanup refusal`);
+            cleanupExecuted.add(mutationCase.name);
+            consumers.add("cleanup refusal");
+          }
+          executed.add(mutationCase.name);
+          assert.deepEqual(readFileSync(fixture.runFile), beforeRun, `${mutationCase.name} protected run bytes`);
+          assertCheckedClaimReceiptUnchanged(fixture.receiptPath, beforeReceipt, mutationCase.name);
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    assert.deepEqual([...executed].sort(), generated.map(({ name }) => name).sort());
+    const expectedRecovery = records
+      .filter(({ source }) => ["active", "unknown"].includes(source.execution_claim.state))
+      .flatMap((record) => emitDurableRecordMutations(record.source, record.descriptor, record.externalSources).map(({ name }) => name));
+    assert.deepEqual([...recoveryExecuted].sort(), expectedRecovery.sort());
+    assert.deepEqual([...cleanupExecuted].filter((name) => !name.endsWith(":canonical")).sort(), expectedRecovery.sort());
+    assert.deepEqual([...cleanupExecuted].filter((name) => name.endsWith(":canonical")).sort(), records
+      .filter(({ source }) => ["active", "unknown"].includes(source.execution_claim.state))
+      .map(({ id }) => `${id}:canonical`).sort());
+    assert.deepEqual([...consumers].sort(), [
+      "checkRunConsistency", "checked execution completion", "checked execution replay", "cleanup refusal",
+      "generic test-verifier acceptance", "public recovery refusal", "validateRun",
+    ]);
+  });
+
+  it("rejects checked claim cross-bindings at panel, gate, fence, and PR consumers", async () => {
+    const record = findRecord(DURABLE_AUTHORITY_CATALOG, "test-execution-claim-completed-pass");
+    const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+    const scenarios = [
+      ["panel", "cross-bound execution_claim.nonce"],
+      ["gate", "hash execution_claim.plan_hash"],
+      ["fence", "stale execution_claim.head_sha"],
+      ["pr", "receipt hash"],
+    ];
+    const root = mkdtempSync(join(tmpdir(), "checked-claim-downstream-catalog-"));
+    try {
+      for (const [sink, label] of scenarios) {
+        const mutationCase = cases.find(({ name }) => name.includes(`(${label})`));
+        assert.ok(mutationCase, `${sink} requires generated case ${label}`);
+        const fixture = await createCheckedClaimMutationFixture(root, record, sink);
+        await acceptCheckedClaimFixture(fixture);
+        const panelInput = await stageCheckedClaimPanels(fixture, sink !== "panel");
+        let fence = null;
+        if (["fence", "pr"].includes(sink)) await stageCheckedClaimPrePrApproval(fixture);
+        if (sink === "pr") fence = await transitionPrePrFenceEstablished(fixture.runDir);
+
+        const mutatedRun = JSON.parse(readFileSync(fixture.runFile, "utf8"));
+        const mutatedStep = mutatedRun.steps.find(({ agent }) => agent === "test-verifier");
+        applyMutationDifference(mutatedStep, record.source, mutationCase.record);
+        mutatedStep.execution_claim_hash = hashValue(mutatedStep.execution_claim);
+        assert.equal(validateRun(mutatedRun), mutatedRun, `${mutationCase.name} remains schema-valid for ${sink}`);
+        writeJson(fixture.runFile, mutatedRun);
+        const beforeRun = readFileSync(fixture.runFile);
+        const beforeReceipt = readFileSync(fixture.receiptPath);
+
+        const consume = sink === "panel"
+          ? () => transitionPanelVerdicts(fixture.runDir, panelInput, { repoRoot: fixture.repo })
+          : sink === "gate"
+            ? () => transitionGateDecision(fixture.runDir, "pre_pr", { status: "pending", artifact: "artifacts/test-report.md", question_ref: "gates/pre-pr.md" })
+            : sink === "fence"
+              ? () => transitionPrePrFenceEstablished(fixture.runDir)
+              : () => transitionPrCreated(fixture.runDir, {}, {
+                  fenceToken: fence.fence.token,
+                  repoRoot: fixture.repo,
+                  observePrOperation: async () => ({
+                    disposition: "open", reason: "unique-exact-open",
+                    pull_request: {
+                      pr_url: "https://github.com/acme/repo/pull/77", pr_number: 77, pr_node_id: "PR_catalog_77",
+                      repository: fence.fence.repository, head_ref: fence.fence.head_ref, head_sha: fence.fence.head_sha,
+                      base_ref: fence.fence.base_ref, base_sha: fence.fence.base_sha, draft: fence.fence.draft,
+                    },
+                  }),
+                });
+        await assert.rejects(consume(), undefined, `${mutationCase.name} ${sink} consumer`);
+        assert.deepEqual(readFileSync(fixture.runFile), beforeRun, `${mutationCase.name} ${sink} protected run bytes`);
+        assert.deepEqual(readFileSync(fixture.receiptPath), beforeReceipt, `${mutationCase.name} ${sink} protected receipt bytes`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects every plan-v2-integration-gate mutation through its production creation validator", () => {
+    const record = findRecord(DURABLE_AUTHORITY_CATALOG, "plan-v2-integration-gate");
+    const fixture = createDurableCatalogBaseline(record);
+    assert.equal(fixture.consumer, "validateSlicesPlan");
+    assert.equal(validateSlicesPlan(fixture.plan, { requireIntegrationGate: true }), fixture.plan);
+
+    const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+    assert.equal(cases.length, 6);
+    for (const mutationCase of cases) {
+      assert.throws(
+        () => validateSlicesPlan(mutationCase.record, { requireIntegrationGate: true }),
+        (error) => error?.name === "ValidationError",
+        mutationCase.name,
+      );
+    }
+  });
+
+  it("rejects every accepted work-decomposer plan/review mutation through its deciding consumers", () => {
+    const record = findRecord(DURABLE_AUTHORITY_CATALOG, "step-work-decomposer-accepted-plan");
+    const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+    assert.equal(cases.length, 12);
+    const canonicalPlan = JSON.parse(record.externalSources.plan.bytes);
+    const root = mkdtempSync(join(tmpdir(), "decomposition-authority-catalog-"));
+    try {
+      for (const [index, mutationCase] of cases.entries()) {
+        const runDir = join(root, String(index));
+        materializeCatalogSources(runDir, mutationCase.externalSources);
+        const run = createRunRecord({
+          run_id: `decomposition-catalog-${index}`,
+          slices: canonicalPlan.slices.map((slice) => ({ id: slice.id, stack: slice.stack, depends_on: slice.depends_on, status: "merged", attempts: 1 })),
+          steps: [mutationCase.record, { agent: "test-verifier", status: "blocked", attempts: 0 }],
+        });
+        assert.throws(() => {
+          validateRun(run);
+          const consistency = checkRunConsistency(runDir, run);
+          if (!consistency.ok) throw new Error(failedConsistencyMessages(consistency));
+          observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+        }, undefined, mutationCase.name);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects accepted decomposition canonical-source substitution, ref/hash drift, and external-byte drift", () => {
+    for (const [label, mutate] of [
+      ["source substitution", (record) => { record.source.status = "running"; }],
+      ["canonical placement", (record) => { record.canonicalPath = ["steps", 1]; }],
+      ["plan ref", (record) => { record.source.acceptance.artifact_ref = "plan/other.json"; }],
+      ["plan hash", (record) => { record.source.acceptance.artifact_hash = `sha256:${"0".repeat(64)}`; }],
+      ["plan bytes", (record) => { record.externalSources.plan.bytes = record.externalSources.plan.bytes.replace("AC1", "AC2"); }],
+      ["review ref", (record) => { record.source.acceptance.review_ref = "reviews/other.json"; }],
+      ["review hash", (record) => { record.source.acceptance.review_hash = `sha256:${"1".repeat(64)}`; }],
+      ["review bytes", (record) => { record.externalSources.review.bytes = record.externalSources.review.bytes.replace("APPROVE", "REJECT"); }],
+    ]) {
+      const catalog = structuredClone(DURABLE_AUTHORITY_CATALOG);
+      mutate(findRecord(catalog, "step-work-decomposer-accepted-plan"));
+      assert.throws(() => assertDurableAuthorityCatalogComplete(catalog), /canonical source|contradicts|metadata/u, label);
+    }
   });
 
   it("rejects aggregate, omitted, and substituted source-boundary entries", () => {
@@ -1064,10 +1394,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 109 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 123 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 109);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 123);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -1174,6 +1504,61 @@ describe("finite durable-authority catalog", () => {
         assert.equal(review.canonicalSource.source.pr_node_id, "PR_catalog_operation");
         assert.equal(review.canonicalSource.source.pr_url, "https://github.com/acme/repo/pull/7");
         assert.equal(review.canonicalSource.source.pr_number, 7);
+      }
+      assert.deepEqual([
+        DURABLE_AUTHORITY_METADATA_MANIFEST.find(([row]) => row === id)[1],
+        DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.find(([row]) => row === id)[1],
+        DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.find(([row]) => row === id)[1],
+      ], digests, id);
+    }
+  });
+
+  it("reviews B1R claim/hash and receipt production consumers before manifest digest updates", () => {
+    const expectedDigests = {
+      "test-execution-claim-active": ["c46fb9721a54c68a7f7106e28d167c2d2d5f4742ab3a86dd2a2d0c295d855148", "b6d6567744c4bd97eeb465ad8e952666fa30fa9d6286b254e5a939d753aa092c", "4a28465ee4bf8ae2aa775e59e6be0c399926cf34e6a485ef2d99c03d43abec87"],
+      "test-execution-claim-completed-pass": ["77d5df2e1a78d7919cdc550c2e7548089937432667622d8000d7e35a8acc3628", "9fc16b9dd1aab571972cdda772597bac746c0616afed92f3ea07a94ccd07d8ac", "a8976d1047f4915d9ef47f7367ce40b89bc381504987eccad0988d78f1719f07"],
+      "test-execution-claim-completed-fail": ["901ce70597b4b00a16bb33ca8a4f7e9b3a470b137f3f285c317dfdb4ecb38d10", "4734b1677957cd938100fbd864e3a10c5e6749006cf9b820d1bd7ccb054f9096", "232b87ab924b9b4a27c38165c4be79370a4fff2fe8bc1192476fa93b9c8c3040"],
+      "test-execution-claim-unknown-process-outcome-indeterminate": ["b03decd53b81a41e4a1e37551c75ea5f795190ebe6160625672256bc430f37c1", "f258ceb956f246c510c1c2f980f9d7aedf48584db4054c4aafb3eee6137eb0cf", "86eb7ef4a735925cb12b2e4685c3cdeb2d2b51cfb62a499704582f96e04e4127"],
+      "test-execution-claim-unknown-authority-changed": ["e00811f4e2fa8c9d8f070948b50d8f40281e52b1e6fca7fe2c99ca92c319e606", "5207c2d7203c285bc73c6835bb83561c5668a1b7e8e3f64165118d51fb511f73", "e1561c254d7767202c70d9d07ca056014ee2168918370303f2997ea0c6ab18d6"],
+      "test-execution-claim-unknown-receipt-publication-indeterminate": ["68ec6266a0135bcf5fb6e72e0546c31df5e08f729cdc44864c90506f931f5c02", "38757e7ff6ec3c1db8ee22cb20e6f5433aefd2f212dabd3895dcd9dd7fe5fe66", "c95c353de36a9719b74d9711f5dc92f19b432a2284ad2902b7cf1580f801d033"],
+      "test-execution-receipt-pass": ["bc3ff7d82ff7af8c1943ab4005f70b3d58e1e7d249f1d6d819d94862da0de9d5", "a8d12876a6459f798537d3afd2b5cf5561637fc7bba5271b4a61412fba233472", "51a2006fc63ead36b0728846d574ee8ad86f806555bebc89c60ba3d06f3eca15"],
+      "test-execution-receipt-failed-nonzero-exit": ["cec982375db591d524859a0b68a0b621b583511cd447c61139e8a5343c4f13a4", "7f2f98e92e13ffa75a3286e3094c344e58e498b97b8cfb69cdb976e2f97cc378", "56bb07696d55efdfcd054c84b1914ea7b8d674afc360c0318ae5c90054c046f6"],
+      "test-execution-receipt-failed-signal": ["098ab671186126021d108bd738029c75748e5daa6e74838f7ddf4df79498d0cc", "3ceff488cc59be6210291029b62a23ab62efb02ce934fe4526c6b38967e93f6b", "3caa57455fd8f7210f479d6004705dbdb6b47ce064a58b7834f8be5ec9e624ee"],
+      "test-execution-receipt-failed-launch-error": ["11fe1658bc1b0c4c29758109d41f7289ea50ab137ade91fba13a04e7c4760418", "535eda5b023fcbe5a0add7ce7e158f9ee6b71bc4aab4d118427a76360b31aecb", "1320ebcb723f155eb795d8f91caf528d7fed2fb3e93f02d91a815c89f6f63008"],
+      "test-execution-receipt-failed-timeout": ["aba412c7a4df3bcc573775c40a8bed3da7c94cf794f656e935da0d197d35d409", "145e09cc8ddf2cc6ad438bfd10eb060732ea5d2818e32f1f2d85bf747b80e755", "5d77cdf0868afcf860e9fd1ec0cd985d0b4d4c2a9603e1efeb55c94e37f24bf4"],
+      "test-execution-receipt-failed-output-limit": ["d0f033038f69b998693a6511b192ee39530c36d94a6854646d13f0180e3a664d", "5d67fdbbcb0e50d8597c747e30d41c3217b13c5f18f511e43d0914b05cfc2895", "9f258d14925eb587cbe96ddfb9c0a1c7f6144c9bca3d7f8a73a07fa638fa328c"],
+    };
+    for (const [id, digests] of Object.entries(expectedDigests)) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const review = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(record));
+      const isClaim = id.startsWith("test-execution-claim-");
+      const productionTest = isClaim
+        ? "test/durable-record-mutations.test.js: executes every generated checked execution claim mutation through production consumers"
+        : "test/durable-record-mutations.test.js: executes every generated checked receipt mutation through production completion, replay, and applicable acceptance consumers";
+      assert.equal(review.metadata.tests.includes(productionTest), true, id);
+      if (!isClaim) {
+        assert.deepEqual(review.metadata.readers, ["completeCheckedTestExecution protected completion transition", "executeCheckedTestExecution completed replay", "transitionRunStep schema-v2 generic acceptance"], id);
+        assert.deepEqual([review.canonicalSource.source.status, review.canonicalSource.source.commands[0].outcome], [record.source.status, record.source.commands[0].outcome], id);
+      } else {
+        assert.equal(review.canonicalSource.source.execution_claim.state, record.source.execution_claim.state, id);
+        assert.equal(review.canonicalSource.source.execution_claim_hash, record.source.execution_claim_hash, id);
+        assert.equal(review.metadata.readers.includes("transitionRecoverOrphan public fail-closed recovery refusal"), !id.includes("completed"), `${id} public recovery consumer`);
+        assert.equal(review.descriptor.targets.some(({ path: targetPath }) => targetPath.join(".") === "execution_claim_hash"), true, `${id} execution_claim_hash`);
+        for (const path of ["execution_claim.state", "execution_claim.attempt", "execution_claim.nonce", "execution_claim.claimed_at", "execution_claim.plan_ref", "execution_claim.plan_hash", "execution_claim.head_sha", "execution_claim.receipt_ref"]) {
+          assert.equal(review.descriptor.targets.some(({ path: targetPath }) => targetPath.join(".") === path), true, `${id} ${path}`);
+        }
+        if (record.source.execution_claim.status) {
+          for (const path of ["execution_claim.completed_at", "execution_claim.status", "execution_claim.receipt_hash", "evidence_ref", "$external.receipt.bytes"]) {
+            assert.equal(review.descriptor.targets.some(({ path: targetPath }) => targetPath.join(".") === path), true, `${id} ${path}`);
+          }
+        } else {
+          assert.match(review.descriptor.exclusions["wrong-bytes"], new RegExp(`^${id}: wrong-bytes is explicitly inapplicable`, "u"), `${id} receipt-byte exclusion`);
+        }
+        if (record.source.execution_claim.reason) {
+          for (const path of ["execution_claim.failed_at", "execution_claim.reason"]) {
+            assert.equal(review.descriptor.targets.some(({ path: targetPath }) => targetPath.join(".") === path), true, `${id} ${path}`);
+          }
+        }
       }
       assert.deepEqual([
         DURABLE_AUTHORITY_METADATA_MANIFEST.find(([row]) => row === id)[1],
@@ -1303,7 +1688,7 @@ describe("finite durable-authority catalog", () => {
   it("binds every catalog row's source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
-    assert.equal(canonicalIds.length, 109);
+    assert.equal(canonicalIds.length, 123);
     assert.deepEqual(canonicalIds, requiredIds);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
@@ -1409,20 +1794,22 @@ describe("finite durable-authority catalog", () => {
       const baseline = createDurableCatalogBaseline(record);
       observedConsumers.set(id, baseline.consumer);
       if (baseline.consumer === "validateSlicesPlan") {
-        assert.equal(validateSlicesPlan(baseline.plan), baseline.plan, `${id} must pass the exported plan validator`);
+        assert.equal(validateSlicesPlan(baseline.plan, { requireIntegrationGate: id === "plan-v2-integration-gate" }), baseline.plan, `${id} must pass the exported plan validator`);
       } else if (baseline.consumer === "final-plan-descriptor-contract") {
         assert.deepEqual(Object.keys(baseline.descriptor), ["schema_version", "kind", "created_at", "run_id", "descriptor"]);
         assert.deepEqual(Object.keys(baseline.descriptor.descriptor), ["kind", "ref", "hash"]);
         assert.equal(baseline.descriptor.descriptor.kind, "slices-graph");
         assert.equal(baseline.descriptor.descriptor.ref, baseline.externalSources.plan.ref);
         assert.equal(baseline.descriptor.descriptor.hash, `sha256:${createHash("sha256").update(baseline.externalSources.plan.bytes).digest("hex")}`);
+      } else if (baseline.consumer === "validateTestExecutionReceipt") {
+        assert.equal(validateTestExecutionReceipt(baseline.receipt), baseline.receipt, `${id} must use the exported closed receipt validator`);
       } else {
         assert.match(baseline.consumer, /^validateRun(?:\/checkRunConsistency)?$/u);
         assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
       }
     }
-    assert.equal(observedConsumers.size, 109);
-    assert.deepEqual([...observedConsumers.keys()].slice(0, 108), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
+    assert.equal(observedConsumers.size, 123);
+    assert.deepEqual([...observedConsumers.keys()].slice(0, 122), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
     assert.equal(observedConsumers.get("final-plan-descriptor"), "final-plan-descriptor-contract", "future-only final.plan is a descriptor contract, not claimed as current validateRun input");
   });
 
@@ -1469,7 +1856,7 @@ describe("finite durable-authority catalog", () => {
       "steering-pr-fence",
       "pr-created-result",
     ];
-    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.slice(0, 40), expectedIds);
+    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "step-work-decomposer-accepted-plan"].includes(id) && !id.startsWith("test-execution-")).slice(0, 40), expectedIds);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
     const continuationDispositions = exactB0m3ContinuationDispositionMap(B0M3_CONTINUATION_EXACT_CASES);
     const executedContinuationCases = [];
@@ -1582,11 +1969,15 @@ describe("finite durable-authority catalog", () => {
     assert.deepEqual(gates.map(({ source }) => source.answer ?? null), [null, "approve", "approve", "changes: revise scope", "stop"]);
     assert.deepEqual(Object.keys(gates[2].externalSources), ["artifact", "question", "answer"]);
 
-    const steps = ["step-running", "step-rejected", "step-blocked", "step-accepted", "step-inherited-acceptance"]
+    const steps = ["step-running", "step-rejected", "step-blocked", "step-accepted", "step-work-decomposer-accepted-plan", "step-inherited-acceptance"]
       .map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id));
-    assert.deepEqual(steps.map(({ source }) => source.status), ["running", "rejected", "blocked", "accepted", "accepted"]);
+    assert.deepEqual(steps.map(({ source }) => source.status), ["running", "rejected", "blocked", "accepted", "accepted", "accepted"]);
     assert.deepEqual(Object.keys(steps[3].source.acceptance), ["artifact_ref", "artifact_hash", "review_ref", "review_hash"]);
-    assert.deepEqual(Object.keys(steps[4].source.inherited_acceptance), ["from_run_id", "parent_spec_review_ref", "artifact_hash", "review_hash"]);
+    assert.deepEqual(steps[4].source.acceptance, {
+      artifact_ref: "plan/slices.json", artifact_hash: `sha256:${createHash("sha256").update(steps[4].externalSources.plan.bytes).digest("hex")}`,
+      review_ref: "reviews/work-decomposer.json", review_hash: `sha256:${createHash("sha256").update(steps[4].externalSources.review.bytes).digest("hex")}`,
+    });
+    assert.deepEqual(Object.keys(steps[5].source.inherited_acceptance), ["from_run_id", "parent_spec_review_ref", "artifact_hash", "review_hash"]);
 
     const slices = ["slice-pending", "slice-running", "slice-review", "slice-merged", "slice-blocked"]
       .map((id) => findRecord(DURABLE_AUTHORITY_CATALOG, id));
@@ -2088,7 +2479,14 @@ describe("per-record durable authority mutation matrices", () => {
   for (const authorityClass of DURABLE_AUTHORITY_CATALOG) {
     for (const record of authorityClass.records) {
       it(`${record.id} mutation matrix`, () => {
-        assert.deepEqual(record.tests, [`test/durable-record-mutations.test.js: ${record.id} mutation matrix`]);
+        assert.equal(record.tests[0], `test/durable-record-mutations.test.js: ${record.id} mutation matrix`);
+        if (record.id.startsWith("test-execution-claim-")) {
+          assert.equal(record.tests.includes("test/durable-record-mutations.test.js: executes every generated checked execution claim mutation through production consumers"), true);
+          assert.equal(record.tests.includes("test/durable-record-mutations.test.js: rejects checked claim cross-bindings at panel, gate, fence, and PR consumers"), record.id === "test-execution-claim-completed-pass");
+        } else if (record.id.startsWith("test-execution-receipt-")) {
+          assert.equal(record.tests.length, 2);
+          assert.equal(record.tests.includes("test/durable-record-mutations.test.js: executes every generated checked receipt mutation through production completion, replay, and applicable acceptance consumers"), true);
+        } else assert.equal(record.tests.length, 1);
         const sourceBefore = structuredClone(record.source);
         const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
         assert.equal(cases.length, record.descriptor.targets.length);
@@ -2160,7 +2558,11 @@ async function consumeSliceMutation(root, record, mutationCase, safeName) {
   if (record.id === "slice-pending") {
     const current = { ...structuredClone(record.source), branch: "progress-bound" };
     writeJson(join(runDir, "run.json"), createRunRecord({ run_id: "catalog-run", slices: [current] }));
-    await assert.rejects(transitionSlicesSeed(runDir, [mutation]), undefined, record.id);
+    writeJson(join(runDir, "plan", "slices.json"), {
+      integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+      slices: [{ id: record.source.id, stack: record.source.stack, paths: ["src/**"], depends_on: record.source.depends_on, acceptance: ["accepted"], test_plan: ["node --test"] }],
+    });
+    await assert.rejects(transitionSlicesSeed(runDir, [mutation], { from: "plan/slices.json" }), undefined, record.id);
     return "transitionSlicesSeed";
   }
 
@@ -2339,6 +2741,158 @@ function initCatalogGit(repo) {
   writeFileSync(join(repo, "README.md"), "fixture\n");
   fixtureGit(repo, ["add", "README.md"]);
   fixtureGit(repo, ["commit", "-q", "-m", "baseline"]);
+}
+
+async function createCheckedClaimMutationFixture(root, record, index) {
+  const repo = join(root, record.id, String(index));
+  const runId = "catalog-run";
+  const runDir = join(repo, ".opencode", "factory", runId);
+  const runFile = join(runDir, "run.json");
+  initCatalogGit(repo);
+  fixtureGit(repo, ["checkout", "-q", "-b", runId]);
+  fixtureGit(repo, ["remote", "add", "origin", "https://github.com/acme/repo.git"]);
+  fixtureGit(repo, ["config", `url.file://${repo}/.insteadOf`, "https://github.com/acme/repo.git"]);
+  const head = fixtureGit(repo, ["rev-parse", "HEAD"]).trim();
+  for (const directory of ["artifacts", "evidence", "reviews", "plan"]) mkdirSync(join(runDir, directory), { recursive: true });
+  writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted brief\n");
+  writeFileSync(join(runDir, "artifacts", "test-report.md"), "checked receipt report\n");
+  writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", attempt: 1, verdict: "APPROVE" });
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE" });
+  writeJson(join(runDir, "reviews", "validator.json"), { subject: "parent", attempt: 1, verdict: "NO-GO" });
+  writeJson(join(runDir, "reviews", "test-verifier.attempt-1.json"), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
+  writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", reviewed_commit: head });
+  const plan = {
+    slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["checked"] }],
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  };
+  writeJson(join(runDir, "plan", "slices.json"), plan);
+  const briefHash = hashFileBytes(join(runDir, "artifacts", "technical-brief.md"));
+  const specReviewHash = hashFileBytes(join(runDir, "reviews", "spec-writer.json"));
+  const planHash = hashFileBytes(join(runDir, "plan", "slices.json"));
+  const decompositionReviewHash = hashFileBytes(join(runDir, "reviews", "work-decomposer.json"));
+  const validatorReviewHash = hashFileBytes(join(runDir, "reviews", "validator.json"));
+  const sliceEvidenceHash = hashFileBytes(join(runDir, "evidence", "slice.json"));
+  const sliceReviewHash = hashFileBytes(join(runDir, "reviews", "slice.json"));
+  const policy = { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } };
+  const continuation = {
+    schema_version: 2, kind: "blocked-run-continuation", created_at: CLAIM_NOW, operator_summary: "checked claim catalog fixture",
+    parent: { run_id: "parent", status: "blocked", run_ref: ".opencode/factory/parent/run.json", run_hash: claimHash("parent"), branch: "parent", commit: head, worktree: "/tmp/parent" },
+    review: { kind: "validator", ref: "reviews/validator.json", hash: validatorReviewHash, subject: "parent", summary: "continue", required_fixes: ["verify"], source: "run.validator.review_ref" },
+    target: { run_id: runId, branch: runId, worktree: repo, base_ref: "main", base_commit: head },
+    parent_artifacts: [{ kind: "technical_brief", ref: "artifacts/technical-brief.md", hash: briefHash }],
+    parent_evidence: [], parent_reviews: [{ kind: "review", ref: "reviews/spec-writer.json", hash: specReviewHash }, { kind: "review", ref: "reviews/validator.json", hash: validatorReviewHash }],
+    planning_reuse: { eligible: true, spec_review_ref: "reviews/spec-writer.json", spec_review_hash: specReviewHash, spec_artifact_ref: "artifacts/technical-brief.md", spec_artifact_hash: briefHash, child_spec_review_ref: "reviews/spec-writer.json" },
+    configuration: { mode: "headless", github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, post_pr_policy: policy },
+    carry_forward: { scope: "full-remaining-plan", plan_ref: "plan/slices.json", plan_hash: planHash, start_commit: head, accepted_slices: [], remaining_slice_ids: ["slice"] },
+  };
+  const run = {
+    schema_version: 1, run_id: runId, mode: "headless", status: "running", base_ref: "main", base_commit: head, branch: runId, worktree: repo,
+    github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, gates: {}, continuation,
+    post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
+    slices: [{ id: "slice", stack: "backend", depends_on: [], status: "merged", attempts: 1, evidence_ref: "evidence/slice.json", evidence_hash: sliceEvidenceHash, review_ref: "reviews/slice.json", review_hash: sliceReviewHash, reviewed_commit: head, merge_commit: head }],
+    steps: [
+      { agent: "spec-writer", status: "accepted", attempts: 0, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json", acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: briefHash, review_ref: "reviews/spec-writer.json", review_hash: specReviewHash }, inherited_acceptance: { from_run_id: "parent", parent_spec_review_ref: "reviews/spec-writer.json", artifact_hash: briefHash, review_hash: specReviewHash } },
+      { agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json", acceptance: { artifact_ref: "plan/slices.json", artifact_hash: planHash, review_ref: "reviews/work-decomposer.json", review_hash: decompositionReviewHash } },
+      { agent: "test-verifier", status: "running", attempts: 1 },
+    ],
+  };
+  writeJson(runFile, validateRun(run));
+  const claimed = await claimCheckedTestExecution(runDir, { now: CLAIM_NOW, nonce: CLAIM_NONCE });
+  const fail = record.id === "test-execution-claim-completed-fail";
+  const emptyStream = { captured_bytes: 0, sha256: claimHash(""), truncated: false };
+  const receipt = {
+    schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: runId, attempt: 1,
+    claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: head,
+    started_at: CLAIM_NOW, completed_at: CLAIM_NOW, duration_ms: 1, status: fail ? "fail" : "pass", review_ready: !fail,
+    commands: [{ index: 0, program: "npm", args: ["run", "check"], outcome: "exited", status: fail ? "fail" : "pass", exit_code: fail ? 7 : 0, signal: null, error_code: null, duration_ms: 1, stdout: emptyStream, stderr: emptyStream }],
+  };
+  const state = record.source.execution_claim.state;
+  if (state === "completed") await completeCheckedTestExecution(runDir, claimed.claim, claimed.authority, receipt, { now: CLAIM_NOW });
+  if (state === "unknown") await markCheckedTestExecutionUnknown(runDir, claimed.claim, record.source.execution_claim.reason, { now: CLAIM_NOW });
+  const receiptPath = join(runDir, claimed.claim.receipt_ref);
+  return { repo, runDir, runFile, runId, head, state, claimed, receipt, receiptPath };
+}
+
+function bindCatalogReceiptToFixture(source, fixture) {
+  return {
+    ...structuredClone(source),
+    run_id: fixture.claimed.claim.run_id,
+    attempt: fixture.claimed.claim.attempt,
+    claim_nonce: fixture.claimed.claim.nonce,
+    plan_ref: fixture.claimed.claim.plan_ref,
+    plan_hash: fixture.claimed.claim.plan_hash,
+    head_sha: fixture.claimed.claim.head_sha,
+  };
+}
+
+function checkedRecoveryBindingChanged(source, mutated) {
+  if (!source || !mutated) return false;
+  return ["run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "receipt_ref"]
+    .some((key) => !Object.is(source[key], mutated[key]));
+}
+
+async function acceptCheckedClaimFixture(fixture) {
+  return transitionRunStep(fixture.runDir, "test-verifier", {
+    status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+    evidence_ref: "evidence/test-verifier.attempt-1.json", review_ref: "reviews/test-verifier.attempt-1.json",
+  }, { mustExist: true });
+}
+
+async function stageCheckedClaimPanels(fixture, publish) {
+  writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n");
+  writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), { subject: "catalog-run", attempt: 1, verdict: "GO", reviewed_head_sha: fixture.head });
+  writeJson(join(fixture.runDir, "reviews", "security-reviewer.json"), { subject: "catalog-run", attempt: 1, verdict: "PASS", reviewed_head_sha: fixture.head });
+  const input = {
+    validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+  };
+  if (publish) await transitionPanelVerdicts(fixture.runDir, input, { repoRoot: fixture.repo });
+  return input;
+}
+
+async function stageCheckedClaimPrePrApproval(fixture) {
+  mkdirSync(join(fixture.runDir, "gates"), { recursive: true });
+  writeFileSync(join(fixture.runDir, "gates", "pre-pr.md"), "approve?\n");
+  await transitionGateDecision(fixture.runDir, "pre_pr", { status: "pending", artifact: "artifacts/test-report.md", question_ref: "gates/pre-pr.md" });
+  const opened = await transitionSteeringBoundaryOpened(fixture.runDir, "gate");
+  await transitionGateDecision(fixture.runDir, "pre_pr", {
+    status: "approved", artifact: "artifacts/test-report.md", question_ref: "gates/pre-pr.md", answer: "approve",
+  }, { boundaryToken: opened.boundary.token });
+}
+
+function applyCheckedClaimExternalMutation(fixture, record, mutationCase) {
+  if (mutationCase.family !== "wrong-bytes" || !record.externalSources?.receipt) return;
+  assert.equal(existsSync(fixture.receiptPath), true, `${mutationCase.name} canonical receipt`);
+  writeFileSync(fixture.receiptPath, mutationCase.externalSources.receipt.bytes);
+}
+
+function assertCheckedClaimReceiptUnchanged(receiptPath, before, name) {
+  if (before === null) assert.equal(existsSync(receiptPath), false, `${name} must not publish a receipt`);
+  else assert.deepEqual(readFileSync(receiptPath), before, `${name} protected receipt bytes`);
+}
+
+function checkedClaimCleanupSnapshot(fixture) {
+  return {
+    runBytes: readFileSync(fixture.runFile),
+    receiptBytes: existsSync(fixture.receiptPath) ? readFileSync(fixture.receiptPath) : null,
+    branchHead: fixtureGit(fixture.repo, ["rev-parse", `refs/heads/${fixture.runId}`]).trim(),
+    runEntries: readdirSync(fixture.runDir).sort(),
+    opencodeEntries: readdirSync(join(fixture.repo, ".opencode")).sort(),
+  };
+}
+
+function assertCheckedClaimCleanupUnchanged(fixture, before, name) {
+  assert.deepEqual(readFileSync(fixture.runFile), before.runBytes, `${name} protected run.json bytes`);
+  assertCheckedClaimReceiptUnchanged(fixture.receiptPath, before.receiptBytes, name);
+  assert.equal(existsSync(fixture.repo), true, `${name} protected worktree`);
+  assert.equal(fixtureGit(fixture.repo, ["rev-parse", `refs/heads/${fixture.runId}`]).trim(), before.branchHead, `${name} protected branch`);
+  assert.deepEqual(readdirSync(fixture.runDir).sort(), before.runEntries, `${name} protected run directory`);
+  assert.deepEqual(readdirSync(join(fixture.repo, ".opencode")).sort(), before.opencodeEntries, `${name} protected cleanup staging`);
+}
+
+function claimHash(value) {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function materializeCatalogSources(runDir, ...sourceGroups) {

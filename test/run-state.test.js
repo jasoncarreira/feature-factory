@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { createPanelReviewRecord, createReviewRecord, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
@@ -8,6 +9,8 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertSliceReviewBindingCurrent,
+  claimCheckedTestExecution,
+  completeCheckedTestExecution,
   heartbeatOnce,
   inspectApprovalHandoffReceipt,
   mutateRunJsonLocked,
@@ -1060,7 +1063,7 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("generic run.json writers reject schema-v2 continuation authority without mutation", async () => {
+  it("generic run.json writers reject incomplete schema-v2 continuation injection without mutation", async () => {
     const fixture = createFixture("generic-writer-v2-continuation");
     try {
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
@@ -1074,7 +1077,7 @@ describe("simplified run-state transitions", () => {
           };
           run.continuation = continuation;
         }),
-        /schema_version: must equal 1|carry_forward: is not allowed/u,
+        /requires planning_reuse|closed mode\/pr configuration/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
     } finally { cleanup(fixture.repo); }
@@ -1098,6 +1101,218 @@ describe("simplified run-state transitions", () => {
     } finally {
       cleanup(fixture.repo);
     }
+  });
+
+  it("reproduces mutable schema-v2 planning and publication configuration through ordinary writers", async () => {
+    const fixture = createFixture("v2-immutable-publication");
+    try {
+      const branch = `${fixture.runId}-branch`;
+      initGitRepo(fixture.repo, [branch]);
+      runGit(fixture.repo, ["checkout", branch]);
+      const run = makeSyntheticV2Run(fixture.runDir, { ...baseRun(fixture.runId), branch, worktree: fixture.repo }, { remaining: ["slice"] });
+      writeJson(join(fixture.runDir, "run.json"), run);
+      for (const [label, mutate] of [
+        ["continuation", (draft) => { draft.continuation.operator_summary = "changed"; }],
+        ["mode", (draft) => { draft.mode = "autonomous"; }],
+        ["github_account", (draft) => { draft.github_account = "other"; }],
+        ["pr_mode", (draft) => { draft.pr_mode = "draft"; }],
+        ["max_parallel_slices", (draft) => { draft.max_parallel_slices = 2; }],
+        ["max_retries", (draft) => { draft.max_retries = 2; }],
+        ["post_pr.policy", (draft) => { draft.post_pr.policy.enabled = true; draft.post_pr.phase = "awaiting-pr"; }],
+      ]) {
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(transitionRunJson(fixture.runDir, mutate), new RegExp(`schema-v2.*${label.replace(".", "\\.")}.*immutable|immutable.*${label.replace(".", "\\.")}`, "u"), label);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, label);
+      }
+
+      const beforeSpec = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionRunStep(fixture.runDir, "spec-writer", { status: "running", attempts: 1 }, { mustExist: true }), /schema-v2.*spec-writer.*immutable/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeSpec);
+
+      const beforeDecomposition = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionRunStep(fixture.runDir, "work-decomposer", { status: "accepted", attempts: 2 }, { mustExist: true }), /schema-v2.*work-decomposer.*immutable/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeDecomposition);
+
+      const progressed = await transitionRunSlice(fixture.runDir, "slice", (slice) => {
+        slice.status = "running"; slice.attempts = 1; slice.branch = "child--slice"; slice.worktree = ".opencode/worktrees/child--slice";
+      });
+      assert.equal(progressed.slice.status, "running");
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("reproduces v2 downstream sink bypasses without all-merged fresh test authority", async () => {
+    const panel = createFixture("v2-panel-bypass");
+    try {
+      initGitRepo(panel.repo, ["feature"]); runGit(panel.repo, ["checkout", "feature"]);
+      const head = gitOutput(panel.repo, ["rev-parse", "HEAD"]);
+      mkdirSync(join(panel.runDir, "reviews"), { recursive: true });
+      writeFileSync(join(panel.runDir, "artifacts", "validation-report.md"), "GO\n");
+      writeJson(join(panel.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "GO" }));
+      writeJson(join(panel.runDir, "reviews", "security-reviewer.json"), createPanelReviewRecord({ subject: "feature", attempt: 1, reviewedHeadSha: head, verdict: "PASS" }));
+      writeJson(join(panel.runDir, "run.json"), makeSyntheticV2Run(panel.runDir, { ...baseRun(panel.runId), branch: "feature", worktree: panel.repo }, { remaining: ["slice"] }));
+      const before = readFileSync(join(panel.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionPanelVerdicts(panel.runDir, {
+        validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+        security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+      }, { repoRoot: panel.repo }), /schema-v2 downstream authority requires all child slices merged.*slice/u);
+      assert.equal(readFileSync(join(panel.runDir, "run.json"), "utf8"), before);
+    } finally { cleanup(panel.repo); }
+
+    const pending = createFixture("v2-pre-pr-create-bypass");
+    try {
+      writeJson(join(pending.runDir, "run.json"), makeSyntheticV2Run(pending.runDir, baseRun(pending.runId), { remaining: ["slice"] }));
+      writeFileSync(join(pending.runDir, "gates", "pre_pr.question.md"), "approve?\n");
+      const before = readFileSync(join(pending.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionGateDecision(pending.runDir, "pre_pr", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/pre_pr.question.md" }), /schema-v2 downstream authority requires all child slices merged.*slice/u);
+      assert.equal(readFileSync(join(pending.runDir, "run.json"), "utf8"), before);
+    } finally { cleanup(pending.repo); }
+
+    const approval = createFixture("v2-pre-pr-approve-bypass");
+    try {
+      initGitRepo(approval.repo, ["approval-feature"]);
+      runGit(approval.repo, ["checkout", "approval-feature"]);
+      writeFileSync(join(approval.runDir, "gates", "pre_pr.question.md"), "approve?\n");
+      await transitionGateDecision(approval.runDir, "pre_pr", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/pre_pr.question.md" });
+      const run = makeSyntheticV2Run(approval.runDir, { ...readJson(join(approval.runDir, "run.json")), branch: "approval-feature", worktree: approval.repo }, { remaining: ["slice"] });
+      writeJson(join(approval.runDir, "run.json"), run);
+      const opened = await transitionSteeringBoundaryOpened(approval.runDir, "gate");
+      const before = readFileSync(join(approval.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionGateDecision(approval.runDir, "pre_pr", { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/pre_pr.question.md", answer: "approve" }, { boundaryToken: opened.boundary.token }), /schema-v2 downstream authority requires all child slices merged.*slice/u);
+      assert.equal(readFileSync(join(approval.runDir, "run.json"), "utf8"), before);
+    } finally { cleanup(approval.repo); }
+
+    const fence = createFixture("v2-fence-bypass");
+    try {
+      writeReadyPrRun(fence, { slices: [{ id: "slice", status: "blocked", attempts: 1, blocked_reason: "blocked" }] });
+      const run = makeSyntheticV2Run(fence.runDir, readJson(join(fence.runDir, "run.json")), { remaining: ["slice"] });
+      writeJson(join(fence.runDir, "run.json"), run);
+      const prepared = preparePrTestOptions(fence.runDir, {});
+      const before = readFileSync(join(fence.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionPrePrFenceEstablished(fence.runDir, prepared), /schema-v2 downstream authority requires all child slices merged.*slice/u);
+      assert.equal(readFileSync(join(fence.runDir, "run.json"), "utf8"), before);
+    } finally { cleanup(fence.repo); }
+
+    const pr = createFixture("v2-pr-bypass");
+    try {
+      writeReadyPrRun(pr);
+      const prepared = preparePrTestOptions(pr.runDir, {});
+      const fenced = await transitionPrePrFenceEstablished(pr.runDir, prepared);
+      const run = makeSyntheticV2Run(pr.runDir, readJson(join(pr.runDir, "run.json")), { remaining: ["slice"] });
+      writeJson(join(pr.runDir, "run.json"), run);
+      const before = readFileSync(join(pr.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionPrCreated(pr.runDir, {}, { ...prepared, fenceToken: fenced.fence.token }), /schema-v2 downstream authority requires fresh accepted test-verifier authority/u);
+      assert.equal(readFileSync(join(pr.runDir, "run.json"), "utf8"), before);
+    } finally { cleanup(pr.repo); }
+  });
+
+  it("admits v2 panels, pre-PR approval, fence, and PR only through fresh child test authority", async () => {
+    const fixture = createFixture("v2-fresh-downstream-authority");
+    try {
+      writeReadyPrRun(fixture);
+      const run = makeSyntheticV2Run(fixture.runDir, readJson(join(fixture.runDir, "run.json")), { remaining: ["slice"] });
+      run.gates = {};
+      run.validator = null;
+      run.security_review = null;
+      run.steps.push({ agent: "test-verifier", status: "blocked", attempts: 0 });
+      writeJson(join(fixture.runDir, "run.json"), run);
+      const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "all tests pass\n");
+      const evidenceRef = "evidence/test-verifier.attempt-1.json";
+      const reviewRef = "reviews/test-verifier.attempt-1.json";
+      const review = { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] };
+      writeJson(join(fixture.runDir, reviewRef), review);
+
+      const beforeDirect = readFileSync(join(fixture.runDir, "run.json"));
+      await assert.rejects(transitionRunStep(fixture.runDir, "test-verifier", {
+        status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md", evidence_ref: evidenceRef, review_ref: reviewRef,
+      }, { mustExist: true }), /must transition from running|running.*same attempt/u);
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), beforeDirect);
+
+      const started = await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }, { mustExist: true });
+      assert.deepEqual(started.step, { agent: "test-verifier", status: "running", attempts: 1 });
+      const claimed = await claimCheckedTestExecution(fixture.runDir, { now: NOW, nonce: "123e4567-e89b-42d3-a456-426614174000" });
+      const emptyStream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false };
+      const receipt = {
+        schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: fixture.runId, attempt: 1,
+        claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: head,
+        started_at: NOW, completed_at: NOW, duration_ms: 0, status: "pass", review_ready: true,
+        commands: claimed.authority.commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
+      };
+      await completeCheckedTestExecution(fixture.runDir, claimed.claim, claimed.authority, receipt, { now: NOW });
+      for (const [label, mutate, expected] of [
+        ["review_ready", (value) => { delete value.review_ready; }, /review_ready|receipt/u],
+        ["commands omitted", (value) => { value.commands = []; }, /commands|receipt/u],
+        ["command substituted", (value) => { value.commands[0].args = ["--test", "test/other.test.js"]; }, /commands|receipt/u],
+        ["evidence head", (value) => { value.head_sha = "b".repeat(40); }, /head_sha|receipt/u],
+      ]) {
+        const invalid = structuredClone(receipt);
+        mutate(invalid);
+        writeJson(join(fixture.runDir, evidenceRef), invalid);
+        const before = readFileSync(join(fixture.runDir, "run.json"));
+        await assert.rejects(transitionRunStep(fixture.runDir, "test-verifier", {
+          status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md", evidence_ref: evidenceRef, review_ref: reviewRef,
+        }, { mustExist: true }), expected, label);
+        assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before, label);
+      }
+      writeJson(join(fixture.runDir, evidenceRef), receipt);
+      for (const [label, invalidReview, expected] of [
+        ["review subject", { ...review, subject: "other" }, /review must bind subject, attempt, and APPROVE/u],
+        ["review attempt", { ...review, attempt: 2 }, /review must bind subject, attempt, and APPROVE/u],
+        ["review head", { ...review, reviewed_head_sha: "b".repeat(40) }, /reviewed_head_sha.*current clean child/u],
+      ]) {
+        writeJson(join(fixture.runDir, reviewRef), invalidReview);
+        await assert.rejects(transitionRunStep(fixture.runDir, "test-verifier", {
+          status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md", evidence_ref: evidenceRef, review_ref: reviewRef,
+        }, { mustExist: true }), expected, label);
+      }
+      writeJson(join(fixture.runDir, reviewRef), review);
+      const accepted = await transitionRunStep(fixture.runDir, "test-verifier", {
+        status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md",
+        evidence_ref: evidenceRef, review_ref: reviewRef,
+      }, { mustExist: true });
+      assert.deepEqual(accepted.step.acceptance, {
+        artifact_ref: "artifacts/test-report.md", artifact_hash: hashFile(join(fixture.runDir, "artifacts", "test-report.md")),
+        evidence_ref: evidenceRef, evidence_hash: hashFile(join(fixture.runDir, evidenceRef)),
+        review_ref: reviewRef, review_hash: hashFile(join(fixture.runDir, reviewRef)), reviewed_head_sha: head,
+      });
+
+      const panelInput = {
+        validator: { verdict: "GO", report: "artifacts/story.md", review_ref: "reviews/implementation-validator.json" },
+        security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+      };
+      const acceptedRunBytes = readFileSync(join(fixture.runDir, "run.json"));
+      writeJson(join(fixture.runDir, evidenceRef), { ...receipt, commands: receipt.commands.map((command, index) => index === 0 ? { ...command, status: "fail", exit_code: 1 } : command), status: "fail", review_ready: false });
+      await assert.rejects(transitionPanelVerdicts(fixture.runDir, panelInput, { repoRoot: fixture.repo }), /receipt|acceptance bytes or head are stale/u);
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), acceptedRunBytes);
+      writeJson(join(fixture.runDir, evidenceRef), receipt);
+
+      runGit(fixture.repo, ["commit", "--allow-empty", "-m", "integration moved after test acceptance"]);
+      await assert.rejects(transitionPanelVerdicts(fixture.runDir, panelInput, { repoRoot: fixture.repo }), /receipt|current authority|acceptance bytes or head are stale/u);
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), acceptedRunBytes);
+      runGit(fixture.repo, ["reset", "--hard", head]);
+
+      const beforeRace = readFileSync(join(fixture.runDir, "run.json"));
+      await assert.rejects(transitionPanelVerdicts(fixture.runDir, panelInput, {
+        repoRoot: fixture.repo,
+        atomicWriteHooks: { beforeCommit: () => writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "raced test result\n") },
+      }), (error) => error?.message === "protected file commit failed" && error?.cause?.message === "schema-v2 test-verifier acceptance bytes or head are stale");
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), beforeRace);
+      writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), "all tests pass\n");
+
+      const panels = await transitionPanelVerdicts(fixture.runDir, panelInput, { repoRoot: fixture.repo });
+      assert.equal(panels.run.validator.verdict, "GO");
+      assert.equal(panels.run.security_review.verdict, "PASS");
+
+      await transitionGateDecision(fixture.runDir, "pre_pr", { status: "pending", artifact: "artifacts/story.md", question_ref: "gates/story.question.md" });
+      const approved = await approveGateDecision(fixture.runDir, "pre_pr", { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve" });
+      assert.equal(approved.run.gates.pre_pr.status, "approved");
+      const prepared = preparePrTestOptions(fixture.runDir, {});
+      const fenced = await transitionPrePrFenceEstablished(fixture.runDir, prepared);
+      assert.equal(fenced.fence.head_sha, gitOutput(fixture.repo, ["rev-parse", "HEAD"]));
+      const created = await transitionPrCreated(fixture.runDir, {}, { ...prepared, fenceToken: fenced.fence.token });
+      assert.equal(created.status, "completed");
+      assert.equal(created.pr_url, "https://github.com/jasoncarreira/opencode-feature-factory/pull/99");
+    } finally { cleanup(fixture.repo); }
   });
 
   it("allows explicit draft PR creation for blocked-run continuations", async () => {
@@ -1518,19 +1733,153 @@ describe("simplified run-state transitions", () => {
     const projection = [{ id: "backend", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
     try {
       writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), slices: [] });
-      const seeded = await transitionSlicesSeed(fixture.runDir, projection);
+      writeSeedPlan(fixture.runDir, projection);
+      const seeded = await transitionSlicesSeed(fixture.runDir, projection, { from: "plan/slices.json" });
       assert.deepEqual(seeded.run.slices, projection);
       const bytes = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      const replay = await transitionSlicesSeed(fixture.runDir, projection);
+      const replay = await transitionSlicesSeed(fixture.runDir, projection, { from: "plan/slices.json" });
       assert.equal(replay.updated, false);
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), bytes);
       const replacement = [{ id: "backend-next", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
-      const reseeded = await transitionSlicesSeed(fixture.runDir, replacement);
+      writeSeedPlan(fixture.runDir, replacement);
+      const reseeded = await transitionSlicesSeed(fixture.runDir, replacement, { from: "plan/slices.json" });
       assert.deepEqual(reseeded.run.slices, replacement);
       await transitionRunSlice(fixture.runDir, "backend-next", { status: "running", attempts: 1 });
       const started = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionSlicesSeed(fixture.runDir, replacement, { force: true }), /after work has started/u);
+      await assert.rejects(transitionSlicesSeed(fixture.runDir, replacement, { from: "plan/slices.json", force: true }), /after work has started/u);
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), started);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("requires the exact run-relative plan source instead of projection-only seed authority", async () => {
+    const fixture = createFixture("checked-slice-seed-source-required");
+    const projection = [{ id: "backend", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
+    try {
+      writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), slices: [] });
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionSlicesSeed(fixture.runDir, projection),
+        /exact run-relative plan source 'plan\/slices\.json' is required/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      writeSeedPlan(fixture.runDir, projection);
+      for (const [label, options, error] of [
+        ["alternate", { from: "plan/alternate.json" }, /exact run-relative plan source/u],
+        ["absolute", { from: join(fixture.runDir, "plan", "slices.json") }, /exact run-relative plan source/u],
+        ["wrong repo", { from: "plan/slices.json", repoRoot: join(fixture.repo, "other-repo") }, /repoRoot does not own/u],
+      ]) {
+        await assert.rejects(transitionSlicesSeed(fixture.runDir, projection, options), error, label);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, label);
+      }
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("binds exact plan and review bytes when accepting work-decomposer", async () => {
+    const fixture = createFixture("work-decomposer-plan-acceptance");
+    const plan = {
+      integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+      slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test"] }],
+    };
+    try {
+      mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
+      mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+      writeJson(join(fixture.runDir, "plan", "slices.json"), plan);
+      writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE" });
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId),
+        slices: [{ id: "backend", stack: "backend", depends_on: [], status: "pending", attempts: 0 }],
+        steps: [{ agent: "work-decomposer", status: "running", attempts: 1 }],
+      });
+
+      const accepted = await transitionRunStep(fixture.runDir, "work-decomposer", {
+        status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      }, { mustExist: true });
+      assert.deepEqual(accepted.step.acceptance, {
+        artifact_ref: "plan/slices.json",
+        artifact_hash: hashFile(join(fixture.runDir, "plan", "slices.json")),
+        review_ref: "reviews/work-decomposer.json",
+        review_hash: hashFile(join(fixture.runDir, "reviews", "work-decomposer.json")),
+      });
+      await transitionRunStep(fixture.runDir, "work-decomposer", { status: "rejected", attempts: 1 }, { mustExist: true });
+      await transitionRunStep(fixture.runDir, "work-decomposer", { status: "running", attempts: 2 }, { mustExist: true });
+      const beforeRace = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionRunStep(fixture.runDir, "work-decomposer", {
+        status: "accepted", attempts: 2, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      }, {
+        mustExist: true,
+        atomicWriteHooks: { beforeCommit: () => writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "REJECT" }) },
+      }), (error) => error?.message === "protected file commit failed" && /review bytes changed/u.test(error?.cause?.message));
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeRace);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rehashes accepted decomposition before test-verifier dispatch", async () => {
+    const fixture = createFixture("test-verifier-decomposition-recheck");
+    const projection = [{ id: "backend", stack: "backend", depends_on: [], status: "merged", attempts: 1 }];
+    try {
+      writeSeedPlan(fixture.runDir, projection);
+      mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+      writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE" });
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId),
+        slices: projection,
+        steps: [
+          {
+            agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+            acceptance: {
+              artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(fixture.runDir, "plan", "slices.json")),
+              review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(fixture.runDir, "reviews", "work-decomposer.json")),
+            },
+          },
+          { agent: "test-verifier", status: "blocked", attempts: 0 },
+        ],
+      });
+      writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "REJECT" });
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 1 }, { mustExist: true }),
+        /accepted work-decomposer review bytes changed after acceptance/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rechecks required-command plan bytes after observation and before seed publication", async () => {
+    const fixture = createFixture("checked-slice-seed-plan-race");
+    const projection = [{ id: "backend", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
+    const planPath = join(fixture.runDir, "plan", "slices.json");
+    try {
+      writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), slices: [] });
+      mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
+      writeJson(planPath, {
+        integration_gate: { required_commands: [{ program: "node", args: ["--test", "test/acceptance.test.js"] }, { program: "npm", args: ["run", "check"] }] },
+        slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test"] }],
+      });
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        transitionSlicesSeed(fixture.runDir, projection, {
+          from: "plan/slices.json",
+          atomicWriteHooks: {
+            beforeCommit() {
+              writeJson(planPath, {
+                integration_gate: { required_commands: [{ program: "node", args: ["--test", "test/other.test.js"] }, { program: "npm", args: ["run", "check"] }] },
+                slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test"] }],
+              });
+            },
+          },
+        }),
+        /protected file commit failed/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
     } finally {
       cleanup(fixture.repo);
     }
@@ -1552,9 +1901,11 @@ describe("simplified run-state transitions", () => {
         try {
           const pending = { id: "slice", stack: "backend", depends_on: [], status: "pending", attempts: 0, [field]: value };
           writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), slices: [pending] });
+          const replacement = [{ id: "replacement", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
+          writeSeedPlan(fixture.runDir, replacement);
           const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
           await assert.rejects(
-            transitionSlicesSeed(fixture.runDir, [{ id: "replacement", stack: "backend", depends_on: [], status: "pending", attempts: 0 }], { force }),
+            transitionSlicesSeed(fixture.runDir, replacement, { from: "plan/slices.json", force }),
             /slice progress after work has started/u,
             `${field}:${force}`,
           );
@@ -2896,6 +3247,109 @@ function continuationMetadata(targetRunId) {
   };
 }
 
+function makeSyntheticV2Run(runDir, input, { accepted = [], remaining = [] } = {}) {
+  const run = structuredClone(input);
+  run.branch = run.branch || `${run.run_id}-branch`;
+  run.worktree = run.worktree || `/tmp/${run.run_id}-worktree`;
+  run.base_ref = run.base_ref || "main";
+  run.base_commit = run.base_commit || "b".repeat(40);
+  const acceptedSet = new Set(accepted);
+  run.slices = (run.slices || []).map((slice) => acceptedSet.has(slice.id) ? {
+    id: slice.id,
+    stack: slice.stack || "backend",
+    depends_on: slice.depends_on || [],
+    status: "merged",
+    attempts: slice.attempts,
+    evidence_ref: slice.evidence_ref,
+    evidence_hash: slice.evidence_hash,
+    review_ref: slice.review_ref,
+    review_hash: slice.review_hash,
+    reviewed_commit: slice.reviewed_commit,
+    merge_commit: slice.merge_commit,
+  } : { ...slice, stack: slice.stack || "backend", depends_on: slice.depends_on || [] });
+  mkdirSync(join(runDir, "plan"), { recursive: true });
+  mkdirSync(join(runDir, "reviews"), { recursive: true });
+  writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted synthetic brief\n");
+  writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", attempt: 1, verdict: "APPROVE" });
+  const plan = {
+    integration_gate: { required_commands: [{ program: "node", args: ["--test", "test/integration.test.js"] }, { program: "npm", args: ["run", "check"] }] },
+    slices: run.slices.map((slice) => ({ id: slice.id, stack: slice.stack, paths: [`${slice.id}.txt`], depends_on: slice.depends_on, acceptance: [`${slice.id} accepted`], test_plan: [`test ${slice.id}`] })),
+  };
+  writeJson(join(runDir, "plan", "slices.json"), plan);
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE" });
+  const briefHash = hashFile(join(runDir, "artifacts", "technical-brief.md"));
+  const specReviewHash = hashFile(join(runDir, "reviews", "spec-writer.json"));
+  const startCommit = "a".repeat(40);
+  const continuation = continuationMetadata(run.run_id);
+  continuation.schema_version = 2;
+  continuation.parent.commit = startCommit;
+  continuation.target = { run_id: run.run_id, branch: run.branch, worktree: run.worktree, base_ref: run.base_ref || "main", base_commit: run.base_commit || "b".repeat(40) };
+  continuation.parent_artifacts.push({ kind: "technical_brief", ref: "artifacts/technical-brief.md", hash: briefHash });
+  continuation.parent_reviews.push({ kind: "review", ref: "reviews/spec-writer.json", hash: specReviewHash });
+  continuation.planning_reuse = {
+    eligible: true,
+    spec_review_ref: "reviews/spec-writer.json",
+    spec_review_hash: specReviewHash,
+    spec_artifact_ref: "artifacts/technical-brief.md",
+    spec_artifact_hash: briefHash,
+    child_spec_review_ref: "reviews/spec-writer.json",
+  };
+  continuation.configuration = {
+    mode: run.mode || "headless", github_account: run.github_account ?? null, pr_mode: run.pr_mode || "ready",
+    max_parallel_slices: 3, max_retries: 3,
+    post_pr_policy: structuredClone((run.post_pr || { policy: { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } } }).policy),
+  };
+  continuation.carry_forward = {
+    scope: "full-remaining-plan",
+    plan_ref: "plan/slices.json",
+    plan_hash: hashFile(join(runDir, "plan", "slices.json")),
+    start_commit: startCommit,
+    accepted_slices: run.slices.filter((slice) => acceptedSet.has(slice.id)).map((slice) => ({
+      id: slice.id,
+      attempts: slice.attempts,
+      evidence_ref: slice.evidence_ref,
+      evidence_hash: slice.evidence_hash,
+      review_ref: slice.review_ref,
+      review_hash: slice.review_hash,
+      reviewed_commit: slice.reviewed_commit,
+      merge_commit: slice.merge_commit,
+    })),
+    remaining_slice_ids: [...remaining],
+  };
+  run.mode = run.mode || "headless";
+  run.github_account = run.github_account ?? null;
+  run.pr_mode = run.pr_mode || "ready";
+  run.max_parallel_slices = 3;
+  run.max_retries = 3;
+  run.continuation = continuation;
+  run.post_pr = run.post_pr || {
+    schema_version: 1,
+    policy: { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } },
+    phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null,
+  };
+  run.continuation.configuration.mode = run.mode;
+  run.continuation.configuration.github_account = run.github_account;
+  run.continuation.configuration.pr_mode = run.pr_mode;
+  run.continuation.configuration.post_pr_policy = structuredClone(run.post_pr.policy);
+  run.steps = [
+    {
+      agent: "spec-writer", status: "accepted", attempts: 0,
+      artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
+      acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: briefHash, review_ref: "reviews/spec-writer.json", review_hash: specReviewHash },
+      inherited_acceptance: { from_run_id: continuation.parent.run_id, parent_spec_review_ref: "reviews/spec-writer.json", artifact_hash: briefHash, review_hash: specReviewHash },
+    },
+    {
+      agent: "work-decomposer", status: "accepted", attempts: 1,
+      artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      acceptance: {
+        artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(runDir, "plan", "slices.json")),
+        review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(runDir, "reviews", "work-decomposer.json")),
+      },
+    },
+  ];
+  return run;
+}
+
 function initGitRepo(repo, branches = []) {
   runGit(repo, ["init", "-b", "main"]);
   runGit(repo, ["config", "user.email", "test@example.com"]);
@@ -2984,6 +3438,21 @@ function assertPendingSteeringUnchanged(fixture, before) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function writeSeedPlan(runDir, projection) {
+  mkdirSync(join(runDir, "plan"), { recursive: true });
+  writeJson(join(runDir, "plan", "slices.json"), {
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    slices: projection.map((slice) => ({
+      id: slice.id,
+      stack: slice.stack,
+      paths: [`${slice.id}.txt`],
+      depends_on: slice.depends_on,
+      acceptance: [`${slice.id} accepted`],
+      test_plan: [`test ${slice.id}`],
+    })),
+  });
 }
 
 function cleanup(repo) {

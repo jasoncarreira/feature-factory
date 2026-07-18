@@ -4,16 +4,17 @@ import { lstat, open, readFile, rename, rm, mkdir, writeFile } from "node:fs/pro
 import { hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
-import { git } from "./git.js";
+import { git, repoRoot } from "./git.js";
 import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
 import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 import { normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
-import { deriveExpectedWorktreePath } from "./worktrees.js";
+import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
+import { directFactoryRoot } from "./factory-paths.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -22,6 +23,8 @@ const HEARTBEAT_SLICE_IN_FLIGHT_STATUSES = new Set(["running", "review"]);
 const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const GATE_DECISION_STATUSES = new Set(["approved", "changes_requested", "stopped"]);
 const DEFAULT_LOCK_TIMEOUT_MS = 1000;
+const PLAN_SLICES_REF = "plan/slices.json";
+const TEST_EXECUTION_UNKNOWN_REASONS = new Set(["process-outcome-indeterminate", "authority-changed", "receipt-publication-indeterminate"]);
 const DEFAULT_LOCK_RETRY_DELAY_MS = 10;
 const DEFAULT_STALE_LOCK_MS = 60000;
 const DEFAULT_MISSING_OWNER_STEAL_MS = 5000;
@@ -40,6 +43,7 @@ const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash",
 const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
 const SECURITY_BINDING_KEYS = Object.freeze(["review_hash", "reviewed_head_sha"]);
 const PR_FENCE_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
+const CARRY_FORWARD_PLANNING_KINDS = new Set(["story", "research_map", "design_brief", "technical_brief"]);
 const LEGACY_MERGED_UPGRADE_ERROR = "legacy merged slice authority upgrade failed";
 const CONTINUATION_PARENT_ARTIFACTS = Object.freeze([
   ["story", "artifacts/story.md"],
@@ -471,8 +475,10 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
   const nextGate = normalizeGateDecision(gateName, gate, options);
   const answerArchives = [];
   const publishedArchives = [];
+  let v2Authority = null;
   const result = await withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    if (gateName === "pre_pr" && ["pending", "approved"].includes(nextGate.status)) v2Authority = assertV2PrePrGateAuthority(runDir, current, `pre_pr ${nextGate.status}`);
     if (nextGate.status === "approved" && mergedSliceRepairFence(current)) {
       throw new Error(`gate '${gateName}' cannot be approved while a merged-slice repair is unresolved`);
     }
@@ -498,7 +504,7 @@ export async function transitionGateDecision(runDir, gateName, gate, options = {
             await archiveConsumedGateAnswer(archive);
             publishedArchives.push(archive);
           }
-        } },
+        }, beforeReplace: v2Authority ? (_next, observed) => assertV2PrePrGateAuthority(runDir, observed, `pre_pr ${nextGate.status}`, v2Authority) : null },
       );
     } catch (error) {
       await restoreConsumedGateAnswers(publishedArchives);
@@ -554,6 +560,7 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
   const text = requireNonEmptyString(message, "steering message");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot be steered`);
     if (current.status !== "running") throw new Error(`steer requires a running run, found '${current.status}'`);
@@ -578,6 +585,7 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
       created_at: createdAt,
       source: "factory steer",
     };
+    assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
     await writeJsonAtomically(resolved.path, steeringFile);
     const fileHash = hashFile(resolved.path, { mode: "raw" });
     const metadata = { id, ref, hash: fileHash, message_chars: text.length, created_at: createdAt };
@@ -598,7 +606,7 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
         history,
       },
     });
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return { updated: true, status: next.status, run: next, steering: metadata };
   }, options);
 }
@@ -608,6 +616,7 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot consume steering`);
     assertNoFreshHeartbeatForSteeringConsume(runDir, options);
@@ -669,9 +678,10 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
     });
     if (!source.consumedRef) {
       const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
+      assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
       await rename(source.path, consumedResolved.path);
     }
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     const steering = {
       kind: "operator-steering-consumed",
       trust: "untrusted-operator-data",
@@ -689,6 +699,7 @@ export async function transitionSteeringAcknowledged(runDir, input, options = {}
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot acknowledge steering`);
     if (current.status !== "running") throw new Error(`steer-ack requires a running run, found '${current.status}'`);
@@ -726,7 +737,7 @@ export async function transitionSteeringAcknowledged(runDir, input, options = {}
         history,
       },
     });
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return { updated: true, status: next.status, run: next, steering: { ref: requestedRef, hash: requestedHash, acknowledged_at: acknowledgedAt, outcome: "applied-prospectively" } };
   }, options);
 }
@@ -736,9 +747,11 @@ export async function transitionSteeringConflict(runDir, input, options = {}) {
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot record steering conflict`);
     if (current.status !== "running") throw new Error(`steer-conflict requires a running run, found '${current.status}'`);
+    assertNoUnreconciledTestExecution(current);
     assertNoFreshHeartbeatForSteeringConflict(runDir, options);
 
     const consumed = current.steering?.uncheckpointed;
@@ -764,7 +777,7 @@ export async function transitionSteeringConflict(runDir, input, options = {}) {
         pr_fence: null,
       },
     });
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return {
       ok: false,
       conflict: true,
@@ -783,6 +796,7 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
   const boundaryKind = normalizeSteeringBoundaryKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-open ${boundaryKind}`);
     if (boundaryKind === "gate" && mergedSliceRepairFence(current)) throw new Error("gate boundary cannot open while a merged-slice repair is unresolved");
@@ -802,7 +816,7 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
       created_at: createdAt,
     };
     const next = validateRun(base);
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return { updated: true, status: next.status, run: next, boundary: cloneJson(next.steering.boundary) };
   }, options);
 }
@@ -812,6 +826,7 @@ export async function transitionSteeringBoundaryCrossed(runDir, kind, token, opt
   if (!STEERING_ACTION_KINDS.has(boundaryKind)) throw new Error("boundary-cross supports dispatch, remediation, terminal, post-pr-observe, or post-pr-push");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-cross ${boundaryKind}`);
     const draft = cloneJson(current);
@@ -828,7 +843,7 @@ export async function transitionSteeringBoundaryCrossed(runDir, kind, token, opt
       },
     });
     const next = validateRun(draft);
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return { updated: true, status: next.status, run: next, action_claim: cloneJson(next.steering.action_claim) };
   }, options);
 }
@@ -845,6 +860,7 @@ export async function transitionSteeringActionClosed(runDir, kind, token, option
   const actionKind = normalizeSteeringActionKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertSteeringBoundaryClear(current, "action-close");
     if (isRecord(current.steering?.boundary) || isRecord(current.steering?.pr_fence)) throw new Error("action-close requires no boundary or PR fence");
@@ -854,7 +870,7 @@ export async function transitionSteeringActionClosed(runDir, kind, token, option
     if (!isRecord(action) || action.kind !== actionKind || action.token !== requestedToken || action.outcome !== "started" || action.generation !== steeringGeneration(current)) throw new Error("origin action is missing, stale, or not started");
     const closedAt = timestamp(options.now);
     const next = validateRun({ ...cloneJson(current), updated_at: closedAt, steering: normalizedSteeringState(current, { last_action: { ...cloneJson(action), outcome: "closed", resolved_at: closedAt } }) });
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return { updated: true, status: next.status, run: next, action: cloneJson(next.steering.last_action) };
   }, options);
 }
@@ -863,11 +879,13 @@ async function transitionSteeringActionResolved(runDir, kind, token, outcome, op
   const actionKind = normalizeSteeringActionKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     const claim = assertSteeringActionClaim(current, actionKind, token);
     if (outcome === "aborted") {
       const recoverable = inspectRecoverableHeartbeat(runDir, options);
       if (!recoverable.ok) throw new Error("action-abort requires inactive heartbeat: active-heartbeat");
+      assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
       await stopHeartbeatForRecovery(runDir, recoverable.heartbeat, timestamp(options.now));
     }
     const resolvedAt = timestamp(options.now);
@@ -886,7 +904,7 @@ async function transitionSteeringActionResolved(runDir, kind, token, outcome, op
         },
       }),
     });
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return { updated: true, status: next.status, run: next, action: cloneJson(next.steering.last_action) };
   }, options);
 }
@@ -895,6 +913,7 @@ export async function transitionPrePrFenceEstablished(runDir, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
     assertBoundaryClean(runDir, current, options, "pr-fence");
     const authority = assertPrCreatedReadiness(runDir, current);
     const gitAuthority = observePrOperationGitAuthority(runDir, current, options, "pr-fence");
@@ -954,8 +973,10 @@ async function reconcilePrOperation(runDir, token, mode, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
     if (current.status !== "running") throw new Error(`${mode === "clear" ? "pr-fence clear" : "pr-created"} requires a running run`);
     if (mergedSliceRepairFence(current)) throw new Error("pr-created is fenced while a merged-slice repair is unresolved");
+    if (mode === "record") assertV2FreshDownstreamAuthority(runDir, current, "PR creation");
     const fence = assertPrFence(current, token);
     if (!hasCompleteBinding(fence, PR_FENCE_IDENTITY_KEYS)) return terminalizeLegacyPrFenceLocked(runDir, current, options);
 
@@ -1077,6 +1098,7 @@ function assertObservedPrTuple(pullRequest, fence, expectedHeadSha) {
 }
 
 function terminalizeLegacyPrFenceLocked(runDir, current, options = {}) {
+  const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
   const now = timestamp(options.now);
   const next = validateRun({
     ...cloneJson(current),
@@ -1091,7 +1113,7 @@ function terminalizeLegacyPrFenceLocked(runDir, current, options = {}) {
       artifacts: {},
     },
   });
-  return writeJsonAtomically(join(runDir, RUN_FILE), next).then(() => ({
+  return writeSemanticRunJson(runDir, next, options, v2Authority).then(() => ({
     ok: false,
     updated: true,
     disposition: "legacy",
@@ -1113,6 +1135,7 @@ export async function transitionLegacyPrFenceNeedsHuman(runDir, options = {}) {
     const fence = current.steering?.pr_fence;
     if (!isRecord(fence) || hasCompleteBinding(fence, PR_FENCE_IDENTITY_KEYS)) return null;
     if (current.status !== "running") return null;
+    if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
     return terminalizeLegacyPrFenceLocked(runDir, current, options);
   }, options);
 }
@@ -1168,6 +1191,7 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
   if (!POST_PR_TERMINAL_PHASE[status] || !POST_PR_TERMINAL_REASONS[status]?.includes(reason)) throw new Error(`invalid closed post-PR terminal reason '${reason}' for ${status}`);
   let completedPrAuthority = null;
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft, { current }) => {
+    assertNoUnreconciledTestExecution(current);
     assertPostPrMutationReady(runDir, current, options, "post-PR terminal transition");
     const phase = POST_PR_TERMINAL_PHASE[status];
     if (current.post_pr?.phase === phase && current.status === status && current.terminal_result?.reason === reason) return;
@@ -1210,6 +1234,7 @@ export async function transitionPostPrTerminal(runDir, input, options = {}) {
 export async function transitionTerminalResult(runDir, terminalResult, options = {}) {
   const nextTerminalResult = normalizeTerminalResult(terminalResult);
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft) => {
+    assertNoUnreconciledTestExecution(draft);
     assertSteeringBoundaryClear(draft, "terminal");
     consumeSteeringBoundary(draft, "terminal", options.boundaryToken);
     const next = { ...cloneJson(nextTerminalResult), run_id: draft.run_id, status: nextTerminalResult.status };
@@ -1236,8 +1261,10 @@ export async function transitionCostUsage(runDir, input, options = {}) {
 export async function transitionRecoverOrphan(runDir, reason = "orphaned factory run", options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.status !== "running") throw new Error(`recover requires a running run, found '${current.status}'`);
+    assertNoUnreconciledTestExecution(current);
     assertSteeringBoundaryClear(current, "recover");
     if (isRecord(current.steering?.pr_fence)) {
       if (!hasCompleteBinding(current.steering.pr_fence, PR_FENCE_IDENTITY_KEYS)) return terminalizeLegacyPrFenceLocked(runDir, current, options);
@@ -1247,6 +1274,7 @@ export async function transitionRecoverOrphan(runDir, reason = "orphaned factory
     if (!recoverable.ok) throw new Error(`recover requires terminal, missing, stale, or dead heartbeat: ${recoverable.reason}`);
 
     const now = timestamp(options.now);
+    assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
     await stopHeartbeatForRecovery(runDir, recoverable.heartbeat, now);
     const next = validateRun({
       ...current,
@@ -1262,9 +1290,153 @@ export async function transitionRecoverOrphan(runDir, reason = "orphaned factory
       },
     });
 
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return { updated: true, status: next.status, run: next, recovery: recoverable };
   }, options);
+}
+
+export async function claimCheckedTestExecution(runDir, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const step = uniqueTestVerifierStep(current);
+    if (!step) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires exactly one test-verifier step");
+    const existing = step.execution_claim;
+    if (isRecord(existing)) {
+      if (existing.state === "active") throw testExecutionError("TEST_EXECUTION_ACTIVE", "checked test execution claim is active; no supported factory command may clear, replace, terminalize, retry, or advance the claim; trusted out-of-band operator/process reconciliation is required");
+      if (existing.state === "unknown") throw operatorReconciliationRequired("checked test execution outcome is unknown");
+      if (existing.state === "completed") return replayCheckedTestExecutionLocked(runDir, current, step, options);
+      throw operatorReconciliationRequired("checked test execution claim state is invalid");
+    }
+    requireRunningTestVerifierStep(current);
+    const authority = observeCheckedTestExecutionAuthority(runDir, current, options);
+    const receiptRef = `evidence/test-verifier.attempt-${step.attempts}.json`;
+    const receipt = resolveEvidenceRef(runDir, receiptRef, { mustExist: false });
+    if (existsSync(receipt.path)) throw testExecutionError("TEST_EXECUTION_UNCLAIMED_RECEIPT", "fixed test execution receipt already exists without a claim");
+    const claim = {
+      schema_version: 1,
+      kind: "checked-test-execution-claim",
+      state: "active",
+      nonce: options.nonce || randomUUID(),
+      run_id: current.run_id,
+      attempt: step.attempts,
+      plan_ref: PLAN_SLICES_REF,
+      plan_hash: authority.plan_hash,
+      head_sha: authority.head_sha,
+      receipt_ref: receiptRef,
+      claimed_at: timestamp(options.now),
+    };
+    const next = cloneJson(current);
+    const nextStep = uniqueTestVerifierStep(next);
+    nextStep.execution_claim = claim;
+    nextStep.execution_claim_hash = hashValue(claim);
+    validateRun(next);
+    await writeProtectedRunJson(runDir, next, options, () => {
+      const observed = validateRun(parseJsonObjectFile(join(runDir, RUN_FILE), "checked test execution claim run.json"));
+      const observedStep = uniqueTestVerifierStep(observed);
+      if (observedStep?.execution_claim !== undefined || observedStep?.execution_claim_hash !== undefined) throw new Error("checked test execution claim changed before publication");
+      assertSameCheckedExecutionAuthority(observeCheckedTestExecutionAuthority(runDir, observed, options), authority);
+    });
+    return { replayed: false, run: next, step: cloneJson(uniqueTestVerifierStep(next)), claim: cloneJson(claim), authority };
+  }, options);
+}
+
+export async function completeCheckedTestExecution(runDir, expectedClaim, expectedAuthority, receiptInput, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const step = uniqueTestVerifierStep(current);
+    assertExactActiveExecutionClaim(step, expectedClaim);
+    let authority;
+    try {
+      authority = observeCheckedTestExecutionAuthority(runDir, current, options);
+      assertSameCheckedExecutionAuthority(authority, expectedAuthority);
+    } catch (error) {
+      await persistUnknownTestExecutionLocked(runDir, current, step, expectedClaim, "authority-changed", options);
+      throw operatorReconciliationRequired(`checked test execution authority changed before receipt publication: ${error.message}`);
+    }
+    const receipt = validateTestExecutionReceipt(cloneJson(receiptInput));
+    assertReceiptMatchesExecution(receipt, expectedClaim, authority);
+    const resolved = resolveEvidenceRef(runDir, expectedClaim.receipt_ref, { mustExist: false });
+    try {
+      await writeProtectedJsonAtomic(runDir, expectedClaim.receipt_ref, receipt, { commit: "create-only", hooks: options.receiptAtomicWriteHooks });
+    } catch (error) {
+      await persistUnknownTestExecutionLocked(runDir, current, step, expectedClaim, "receipt-publication-indeterminate", options);
+      throw operatorReconciliationRequired(`checked test execution receipt publication is indeterminate: ${error.message}`);
+    }
+    const receiptHash = hashFile(resolved.path, { mode: "raw" });
+    const next = cloneJson(current);
+    const nextStep = uniqueTestVerifierStep(next);
+    nextStep.evidence_ref = expectedClaim.receipt_ref;
+    nextStep.execution_claim = {
+      ...cloneJson(expectedClaim),
+      state: "completed",
+      completed_at: receipt.completed_at,
+      status: receipt.status,
+      receipt_hash: receiptHash,
+    };
+    nextStep.execution_claim_hash = hashValue(nextStep.execution_claim);
+    if (receipt.status === "fail") nextStep.status = "rejected";
+    validateRun(next);
+    await writeProtectedRunJson(runDir, next, options, () => {
+      const observed = validateRun(parseJsonObjectFile(join(runDir, RUN_FILE), "checked test execution completion run.json"));
+      assertExactActiveExecutionClaim(uniqueTestVerifierStep(observed), expectedClaim);
+      assertSameCheckedExecutionAuthority(observeCheckedTestExecutionAuthority(runDir, observed, options), expectedAuthority);
+      const exactReceipt = validateTestExecutionReceipt(parseJsonObjectFile(resolved.path, "checked test execution receipt"));
+      if (!sameJson(exactReceipt, receipt) || hashFile(resolved.path, { mode: "raw" }) !== receiptHash) throw new Error("checked test execution receipt changed before completion publication");
+    });
+    return checkedTestExecutionEnvelope(next, nextStep, receiptHash, false);
+  }, options);
+}
+
+export async function markCheckedTestExecutionUnknown(runDir, expectedClaim, reason, options = {}) {
+  if (!TEST_EXECUTION_UNKNOWN_REASONS.has(reason)) throw new Error("unknown checked execution reason is invalid");
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const step = uniqueTestVerifierStep(current);
+    assertExactActiveExecutionClaim(step, expectedClaim);
+    const next = await persistUnknownTestExecutionLocked(runDir, current, step, expectedClaim, reason, options);
+    return { updated: true, status: next.status, run: next, claim: cloneJson(uniqueTestVerifierStep(next).execution_claim) };
+  }, options);
+}
+
+async function persistUnknownTestExecutionLocked(runDir, current, step, expectedClaim, reason, options) {
+  assertExactActiveExecutionClaim(step, expectedClaim);
+  const next = cloneJson(current);
+  const nextStep = uniqueTestVerifierStep(next);
+  nextStep.execution_claim = {
+    ...cloneJson(expectedClaim),
+    state: "unknown",
+    failed_at: timestamp(options.now),
+    reason,
+  };
+  nextStep.execution_claim_hash = hashValue(nextStep.execution_claim);
+  validateRun(next);
+  await writeProtectedRunJson(runDir, next, options, () => {
+    const observed = validateRun(parseJsonObjectFile(join(runDir, RUN_FILE), "checked test execution unknown run.json"));
+    assertExactActiveExecutionClaim(uniqueTestVerifierStep(observed), expectedClaim);
+  });
+  return next;
+}
+
+function replayCheckedTestExecutionLocked(runDir, current, step, options) {
+  const authority = observeCheckedTestExecutionAuthority(runDir, current, options, { allowCompleted: true });
+  const observed = observeCompletedCheckedTestExecutionAuthority(runDir, current, step, authority);
+  return { replayed: true, run: current, step: cloneJson(step), claim: cloneJson(step.execution_claim), authority, result: checkedTestExecutionEnvelope(current, step, observed.receipt_hash, true) };
+}
+
+function checkedTestExecutionEnvelope(run, step, receiptHash, replayed) {
+  const claim = step.execution_claim;
+  return {
+    ok: claim.status === "pass",
+    run_id: run.run_id,
+    attempt: step.attempts,
+    status: claim.status,
+    step_status: step.status,
+    head_sha: claim.head_sha,
+    plan_hash: claim.plan_hash,
+    receipt_ref: claim.receipt_ref,
+    receipt_hash: receiptHash,
+    replayed,
+  };
 }
 
 export async function transitionRunStep(runDir, stepSelector, updater, options = {}) {
@@ -1277,6 +1449,7 @@ export async function transitionContinuationAdoption(runDir, options = {}) {
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft) => {
     const continuation = draft.continuation;
     const reuse = continuation?.planning_reuse;
+    if (continuation?.schema_version === 2) throw new Error("schema-v2 carry-forward spec adoption is already canonical and immutable");
     if (continuation?.kind !== "blocked-run-continuation" || reuse?.eligible !== true) throw new Error("checked continuation adoption requires reuse-eligible continuation metadata");
     adoptionAuthority = observeContinuationAdoptionAuthority(runDir, draft, options);
     const hadSteps = Array.isArray(draft.steps);
@@ -1307,7 +1480,7 @@ export async function transitionContinuationAdoption(runDir, options = {}) {
     if (!hadSteps) draft.steps = steps;
     assertStepIdentityAndAttempts("spec-writer", priorStep, steps[stepIndex]);
     prepareStepAcceptanceAuthority(priorStep, steps[stepIndex], { allowInheritedAcceptance: true });
-    bindStepAcceptance(runDir, steps[stepIndex]);
+    bindStepAcceptance(runDir, steps[stepIndex], draft, options);
   }, options, {
     authorizedStep: "spec-writer",
     allowInheritedAcceptance: true,
@@ -1354,8 +1527,370 @@ export function assertContinuationAuthorityCurrent(runDir, run, options = {}) {
   assertContinuationContext(parentFile, parentRun, continuation);
   assertContinuationPlanningReuse(parentFile, parentRun, continuation);
   assertContinuationPostPr(parentFile, parentRun, continuation);
+  if (continuation.schema_version === 2) assertV2ContinuationPlanAuthority(parentFile, parentRun, continuation);
   assertContinuationTarget(repo, run, parentRun, continuation);
   return { parentRun, repo, parentFile };
+}
+
+function assertV2ContinuationPlanAuthority(parentFile, parentRun, continuation) {
+  const parentDir = dirname(parentFile);
+  let authority;
+  try { authority = observeAcceptedDecompositionAuthority(parentDir, parentRun, { requireIntegrationGate: true }); }
+  catch (error) { throw new Error(`schema-v2 continuation bound plan/decomposition authority is invalid: ${error.message}`); }
+  if (authority.plan_hash !== continuation.carry_forward.plan_hash) {
+    throw new Error("schema-v2 continuation bound plan bytes do not match carry_forward.plan_hash");
+  }
+}
+
+export function observeCarryForwardAuthority(repoInput, parentRunDirInput, parentRun, targetBaseRef, targetBaseCommit, options = {}) {
+  const repo = repoRoot(repoInput);
+  const parentRunDir = resolve(parentRunDirInput);
+  const planRef = PLAN_SLICES_REF;
+  let decomposition;
+  try { decomposition = observeAcceptedDecompositionAuthority(parentRunDir, parentRun, { requireIntegrationGate: true }); }
+  catch (error) { throw new Error(`accepted work-decomposer plan authority for the bound plan is invalid: ${error.message}`); }
+  const { plan, plan_bytes: planBytes } = decomposition;
+
+  const runSlices = Array.isArray(parentRun.slices) ? parentRun.slices : [];
+  const runById = new Map(runSlices.map((slice) => [slice?.id, slice]));
+  if (runById.size !== runSlices.length || runSlices.length !== plan.slices.length) throw new Error("parent run slices must exactly classify the bound plan");
+  const acceptedSlices = [];
+  const remainingSliceIds = [];
+  for (const planned of plan.slices) {
+    const slice = runById.get(planned.id);
+    if (!slice || slice.stack !== planned.stack || !sameJson(slice.depends_on, planned.depends_on)) throw new Error(`parent slice '${planned.id}' identity/dependencies do not match the bound plan`);
+    if (slice.status !== "merged") { remainingSliceIds.push(planned.id); continue; }
+    if (!Number.isInteger(slice.attempts) || slice.attempts < 1) throw new Error(`accepted slice '${planned.id}' attempts must be positive`);
+    const observed = assertSliceReviewBindingCurrent(parentRunDir, planned.id, slice);
+    if (observed.review.verdict !== "APPROVE") throw new Error(`accepted slice '${planned.id}' requires APPROVE review`);
+    acceptedSlices.push({
+      id: planned.id, attempts: slice.attempts, evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
+      review_ref: slice.review_ref, review_hash: slice.review_hash, reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit,
+    });
+  }
+  if (remainingSliceIds.length === 0) throw new Error("v2 carry-forward requires at least one nonmerged slice");
+
+  const branch = git(repo, ["rev-parse", "--verify", `refs/heads/${parentRun.branch}^{commit}`]);
+  if (!branch.ok || !/^[0-9a-f]{40}$/u.test(branch.stdout.trim())) throw new Error("v2 carry-forward parent branch HEAD cannot be observed");
+  const startCommit = branch.stdout.trim();
+  assertObservedCarryForwardIntegration(repo, targetBaseCommit, startCommit, acceptedSlices);
+  assertObservedCarryForwardPanels(parentRunDir, parentRun, startCommit);
+  assertObservedOriginBase(repo, targetBaseRef, targetBaseCommit, startCommit, options);
+  return {
+    scope: "full-remaining-plan", plan_ref: planRef, plan_hash: decomposition.plan_hash,
+    start_commit: startCommit, accepted_slices: acceptedSlices, remaining_slice_ids: remainingSliceIds,
+  };
+}
+
+function assertObservedCarryForwardIntegration(repo, baseCommit, startCommit, acceptedSlices) {
+  if (!git(repo, ["merge-base", "--is-ancestor", baseCommit, startCommit]).ok) throw new Error("v2 carry-forward start_commit must descend from target.base_commit");
+  if (acceptedSlices.length === 0) {
+    if (startCommit !== baseCommit) throw new Error("v2 carry-forward with zero accepted slices requires start_commit equal target.base_commit");
+    return;
+  }
+  const chainResult = git(repo, ["rev-list", "--first-parent", "--reverse", `${baseCommit}..${startCommit}`]);
+  if (!chainResult.ok) throw new Error("v2 carry-forward first-parent merge chain cannot be observed");
+  const chain = chainResult.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean);
+  const acceptedByMerge = new Map(acceptedSlices.map((slice) => [slice.merge_commit, slice]));
+  if (chain.length !== acceptedSlices.length || acceptedByMerge.size !== acceptedSlices.length || chain.some((commit) => !acceptedByMerge.has(commit))) {
+    throw new Error("v2 carry-forward first-parent range must contain all and only accepted merge commits exactly once");
+  }
+  for (const [index, mergeCommit] of chain.entries()) {
+    const accepted = acceptedByMerge.get(mergeCommit);
+    const proof = observeReviewedMergeProof(repo, accepted.id, mergeCommit, accepted.reviewed_commit);
+    const expectedFirstParent = index === 0 ? baseCommit : chain[index - 1];
+    if (proof.first_parent !== expectedFirstParent) throw new Error(`accepted slice '${accepted.id}' merge first parent does not match the actual first-parent chain`);
+  }
+}
+
+function assertObservedCarryForwardPanels(parentRunDir, parentRun, startCommit) {
+  const validatorKeys = ["report_hash", "review_hash", "reviewed_head_sha"];
+  const securityKeys = ["review_hash", "reviewed_head_sha"];
+  const any = validatorKeys.some((key) => parentRun.validator?.[key] !== undefined) || securityKeys.some((key) => parentRun.security_review?.[key] !== undefined);
+  if (!any) return;
+  if (!validatorKeys.every((key) => parentRun.validator?.[key] != null) || !securityKeys.every((key) => parentRun.security_review?.[key] != null)) throw new Error("optional parent validator/security successor bindings must be all-or-none complete");
+  if (parentRun.validator.reviewed_head_sha !== startCommit || parentRun.security_review.reviewed_head_sha !== startCommit) throw new Error("optional parent panel reviewed heads must equal carry_forward.start_commit");
+  assertPanelReviewBindingsCurrent(parentRunDir, parentRun);
+}
+
+function assertObservedOriginBase(repo, targetBaseRef, targetBaseCommit, startCommit, options) {
+  const prefix = "refs/remotes/origin/";
+  if (!targetBaseRef.startsWith(prefix) || targetBaseRef.length === prefix.length) throw carryForwardOutcomeError("origin-base-invalid", "target.base_ref must identify one origin branch");
+  const remoteRef = `refs/heads/${targetBaseRef.slice(prefix.length)}`;
+  const gitOptions = { timeout: 30000, ...(typeof options.originSpawnSync === "function" ? { spawnSync: options.originSpawnSync } : {}) };
+  const observed = git(repo, ["ls-remote", "--exit-code", "origin", remoteRef], gitOptions);
+  const lines = observed.stdout.split(/\r?\n/u).filter(Boolean);
+  const match = observed.ok && lines.length === 1 ? /^([0-9a-f]{40})\t(.+)$/u.exec(lines[0]) : null;
+  if (!match || match[2] !== remoteRef) throw carryForwardOutcomeError("origin-base-unavailable", "configured origin base could not be observed unambiguously");
+  const tip = match[1];
+  if (typeof options.beforeOriginFetch === "function") options.beforeOriginFetch({ oid: tip, remote_ref: remoteRef });
+  const fetched = git(repo, ["fetch", "--no-tags", "--quiet", "--no-write-fetch-head", "origin", tip], gitOptions);
+  if (!fetched.ok) throw carryForwardOutcomeError("origin-base-unavailable", "captured origin base commit could not be fetched");
+  const fetchedCommit = git(repo, ["rev-parse", "--verify", `${tip}^{commit}`]);
+  if (!fetchedCommit.ok || fetchedCommit.stdout.trim() !== tip) throw carryForwardOutcomeError("origin-base-unavailable", "captured origin base commit is not an unambiguous commit");
+  if (tip === targetBaseCommit) return;
+  const contains = git(repo, ["merge-base", "--is-ancestor", startCommit, tip]);
+  if (contains.ok) throw carryForwardOutcomeError("rebaseline-required", "configured origin base already contains carry_forward.start_commit");
+  if (contains.status === 1) throw carryForwardOutcomeError("stale-parent-base-moved", "configured origin base moved without containing carry_forward.start_commit");
+  throw carryForwardOutcomeError("origin-base-unavailable", "configured origin base ancestry could not be observed");
+}
+
+function carryForwardOutcomeError(code, message) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  return error;
+}
+
+export function assertPublishedCarryForwardRun(repoInput, expectedContinuation, options = {}) {
+  const repo = repoRoot(repoInput);
+  if (expectedContinuation?.schema_version !== 2 || expectedContinuation?.kind !== "blocked-run-continuation") throw new Error("published carry-forward check requires schema-v2 continuation metadata");
+  const runDir = resolve(directFactoryRoot(repo), expectedContinuation.target?.run_id || "invalid-carry-forward");
+  const runFile = join(runDir, "run.json");
+  assertNoSymlinkPath(repo, runFile, "published carry-forward run.json");
+  if (!existsSync(runFile) || !lstatSync(runFile).isFile()) throw new Error("schema-v2 carry-forward payload requires an exact published child run");
+  const run = validateRun(parseJsonObjectFile(runFile, "published carry-forward run.json"));
+  if (!sameJson(run.continuation, expectedContinuation)) throw new Error("schema-v2 carry-forward payload does not match the published child continuation");
+  const validation = validateRunDir(runDir);
+  if (!validation.ok) throw new Error("published carry-forward child directory is invalid");
+  const parent = assertContinuationAuthorityCurrent(runDir, run, { repoRoot: repo });
+  const observedCarryForward = observeCarryForwardAuthority(repo, dirname(parent.parentFile), parent.parentRun, expectedContinuation.target.base_ref, expectedContinuation.target.base_commit, options);
+  if (!sameJson(observedCarryForward, expectedContinuation.carry_forward)) throw new Error("continuation carry_forward authority changed after publication");
+  assertPublishedCarryForwardConfiguration(run, options.expectedConfiguration);
+
+  const planRef = expectedContinuation.carry_forward.plan_ref;
+  const planPath = resolve(runDir, planRef);
+  assertNoSymlinkPath(runDir, planPath, "published carry-forward plan");
+  if (!existsSync(planPath) || !lstatSync(planPath).isFile() || hashFile(planPath) !== expectedContinuation.carry_forward.plan_hash) throw new Error("published carry-forward plan bytes do not match continuation authority");
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true });
+  assertPublishedCarryForwardSlices(runDir, run, plan, expectedContinuation.carry_forward);
+  assertPublishedCarryForwardSpec(runDir, run, expectedContinuation);
+  observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+  assertPublishedCarryForwardClaim(repo, expectedContinuation);
+
+  const branchRef = `refs/heads/${run.branch}`;
+  const branch = git(repo, ["rev-parse", "--verify", `${branchRef}^{commit}`]);
+  if (!branch.ok || !git(repo, ["merge-base", "--is-ancestor", expectedContinuation.carry_forward.start_commit, branch.stdout.trim()]).ok) throw new Error("published carry-forward branch no longer descends from start_commit");
+  const worktree = checkWorktreeIdentity(repo, run.worktree, { branch: run.branch, head: branch.stdout.trim() });
+  if (!worktree.ok) throw new Error(`published carry-forward worktree identity is invalid: ${worktree.reason}`);
+  if ((run.steps || []).some((step) => step?.agent === "test-verifier" && step.status === "accepted")) {
+    assertV2FreshDownstreamAuthority(runDir, run, "published carry-forward authority");
+  }
+  if (options.driver) assertCarryForwardDriverProjection(run, options.driver);
+  if (options.postPrPolicy !== undefined && !sameJson(run.post_pr?.policy, options.postPrPolicy)) throw new Error("schema-v2 resume policy does not match published child configuration");
+  return run;
+}
+
+export function assertPublishedCarryForwardRunById(repoInput, runId, options = {}) {
+  const repo = repoRoot(repoInput);
+  const runFile = resolve(directFactoryRoot(repo), runId, "run.json");
+  assertNoSymlinkPath(repo, runFile, "published carry-forward resume run.json");
+  if (!existsSync(runFile)) throw new Error("schema-v2 resume requires a published carry-forward child");
+  const run = validateRun(parseJsonObjectFile(runFile, "published carry-forward resume run.json"));
+  if (run.continuation?.schema_version !== 2) throw new Error("schema-v2 resume requires a published carry-forward child");
+  return assertPublishedCarryForwardRun(repo, run.continuation, options);
+}
+
+export function inspectContinuationRouteSchema(repoInput, runId, claimedSchema, options = {}) {
+  const repo = repoRoot(repoInput);
+  const claims = observePermanentContinuationClaims(repo, runId);
+  const reservation = observeContinuationTargetReservation(repo, runId);
+  if (reservation && reservation.route_schema !== claimedSchema) throw routeSchemaError(options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch");
+  const runFile = resolve(directFactoryRoot(repo), runId, "run.json");
+  assertNoSymlinkPath(repo, runFile, "continuation route run.json");
+  if (!existsSync(runFile)) {
+    if (claims.length > 0) throw routeSchemaError(options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch");
+    return null;
+  }
+  if (!lstatSync(runFile).isFile()) throw routeSchemaError(options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch");
+  const run = validateRun(parseJsonObjectFile(runFile, "continuation route run.json"));
+  const persistedSchema = options.route === "resume" && run.continuation === undefined ? options.ordinaryResumeSchema ?? 1 : run.continuation?.schema_version;
+  if (persistedSchema !== claimedSchema) throw routeSchemaError(options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch");
+  if ((persistedSchema === 2) !== (claims.length === 1)) throw routeSchemaError(options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch");
+  if (claimedSchema === 2 && options.route === "resume" && !sameJson(run.post_pr?.policy, options.postPrPolicy)) throw routeSchemaError("resume-policy-route-mismatch");
+  return run;
+}
+
+export function observeContinuationTargetReservation(repoInput, runId) {
+  const repo = repoRoot(repoInput);
+  const ref = `refs/opencode/continuation-targets/${createHash("sha256").update(runId, "utf8").digest("hex")}`;
+  const observed = git(repo, ["show-ref", "--verify", "--hash", ref]);
+  if (!observed.ok) return null;
+  const oid = observed.stdout.trim();
+  if (!/^[0-9a-f]{40}$/u.test(oid)) throw new Error("continuation target reservation has an invalid object id");
+  const type = git(repo, ["cat-file", "-t", oid]);
+  const content = git(repo, ["cat-file", "blob", oid]);
+  if (!type.ok || type.stdout.trim() !== "blob" || !content.ok) throw new Error("continuation target reservation is malformed");
+  let reservation;
+  try {
+    reservation = JSON.parse(content.stdout);
+  } catch {
+    throw new Error("continuation target reservation is malformed");
+  }
+  if (!isRecord(reservation) || Object.keys(reservation).length !== 6 || reservation.schema_version !== 1
+    || reservation.kind !== "continuation-target-reservation" || reservation.child_run_id !== runId
+    || ![1, 2].includes(reservation.route_schema) || !/^sha256:[a-f0-9]{64}$/u.test(String(reservation.authority_hash || ""))
+    || !stringValue(reservation.created_at) || !Number.isFinite(Date.parse(reservation.created_at))
+    || !Buffer.from(content.stdout).equals(canonicalJsonBytes(reservation))) {
+    throw new Error("continuation target reservation is malformed");
+  }
+  return { ref, oid, ...reservation };
+}
+
+export function assertContinuationReservationAuthority(repoInput, continuation) {
+  const reservation = observeContinuationTargetReservation(repoInput, continuation.target.run_id);
+  if (!reservation) throw routeSchemaError("continuation-schema-route-mismatch");
+  if (reservation.route_schema !== continuation.schema_version || reservation.created_at !== continuation.created_at
+    || reservation.authority_hash !== hashValue(continuation)) {
+    throw routeSchemaError("continuation-schema-route-mismatch");
+  }
+  return reservation;
+}
+
+export function observePermanentContinuationClaims(repoInput, runId) {
+  const repo = repoRoot(repoInput);
+  const listed = git(repo, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/opencode/continuations"]);
+  if (!listed.ok) {
+    const repository = git(repo, ["rev-parse", "--git-dir"]);
+    if (!repository.ok) return [];
+    throw new Error("permanent continuation claims could not be inspected");
+  }
+  const matches = [];
+  for (const line of listed.stdout.split("\n").filter(Boolean)) {
+    const parsed = /^(refs\/opencode\/continuations\/[a-f0-9]{64}) ([0-9a-f]{40})$/u.exec(line);
+    if (!parsed) throw new Error("continuation claim conflict: malformed permanent claim blocks routing");
+    const [, ref, oid] = parsed;
+    const type = git(repo, ["cat-file", "-t", oid]);
+    const content = git(repo, ["cat-file", "blob", oid]);
+    if (!type.ok || type.stdout.trim() !== "blob" || !content.ok) throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
+    let claim;
+    try {
+      claim = JSON.parse(content.stdout);
+    } catch {
+      throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
+    }
+    if (!isRecord(claim) || claim.schema_version !== 2 || claim.kind !== "blocked-run-continuation-claim"
+      || !isRecord(claim.parent_identity) || !stringValue(claim.child_run_id) || !stringValue(claim.child_branch_ref)
+      || !/^[0-9a-f]{40}$/u.test(String(claim.start_commit || "")) || !content.stdout || !Buffer.from(content.stdout).equals(canonicalJsonBytes(claim))) {
+      throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
+    }
+    if (claim.child_run_id === runId) matches.push({ ref, oid, claim, bytes: content.stdout });
+  }
+  if (matches.length > 1) throw new Error(`multiple permanent continuation claims target run '${runId}'`);
+  return matches;
+}
+
+function routeSchemaError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function assertPublishedCarryForwardConfiguration(run, expected) {
+  const actual = {
+    mode: run.mode,
+    github_account: run.github_account ?? null,
+    pr_mode: run.pr_mode,
+    max_parallel_slices: run.max_parallel_slices,
+    max_retries: run.max_retries,
+    policy: run.post_pr?.policy,
+  };
+  if (run.review_tier !== undefined) throw new Error("schema-v2 carry-forward child cannot contain review_tier");
+  if (actual.max_parallel_slices !== 3 || actual.max_retries !== 3 || !actual.mode || !actual.pr_mode || !isRecord(actual.policy)) throw new Error("published carry-forward child configuration is incomplete");
+  const persisted = run.continuation?.configuration;
+  const bound = isRecord(persisted) ? {
+    mode: persisted.mode,
+    github_account: persisted.github_account ?? null,
+    pr_mode: persisted.pr_mode,
+    max_parallel_slices: persisted.max_parallel_slices,
+    max_retries: persisted.max_retries,
+    policy: persisted.post_pr_policy,
+  } : null;
+  if (!bound || !sameJson(actual, bound)) throw new Error("published carry-forward child configuration differs from immutable continuation configuration");
+  if (!expected) return;
+  const wanted = { mode: expected.mode, github_account: expected.github_account ?? null, pr_mode: expected.pr_mode, max_parallel_slices: 3, max_retries: 3, policy: expected.post_pr?.policy };
+  if (!sameJson(actual, wanted)) throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+}
+
+function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
+  const rows = Array.isArray(run.slices) ? run.slices : [];
+  if (rows.length !== plan.slices.length || rows.some((row, index) => row.id !== plan.slices[index].id || row.stack !== plan.slices[index].stack || !sameJson(row.depends_on, plan.slices[index].depends_on))) {
+    throw new Error("published carry-forward slices must remain in exact PLAN order with plan identity and dependencies");
+  }
+  const accepted = new Map(carry.accepted_slices.map((row) => [row.id, row]));
+  for (const row of rows) {
+    const adopted = accepted.get(row.id);
+    if (!adopted) continue;
+    const expected = {
+      id: row.id, stack: row.stack, depends_on: row.depends_on, status: "merged", attempts: adopted.attempts,
+      evidence_ref: adopted.evidence_ref, evidence_hash: adopted.evidence_hash, review_ref: adopted.review_ref, review_hash: adopted.review_hash,
+      reviewed_commit: adopted.reviewed_commit, merge_commit: adopted.merge_commit,
+    };
+    if (!sameJson(row, expected)) throw new Error(`adopted carry-forward slice '${row.id}' is immutable`);
+    for (const [ref, hash, label] of [[row.evidence_ref, row.evidence_hash, "evidence"], [row.review_ref, row.review_hash, "review"]]) {
+      const path = resolve(runDir, ref);
+      assertNoSymlinkPath(runDir, path, `adopted slice ${label}`);
+      if (!existsSync(path) || !lstatSync(path).isFile() || hashFile(path) !== hash) throw new Error(`adopted carry-forward slice '${row.id}' ${label} sidecar changed`);
+    }
+  }
+}
+
+function assertPublishedCarryForwardSpec(runDir, run, continuation) {
+  const step = (run.steps || []).find((item) => item?.agent === "spec-writer");
+  const reuse = continuation.planning_reuse;
+  const expected = canonicalCarryForwardSpecStep(continuation);
+  if (!sameJson(step, expected)) throw new Error("published carry-forward spec acceptance is not the exact inherited acceptance");
+  const copiedPlanning = continuation.parent_artifacts.filter((item) => CARRY_FORWARD_PLANNING_KINDS.has(item.kind));
+  if (!copiedPlanning.some((item) => item.kind === "technical_brief" && item.ref === reuse.spec_artifact_ref && item.hash === reuse.spec_artifact_hash)) {
+    throw new Error("published carry-forward technical brief is not bound by parent_artifacts and planning_reuse");
+  }
+  for (const { ref, hash } of copiedPlanning) {
+    const path = resolve(runDir, ref);
+    assertNoSymlinkPath(runDir, path, "published inherited planning file");
+    if (!existsSync(path) || !lstatSync(path).isFile() || hashFile(path) !== hash) throw new Error("published inherited planning bytes changed");
+  }
+  const reviewPath = resolve(runDir, reuse.child_spec_review_ref);
+  assertNoSymlinkPath(runDir, reviewPath, "published inherited spec review");
+  if (!existsSync(reviewPath) || !lstatSync(reviewPath).isFile() || hashFile(reviewPath) !== reuse.spec_review_hash) throw new Error("published inherited spec review bytes changed");
+}
+
+function assertPublishedCarryForwardClaim(repo, continuation) {
+  const parentIdentity = {
+    schema_version: 2, kind: "blocked-run-continuation-parent", parent_run_id: continuation.parent.run_id,
+    parent_run_ref: continuation.parent.run_ref, parent_run_hash: continuation.parent.run_hash,
+    parent_branch_ref: `refs/heads/${continuation.parent.branch}`, target_base_ref: continuation.target.base_ref,
+    target_base_commit: continuation.target.base_commit, plan_ref: continuation.carry_forward.plan_ref,
+    plan_hash: continuation.carry_forward.plan_hash, start_commit: continuation.carry_forward.start_commit,
+  };
+  const claim = { schema_version: 2, kind: "blocked-run-continuation-claim", parent_identity: parentIdentity, child_run_id: continuation.target.run_id, child_branch_ref: `refs/heads/${continuation.target.branch}`, start_commit: continuation.carry_forward.start_commit };
+  const parentBytes = canonicalJsonBytes(parentIdentity);
+  const claimBytes = canonicalJsonBytes(claim);
+  const claimRef = `refs/opencode/continuations/${createHash("sha256").update(parentBytes).digest("hex")}`;
+  const claims = observePermanentContinuationClaims(repo, continuation.target.run_id);
+  if (claims.length !== 1) throw new Error("published carry-forward permanent claim is missing");
+  const [observed] = claims;
+  if (observed.ref !== claimRef || observed.bytes !== claimBytes.toString("utf8")) throw new Error("published carry-forward permanent claim bytes mismatch");
+  const reservation = observeContinuationTargetReservation(repo, continuation.target.run_id);
+  if (!reservation || reservation.route_schema !== 2 || reservation.created_at !== continuation.created_at
+    || reservation.authority_hash !== hashValue(continuation)) {
+    throw new Error("published carry-forward target reservation is missing, stale, or cross-schema");
+  }
+}
+
+function assertCarryForwardDriverProjection(run, driver) {
+  const expected = {
+    mode: run.mode,
+    ready: run.pr_mode === "ready",
+    pr_mode: run.pr_mode,
+    reviewer: run.post_pr.policy.review.required ? run.post_pr.policy.review.reviewer_login : null,
+    github_account: run.github_account ?? null,
+    post_pr_ci: Object.fromEntries(Object.entries(cloneJson(run.post_pr.policy)).filter(([key]) => key !== "review")),
+  };
+  if (!sameJson(driver, expected)) throw new Error("schema-v2 payload driver does not exactly project published child configuration");
+}
+
+function canonicalJsonBytes(value) {
+  const canonical = (input) => Array.isArray(input) ? input.map(canonical) : isRecord(input) ? Object.fromEntries(Object.keys(input).sort().map((key) => [key, canonical(input[key])])) : input;
+  return Buffer.from(JSON.stringify(canonical(value)), "utf8");
 }
 
 function observeContinuationAdoptionAuthority(runDir, run, options) {
@@ -1417,6 +1952,16 @@ function assertNoSymlinkPath(rootDir, targetPath, label) {
     if (!existsSync(current)) return;
     if (lstatSync(current).isSymbolicLink()) throw new Error(`${label} must not contain symlinks`);
   }
+}
+
+function resolveExactPlanSlicesFile(runDir, ref, label) {
+  if (ref !== PLAN_SLICES_REF) throw new Error(`${label} must be exactly '${PLAN_SLICES_REF}'`);
+  const path = join(resolve(runDir), "plan", "slices.json");
+  assertNoSymlinkPath(runDir, path, label);
+  if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) {
+    throw new Error(`${label} must be a regular non-symlink file contained in the run directory`);
+  }
+  return path;
 }
 
 function continuationReviewAuthority(parentRun, ref) {
@@ -1554,6 +2099,7 @@ function assertContinuationTarget(repo, run, parentRun, continuation) {
 async function transitionRunStepChecked(runDir, stepSelector, updater, options, authority) {
   assertCollectionUpdater(updater, "transitionRunStep");
   let stepIndex = -1;
+  let decompositionAuthority = null;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft) => {
     const hadSteps = Array.isArray(draft.steps);
     const steps = hadSteps ? draft.steps : [];
@@ -1571,10 +2117,19 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
         throw new Error(`step '${steps[stepIndex].agent || formatSelector(stepSelector)}' cannot advance while a merged-slice repair is unresolved`);
       }
       assertTestVerifierIntegrationGate(draft, steps[stepIndex], priorStep);
+      if (steps[stepIndex]?.agent === "test-verifier" && steps[stepIndex].status === "running" && draft.continuation?.schema_version !== 2) {
+        decompositionAuthority = observeAcceptedDecompositionAuthority(runDir, draft, { requireForIntegrationGatePlan: true });
+      }
       assertDraftSpecReuseAttempt(draft, steps[stepIndex], priorStep);
-      bindStepAcceptance(runDir, steps[stepIndex]);
+      decompositionAuthority = bindStepAcceptance(runDir, steps[stepIndex], draft, options) || decompositionAuthority;
     }
-  }, options, { authorizedStep: stepIdentityForSelector(stepSelector), allowInheritedAcceptance: authority.allowInheritedAcceptance }), options);
+  }, options, {
+    authorizedStep: stepIdentityForSelector(stepSelector),
+    allowInheritedAcceptance: authority.allowInheritedAcceptance,
+    beforeReplace: (next) => {
+      if (decompositionAuthority) assertAcceptedDecompositionAuthorityCurrent(runDir, next, decompositionAuthority);
+    },
+  }), options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
 }
 
@@ -1587,6 +2142,13 @@ function assertStepIdentityAndAttempts(selector, priorStep, step) {
 }
 
 function prepareStepAcceptanceAuthority(priorStep, step, authority) {
+  if (!sameJson(priorStep?.execution_claim ?? null, step.execution_claim ?? null)) {
+    throw new Error("execution_claim can only be changed by checked test execution transitions");
+  }
+  if (priorStep?.execution_claim_hash !== step.execution_claim_hash) throw new Error("execution_claim_hash can only be changed by checked test execution transitions");
+  if (["active", "unknown"].includes(priorStep?.execution_claim?.state) && step.status !== priorStep.status) {
+    throw new Error("active or unknown checked test execution cannot change step status through a generic transition");
+  }
   if (step.status !== "accepted") {
     delete step.acceptance;
     delete step.inherited_acceptance;
@@ -1631,7 +2193,14 @@ function assertDraftSpecReuseAttempt(run, step, priorStep) {
 }
 
 function assertTestVerifierIntegrationGate(run, step, priorStep) {
-  if (step?.agent !== "test-verifier" || step.status !== "running") return;
+  if (step?.agent !== "test-verifier") return;
+  if (run.continuation?.schema_version === 2 && step.status === "accepted") {
+    if (priorStep?.status !== "running" || !Number.isInteger(step.attempts) || step.attempts < 1 || step.attempts !== priorStep.attempts) {
+      throw new Error("schema-v2 test-verifier acceptance must transition from running at the same positive attempt");
+    }
+    return;
+  }
+  if (step.status !== "running") return;
   const incomplete = Array.isArray(run.slices) ? run.slices.filter((slice) => slice?.status !== "merged") : [];
   if (incomplete.length > 0) {
     throw new Error(`test-verifier integration gate requires all slices merged: ${incomplete.map((slice) => slice?.id || "unknown").join(", ")}`);
@@ -1662,14 +2231,32 @@ function assertTestVerifierIntegrationGate(run, step, priorStep) {
 // → accepted(missing B) would keep A's binding while the step points at B, a stale
 // provenance claim. So clear first, then re-bind only when this transition's own
 // accepted refs resolve.
-function bindStepAcceptance(runDir, step) {
-  if (!step) return;
+function bindStepAcceptance(runDir, step, run = null, options = {}) {
+  if (!step) return null;
   delete step.acceptance;
-  if (step.status !== "accepted") return;
+  if (step.status !== "accepted") return null;
+  if (run?.continuation?.schema_version === 2 && step.agent === "test-verifier") {
+    step.acceptance = observeV2TestVerifierAuthority(runDir, run, step, options).acceptance;
+    return null;
+  }
+  if (step.agent === "work-decomposer") {
+    if (step.artifact_ref !== PLAN_SLICES_REF) throw new Error(`accepted work-decomposer step requires artifact_ref exactly '${PLAN_SLICES_REF}'`);
+    if (!stringValue(step.review_ref)) throw new Error("accepted work-decomposer step requires review_ref");
+    const planAuthority = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, run?.slices, { ...options, requireIntegrationGate: true, enforceDependencyDepth: false });
+    const review = resolveReviewRef(runDir, step.review_ref, { mustExist: true });
+    const reviewHash = hashFile(review.path);
+    step.acceptance = {
+      artifact_ref: PLAN_SLICES_REF,
+      artifact_hash: planAuthority.plan_hash,
+      review_ref: step.review_ref,
+      review_hash: reviewHash,
+    };
+    return { plan_hash: planAuthority.plan_hash, review_ref: step.review_ref, review_hash: reviewHash };
+  }
   const artifactRef = typeof step.artifact_ref === "string" ? step.artifact_ref.trim() : "";
   if (!artifactRef) {
     if (step.agent === "spec-writer") throw new Error("accepted spec-writer step requires artifact_ref");
-    return;
+    return null;
   }
   const artifactHash = tryHashDurableRef(() => resolveArtifactRef(runDir, artifactRef, { mustExist: true }));
   if (!artifactHash) throw new Error(`accepted step artifact_ref '${artifactRef}' must resolve to current bytes`);
@@ -1682,6 +2269,7 @@ function bindStepAcceptance(runDir, step) {
     acceptance.review_hash = reviewHash;
   }
   step.acceptance = acceptance;
+  return null;
 }
 
 function tryHashDurableRef(resolveFn) {
@@ -1724,6 +2312,11 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     if (sliceIndex >= 0) {
       if (update.changed) {
         normalizeSliceTransition(priorSlice, slices[sliceIndex]);
+        if (draft.continuation?.schema_version === 2 && priorSlice.status === "pending" && slices[sliceIndex].status === "running") {
+          const byId = new Map(slices.map((slice) => [slice.id, slice]));
+          const unmet = (priorSlice.depends_on || []).filter((id) => byId.get(id)?.status !== "merged");
+          if (unmet.length) throw new Error(`slice '${priorSlice.id}' is not dependency-ready: ${unmet.join(", ")}`);
+        }
         assertSliceTransition(runDir, priorSlice, slices[sliceIndex]);
         if (priorSlice.status === "review") priorReviewAuthority = hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)
           ? assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice)
@@ -1809,14 +2402,88 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
 
 export async function transitionSlicesSeed(runDir, slices, options = {}) {
   const projection = normalizePendingSliceProjection(slices);
+  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, projection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+    assertSeedPlanAuthorityCurrent(runDir, projection, options, seedPlanAuthority);
     const existing = Array.isArray(current.slices) ? current.slices : [];
     if (sameJson(existing, projection)) return;
     if (existing.some(hasSliceProgress)) {
       throw new Error("factory slices-seed refuses to replace non-pending slice progress after work has started");
     }
     draft.slices = cloneJson(projection);
-  }, options, { slicesSeed: true }), options);
+  }, options, {
+    slicesSeed: true,
+    beforeReplace: () => assertSeedPlanAuthorityCurrent(runDir, projection, options, seedPlanAuthority),
+  }), options);
+}
+
+export function readSlicesSeedPlan(runDir, from, options = {}) {
+  return observePlanSourceAuthority(runDir, from, null, { ...options, requireIntegrationGate: true }).plan;
+}
+
+function observePlanSourceAuthority(runDir, from, slices, options = {}) {
+  if (from !== PLAN_SLICES_REF) throw new Error(`exact run-relative plan source '${PLAN_SLICES_REF}' is required`);
+  const expectedRepo = resolve(runDir, "../../..");
+  if (stringValue(options.repoRoot) && resolve(options.repoRoot) !== expectedRepo) throw new Error("slice seed repoRoot does not own the target run directory");
+  const planPath = resolveExactPlanSlicesFile(runDir, from, "slice seed plan source");
+  const bytes = readFileSync(planPath);
+  const plan = parseSlicesPlanBytes(bytes, {
+    label: PLAN_SLICES_REF,
+    enforceDependencyDepth: options.enforceDependencyDepth !== false,
+    requireIntegrationGate: options.requireIntegrationGate === true,
+  });
+  if (slices) assertPlanSlicesMatch(plan, slices, { requirePendingProjection: options.requirePendingProjection === true });
+  return { path: planPath, plan, plan_bytes: bytes, plan_hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+}
+
+function assertSeedPlanAuthorityCurrent(runDir, projection, options, expected) {
+  const current = observePlanSourceAuthority(runDir, options.from, projection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
+  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash) throw new Error("slice seed plan authority changed before run.json publication");
+}
+
+export function observeAcceptedDecompositionAuthority(runDir, run, options = {}) {
+  if (options.requireForIntegrationGatePlan === true && !existsSync(join(resolve(runDir), "plan", "slices.json"))) return null;
+  const source = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, run.slices, {
+    ...options,
+    enforceDependencyDepth: false,
+    requireIntegrationGate: options.requireIntegrationGate === true,
+  });
+  if (source.plan.integration_gate === undefined && options.requireForIntegrationGatePlan === true) return null;
+  const matches = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
+  if (matches.length !== 1) throw new Error("accepted work-decomposer plan authority requires exactly one work-decomposer step");
+  const step = matches[0];
+  if (step.status !== "accepted" || !isRecord(step.acceptance)) throw new Error("accepted work-decomposer plan authority is required");
+  if (!Number.isInteger(step.attempts) || step.attempts < 1) throw new Error("accepted work-decomposer plan authority requires a positive attempt");
+  if (step.artifact_ref !== PLAN_SLICES_REF || step.acceptance.artifact_ref !== PLAN_SLICES_REF || step.acceptance.artifact_hash !== source.plan_hash) {
+    throw new Error("accepted work-decomposer plan ref/hash does not match exact plan bytes");
+  }
+  if (!stringValue(step.review_ref) || step.acceptance.review_ref !== step.review_ref || !stringValue(step.acceptance.review_hash)) {
+    throw new Error("accepted work-decomposer review ref/hash binding is incomplete");
+  }
+  const review = resolveReviewRef(runDir, step.review_ref, { mustExist: true });
+  const reviewHash = hashFile(review.path);
+  if (reviewHash !== step.acceptance.review_hash) throw new Error("accepted work-decomposer review bytes changed after acceptance");
+  return { ...source, attempts: step.attempts, review_ref: step.review_ref, review_hash: reviewHash };
+}
+
+function assertAcceptedDecompositionAuthorityCurrent(runDir, run, expected) {
+  const current = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+  if (current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref || current.review_hash !== expected.review_hash) {
+    throw new Error("accepted work-decomposer plan authority changed before run.json publication");
+  }
+}
+
+function assertPlanSlicesMatch(plan, slices, { requirePendingProjection = false } = {}) {
+  if (!Array.isArray(slices) || slices.length !== plan.slices.length) throw new Error("parent run slices must exactly classify the bound plan");
+  for (const [index, planned] of plan.slices.entries()) {
+    const slice = slices[index];
+    if (!slice || slice.id !== planned.id || slice.stack !== planned.stack || !sameJson(slice.depends_on, planned.depends_on)) {
+      throw new Error("parent run slices must exactly classify the bound plan");
+    }
+    if (requirePendingProjection && (slice.status !== "pending" || slice.attempts !== 0 || hasSliceProgress(slice))) {
+      throw new Error("slice seed projection does not match the required-command plan source");
+    }
+  }
 }
 
 function hasSliceProgress(slice) {
@@ -1828,8 +2495,10 @@ function hasSliceProgress(slice) {
 export async function transitionPanelVerdicts(runDir, input, options = {}) {
   const request = normalizePanelVerdictInput(input);
   let authority = null;
+  let v2Authority = null;
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
     if (mergedSliceRepairFence(current)) throw new Error("panel verdicts are fenced while a merged-slice repair is unresolved");
+    v2Authority = assertV2FreshDownstreamAuthority(runDir, current, "panel publication");
     const exactReplay = panelBaseEquals(current.validator, request.validator) && panelBaseEquals(current.security_review, request.security_review);
     const legacyValidator = isRecord(current.validator) && !hasCompleteBinding(current.validator, VALIDATOR_BINDING_KEYS);
     const legacySecurity = isRecord(current.security_review) && !hasCompleteBinding(current.security_review, SECURITY_BINDING_KEYS);
@@ -1855,7 +2524,10 @@ export async function transitionPanelVerdicts(runDir, input, options = {}) {
     draft.security_review = securityReview;
   }, options, {
     panelVerdicts: true,
-    beforeReplace: (_next, current) => assertPanelVerdictAuthorityCurrent(runDir, current, request, authority, options),
+    beforeReplace: (_next, current) => {
+      assertV2FreshDownstreamAuthority(runDir, current, "panel publication", v2Authority);
+      assertPanelVerdictAuthorityCurrent(runDir, current, request, authority, options);
+    },
   }), options);
 }
 
@@ -1873,6 +2545,7 @@ export async function heartbeatOnce(runDir, { now } = {}, options = {}) {
 
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     if (isRecord(current.steering?.pr_fence)) throw new Error("heartbeat tick rejected: active pre-PR fence");
     if (TERMINAL_RUN_STATUSES.has(current.status)) return { updated: false, reason: "terminal-status", status: current.status, run: current };
     if (current.status !== "running") return { updated: false, reason: "run-not-running", status: current.status, run: current };
@@ -1881,7 +2554,7 @@ export async function heartbeatOnce(runDir, { now } = {}, options = {}) {
     if (!hasInFlightHeartbeatWork(current)) return { updated: false, reason: "no-in-flight-work", status: current.status, run: current };
 
     const next = validateRun({ ...current, heartbeat_at: heartbeatAt });
-    await writeJsonAtomically(join(runDir, RUN_FILE), next);
+    await writeSemanticRunJson(runDir, next, options, v2Authority);
     return { updated: true, status: next.status, heartbeat_at: heartbeatAt, run: next };
   }, options);
 }
@@ -1898,6 +2571,7 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   const current = await readRunJson(runDir);
   assertExpectedCurrentHash(current, options.expectedCurrentHash);
   assertRunJsonWriterAllowed(current, "run.json transition", { allowPrePrFence: hooks.prCreated === true });
+  const v2AdmissionAuthority = assertV2LocalPublishedAuthority(runDir, current, options);
 
   const draft = cloneJson(current);
   let nextValue = await mutator(draft, { current, runDir });
@@ -1906,28 +2580,103 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
     nextValue = draft;
   }
 
+  assertV2ImmutablePublicationTransition(current, nextValue);
   assertPostPrGenericMutation(current, nextValue, hooks);
   assertScopedAuthorityTransitions(current, nextValue, hooks);
   assertGateDecisionTransitions(current, nextValue, hooks);
   assertStepTransitions(current, nextValue, hooks);
   const next = validateRun(nextValue);
   assertRunIdentityTransition(current, next);
+  assertV2ImmutablePublicationTransition(current, next);
   assertScopedAuthorityTransitions(current, next, hooks);
   assertGateDecisionTransitions(current, next, hooks);
   assertStepTransitions(current, next, hooks);
   assertTerminalTransition(current, next, hooks);
+  const v2PublicationAuthority = assertV2LocalPublishedAuthority(runDir, next, options);
+  assertV2AuthorityExtends(v2PublicationAuthority, v2AdmissionAuthority);
   if (typeof hooks.beforeWrite === "function") await hooks.beforeWrite(next, current);
   const postPrPublicationAuthority = hooks.postPr === true ? observePostPrPublicationAuthority(runDir, next, options) : null;
   const repairPublicationAuthority = hooks.mergedSliceRepair === MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY ? observeRepairPublicationAuthority(runDir, next, options) : null;
-  const beforeReplace = hooks.beforeReplace || postPrPublicationAuthority || repairPublicationAuthority
+  const beforeReplace = hooks.beforeReplace || postPrPublicationAuthority || repairPublicationAuthority || v2PublicationAuthority
     ? async () => {
         if (hooks.beforeReplace) await hooks.beforeReplace(next, current);
+        if (v2PublicationAuthority) assertV2LocalPublishedAuthority(runDir, next, options, v2PublicationAuthority);
         if (postPrPublicationAuthority) assertPostPrPublicationAuthorityCurrent(runDir, next, options, postPrPublicationAuthority);
         if (repairPublicationAuthority) assertRepairPublicationAuthorityCurrent(runDir, next, options, repairPublicationAuthority);
       }
     : null;
   await writeProtectedRunJson(runDir, next, options, beforeReplace);
   return { updated: true, status: next.status, run: next };
+}
+
+export function assertV2LocalPublishedAuthority(runDir, run, options = {}, expected = null) {
+  if (run.continuation?.schema_version !== 2) return null;
+  assertPublishedCarryForwardConfiguration(run);
+  const planPath = resolve(runDir, run.continuation.carry_forward.plan_ref);
+  assertNoSymlinkPath(runDir, planPath, "published carry-forward plan");
+  if (!existsSync(planPath) || !lstatSync(planPath).isFile() || hashFile(planPath) !== run.continuation.carry_forward.plan_hash) throw new Error("published carry-forward plan bytes do not match continuation authority");
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: "published carry-forward plan", enforceDependencyDepth: false, requireIntegrationGate: true });
+  assertPublishedCarryForwardSlices(runDir, run, plan, run.continuation.carry_forward);
+  assertPublishedCarryForwardSpec(runDir, run, run.continuation);
+  observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "schema-v2 local publication");
+  const repository = integration.repository;
+  const merged = (run.slices || []).filter((slice) => slice?.status === "merged").map((slice) => {
+    if (!stringValue(slice.merge_commit)) throw new Error(`schema-v2 merged slice '${slice.id}' has no merge_commit`);
+    const resolvedCommit = authorityGit(options, repository, ["rev-parse", "--verify", `${slice.merge_commit}^{commit}`]);
+    const resolvedSha = resolvedCommit.ok ? resolvedCommit.stdout.trim() : "";
+    if (!/^[0-9a-f]{40}$/u.test(resolvedSha)) throw new Error(`schema-v2 merged slice '${slice.id}' merge_commit does not resolve`);
+    if (!authorityGit(options, repository, ["merge-base", "--is-ancestor", resolvedSha, integration.head]).ok) {
+      throw new Error(`schema-v2 merged slice '${slice.id}' merge_commit is not an ancestor of exact clean child HEAD`);
+    }
+    return { id: slice.id, merge_commit: slice.merge_commit, resolved_sha: resolvedSha };
+  });
+  const testStep = (run.steps || []).find((step) => step?.agent === "test-verifier");
+  if (testStep?.status === "accepted") assertV2FreshDownstreamAuthority(runDir, run, "checked v2 mutation");
+  const observed = {
+    continuation_hash: hashValue(run.continuation),
+    plan_hash: run.continuation.carry_forward.plan_hash,
+    integration,
+    merged,
+  };
+  if (expected && !sameJson(observed, expected)) throw new Error("schema-v2 local publication authority changed before mutation");
+  return observed;
+}
+
+function assertV2AuthorityExtends(actual, expected) {
+  if (!expected) return;
+  if (!actual || actual.continuation_hash !== expected.continuation_hash || actual.plan_hash !== expected.plan_hash
+    || !sameJson(actual.integration, expected.integration)) {
+    throw new Error("schema-v2 local publication authority changed before mutation");
+  }
+  const merged = new Map(actual.merged.map((entry) => [entry.id, entry]));
+  if (expected.merged.some((entry) => !sameJson(merged.get(entry.id), entry))) {
+    throw new Error("schema-v2 local publication authority changed before mutation");
+  }
+}
+
+function canonicalCarryForwardSpecStep(continuation) {
+  const reuse = continuation.planning_reuse;
+  return {
+    agent: "spec-writer", status: "accepted", attempts: 0, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
+    acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: reuse.spec_artifact_hash, review_ref: "reviews/spec-writer.json", review_hash: reuse.spec_review_hash },
+    inherited_acceptance: { from_run_id: continuation.parent.run_id, parent_spec_review_ref: reuse.spec_review_ref, artifact_hash: reuse.spec_artifact_hash, review_hash: reuse.spec_review_hash },
+  };
+}
+
+function assertV2ImmutablePublicationTransition(current, next) {
+  if (current.continuation?.schema_version !== 2) return;
+  for (const key of ["continuation", "mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries"]) {
+    if (!sameJson(current[key], next[key])) throw new Error(`schema-v2 publication field '${key}' is immutable`);
+  }
+  if (!sameJson(current.post_pr?.policy, next.post_pr?.policy)) throw new Error("schema-v2 publication field 'post_pr.policy' is immutable");
+  const canonical = canonicalCarryForwardSpecStep(current.continuation);
+  const currentSpec = (current.steps || []).find((step) => step?.agent === "spec-writer");
+  const nextSpec = (next.steps || []).find((step) => step?.agent === "spec-writer");
+  if (!sameJson(currentSpec, canonical) || !sameJson(nextSpec, canonical)) throw new Error("schema-v2 carry-forward spec-writer projection is immutable");
+  const currentDecomposition = (current.steps || []).find((step) => step?.agent === "work-decomposer");
+  const nextDecomposition = (next.steps || []).find((step) => step?.agent === "work-decomposer");
+  if (!isRecord(currentDecomposition) || !sameJson(currentDecomposition, nextDecomposition)) throw new Error("schema-v2 accepted work-decomposer projection is immutable");
 }
 
 function assertRunIdentityTransition(current, next) {
@@ -1978,6 +2727,16 @@ async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace =
       }
     : undefined;
   await writeProtectedJsonAtomic(runDir, RUN_FILE, next, { hooks: options.atomicWriteHooks, fsOps });
+}
+
+async function writeSemanticRunJson(runDir, next, options = {}, expected = null) {
+  const authority = assertV2LocalPublishedAuthority(runDir, next, options, expected);
+  await writeProtectedRunJson(
+    runDir,
+    next,
+    options,
+    authority ? () => assertV2LocalPublishedAuthority(runDir, next, options, authority) : null,
+  );
 }
 
 async function readRunJson(runDir) {
@@ -2938,11 +3697,14 @@ function assertTerminalTransition(current, next, hooks = {}) {
 }
 
 function assertPrCreatedReadiness(runDir, run) {
+  if (run.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, run, { runDir });
   if (stringValue(run.pr_url)) throw new Error("pr-created requires run.pr_url to be unset");
   if (run.gates?.pre_pr?.status !== "approved") throw new Error("pr-created requires approved pre_pr gate");
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict)) throw new Error("pr-created requires validator verdict GO or GO-WITH-NITS");
   if (!PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) throw new Error("pr-created requires security_review verdict PASS");
+  const freshTestAuthority = assertV2FreshDownstreamAuthority(runDir, run, "pre-PR admission");
   return {
+    fresh_test_authority: freshTestAuthority,
     slices: assertPrCreatedSliceState(runDir, run),
     panels: assertPanelReviewBindingsCurrent(runDir, run),
   };
@@ -2950,7 +3712,8 @@ function assertPrCreatedReadiness(runDir, run) {
 
 function assertPrCreatedSliceState(runDir, run) {
   const slices = Array.isArray(run.slices) ? run.slices : [];
-  const unfinished = slices.filter((slice) => slice?.status !== "merged" && slice?.status !== "blocked").map((slice) => slice?.id || "<unknown>");
+  const allowed = run.continuation?.schema_version === 2 ? new Set(["merged"]) : new Set(["merged", "blocked"]);
+  const unfinished = slices.filter((slice) => !allowed.has(slice?.status)).map((slice) => slice?.id || "<unknown>");
   if (unfinished.length > 0) throw new Error(`pr-created requires all slices to be merged or blocked; unfinished slices: ${unfinished.join(", ")}`);
   if (!slices.some((slice) => slice?.status === "merged")) throw new Error("pr-created requires at least one merged slice");
   return slices.filter((candidate) => candidate?.status === "merged").map((slice) => {
@@ -2959,6 +3722,197 @@ function assertPrCreatedSliceState(runDir, run) {
     if (observed.review.verdict !== "APPROVE") throw new Error(`pr-created requires merged slice '${slice.id}' review verdict APPROVE`);
     return { id: slice.id, authority: observed };
   });
+}
+
+export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, policy = {}) {
+  if (run?.continuation?.schema_version !== 2 || run.continuation.kind !== "blocked-run-continuation") {
+    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2 child");
+  }
+  const repository = resolve(runDir, "../../..");
+  const target = run.continuation.target;
+  if (resolve(runDir) !== resolve(directFactoryRoot(repository), run.run_id)
+    || target?.run_id !== run.run_id || target?.branch !== run.branch || resolve(target?.worktree || "") !== resolve(run.worktree || "")) {
+    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution run identity does not match the published schema-v2 target");
+  }
+  if (run.status !== "running") throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
+  if (policy.skipLocalAuthority !== true) assertV2LocalPublishedAuthority(runDir, run, options);
+  const step = uniqueTestVerifierStep(run);
+  if (!step || !Number.isInteger(step.attempts) || step.attempts < 1) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires exactly one positive-attempt test-verifier step");
+  if (policy.allowCompleted !== true && step.status !== "running") throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires test-verifier running at its current attempt");
+  if (policy.allowCompleted === true && !["running", "rejected", "accepted"].includes(step.status)) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "completed checked test execution has an invalid step status");
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "checked test execution");
+  const slices = Array.isArray(run.slices) ? run.slices : [];
+  if (slices.length === 0 || slices.some((slice) => slice?.status !== "merged")) {
+    const incomplete = slices.filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
+    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", `checked test execution requires every slice merged${incomplete.length ? `: ${incomplete.join(", ")}` : ""}`);
+  }
+  const merged = slices.map((slice) => {
+    if (!stringValue(slice.merge_commit)) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", `merged slice '${slice.id}' has no merge_commit`);
+    const resolvedCommit = authorityGit(options, repository, ["rev-parse", "--verify", `${slice.merge_commit}^{commit}`]);
+    const resolvedSha = resolvedCommit.ok ? resolvedCommit.stdout.trim() : "";
+    if (!/^[0-9a-f]{40}$/u.test(resolvedSha)) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", `merged slice '${slice.id}' merge_commit does not resolve`);
+    const ancestry = authorityGit(options, repository, ["merge-base", "--is-ancestor", resolvedSha, integration.head]);
+    if (!ancestry.ok) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", `merged slice '${slice.id}' merge_commit is not an ancestor of exact child HEAD`);
+    return { id: slice.id, merge_commit: slice.merge_commit, resolved_sha: resolvedSha };
+  });
+  return {
+    run_id: run.run_id,
+    attempt: step.attempts,
+    plan_ref: PLAN_SLICES_REF,
+    plan_hash: decomposition.plan_hash,
+    plan_bytes: decomposition.plan_bytes.toString("base64"),
+    commands: cloneJson(decomposition.plan.integration_gate.required_commands),
+    decomposition_review_ref: decomposition.review_ref,
+    decomposition_review_hash: decomposition.review_hash,
+    branch: integration.branch,
+    worktree: integration.worktree,
+    head_sha: integration.head,
+    merged,
+  };
+}
+
+export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step = uniqueTestVerifierStep(run), authority = null) {
+  const claim = step?.execution_claim;
+  if (!isRecord(claim) || claim.state !== "completed") throw new Error("schema-v2 test authority requires a completed checked execution claim");
+  if (step.execution_claim_hash !== hashValue(claim)) throw new Error("completed checked execution claim hash is stale");
+  const currentAuthority = authority || observeCheckedTestExecutionAuthority(runDir, run, { runDir }, { allowCompleted: true, skipLocalAuthority: true });
+  if (claim.run_id !== run.run_id || claim.attempt !== step.attempts || claim.plan_ref !== currentAuthority.plan_ref
+    || claim.plan_hash !== currentAuthority.plan_hash || claim.head_sha !== currentAuthority.head_sha) throw new Error("completed checked execution claim no longer matches current authority");
+  const receipt = resolveEvidenceRef(runDir, claim.receipt_ref);
+  const receiptValue = validateTestExecutionReceipt(parseJsonObjectFile(receipt.path, "checked test execution receipt"));
+  const receiptHash = hashFile(receipt.path, { mode: "raw" });
+  if (receiptHash !== claim.receipt_hash) throw new Error("completed checked execution receipt hash is stale");
+  assertReceiptMatchesExecution(receiptValue, claim, currentAuthority);
+  if (receiptValue.status !== claim.status || receiptValue.review_ready !== (claim.status === "pass")) throw new Error("completed checked execution receipt status is cross-bound");
+  if (claim.status === "fail" && step.status !== "rejected") throw new Error("completed failed checked execution must leave test-verifier rejected");
+  if (claim.status === "pass" && !["running", "accepted"].includes(step.status)) throw new Error("completed passing checked execution must leave test-verifier running or accepted");
+  return { claim: cloneJson(claim), receipt: receiptValue, receipt_hash: receiptHash, authority: currentAuthority };
+}
+
+function assertReceiptMatchesExecution(receipt, claim, authority) {
+  const expected = {
+    run_id: claim.run_id,
+    attempt: claim.attempt,
+    claim_nonce: claim.nonce,
+    plan_ref: claim.plan_ref,
+    plan_hash: claim.plan_hash,
+    head_sha: claim.head_sha,
+  };
+  for (const [key, value] of Object.entries(expected)) if (receipt[key] !== value) throw new Error(`checked test execution receipt ${key} is cross-bound`);
+  if (receipt.commands.length !== authority.commands.length) throw new Error("checked test execution receipt command count differs from accepted plan");
+  for (const [index, command] of authority.commands.entries()) {
+    const result = receipt.commands[index];
+    if (result.index !== index || result.program !== command.program || !sameJson(result.args, command.args)) throw new Error("checked test execution receipt commands differ from accepted plan order");
+  }
+}
+
+function assertSameCheckedExecutionAuthority(actual, expected) {
+  if (!sameJson(actual, expected)) throw new Error("checked test execution authority changed");
+}
+
+function uniqueTestVerifierStep(run) {
+  const matches = (Array.isArray(run?.steps) ? run.steps : []).filter((step) => step?.agent === "test-verifier");
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function requireRunningTestVerifierStep(run) {
+  const step = uniqueTestVerifierStep(run);
+  if (!step || step.status !== "running" || !Number.isInteger(step.attempts) || step.attempts < 1) {
+    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires test-verifier running at a positive current attempt");
+  }
+  return step;
+}
+
+function assertExactActiveExecutionClaim(step, expected) {
+  if (!isRecord(expected) || !isRecord(step?.execution_claim) || step.execution_claim.state !== "active" || !sameJson(step.execution_claim, expected)
+    || step.execution_claim_hash !== hashValue(expected)) {
+    throw operatorReconciliationRequired("active checked test execution claim changed or is missing");
+  }
+}
+
+export function assertNoUnreconciledTestExecution(run) {
+  const claim = uniqueTestVerifierStep(run)?.execution_claim;
+  if (isRecord(claim) && ["active", "unknown"].includes(claim.state)) {
+    throw operatorReconciliationRequired("active or unknown checked test execution cannot be changed by any supported factory command");
+  }
+}
+
+function operatorReconciliationRequired(message) {
+  return testExecutionError(
+    "TEST_EXECUTION_OPERATOR_RECONCILIATION_REQUIRED",
+    `${message}; no supported factory command may clear, replace, terminalize, retry, or advance the claim; trusted out-of-band operator/process reconciliation is required`,
+  );
+}
+
+function testExecutionError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function assertV2FreshDownstreamAuthority(runDir, run, sink, expected = null) {
+  if (run.continuation?.schema_version !== 2) return null;
+  const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
+  if (incomplete.length) throw new Error(`schema-v2 downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
+  const step = (run.steps || []).find((candidate) => candidate?.agent === "test-verifier");
+  if (!step || step.status !== "accepted" || !Number.isInteger(step.attempts) || step.attempts < 1 || !isRecord(step.acceptance)) {
+    throw new Error(`schema-v2 downstream authority requires fresh accepted test-verifier authority before ${sink}`);
+  }
+  const authority = observeV2TestVerifierAuthority(runDir, run, step, { runDir });
+  if (!sameJson(step.acceptance, authority.acceptance)) throw new Error("schema-v2 test-verifier acceptance bytes or head are stale");
+  const observed = { step: cloneJson(step), ...authority };
+  if (expected && !sameJson(observed, expected)) throw new Error(`schema-v2 downstream authority changed before ${sink} publication`);
+  return observed;
+}
+
+function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
+  for (const [key, label] of [["artifact_ref", "artifact"], ["evidence_ref", "evidence"], ["review_ref", "review"]]) {
+    if (!stringValue(step?.[key])) throw new Error(`schema-v2 test-verifier acceptance requires ${label}_ref`);
+  }
+  if (step.artifact_ref !== "artifacts/test-report.md") throw new Error("schema-v2 test-verifier acceptance requires artifacts/test-report.md");
+  const artifact = resolveArtifactRef(runDir, step.artifact_ref);
+  const evidence = resolveEvidenceRef(runDir, step.evidence_ref);
+  const review = resolveReviewRef(runDir, step.review_ref);
+  const checked = observeCompletedCheckedTestExecutionAuthority(runDir, run, step);
+  const evidenceValue = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, "schema-v2 test-verifier receipt"));
+  const reviewValue = parseJsonObjectFile(review.path, "schema-v2 test-verifier review");
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "schema-v2 test-verifier acceptance");
+  if (step.evidence_ref !== checked.claim.receipt_ref || hashFile(evidence.path, { mode: "raw" }) !== checked.receipt_hash || !sameJson(evidenceValue, checked.receipt)) throw new Error("schema-v2 test-verifier evidence must be the exact completed checked receipt");
+  if (checked.claim.status !== "pass" || evidenceValue.status !== "pass" || evidenceValue.review_ready !== true) throw new Error("schema-v2 test-verifier acceptance requires a completed passing checked receipt");
+  const planAuthority = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+  const expectedCommands = planAuthority.plan.integration_gate.required_commands;
+  if (evidenceValue.commands.length !== expectedCommands.length || evidenceValue.commands.some((result, index) => result.program !== expectedCommands[index].program || !sameJson(result.args, expectedCommands[index].args) || result.status !== "pass")) throw new Error("schema-v2 test-verifier receipt commands must exactly pass every accepted plan command in order");
+  if (evidenceValue.head_sha !== integration.head) throw new Error("schema-v2 test-verifier evidence head_sha must equal the current clean child branch/worktree HEAD");
+  if (reviewValue.subject !== "test-verifier" || reviewValue.attempt !== step.attempts || String(reviewValue.verdict || "").toUpperCase() !== "APPROVE") {
+    throw new Error("schema-v2 test-verifier review must bind subject, attempt, and APPROVE verdict");
+  }
+  if (reviewValue.reviewed_head_sha !== integration.head) throw new Error("schema-v2 test-verifier review reviewed_head_sha must equal the current clean child branch/worktree HEAD");
+  return {
+    acceptance: {
+      artifact_ref: step.artifact_ref, artifact_hash: hashFile(artifact.path),
+      evidence_ref: step.evidence_ref, evidence_hash: hashFile(evidence.path),
+      review_ref: step.review_ref, review_hash: hashFile(review.path), reviewed_head_sha: integration.head,
+    },
+    evidence: evidenceValue,
+    plan: { ref: PLAN_SLICES_REF, hash: planAuthority.plan_hash, commands: cloneJson(planAuthority.plan.integration_gate.required_commands) },
+    review: reviewValue,
+    integration: { branch: integration.branch, worktree: integration.worktree, head: integration.head, clean: true },
+  };
+}
+
+function assertV2PrePrGateAuthority(runDir, run, sink, expected = null) {
+  if (run.continuation?.schema_version !== 2) return null;
+  const freshTestAuthority = assertV2FreshDownstreamAuthority(runDir, run, sink);
+  if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
+    throw new Error(`schema-v2 pre-PR gate requires fresh passing child panels before ${sink}`);
+  }
+  const observed = {
+    fresh_test_authority: freshTestAuthority,
+    panels: assertPanelReviewBindingsCurrent(runDir, run),
+  };
+  if (expected && !sameJson(observed, expected)) throw new Error(`schema-v2 downstream authority changed before ${sink} publication`);
+  return observed;
 }
 
 export function assertPanelReviewBindingsCurrent(runDir, run) {
@@ -3784,7 +4738,7 @@ function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath, expectedP
   if (requireNonEmptyString(expectedPlanHash, "repair plan_hash") !== hashFile(planPath)) {
     throw new Error("plan/slices.json no longer matches the lane authority bound when the repair was reported");
   }
-  const plan = parseJsonObjectFile(planPath, "plan/slices.json");
+  const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
   const planned = (Array.isArray(plan.slices) ? plan.slices : []).find((slice) => slice?.id === ownerSliceId);
   if (!planned) throw new Error(`repair owner slice '${ownerSliceId}' is missing from plan/slices.json`);
   let lanes;

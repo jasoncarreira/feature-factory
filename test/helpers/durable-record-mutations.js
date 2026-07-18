@@ -28,6 +28,7 @@ export const DURABLE_MUTATION_FAMILIES = Object.freeze([
 
 export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "plan-slices-json",
+  "plan-v2-integration-gate",
   "run-envelope-running",
   "run-envelope-terminal",
   "terminal-result-completed",
@@ -43,7 +44,20 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "step-rejected",
   "step-blocked",
   "step-accepted",
+  "step-work-decomposer-accepted-plan",
   "step-inherited-acceptance",
+  "test-execution-claim-active",
+  "test-execution-claim-completed-pass",
+  "test-execution-claim-completed-fail",
+  "test-execution-claim-unknown-process-outcome-indeterminate",
+  "test-execution-claim-unknown-authority-changed",
+  "test-execution-claim-unknown-receipt-publication-indeterminate",
+  "test-execution-receipt-pass",
+  "test-execution-receipt-failed-nonzero-exit",
+  "test-execution-receipt-failed-signal",
+  "test-execution-receipt-failed-launch-error",
+  "test-execution-receipt-failed-timeout",
+  "test-execution-receipt-failed-output-limit",
   "continuation-envelope",
   "continuation-parent-binding",
   "continuation-selected-review",
@@ -163,6 +177,16 @@ const POST_PR_EXTERNAL = Object.freeze({
 const PLAN_EXTERNAL = Object.freeze({
   plan: { ref: "plan/slices.json", bytes: "{\"slices\":[{\"id\":\"B0.2\",\"stack\":\"backend\",\"paths\":[\"src/**\"],\"depends_on\":[],\"acceptance\":[\"AC2\"],\"test_plan\":[\"node --test\"]},{\"id\":\"B0.3\",\"stack\":\"backend\",\"paths\":[\"test/**\"],\"depends_on\":[\"B0.2\"],\"acceptance\":[\"AC3\"],\"test_plan\":[\"node --test\"]}]}\n" },
 });
+const PLAN_V2_EXTERNAL = Object.freeze({
+  plan: { ref: "plan/slices.json", bytes: "{\"slices\":[{\"id\":\"B1C\",\"stack\":\"backend\",\"paths\":[\"src/**\"],\"depends_on\":[],\"acceptance\":[\"AC1\"],\"test_plan\":[\"node --test test/acceptance.test.js\"]}],\"integration_gate\":{\"required_commands\":[{\"program\":\"node\",\"args\":[\"--test\",\"test/acceptance.test.js\"]},{\"program\":\"npm\",\"args\":[\"run\",\"check\"]}]}}\n" },
+});
+const DECOMPOSITION_EXTERNAL = Object.freeze({
+  plan: PLAN_V2_EXTERNAL.plan,
+  review: { ref: "reviews/work-decomposer.json", bytes: "{\"subject\":\"work-decomposer\",\"attempt\":1,\"verdict\":\"APPROVE\",\"required_fixes\":[]}\n" },
+});
+const TEST_EXECUTION_NONCE = "123e4567-e89b-42d3-a456-426614174000";
+const EMPTY_STREAM = Object.freeze({ captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false });
+const TRUNCATED_STREAM = Object.freeze({ captured_bytes: 1048576, sha256: `sha256:${"9".repeat(64)}`, truncated: true });
 const CONTINUATION_EXTERNAL = Object.freeze({
   parentRun: { ref: ".opencode/factory/parent-run/run.json", bytes: "{\"schema_version\":1,\"run_id\":\"parent-run\",\"status\":\"blocked\",\"gates\":{},\"terminal_result\":{\"status\":\"blocked\",\"run_id\":\"parent-run\",\"reason\":\"review blocked\"}}\n" },
   selectedReview: { ref: "reviews/remediation-review.json", bytes: "{\"kind\":\"validator\",\"subject\":\"parent\",\"verdict\":\"APPROVE\",\"required_fixes\":[\"fix\"]}\n" },
@@ -202,6 +226,7 @@ const REPAIR_EXTERNAL = Object.freeze({
 export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
   "plan-slices-graph": [
     "plan-slices-json",
+    "plan-v2-integration-gate",
     "final-plan-descriptor",
   ],
   "run-envelope-terminal-result": [
@@ -224,7 +249,20 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "step-rejected",
     "step-blocked",
     "step-accepted",
+    "step-work-decomposer-accepted-plan",
     "step-inherited-acceptance",
+    "test-execution-claim-active",
+    "test-execution-claim-completed-pass",
+    "test-execution-claim-completed-fail",
+    "test-execution-claim-unknown-process-outcome-indeterminate",
+    "test-execution-claim-unknown-authority-changed",
+    "test-execution-claim-unknown-receipt-publication-indeterminate",
+    "test-execution-receipt-pass",
+    "test-execution-receipt-failed-nonzero-exit",
+    "test-execution-receipt-failed-signal",
+    "test-execution-receipt-failed-launch-error",
+    "test-execution-receipt-failed-timeout",
+    "test-execution-receipt-failed-output-limit",
   ],
   "slices-review-evidence-bindings": [
     "slice-pending",
@@ -335,6 +373,7 @@ const FAMILY_BY_CODE = Object.freeze({ m: "missing-key", u: "unknown-key", s: "w
 // explicitly classifies the families excluded by that entry; every other family must be targeted.
 const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "plan-slices-json": "sktrhb",
+  "plan-v2-integration-gate": "sktrhb",
   "final-plan-descriptor": "",
   "run-envelope-running": "khbd",
   "run-envelope-terminal": "krhbd",
@@ -351,7 +390,20 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "step-rejected": "skthbd",
   "step-blocked": "skthbd",
   "step-accepted": "skt",
+  "step-work-decomposer-accepted-plan": "skt",
   "step-inherited-acceptance": "skt",
+  "test-execution-claim-active": "b",
+  "test-execution-claim-completed-pass": "",
+  "test-execution-claim-completed-fail": "",
+  "test-execution-claim-unknown-process-outcome-indeterminate": "b",
+  "test-execution-claim-unknown-authority-changed": "b",
+  "test-execution-claim-unknown-receipt-publication-indeterminate": "b",
+  "test-execution-receipt-pass": "b",
+  "test-execution-receipt-failed-nonzero-exit": "b",
+  "test-execution-receipt-failed-signal": "b",
+  "test-execution-receipt-failed-launch-error": "b",
+  "test-execution-receipt-failed-timeout": "b",
+  "test-execution-receipt-failed-output-limit": "b",
   "slice-pending": "sktrhbd",
   "slice-running": "skthbd",
   "slice-review": "sktd",
@@ -449,6 +501,7 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
 // authority facts, and complete sidecar descriptors, in that order. They are not derived from RECORDS.
 export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["plan-slices-json", "989039b0b23d8bef1c9c50b80f4f80da94bb3c982834804154e688ae72e2790a"],
+  ["plan-v2-integration-gate", "4e3972913ea1304af33b23a9beb234878e1aa4be6e1a7929440098dab8829538"],
   ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
@@ -465,7 +518,20 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["step-rejected", "d54549ecdbbda07370535e204db33722a56d1d958fa36af9e977fec2f2dc9f2b"],
   ["step-blocked", "d3a8fc846c39704346d34938951062d884fb3e03eedb522bfd4e15161c26885a"],
   ["step-accepted", "a10f57321f62fb099ae381316e62a2c089a83a89f160178400e7f3d994b1c699"],
+  ["step-work-decomposer-accepted-plan", "46f6d0bf7382613418da268823e0ef0a13649ab5ff7b33eee306f4b0c6ecab8a"],
   ["step-inherited-acceptance", "c995fe9943a2898b6f9405e2a427f3de3b61d198f6d7b9d2edf46f177ff4f0f9"],
+  ["test-execution-claim-active", "c46fb9721a54c68a7f7106e28d167c2d2d5f4742ab3a86dd2a2d0c295d855148"],
+  ["test-execution-claim-completed-pass", "77d5df2e1a78d7919cdc550c2e7548089937432667622d8000d7e35a8acc3628"],
+  ["test-execution-claim-completed-fail", "901ce70597b4b00a16bb33ca8a4f7e9b3a470b137f3f285c317dfdb4ecb38d10"],
+  ["test-execution-claim-unknown-process-outcome-indeterminate", "b03decd53b81a41e4a1e37551c75ea5f795190ebe6160625672256bc430f37c1"],
+  ["test-execution-claim-unknown-authority-changed", "e00811f4e2fa8c9d8f070948b50d8f40281e52b1e6fca7fe2c99ca92c319e606"],
+  ["test-execution-claim-unknown-receipt-publication-indeterminate", "68ec6266a0135bcf5fb6e72e0546c31df5e08f729cdc44864c90506f931f5c02"],
+  ["test-execution-receipt-pass", "bc3ff7d82ff7af8c1943ab4005f70b3d58e1e7d249f1d6d819d94862da0de9d5"],
+  ["test-execution-receipt-failed-nonzero-exit", "cec982375db591d524859a0b68a0b621b583511cd447c61139e8a5343c4f13a4"],
+  ["test-execution-receipt-failed-signal", "098ab671186126021d108bd738029c75748e5daa6e74838f7ddf4df79498d0cc"],
+  ["test-execution-receipt-failed-launch-error", "11fe1658bc1b0c4c29758109d41f7289ea50ab137ade91fba13a04e7c4760418"],
+  ["test-execution-receipt-failed-timeout", "aba412c7a4df3bcc573775c40a8bed3da7c94cf794f656e935da0d197d35d409"],
+  ["test-execution-receipt-failed-output-limit", "d0f033038f69b998693a6511b192ee39530c36d94a6854646d13f0180e3a664d"],
   ["slice-pending", "27d978f06a5d77e19f3293902f5ef98a674bd920b35b39a0a56519f48b40b586"],
   ["slice-running", "d5e779da2618570c2922ff58dc14927a60548dc770616322812912c6c4ada981"],
   ["slice-review", "8fd0fae00323e9bed95c0673fc1f4f22d345a0f886438fee4991e7a390b7e7b0"],
@@ -565,6 +631,7 @@ const DURABLE_AUTHORITY_METADATA_BY_ID = new Map(DURABLE_AUTHORITY_METADATA_MANI
 // order and every family, path, value, from, to, key, sidecar, and label without reading RECORDS.
 export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["plan-slices-json", "3c923442fe75f188546037455e61dca6f3172bb766399c4df4289de2f1c6f726"],
+  ["plan-v2-integration-gate", "135d4108dcdb1889bfff58b1da09163093be21b85c52d1a43f9a92c59fa17ec7"],
   ["final-plan-descriptor", "b8ef8dbfe1f1e54cae98fb0960aa315fe4479e33533b63d0a9e0b88f0df959da"],
   ["run-envelope-running", "0dfdf9c52ba1ee909070da85617630bbb0cac990f109bdc3c7f25c4f686276dd"],
   ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
@@ -581,7 +648,20 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["step-rejected", "a61fead311954856883b3876e50c14e41256951a84fb5550bd2184e3712753fa"],
   ["step-blocked", "68ee4697dcb1a92d8ba39e32d9091eeeb0e74c03818da5cf53ca8c2bf25c3f43"],
   ["step-accepted", "738ac9fd074c33be9c9aefa66abc6de1a4880b244d7625960f3e6febffaf0e94"],
+  ["step-work-decomposer-accepted-plan", "cbe47dca87af01e53b5a9897f3640d1e63b33ea38301f066b1895973a30e593d"],
   ["step-inherited-acceptance", "1eb12c653d87652e1fd82b8bc0f7fa40810fb892616ee3327cbfeea3b32ca531"],
+  ["test-execution-claim-active", "b6d6567744c4bd97eeb465ad8e952666fa30fa9d6286b254e5a939d753aa092c"],
+  ["test-execution-claim-completed-pass", "9fc16b9dd1aab571972cdda772597bac746c0616afed92f3ea07a94ccd07d8ac"],
+  ["test-execution-claim-completed-fail", "4734b1677957cd938100fbd864e3a10c5e6749006cf9b820d1bd7ccb054f9096"],
+  ["test-execution-claim-unknown-process-outcome-indeterminate", "f258ceb956f246c510c1c2f980f9d7aedf48584db4054c4aafb3eee6137eb0cf"],
+  ["test-execution-claim-unknown-authority-changed", "5207c2d7203c285bc73c6835bb83561c5668a1b7e8e3f64165118d51fb511f73"],
+  ["test-execution-claim-unknown-receipt-publication-indeterminate", "38757e7ff6ec3c1db8ee22cb20e6f5433aefd2f212dabd3895dcd9dd7fe5fe66"],
+  ["test-execution-receipt-pass", "a8d12876a6459f798537d3afd2b5cf5561637fc7bba5271b4a61412fba233472"],
+  ["test-execution-receipt-failed-nonzero-exit", "7f2f98e92e13ffa75a3286e3094c344e58e498b97b8cfb69cdb976e2f97cc378"],
+  ["test-execution-receipt-failed-signal", "3ceff488cc59be6210291029b62a23ab62efb02ce934fe4526c6b38967e93f6b"],
+  ["test-execution-receipt-failed-launch-error", "535eda5b023fcbe5a0add7ce7e158f9ee6b71bc4aab4d118427a76360b31aecb"],
+  ["test-execution-receipt-failed-timeout", "145e09cc8ddf2cc6ad438bfd10eb060732ea5d2818e32f1f2d85bf747b80e755"],
+  ["test-execution-receipt-failed-output-limit", "5d67fdbbcb0e50d8597c747e30d41c3217b13c5f18f511e43d0914b05cfc2895"],
   ["slice-pending", "63b63efe898da669ae80a855536c52a7f00a0009a0465a2ec6cee66477b11f50"],
   ["slice-running", "e4d226476601e984b5b50f12ad36ce05f8a7e3ac3a49421218b72a94be54c962"],
   ["slice-review", "1d0d4c6beaa40f3f3397a3d015ae7d682cd8eb4ed10e268998b59bf14d7c76ef"],
@@ -685,6 +765,7 @@ const CANONICAL_SOURCE_RECORD_ID_SET = new Set(CANONICAL_SOURCE_RECORD_IDS);
 // literals rather than values derived from RECORDS or DURABLE_AUTHORITY_CATALOG.
 export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["plan-slices-json", "dd6fabc7def0955d82f37d30a53fc19e4e8cc8fa69fa445badbc3c051d4dd7b9"],
+  ["plan-v2-integration-gate", "b940206e8a4add6cee008305f694091dfadfb2fcddb12e8ffde34cae44ddcfe4"],
   ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
   ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
@@ -701,7 +782,20 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["step-rejected", "4012aaf36e583d5636a126cdc40a36ddc3fabf32e1a150503dd6ee62d317fd87"],
   ["step-blocked", "8d9ce53c44e2bccca8b3555f4906bedf95fc91de76ee37fd886d47ad64942ad6"],
   ["step-accepted", "29ad392882b94a0bc78a5b0bac4df748cae19d80965e6a0c62cc758df8fd89c0"],
+  ["step-work-decomposer-accepted-plan", "013523cc9576c74c21c46d3a59c8e9df1bda254971423d0519923f14dc1fe71e"],
   ["step-inherited-acceptance", "ba9a7a06a122aa68917e10675cf6b2ec97eab054ab7f40353904ef16ef226657"],
+  ["test-execution-claim-active", "4a28465ee4bf8ae2aa775e59e6be0c399926cf34e6a485ef2d99c03d43abec87"],
+  ["test-execution-claim-completed-pass", "a8976d1047f4915d9ef47f7367ce40b89bc381504987eccad0988d78f1719f07"],
+  ["test-execution-claim-completed-fail", "232b87ab924b9b4a27c38165c4be79370a4fff2fe8bc1192476fa93b9c8c3040"],
+  ["test-execution-claim-unknown-process-outcome-indeterminate", "86eb7ef4a735925cb12b2e4685c3cdeb2d2b51cfb62a499704582f96e04e4127"],
+  ["test-execution-claim-unknown-authority-changed", "e1561c254d7767202c70d9d07ca056014ee2168918370303f2997ea0c6ab18d6"],
+  ["test-execution-claim-unknown-receipt-publication-indeterminate", "c95c353de36a9719b74d9711f5dc92f19b432a2284ad2902b7cf1580f801d033"],
+  ["test-execution-receipt-pass", "51a2006fc63ead36b0728846d574ee8ad86f806555bebc89c60ba3d06f3eca15"],
+  ["test-execution-receipt-failed-nonzero-exit", "56bb07696d55efdfcd054c84b1914ea7b8d674afc360c0318ae5c90054c046f6"],
+  ["test-execution-receipt-failed-signal", "3caa57455fd8f7210f479d6004705dbdb6b47ce064a58b7834f8be5ec9e624ee"],
+  ["test-execution-receipt-failed-launch-error", "1320ebcb723f155eb795d8f91caf528d7fed2fb3e93f02d91a815c89f6f63008"],
+  ["test-execution-receipt-failed-timeout", "5d77cdf0868afcf860e9fd1ec0cd985d0b4d4c2a9603e1efeb55c94e37f24bf4"],
+  ["test-execution-receipt-failed-output-limit", "9f258d14925eb587cbe96ddfb9c0a1c7f6144c9bca3d7f8a73a07fa638fa328c"],
   ["slice-pending", "ae8061ad556cf202f28c06dad1d8dfaf84168512be57e8dae034984926ad766b"],
   ["slice-running", "c481d007f40269d98676cf2746db9a5ab4b15ffb1cafe92fc9d0569181cef758"],
   ["slice-review", "ac668a5340a0db81df8ad31e4d73302234dfd49da5933161e0f43d869e8a3262"],
@@ -945,6 +1039,15 @@ const RECORDS = [
     targets: [drift(["slices", 1], "depends_on", "dependencies"), stale(["slices", 1, "depends_on", 0], "stale-slice"), cross(["slices", 1, "depends_on", 0], "other-wave")],
   }),
   recordEntry({
+    authorityClassId: "plan-slices-graph", id: "plan-v2-integration-gate", record: "plan/slices.json.integration_gate", variant: "schema-v2 required command authority",
+    writer: "work-decomposer plan production followed by checked factory slices-seed",
+    readers: ["validateSlicesPlan creation mode", "transitionSlicesSeed checked source authority", "observeCarryForwardAuthority and schema-v2 publication/adoption/replay"],
+    canonicalPath: ["plan/slices.json"], source: JSON.parse(PLAN_V2_EXTERNAL.plan.bytes), externalSources: PLAN_V2_EXTERNAL,
+    facts: exactFacts(JSON.parse(PLAN_V2_EXTERNAL.plan.bytes)),
+    requiredPath: ["integration_gate", "required_commands"], unknownPath: ["integration_gate"], typePath: ["integration_gate", "required_commands"],
+    targets: [drift(["integration_gate", "required_commands", 0], "program", "command"), stale(["integration_gate", "required_commands", 1, "args", 1], "test"), cross(["integration_gate", "required_commands", 1, "program"], "pnpm")],
+  }),
+  recordEntry({
     authorityClassId: "plan-slices-graph", id: "final-plan-descriptor", record: "final.plan.json descriptor", variant: "required descriptor",
     writer: "work-decomposer final plan write followed by reviewed planning acceptance",
     readers: ["work-reviewer decomposition review", "factory slices-seed descriptor consumption"],
@@ -987,7 +1090,20 @@ const RECORDS = [
   stepEntry("step-rejected", "rejected"),
   stepEntry("step-blocked", "blocked"),
   stepEntry("step-accepted", "accepted"),
+  workDecomposerAcceptedEntry(),
   stepEntry("step-inherited-acceptance", "inherited-acceptance"),
+  testExecutionClaimEntry("test-execution-claim-active", "active"),
+  testExecutionClaimEntry("test-execution-claim-completed-pass", "completed-pass"),
+  testExecutionClaimEntry("test-execution-claim-completed-fail", "completed-fail"),
+  testExecutionClaimEntry("test-execution-claim-unknown-process-outcome-indeterminate", "unknown-process-outcome-indeterminate"),
+  testExecutionClaimEntry("test-execution-claim-unknown-authority-changed", "unknown-authority-changed"),
+  testExecutionClaimEntry("test-execution-claim-unknown-receipt-publication-indeterminate", "unknown-receipt-publication-indeterminate"),
+  testExecutionReceiptEntry("test-execution-receipt-pass", "pass"),
+  testExecutionReceiptEntry("test-execution-receipt-failed-nonzero-exit", "failed-nonzero-exit"),
+  testExecutionReceiptEntry("test-execution-receipt-failed-signal", "failed-signal"),
+  testExecutionReceiptEntry("test-execution-receipt-failed-launch-error", "failed-launch-error"),
+  testExecutionReceiptEntry("test-execution-receipt-failed-timeout", "failed-timeout"),
+  testExecutionReceiptEntry("test-execution-receipt-failed-output-limit", "failed-output-limit"),
 
   sliceEntry("slice-pending", "pending"),
   sliceEntry("slice-running", "running"),
@@ -1327,6 +1443,134 @@ function stepEntry(id, variant) {
       ] : []),
     ],
     requiredPath: ["agent"], typePath: ["attempts"], targets,
+  });
+}
+
+function testExecutionClaimEntry(id, variant) {
+  const completed = variant.startsWith("completed-");
+  const unknown = variant.startsWith("unknown-");
+  const status = completed && variant.endsWith("fail") ? "fail" : "pass";
+  const receipt = completed ? testExecutionReceipt(status === "pass" ? "pass" : "failed-nonzero-exit") : null;
+  const receiptBytes = receipt ? `${JSON.stringify(receipt)}\n` : null;
+  const claim = {
+    schema_version: 1, kind: "checked-test-execution-claim", state: completed ? "completed" : unknown ? "unknown" : "active",
+    nonce: TEST_EXECUTION_NONCE, run_id: "catalog-run", attempt: 1, plan_ref: "plan/slices.json", plan_hash: hashBytes(PLAN_V2_EXTERNAL.plan.bytes),
+    head_sha: SHA_B, receipt_ref: "evidence/test-verifier.attempt-1.json", claimed_at: NOW,
+  };
+  if (completed) Object.assign(claim, { completed_at: NOW, status, receipt_hash: hashBytes(receiptBytes) });
+  if (unknown) Object.assign(claim, { failed_at: NOW, reason: variant.slice("unknown-".length) });
+  const source = {
+    agent: "test-verifier", status: completed && status === "fail" ? "rejected" : "running", attempts: 1,
+    execution_claim: claim, execution_claim_hash: hashCanonical(claim),
+  };
+  const externalSources = completed ? { receipt: { ref: claim.receipt_ref, bytes: receiptBytes } } : {};
+  if (completed) source.evidence_ref = claim.receipt_ref;
+  const sidecars = completed ? [externalSidecar("receipt", ["evidence_ref"], ["execution_claim", "receipt_hash"])] : [];
+  const targets = [
+    schema(["execution_claim", "schema_version"]), kind(["execution_claim", "kind"], "other-claim"),
+    time(["execution_claim", "claimed_at"]), ...(completed || unknown ? [time(["execution_claim", completed ? "completed_at" : "failed_at"])] : []),
+    ref(["execution_claim", "plan_ref"]), ref(["execution_claim", "receipt_ref"]), hash(["execution_claim", "plan_hash"]),
+    drift(["execution_claim"], "state", "claim_state"), stale(["execution_claim", "attempt"], 2), stale(["execution_claim", "head_sha"], SHA_A),
+    cross(["execution_claim", "nonce"], "223e4567-e89b-42d3-a456-426614174000"),
+    cross(["execution_claim", "state"], completed ? "active" : unknown ? "active" : "unknown"),
+    cross(["execution_claim", "run_id"], "other-run"),
+    ...(completed ? [cross(["execution_claim", "status"], status === "pass" ? "fail" : "pass")] : []),
+    ...(unknown ? [cross(["execution_claim", "reason"], variant.endsWith("authority-changed") ? "process-outcome-indeterminate" : "authority-changed")] : []),
+    ...(completed ? externalSidecarTargets("receipt", ["evidence_ref"], ["execution_claim", "receipt_hash"]) : []),
+  ];
+  return recordEntry({
+    authorityClassId: "steps-acceptance-inheritance", id, record: "run.json.steps[].execution_claim", variant,
+    writer: completed ? "completeCheckedTestExecution protected completion transition" : unknown ? "markCheckedTestExecutionUnknown protected terminal claim transition" : "claimCheckedTestExecution protected active claim transition",
+    readers: [
+      "executeCheckedTestExecution replay and retry refusal", "schema-v2 generic test-verifier acceptance",
+      "assertV2FreshDownstreamAuthority panels/gates/fence/PR consumers", "validateRun sibling execution_claim_hash binding",
+      ...(!completed ? ["transitionRecoverOrphan public fail-closed recovery refusal"] : []),
+      ...(!completed ? ["cleanupRun and cleanupRunLocked fail-closed cleanup refusal"] : []),
+    ],
+    tests: [
+      `test/durable-record-mutations.test.js: ${id} mutation matrix`,
+      "test/durable-record-mutations.test.js: executes every generated checked execution claim mutation through production consumers",
+      ...(!completed ? ["test/durable-record-mutations.test.js: routes canonical and generated active/unknown claims through cleanup refusal"] : []),
+      ...(completed && status === "pass" ? ["test/durable-record-mutations.test.js: rejects checked claim cross-bindings at panel, gate, fence, and PR consumers"] : []),
+    ],
+    canonicalPath: ["steps", 0], source, externalSources, sidecars, facts: exactFacts(source),
+    requiredPath: ["execution_claim", "state"], unknownPath: ["execution_claim"], typePath: ["execution_claim", "attempt"],
+    targets: [...targets, hash(["execution_claim_hash"])],
+  });
+}
+
+function testExecutionReceiptEntry(id, variant) {
+  const source = testExecutionReceipt(variant);
+  return recordEntry({
+    authorityClassId: "steps-acceptance-inheritance", id, record: "evidence/test-verifier.attempt-N.json", variant,
+    writer: "completeCheckedTestExecution create-only factory receipt publication",
+    readers: ["completeCheckedTestExecution protected completion transition", "executeCheckedTestExecution completed replay", "transitionRunStep schema-v2 generic acceptance"],
+    tests: [
+      `test/durable-record-mutations.test.js: ${id} mutation matrix`,
+      "test/durable-record-mutations.test.js: executes every generated checked receipt mutation through production completion, replay, and applicable acceptance consumers",
+    ],
+    canonicalPath: ["evidence", "test-verifier.attempt-1.json"], source, facts: exactFacts(source),
+    requiredPath: ["kind"], typePath: ["attempt"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-receipt"), time(["completed_at"]), ref(["plan_ref"]), hash(["plan_hash"]), drift([], "kind", "record_kind"), stale(["head_sha"], SHA_A), cross(["run_id"], "other-run")],
+  });
+}
+
+function testExecutionReceipt(variant) {
+  const result = {
+    index: 0, program: "npm", args: ["run", "check"], outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null,
+    duration_ms: 1, stdout: EMPTY_STREAM, stderr: EMPTY_STREAM,
+  };
+  if (variant === "failed-nonzero-exit") Object.assign(result, { status: "fail", exit_code: 7 });
+  if (variant === "failed-signal") Object.assign(result, { outcome: "signaled", status: "fail", exit_code: null, signal: "SIGTERM" });
+  if (variant === "failed-launch-error") Object.assign(result, { outcome: "launch-error", status: "fail", exit_code: null, error_code: "spawn-failed" });
+  if (variant === "failed-timeout") Object.assign(result, { outcome: "timeout", status: "fail", exit_code: null, signal: "SIGKILL" });
+  if (variant === "failed-output-limit") Object.assign(result, { outcome: "output-limit", status: "fail", exit_code: null, signal: "SIGKILL", stdout: TRUNCATED_STREAM });
+  const passing = variant === "pass";
+  return {
+    schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: "catalog-run", attempt: 1,
+    claim_nonce: TEST_EXECUTION_NONCE, plan_ref: "plan/slices.json", plan_hash: hashBytes(PLAN_V2_EXTERNAL.plan.bytes), head_sha: SHA_B,
+    started_at: NOW, completed_at: NOW, duration_ms: 1, status: passing ? "pass" : "fail", review_ready: passing, commands: [result],
+  };
+}
+
+function workDecomposerAcceptedEntry() {
+  const source = {
+    agent: "work-decomposer",
+    status: "accepted",
+    attempts: 1,
+    artifact_ref: DECOMPOSITION_EXTERNAL.plan.ref,
+    review_ref: DECOMPOSITION_EXTERNAL.review.ref,
+    acceptance: {
+      artifact_ref: DECOMPOSITION_EXTERNAL.plan.ref,
+      artifact_hash: hashBytes(DECOMPOSITION_EXTERNAL.plan.bytes),
+      review_ref: DECOMPOSITION_EXTERNAL.review.ref,
+      review_hash: hashBytes(DECOMPOSITION_EXTERNAL.review.bytes),
+    },
+  };
+  return recordEntry({
+    authorityClassId: "steps-acceptance-inheritance",
+    id: "step-work-decomposer-accepted-plan",
+    record: "run.json.steps[].work-decomposer accepted plan binding",
+    variant: "accepted exact plan and decomposition review",
+    writer: "transitionRunStep checked work-decomposer acceptance",
+    readers: ["test-verifier dispatch", "schema-v2 construction/publication/adoption/replay/resume", "schema-v2 downstream authority checks"],
+    canonicalPath: ["steps", 0],
+    source,
+    externalSources: DECOMPOSITION_EXTERNAL,
+    sidecars: [
+      externalSidecar("plan", ["acceptance", "artifact_ref"], ["acceptance", "artifact_hash"]),
+      externalSidecar("review", ["acceptance", "review_ref"], ["acceptance", "review_hash"]),
+    ],
+    facts: exactFacts(source),
+    requiredPath: ["acceptance"],
+    typePath: ["attempts"],
+    targets: [
+      ...externalSidecarTargets("plan", ["acceptance", "artifact_ref"], ["acceptance", "artifact_hash"]),
+      ...externalSidecarTargets("review", ["acceptance", "review_ref"], ["acceptance", "review_hash"]),
+      drift(["acceptance"], "artifact_ref", "artifact"),
+      stale(["attempts"], 0),
+      cross(["agent"], "test-verifier"),
+    ],
   });
 }
 
@@ -1867,11 +2111,14 @@ export function createPostPrCatalogBaseline(record) {
 
 export function createDurableCatalogBaseline(record) {
   if (!record || !CANONICAL_SOURCE_RECORD_ID_SET.has(record.id)) throw new TypeError("catalog baseline requires a registered canonical source row");
-  if (record.id === "plan-slices-json") {
+  if (["plan-slices-json", "plan-v2-integration-gate"].includes(record.id)) {
     return structuredClone({ consumer: "validateSlicesPlan", plan: record.source, externalSources: record.externalSources ?? {} });
   }
   if (record.id === "final-plan-descriptor") {
     return structuredClone({ consumer: "final-plan-descriptor-contract", descriptor: record.source, externalSources: record.externalSources ?? {} });
+  }
+  if (record.id.startsWith("test-execution-receipt-")) {
+    return structuredClone({ consumer: "validateTestExecutionReceipt", receipt: record.source, externalSources: {} });
   }
   if (record.authorityClassId === "post-pr-nested-records") {
     return { consumer: "validateRun/checkRunConsistency", ...createPostPrCatalogBaseline(record) };
@@ -2299,10 +2546,10 @@ function repairReobservation(name, expected, consumer) {
   return { name, source: "re-observed", expected, consumer };
 }
 
-function recordEntry({ authorityClassId, id, record, variant, writer, readers, source, canonicalPath, externalSources = {}, requiredPath, typePath, targets = [], sidecars = [], facts = [], observations }) {
+function recordEntry({ authorityClassId, id, record, variant, writer, readers, tests, source, canonicalPath, externalSources = {}, requiredPath, unknownPath = [], typePath, targets = [], sidecars = [], facts = [], observations }) {
   const commonTargets = [
     target("missing-key", requiredPath, "required field"),
-    target("unknown-key", [], "record root", { key: "unexpected_authority_key", value: true }),
+    target("unknown-key", unknownPath, unknownPath.length === 0 ? "record root" : `record ${renderPath(unknownPath)}`, { key: "unexpected_authority_key", value: true }),
     target("wrong-type", typePath, "typed field"),
   ];
   return {
@@ -2312,7 +2559,7 @@ function recordEntry({ authorityClassId, id, record, variant, writer, readers, s
     variant,
     writer,
     readers,
-    tests: [`test/durable-record-mutations.test.js: ${id} mutation matrix`],
+    tests: tests ?? [`test/durable-record-mutations.test.js: ${id} mutation matrix`],
     sidecars,
     facts,
     ...(observations === undefined ? {} : { observations }),

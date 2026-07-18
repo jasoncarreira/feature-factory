@@ -96,10 +96,11 @@ describe("factory resume", () => {
     { name: "interactive detached resume", durableMode: "interactive", driverMode: "headless", detached: true, invoke: (f, o) => resumeFactory(f.runId, { ...o, detached: true, headless: true }), payloadKind: "resume" },
     { name: "headless detached resume", durableMode: "headless", driverMode: "headless", detached: true, invoke: (f, o) => resumeFactory(f.runId, { ...o, detached: true, headless: true }), payloadKind: "resume" },
     { name: "autonomous detached resume", durableMode: "autonomous", driverMode: "autonomous", detached: true, invoke: (f, o) => resumeFactory(f.runId, { ...o, detached: true, autonomous: true }), payloadKind: "resume" },
-    { name: "headless start-resume", durableMode: "headless", driverMode: "headless", invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, headless: true }), payloadKind: "start" },
-    { name: "autonomous start-resume", durableMode: "autonomous", driverMode: "autonomous", invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, autonomous: true }), payloadKind: "start" },
-    { name: "headless detached start-resume", durableMode: "headless", driverMode: "headless", detached: true, invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, headless: true, detached: true }), payloadKind: "start" },
-    { name: "autonomous detached start-resume", durableMode: "autonomous", driverMode: "autonomous", detached: true, invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, autonomous: true, detached: true }), payloadKind: "start" },
+    { name: "interactive start-resume", durableMode: "interactive", driverMode: "interactive", invoke: (f, o) => startFactory([`resume ${f.runId}`], o), payloadKind: "resume" },
+    { name: "headless start-resume", durableMode: "headless", driverMode: "headless", invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, headless: true }), payloadKind: "resume" },
+    { name: "autonomous start-resume", durableMode: "autonomous", driverMode: "autonomous", invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, autonomous: true }), payloadKind: "resume" },
+    { name: "headless detached start-resume", durableMode: "headless", driverMode: "headless", detached: true, invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, headless: true, detached: true }), payloadKind: "resume" },
+    { name: "autonomous detached start-resume", durableMode: "autonomous", driverMode: "autonomous", detached: true, invoke: (f, o) => startFactory([`resume ${f.runId}`], { ...o, autonomous: true, detached: true }), payloadKind: "resume" },
   ];
 
   for (const row of ownershipRows) {
@@ -250,7 +251,7 @@ describe("factory resume", () => {
   it("preflights start-resume before seeding skills and refuses without launching", async () => {
     const repo = mkdtempSync(join(tmpdir(), "factory-start-resume-preflight-"));
     try {
-      const result = await startFactory(["resume missing-run"], { cwd: repo, headless: true, json: true });
+      const result = await startFactory(["resume missing-run"], { cwd: repo, json: true });
       assert.equal(result.ok, false);
       assert.match(result.terminal_result.reason, /missing run\.json/i);
       assert.equal(existsSync(join(repo, ".opencode", "skills", "feature", "SKILL.md")), false, "a refused start-resume must not seed skills");
@@ -260,14 +261,13 @@ describe("factory resume", () => {
   });
 
   it("refuses start-resume against an active heartbeat without mutating durable state", async () => {
-    const fixture = createFixture("start-resume-active-heartbeat", { mode: "headless" });
+    const fixture = createFixture("start-resume-active-heartbeat", { mode: "interactive" });
     try {
       const runBytesBefore = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
 
       const result = await startFactory([`resume ${fixture.runId}`], {
         cwd: fixture.repo,
-        headless: true,
         json: true,
         foregroundLaunchFn: async () => { throw new Error("must not launch"); },
         detachedLaunchFn: async () => { throw new Error("must not launch"); },

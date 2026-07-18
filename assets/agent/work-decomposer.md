@@ -29,6 +29,7 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 - Dependencies must be real consumption dependencies, not blanket backend-before-frontend ordering.
 - For each test command, identify the changed slice outputs it validates. Add dependencies on every sibling slice whose changed output must exist before that command runs. Broad regression commands do not imply dependencies on unaffected code.
 - Keep each slice `test_plan` limited to focused and directly impacted checks that can attribute failure to that slice. Do not assign the repository-wide full-suite/build/package command to any implementation slice, including the final slice; preserve it as the post-merge `test-verifier` integration gate.
+- Emit the accepted brief's whole-story commands in root `integration_gate.required_commands` as ordered structured argv objects containing exactly `program` and `args`. Never emit shell text. The exact `{ "program": "npm", "args": ["run", "check"] }` command must appear exactly once and last.
 - Shared hotspots must be serialized into different waves.
 - Generated files have one owning slice.
 - **Per-slice width budget (primary constraint).** Each slice owns one dominant hard concern — a single locus of crash-recovery, concurrency, security-boundary, canonicalization/serialization, migration, or protocol-contract reasoning — plus its focused tests. Do not bundle multiple independent hard concerns into one slice. A large, heterogeneous acceptance list (a rough smell above ~6-8 criteria, not a hard line) is a signal to split along the concern seams, not to grow the slice. Width is the primary limit; prefer splitting over widening.
@@ -63,6 +64,11 @@ Return exactly this structure:
 ### Slices JSON
 ```json
 {
+  "integration_gate": {
+    "required_commands": [
+      { "program": "npm", "args": ["run", "check"] }
+    ]
+  },
   "slices": [
     {
       "id": "be-api",
@@ -97,13 +103,13 @@ Return exactly this structure:
 - Deferred mechanical completeness -> <brief obligation -> owning slice -> executable schema or state model -> table-driven or model-based test, or none>
 
 ### Test-verifier integration gate
-- `<exact canonical repository-wide command from the accepted brief>` - runs after every slice is merged
+- Mirror every ordered `{program,args}` entry from JSON, in the same order, and state that test-verifier reruns and reports every entry after all slices merge. There is no singular canonical command, shell-text `cmd`, substitution, omission, or reordering fallback.
 
 ### Risks
 - <parallelism risk, giant slice, ambiguous dependency, generated code, migration, or none>
 ```
 
-The JSON must be valid and directly usable as `plan/slices.json`.
+The JSON must be valid and directly usable as `plan/slices.json`. `integration_gate` is required even for a one-slice plan. It is closed to `required_commands`; the ordered list has 1-32 closed `{program,args}` entries. `program` is trimmed, 1-255 UTF-8 bytes, and has no NUL/control characters. `args` has 0-64 strings per command, each at most 4096 UTF-8 bytes and without NUL; the JSON-encoded command list is at most 64 KiB. The human plan mirrors all entries, while the JSON list alone is execution authority.
 
 If the redesign escalation applies, emit no slice plan. Instead return exactly:
 

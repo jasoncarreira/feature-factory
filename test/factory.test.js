@@ -5,6 +5,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { spawnSync } from "./helpers/git-fixture.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   CleanupRunChangedError,
   CleanupRunUnexpectedError,
@@ -24,7 +25,10 @@ import {
   writeSteering,
 } from "../src/factory.js";
 import { acquireLaunchFence, releaseLaunchFence } from "../src/process-evidence.js";
+import { hashValue } from "../src/refs.js";
 import { checkWorktreeIdentity } from "../src/worktrees.js";
+
+const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 describe("factory public state operations", { concurrency: false }, () => {
   it("lists and reads runs without authority proofs", () => {
@@ -559,6 +563,93 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 
+  it("refuses forced public and locked cleanup before touching active or unknown checked execution claims", async () => {
+    for (const state of ["active", "unknown"]) {
+      for (const entry of ["cleanupRun", "cleanupRunLocked", "cli"]) {
+        const fixture = createFixture(`cleanup-checked-${state}-${entry.toLowerCase()}`, { git: true });
+        try {
+          const snapshot = installCheckedExecutionClaim(fixture, state);
+          let error;
+          let launchFenceCalls = 0;
+          if (entry === "cleanupRun") {
+            error = await captureRejected(() => cleanupRun(fixture.runId, {
+              cwd: fixture.repo,
+              force: true,
+              acquireLaunchFence() {
+                launchFenceCalls += 1;
+                return { acquired: false };
+              },
+            }));
+          } else if (entry === "cleanupRunLocked") {
+            error = captureThrown(() => cleanupRunLocked(fixture.runDir, readJson(snapshot.runFile), {
+              mode: "single-run",
+              repo: fixture.repo,
+              force: true,
+            }));
+          } else {
+            const proc = spawnSync(process.execPath, [CLI_PATH, "factory", "cleanup", fixture.runId, "--force", "--json"], {
+              cwd: fixture.repo,
+              encoding: "utf8",
+            });
+            assert.notEqual(proc.status, 0, `${state} CLI cleanup must fail closed`);
+            error = new Error(`${proc.stderr}\n${proc.stdout}`);
+          }
+
+          assert.equal(error?.code === "TEST_EXECUTION_OPERATOR_RECONCILIATION_REQUIRED"
+            || /trusted out-of-band operator\/process reconciliation is required/u.test(error?.message || ""), true, `${state} ${entry}`);
+          assert.equal(launchFenceCalls, 0, `${state} cleanup must reject before launch-fence acquisition`);
+          assert.deepEqual(readFileSync(snapshot.runFile), snapshot.runBytes, `${state} ${entry} run.json`);
+          assert.deepEqual(readFileSync(snapshot.receiptFile), snapshot.receiptBytes, `${state} ${entry} receipt`);
+          assert.deepEqual(readFileSync(snapshot.heartbeatFile), snapshot.heartbeatBytes, `${state} ${entry} heartbeat`);
+          assert.equal(existsSync(snapshot.worktree), true, `${state} ${entry} worktree`);
+          assert.equal(branchHead(fixture.repo, fixture.runId), snapshot.branchHead, `${state} ${entry} branch`);
+          assert.deepEqual(readdirSync(fixture.runDir).sort(), snapshot.runEntries, `${state} ${entry} run directory`);
+          assert.deepEqual(readdirSync(join(fixture.repo, ".opencode", "worktrees")).sort(), snapshot.worktreeEntries, `${state} ${entry} cleanup staging`);
+        } finally {
+          cleanup(fixture.repo);
+        }
+      }
+    }
+  });
+
+  it("retains normal cleanup for completed checked execution claims", async () => {
+    const fixture = createFixture("cleanup-checked-completed", { git: true });
+    try {
+      installCheckedExecutionClaim(fixture, "completed");
+
+      const result = await cleanupRun(fixture.runId, { cwd: fixture.repo, force: true });
+
+      assert.equal(result.removed_run_dir, true);
+      assert.deepEqual(result.deleted_branches, [fixture.runId]);
+      assert.equal(result.removed_worktrees.length, 1);
+      assert.equal(existsSync(fixture.runDir), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("validates direct locked cleanup input before inspecting checked execution claims", () => {
+    const fixture = createFixture("cleanup-checked-malformed-direct", { git: true });
+    try {
+      const snapshot = installCheckedExecutionClaim(fixture, "active");
+      const malformed = readJson(snapshot.runFile);
+      malformed.steps.push(structuredClone(malformed.steps.find((step) => step.agent === "test-verifier")));
+
+      assert.throws(() => cleanupRunLocked(fixture.runDir, malformed, {
+        mode: "single-run",
+        repo: fixture.repo,
+        force: true,
+      }), /active or unknown checked test execution/u);
+      assert.deepEqual(readFileSync(snapshot.runFile), snapshot.runBytes);
+      assert.deepEqual(readFileSync(snapshot.receiptFile), snapshot.receiptBytes);
+      assert.deepEqual(readFileSync(snapshot.heartbeatFile), snapshot.heartbeatBytes);
+      assert.equal(existsSync(snapshot.worktree), true);
+      assert.equal(branchHead(fixture.repo, fixture.runId), snapshot.branchHead);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("collects the same deduplicated run and slice targets used by single-run cleanup", () => {
     const run = {
       branch: "run-branch",
@@ -950,6 +1041,59 @@ function createFixture(runId, { gate = false, terminal = false, git = false, rep
   return { repo, runDir, runId };
 }
 
+function installCheckedExecutionClaim(fixture, state) {
+  const runFile = join(fixture.runDir, "run.json");
+  const receiptFile = join(fixture.runDir, "evidence", "test-verifier.attempt-1.json");
+  const heartbeatFile = join(fixture.runDir, "heartbeat.json");
+  mkdirSync(dirname(receiptFile), { recursive: true });
+  writeJson(receiptFile, { sentinel: `${state} receipt bytes must survive refused cleanup` });
+  if (state !== "completed") writeFileSync(heartbeatFile, "malformed heartbeat bytes must not be observed\n");
+  const claim = {
+    schema_version: 1,
+    kind: "checked-test-execution-claim",
+    state,
+    nonce: "123e4567-e89b-42d3-a456-426614174000",
+    run_id: fixture.runId,
+    attempt: 1,
+    plan_ref: "plan/slices.json",
+    plan_hash: `sha256:${"1".repeat(64)}`,
+    head_sha: branchHead(fixture.repo, fixture.runId),
+    receipt_ref: "evidence/test-verifier.attempt-1.json",
+    claimed_at: "2026-07-17T12:00:00.000Z",
+    ...(state === "completed" ? {
+      completed_at: "2026-07-17T12:00:01.000Z",
+      status: "pass",
+      receipt_hash: hashFile(receiptFile),
+    } : {}),
+    ...(state === "unknown" ? {
+      failed_at: "2026-07-17T12:00:01.000Z",
+      reason: "process-outcome-indeterminate",
+    } : {}),
+  };
+  const run = readJson(runFile);
+  run.steps = [{
+    agent: "test-verifier",
+    status: "running",
+    attempts: 1,
+    ...(state === "completed" ? { evidence_ref: claim.receipt_ref } : {}),
+    execution_claim: claim,
+    execution_claim_hash: hashValue(claim),
+  }];
+  writeJson(runFile, run);
+  return {
+    runFile,
+    runBytes: readFileSync(runFile),
+    receiptFile,
+    receiptBytes: readFileSync(receiptFile),
+    heartbeatFile,
+    heartbeatBytes: state === "completed" ? null : readFileSync(heartbeatFile),
+    worktree: run.worktree,
+    branchHead: branchHead(fixture.repo, fixture.runId),
+    runEntries: readdirSync(fixture.runDir).sort(),
+    worktreeEntries: readdirSync(join(fixture.repo, ".opencode", "worktrees")).sort(),
+  };
+}
+
 function initGitRepo(repo, branch) {
   runGit(repo, ["init", "-b", "main"]);
   runGit(repo, ["config", "user.email", "test@example.com"]);
@@ -999,6 +1143,15 @@ function captureThrown(fn) {
     return error;
   }
   assert.fail("expected function to throw");
+}
+
+async function captureRejected(fn) {
+  try {
+    await fn();
+  } catch (error) {
+    return error;
+  }
+  assert.fail("expected function to reject");
 }
 
 function hashFile(file) {

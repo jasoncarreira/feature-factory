@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "./helpers/git-fixture.js";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,29 @@ const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const RUN_ID = "cli-write-surface";
 
 describe("cli write surface", () => {
+  it("exposes only the exact JSON checked-test execution grammar", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-test-execute-grammar-"));
+    try {
+      initGitRepo(repo);
+      for (const args of [
+        ["factory", "test-execute", RUN_ID],
+        ["factory", "test-execute", RUN_ID, "--json", "--json"],
+        ["factory", "test-execute", RUN_ID, "--json", "--attempts", "1"],
+        ["factory", "test-execute", RUN_ID, "--json", "--evidence-ref", "evidence/caller.json"],
+        ["factory", "test-execute", RUN_ID, "--json", "--repo", repo],
+      ]) {
+        const proc = spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+        assert.equal(proc.status, 1, args.join(" "));
+        assert.equal(proc.stderr, "", args.join(" "));
+        const error = JSON.parse(proc.stdout);
+        assert.deepEqual(Object.keys(error), ["ok", "error"]);
+        assert.deepEqual(Object.keys(error.error), ["code", "message"]);
+        assert.equal(error.ok, false);
+        assert.match(error.error.message, /requires exactly <run-id> --json/u);
+      }
+    } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
   it("passes a named start run id as driver config", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-start-run-id-"));
     try {
@@ -124,7 +147,7 @@ describe("cli write surface", () => {
       runFactory(repo, ["steer-ack", RUN_ID, "--ref", consumed.steering.ref, "--hash", consumed.steering.hash, "--json"]);
       validateFactory(repo);
 
-      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+      runFactory(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
       validateFactory(repo);
       const costRecorded = JSON.parse(runFactory(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--step", "build", "--slice-id", "slice", "--provider", "opencode", "--model", "gpt-5.5", "--source", "usage-log", "--operation", "completion", "--request-id", "req-1", "--input-tokens", "10", "--output-tokens", "5", "--total-tokens", "15", "--cost-total", "0.02", "--currency", "USD", "--recorded-at", "2026-07-08T12:30:00.000Z", "--entry-id", "cli-cost", "--json"]).stdout);
       assert.equal(costRecorded.entry.id, "cli-cost");
@@ -136,7 +159,7 @@ describe("cli write surface", () => {
       validateFactory(repo);
       runFactory(repo, ["slice-status", RUN_ID, "slice", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/slice", "--attempts", "1", "--json"]);
       validateFactory(repo);
-      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]).stderr, /refuses to replace non-pending slice progress/u);
+      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]).stderr, /refuses to replace non-pending slice progress/u);
       assert.match(runFactoryFail(repo, ["slice-status", RUN_ID, "typo", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/typo", "--attempts", "1", "--json"]).stderr, /slice 'typo' not found/u);
       writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedHead });
       writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", verdict: "APPROVE", required_fixes: [], attempt: 1, reviewed_commit: reviewedHead });
@@ -184,26 +207,53 @@ describe("cli write surface", () => {
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
     try {
       seedRun(runDir);
-      const record = DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).find(({ id }) => id === "plan-slices-json");
+      const record = DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).find(({ id }) => id === "plan-v2-integration-gate");
       const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
       assert.equal(cases.length, 6);
+      const planPath = join(runDir, "plan", "slices.json");
+      const alternatePath = join(runDir, "plan", "alternate.json");
+      writeJson(alternatePath, record.source);
+      const beforeSourceRejections = readFileSync(join(runDir, "run.json"), "utf8");
+      for (const from of ["plan/alternate.json", alternatePath, `.opencode/factory/${RUN_ID}/plan/slices.json`]) {
+        const rejected = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", from, "--json"]);
+        assert.match(rejected.stderr, /--from must be exactly plan\/slices\.json/u, from);
+        assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), beforeSourceRejections, from);
+      }
+      const invalidUtf8 = Buffer.concat([
+        Buffer.from('{"slices":[{"id":"B1C","stack":"backend","paths":["src/**"],"depends_on":[],"acceptance":["AC1"],"test_plan":["node --test"]}],"integration_gate":{"required_commands":[{"program":"node","args":["', "utf8"),
+        Buffer.from([0xc3, 0x28]),
+        Buffer.from('"]},{"program":"npm","args":["run","check"]}]}}\n', "utf8"),
+      ]);
+      writeFileSync(planPath, invalidUtf8);
+      const invalidUtf8Rejected = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
+      assert.match(invalidUtf8Rejected.stderr, /valid UTF-8/u);
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), beforeSourceRejections);
+      rmSync(planPath);
+      symlinkSync(alternatePath, planPath);
+      const symlinkRejected = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
+      assert.match(symlinkRejected.stderr, /must not contain symlinks|regular non-symlink/u);
+      assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), beforeSourceRejections);
+      rmSync(planPath);
+      writeJson(join(runDir, "plan", "slices.json"), { slices: record.source.slices });
+      const legacyRejected = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
+      assert.match(legacyRejected.stderr, /plan\.integration_gate: is required for newly produced and schema-v2 plans/u);
       for (const mutationCase of cases) {
         writeJson(join(runDir, "plan", "slices.json"), mutationCase.record);
         const before = readFileSync(join(runDir, "run.json"), "utf8");
-        const rejected = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+        const rejected = runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
         assert.match(rejected.stderr, /plan\.|dependency/u, mutationCase.name);
         assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), before, mutationCase.name);
       }
 
       writeJson(join(runDir, "plan", "slices.json"), record.source);
-      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+      runFactory(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
       const seededBytes = readFileSync(join(runDir, "run.json"), "utf8");
-      runFactory(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]);
+      runFactory(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), seededBytes, "byte-identical pending reseed is a checked no-op");
-      runFactory(repo, ["slice-status", RUN_ID, "B0.2", "running", "--attempts", "1", "--json"]);
+      runFactory(repo, ["slice-status", RUN_ID, "B1C", "running", "--attempts", "1", "--json"]);
       const startedBytes = readFileSync(join(runDir, "run.json"), "utf8");
-      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--json"]).stderr, /refuses to replace non-pending slice progress/u);
-      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", `.opencode/factory/${RUN_ID}/plan/slices.json`, "--force", "--json"]).stderr, /refuses to replace non-pending slice progress/u);
+      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]).stderr, /refuses to replace non-pending slice progress/u);
+      assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--force", "--json"]).stderr, /refuses to replace non-pending slice progress/u);
       assert.equal(readFileSync(join(runDir, "run.json"), "utf8"), startedBytes, "post-start reseed rejection must not mutate run.json");
     } finally {
       rmSync(repo, { recursive: true, force: true });
@@ -263,6 +313,7 @@ function seedRun(runDir) {
   mkdirSync(join(runDir, "gates"), { recursive: true });
   writeJson(join(runDir, "run.json"), { schema_version: 1, run_id: RUN_ID, status: "running", branch: "main", worktree: resolve(runDir, "../../.."), gates: {}, slices: [], steps: [{ agent: "spec-writer", status: "running", attempts: 0 }] });
   writeJson(join(runDir, "plan", "slices.json"), {
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [{ id: "slice", stack: "backend", paths: ["src/example.js"], depends_on: [], acceptance: ["works"], test_plan: ["unit"] }],
   });
 }
