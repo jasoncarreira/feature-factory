@@ -94,7 +94,7 @@ const TEST_EXECUTION_OUTCOMES = new Set(["exited", "signaled", "timeout", "outpu
 const TEST_EXECUTION_STATUSES = new Set(["pass", "fail"]);
 const SIGNAL_PATTERN = /^SIG[A-Z0-9]{1,31}$/u;
 const SLICE_KEYS = new Set(["id", "stack", "depends_on", "status", "branch", "worktree", "attempts", "attempt_reviews", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "blocked_reason", "updated_at"]);
-const SLICE_ATTEMPT_REVIEW_KEYS = new Set(["attempt", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "verdict", "convergence", "remaining_fix_count", "legacy_unclassified", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
+const SLICE_ATTEMPT_REVIEW_KEYS = new Set(["attempt", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "verdict", "convergence", "remaining_fix_count", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
 const SLICE_REVIEW_VERDICTS = new Set(["APPROVE", "REJECT"]);
 const SLICE_REVIEW_CONVERGENCE = new Set(["converging", "nonconvergent"]);
 const SLICE_MAX_ATTEMPTS = 3;
@@ -112,7 +112,6 @@ const SLICE_FIX_CLASSIFICATION_SET = new Set(SLICE_FIX_CLASSIFICATIONS);
 export const SLICE_FIX_SCOPE_EFFECTS = Object.freeze(["in-lane", "unowned-extension", "sibling-owned", "contract-change"]);
 const SLICE_FIX_SCOPE_EFFECT_SET = new Set(SLICE_FIX_SCOPE_EFFECTS);
 const SLICE_REMEDIATION_CONTEXT_KEYS = new Set(["schema_version", "fixes"]);
-const SLICE_REMEDIATION_V1_FIX_KEYS = new Set(["required_fix_index", "classification"]);
 const SLICE_REMEDIATION_V2_FIX_KEYS = new Set(["required_fix_index", "classification", "scope_effect", "likely_paths", "fix_owner"]);
 const VERDICT_KEYS = new Set(["verdict", "report", "report_hash", "review_ref", "review_hash", "reviewed_head_sha", "loops"]);
 const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
@@ -135,7 +134,7 @@ const CONTINUATION_ARTIFACT_KINDS = new Set(["artifact", "story", "research_map"
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
 const CONTINUATION_DRAFT_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
-const CONTINUATION_CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+const CONTINUATION_CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 const CONTINUATION_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy"]);
 
 export class ValidationError extends Error {
@@ -151,7 +150,7 @@ export class ValidationError extends Error {
   }
 }
 
-export function validateSliceReviewResult(review, { sliceId = "slice", requireV2 = false } = {}) {
+export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
   const errors = [];
   const path = "review";
   if (!isRecord(review)) fail([{ path, message: "must be an object" }]);
@@ -174,8 +173,7 @@ export function validateSliceReviewResult(review, { sliceId = "slice", requireV2
   } else {
     allowedKeys(errors, context, SLICE_REMEDIATION_CONTEXT_KEYS, `${path}.remediation_context`);
     requiredInteger(errors, context, "schema_version", `${path}.remediation_context.schema_version`);
-    if (![1, 2].includes(context.schema_version)) errors.push({ path: `${path}.remediation_context.schema_version`, message: "must equal 1 or 2" });
-    if (requireV2 && context.schema_version !== 2) errors.push({ path: `${path}.remediation_context.schema_version`, message: "must equal 2 for newly published reviews" });
+    if (context.schema_version !== 2) errors.push({ path: `${path}.remediation_context.schema_version`, message: "must equal 2" });
     if (!Array.isArray(context.fixes)) {
       errors.push({ path: `${path}.remediation_context.fixes`, message: "must be an array" });
     } else {
@@ -186,16 +184,13 @@ export function validateSliceReviewResult(review, { sliceId = "slice", requireV2
           errors.push({ path: fixPath, message: "must be an object" });
           continue;
         }
-        const v2 = context.schema_version === 2;
-        allowedKeys(errors, classification, v2 ? SLICE_REMEDIATION_V2_FIX_KEYS : SLICE_REMEDIATION_V1_FIX_KEYS, fixPath);
+        allowedKeys(errors, classification, SLICE_REMEDIATION_V2_FIX_KEYS, fixPath);
         boundedInteger(errors, classification, "required_fix_index", 0, Math.max(0, fixes.length - 1), `${fixPath}.required_fix_index`);
         if (classification.required_fix_index !== index) errors.push({ path: `${fixPath}.required_fix_index`, message: "must equal its required_fixes position" });
         requiredEnum(errors, classification, "classification", SLICE_FIX_CLASSIFICATION_SET, `${fixPath}.classification`);
-        if (v2) {
-          requiredEnum(errors, classification, "scope_effect", SLICE_FIX_SCOPE_EFFECT_SET, `${fixPath}.scope_effect`);
-          requiredTerminalSafeString(errors, classification, "fix_owner", `${fixPath}.fix_owner`);
-          validateLikelyRepositoryPaths(errors, classification.likely_paths, `${fixPath}.likely_paths`);
-        }
+        requiredEnum(errors, classification, "scope_effect", SLICE_FIX_SCOPE_EFFECT_SET, `${fixPath}.scope_effect`);
+        requiredTerminalSafeString(errors, classification, "fix_owner", `${fixPath}.fix_owner`);
+        validateLikelyRepositoryPaths(errors, classification.likely_paths, `${fixPath}.likely_paths`);
       }
       const hasNonconvergent = context.fixes.some((fix) => fix?.classification === "nonconvergent");
       if ((review.convergence === "nonconvergent") !== hasNonconvergent) {
@@ -218,15 +213,7 @@ export function sliceReviewTaskContext(review, options = {}) {
 }
 
 export function validateSliceReviewFeasibility(review, plan, { sliceId = "slice" } = {}) {
-  const preVersionReview = isRecord(review)
-    && ["convergence", "remaining_fix_count", "remediation_context"].every((key) => review[key] === undefined);
-  if (preVersionReview) {
-    fail([{ path: "review.remediation_context", message: `pre-version review grants no lane-feasibility authority for slice '${sliceId}'` }]);
-  }
   validateSliceReviewResult(review, { sliceId });
-  if (review.remediation_context.schema_version !== 2) {
-    fail([{ path: "review.remediation_context.schema_version", message: `schema version 1 grants no lane-feasibility authority for slice '${sliceId}'` }]);
-  }
   validateSlicesPlan(plan, { enforceDependencyDepth: false });
   const byId = new Map(plan.slices.map((slice) => [slice.id, slice]));
   if (!byId.has(sliceId)) {
@@ -1318,6 +1305,7 @@ function validateContinuationCarryForward(errors, run, continuation, path) {
     }
     for (const key of ["evidence_hash", "review_hash"]) requiredHash(errors, accepted, key, `${itemPath}.${key}`);
     for (const key of ["reviewed_commit", "merge_commit"]) requiredFullGitSha(errors, accepted, key, `${itemPath}.${key}`);
+    validateSliceAttemptReviews(errors, { ...accepted, status: "merged" }, itemPath);
   }
   const remainingIds = new Set();
   if (!Array.isArray(carry.remaining_slice_ids) || carry.remaining_slice_ids.length === 0) errors.push({ path: `${path}.remaining_slice_ids`, message: "must contain at least one id" });
@@ -1335,10 +1323,11 @@ function validateContinuationCarryForward(errors, run, continuation, path) {
       if (acceptedIds.has(slice?.id)) {
         if (carry.accepted_slices[acceptedIndex++]?.id !== slice.id) errors.push({ path: "run.slices", message: "accepted carry-forward rows must remain in PLAN order" });
         const adopted = carry.accepted_slices.find((entry) => entry.id === slice.id);
-        const allowed = new Set(["id", "stack", "depends_on", "status", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+        const allowed = new Set(["id", "stack", "depends_on", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
         if (Object.keys(slice).some((key) => !allowed.has(key)) || slice.status !== "merged" || slice.attempts !== adopted.attempts
           || slice.evidence_ref !== adopted.evidence_ref || slice.evidence_hash !== adopted.evidence_hash || slice.review_ref !== adopted.review_ref
-          || slice.review_hash !== adopted.review_hash || slice.reviewed_commit !== adopted.reviewed_commit || slice.merge_commit !== adopted.merge_commit) {
+          || slice.review_hash !== adopted.review_hash || slice.reviewed_commit !== adopted.reviewed_commit || slice.merge_commit !== adopted.merge_commit
+          || JSON.stringify(slice.attempt_reviews) !== JSON.stringify(adopted.attempt_reviews)) {
           errors.push({ path: `run.slices.${slice.id}`, message: "adopted carry-forward row is immutable" });
         }
       } else if (remainingIds.has(slice?.id) && carry.remaining_slice_ids[remainingIndex++] !== slice.id) errors.push({ path: "run.slices", message: "remaining carry-forward rows must remain in PLAN order" });
@@ -2286,18 +2275,19 @@ function validateRunSlice(errors, slice, path, ids) {
   if (slice.status === "blocked" && !stringValue(slice.blocked_reason)) errors.push({ path: `${path}.blocked_reason`, message: "is required for blocked" });
   const bindingCount = presentBindingCount(slice, SLICE_REVIEW_BINDING_KEYS);
   if (["review", "merged"].includes(slice.status)) {
-    if (bindingCount !== 0 && bindingCount !== SLICE_REVIEW_BINDING_KEYS.length) errors.push({ path, message: "evidence_hash, review_hash, and reviewed_commit must be all present or all absent" });
-    if (bindingCount === SLICE_REVIEW_BINDING_KEYS.length) {
-      if (!stringValue(slice.evidence_ref)) errors.push({ path: `${path}.evidence_ref`, message: "is required by the successor review binding" });
-      if (!stringValue(slice.review_ref)) errors.push({ path: `${path}.review_ref`, message: "is required by the successor review binding" });
-    }
+    if (bindingCount !== SLICE_REVIEW_BINDING_KEYS.length) errors.push({ path, message: "review and merged slices require complete evidence_hash, review_hash, and reviewed_commit bindings" });
+    if (!stringValue(slice.evidence_ref)) errors.push({ path: `${path}.evidence_ref`, message: "is required by the successor review binding" });
+    if (!stringValue(slice.review_ref)) errors.push({ path: `${path}.review_ref`, message: "is required by the successor review binding" });
   } else if (bindingCount !== 0) {
     errors.push({ path, message: "evidence_hash, review_hash, and reviewed_commit are forbidden outside review or merged" });
   }
 }
 
 function validateSliceAttemptReviews(errors, slice, path) {
-  if (slice.attempt_reviews === undefined) return;
+  if (slice.attempt_reviews === undefined) {
+    if (["review", "merged"].includes(slice.status)) errors.push({ path: `${path}.attempt_reviews`, message: "is required for review and merged slices" });
+    return;
+  }
   if (!Array.isArray(slice.attempt_reviews)) {
     errors.push({ path: `${path}.attempt_reviews`, message: "must be an array" });
     return;
@@ -2317,14 +2307,8 @@ function validateSliceAttemptReviews(errors, slice, path) {
     requiredHash(errors, review, "review_hash", `${reviewPath}.review_hash`);
     requiredFullGitSha(errors, review, "reviewed_commit", `${reviewPath}.reviewed_commit`);
     requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${reviewPath}.verdict`);
-    const legacyUnclassified = review.legacy_unclassified === true;
-    if (review.legacy_unclassified !== undefined && !legacyUnclassified) errors.push({ path: `${reviewPath}.legacy_unclassified`, message: "must equal true when present" });
-    if (legacyUnclassified) {
-      if (review.convergence !== undefined || review.remaining_fix_count !== undefined) errors.push({ path: reviewPath, message: "legacy_unclassified review cannot claim convergence or remaining_fix_count" });
-    } else {
-      requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${reviewPath}.convergence`);
-      boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${reviewPath}.remaining_fix_count`);
-    }
+    requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${reviewPath}.convergence`);
+    boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${reviewPath}.remaining_fix_count`);
     for (const key of ["dispatch_claim_ref", "dispatch_closure_ref"]) optionalString(errors, review, key, `${reviewPath}.${key}`);
     for (const key of ["dispatch_claim_hash", "dispatch_closure_hash"]) optionalHash(errors, review, key, `${reviewPath}.${key}`);
     const dispatchCount = presentBindingCount(review, ["dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
@@ -2341,13 +2325,17 @@ function validateSliceAttemptReviews(errors, slice, path) {
       if (Number.isInteger(slice.attempts) && review.attempt > slice.attempts) errors.push({ path: `${reviewPath}.attempt`, message: "must not exceed slice attempts" });
       priorAttempt = Math.max(priorAttempt, review.attempt);
     }
-    if (!legacyUnclassified && review.verdict === "APPROVE" && review.remaining_fix_count !== 0) errors.push({ path: `${reviewPath}.remaining_fix_count`, message: "must equal 0 for APPROVE" });
-    if (!legacyUnclassified && review.verdict === "REJECT" && Number.isInteger(review.remaining_fix_count) && review.remaining_fix_count < 1) errors.push({ path: `${reviewPath}.remaining_fix_count`, message: "must be positive for REJECT" });
+    if (review.verdict === "APPROVE" && review.remaining_fix_count !== 0) errors.push({ path: `${reviewPath}.remaining_fix_count`, message: "must equal 0 for APPROVE" });
+    if (review.verdict === "REJECT" && Number.isInteger(review.remaining_fix_count) && review.remaining_fix_count < 1) errors.push({ path: `${reviewPath}.remaining_fix_count`, message: "must be positive for REJECT" });
   }
   const current = slice.attempt_reviews.at(-1);
-  if (current && ["review", "merged"].includes(slice.status) && Number.isInteger(slice.attempts) && current.attempt === slice.attempts) {
-    for (const key of ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit"]) {
-      if (slice[key] !== current[key]) errors.push({ path: `${path}.${key}`, message: `must equal the current attempt_reviews ${key}` });
+  if (["review", "merged"].includes(slice.status)) {
+    if (!current || !Number.isInteger(slice.attempts) || current.attempt !== slice.attempts) {
+      errors.push({ path: `${path}.attempt_reviews`, message: "must end with the current review or merged slice attempt" });
+    } else {
+      for (const key of ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit"]) {
+        if (slice[key] !== current[key]) errors.push({ path: `${path}.${key}`, message: `must equal the current attempt_reviews ${key}` });
+      }
     }
   }
 }

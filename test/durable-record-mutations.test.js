@@ -1479,11 +1479,11 @@ describe("finite durable-authority catalog", () => {
       },
     };
     const expectedDigests = {
-      "terminal-result-blocked-nonconvergence": ["ff3b38d78511a20d991e47a4012de960cd49e80292c6d0f7964ed72d11497266", "484c993240b44861d7d71c96e40fcf4008241b506d9b8f08105352beec069b1b", "d895ff92ed6bab962b8221cb95673add5977f5e64bb60004e492f89e8af65379"],
+      "terminal-result-blocked-nonconvergence": ["e6a9286a1c4fcdd541621649bfd49378d36ed51d45c84400098e1511c5767687", "484c993240b44861d7d71c96e40fcf4008241b506d9b8f08105352beec069b1b", "14f393a215fcdd7410b6030e6fc3a2448e9e4c6635b5bf830ae6a4f9d843cbfb"],
       "slice-running": ["4643d7feda2aec0a65367792c879fd11ac8ff385317356990e866967595b5aee", "beab1f224a3723cf005fb260d8d79a7f53b5083458b165cc5bcc98ffc40c5645", "ab8b06098386b7d5ca8ffb67fea577d4174fa961a945fa9f7179cbd448171a0a"],
-      "slice-review": ["7a4ea5d772656be13ee66e4c94c31a0e7a69532b908a3522725a8a3d681fe73f", "f3032a106a15dda6324ea24d196196f8629cd57d1fc53a5e1e9f1f8c528d6b51", "391efdb3775c45b0987389547128b0273363707057bd8d02dc89e36452b23500"],
-      "slice-merged": ["f3432c6b31c7297727f2070e5f2826ef9bc524dfbc0c6b74d3d8f05449c9b8d3", "a36bfb5c4e168c8015eae87263ca562eba651051261c41d03441a1b87bf23e3e", "b6f08ae9aebc6d480f40e092e93473a87b9c4874761e43dc457c51dafe65f07c"],
-      "slice-blocked": ["33c00053f9fa0dcc2dde6067fec9e058d72cd6c96a98b9c50db47f146c74c491", "c566d2365a70e36e1616952e990317196ab85647c672afb731af20e402d1ceba", "cfa4ca2eba3f1536760ca4c26b2d5194b2e159b65fa8eee8b2bee9789023188f"],
+      "slice-review": ["9d4974e8bf94101a2b8a5befced5b9ba57c8a6e0a7026be2986d303e66ef0210", "f3032a106a15dda6324ea24d196196f8629cd57d1fc53a5e1e9f1f8c528d6b51", "5bf07b76dffccf27da6e1cc3b92e40d79b7a2134a6ffe83d5c13a63f0bed78c6"],
+      "slice-merged": ["dcbc32b1065038e3d0dfae63efc9958f449bfb3058b45956e9c812ddc6925fe7", "a36bfb5c4e168c8015eae87263ca562eba651051261c41d03441a1b87bf23e3e", "55cc1727a80c4ab964a896ef20a6b6bf34985f8ec4779bc816b41c453f0c2167"],
+      "slice-blocked": ["92c67de66396ab30c7e8a71bdb3a3a278fcef954a7b37182ffd7c19525bd1335", "c566d2365a70e36e1616952e990317196ab85647c672afb731af20e402d1ceba", "7a5f4c71dab812dd69e3c810ca632e55274770e020afd1ba8e221d5dace36d83"],
     };
     for (const [id, digests] of Object.entries(expectedDigests)) {
       const current = findRecord(DURABLE_AUTHORITY_CATALOG, id);
@@ -2849,7 +2849,7 @@ function createPrOperationTransitionFixture(root, family, safeName) {
   for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
   writeJson(join(runDir, "evidence", "backend.json"), { subject: "backend", attempt: 1, status: "pass", review_ready: true, head_sha: head });
-  writeJson(join(runDir, "reviews", "backend.json"), { subject: "backend", attempt: 1, verdict: "APPROVE", reviewed_commit: head });
+  writeJson(join(runDir, "reviews", "backend.json"), { subject: "backend", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head });
   writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "main", attempt: 1, verdict: "GO", reviewed_head_sha: head });
   writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "main", attempt: 1, verdict: "PASS", reviewed_head_sha: head });
   writeJson(runFile, createRunRecord({
@@ -2861,7 +2861,7 @@ function createPrOperationTransitionFixture(root, family, safeName) {
     github_account: "acme",
     pr_mode: "ready",
     gates: { pre_pr: { status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre-pr.md", answer: "approve", answered_at: "2026-07-16T12:00:00.000Z" } },
-    slices: [{ id: "backend", status: "merged", attempts: 1, evidence_ref: "evidence/backend.json", evidence_hash: hashFileBytes(join(runDir, "evidence", "backend.json")), review_ref: "reviews/backend.json", review_hash: hashFileBytes(join(runDir, "reviews", "backend.json")), reviewed_commit: head, merge_commit: head }],
+    slices: [modernMergedSlice(runDir, "backend", head)],
     validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFileBytes(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFileBytes(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
     security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFileBytes(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head },
   }));
@@ -2870,7 +2870,7 @@ function createPrOperationTransitionFixture(root, family, safeName) {
 
 function materializeSliceSidecars(runDir, subject, reviewedHead = "b".repeat(40)) {
   writeJson(join(runDir, "evidence", "backend.json"), { subject, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedHead });
-  writeJson(join(runDir, "reviews", "backend.json"), { subject, attempt: 1, verdict: "APPROVE", reviewed_commit: reviewedHead });
+  writeJson(join(runDir, "reviews", "backend.json"), { subject, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedHead });
 }
 
 function initCatalogGit(repo) {
@@ -2901,7 +2901,7 @@ async function createCheckedClaimMutationFixture(root, record, index) {
   writeJson(join(runDir, "reviews", "validator.json"), { subject: "parent", attempt: 1, verdict: "NO-GO" });
   writeJson(join(runDir, "reviews", "test-verifier.attempt-1.json"), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
   writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
-  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", reviewed_commit: head });
+  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head });
   const plan = {
     slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["checked"] }],
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
@@ -2930,7 +2930,7 @@ async function createCheckedClaimMutationFixture(root, record, index) {
     schema_version: 1, run_id: runId, mode: "headless", status: "running", base_ref: "main", base_commit: head, branch: runId, worktree: repo,
     github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, gates: {}, continuation,
     post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
-    slices: [{ id: "slice", stack: "backend", depends_on: [], status: "merged", attempts: 1, evidence_ref: "evidence/slice.json", evidence_hash: sliceEvidenceHash, review_ref: "reviews/slice.json", review_hash: sliceReviewHash, reviewed_commit: head, merge_commit: head }],
+    slices: [{ ...modernMergedSlice(runDir, "slice", head), stack: "backend", depends_on: [] }],
     steps: [
       { agent: "spec-writer", status: "accepted", attempts: 0, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json", acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: briefHash, review_ref: "reviews/spec-writer.json", review_hash: specReviewHash }, inherited_acceptance: { from_run_id: "parent", parent_spec_review_ref: "reviews/spec-writer.json", artifact_hash: briefHash, review_hash: specReviewHash } },
       { agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json", acceptance: { artifact_ref: "plan/slices.json", artifact_hash: planHash, review_ref: "reviews/work-decomposer.json", review_hash: decompositionReviewHash } },
@@ -3090,15 +3090,15 @@ function createRepairTransitionFixture() {
     ],
   });
   writeJson(join(runDir, "evidence", "consumer-failure.json"), { subject: "consumer", status: "fail" });
-  writeJson(join(runDir, "evidence", "owner.json"), { subject: "owner", status: "pass" });
-  writeJson(join(runDir, "reviews", "owner.json"), createReviewRecord({ subject: "owner" }));
+  writeJson(join(runDir, "evidence", "owner.json"), { subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: baselineCommit });
+  writeJson(join(runDir, "reviews", "owner.json"), { subject: "owner", attempt: 1, reviewed_commit: baselineCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] } });
   writeJson(join(runDir, "run.json"), createRunRecord({
     run_id: "repair-run",
     branch: "repair-feature",
     worktree: repo,
     steps: [],
     slices: [
-      { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 1, evidence_ref: "evidence/owner.json", review_ref: "reviews/owner.json", merge_commit: baselineCommit },
+      { ...modernMergedSlice(runDir, "owner", baselineCommit), stack: "backend", depends_on: [] },
       { id: "consumer", stack: "backend", depends_on: ["owner"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
     ],
   }));
@@ -3160,6 +3160,18 @@ function fixtureGit(repo, args) {
 function writeJson(file, value) {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function modernMergedSlice(runDir, id, reviewedCommit) {
+  const evidenceRef = `evidence/${id}.json`;
+  const reviewRef = `reviews/${id}.json`;
+  const evidenceHash = hashFileBytes(join(runDir, evidenceRef));
+  const reviewHash = hashFileBytes(join(runDir, reviewRef));
+  return {
+    id, status: "merged", attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+    reviewed_commit: reviewedCommit, merge_commit: reviewedCommit,
+    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+  };
 }
 
 function exactB0m3ContinuationDispositionMap(cases) {

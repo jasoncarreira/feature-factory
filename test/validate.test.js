@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createReviewRecord } from "./helpers/review-record-fixture.js";
+import { createReviewRecord, createSliceAttemptReview } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
@@ -620,7 +620,7 @@ describe("run schema and consistency", () => {
     }
   });
 
-  it("accepts legacy slice/panel rows while closing successor and steering authority records", () => {
+  it("accepts unbound running slices and panel rows while closing successor and steering authority records", () => {
     const slice = { id: "slice", stack: "backend", depends_on: [], status: "running", attempts: 1, branch: "feature--slice", worktree: "/tmp/slice" };
     const steering = {
       schema_version: 1,
@@ -678,17 +678,19 @@ describe("run schema and consistency", () => {
     }
   });
 
-  it("enforces every slice and dual-panel successor binding as all-or-none", () => {
+  it("requires complete current slice review authority and dual-panel successor bindings", () => {
     const sha = "a".repeat(40);
     const sliceBinding = { evidence_hash: HASH, review_hash: HASH, reviewed_commit: sha };
     const reviewSlice = { id: "slice", status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" };
-    for (let mask = 1; mask < 7; mask += 1) {
+    for (let mask = 0; mask < 8; mask += 1) {
       const partial = { ...reviewSlice };
       Object.entries(sliceBinding).forEach(([key, value], index) => { if (mask & (1 << index)) partial[key] = value; });
-      assert.throws(() => validateRun({ ...runningRun(), slices: [partial] }), /all present or all absent/u, `slice mask ${mask}`);
+      assert.throws(() => validateRun({ ...runningRun(), slices: [partial] }), /attempt_reviews: is required for review and merged slices/u, `slice mask ${mask}`);
     }
-    const completeSlice = { ...reviewSlice, ...sliceBinding };
+    const attemptReview = createSliceAttemptReview({ evidenceRef: reviewSlice.evidence_ref, evidenceHash: HASH, reviewRef: reviewSlice.review_ref, reviewHash: HASH, reviewedCommit: sha });
+    const completeSlice = { ...reviewSlice, ...sliceBinding, attempt_reviews: [attemptReview] };
     assert.equal(validateRun({ ...runningRun(), slices: [completeSlice] }).slices[0].reviewed_commit, sha);
+    assert.deepEqual(validateRun({ ...runningRun(), slices: [completeSlice] }).slices[0].attempt_reviews, [attemptReview]);
     assert.throws(() => validateRun({ ...runningRun(), slices: [{ ...completeSlice, status: "running" }] }), /forbidden outside review or merged/u);
 
     const validatorBase = { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" };
@@ -804,7 +806,7 @@ describe("run schema and consistency", () => {
       max_parallel_slices: 3, max_retries: 3, continuation: v2,
       post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
       slices: [
-        { id: "A", stack: "backend", depends_on: [], status: "merged", attempts: 1, evidence_ref: "evidence/A.json", evidence_hash: HASH, review_ref: "reviews/A.json", review_hash: HASH, reviewed_commit: "a".repeat(40), merge_commit: "b".repeat(40) },
+        { id: "A", stack: "backend", depends_on: [], status: "merged", ...v2.carry_forward.accepted_slices[0] },
         { id: "B", stack: "backend", depends_on: ["A"], status: "pending", attempts: 0 },
       ],
     };
@@ -864,7 +866,7 @@ describe("run schema and consistency", () => {
     assert.throws(() => validateRun(rewrittenAccepted), /adopted carry-forward row is immutable/u);
   });
 
-  it("reports advisory consistency failures for missing refs and merged slices", () => {
+  it("rejects merged rows before advisory checks when review authority is absent", () => {
     const repo = tempRepo();
     const runDir = createRunDir(repo, "consistency");
     const run = {
@@ -878,7 +880,8 @@ describe("run schema and consistency", () => {
       const result = checkRunConsistency(runDir, run);
       const errors = result.checks.flatMap((check) => check.errors || []).map((error) => error.message).join("\n");
       assert.equal(result.ok, false);
-      assert.match(errors, /missing artifacts ref|missing gates ref|merged slice requires review_ref|merged slice requires merge_commit/u);
+      assert.match(errors, /is required for review and merged slices/u);
+      assert.match(errors, /review and merged slices require complete evidence_hash, review_hash, and reviewed_commit bindings/u);
     } finally {
       cleanup(repo);
     }
@@ -1083,6 +1086,7 @@ function continuationMetadata(targetRunId = "run") {
 }
 
 function carryForwardMetadata() {
+  const attemptReview = createSliceAttemptReview({ evidenceRef: "evidence/A.json", evidenceHash: HASH, reviewRef: "reviews/A.json", reviewHash: HASH, reviewedCommit: "a".repeat(40) });
   return {
     scope: "full-remaining-plan",
     plan_ref: "plan/slices.json",
@@ -1091,6 +1095,7 @@ function carryForwardMetadata() {
     accepted_slices: [{
       id: "A",
       attempts: 1,
+      attempt_reviews: [attemptReview],
       evidence_ref: "evidence/A.json",
       evidence_hash: HASH,
       review_ref: "reviews/A.json",

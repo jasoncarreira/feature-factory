@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readFileSync } from "node:fs";
@@ -76,10 +77,23 @@ describe("slice merge transition guard", () => {
   });
 
   it("refuses to roll a merged slice back to running/review/blocked via transitionRunSlice", async () => {
+    const reviewedCommit = "c".repeat(40);
+    const evidence = { subject: "s1", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit };
+    const review = { subject: "s1", attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] } };
+    const evidenceHash = jsonHash(evidence);
+    const reviewHash = jsonHash(review);
     const runDir = createRunDir("slice-merged-immutable", {
-      slices: [{ id: "s1", status: "merged", merge_commit: "abc1234", review_ref: "reviews/s1.json", evidence_ref: "evidence/s1.json", attempts: 1 }],
+      slices: [{
+        id: "s1", status: "merged", merge_commit: "abc1234", review_ref: "reviews/s1.json", review_hash: reviewHash,
+        evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, reviewed_commit: reviewedCommit, attempts: 1,
+        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, review_ref: "reviews/s1.json", review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+      }],
     });
     try {
+      mkdirSync(join(runDir, "evidence"), { recursive: true });
+      mkdirSync(join(runDir, "reviews"), { recursive: true });
+      writeJson(join(runDir, "evidence", "s1.json"), evidence);
+      writeJson(join(runDir, "reviews", "s1.json"), review);
       for (const status of ["running", "review", "blocked"]) {
         await assert.rejects(
           transitionRunSlice(runDir, "s1", { status }, { mustExist: true }),
@@ -125,15 +139,18 @@ describe("slice remediation task context", () => {
     assert.throws(() => validateSliceReviewResult(classifiedReview(["narrow-correction"], { convergence: "nonconvergent" })), /classify nonconvergent exactly when review convergence is nonconvergent/u);
   });
 
-  it("preserves v1 validation and task-context compatibility without granting feasibility authority", () => {
-    const legacy = classifiedReview(["narrow-correction"], { schemaVersion: 1 });
-    assert.equal(validateSliceReviewResult(legacy).task_context, "reuse");
-    assert.equal(sliceReviewTaskContext(legacy), "reuse");
-    assert.throws(() => validateSliceReviewResult(legacy, { requireV2: true }), /must equal 2 for newly published reviews/u);
-    assert.throws(
-      () => validateSliceReviewFeasibility(legacy, feasibilityPlan(), { sliceId: "slice" }),
-      /schema version 1 grants no lane-feasibility authority/u,
-    );
+  it("rejects schema-v1 and unstructured slice reviews for validation, task context, and feasibility", () => {
+    const schemaV1 = classifiedReview(["narrow-correction"], { schemaVersion: 1 });
+    const unstructured = classifiedReview(["narrow-correction"]);
+    delete unstructured.remediation_context;
+    for (const [name, review, expected] of [
+      ["schema-v1", schemaV1, /schema_version.*must equal 2/u],
+      ["unstructured", unstructured, /remediation_context.*required/u],
+    ]) {
+      assert.throws(() => validateSliceReviewResult(review), expected, name);
+      assert.throws(() => sliceReviewTaskContext(review), expected, name);
+      assert.throws(() => validateSliceReviewFeasibility(review, feasibilityPlan(), { sliceId: "slice" }), expected, name);
+    }
   });
 
   it("requires every v2 positional fix to carry closed canonical feasibility fields", () => {
@@ -545,6 +562,10 @@ function readJson(file) {
 function writeJson(file, value) {
   mkdirSync(join(file, ".."), { recursive: true });
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function jsonHash(value) {
+  return `sha256:${createHash("sha256").update(`${JSON.stringify(value, null, 2)}\n`).digest("hex")}`;
 }
 
 function cleanupDir(runDir) {

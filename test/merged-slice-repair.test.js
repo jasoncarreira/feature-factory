@@ -4,8 +4,9 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
-import { createReviewRecord } from "./helpers/review-record-fixture.js";
+import { createReviewRecord, createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
+import { hashFile } from "../src/refs.js";
 import { completeSpecialBuilderTaskDispatch, createPostPrState, hasInFlightHeartbeatWork, heartbeatOnce, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionMergedSliceRepair, transitionPrCreated, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { resumeFactory, runActiveHeartbeatTickForTest, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
@@ -845,15 +846,35 @@ function createFixture() {
   const runDir = join(repo, ".opencode", "factory", RUN_ID);
   for (const dir of ["evidence", "reviews", "plan"]) mkdirSync(join(runDir, dir), { recursive: true });
 
+  const acceptedSlices = [
+    { id: "owner", attempt: 2 },
+    { id: "merged-consumer", attempt: 1 },
+  ].map(({ id, attempt }) => {
+    const evidenceRef = `evidence/${id}.json`;
+    const reviewRef = `reviews/${id}.json`;
+    writeJson(join(runDir, evidenceRef), { subject: id, attempt, status: "pass", review_ready: true, head_sha: featureCommit });
+    writeJson(join(runDir, reviewRef), createSliceReviewRecord({ subject: id, attempt, reviewedCommit: featureCommit }));
+    const evidenceHash = hashFile(join(runDir, evidenceRef));
+    const reviewHash = hashFile(join(runDir, reviewRef));
+    return {
+      id,
+      attemptReview: createSliceAttemptReview({ attempt, evidenceRef, evidenceHash, reviewRef, reviewHash, reviewedCommit: featureCommit }),
+    };
+  });
+  const authorityFor = (id) => {
+    const authority = acceptedSlices.find((slice) => slice.id === id).attemptReview;
+    return { attempt_reviews: [authority], evidence_ref: authority.evidence_ref, evidence_hash: authority.evidence_hash, review_ref: authority.review_ref, review_hash: authority.review_hash, reviewed_commit: authority.reviewed_commit };
+  };
+
   writeJson(join(runDir, "run.json"), createRunRecord({
     run_id: RUN_ID,
     branch: FEATURE_BRANCH,
     worktree: repo,
     steps: [],
     slices: [
-      { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 2, merge_commit: "1111111", review_ref: "reviews/owner.json" },
+      { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 2, merge_commit: "1111111", ...authorityFor("owner") },
       { id: "consumer", stack: "backend", depends_on: ["owner"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
-      { id: "merged-consumer", stack: "backend", depends_on: ["owner"], status: "merged", attempts: 1, merge_commit: "2222222", review_ref: "reviews/owner.json" },
+      { id: "merged-consumer", stack: "backend", depends_on: ["owner"], status: "merged", attempts: 1, merge_commit: "2222222", ...authorityFor("merged-consumer") },
       { id: "unrelated", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
       { id: "other", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
     ],
@@ -870,7 +891,6 @@ function createFixture() {
   writeJson(join(runDir, "evidence", "no-subject.json"), { status: "fail" });
   writeJson(join(runDir, "evidence", "passing.json"), { subject: "consumer", status: "pass" });
   writeJson(join(runDir, "evidence", "repair-attempt.json"), { subject: "repair:owner", changed_paths: ["src/owner/records.js", "test/owner.test.js"] });
-  writeJson(join(runDir, "reviews", "owner.json"), createReviewRecord({ subject: "owner", verdict: "APPROVE", required_fixes: [] }));
   return { repo, runDir, featureCommit, mainOnlyCommit };
 }
 

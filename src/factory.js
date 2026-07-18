@@ -38,7 +38,7 @@ const SAFE_GATE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
-const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
 const CARRY_FORWARD_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy"]);
 const CARRY_FORWARD_MODES = new Set(["interactive", "headless", "autonomous"]);
 const CARRY_FORWARD_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -3128,6 +3128,7 @@ function initialCarryForwardRun(continuation, configuration, plan, decomposition
       review_hash: adopted.review_hash,
       reviewed_commit: adopted.reviewed_commit,
       merge_commit: adopted.merge_commit,
+      attempt_reviews: cloneJson(adopted.attempt_reviews),
     } : { id: planned.id, stack: planned.stack, depends_on: cloneJson(planned.depends_on), status: "pending", attempts: 0 };
   });
   const reuse = continuation.planning_reuse;
@@ -3204,8 +3205,10 @@ function collectCarryForwardPublicationInputs(parentRunDir, continuation) {
   for (const item of inheritedArtifacts) add(item.ref, readExactCarryForwardFile(parentRunDir, item.ref, item.hash));
   add("reviews/spec-writer.json", readExactCarryForwardFile(parentRunDir, continuation.planning_reuse.spec_review_ref, continuation.planning_reuse.spec_review_hash));
   for (const slice of continuation.carry_forward.accepted_slices) {
-    add(slice.evidence_ref, readExactCarryForwardFile(parentRunDir, slice.evidence_ref, slice.evidence_hash));
-    add(slice.review_ref, readExactCarryForwardFile(parentRunDir, slice.review_ref, slice.review_hash));
+    for (const attempt of slice.attempt_reviews) {
+      add(attempt.evidence_ref, readExactCarryForwardFile(parentRunDir, attempt.evidence_ref, attempt.evidence_hash));
+      add(attempt.review_ref, readExactCarryForwardFile(parentRunDir, attempt.review_ref, attempt.review_hash));
+    }
   }
   return { plan: { bytes: planBytes }, decomposition, files };
 }
@@ -3439,6 +3442,7 @@ function validateCarryForwardCandidate(run) {
     if (!canonicalCarryForwardRef(accepted.evidence_ref, "evidence") || !canonicalCarryForwardRef(accepted.review_ref, "reviews")) throw new Error(`${label} refs must be canonical JSON sidecars`);
     if (!CARRY_FORWARD_HASH_PATTERN.test(String(accepted.evidence_hash || "")) || !CARRY_FORWARD_HASH_PATTERN.test(String(accepted.review_hash || ""))) throw new Error(`${label} hashes must be sha256 hashes`);
     if (!FULL_COMMIT_PATTERN.test(String(accepted.reviewed_commit || "")) || !FULL_COMMIT_PATTERN.test(String(accepted.merge_commit || ""))) throw new Error(`${label} commits must be full Git SHAs`);
+    validateRun({ schema_version: 1, run_id: "carry-forward-accepted-slice", status: "running", gates: {}, slices: [{ ...cloneJson(accepted), status: "merged" }] });
     acceptedIds.add(accepted.id);
   }
   const remainingIds = new Set();

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashFile } from "../src/refs.js";
+import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { transitionSteeringAcknowledged, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
 import { collectProtectedSteeringState } from "../src/steering-conflicts.js";
 import { validateRunDir } from "../src/validate.js";
@@ -185,6 +186,7 @@ function createFixture(runId, { durable = false } = {}) {
 }
 
 function writeDurableFilesAndRun(runDir, runId) {
+  const reviewedCommit = "a".repeat(40);
   writeFileSync(join(runDir, "artifacts", "story.md"), "approved story\n", "utf8");
   writeFileSync(join(runDir, "artifacts", "brief.md"), "accepted brief\n", "utf8");
   writeFileSync(join(runDir, "artifacts", "pre-pr.md"), "pre-pr\n", "utf8");
@@ -199,11 +201,16 @@ function writeDurableFilesAndRun(runDir, runId) {
   writeJson(join(runDir, "evidence", "be-docs.json"), { subject: "be-docs", status: "blocked" });
   writeJson(join(runDir, "reviews", "spec.json"), { subject: "spec-writer", verdict: "APPROVE" });
   writeJson(join(runDir, "reviews", "test.json"), { subject: "test-verifier", verdict: "APPROVE" });
-  writeJson(join(runDir, "reviews", "be-api.json"), { subject: "be-api", verdict: "APPROVE" });
-  writeJson(join(runDir, "reviews", "be-docs.json"), { subject: "be-docs", verdict: "APPROVE" });
+  writeJson(join(runDir, "reviews", "be-api.json"), createSliceReviewRecord({ subject: "be-api", attempt: 1, reviewedCommit }));
+  writeJson(join(runDir, "reviews", "be-docs.json"), createSliceReviewRecord({ subject: "be-docs", attempt: 1, reviewedCommit }));
   writeJson(join(runDir, "reviews", "validator.json"), { subject: "implementation-validator", verdict: "GO-WITH-NITS" });
   writeJson(join(runDir, "reviews", "security.json"), { subject: "security-reviewer", verdict: "PASS" });
   writeJson(join(runDir, "plan", "slices.json"), { slices: [] });
+  const evidenceRef = "evidence/be-api.json";
+  const reviewRef = "reviews/be-api.json";
+  const evidenceHash = hashFile(join(runDir, evidenceRef));
+  const reviewHash = hashFile(join(runDir, reviewRef));
+  const attemptReview = createSliceAttemptReview({ evidenceRef, evidenceHash, reviewRef, reviewHash, reviewedCommit });
 
   writeJson(join(runDir, "run.json"), {
     schema_version: 1,
@@ -240,8 +247,8 @@ function writeDurableFilesAndRun(runDir, runId) {
       { agent: "test-verifier", status: "accepted", evidence_ref: "evidence/test.json", review_ref: "reviews/test.json", attempts: 2 },
     ],
     slices: [
-      { id: "be-api", status: "merged", branch: "be-api", worktree: "/tmp/be-api", evidence_ref: "evidence/be-api.json", review_ref: "reviews/be-api.json", merge_commit: "abc123" },
-      { id: "be-docs", status: "blocked", branch: "be-docs", worktree: "/tmp/be-docs", evidence_ref: "evidence/be-docs.json", review_ref: "reviews/be-docs.json", blocked_reason: "blocked by upstream" },
+      { id: "be-api", status: "merged", branch: "be-api", worktree: "/tmp/be-api", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, merge_commit: "abc123" },
+      { id: "be-docs", status: "blocked", branch: "be-docs", worktree: "/tmp/be-docs", attempts: 1, evidence_ref: "evidence/be-docs.json", review_ref: "reviews/be-docs.json", blocked_reason: "blocked by upstream" },
     ],
     validator: { verdict: "GO-WITH-NITS", report: "artifacts/validator.md", review_ref: "reviews/validator.json" },
     security_review: { verdict: "PASS", review_ref: "reviews/security.json" },

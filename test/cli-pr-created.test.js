@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 
 const CLI = new URL("../src/cli.js", import.meta.url).pathname;
 const PR_URL = "https://github.com/jasoncarreira/opencode-feature-factory/pull/99";
@@ -110,11 +111,14 @@ function createFixture(runId, disposition = "open") {
   for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
   writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
-  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", required_fixes: [], reviewed_commit: head });
+  writeJson(join(runDir, "reviews", "slice.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head }));
   writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "feature-branch", attempt: 1, verdict: "GO", reviewed_head_sha: head });
   writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "feature-branch", attempt: 1, verdict: "PASS", reviewed_head_sha: head });
+  const evidenceRef = "evidence/slice.json"; const reviewRef = "reviews/slice.json";
+  const evidenceHash = hashFile(join(runDir, evidenceRef)); const reviewHash = hashFile(join(runDir, reviewRef));
+  const attemptReview = createSliceAttemptReview({ evidenceRef, evidenceHash, reviewRef, reviewHash, reviewedCommit: head });
   writeJson(runPath, { schema_version: 1, run_id: runId, status: "running", base_ref: "main", base_commit: base, branch: "feature-branch", worktree: repo, github_account: "jasoncarreira", pr_mode: "ready", pr_url: null,
-    gates: { pre_pr: { status: "approved" } }, slices: [{ id: "slice", status: "merged", attempts: 1, evidence_ref: "evidence/slice.json", evidence_hash: hashFile(join(runDir, "evidence", "slice.json")), review_ref: "reviews/slice.json", review_hash: hashFile(join(runDir, "reviews", "slice.json")), reviewed_commit: head, merge_commit: head }],
+    gates: { pre_pr: { status: "approved" } }, slices: [{ id: "slice", status: "merged", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head }],
     validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFile(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFile(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
     security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFile(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head }, terminal_result: null });
   writeFakeGh(repo, disposition);

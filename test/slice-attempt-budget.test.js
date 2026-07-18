@@ -214,68 +214,30 @@ describe("uniform slice attempt evidence", () => {
     }
   });
 
-  it("does not let caller options enable structured-v1 ordinary review publication", async () => {
-    const ordinary = createFixture("v1-caller-option");
-    try {
-      await startAttempt(ordinary, 1);
-      commitSliceAttempt(ordinary, 1);
-      const head = gitOutput(ordinary.repo, ["rev-parse", "HEAD"]);
-      writeJson(join(ordinary.runDir, "evidence", "slice.attempt-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
-      writeJson(join(ordinary.runDir, "reviews", "slice.attempt-1.json"), reviewRecord(ordinary, 1, { verdict: "REJECT", fixes: ["legacy fix"], schemaVersion: 1 }));
-      const before = readFileSync(join(ordinary.runDir, "run.json"), "utf8");
-      await assert.rejects(
-        transitionRunSlice(ordinary.runDir, "slice", {
-          status: "review", attempts: 1, evidence_ref: "evidence/slice.attempt-1.json", review_ref: "reviews/slice.attempt-1.json",
-        }, { allowLegacyReview: true, allowLegacyMergedUpgrade: true }),
-        /must equal 2 for newly published reviews/u,
-      );
-      assert.equal(readFileSync(join(ordinary.runDir, "run.json"), "utf8"), before);
-    } finally {
-      cleanup(ordinary);
-    }
-  });
-
-  it("replays structured-v1 compatibility only from exact persisted same-status review state", async () => {
-    const replay = createFixture("v1-same-status-replay");
-    try {
-      await startAttempt(replay, 1);
-      commitSliceAttempt(replay, 1);
-      const head = gitOutput(replay.repo, ["rev-parse", "HEAD"]);
-      const evidenceRef = "evidence/slice.attempt-1.json";
-      const reviewRef = "reviews/slice.attempt-1.json";
-      writeJson(join(replay.runDir, evidenceRef), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
-      writeJson(join(replay.runDir, reviewRef), reviewRecord(replay, 1, { verdict: "REJECT", fixes: ["legacy fix"], schemaVersion: 1 }));
-      const persisted = readRun(replay);
-      Object.assign(persisted.slices[0], { status: "review", evidence_ref: evidenceRef, review_ref: reviewRef });
-      writeJson(join(replay.runDir, "run.json"), persisted);
-
-      const upgraded = await transitionRunSlice(replay.runDir, "slice", { status: "review", attempts: 1, evidence_ref: evidenceRef, review_ref: reviewRef });
-      assert.equal(upgraded.slice.attempt_reviews[0].verdict, "REJECT");
-      assert.equal(upgraded.slice.attempt_reviews[0].convergence, "converging");
-      assert.equal(upgraded.slice.attempt_reviews[0].remaining_fix_count, 1);
-      assert.equal(upgraded.slice.attempt_reviews[0].legacy_unclassified, undefined);
-      assert.match(upgraded.slice.review_hash, /^sha256:[0-9a-f]{64}$/u);
-
-      const beforeRetry = readFileSync(join(replay.runDir, "run.json"), "utf8");
-      await assert.rejects(
-        transitionRunSlice(replay.runDir, "slice", { status: "running", attempts: 2 }),
-        /schema version 1 grants no lane-feasibility authority/u,
-      );
-      assert.equal(readFileSync(join(replay.runDir, "run.json"), "utf8"), beforeRetry);
-
-      const forced = readRun(replay);
-      forced.slices[0].status = "running";
-      forced.slices[0].attempts = 2;
-      for (const key of ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]) delete forced.slices[0][key];
-      writeJson(join(replay.runDir, "run.json"), forced);
-      const dispatchFilesBefore = readdirSync(join(replay.runDir, "dispatch")).sort();
-      await assert.rejects(
-        prepareSliceBuilderTaskDispatch(replay.repo, { run_id: "run", slice_id: "slice", attempt: 2, agent: "backend-builder" }, { claimDispatch: true, completionToken: "legacy-must-not-publish" }),
-        /schema version 1 grants no lane-feasibility authority/u,
-      );
-      assert.deepEqual(readdirSync(join(replay.runDir, "dispatch")).sort(), dispatchFilesBefore);
-    } finally {
-      cleanup(replay);
+  it("rejects schema-v1 and unstructured slice-review publication without mutation", async () => {
+    for (const shape of ["schema-v1", "unstructured"]) {
+      const fixture = createFixture(`rejected-${shape}`);
+      try {
+        await startAttempt(fixture, 1);
+        commitSliceAttempt(fixture, 1);
+        const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+        const evidenceRef = "evidence/slice.attempt-1.json";
+        const reviewRef = "reviews/slice.attempt-1.json";
+        writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
+        const review = reviewRecord(fixture, 1, { verdict: "REJECT", fixes: ["invalid review shape"] });
+        if (shape === "schema-v1") review.remediation_context.schema_version = 1;
+        else delete review.remediation_context;
+        writeJson(join(fixture.runDir, reviewRef), review);
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: evidenceRef, review_ref: reviewRef }),
+          shape === "schema-v1" ? /schema_version.*must equal 2/u : /remediation_context.*required/u,
+          shape,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, shape);
+      } finally {
+        cleanup(fixture);
+      }
     }
   });
 
@@ -689,7 +651,7 @@ function commitSliceAttempt(fixture, attempt) {
   git(fixture.repo, ["commit", "-m", `slice attempt ${attempt}`]);
 }
 
-function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "converging", classifications, schemaVersion = 2, scopeEffect = "in-lane", likelyPaths = ["slice.txt"], fixOwner = "slice" }) {
+function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "converging", classifications, scopeEffect = "in-lane", likelyPaths = ["slice.txt"], fixOwner = "slice" }) {
   return {
     subject: "slice",
     attempt,
@@ -699,11 +661,13 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
     remaining_fix_count: fixes.length,
     required_fixes: fixes,
     remediation_context: {
-      schema_version: schemaVersion,
+      schema_version: 2,
       fixes: fixes.map((_, required_fix_index) => ({
         required_fix_index,
         classification: classifications?.[required_fix_index] || (convergence === "nonconvergent" ? "nonconvergent" : "narrow-correction"),
-        ...(schemaVersion === 2 ? { scope_effect: scopeEffect, likely_paths: [...likelyPaths], fix_owner: fixOwner } : {}),
+        scope_effect: scopeEffect,
+        likely_paths: [...likelyPaths],
+        fix_owner: fixOwner,
       })),
     },
   };

@@ -107,7 +107,7 @@ describe("simplified run-state transitions", () => {
         ...baseRun(fixture.runId),
         max_retries: 3,
         slices: [
-          { id: "api", status: "merged", attempts: 1, merge_commit: "abc123" },
+          writeModernReviewedSlice(fixture.runDir, "api", { status: "merged", mergeCommit: "abc123" }),
           { id: "ui", status: "running", attempts: 1 },
         ],
       });
@@ -119,8 +119,7 @@ describe("simplified run-state transitions", () => {
       );
 
       const allMerged = readJson(join(fixture.runDir, "run.json"));
-      allMerged.slices[1].status = "merged";
-      allMerged.slices[1].merge_commit = "def456";
+      allMerged.slices[1] = writeModernReviewedSlice(fixture.runDir, "ui", { status: "merged", mergeCommit: "def456" });
       writeJson(join(fixture.runDir, "run.json"), allMerged);
       await assert.rejects(
         transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: 0 }),
@@ -967,113 +966,41 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("upgrades only exact legacy review and merged replays and keeps terminal rows immutable", async () => {
-    const reviewFixture = createFixture("legacy-review-upgrade");
-    try {
-      initGitRepo(reviewFixture.repo, ["slice-branch"]);
-      prepareSliceMergeState(reviewFixture);
-      writeLegacySliceReview(join(reviewFixture.runDir, "reviews", "slice.json"));
-      const legacy = readJson(join(reviewFixture.runDir, "run.json"));
-      for (const key of ["evidence_hash", "review_hash", "reviewed_commit"]) delete legacy.slices[0][key];
-      writeJson(join(reviewFixture.runDir, "run.json"), legacy);
-      const legacyBytes = readFileSync(join(reviewFixture.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionRunSlice(reviewFixture.runDir, "slice", { status: "review", attempts: 2 }), /exact same-status replay|attempts must both|current running attempt/u);
-      assert.equal(readFileSync(join(reviewFixture.runDir, "run.json"), "utf8"), legacyBytes);
-      writeFileSync(join(legacy.slices[0].worktree, "dirty-after-review.txt"), "dirty\n");
-      await assert.rejects(transitionRunSlice(reviewFixture.runDir, "slice", {
-        status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
-      }), /clean slice worktree/u);
-      rmSync(join(legacy.slices[0].worktree, "dirty-after-review.txt"));
-      const upgraded = await transitionRunSlice(reviewFixture.runDir, "slice", {
-        status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
-      });
-      assert.match(upgraded.slice.evidence_hash, /^sha256:[0-9a-f]{64}$/u);
-      assert.equal(upgraded.slice.reviewed_commit, readJson(join(reviewFixture.runDir, "reviews", "slice.json")).reviewed_commit);
-      assert.deepEqual(upgraded.slice.attempt_reviews, [{
-        attempt: 1,
-        evidence_ref: "evidence/slice.json",
-        evidence_hash: upgraded.slice.evidence_hash,
-        review_ref: "reviews/slice.json",
-        review_hash: upgraded.slice.review_hash,
-        reviewed_commit: upgraded.slice.reviewed_commit,
-        verdict: "APPROVE",
-        legacy_unclassified: true,
-      }]);
-
-      const replayBytes = readFileSync(join(reviewFixture.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionRunSlice(reviewFixture.runDir, "slice", { status: "review", attempts: 2 }), /write-once|greater attempt|attempts must both|current running attempt/u);
-      assert.equal(readFileSync(join(reviewFixture.runDir, "run.json"), "utf8"), replayBytes);
-    } finally {
-      cleanup(reviewFixture.repo);
+  it("rejects in-review and merged rows missing modern bindings or attempt history without mutation", async () => {
+    for (const missing of ["bindings", "history"]) {
+      const fixture = createFixture(`incomplete-review-${missing}`);
+      try {
+        initGitRepo(fixture.repo, ["slice-branch"]);
+        prepareSliceMergeState(fixture);
+        const run = readJson(join(fixture.runDir, "run.json"));
+        if (missing === "bindings") for (const key of ["evidence_hash", "review_hash", "reviewed_commit"]) delete run.slices[0][key];
+        else delete run.slices[0].attempt_reviews;
+        writeJson(join(fixture.runDir, "run.json"), run);
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" }),
+          /complete evidence_hash|attempt_reviews|append-only attempt history/u,
+          missing,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      } finally {
+        cleanup(fixture.repo);
+      }
     }
 
-    const mergedFixture = createFixture("legacy-merged-upgrade");
+    const merged = createFixture("incomplete-merged-history");
     try {
-      initGitRepo(mergedFixture.repo, ["slice-branch"]);
-      const merge = prepareSliceMergeState(mergedFixture);
-      await transitionSliceMerged(mergedFixture.runDir, "slice", { merge_commit: merge.mergeCommit });
-      writeLegacySliceReview(join(mergedFixture.runDir, "reviews", "slice.json"));
-      const legacy = readJson(join(mergedFixture.runDir, "run.json"));
-      for (const key of ["evidence_hash", "review_hash", "reviewed_commit"]) delete legacy.slices[0][key];
-      writeJson(join(mergedFixture.runDir, "run.json"), legacy);
-      const upgraded = await transitionSliceMerged(mergedFixture.runDir, "slice", { merge_commit: merge.mergeCommit });
-      assert.equal(upgraded.slice.reviewed_commit, merge.reviewedCommit);
-      assert.equal(upgraded.slice.attempt_reviews.length, 1);
-      assert.equal(upgraded.slice.attempt_reviews[0].reviewed_commit, merge.reviewedCommit);
-      const successorBytes = readFileSync(join(mergedFixture.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionSliceMerged(mergedFixture.runDir, "slice", { merge_commit: merge.mergeCommit }), /already merged/u);
-      assert.equal(readFileSync(join(mergedFixture.runDir, "run.json"), "utf8"), successorBytes);
-
-      const failed = readJson(join(mergedFixture.runDir, "run.json"));
-      for (const key of ["evidence_hash", "review_hash", "reviewed_commit"]) delete failed.slices[0][key];
-      delete failed.slices[0].attempt_reviews;
-      writeJson(join(mergedFixture.runDir, "run.json"), failed);
-      const failedBytes = readFileSync(join(mergedFixture.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionSliceMerged(mergedFixture.runDir, "slice", { merge_commit: "0".repeat(40) }), (error) => error.message === "legacy merged slice authority upgrade failed");
-      assert.equal(readFileSync(join(mergedFixture.runDir, "run.json"), "utf8"), failedBytes);
-      const approvedReview = readJson(join(mergedFixture.runDir, "reviews", "slice.json"));
-      writeJson(join(mergedFixture.runDir, "reviews", "slice.json"), { ...approvedReview, verdict: "REJECT" });
-      await assert.rejects(transitionSliceMerged(mergedFixture.runDir, "slice", { merge_commit: merge.mergeCommit }), (error) => error.message === "legacy merged slice authority upgrade failed");
-      assert.equal(readFileSync(join(mergedFixture.runDir, "run.json"), "utf8"), failedBytes);
-      writeJson(join(mergedFixture.runDir, "reviews", "slice.json"), approvedReview);
-
-      failed.status = "completed";
-      failed.terminal_result = { status: "completed", run_id: failed.run_id, pr_url: "https://github.com/acme/repo/pull/1", pr_number: 1, repository: "acme/repo", draft: false };
-      failed.pr_url = failed.terminal_result.pr_url;
-      writeJson(join(mergedFixture.runDir, "run.json"), failed);
-      const terminalBytes = readFileSync(join(mergedFixture.runDir, "run.json"), "utf8");
-      await assert.rejects(transitionSliceMerged(mergedFixture.runDir, "slice", { merge_commit: merge.mergeCommit }), /legacy completed run is read-only/u);
-      assert.equal(readFileSync(join(mergedFixture.runDir, "run.json"), "utf8"), terminalBytes);
+      initGitRepo(merged.repo, ["slice-branch"]);
+      const merge = prepareSliceMergeState(merged);
+      await transitionSliceMerged(merged.runDir, "slice", { merge_commit: merge.mergeCommit });
+      const run = readJson(join(merged.runDir, "run.json"));
+      delete run.slices[0].attempt_reviews;
+      writeJson(join(merged.runDir, "run.json"), run);
+      const before = readFileSync(join(merged.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionSliceMerged(merged.runDir, "slice", { merge_commit: merge.mergeCommit }), /attempt_reviews|append-only attempt history/u);
+      assert.equal(readFileSync(join(merged.runDir, "run.json"), "utf8"), before);
     } finally {
-      cleanup(mergedFixture.repo);
-    }
-  });
-
-  it("retains exact legacy REJECT evidence without granting lane-feasibility retry authority", async () => {
-    const fixture = createFixture("legacy-reject-retry");
-    try {
-      initGitRepo(fixture.repo, ["slice-branch"]);
-      prepareSliceMergeState(fixture, { verdict: "REJECT" });
-      writeLegacySliceReview(join(fixture.runDir, "reviews", "slice.json"));
-      const legacy = readJson(join(fixture.runDir, "run.json"));
-      for (const key of ["evidence_hash", "review_hash", "reviewed_commit"]) delete legacy.slices[0][key];
-      writeJson(join(fixture.runDir, "run.json"), legacy);
-      seedBuilderDispatchAuthority(fixture);
-
-      const upgraded = await transitionRunSlice(fixture.runDir, "slice", {
-        status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
-      });
-      assert.equal(upgraded.slice.attempt_reviews[0].legacy_unclassified, true);
-      assert.equal(upgraded.slice.attempt_reviews[0].verdict, "REJECT");
-      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
-      await assert.rejects(
-        transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 }),
-        /grants no lane-feasibility authority/u,
-      );
-      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
-      assert.equal(readJson(join(fixture.runDir, "run.json")).slices[0].attempts, 1);
-    } finally {
-      cleanup(fixture.repo);
+      cleanup(merged.repo);
     }
   });
 
@@ -1899,7 +1826,7 @@ describe("simplified run-state transitions", () => {
 
   it("rehashes accepted decomposition before test-verifier dispatch", async () => {
     const fixture = createFixture("test-verifier-decomposition-recheck");
-    const projection = [{ id: "backend", stack: "backend", depends_on: [], status: "merged", attempts: 1 }];
+    const projection = [writeModernReviewedSlice(fixture.runDir, "backend", { status: "merged", mergeCommit: "abc123" })];
     try {
       writeSeedPlan(fixture.runDir, projection);
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
@@ -2078,11 +2005,15 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
-      writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head, verdict: "REJECT", requiredFixes: ["fix the rejected slice"] }));
+      writeJson(join(fixture.runDir, "reviews", "slice-1.json"), {
+        subject: "slice", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
+        remaining_fix_count: 1, required_fixes: ["fix the rejected slice"],
+        remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "narrow-correction" }] },
+      });
       const beforeV1Publication = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       await assert.rejects(
         transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice-1.json", review_ref: "reviews/slice-1.json" }),
-        /must equal 2 for newly published reviews/u,
+        /must equal 2/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeV1Publication);
       writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head, verdict: "REJECT", requiredFixes: ["fix the rejected slice"] }));
@@ -3176,6 +3107,22 @@ function deferredPromise() {
   return { promise, resolve };
 }
 
+function writeModernReviewedSlice(runDir, id, { status = "review", mergeCommit, reviewedCommit = "a".repeat(40) } = {}) {
+  const evidenceRef = `evidence/${id}.fixture.json`;
+  const reviewRef = `reviews/${id}.fixture.json`;
+  mkdirSync(join(runDir, "evidence"), { recursive: true });
+  mkdirSync(join(runDir, "reviews"), { recursive: true });
+  writeJson(join(runDir, evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(runDir, reviewRef), createV2SliceReviewRecord({ subject: id, attempt: 1, reviewedCommit }));
+  const evidenceHash = hashFile(join(runDir, evidenceRef));
+  const reviewHash = hashFile(join(runDir, reviewRef));
+  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
+  return {
+    id, stack: "backend", depends_on: [], status, attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+    reviewed_commit: reviewedCommit, attempt_reviews: [history], ...(status === "merged" ? { merge_commit: mergeCommit ?? reviewedCommit } : {}),
+  };
+}
+
 function createFixture(runId) {
   const repo = mkdtempSync(join(tmpdir(), "run-state-simplified-"));
   const runDir = join(repo, ".opencode", "factory", runId);
@@ -3257,11 +3204,27 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
   runGit(sliceWorktree, ["commit", "-m", "reviewed slice"]);
   const reviewedCommit = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
   writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
-  writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject, verdict, attempt: 1, reviewedCommit }));
+  const requiredFixes = verdict === "REJECT" ? ["fix rejected slice"] : [];
+  const review = createV2SliceReviewRecord({ subject, verdict, attempt: 1, reviewedCommit, requiredFixes });
+  writeJson(join(fixture.runDir, "reviews", "slice.json"), review);
+  const evidenceHash = hashFile(join(fixture.runDir, "evidence", "slice.json"));
+  const reviewHash = hashFile(join(fixture.runDir, "reviews", "slice.json"));
+  const attemptReview = {
+    attempt: 1,
+    evidence_ref: "evidence/slice.json",
+    evidence_hash: evidenceHash,
+    review_ref: "reviews/slice.json",
+    review_hash: reviewHash,
+    reviewed_commit: reviewedCommit,
+    verdict,
+    convergence: review.convergence,
+    remaining_fix_count: review.remaining_fix_count,
+  };
   const slices = [{
     id: "slice", status: "review", attempts: 1, branch: "slice-branch", worktree: sliceWorktree,
-    evidence_ref: "evidence/slice.json", evidence_hash: hashFile(join(fixture.runDir, "evidence", "slice.json")),
-    review_ref: "reviews/slice.json", review_hash: hashFile(join(fixture.runDir, "reviews", "slice.json")), reviewed_commit: reviewedCommit,
+    evidence_ref: "evidence/slice.json", evidence_hash: evidenceHash,
+    review_ref: "reviews/slice.json", review_hash: reviewHash, reviewed_commit: reviewedCommit,
+    attempt_reviews: [attemptReview],
   }];
   let priorCommit = null;
   if (priorIntegration) {
@@ -3269,7 +3232,12 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
     runGit(fixture.repo, ["add", "prior.txt"]);
     runGit(fixture.repo, ["commit", "-m", "disjoint prior integration"]);
     priorCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
-    slices.unshift({ id: "prior", status: "merged", attempts: 1, merge_commit: priorCommit });
+    slices.unshift({
+      id: "prior", status: "merged", attempts: 1, merge_commit: priorCommit,
+      evidence_ref: attemptReview.evidence_ref, evidence_hash: attemptReview.evidence_hash,
+      review_ref: attemptReview.review_ref, review_hash: attemptReview.review_hash, reviewed_commit: attemptReview.reviewed_commit,
+      attempt_reviews: [{ ...attemptReview }],
+    });
   }
   writeJson(join(fixture.runDir, "run.json"), {
     ...baseRun(fixture.runId),
@@ -3416,16 +3384,36 @@ function writeReadyPrRun(fixture, overrides = {}) {
     review_ref: "reviews/slice.json", review_hash: hashFile(join(fixture.runDir, "reviews", "slice.json")), reviewed_commit: head,
     merge_commit: head, updated_at: NOW,
   };
+  slice.attempt_reviews = [{
+    attempt: 1,
+    evidence_ref: slice.evidence_ref,
+    evidence_hash: slice.evidence_hash,
+    review_ref: slice.review_ref,
+    review_hash: slice.review_hash,
+    reviewed_commit: head,
+    verdict: "APPROVE",
+    convergence: "converging",
+    remaining_fix_count: 0,
+  }];
   const sanitizedOverrides = { ...overrides };
   delete sanitizedOverrides.branch;
   delete sanitizedOverrides.worktree;
   delete sanitizedOverrides.validator;
   delete sanitizedOverrides.security_review;
+  delete sanitizedOverrides.slices;
   if (sanitizedOverrides.continuation) {
     sanitizedOverrides.continuation = structuredClone(sanitizedOverrides.continuation);
     sanitizedOverrides.continuation.target.branch = branch;
     sanitizedOverrides.continuation.target.worktree = fixture.repo;
   }
+  const slices = overrides.slices
+    ? overrides.slices.map((override) => {
+      if (override.id !== "slice" || !["review", "merged"].includes(override.status)) return override;
+      const modern = { ...slice, ...override };
+      if (modern.status === "review") delete modern.merge_commit;
+      return modern;
+    })
+    : [slice];
   writeJson(join(fixture.runDir, "run.json"), {
     ...baseRun(fixture.runId),
     branch,
@@ -3434,7 +3422,7 @@ function writeReadyPrRun(fixture, overrides = {}) {
     worktree: fixture.repo,
     pr_mode: "ready",
     gates: { pre_pr: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve", answered_at: NOW } },
-    slices: overrides.slices || [slice],
+    slices,
     validator,
     security_review: securityReview,
     ...sanitizedOverrides,
@@ -3468,6 +3456,12 @@ function bindReadyPrSliceDispatch(fixture) {
   Object.assign(slice, {
     stack: "backend", depends_on: [], dispatch_required: true, dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash,
     dispatch_closure_ref: closureRef, dispatch_closure_hash: hashFile(closurePath),
+  });
+  Object.assign(slice.attempt_reviews.at(-1), {
+    dispatch_claim_ref: slice.dispatch_claim_ref,
+    dispatch_claim_hash: slice.dispatch_claim_hash,
+    dispatch_closure_ref: slice.dispatch_closure_ref,
+    dispatch_closure_hash: slice.dispatch_closure_hash,
   });
   writeJson(runPath, run);
   return { claimPath, closurePath };
@@ -3709,12 +3703,6 @@ function assertPendingSteeringUnchanged(fixture, before) {
 
 function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-}
-
-function writeLegacySliceReview(file) {
-  const review = readJson(file);
-  for (const key of ["convergence", "remaining_fix_count", "remediation_context"]) delete review[key];
-  writeJson(file, review);
 }
 
 function writeSeedPlan(runDir, projection) {

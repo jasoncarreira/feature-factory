@@ -454,8 +454,8 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /separate external-source declarations rather than a `sidecar_bytes` member of the gate/i);
     assert.match(schemaCatalog, /No step variant joins `rejected` and `blocked`/i);
     assert.match(schemaCatalog, /no synthetic nested `review_binding`/i);
-    assert.match(schemaCatalog, /actual top-level all-or-none `\{evidence_hash, review_hash, reviewed_commit\}` fields remain the current review\/merge authority/i);
-    assert.match(schemaCatalog, /B2 adds append-only `attempt_reviews`/i);
+    assert.match(schemaCatalog, /top-level `\{evidence_hash, review_hash, reviewed_commit\}` fields are required current review\/merge authority/i);
+    assert.match(schemaCatalog, /B2 adds required append-only `attempt_reviews`/i);
     assert.match(SPEC_WRITER_PROMPT, /retain the real append-only `attempt_reviews`[\s\S]*checked dispatch-required claim\/closure ref-plus-hash fields/i);
     assert.doesNotMatch(SPEC_WRITER_PROMPT, /do not invent[^\n]*`attempt_reviews`/i);
     assert.match(schemaCatalog, /successor validator source is exactly `\{verdict, report, report_hash, review_ref, review_hash, reviewed_head_sha\}` and the successor security source exactly `\{verdict, review_ref, review_hash, reviewed_head_sha\}`/i);
@@ -542,7 +542,7 @@ describe("class-wide planning prompt contract", () => {
       assert.match(text, /`?evidence_hash`?.*`?review_hash`?.*`?reviewed_commit`?/is);
       assert.match(text, /`?report_hash`?.*`?review_hash`?.*`?reviewed_head_sha`?/is);
     }
-    assert.match(runSchema, /For slice `review` and `merged`, `evidence_hash`, `review_hash`, and `reviewed_commit` are all present or all absent/i);
+    assert.match(runSchema, /For slice `review` and `merged`, `evidence_hash`, `review_hash`, and `reviewed_commit` are all required/i);
     assert.match(runSchema, /Validator and security must both use their successor tuples or both use the legacy ref-only form/i);
     assert.match(buildSlices, /full 40-character lowercase `head_sha`/i);
     assert.match(buildSlices, /`reviewed_commit` equal to the exact full SHA the reviewer inspected/i);
@@ -557,14 +557,12 @@ describe("class-wide planning prompt contract", () => {
     assert.match(runSchema, /earlier merged slice commit must already be an ancestor of `P1`/i);
 
     for (const text of [README, SPEC, SCHEMA, SKILL]) {
-      assert.match(text, /legacy.*(?:review|slice).*upgrade/is);
+      assert.match(text, /legacy slice review\/merged rows.*reject/is);
       assert.match(text, /partial successor.*reject/is);
       assert.match(text, /legacy completed.*read-only/is);
       assert.match(text, /re-hash.*slice\/panel|re-hash.*bound slice\/panel/is);
       assert.match(text, /current clean integration (?:branch\/worktree )?HEAD/i);
     }
-    assert.match(runSchema, /legacy merged slice authority upgrade failed/i);
-
     assert.match(WORK_REVIEWER_PROMPT, /machine-readable review JSON.*exact slice `subject`, positive `attempt`.*`reviewed_commit`/is);
     assert.match(WORK_REVIEWER_PROMPT, /Reviewed commit.*full 40-character lowercase Git SHA/i);
     assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /machine-readable verdict JSON.*positive panel `attempt`.*`reviewed_head_sha`/is);
@@ -1757,7 +1755,7 @@ describe("implemented v2 reviewed carry-forward docs contract", () => {
     for (const text of [design, futureSchema]) {
       assert.match(text, /closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted_slices`, and `remaining_slice_ids`/i);
       assert.match(text, /`scope` is exactly `full-remaining-plan`|`scope: "full-remaining-plan"`/i);
-      assert.match(text, /closed to exactly `id`, `attempts`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`/i);
+      assert.match(text, /closed to exactly `id`, `attempts`, (?:exact )?`attempt_reviews`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`/i);
       assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order/i);
       assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order/i);
       assert.match(text, /unique[\s\S]*disjoint[\s\S]*set union[\s\S]*exactly[\s\S]*(?:complete `slices\[\]\.id` set|full plan)/i);
@@ -2009,13 +2007,13 @@ describe("remediation context reuse docs contract", () => {
     }
     assert.match(WORK_REVIEWER_PROMPT, /`likely_paths` is a nonempty unique list of canonical concrete repository paths[\s\S]*without globs/i);
     assert.match(WORK_REVIEWER_PROMPT, /`fix_owner` must equal an existing current-plan slice id/i);
-    assert.match(WORK_REVIEWER_PROMPT, /version 1 is compatibility data only and grants no lane-feasibility authority/i);
-    assert.match(WORK_REVIEWER_PROMPT, /compatibility eligibility is derived only from that persisted transition state, never from caller options/i);
+    assert.match(WORK_REVIEWER_PROMPT, /Schema version 1 and unstructured slice reviews always reject/i);
+    assert.match(WORK_REVIEWER_PROMPT, /there is no replay or publication compatibility path/i);
     assert.match(WORK_REVIEWER_PROMPT, /do not authorize editing, extend a builder lane, create durable effective paths/i);
     assert.match(WORK_REVIEWER_PROMPT, /Do not request or introduce another agent call/i);
     assert.match(SKILL, /exact hash-bound review must classify every required fix as `narrow-correction`/i);
     assert.match(SKILL, /do not pass `task_id`; start a fresh implementer Task/i);
-    assert.match(SCHEMA, /missing, duplicate-position, extra, unknown, or reordered classifications reject before review publication/i);
+    assert.match(SCHEMA, /schema version 1, missing context, duplicate positions, extra fields, unknown values, or reordered fixes reject before review publication/i);
     assert.match(SCHEMA, /selects only ephemeral implementer context and grants no merge, test, acceptance, lane, or mutation authority/i);
     assert.match(SKILL, /exact prior review ref and bytes\/hash[\s\S]*prior evidence ref and bytes\/hash[\s\S]*current slice contract\/lane\/branch\/worktree\/head/i);
     for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {

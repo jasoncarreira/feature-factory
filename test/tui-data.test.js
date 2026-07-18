@@ -661,19 +661,20 @@ describe("TUI factory scanner", () => {
     cleanup(repo);
   });
 
-  it("keeps simplified consistency issues visible without authority proof diagnostics", () => {
+  it("surfaces merged rows without review authority as invalid run state", () => {
     const repo = tempDir();
     writeRun(repo, "unverifiable", {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
+      allow_invalid_slice_authority: true,
       slices: [{ id: "merged-without-proof", status: "merged", attempts: 1 }],
     });
 
     const [run] = readRuns(findFactoryRoots(repo));
 
     assert.equal(run.run_id, "unverifiable");
-    assert.equal(run.status, "running");
-    assert.equal(run.diagnostics.items[0]?.condition, "protected-gate");
+    assert.equal(run.status, "invalid");
+    assert.equal(run.diagnostics.items[0]?.condition, "invalid-run-state");
     cleanup(repo);
   });
 
@@ -736,11 +737,18 @@ function writeRun(repo, id, input) {
   if (input.pr_url !== undefined) run.pr_url = input.pr_url;
   if (input.review_tier !== undefined) run.review_tier = input.review_tier;
   if (input.slices !== undefined) {
-    run.slices = input.slices.map((slice) => ({
-      ...slice,
-      ...(slice.attempts === undefined ? { attempts: slice.status === "pending" ? 0 : 1 } : {}),
-      ...(slice.status === "blocked" && slice.blocked_reason === undefined ? { blocked_reason: "blocked fixture" } : {}),
-    }));
+    run.slices = input.slices.map((slice) => {
+      const attempts = slice.attempts === undefined ? (slice.status === "pending" ? 0 : 1) : slice.attempts;
+      const authority = ["review", "merged"].includes(slice.status) && input.allow_invalid_slice_authority !== true
+        ? tuiSliceAuthority(slice.id, slice.status, attempts)
+        : {};
+      return {
+        ...slice,
+        attempts,
+        ...authority,
+        ...(slice.status === "blocked" && slice.blocked_reason === undefined ? { blocked_reason: "blocked fixture" } : {}),
+      };
+    });
   }
   if (input.steps !== undefined) run.steps = input.steps;
   if (input.validator !== undefined) run.validator = input.validator;
@@ -759,6 +767,23 @@ function writeRun(repo, id, input) {
     join(dir, "run.json"),
     `${JSON.stringify(run, null, 2)}\n`,
   );
+}
+
+function tuiSliceAuthority(id, status, attempt) {
+  const evidenceRef = `evidence/${id}.json`;
+  const reviewRef = `reviews/${id}.json`;
+  const evidenceHash = `sha256:${"a".repeat(64)}`;
+  const reviewHash = `sha256:${"b".repeat(64)}`;
+  const reviewedCommit = "c".repeat(40);
+  return {
+    attempt_reviews: [{ attempt, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+    evidence_ref: evidenceRef,
+    evidence_hash: evidenceHash,
+    review_ref: reviewRef,
+    review_hash: reviewHash,
+    reviewed_commit: reviewedCommit,
+    ...(status === "merged" ? { merge_commit: reviewedCommit } : {}),
+  };
 }
 
 function writePendingSteeringRun(repo, id, message) {

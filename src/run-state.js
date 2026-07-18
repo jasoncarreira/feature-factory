@@ -39,7 +39,6 @@ const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "terminal", "p
 const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
 const POST_PR_TERMINAL_PHASE = Object.freeze({ completed: "succeeded", blocked: "blocked", "needs-human": "needs-human" });
 const MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY = Symbol("merged-slice-repair-transition-authority");
-const LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY = Symbol("legacy-slice-review-compatibility-authority");
 const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
 const SLICE_DISPATCH_BINDING_KEYS = Object.freeze(["dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
 const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
@@ -48,7 +47,6 @@ const PR_FENCE_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "hea
 const CARRY_FORWARD_PLANNING_KINDS = new Set(["story", "research_map", "design_brief", "technical_brief"]);
 const SLICE_BUILDER_AGENTS = new Set(["backend-builder", "frontend-builder"]);
 const SAFE_TASK_DISPATCH_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const LEGACY_MERGED_UPGRADE_ERROR = "legacy merged slice authority upgrade failed";
 const CONTINUATION_PARENT_ARTIFACTS = Object.freeze([
   ["story", "artifacts/story.md"],
   ["research_map", "artifacts/research-map.md"],
@@ -1584,6 +1582,7 @@ export function observeCarryForwardAuthority(repoInput, parentRunDirInput, paren
     acceptedSlices.push({
       id: planned.id, attempts: slice.attempts, evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
       review_ref: slice.review_ref, review_hash: slice.review_hash, reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit,
+      attempt_reviews: cloneJson(slice.attempt_reviews),
     });
   }
   if (remainingSliceIds.length === 0) throw new Error("v2 carry-forward requires at least one nonmerged slice");
@@ -1841,7 +1840,7 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
     const expected = {
       id: row.id, stack: row.stack, depends_on: row.depends_on, status: "merged", attempts: adopted.attempts,
       evidence_ref: adopted.evidence_ref, evidence_hash: adopted.evidence_hash, review_ref: adopted.review_ref, review_hash: adopted.review_hash,
-      reviewed_commit: adopted.reviewed_commit, merge_commit: adopted.merge_commit,
+      reviewed_commit: adopted.reviewed_commit, merge_commit: adopted.merge_commit, attempt_reviews: adopted.attempt_reviews,
     };
     if (!sameJson(row, expected)) throw new Error(`adopted carry-forward slice '${row.id}' is immutable`);
     for (const [ref, hash, label] of [[row.evidence_ref, row.evidence_hash, "evidence"], [row.review_ref, row.review_hash, "review"]]) {
@@ -2344,23 +2343,9 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     sliceIndex = update.index;
     if (!update.changed) {
       if (priorSlice.status !== "review") return;
-      if (hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)) {
-        priorDispatchAuthority = observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
-        assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
-        if (TERMINAL_RUN_STATUSES.has(current.status)) return;
-        const currentHistory = priorSlice.attempt_reviews?.find((entry) => entry?.attempt === priorSlice.attempts);
-        if (currentHistory) return;
-        nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
-        appendSliceAttemptReview(slices[priorIndex], nextReviewAuthority);
-        sliceIndex = priorIndex;
-        return;
-      }
-      if (TERMINAL_RUN_STATUSES.has(current.status)) return;
       priorDispatchAuthority = observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
-      nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
-      Object.assign(slices[priorIndex], nextReviewAuthority.binding);
-      if (nextReviewAuthority.history_entry) appendSliceAttemptReview(slices[priorIndex], nextReviewAuthority);
-      sliceIndex = priorIndex;
+      assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
+      return;
     }
     if (sliceIndex >= 0 && slices[sliceIndex].status === "merged") {
       throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' merges must use transitionSliceMerged`);
@@ -2374,9 +2359,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
           priorDispatchAuthority = observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
         }
         if (priorSlice.status === "review" && slices[sliceIndex].status !== "review") {
-          priorReviewAuthority = hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)
-            ? assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice)
-            : observeSliceReviewSidecars(runDir, priorSlice.id, priorSlice);
+          priorReviewAuthority = assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
           if (priorReviewAuthority.review.verdict === "REJECT" && priorReviewAuthority.review.convergence === "nonconvergent") {
             if (slices[sliceIndex].status !== "running") throw new Error(`slice '${priorSlice.id}' current nonconvergent review cannot transition to ordinary blocked state`);
             terminalizeSliceNonconvergence(draft, priorSlice, sliceIndex, options);
@@ -2397,13 +2380,8 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
           if (unmet.length) throw new Error(`slice '${priorSlice.id}' is not dependency-ready: ${unmet.join(", ")}`);
         }
         assertSliceTransition(runDir, priorSlice, slices[sliceIndex]);
-        if (priorSlice.status === "review") priorReviewAuthority = hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)
-          ? assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice)
-          : observeSliceReviewSidecars(runDir, priorSlice.id, priorSlice);
+        if (priorSlice.status === "review") priorReviewAuthority = assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
         if (slices[sliceIndex].status === "review") {
-          if (priorSlice.status === "review" && !hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)) {
-            throw new Error(`legacy slice '${priorSlice.id}' review upgrade requires an exact same-status replay`);
-          }
           if (priorSlice.status === "review") throw new Error(`slice '${priorSlice.id}' review binding is write-once; return to running before publishing another review`);
           assertNoBindingFields(slices[sliceIndex], SLICE_REVIEW_BINDING_KEYS, `slice '${priorSlice.id}' review binding`);
           nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], options);
@@ -2439,7 +2417,6 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
   const request = normalizeSliceMergedInput(input);
   let sliceIndex = -1;
   let mergeAuthority = null;
-  let legacyUpgrade = false;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft) => {
     const slices = Array.isArray(draft.slices) ? draft.slices : [];
     sliceIndex = slices.findIndex((slice) => slice?.id === sliceId);
@@ -2447,32 +2424,8 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
     const currentSlice = slices[sliceIndex];
     if (mergedSliceRepairFence(draft)) throw new Error(`slice '${sliceId}' cannot merge while a merged-slice repair is unresolved`);
     if (currentSlice.status === "merged") {
-      if (hasCompleteBinding(currentSlice, SLICE_REVIEW_BINDING_KEYS)) {
-        if (TERMINAL_RUN_STATUSES.has(draft.status)) throw new Error("legacy completed run is read-only");
-        if (request.merge_commit === currentSlice.merge_commit) {
-          const currentHistory = currentSlice.attempt_reviews?.find((entry) => entry?.attempt === currentSlice.attempts);
-          if (!currentHistory) {
-            legacyUpgrade = true;
-            const reviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, sliceId, currentSlice, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
-            appendSliceAttemptReview(currentSlice, reviewAuthority);
-            mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
-            return;
-          }
-          observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, options);
-        }
-        throw new Error(`slice '${sliceId}' is already merged`);
-      }
-      if (TERMINAL_RUN_STATUSES.has(draft.status)) throw new Error("legacy completed run is read-only");
-      if (request.merge_commit !== currentSlice.merge_commit) throw new Error(LEGACY_MERGED_UPGRADE_ERROR);
-      legacyUpgrade = true;
-      try {
-        mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, legacyCompatibilityAuthority: LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY });
-      } catch (error) {
-        throw new Error(LEGACY_MERGED_UPGRADE_ERROR, { cause: error });
-      }
-      Object.assign(currentSlice, mergeAuthority.review_authority.binding);
-      appendSliceAttemptReview(currentSlice, mergeAuthority.review_authority);
-      return;
+      assertSliceReviewBindingCurrent(runDir, sliceId, currentSlice);
+      throw new Error(`slice '${sliceId}' is already merged`);
     }
     if (currentSlice.status !== "review") throw new Error(`slice '${sliceId}' can merge only from review`);
     const updatedAt = timestamp(options.now);
@@ -2489,15 +2442,7 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
   }, options, {
     sliceTransition: true,
     beforeReplace: (next) => {
-      try {
-        return assertSliceMergeAuthorityCurrent(runDir, next, sliceId, next.slices[sliceIndex], mergeAuthority, {
-          ...options,
-          legacyCompatibilityAuthority: legacyUpgrade ? LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY : undefined,
-        });
-      } catch (error) {
-        if (legacyUpgrade) throw new Error(LEGACY_MERGED_UPGRADE_ERROR, { cause: error });
-        throw error;
-      }
+      return assertSliceMergeAuthorityCurrent(runDir, next, sliceId, next.slices[sliceIndex], mergeAuthority, options);
     },
   }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
@@ -4218,16 +4163,11 @@ function normalizeSliceMergedInput(input) {
 }
 
 function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, options = {}) {
-  const legacyUpgrade = options.legacyCompatibilityAuthority === LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY;
-  if (!legacyUpgrade && !hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) {
-    throw new Error(`slice '${sliceId}' merge requires a successor review binding; replay the legacy review first`);
-  }
-  const observed = legacyUpgrade
-    ? observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options)
-    : assertSliceReviewBindingCurrent(runDir, sliceId, slice);
+  if (!hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) throw new Error(`slice '${sliceId}' merge requires a complete successor review binding`);
+  const observed = assertSliceReviewBindingCurrent(runDir, sliceId, slice);
   const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: slice.dispatch_required === true });
   if (observed.review.verdict !== "APPROVE") throw new Error(`slice '${sliceId}' merge requires APPROVE review`);
-  const sliceGit = legacyUpgrade ? observed.git : observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
+  const sliceGit = observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
   if (sliceGit.head !== observed.binding.reviewed_commit) throw new Error(`slice '${sliceId}' current branch/worktree head differs from reviewed_commit`);
   const repository = resolveAuthorityRepository(runDir, run, options);
   if (!stringValue(repository)) throw new Error(`slice '${sliceId}' merge requires a local git repository`);
@@ -4296,8 +4236,8 @@ function observeSliceReviewSidecars(runDir, sliceId, slice) {
   };
 }
 
-function observeAttemptReviewResult(sliceId, review, options = {}) {
-  const { task_context: _taskContext, ...result } = validateSliceReviewResult(review, { sliceId, requireV2: options.requireV2 === true });
+function observeAttemptReviewResult(sliceId, review) {
+  const { task_context: _taskContext, ...result } = validateSliceReviewResult(review, { sliceId });
   return result;
 }
 
@@ -4309,13 +4249,8 @@ function assertSliceReviewAuthorityCurrent(runDir, sliceId, slice, expected) {
 
 function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options = {}) {
   const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
-  const compatibilityReplay = options.legacyCompatibilityAuthority === LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY;
-  const legacyReview = compatibilityReplay
-    && ["convergence", "remaining_fix_count", "remediation_context"].every((key) => observed.review[key] === undefined);
-  const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: slice.dispatch_required === true || !compatibilityReplay });
-  const result = legacyReview
-    ? { verdict: observed.review.verdict, legacy_unclassified: true }
-    : observeAttemptReviewResult(sliceId, observed.review, { requireV2: !compatibilityReplay });
+  const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: true });
+  const result = observeAttemptReviewResult(sliceId, observed.review);
   const attempt = slice.attempts;
   if (!Number.isInteger(attempt) || attempt < 1 || observed.evidence.attempt !== attempt || observed.review.attempt !== attempt) {
     throw new Error(`slice '${sliceId}' successor evidence and review attempts must equal the positive slice attempt`);
@@ -4348,12 +4283,7 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
 }
 
 function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, options = {}) {
-  const compatibilityReplay = expected?.history_entry?.legacy_unclassified === true
-    || expected?.review?.remediation_context?.schema_version === 1;
-  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, {
-    ...options,
-    legacyCompatibilityAuthority: compatibilityReplay ? LEGACY_SLICE_REVIEW_COMPATIBILITY_AUTHORITY : undefined,
-  });
+  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options);
   if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' review authority changed before publication`);
   return current;
 }
@@ -4371,26 +4301,23 @@ export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
     throw new Error(`slice '${sliceId}' successor review hashes are stale`);
   }
   const history = Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : [];
-  if (history.length > 0) {
-    assertSliceAttemptHistoryCurrent(runDir, sliceId, slice);
-    const current = history.find((entry) => entry?.attempt === slice.attempts);
-    if (!current) throw new Error(`slice '${sliceId}' current review is missing from append-only attempt history`);
-    const result = current.legacy_unclassified === true
-      ? legacyAttemptReviewResult(sliceId, observed.review)
-      : observeAttemptReviewResult(sliceId, observed.review);
-    const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, current);
-    const expected = {
-      attempt: slice.attempts,
-      evidence_ref: slice.evidence_ref,
-      evidence_hash: slice.evidence_hash,
-      review_ref: slice.review_ref,
-      review_hash: slice.review_hash,
-      reviewed_commit: slice.reviewed_commit,
-      ...result,
-      ...dispatch,
-    };
-    if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' current review differs from append-only attempt history`);
-  }
+  if (history.length === 0) throw new Error(`slice '${sliceId}' current review is missing append-only attempt history`);
+  assertSliceAttemptHistoryCurrent(runDir, sliceId, slice);
+  const current = history.find((entry) => entry?.attempt === slice.attempts);
+  if (!current) throw new Error(`slice '${sliceId}' current review is missing from append-only attempt history`);
+  const result = observeAttemptReviewResult(sliceId, observed.review);
+  const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, current);
+  const expected = {
+    attempt: slice.attempts,
+    evidence_ref: slice.evidence_ref,
+    evidence_hash: slice.evidence_hash,
+    review_ref: slice.review_ref,
+    review_hash: slice.review_hash,
+    reviewed_commit: slice.reviewed_commit,
+    ...result,
+    ...dispatch,
+  };
+  if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' current review differs from append-only attempt history`);
   return { ...observed, binding: pickBinding(slice, SLICE_REVIEW_BINDING_KEYS) };
 }
 
@@ -4450,9 +4377,7 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
         reviewed_commit: previous.reviewed_commit,
       });
       if (head !== previous.reviewed_commit) throw new Error("slice builder remediation head must equal the immediately prior reviewed_commit");
-      taskContext = previous.legacy_unclassified === true
-        ? "fresh"
-        : validateSliceReviewResult(observed.review, { sliceId: slice.id }).task_context;
+      taskContext = validateSliceReviewResult(observed.review, { sliceId: slice.id }).task_context;
       validateSliceReviewFeasibility(observed.review, plan, { sliceId: slice.id });
       assertReviewedSliceRetryRoute(observed.review, slice.id);
       prior = {
@@ -5365,9 +5290,7 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
       evidence_ref: entry.evidence_ref,
       review_ref: entry.review_ref,
     });
-    const result = entry.legacy_unclassified === true
-      ? legacyAttemptReviewResult(sliceId, observed.review)
-      : observeAttemptReviewResult(sliceId, observed.review);
+    const result = observeAttemptReviewResult(sliceId, observed.review);
     const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, entry);
     const current = {
       attempt: entry.attempt,
@@ -5383,14 +5306,6 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
       throw new Error(`slice '${sliceId}' attempt ${entry.attempt} review history is stale`);
     }
   }
-}
-
-function legacyAttemptReviewResult(sliceId, review) {
-  if (!review || review.subject !== sliceId || !["APPROVE", "REJECT"].includes(review.verdict)
-    || ["convergence", "remaining_fix_count", "remediation_context"].some((key) => review[key] !== undefined)) {
-    throw new Error(`slice '${sliceId}' legacy review history is not exact unclassified authority`);
-  }
-  return { verdict: review.verdict, legacy_unclassified: true };
 }
 
 function observeAttemptReviewDispatch(runDir, sliceId, slice, entry) {
