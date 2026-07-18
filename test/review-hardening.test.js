@@ -10,8 +10,22 @@ import { normalizeCostAttribution } from "../src/cost-attribution.js";
 import { runAttributes, sanitizeOtlpEnv, validateTracestate } from "../src/telemetry.js";
 import { collectProtectedSteeringState } from "../src/steering-conflicts.js";
 import { cancelFactoryRun, cleanupRun, continueFactory, recordCostUsage, startFactory } from "../src/factory.js";
+import { SLICE_FIX_CLASSIFICATIONS, sliceReviewTaskContext, validateSliceReviewResult } from "../src/validate.js";
 
 const NOW = "2026-07-09T15:00:00.000Z";
+
+function classifiedReview(classifications, { convergence = "converging" } = {}) {
+  return {
+    verdict: "REJECT",
+    convergence,
+    required_fixes: classifications.map((_, index) => `fix-${index + 1}`),
+    remaining_fix_count: classifications.length,
+    remediation_context: {
+      schema_version: 1,
+      fixes: classifications.map((classification, required_fix_index) => ({ required_fix_index, classification })),
+    },
+  };
+}
 
 describe("steering consume crash recovery", () => {
   it("finishes an interrupted consume whose pending file was already renamed", async () => {
@@ -73,6 +87,38 @@ describe("slice merge transition guard", () => {
     } finally {
       cleanupDir(runDir);
     }
+  });
+});
+
+describe("slice remediation task context", () => {
+  it("reuses context only for an all-narrow fix list", () => {
+    for (const classification of SLICE_FIX_CLASSIFICATIONS) {
+      const review = classifiedReview([classification], { convergence: classification === "nonconvergent" ? "nonconvergent" : "converging" });
+      assert.equal(sliceReviewTaskContext(review, { sliceId: "slice" }), classification === "narrow-correction" ? "reuse" : "fresh", classification);
+    }
+    assert.equal(sliceReviewTaskContext(classifiedReview(["narrow-correction", "schema-redesign"])), "fresh");
+  });
+
+  it("requires one ordered closed classification for every required fix", () => {
+    const missing = classifiedReview(["narrow-correction"]);
+    delete missing.remediation_context;
+    assert.throws(() => validateSliceReviewResult(missing), /remediation_context.*required/u);
+
+    const unknown = classifiedReview(["unknown"]);
+    assert.throws(() => validateSliceReviewResult(unknown), /classification.*one of/u);
+
+    const skipped = classifiedReview(["narrow-correction", "narrow-correction"]);
+    skipped.remediation_context.fixes[1].required_fix_index = 0;
+    assert.throws(() => validateSliceReviewResult(skipped), /must equal its required_fixes position/u);
+
+    const incomplete = classifiedReview(["narrow-correction", "narrow-correction"]);
+    incomplete.remediation_context.fixes.pop();
+    assert.throws(() => validateSliceReviewResult(incomplete), /classify every required fix exactly once/u);
+  });
+
+  it("keeps nonconvergent review state and fix classification consistent", () => {
+    assert.throws(() => validateSliceReviewResult(classifiedReview(["nonconvergent"])), /classify nonconvergent exactly when review convergence is nonconvergent/u);
+    assert.throws(() => validateSliceReviewResult(classifiedReview(["narrow-correction"], { convergence: "nonconvergent" })), /classify nonconvergent exactly when review convergence is nonconvergent/u);
   });
 });
 

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
+import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch } from "../src/run-state.js";
 import { DURABLE_AUTHORITY_CATALOG, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -121,7 +122,7 @@ describe("cli write surface", () => {
     }
   });
 
-  it("drives a run through local state transitions without direct run.json edits", () => {
+  it("drives a run through local state transitions without direct run.json edits", async () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-write-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);
     try {
@@ -139,6 +140,10 @@ describe("cli write surface", () => {
       runGit(repo, ["checkout", "-b", "feature-branch"]);
       seedRun(runDir);
       writeJson(join(runDir, "run.json"), { ...readJson(join(runDir, "run.json")), base_ref: "main", base_commit: baseCommit, branch: "feature-branch", github_account: "jasoncarreira", pr_mode: "ready" });
+      writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted brief\n");
+      writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
+      writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
+      runFactory(repo, ["step", RUN_ID, "spec-writer", "accepted", "--attempts", "1", "--artifact-ref", "artifacts/technical-brief.md", "--review-ref", "reviews/spec-writer.json", "--json"]);
 
       const steered = JSON.parse(runFactory(repo, ["steer", RUN_ID, "--message", "operator steering", "--json"]).stdout);
       assert.equal(steered.steering.message_chars, 17);
@@ -148,6 +153,7 @@ describe("cli write surface", () => {
       validateFactory(repo);
 
       runFactory(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]);
+      runFactory(repo, ["step", RUN_ID, "work-decomposer", "accepted", "--attempts", "1", "--artifact-ref", "plan/slices.json", "--review-ref", "reviews/work-decomposer.json", "--json"]);
       validateFactory(repo);
       const costRecorded = JSON.parse(runFactory(repo, ["cost-record", RUN_ID, "--agent", "backend-builder", "--step", "build", "--slice-id", "slice", "--provider", "opencode", "--model", "gpt-5.5", "--source", "usage-log", "--operation", "completion", "--request-id", "req-1", "--input-tokens", "10", "--output-tokens", "5", "--total-tokens", "15", "--cost-total", "0.02", "--currency", "USD", "--recorded-at", "2026-07-08T12:30:00.000Z", "--entry-id", "cli-cost", "--json"]).stdout);
       assert.equal(costRecorded.entry.id, "cli-cost");
@@ -158,11 +164,24 @@ describe("cli write surface", () => {
       assert.match(runFactory(repo, ["list"]).stdout, /cost available · 1 entry · 15 tokens · 0\.02 USD/u);
       validateFactory(repo);
       runFactory(repo, ["slice-status", RUN_ID, "slice", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/slice", "--attempts", "1", "--json"]);
+      const completionToken = "cli-write-surface-completion";
+      const dispatch = await prepareSliceBuilderTaskDispatch(repo, {
+        run_id: RUN_ID, slice_id: "slice", attempt: 1, agent: "backend-builder",
+      }, { claimDispatch: true, completionToken });
+      await completeSliceBuilderTaskDispatch(repo, {
+        run_id: RUN_ID,
+        slice_id: "slice",
+        attempt: 1,
+        agent: "backend-builder",
+        claim_ref: dispatch.dispatch_claim.ref,
+        claim_hash: dispatch.dispatch_claim.hash,
+        completion_token: completionToken,
+      });
       validateFactory(repo);
       assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]).stderr, /refuses to replace non-pending slice progress/u);
       assert.match(runFactoryFail(repo, ["slice-status", RUN_ID, "typo", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/typo", "--attempts", "1", "--json"]).stderr, /slice 'typo' not found/u);
       writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedHead });
-      writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", verdict: "APPROVE", required_fixes: [], attempt: 1, reviewed_commit: reviewedHead });
+      writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 1, fixes: [] }, attempt: 1, reviewed_commit: reviewedHead });
       runFactory(repo, ["slice-status", RUN_ID, "slice", "review", "--evidence-ref", "evidence/slice.json", "--review-ref", "reviews/slice.json", "--json"]);
       validateFactory(repo);
       runGit(repo, ["merge", "--no-ff", "slice-branch", "-m", "merge slice"]);
@@ -171,7 +190,7 @@ describe("cli write surface", () => {
       validateFactory(repo);
 
       writeFileSync(join(runDir, "artifacts", "story.md"), "story\n", "utf8");
-      runFactory(repo, ["step", RUN_ID, "spec-writer", "accepted", "--artifact-ref", "artifacts/story.md", "--review-ref", "reviews/slice.json", "--json"]);
+      runFactory(repo, ["step", RUN_ID, "story-reader", "accepted", "--attempts", "1", "--artifact-ref", "artifacts/story.md", "--review-ref", "reviews/slice.json", "--json"]);
       validateFactory(repo);
       assert.match(runFactoryFail(repo, ["step", RUN_ID, "unknown-agent", "running", "--attempts", "1", "--json"]).stderr, /step 'unknown-agent' not found/u);
 
@@ -311,7 +330,20 @@ function seedRun(runDir) {
   mkdirSync(join(runDir, "evidence"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   mkdirSync(join(runDir, "gates"), { recursive: true });
-  writeJson(join(runDir, "run.json"), { schema_version: 1, run_id: RUN_ID, status: "running", branch: "main", worktree: resolve(runDir, "../../.."), gates: {}, slices: [], steps: [{ agent: "spec-writer", status: "running", attempts: 0 }] });
+  writeJson(join(runDir, "run.json"), {
+    schema_version: 1,
+    run_id: RUN_ID,
+    status: "running",
+    branch: "main",
+    worktree: resolve(runDir, "../../.."),
+    gates: {},
+    slices: [],
+    steps: [
+      { agent: "spec-writer", status: "running", attempts: 0 },
+      { agent: "work-decomposer", status: "running", attempts: 0 },
+      { agent: "story-reader", status: "running", attempts: 0 },
+    ],
+  });
   writeJson(join(runDir, "plan", "slices.json"), {
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [{ id: "slice", stack: "backend", paths: ["src/example.js"], depends_on: [], acceptance: ["works"], test_plan: ["unit"] }],

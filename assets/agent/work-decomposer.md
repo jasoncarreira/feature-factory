@@ -23,6 +23,7 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 ## Slice Rules
 
 - Every slice has `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
+- Every slice uses the same fixed three-attempt runtime limit. Do not emit `max_attempts`, `dominant_concern`, obligation-count eligibility, or any fourth-attempt policy; reviewed carry-forward is the only escape hatch after the bounded loop.
 - Every acceptance criterion maps to at least one slice.
 - Every deferred mechanical completeness obligation in the brief maps to exactly one owning slice. Preserve its declared dimensions in that slice's acceptance, assign an owned path lane for the builder-selected executable schema or state model, and include its table-driven or model-based verification in the slice test plan; require an exact artifact path only when it is existing, public, generated, shared, contested, or source-fixed. Do not let completeness disappear merely because it is not a story acceptance criterion.
 - Same-wave slices must be file-disjoint.

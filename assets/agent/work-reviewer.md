@@ -61,7 +61,8 @@ Follow these steps in order. If rules appear to conflict, the explicit precedenc
    - `BLOCKER` -> REJECT. `MAJOR` -> APPROVE only when there is no blocker and the risk is safe to carry to human review. `MINOR` -> note only.
 
 8. **Emit the structured review.** Give actionable justification for every rejection and specific fixes owned by the appropriate agent. Every rejecting finding and `required_fixes` item follows the explicit required-fix rule: exact names, source requirement, artifact location, and complete finite membership rather than an umbrella category. Cite `path:line` for code findings; for missing evidence, cite the missing evidence ref or command. If clean, approve without inventing nits.
-   - For a slice build, inspect the checked-out commit and emit `reviewed_commit` as its exact full 40-character lowercase Git SHA. It must be the code actually reviewed, never a short SHA or a value copied from instructions without verification. The machine-readable review JSON must carry the exact slice `subject`, positive `attempt`, verdict, `required_fixes`, and this `reviewed_commit`.
+   - For a slice build, inspect the checked-out commit and emit `reviewed_commit` as its exact full 40-character lowercase Git SHA. It must be the code actually reviewed, never a short SHA or a value copied from instructions without verification. The machine-readable review JSON must carry the exact slice `subject`, positive `attempt`, verdict, `required_fixes`, `convergence`, `remaining_fix_count`, and this `reviewed_commit`. `required_fixes` is a unique list of non-empty, trimmed, NFC-normalized atomic issues, and `remaining_fix_count` equals its length. APPROVE requires zero fixes; REJECT requires at least one. The factory hash-binds this result into append-only attempt history. Every slice has exactly three attempts; never recommend attempt 4, `max_attempts`, `dominant_concern`, or obligation-count eligibility. For every slice attempt, `nonconvergent` has one terminal meaning: the current REJECT must not receive another autonomous builder attempt. It is not a severity synonym or optional note; the factory blocks the run from that exact review and exposes reviewed B1 carry-forward.
+   - The same slice review JSON must contain closed `remediation_context: {schema_version: 1, fixes: [...]}` with exactly one ordered `{required_fix_index, classification}` entry for every `required_fixes` item. Classification is exactly one of `architecture-replacement`, `ownership-amendment`, `parallel-authority-removal`, `schema-redesign`, `migration-redesign`, `wholesale-head-replacement`, `nonconvergent`, or `narrow-correction`. Use `narrow-correction` only when the same implementation context can safely amend the current approach. Every other class requires a fresh builder context. Mark review convergence `nonconvergent` exactly when at least one fix has classification `nonconvergent`.
 
 ## Output
 
@@ -78,6 +79,7 @@ Return exactly this structure:
 **Claim vs observed:** consistent | MISMATCH - <details>
 
 **Convergence:** converging | nonconvergent
+**Remaining fix count:** <exact required-fixes length>
 
 **Findings:**
 - [BLOCKER] <what> - `path:line` - <why it fails> - fix_owner: <agent>
@@ -85,5 +87,5 @@ Return exactly this structure:
 - [MINOR] <...>
 
 **Required fixes (if REJECT):**
-1. <specific fix>
+1. [classification: <closed classification>] <specific fix>
 ```

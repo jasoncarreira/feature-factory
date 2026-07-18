@@ -64,7 +64,7 @@ export const POST_PR_TERMINAL_REASONS = Object.freeze({
 const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
-const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
+const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "special_builder_dispatch", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
 const PLAN_KEYS = new Set(["slices", "integration_gate"]);
 const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
 const INTEGRATION_GATE_KEYS = new Set(["required_commands"]);
@@ -72,8 +72,10 @@ const INTEGRATION_GATE_COMMAND_KEYS = new Set(["program", "args"]);
 const REQUIRED_FINAL_INTEGRATION_COMMAND = Object.freeze({ program: "npm", args: Object.freeze(["run", "check"]) });
 const PLAN_SLICES_REF = "plan/slices.json";
 const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
-const TERMINAL_RESULT_COMMON_KEYS = new Set(["status", "run_id", "pr_url", "reason", "summary", "artifacts"]);
+const TERMINAL_RESULT_COMMON_KEYS = new Set(["status", "run_id", "pr_url", "reason", "summary", "artifacts", "nonconvergence"]);
 const TERMINAL_RESULT_COMPLETED_KEYS = new Set([...TERMINAL_RESULT_COMMON_KEYS, "pr_number", "pr_node_id", "repository", "operation_id", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
+const TERMINAL_NONCONVERGENCE_KEYS = new Set(["schema_version", "kind", "slice_id", "source_review", "continuation"]);
+const TERMINAL_NONCONVERGENCE_CONTINUATION_KEYS = new Set(["program", "args"]);
 const DURABLE_REF_ROOTS = new Set(["artifacts", "evidence", "reviews", "gates", "steering"]);
 const GATE_KEYS = new Set(["status", "artifact", "question_ref", "answer_ref", "answered_at", "answer", "decision_note", "approval_source", "pending_snapshot", "handoff_receipt"]);
 const PENDING_SNAPSHOT_KEYS = new Set(["question_ref", "question_hash", "artifact_ref", "artifact_hash", "answer_ref", "answer_hash", "created_at"]);
@@ -91,7 +93,24 @@ const TEST_EXECUTION_STREAM_KEYS = new Set(["captured_bytes", "sha256", "truncat
 const TEST_EXECUTION_OUTCOMES = new Set(["exited", "signaled", "timeout", "output-limit", "launch-error"]);
 const TEST_EXECUTION_STATUSES = new Set(["pass", "fail"]);
 const SIGNAL_PATTERN = /^SIG[A-Z0-9]{1,31}$/u;
-const SLICE_KEYS = new Set(["id", "stack", "depends_on", "status", "branch", "worktree", "attempts", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "blocked_reason", "updated_at"]);
+const SLICE_KEYS = new Set(["id", "stack", "depends_on", "status", "branch", "worktree", "attempts", "attempt_reviews", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "blocked_reason", "updated_at"]);
+const SLICE_ATTEMPT_REVIEW_KEYS = new Set(["attempt", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "verdict", "convergence", "remaining_fix_count", "legacy_unclassified", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
+const SLICE_REVIEW_VERDICTS = new Set(["APPROVE", "REJECT"]);
+const SLICE_REVIEW_CONVERGENCE = new Set(["converging", "nonconvergent"]);
+const SLICE_MAX_ATTEMPTS = 3;
+export const SLICE_FIX_CLASSIFICATIONS = Object.freeze([
+  "architecture-replacement",
+  "ownership-amendment",
+  "parallel-authority-removal",
+  "schema-redesign",
+  "migration-redesign",
+  "wholesale-head-replacement",
+  "nonconvergent",
+  "narrow-correction",
+]);
+const SLICE_FIX_CLASSIFICATION_SET = new Set(SLICE_FIX_CLASSIFICATIONS);
+const SLICE_REMEDIATION_CONTEXT_KEYS = new Set(["schema_version", "fixes"]);
+const SLICE_REMEDIATION_FIX_KEYS = new Set(["required_fix_index", "classification"]);
 const VERDICT_KEYS = new Set(["verdict", "report", "report_hash", "review_ref", "review_hash", "reviewed_head_sha", "loops"]);
 const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
 const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
@@ -129,6 +148,65 @@ export class ValidationError extends Error {
   }
 }
 
+export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
+  const errors = [];
+  const path = "review";
+  if (!isRecord(review)) fail([{ path, message: "must be an object" }]);
+  if (!Array.isArray(review.required_fixes)) errors.push({ path: `${path}.required_fixes`, message: "must be an array" });
+  const fixes = Array.isArray(review.required_fixes) ? review.required_fixes : [];
+  const canonicalFixes = fixes.map((fix) => typeof fix === "string" ? fix.trim().normalize("NFC") : null);
+  if (canonicalFixes.some((fix, index) => !fix || fix !== fixes[index]) || new Set(canonicalFixes).size !== canonicalFixes.length) {
+    errors.push({ path: `${path}.required_fixes`, message: "must be unique trimmed NFC-normalized atomic issues" });
+  }
+  requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${path}.verdict`);
+  requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${path}.convergence`);
+  boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${path}.remaining_fix_count`);
+  if (review.remaining_fix_count !== fixes.length) errors.push({ path: `${path}.remaining_fix_count`, message: "must equal required_fixes length" });
+  if (review.verdict === "APPROVE" && fixes.length !== 0) errors.push({ path: `${path}.required_fixes`, message: "APPROVE review requires zero remaining fixes" });
+  if (review.verdict === "REJECT" && fixes.length < 1) errors.push({ path: `${path}.required_fixes`, message: "REJECT review requires at least one remaining fix" });
+
+  const context = review.remediation_context;
+  if (!isRecord(context)) {
+    errors.push({ path: `${path}.remediation_context`, message: "is required and must be an object" });
+  } else {
+    allowedKeys(errors, context, SLICE_REMEDIATION_CONTEXT_KEYS, `${path}.remediation_context`);
+    requiredInteger(errors, context, "schema_version", `${path}.remediation_context.schema_version`);
+    if (context.schema_version !== 1) errors.push({ path: `${path}.remediation_context.schema_version`, message: "must equal 1" });
+    if (!Array.isArray(context.fixes)) {
+      errors.push({ path: `${path}.remediation_context.fixes`, message: "must be an array" });
+    } else {
+      if (context.fixes.length !== fixes.length) errors.push({ path: `${path}.remediation_context.fixes`, message: "must classify every required fix exactly once" });
+      for (const [index, classification] of context.fixes.entries()) {
+        const fixPath = `${path}.remediation_context.fixes[${index}]`;
+        if (!isRecord(classification)) {
+          errors.push({ path: fixPath, message: "must be an object" });
+          continue;
+        }
+        allowedKeys(errors, classification, SLICE_REMEDIATION_FIX_KEYS, fixPath);
+        boundedInteger(errors, classification, "required_fix_index", 0, Math.max(0, fixes.length - 1), `${fixPath}.required_fix_index`);
+        if (classification.required_fix_index !== index) errors.push({ path: `${fixPath}.required_fix_index`, message: "must equal its required_fixes position" });
+        requiredEnum(errors, classification, "classification", SLICE_FIX_CLASSIFICATION_SET, `${fixPath}.classification`);
+      }
+      const hasNonconvergent = context.fixes.some((fix) => fix?.classification === "nonconvergent");
+      if ((review.convergence === "nonconvergent") !== hasNonconvergent) {
+        errors.push({ path: `${path}.remediation_context.fixes`, message: "must classify nonconvergent exactly when review convergence is nonconvergent" });
+      }
+    }
+  }
+  if (errors.length) fail(errors.map((error) => ({ ...error, message: `${error.message} for slice '${sliceId}'` })));
+  const classifications = context.fixes.map((fix) => fix.classification);
+  return {
+    verdict: review.verdict,
+    convergence: review.convergence,
+    remaining_fix_count: review.remaining_fix_count,
+    task_context: classifications.length > 0 && classifications.every((classification) => classification === "narrow-correction") ? "reuse" : "fresh",
+  };
+}
+
+export function sliceReviewTaskContext(review, options = {}) {
+  return validateSliceReviewResult(review, options).task_context;
+}
+
 export function validateRun(run) {
   const errors = [];
   if (!isRecord(run)) return fail([{ path: "run", message: "must be an object" }]);
@@ -156,6 +234,7 @@ export function validateRun(run) {
   validateDebugSnapshot(errors, run.debug_snapshot, "run.debug_snapshot");
   validateProvenance(errors, run.provenance, "run.provenance");
   validateMergedSliceRepair(errors, run, "run.merged_slice_repair");
+  validateSpecialBuilderDispatch(errors, run.special_builder_dispatch, "run.special_builder_dispatch");
   validateContinuation(errors, run, "run.continuation");
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
@@ -587,6 +666,15 @@ export function checkRunConsistency(runDir, run) {
   for (const [index, slice] of (Array.isArray(validRun.slices) ? validRun.slices : []).entries()) {
     if (stringValue(slice?.evidence_ref)) checks.push(refCheck(`run.slices[${index}].evidence_ref`, () => resolveEvidenceRef(runDir, slice.evidence_ref)));
     if (stringValue(slice?.review_ref)) checks.push(refCheck(`run.slices[${index}].review_ref`, () => resolveReviewRef(runDir, slice.review_ref)));
+    for (const [reviewIndex, review] of (Array.isArray(slice?.attempt_reviews) ? slice.attempt_reviews : []).entries()) {
+      checks.push(runCheck(`run.slices[${index}].attempt_reviews[${reviewIndex}]`, () => {
+        const evidence = resolveEvidenceRef(runDir, review.evidence_ref);
+        const reviewed = resolveReviewRef(runDir, review.review_ref);
+        if (hashFile(evidence.path) !== review.evidence_hash) fail([{ path: `run.slices[${index}].attempt_reviews[${reviewIndex}].evidence_hash`, message: "must match evidence_ref bytes" }]);
+        if (hashFile(reviewed.path) !== review.review_hash) fail([{ path: `run.slices[${index}].attempt_reviews[${reviewIndex}].review_hash`, message: "must match review_ref bytes" }]);
+        return { attempt: review.attempt, evidence_ref: review.evidence_ref, review_ref: review.review_ref };
+      }));
+    }
     if (slice?.status === "merged") {
       checks.push(runCheck(`run.slices[${index}].merged`, () => {
         const errors = [];
@@ -925,6 +1013,31 @@ function validateMergedSliceRepair(errors, run, path) {
   if (stringValue(repair.consumer_slice_id) && slices.length > 0 && !slices.some((slice) => slice?.id === repair.consumer_slice_id)) {
     errors.push({ path: `${path}.consumer_slice_id`, message: "must reference a known slice" });
   }
+}
+
+function validateSpecialBuilderDispatch(errors, dispatch, path) {
+  if (dispatch === undefined || dispatch === null) return;
+  if (!isRecord(dispatch)) { errors.push({ path, message: "must be an object" }); return; }
+  const keys = new Set(["schema_version", "route", "instance", "agent", "claim_ref", "claim_hash", "closure_ref", "closure_hash", "completion_head", "owner_slice_id"]);
+  allowedKeys(errors, dispatch, keys, path);
+  requiredInteger(errors, dispatch, "schema_version", `${path}.schema_version`);
+  if (dispatch.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredEnum(errors, dispatch, "route", new Set(["merged-slice-repair", "panel-remediation", "post-pr-remediation"]), `${path}.route`);
+  requiredString(errors, dispatch, "instance", `${path}.instance`);
+  requiredEnum(errors, dispatch, "agent", new Set(["backend-builder", "frontend-builder"]), `${path}.agent`);
+  requiredString(errors, dispatch, "claim_ref", `${path}.claim_ref`);
+  requiredHash(errors, dispatch, "claim_hash", `${path}.claim_hash`);
+  const closureCount = presentBindingCount(dispatch, ["closure_ref", "closure_hash", "completion_head"]);
+  if (![0, 3].includes(closureCount)) errors.push({ path, message: "closure_ref, closure_hash, and completion_head must be all present or all absent" });
+  if (closureCount === 3) {
+    requiredString(errors, dispatch, "closure_ref", `${path}.closure_ref`);
+    requiredHash(errors, dispatch, "closure_hash", `${path}.closure_hash`);
+    requiredFullGitSha(errors, dispatch, "completion_head", `${path}.completion_head`);
+  }
+  if (dispatch.route === "panel-remediation" && closureCount === 3) requiredString(errors, dispatch, "owner_slice_id", `${path}.owner_slice_id`);
+  if (dispatch.route !== "panel-remediation" && dispatch.owner_slice_id !== undefined) errors.push({ path: `${path}.owner_slice_id`, message: "is allowed only for panel-remediation" });
+  if (stringValue(dispatch.claim_ref) && !/^dispatch\/[0-9a-f]{64}\.special\.json$/u.test(dispatch.claim_ref)) errors.push({ path: `${path}.claim_ref`, message: "must be a safe special dispatch claim ref" });
+  if (stringValue(dispatch.closure_ref) && !/^dispatch\/[0-9a-f]{64}\.special\.closed\.json$/u.test(dispatch.closure_ref)) errors.push({ path: `${path}.closure_ref`, message: "must be a safe special dispatch closure ref" });
 }
 
 function validateProvenance(errors, provenance, path) {
@@ -2025,6 +2138,24 @@ function validateRunSlice(errors, slice, path, ids) {
     }
   }
   optionalInteger(errors, slice, "attempts", `${path}.attempts`);
+  if (Number.isInteger(slice.attempts) && slice.attempts > SLICE_MAX_ATTEMPTS) errors.push({ path: `${path}.attempts`, message: `must not exceed ${SLICE_MAX_ATTEMPTS}` });
+  if (slice.dispatch_required !== undefined && typeof slice.dispatch_required !== "boolean") errors.push({ path: `${path}.dispatch_required`, message: "must be a boolean" });
+  for (const key of ["dispatch_claim_ref", "dispatch_closure_ref"]) optionalString(errors, slice, key, `${path}.${key}`);
+  for (const key of ["dispatch_claim_hash", "dispatch_closure_hash"]) optionalHash(errors, slice, key, `${path}.${key}`);
+  const dispatchClaimCount = presentBindingCount(slice, ["dispatch_claim_ref", "dispatch_claim_hash"]);
+  const dispatchClosureCount = presentBindingCount(slice, ["dispatch_closure_ref", "dispatch_closure_hash"]);
+  if (![0, 2].includes(dispatchClaimCount)) errors.push({ path, message: "dispatch_claim_ref and dispatch_claim_hash must be both present or both absent" });
+  if (![0, 2].includes(dispatchClosureCount)) errors.push({ path, message: "dispatch_closure_ref and dispatch_closure_hash must be both present or both absent" });
+  if (dispatchClosureCount === 2 && dispatchClaimCount !== 2) errors.push({ path, message: "dispatch closure binding requires the claim binding" });
+  if (dispatchClaimCount > 0 && slice.dispatch_required !== true) errors.push({ path: `${path}.dispatch_required`, message: "must be true when dispatch authority is bound" });
+  if (slice.status === "pending" && (slice.dispatch_required !== undefined || dispatchClaimCount > 0 || dispatchClosureCount > 0)) errors.push({ path, message: "pending slice cannot carry dispatch authority" });
+  if (["review", "merged"].includes(slice.status) && slice.dispatch_required === true && dispatchClosureCount !== 2) errors.push({ path, message: "successor review/merged slice requires exact closed dispatch authority" });
+  for (const [key, suffix] of [["dispatch_claim_ref", ".json"], ["dispatch_closure_ref", ".closed.json"]]) {
+    if (stringValue(slice[key]) && (!slice[key].startsWith("dispatch/") || !slice[key].endsWith(suffix) || slice[key].includes("..") || slice[key].includes("\\"))) {
+      errors.push({ path: `${path}.${key}`, message: `must be a safe dispatch/${suffix === ".json" ? "<hash>.json" : "<hash>.closed.json"} ref` });
+    }
+  }
+  validateSliceAttemptReviews(errors, slice, path);
   optionalString(errors, slice, "evidence_ref", `${path}.evidence_ref`);
   optionalHash(errors, slice, "evidence_hash", `${path}.evidence_hash`);
   optionalString(errors, slice, "review_ref", `${path}.review_ref`);
@@ -2047,6 +2178,62 @@ function validateRunSlice(errors, slice, path, ids) {
     }
   } else if (bindingCount !== 0) {
     errors.push({ path, message: "evidence_hash, review_hash, and reviewed_commit are forbidden outside review or merged" });
+  }
+}
+
+function validateSliceAttemptReviews(errors, slice, path) {
+  if (slice.attempt_reviews === undefined) return;
+  if (!Array.isArray(slice.attempt_reviews)) {
+    errors.push({ path: `${path}.attempt_reviews`, message: "must be an array" });
+    return;
+  }
+  let priorAttempt = 0;
+  for (const [index, review] of slice.attempt_reviews.entries()) {
+    const reviewPath = `${path}.attempt_reviews[${index}]`;
+    if (!isRecord(review)) {
+      errors.push({ path: reviewPath, message: "must be an object" });
+      continue;
+    }
+    allowedKeys(errors, review, SLICE_ATTEMPT_REVIEW_KEYS, reviewPath);
+    boundedInteger(errors, review, "attempt", 1, SLICE_MAX_ATTEMPTS, `${reviewPath}.attempt`);
+    requiredString(errors, review, "evidence_ref", `${reviewPath}.evidence_ref`);
+    requiredHash(errors, review, "evidence_hash", `${reviewPath}.evidence_hash`);
+    requiredString(errors, review, "review_ref", `${reviewPath}.review_ref`);
+    requiredHash(errors, review, "review_hash", `${reviewPath}.review_hash`);
+    requiredFullGitSha(errors, review, "reviewed_commit", `${reviewPath}.reviewed_commit`);
+    requiredEnum(errors, review, "verdict", SLICE_REVIEW_VERDICTS, `${reviewPath}.verdict`);
+    const legacyUnclassified = review.legacy_unclassified === true;
+    if (review.legacy_unclassified !== undefined && !legacyUnclassified) errors.push({ path: `${reviewPath}.legacy_unclassified`, message: "must equal true when present" });
+    if (legacyUnclassified) {
+      if (review.convergence !== undefined || review.remaining_fix_count !== undefined) errors.push({ path: reviewPath, message: "legacy_unclassified review cannot claim convergence or remaining_fix_count" });
+    } else {
+      requiredEnum(errors, review, "convergence", SLICE_REVIEW_CONVERGENCE, `${reviewPath}.convergence`);
+      boundedInteger(errors, review, "remaining_fix_count", 0, Number.MAX_SAFE_INTEGER, `${reviewPath}.remaining_fix_count`);
+    }
+    for (const key of ["dispatch_claim_ref", "dispatch_closure_ref"]) optionalString(errors, review, key, `${reviewPath}.${key}`);
+    for (const key of ["dispatch_claim_hash", "dispatch_closure_hash"]) optionalHash(errors, review, key, `${reviewPath}.${key}`);
+    const dispatchCount = presentBindingCount(review, ["dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
+    if (![0, 4].includes(dispatchCount)) errors.push({ path: reviewPath, message: "attempt dispatch claim and closure bindings must be all present or all absent" });
+    for (const [key, suffix] of [["dispatch_claim_ref", ".json"], ["dispatch_closure_ref", ".closed.json"]]) {
+      if (stringValue(review[key]) && (!review[key].startsWith("dispatch/") || !review[key].endsWith(suffix) || review[key].includes("..") || review[key].includes("\\"))) {
+        errors.push({ path: `${reviewPath}.${key}`, message: `must be a safe dispatch/${suffix === ".json" ? "<hash>.json" : "<hash>.closed.json"} ref` });
+      }
+    }
+    validateDurableRef(errors, review.evidence_ref, "evidence", `${reviewPath}.evidence_ref`);
+    validateDurableRef(errors, review.review_ref, "reviews", `${reviewPath}.review_ref`);
+    if (Number.isInteger(review.attempt)) {
+      if (review.attempt <= priorAttempt) errors.push({ path: `${reviewPath}.attempt`, message: "must be strictly increasing" });
+      if (Number.isInteger(slice.attempts) && review.attempt > slice.attempts) errors.push({ path: `${reviewPath}.attempt`, message: "must not exceed slice attempts" });
+      priorAttempt = Math.max(priorAttempt, review.attempt);
+    }
+    if (!legacyUnclassified && review.verdict === "APPROVE" && review.remaining_fix_count !== 0) errors.push({ path: `${reviewPath}.remaining_fix_count`, message: "must equal 0 for APPROVE" });
+    if (!legacyUnclassified && review.verdict === "REJECT" && Number.isInteger(review.remaining_fix_count) && review.remaining_fix_count < 1) errors.push({ path: `${reviewPath}.remaining_fix_count`, message: "must be positive for REJECT" });
+  }
+  const current = slice.attempt_reviews.at(-1);
+  if (current && ["review", "merged"].includes(slice.status) && Number.isInteger(slice.attempts) && current.attempt === slice.attempts) {
+    for (const key of ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit"]) {
+      if (slice[key] !== current[key]) errors.push({ path: `${path}.${key}`, message: `must equal the current attempt_reviews ${key}` });
+    }
   }
 }
 
@@ -2351,10 +2538,54 @@ function validateTerminalResult(errors, run, path) {
   optionalString(errors, run.terminal_result, "reason", `${path}.reason`);
   optionalString(errors, run.terminal_result, "summary", `${path}.summary`);
   validateTerminalArtifactMap(errors, run.terminal_result.artifacts, `${path}.artifacts`, { allowPostPrBindings: run.terminal_result.reason === "post-pr-retry-exhausted" });
+  validateTerminalNonconvergence(errors, run, run.terminal_result.nonconvergence, `${path}.nonconvergence`);
   if (run.terminal_result.status && run.terminal_result.status !== run.status) errors.push({ path: `${path}.status`, message: `must match run.status '${run.status}'` });
   if (run.terminal_result.run_id && run.terminal_result.run_id !== run.run_id) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
   if (["blocked", "partial", "needs-human"].includes(run.status) && !stringValue(run.terminal_result.reason)) errors.push({ path: `${path}.reason`, message: `is required for ${run.status}` });
   if (run.terminal_result.status === "completed") validateCompletedTerminalPrTuple(errors, run, path);
+}
+
+function validateTerminalNonconvergence(errors, run, value, path) {
+  const required = run.terminal_result?.reason === "slice-review-nonconvergent";
+  if (value === undefined || value === null) {
+    if (required) errors.push({ path, message: "is required for slice-review-nonconvergent" });
+    return;
+  }
+  if (!required) errors.push({ path, message: "is allowed only for slice-review-nonconvergent" });
+  if (required && (run.status !== "blocked" || run.terminal_result?.status !== "blocked" || run.pr_url != null || run.terminal_result?.pr_url != null)) {
+    errors.push({ path, message: "requires an exact pre-PR blocked run and terminal status" });
+  }
+  if (!isRecord(value)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  allowedKeys(errors, value, TERMINAL_NONCONVERGENCE_KEYS, path);
+  requiredInteger(errors, value, "schema_version", `${path}.schema_version`);
+  if (value.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredEnum(errors, value, "kind", new Set(["slice-review-nonconvergence"]), `${path}.kind`);
+  requiredTerminalSafeString(errors, value, "slice_id", `${path}.slice_id`);
+  const source = value.source_review;
+  validateSliceAttemptReviews(errors, { attempts: source?.attempt, status: "blocked", attempt_reviews: source === undefined ? undefined : [source] }, `${path}.source`);
+  if (!isRecord(value.continuation)) {
+    errors.push({ path: `${path}.continuation`, message: "must be an object" });
+  } else {
+    allowedKeys(errors, value.continuation, TERMINAL_NONCONVERGENCE_CONTINUATION_KEYS, `${path}.continuation`);
+    requiredEnum(errors, value.continuation, "program", new Set(["feature-factory"]), `${path}.continuation.program`);
+    const expectedArgs = ["factory", "continue", run.run_id, "--review", source?.review_ref, "--run-id", "<new-run-id>", "--carry-forward", "--json"];
+    if (!Array.isArray(value.continuation.args) || value.continuation.args.length !== expectedArgs.length
+      || value.continuation.args.some((arg, index) => arg !== expectedArgs[index])) {
+      errors.push({ path: `${path}.continuation.args`, message: "must be the exact checked carry-forward command template" });
+    }
+  }
+  const slice = Array.isArray(run.slices) ? run.slices.find((candidate) => candidate?.id === value.slice_id) : null;
+  if (!slice || slice.status !== "blocked" || slice.blocked_reason !== "slice-review-nonconvergent") {
+    errors.push({ path: `${path}.slice_id`, message: "must identify the blocked nonconvergent slice" });
+  } else if (!Array.isArray(slice.attempt_reviews) || source?.attempt !== slice.attempts || JSON.stringify(slice.attempt_reviews.at(-1)) !== JSON.stringify(source)) {
+    errors.push({ path: `${path}.source_review`, message: "must equal the current latest append-only slice review entry" });
+  }
+  if (source?.verdict !== "REJECT" || source?.convergence !== "nonconvergent") {
+    errors.push({ path: `${path}.source_review`, message: "must be a nonconvergent REJECT review" });
+  }
 }
 
 function validateCompletedTerminalPrTuple(errors, run, path) {

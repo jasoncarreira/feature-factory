@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { adoptContinuation, assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, seedContinuationPlanningArtifacts, startFactory } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
-import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice } from "../src/run-state.js";
+import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice } from "../src/run-state.js";
 import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, createDurableCatalogBaseline, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
@@ -20,6 +20,39 @@ import { executeCheckedTestExecution } from "../src/test-execution.js";
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
 describe("factory continue", () => {
+  it("rejects a blocked parent that carries an unresolved builder dispatch", () => {
+    const fixture = createFixture("blocked-unresolved-dispatch");
+    try {
+      const head = gitStdout(fixture.repo, ["rev-parse", `${fixture.runId}^{commit}`]);
+      const worktree = join(fixture.repo, ".opencode", "worktrees", fixture.runId);
+      updateRun(fixture, (run) => {
+        run.slices = [{ id: "slice", stack: "backend", depends_on: [], status: "running", attempts: 1, branch: fixture.runId, worktree, dispatch_required: true }];
+      });
+      const claimStem = createHash("sha256").update(`${fixture.runId}\0slice\0${1}`, "utf8").digest("hex");
+      mkdirSync(join(fixture.runDir, "dispatch"), { recursive: true });
+      writeJson(join(fixture.runDir, "dispatch", `${claimStem}.json`), {
+        schema_version: 1,
+        kind: "checked-slice-builder-dispatch-claim",
+        run_id: fixture.runId,
+        slice_id: "slice",
+        attempt: 1,
+        agent: "backend-builder",
+        branch: fixture.runId,
+        worktree,
+        head,
+        context_hash: `sha256:${"1".repeat(64)}`,
+        completion_token_hash: `sha256:${"2".repeat(64)}`,
+        claimed_at: "2026-07-18T12:00:00.000Z",
+        closure_ref: `dispatch/${claimStem}.closed.json`,
+      });
+
+      assert.throws(
+        () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "blocked-unresolved-dispatch-next" }),
+        /unresolved checked slice builder Task dispatch/u,
+      );
+    } finally { cleanup(fixture.repo); }
+  });
+
   it("builds a dry-run continuation payload from a blocked parent without mutating parent state", () => {
     const fixture = createFixture("blocked-parent");
     try {
@@ -1599,6 +1632,160 @@ describe("continuation planning-artifact reuse", () => {
     } finally { cleanup(fixture.repo); }
   });
 
+  it("accepts the exact terminal nonconvergence review as the v2 carry-forward selector", () => {
+    const fixture = createV2Fixture("nonconvergent-route", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      const { head, evidenceRef, reviewRef, priorReviewRef, currentReview } = configureNonconvergentRoute(fixture);
+
+      assert.throws(
+        () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: reviewRef, runId: "nonconvergent-route-v1" }),
+        /requires --carry-forward schema v2/u,
+      );
+
+      const continuation = buildContinuation(fixture.runId, { cwd: fixture.repo, review: reviewRef, runId: "nonconvergent-route-next", carryForward: true });
+      const exactTerminalResult = structuredClone(JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8")).terminal_result);
+
+      assert.equal(continuation.review.ref, reviewRef);
+      assert.equal(continuation.review.verdict, "REJECT");
+      assert.deepEqual(continuation.review.required_fixes, ["replace the missed category"]);
+      assert.deepEqual(continuation.carry_forward.remaining_slice_ids, ["B", "C"]);
+
+      const alternateRef = "reviews/B.alternate.json";
+      writeJson(join(fixture.runDir, alternateRef), { subject: "B", verdict: "REJECT", summary: "alternate parent ref", required_fixes: ["other"] });
+      updateRun(fixture, (run) => { run.slices[1].review_ref = alternateRef; });
+      assert.throws(
+        () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: alternateRef, runId: "nonconvergent-route-alternate", carryForward: true }),
+        /must equal run\.terminal_result\.nonconvergence\.source_review\.review_ref/u,
+      );
+
+      updateRun(fixture, (run) => {
+        run.terminal_result = { status: "blocked", run_id: run.run_id, pr_url: null, reason: "generic-block", summary: "generic", artifacts: {} };
+      });
+      assert.throws(
+        () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: alternateRef, runId: "nonconvergent-route-generic", carryForward: true }),
+        /must equal run\.terminal_result\.nonconvergence\.source_review\.review_ref/u,
+      );
+
+      updateRun(fixture, (run) => { run.slices[1].review_ref = reviewRef; run.terminal_result = exactTerminalResult; });
+      writeJson(join(fixture.runDir, reviewRef), {
+        subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
+        remaining_fix_count: 1, required_fixes: ["rewritten after terminalization"],
+        remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "nonconvergent" }] },
+      });
+      assert.throws(
+        () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: reviewRef, runId: "nonconvergent-route-rewritten", carryForward: true }),
+        /attempt 2 review history is stale|consume the exact source review bytes/u,
+      );
+      writeJson(join(fixture.runDir, reviewRef), currentReview);
+      writeJson(join(fixture.runDir, priorReviewRef), {
+        subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
+        remaining_fix_count: 1, required_fixes: ["rewritten earlier history"],
+        remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "narrow-correction" }] },
+      });
+      assert.throws(
+        () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: reviewRef, runId: "nonconvergent-route-history-rewritten", carryForward: true }),
+        /attempt 1 review history is stale/u,
+      );
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("injects exact terminal nonconvergence evidence into the first child builder dispatch", async () => {
+    const fixture = createV2Fixture("nonconvergent-dispatch", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      const { evidenceRef, reviewRef } = configureNonconvergentRoute(fixture);
+      const childRunId = "nonconvergent-dispatch-next";
+      await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: reviewRef,
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+      });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const childWorktree = join(fixture.repo, ".opencode", "worktrees", childRunId);
+      await transitionRunSlice(childRunDir, "B", { status: "running", attempts: 1, branch: childRunId, worktree: childWorktree });
+
+      const context = await prepareSliceBuilderTaskDispatch(fixture.repo, {
+        run_id: childRunId, slice_id: "B", attempt: 1, agent: "backend-builder",
+      });
+      assert.equal(context.task_context, "fresh");
+      assert.deepEqual(context.prior.origin, { kind: "carry-forward-nonconvergence", parent_run_id: fixture.runId });
+      assert.equal(context.prior.binding.evidence_ref, evidenceRef);
+      assert.equal(JSON.parse(Buffer.from(context.prior.review.bytes, "base64").toString("utf8")).required_fixes[0], "replace the missed category");
+      assert.equal(JSON.parse(Buffer.from(context.prior.evidence.bytes, "base64").toString("utf8")).attempt, 2);
+
+      const parentEvidencePath = join(fixture.runDir, evidenceRef);
+      const parentEvidenceBytes = readFileSync(parentEvidencePath, "utf8");
+      await transitionRunSlice(childRunDir, "C", { status: "running", attempts: 1, branch: childRunId, worktree: childWorktree });
+      writeFileSync(parentEvidencePath, `${parentEvidenceBytes}\n`, "utf8");
+      await assert.rejects(
+        prepareSliceBuilderTaskDispatch(fixture.repo, {
+          run_id: childRunId, slice_id: "C", attempt: 1, agent: "backend-builder",
+        }),
+        /schema-v2 parent evidence|schema-v2 parent run|parent.*stale|review history is stale/u,
+      );
+      writeFileSync(parentEvidencePath, parentEvidenceBytes, "utf8");
+      await assert.rejects(
+        prepareSliceBuilderTaskDispatch(fixture.repo, {
+          run_id: childRunId, slice_id: "C", attempt: 1, agent: "backend-builder",
+        }, {
+          claimDispatch: true,
+          completionToken: "parent-authority-race-token",
+          atomicWriteHooks: { beforeCommit: () => writeFileSync(parentEvidencePath, `${parentEvidenceBytes}\n`, "utf8") },
+        }),
+        /prior authority changed before claim publication|commit failed/u,
+      );
+      writeFileSync(parentEvidencePath, parentEvidenceBytes, "utf8");
+      const completionToken = "parent-authority-closure-token";
+      const claimed = await prepareSliceBuilderTaskDispatch(fixture.repo, {
+        run_id: childRunId, slice_id: "B", attempt: 1, agent: "backend-builder",
+      }, { claimDispatch: true, completionToken });
+      writeFileSync(parentEvidencePath, `${parentEvidenceBytes}\n`, "utf8");
+      await assert.rejects(
+        completeSliceBuilderTaskDispatch(fixture.repo, {
+          run_id: childRunId, slice_id: "B", attempt: 1, agent: "backend-builder",
+          claim_ref: claimed.dispatch_claim.ref, claim_hash: claimed.dispatch_claim.hash, completion_token: completionToken,
+        }),
+        /schema-v2 parent evidence|schema-v2 parent run|parent.*stale|review history is stale/u,
+      );
+    } finally { cleanup(fixture.repo); }
+  });
+
+  it("injects the exact selected ordinary slice REJECT into the child builder dispatch", async () => {
+    const fixture = createV2Fixture("slice-review-dispatch", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      const { evidenceRef, reviewRef } = configureConvergingSliceRoute(fixture);
+      const childRunId = "slice-review-dispatch-next";
+      await continueFactory(fixture.runId, {
+        cwd: fixture.repo,
+        review: reviewRef,
+        runId: childRunId,
+        carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+      });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const childWorktree = join(fixture.repo, ".opencode", "worktrees", childRunId);
+      await transitionRunSlice(childRunDir, "B", { status: "running", attempts: 1, branch: childRunId, worktree: childWorktree });
+
+      const context = await prepareSliceBuilderTaskDispatch(fixture.repo, {
+        run_id: childRunId, slice_id: "B", attempt: 1, agent: "backend-builder",
+      });
+      assert.equal(context.task_context, "fresh");
+      assert.deepEqual(context.prior.origin, { kind: "continuation-slice-review", parent_run_id: fixture.runId });
+      assert.equal(context.prior.binding.review_ref, reviewRef);
+      assert.equal(JSON.parse(Buffer.from(context.prior.review.bytes, "base64").toString("utf8")).required_fixes[0], "apply the selected correction");
+      assert.equal(JSON.parse(Buffer.from(context.prior.evidence.bytes, "base64").toString("utf8")).subject, "B");
+
+      const parentReviewPath = join(fixture.runDir, reviewRef);
+      const parentReviewBytes = readFileSync(parentReviewPath, "utf8");
+      writeFileSync(parentReviewPath, `${parentReviewBytes}\n`, "utf8");
+      await assert.rejects(
+        prepareSliceBuilderTaskDispatch(fixture.repo, { run_id: childRunId, slice_id: "B", attempt: 1, agent: "backend-builder" }),
+        /schema-v2 parent review|parent.*stale|review history is stale/u,
+      );
+    } finally { cleanup(fixture.repo); }
+  });
+
   it("requires accepted unchanged planning and forbids draft carry-forward before allocation", () => {
     for (const [label, mutate] of [
       ["unaccepted", (fixture) => updateRun(fixture, (run) => { run.steps[0].status = "rejected"; delete run.steps[0].acceptance; })],
@@ -2850,6 +3037,93 @@ function createFixture(runId, { status = "blocked", createBranch = true, review,
 const V2_TEMPLATE_RUN = "v2template";
 const v2Templates = new Map();
 const v2TemplateDirs = [];
+
+function configureNonconvergentRoute(fixture) {
+  const head = gitStdout(fixture.repo, ["rev-parse", `${fixture.runId}^{commit}`]);
+  const evidenceRef = "evidence/B.attempt-2.json";
+  const reviewRef = "reviews/B.attempt-2.json";
+  const priorEvidenceRef = "evidence/B.attempt-1.json";
+  const priorReviewRef = "reviews/B.attempt-1.json";
+  writeJson(join(fixture.runDir, priorEvidenceRef), { subject: "B", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+  writeJson(join(fixture.runDir, priorReviewRef), {
+    subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
+    remaining_fix_count: 1, required_fixes: ["first correction"],
+    remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "narrow-correction" }] },
+  });
+  writeJson(join(fixture.runDir, evidenceRef), { subject: "B", attempt: 2, status: "pass", review_ready: true, head_sha: head });
+  const currentReview = {
+    subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
+    remaining_fix_count: 1, required_fixes: ["replace the missed category"],
+    remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "nonconvergent" }] },
+  };
+  writeJson(join(fixture.runDir, reviewRef), currentReview);
+  const priorReview = {
+    attempt: 1,
+    evidence_ref: priorEvidenceRef,
+    evidence_hash: hashFile(join(fixture.runDir, priorEvidenceRef)),
+    review_ref: priorReviewRef,
+    review_hash: hashFile(join(fixture.runDir, priorReviewRef)),
+    reviewed_commit: head,
+    verdict: "REJECT",
+    convergence: "converging",
+    remaining_fix_count: 1,
+  };
+  const sourceReview = {
+    attempt: 2,
+    evidence_ref: evidenceRef,
+    evidence_hash: hashFile(join(fixture.runDir, evidenceRef)),
+    review_ref: reviewRef,
+    review_hash: hashFile(join(fixture.runDir, reviewRef)),
+    reviewed_commit: head,
+    verdict: "REJECT",
+    convergence: "nonconvergent",
+    remaining_fix_count: 1,
+  };
+  updateRun(fixture, (run) => {
+    run.slices[1] = {
+      ...run.slices[1], status: "blocked", attempts: 2, evidence_ref: evidenceRef, review_ref: reviewRef,
+      attempt_reviews: [priorReview, sourceReview], blocked_reason: "slice-review-nonconvergent",
+    };
+    run.terminal_result = {
+      status: "blocked", run_id: fixture.runId, pr_url: null, reason: "slice-review-nonconvergent", summary: "nonconvergent", artifacts: {},
+      nonconvergence: {
+        schema_version: 1, kind: "slice-review-nonconvergence", slice_id: "B", source_review: sourceReview,
+        continuation: { program: "feature-factory", args: ["factory", "continue", fixture.runId, "--review", reviewRef, "--run-id", "<new-run-id>", "--carry-forward", "--json"] },
+      },
+    };
+  });
+  return { head, evidenceRef, reviewRef, priorEvidenceRef, priorReviewRef, currentReview, sourceReview };
+}
+
+function configureConvergingSliceRoute(fixture) {
+  const head = gitStdout(fixture.repo, ["rev-parse", `${fixture.runId}^{commit}`]);
+  const evidenceRef = "evidence/B.attempt-1.json";
+  const reviewRef = "reviews/B.attempt-1.json";
+  writeJson(join(fixture.runDir, evidenceRef), { subject: "B", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+  writeJson(join(fixture.runDir, reviewRef), {
+    subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
+    remaining_fix_count: 1, required_fixes: ["apply the selected correction"],
+    remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "narrow-correction" }] },
+  });
+  const source = {
+    attempt: 1,
+    evidence_ref: evidenceRef,
+    evidence_hash: hashFile(join(fixture.runDir, evidenceRef)),
+    review_ref: reviewRef,
+    review_hash: hashFile(join(fixture.runDir, reviewRef)),
+    reviewed_commit: head,
+    verdict: "REJECT",
+    convergence: "converging",
+    remaining_fix_count: 1,
+  };
+  updateRun(fixture, (run) => {
+    run.slices[1] = {
+      ...run.slices[1], status: "blocked", attempts: 1, evidence_ref: evidenceRef, review_ref: reviewRef,
+      attempt_reviews: [source], blocked_reason: "slice review rejected",
+    };
+  });
+  return { evidenceRef, reviewRef, source };
+}
 
 function v2GitTemplate(accepted, mergeOrder) {
   const key = JSON.stringify([accepted, mergeOrder]);

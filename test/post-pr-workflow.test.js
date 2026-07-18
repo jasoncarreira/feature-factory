@@ -9,6 +9,7 @@ import { continueFactory, heartbeatStatus, postPrObserve, postPrRemediation, res
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
 import { computePrOperationId } from "../src/github.js";
+import { completeSpecialBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionPostPrState } from "../src/run-state.js";
 
 const SHA = "a".repeat(40);
 const EMPTY_PATHS_HASH = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
@@ -142,12 +143,24 @@ describe("post-PR workflow orchestration", () => {
   it("persists dispatch/action before wait, heartbeats during dispatch, and stops before return", async () => {
     const fixture = createFixture("post-pr-dispatch");
     try {
+      runGit(fixture.repo, ["init", "-b", "feature"]);
+      runGit(fixture.repo, ["config", "user.email", "test@example.com"]);
+      runGit(fixture.repo, ["config", "user.name", "Test"]);
+      writeFileSync(join(fixture.repo, ".gitignore"), ".opencode/\n", "utf8");
+      writeFileSync(join(fixture.repo, "README.md"), "fixture\n", "utf8");
+      runGit(fixture.repo, ["add", ".gitignore", "README.md"]);
+      runGit(fixture.repo, ["commit", "-m", "fixture"]);
+      const localHead = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
       await observeApiRed(fixture);
       let dispatch;
+      let checkedContext;
       const result = await postPrRemediation(fixture.runId, 1, "running", {
         cwd: fixture.repo, now: "2026-07-12T12:01:00.000Z", heartbeatIntervalMs: 1000,
         dispatchRemediation: async (input) => {
           dispatch = input;
+          checkedContext = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
+            run_id: fixture.runId, route: "post-pr-remediation", agent: "backend-builder",
+          });
           const during = heartbeatStatus(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:01:00.000Z" });
           assert.equal(during.phase, "post-pr-remediation");
           assert.equal(during.fresh, true);
@@ -158,6 +171,9 @@ describe("post-PR workflow orchestration", () => {
       assert.equal(dispatch.run_id, fixture.runId);
       assert.equal(dispatch.attempt, 1);
       assert.equal(dispatch.role, "backend-builder");
+      assert.equal(checkedContext.authority.remediation.failure_evidence_ref, "evidence/post-pr-ci.attempt-1.json");
+      assert.match(checkedContext.authority.publication.files["evidence/post-pr-ci.attempt-1.json"].hash, /^sha256:/u);
+      assert.equal(checkedContext.target.head, localHead);
       assert.equal(readRun(fixture).post_pr.remediation.dispatch.status, "running");
       assert.equal(heartbeatStatus(fixture.runId, { cwd: fixture.repo }).pid, null);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
@@ -173,6 +189,54 @@ describe("post-PR workflow orchestration", () => {
       assert.equal(run.status, "needs-human");
       assert.equal(run.terminal_result.reason, "post-pr-dispatch-start-unknown");
       assert.equal(run.post_pr.terminal_fact.dispatch_id, run.post_pr.remediation.dispatch.id);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("consumes a plugin-closed post-PR dispatch before opening revalidation steering", async () => {
+    const fixture = createRevalidationFixture("post-pr-checked-revalidating");
+    try {
+      updateRunFile(fixture, (run) => {
+        run.post_pr.phase = "remediation-running";
+        Object.assign(run.post_pr.remediation, {
+          stage: "running",
+          changes: { paths: [], entries: [], tree_hash: null },
+          candidate_head_sha: null,
+          remediation_evidence_ref: null,
+          remediation_evidence_hash: null,
+        });
+        Object.assign(run.post_pr.remediation.dispatch, { status: "running", returned_at: null });
+      });
+      runGit(fixture.repo, ["reset", "--hard", fixture.baseline]);
+      const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
+        run_id: fixture.runId, route: "post-pr-remediation", agent: "backend-builder",
+      }, { claimDispatch: true, completionToken: "post-pr-revalidating-token" });
+      runGit(fixture.repo, ["reset", "--hard", fixture.candidate]);
+      await completeSpecialBuilderTaskDispatch(fixture.repo, {
+        run_id: fixture.runId, route: "post-pr-remediation", agent: "backend-builder",
+        claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash,
+        completion_token: "post-pr-revalidating-token",
+      });
+      const remediationEvidencePath = join(fixture.runDir, "evidence", "post-pr-remediation.attempt-1.json");
+      const remediationEvidence = JSON.parse(readFileSync(remediationEvidencePath, "utf8"));
+      remediationEvidence.changes = [{ source: "commit", status: "modified", index_status: null, worktree_status: null, path: "src/api.js", previous_path: null, old_mode: null, new_mode: null }];
+      remediationEvidence.diff_hash = hashValue(remediationEvidence.changes);
+      writeJson(remediationEvidencePath, remediationEvidence);
+      await assert.rejects(
+        transitionPostPrState(fixture.runDir, structuredClone(readRun(fixture).post_pr)),
+        /closed but awaits exact route consumption/u,
+        "non-consuming post-PR transitions must not inherit the route-consumer exemption",
+      );
+
+      const result = await postPrRemediation(fixture.runId, 1, "revalidating", {
+        cwd: fixture.repo,
+        remediationEvidenceRef: "evidence/post-pr-remediation.attempt-1.json",
+        now: "2026-07-12T12:03:00.000Z",
+      });
+      const run = readRun(fixture);
+      assert.equal(result.action, "revalidating");
+      assert.equal(run.post_pr.phase, "revalidating");
+      assert.equal(run.post_pr.remediation.candidate_head_sha, fixture.candidate);
+      assert.equal(run.special_builder_dispatch, undefined);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
@@ -304,7 +368,7 @@ describe("post-PR workflow orchestration", () => {
     }
   });
 
-  it("adopts a clean descendant commit after a crashed started dispatch", async () => {
+  it("terminalizes an unclaimed clean descendant after a crashed started dispatch", async () => {
     const fixture = createRevalidationFixture("post-pr-adopt-descendant");
     try {
       updateRunFile(fixture, (run) => {
@@ -312,15 +376,17 @@ describe("post-PR workflow orchestration", () => {
         Object.assign(run.post_pr.remediation, { stage: "running", candidate_head_sha: null, remediation_evidence_ref: null, remediation_evidence_hash: null, changes: { paths: [], tree_hash: null } });
         Object.assign(run.post_pr.remediation.dispatch, { status: "running", returned_at: null });
       });
-      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
-      assert.equal(result.status, "dry-run");
+      await assert.rejects(
+        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" }),
+        /terminal-run/u,
+      );
       const run = readRun(fixture);
-      assert.equal(run.post_pr.phase, "committed");
-      assert.equal(run.post_pr.remediation.candidate_head_sha, fixture.candidate);
+      assert.equal(run.status, "needs-human");
+      assert.equal(run.terminal_result.reason, "post-pr-dispatch-start-unknown");
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
-  it("adopts a lane-contained dirty diff after a crashed started dispatch", async () => {
+  it("terminalizes an unclaimed dirty diff after a crashed started dispatch", async () => {
     const fixture = createRevalidationFixture("post-pr-adopt-dirty");
     try {
       runGit(fixture.repo, ["reset", "--hard", fixture.baseline]);
@@ -330,11 +396,13 @@ describe("post-PR workflow orchestration", () => {
         Object.assign(run.post_pr.remediation, { stage: "running", candidate_head_sha: null, remediation_evidence_ref: null, remediation_evidence_hash: null, changes: { paths: [], tree_hash: null } });
         Object.assign(run.post_pr.remediation.dispatch, { status: "running", returned_at: null });
       });
-      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" });
-      assert.equal(result.status, "dry-run");
+      await assert.rejects(
+        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" }),
+        /terminal-run/u,
+      );
       const run = readRun(fixture);
-      assert.equal(run.post_pr.phase, "changes-observed");
-      assert.deepEqual(run.post_pr.remediation.changes.paths, ["src/api.js"]);
+      assert.equal(run.status, "needs-human");
+      assert.equal(run.terminal_result.reason, "post-pr-dispatch-start-unknown");
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 

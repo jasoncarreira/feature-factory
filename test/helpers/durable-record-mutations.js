@@ -33,6 +33,7 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "run-envelope-terminal",
   "terminal-result-completed",
   "terminal-result-blocked",
+  "terminal-result-blocked-nonconvergence",
   "terminal-result-partial",
   "terminal-result-needs-human",
   "gate-pending",
@@ -73,6 +74,7 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "slice-running",
   "slice-review",
   "slice-merged",
+  "slice-blocked-ordinary",
   "slice-blocked",
   "validator-verdict-binding",
   "security-verdict-binding",
@@ -201,7 +203,35 @@ const CONTINUATION_EXTERNAL = Object.freeze({
 });
 const SLICE_EXTERNAL = Object.freeze({
   evidence: { ref: "evidence/backend.json", bytes: `{"subject":"backend","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_B}"}\n` },
-  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"APPROVE","required_fixes":[],"reviewed_commit":"${SHA_B}"}\n` },
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"APPROVE","convergence":"converging","remaining_fix_count":0,"required_fixes":[],"remediation_context":{"schema_version":1,"fixes":[]},"reviewed_commit":"${SHA_B}"}\n` },
+});
+const SLICE_DISPATCH_CLAIM_REF = `dispatch/${createHash("sha256").update(`catalog-run\0backend\0${1}`, "utf8").digest("hex")}.json`;
+const SLICE_DISPATCH_CLOSURE_REF = `${SLICE_DISPATCH_CLAIM_REF.slice(0, -5)}.closed.json`;
+const SLICE_DISPATCH_TOKEN = "catalog-dispatch-completion-capability";
+const SLICE_DISPATCH_CLAIM_BYTES = `${JSON.stringify({
+  schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: "catalog-run", slice_id: "backend", attempt: 1,
+  agent: "backend-builder", branch: "feature--backend", worktree: "/tmp/backend", head: SHA_B, context_hash: HASH_A,
+  completion_token_hash: hashBytes(SLICE_DISPATCH_TOKEN), claimed_at: NOW, closure_ref: SLICE_DISPATCH_CLOSURE_REF,
+}, null, 2)}\n`;
+const SLICE_DISPATCH_CLOSURE_BYTES = `${JSON.stringify({
+  schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: SLICE_DISPATCH_CLAIM_REF,
+  claim_hash: hashBytes(SLICE_DISPATCH_CLAIM_BYTES), run_id: "catalog-run", slice_id: "backend", attempt: 1,
+  agent: "backend-builder", branch: "feature--backend", worktree: "/tmp/backend", head: SHA_B, completion_head: SHA_B, context_hash: HASH_A,
+  completion_token: SLICE_DISPATCH_TOKEN, returned_at: NOW,
+}, null, 2)}\n`;
+const SLICE_DISPATCH_EXTERNAL = Object.freeze({
+  claim: { ref: SLICE_DISPATCH_CLAIM_REF, bytes: SLICE_DISPATCH_CLAIM_BYTES },
+  closure: { ref: SLICE_DISPATCH_CLOSURE_REF, bytes: SLICE_DISPATCH_CLOSURE_BYTES },
+});
+const SLICE_NONCONVERGENCE_EXTERNAL = Object.freeze({
+  evidence: SLICE_EXTERNAL.evidence,
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"nonconvergent","remaining_fix_count":1,"required_fixes":["replace missed category"],"remediation_context":{"schema_version":1,"fixes":[{"required_fix_index":0,"classification":"nonconvergent"}]},"reviewed_commit":"${SHA_B}"}\n` },
+  ...SLICE_DISPATCH_EXTERNAL,
+});
+const SLICE_BLOCKED_EXTERNAL = Object.freeze({
+  evidence: SLICE_EXTERNAL.evidence,
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"converging","remaining_fix_count":1,"required_fixes":["apply narrow correction"],"remediation_context":{"schema_version":1,"fixes":[{"required_fix_index":0,"classification":"narrow-correction"}]},"reviewed_commit":"${SHA_B}"}\n` },
+  ...SLICE_DISPATCH_EXTERNAL,
 });
 const PANEL_EXTERNAL = Object.freeze({
   report: { ref: "artifacts/validation-report.md", bytes: "GO\n" },
@@ -234,6 +264,7 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "run-envelope-terminal",
     "terminal-result-completed",
     "terminal-result-blocked",
+    "terminal-result-blocked-nonconvergence",
     "terminal-result-partial",
     "terminal-result-needs-human",
   ],
@@ -269,6 +300,7 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "slice-running",
     "slice-review",
     "slice-merged",
+    "slice-blocked-ordinary",
     "slice-blocked",
   ],
   "validator-security-pr-result": [
@@ -379,6 +411,7 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "run-envelope-terminal": "krhbd",
   "terminal-result-completed": "skthbd",
   "terminal-result-blocked": "sktrhbd",
+  "terminal-result-blocked-nonconvergence": "skt",
   "terminal-result-partial": "sktrhbd",
   "terminal-result-needs-human": "sktrhbd",
   "gate-pending": "sk",
@@ -405,10 +438,11 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "test-execution-receipt-failed-timeout": "b",
   "test-execution-receipt-failed-output-limit": "b",
   "slice-pending": "sktrhbd",
-  "slice-running": "skthbd",
-  "slice-review": "sktd",
-  "slice-merged": "skd",
-  "slice-blocked": "skthbd",
+  "slice-running": "sktd",
+  "slice-review": "skt",
+  "slice-merged": "sk",
+  "slice-blocked-ordinary": "skt",
+  "slice-blocked": "skt",
   "validator-verdict-binding": "sktd",
   "security-verdict-binding": "sktd",
   "steering-boundary": "srb",
@@ -507,6 +541,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
   ["terminal-result-completed", "624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c"],
   ["terminal-result-blocked", "681845bd946f1cb11d6f2d0a528946365756a79f2ce284179856360e3d9b631e"],
+  ["terminal-result-blocked-nonconvergence", "ff3b38d78511a20d991e47a4012de960cd49e80292c6d0f7964ed72d11497266"],
   ["terminal-result-partial", "6726223fbe9f4850a9d6815d78ccf5b5fbbdfdebcd6bf5c7611ace16569b9705"],
   ["terminal-result-needs-human", "8b7d4e6f6533c6072da2e83300c1f2503055905c0bcf5d69a54a91196f6c2eef"],
   ["gate-pending", "fed011780d644435b702f54dec1207d1b9d1a9990ce61c617c1a716c76ada680"],
@@ -533,10 +568,11 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-timeout", "aba412c7a4df3bcc573775c40a8bed3da7c94cf794f656e935da0d197d35d409"],
   ["test-execution-receipt-failed-output-limit", "d0f033038f69b998693a6511b192ee39530c36d94a6854646d13f0180e3a664d"],
   ["slice-pending", "27d978f06a5d77e19f3293902f5ef98a674bd920b35b39a0a56519f48b40b586"],
-  ["slice-running", "d5e779da2618570c2922ff58dc14927a60548dc770616322812912c6c4ada981"],
-  ["slice-review", "8fd0fae00323e9bed95c0673fc1f4f22d345a0f886438fee4991e7a390b7e7b0"],
-  ["slice-merged", "785275ed7b23a9ecb8fd33d838e0e3a6acc2980d9e69e96ebd0f4cb6a9410707"],
-  ["slice-blocked", "bfb537c4489fa0d6512d0470e5a28ab6fabeea5dfb2f86fb53ae11a6057fe954"],
+  ["slice-running", "4643d7feda2aec0a65367792c879fd11ac8ff385317356990e866967595b5aee"],
+  ["slice-review", "7a4ea5d772656be13ee66e4c94c31a0e7a69532b908a3522725a8a3d681fe73f"],
+  ["slice-merged", "f3432c6b31c7297727f2070e5f2826ef9bc524dfbc0c6b74d3d8f05449c9b8d3"],
+  ["slice-blocked-ordinary", "028e5101622a972a5c040d41c1de479f11e7dc6cb299f069926bb860a28e0cac"],
+  ["slice-blocked", "33c00053f9fa0dcc2dde6067fec9e058d72cd6c96a98b9c50db47f146c74c491"],
   ["validator-verdict-binding", "ce1205fb84feece303f45e9841916d68fe26431d3117636aecc4b0cdccc79e14"],
   ["security-verdict-binding", "81cbb46158b44646aabf50e0152b80d5ed6dc423826337bf45fe6be7c24e5995"],
   ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
@@ -637,6 +673,7 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
   ["terminal-result-completed", "8156685012bdcf0072fc38331dd34c2ee2f0ac59c94d14418a0cadc3f92b84be"],
   ["terminal-result-blocked", "9e2aac2293e6a2aa0ff69725ec484565d1ba598e4f921be01c44267eaab6d231"],
+  ["terminal-result-blocked-nonconvergence", "484c993240b44861d7d71c96e40fcf4008241b506d9b8f08105352beec069b1b"],
   ["terminal-result-partial", "c7c56d99562df246e6e5219fb7ca002924103fea7be86bc2cab1b8c04eada6f6"],
   ["terminal-result-needs-human", "f10e0e1b566924c9b223e63b30426d6004b3210b0be12d884c63ec42310af5b9"],
   ["gate-pending", "9af58fac48dd996f8f66431b251cae4ec56e5ed1bdd956a903beb70de3ab504e"],
@@ -663,10 +700,11 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-timeout", "145e09cc8ddf2cc6ad438bfd10eb060732ea5d2818e32f1f2d85bf747b80e755"],
   ["test-execution-receipt-failed-output-limit", "5d67fdbbcb0e50d8597c747e30d41c3217b13c5f18f511e43d0914b05cfc2895"],
   ["slice-pending", "63b63efe898da669ae80a855536c52a7f00a0009a0465a2ec6cee66477b11f50"],
-  ["slice-running", "e4d226476601e984b5b50f12ad36ce05f8a7e3ac3a49421218b72a94be54c962"],
-  ["slice-review", "1d0d4c6beaa40f3f3397a3d015ae7d682cd8eb4ed10e268998b59bf14d7c76ef"],
-  ["slice-merged", "d02186b0bac9122bd39058f4205cc5234e6a8da5bc82fd221c6b88ca76e6633f"],
-  ["slice-blocked", "284ac69650ab3643fab2f8aece086a1a16c66f106449b29e3003848f9e53cd11"],
+  ["slice-running", "beab1f224a3723cf005fb260d8d79a7f53b5083458b165cc5bcc98ffc40c5645"],
+  ["slice-review", "f3032a106a15dda6324ea24d196196f8629cd57d1fc53a5e1e9f1f8c528d6b51"],
+  ["slice-merged", "a36bfb5c4e168c8015eae87263ca562eba651051261c41d03441a1b87bf23e3e"],
+  ["slice-blocked-ordinary", "bc27e546fad0fae0b3d3408199d29e0d1e492fdcc074f42d6707cde54f3cd0c3"],
+  ["slice-blocked", "c566d2365a70e36e1616952e990317196ab85647c672afb731af20e402d1ceba"],
   ["validator-verdict-binding", "d5663f22b888f878625141430a2602863730f8ab122a815359dd545d876b49cb"],
   ["security-verdict-binding", "88c89ebb14e5f14121dc022da8f0c73dc1e5e9639d570337edcfb09cef5c17d7"],
   ["steering-boundary", "7842e29ee7d10b4465db99127739e4b602479aff47b848a5c7bb9d2e30ecf732"],
@@ -771,6 +809,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
   ["terminal-result-completed", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
   ["terminal-result-blocked", "2e50300aa3e14e8fd6c935f3dae3fa44dd388c6ff386091ecbc28109f82ad855"],
+  ["terminal-result-blocked-nonconvergence", "d895ff92ed6bab962b8221cb95673add5977f5e64bb60004e492f89e8af65379"],
   ["terminal-result-partial", "b5808744bc1ae0146a9a59e9814be3d58712a04c0cfbaf6f5d1858ab698c7746"],
   ["terminal-result-needs-human", "4c5aee988d94853ac78432435d4b65f7ebe8720dfa0652b6c9eeb8ee30bd0581"],
   ["gate-pending", "802c580efe10eaa5728775d05bb1f088c4831455b3763763b9daf3885c6442f4"],
@@ -797,10 +836,11 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-timeout", "5d77cdf0868afcf860e9fd1ec0cd985d0b4d4c2a9603e1efeb55c94e37f24bf4"],
   ["test-execution-receipt-failed-output-limit", "9f258d14925eb587cbe96ddfb9c0a1c7f6144c9bca3d7f8a73a07fa638fa328c"],
   ["slice-pending", "ae8061ad556cf202f28c06dad1d8dfaf84168512be57e8dae034984926ad766b"],
-  ["slice-running", "c481d007f40269d98676cf2746db9a5ab4b15ffb1cafe92fc9d0569181cef758"],
-  ["slice-review", "ac668a5340a0db81df8ad31e4d73302234dfd49da5933161e0f43d869e8a3262"],
-  ["slice-merged", "ad2674135456283cf415406224c7a04cf661565770b6a7270a00d673fe2d6869"],
-  ["slice-blocked", "720be910a4201dab3958263b06f17510181df9c58c77f63eda5b9a91bb39da10"],
+  ["slice-running", "ab8b06098386b7d5ca8ffb67fea577d4174fa961a945fa9f7179cbd448171a0a"],
+  ["slice-review", "391efdb3775c45b0987389547128b0273363707057bd8d02dc89e36452b23500"],
+  ["slice-merged", "b6f08ae9aebc6d480f40e092e93473a87b9c4874761e43dc457c51dafe65f07c"],
+  ["slice-blocked-ordinary", "bbc29feaab8cab439d2b7f32e0526358344ace407b39304e046d647dec72417e"],
+  ["slice-blocked", "cfa4ca2eba3f1536760ca4c26b2d5194b2e159b65fa8eee8b2bee9789023188f"],
   ["validator-verdict-binding", "22c22e8e118609a58e29101a6f6a89dacc8ddfddcc92974c810fe4b51cc5fdc9"],
   ["security-verdict-binding", "56e34d4427dc76cb46caee5a002856e4e97ef2dc870543fc489a750e384e6d99"],
   ["steering-boundary", "b3477a6967254d04f869b97b8d15d00ddb952673f00807ebec41f05afdbdacfc"],
@@ -1077,6 +1117,7 @@ const RECORDS = [
   }),
   terminalResultEntry("terminal-result-completed", "completed", { pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, pr_node_id: "PR_catalog_operation", repository: "acme/repo", operation_id: PR_OPERATION_ID, head_ref: "feature--catalog", head_sha: SHA_B, base_ref: "main", base_sha: SHA_A, draft: false, artifacts: { test_report: "artifacts/test-report.md" } }, [ref(["artifacts", "test_report"]), stale(["head_sha"], SHA_A), cross(["operation_id"], `ffpr-v1-${"e".repeat(64)}`)]),
   terminalResultEntry("terminal-result-blocked", "blocked", { reason: "review-blocked", summary: "Review blocked." }),
+  nonconvergenceTerminalResultEntry(),
   terminalResultEntry("terminal-result-partial", "partial", { reason: "partial-completion", summary: "Some work completed." }),
   terminalResultEntry("terminal-result-needs-human", "needs-human", { reason: "operator-reconciliation", summary: "Operator action required." }),
 
@@ -1109,6 +1150,7 @@ const RECORDS = [
   sliceEntry("slice-running", "running"),
   sliceEntry("slice-review", "review"),
   sliceEntry("slice-merged", "merged"),
+  sliceEntry("slice-blocked-ordinary", "blocked-ordinary"),
   sliceEntry("slice-blocked", "blocked"),
 
   panelEntry("validator-verdict-binding", "run.json.validator", "validator", { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" }),
@@ -1278,6 +1320,64 @@ function terminalResultEntry(id, status, extras, targets = []) {
     readers: ["validateRun terminal consistency", "resumeFactory terminal check", "factory status/list/watch terminal readers", "cleanup eligibility readers"],
     canonicalPath: ["terminal_result"], source, facts: exactFacts(source),
     requiredPath: ["status"], typePath: ["run_id"], targets: [...targets, stale(["status"], "running"), cross(["run_id"], "other-run")],
+  });
+}
+
+function nonconvergenceTerminalResultEntry() {
+  const sourceReview = {
+    attempt: 1,
+    evidence_ref: SLICE_NONCONVERGENCE_EXTERNAL.evidence.ref,
+    evidence_hash: hashBytes(SLICE_NONCONVERGENCE_EXTERNAL.evidence.bytes),
+    review_ref: SLICE_NONCONVERGENCE_EXTERNAL.review.ref,
+    review_hash: hashBytes(SLICE_NONCONVERGENCE_EXTERNAL.review.bytes),
+    reviewed_commit: SHA_B,
+    verdict: "REJECT",
+    convergence: "nonconvergent",
+    remaining_fix_count: 1,
+    dispatch_claim_ref: SLICE_NONCONVERGENCE_EXTERNAL.claim.ref,
+    dispatch_claim_hash: hashBytes(SLICE_NONCONVERGENCE_EXTERNAL.claim.bytes),
+    dispatch_closure_ref: SLICE_NONCONVERGENCE_EXTERNAL.closure.ref,
+    dispatch_closure_hash: hashBytes(SLICE_NONCONVERGENCE_EXTERNAL.closure.bytes),
+  };
+  const source = {
+    status: "blocked",
+    run_id: "catalog-run",
+    pr_url: null,
+    reason: "slice-review-nonconvergent",
+    summary: "Slice 'backend' review marked attempt 1 nonconvergent; continue from the reviewed integration state.",
+    artifacts: {},
+    nonconvergence: {
+      schema_version: 1,
+      kind: "slice-review-nonconvergence",
+      slice_id: "backend",
+      source_review: sourceReview,
+      continuation: { program: "feature-factory", args: ["factory", "continue", "catalog-run", "--review", sourceReview.review_ref, "--run-id", "<new-run-id>", "--carry-forward", "--json"] },
+    },
+  };
+  return recordEntry({
+    authorityClassId: "run-envelope-terminal-result",
+    id: "terminal-result-blocked-nonconvergence",
+    record: "run.json.terminal_result",
+    variant: "blocked slice-review nonconvergence",
+    writer: "transitionRunSlice checked nonconvergence terminalization",
+    readers: ["validateRun terminal nonconvergence consistency", "factory continue schema-v2 selector", "schema-v2 child dispatch parent authority", "terminal and continuation diagnostics"],
+    canonicalPath: ["terminal_result"],
+    source,
+    externalSources: { evidence: SLICE_NONCONVERGENCE_EXTERNAL.evidence, review: SLICE_NONCONVERGENCE_EXTERNAL.review },
+    sidecars: [
+      externalSidecar("evidence", ["nonconvergence", "source_review", "evidence_ref"], ["nonconvergence", "source_review", "evidence_hash"]),
+      externalSidecar("review", ["nonconvergence", "source_review", "review_ref"], ["nonconvergence", "source_review", "review_hash"]),
+    ],
+    facts: exactFacts(source),
+    requiredPath: ["nonconvergence"],
+    typePath: ["nonconvergence", "source_review", "attempt"],
+    targets: [
+      ...externalSidecarTargets("evidence", ["nonconvergence", "source_review", "evidence_ref"], ["nonconvergence", "source_review", "evidence_hash"]),
+      ...externalSidecarTargets("review", ["nonconvergence", "source_review", "review_ref"], ["nonconvergence", "source_review", "review_hash"]),
+      drift(["nonconvergence"], "kind", "terminal source kind"),
+      stale(["nonconvergence", "source_review", "attempt"], 0),
+      cross(["nonconvergence", "slice_id"], "frontend"),
+    ],
   });
 }
 
@@ -1575,24 +1675,77 @@ function workDecomposerAcceptedEntry() {
 }
 
 function sliceEntry(id, variant) {
-  const source = { id: "backend", stack: "backend", depends_on: [], status: variant, attempts: variant === "pending" ? 0 : 1 };
+  const status = variant === "blocked-ordinary" ? "blocked" : variant;
+  const blocked = status === "blocked";
+  const source = { id: "backend", stack: "backend", depends_on: [], status, attempts: variant === "pending" ? 0 : 1 };
   const targets = [stale(["attempts"], variant === "pending" ? 1 : 0), cross(["id"], "frontend")];
+  let externalSources = {};
+  const sidecars = [];
+  const observations = [];
   if (variant !== "pending") {
     source.branch = "feature--backend";
     source.worktree = "/tmp/backend";
+    source.dispatch_required = true;
+    source.dispatch_claim_ref = SLICE_DISPATCH_EXTERNAL.claim.ref;
+    source.dispatch_claim_hash = hashBytes(SLICE_DISPATCH_EXTERNAL.claim.bytes);
+    externalSources = { claim: SLICE_DISPATCH_EXTERNAL.claim };
+    sidecars.push(externalSidecar("claim", ["dispatch_claim_ref"], ["dispatch_claim_hash"]));
+    targets.push(...externalSidecarTargets("claim", ["dispatch_claim_ref"], ["dispatch_claim_hash"]));
+    observations.push({ name: "dispatch-claim-head", source: "claim", path: ["head"], expected: SHA_B, consumer: "checked slice dispatch and terminal/continuation unresolved-dispatch guard" });
     targets.push(ref(["worktree"]));
   }
-  if (["review", "merged"].includes(variant)) {
-    source.evidence_ref = SLICE_EXTERNAL.evidence.ref;
-    source.evidence_hash = hashBytes(SLICE_EXTERNAL.evidence.bytes);
-    source.review_ref = SLICE_EXTERNAL.review.ref;
-    source.review_hash = hashBytes(SLICE_EXTERNAL.review.bytes);
+  if (["review", "merged", "blocked", "blocked-ordinary"].includes(variant)) {
+    const reviewSources = variant === "blocked"
+      ? SLICE_NONCONVERGENCE_EXTERNAL
+      : variant === "blocked-ordinary"
+        ? SLICE_BLOCKED_EXTERNAL
+        : { ...SLICE_EXTERNAL, ...SLICE_DISPATCH_EXTERNAL };
+    const historyEntry = {
+      attempt: 1,
+      evidence_ref: reviewSources.evidence.ref,
+      evidence_hash: hashBytes(reviewSources.evidence.bytes),
+      review_ref: reviewSources.review.ref,
+      review_hash: hashBytes(reviewSources.review.bytes),
+      reviewed_commit: SHA_B,
+      verdict: blocked ? "REJECT" : "APPROVE",
+      convergence: variant === "blocked" ? "nonconvergent" : "converging",
+      remaining_fix_count: blocked ? 1 : 0,
+      dispatch_claim_ref: reviewSources.claim.ref,
+      dispatch_claim_hash: hashBytes(reviewSources.claim.bytes),
+      dispatch_closure_ref: reviewSources.closure.ref,
+      dispatch_closure_hash: hashBytes(reviewSources.closure.bytes),
+    };
+    source.attempt_reviews = [historyEntry];
+    source.dispatch_closure_ref = reviewSources.closure.ref;
+    source.dispatch_closure_hash = hashBytes(reviewSources.closure.bytes);
+    source.evidence_ref = reviewSources.evidence.ref;
+    source.review_ref = reviewSources.review.ref;
+    if (!blocked) {
+      source.evidence_hash = historyEntry.evidence_hash;
+      source.review_hash = historyEntry.review_hash;
+    }
     source.reviewed_commit = SHA_B;
+    if (blocked) delete source.reviewed_commit;
+    externalSources = reviewSources;
+    sidecars.push(externalSidecar("closure", ["dispatch_closure_ref"], ["dispatch_closure_hash"]));
+    targets.push(...externalSidecarTargets("closure", ["dispatch_closure_ref"], ["dispatch_closure_hash"]));
+    const evidenceRefPath = blocked ? ["attempt_reviews", 0, "evidence_ref"] : ["evidence_ref"];
+    const evidenceHashPath = blocked ? ["attempt_reviews", 0, "evidence_hash"] : ["evidence_hash"];
+    const reviewRefPath = blocked ? ["attempt_reviews", 0, "review_ref"] : ["review_ref"];
+    const reviewHashPath = blocked ? ["attempt_reviews", 0, "review_hash"] : ["review_hash"];
+    sidecars.push(externalSidecar("evidence", evidenceRefPath, evidenceHashPath), externalSidecar("review", reviewRefPath, reviewHashPath));
     targets.push(
-      ...externalSidecarTargets("evidence", ["evidence_ref"], ["evidence_hash"]),
-      ...externalSidecarTargets("review", ["review_ref"], ["review_hash"]),
-      stale(["reviewed_commit"], SHA_A, "stale reviewed head"),
-      cross(["reviewed_commit"], SHA_C, "cross-bound reviewed head"),
+      ...externalSidecarTargets("evidence", evidenceRefPath, evidenceHashPath),
+      ...externalSidecarTargets("review", reviewRefPath, reviewHashPath),
+      drift(["attempt_reviews", 0], "verdict", "attempt review result"),
+      stale(["attempt_reviews", 0, "attempt"], 0, "stale attempt review"),
+      cross(["attempt_reviews", 0, "reviewed_commit"], SHA_C, "cross-bound reviewed head"),
+    );
+    if (!blocked) targets.push(stale(["reviewed_commit"], SHA_A, "stale current reviewed head"));
+    observations.push(
+      { name: "evidence-head", source: "evidence", path: ["head_sha"], expected: SHA_B, consumer: "transitionRunSlice and PR readiness" },
+      { name: "reviewed-commit", source: "review", path: ["reviewed_commit"], expected: SHA_B, consumer: "transitionRunSlice, transitionSliceMerged, and nonconvergence continuation" },
+      { name: "dispatch-closure-claim", source: "closure", path: ["claim_hash"], expected: hashBytes(SLICE_DISPATCH_CLAIM_BYTES), consumer: "checked slice review and terminal/continuation unresolved-dispatch guard" },
     );
   }
   if (variant === "merged") {
@@ -1600,29 +1753,21 @@ function sliceEntry(id, variant) {
     source.updated_at = NOW;
     targets.push(time(["updated_at"]));
   }
-  if (variant === "blocked") source.blocked_reason = "review rejected";
+  if (variant === "blocked") source.blocked_reason = "slice-review-nonconvergent";
+  if (variant === "blocked-ordinary") source.blocked_reason = "review rejected";
   return recordEntry({
     authorityClassId: "slices-review-evidence-bindings", id, record: "run.json.slices[]", variant,
     writer: variant === "merged" ? "transitionSliceMerged checked transition" : variant === "pending" ? "factory slices-seed checked transition" : "transitionRunSlice checked transition",
-    readers: source.reviewed_commit
-      ? ["validateRun slice validation", "builder-wave dependency scheduler", "transitionSliceMerged exact merge proof", "PR readiness ref/hash re-observation", "repair admission readers"]
-      : ["validateRun slice validation", "builder-wave dependency scheduler", "transitionSliceMerged", "PR readiness and repair admission readers"],
+    readers: variant === "pending"
+      ? ["validateRun slice validation", "builder-wave dependency scheduler", "transitionSliceMerged", "PR readiness and repair admission readers"]
+      : ["validateRun slice validation", "checked builder dispatch claim/closure publication", "transitionRunSlice review/history and commit-bound retry", "terminal/continuation unresolved-dispatch guard", "transitionSliceMerged and PR readiness"],
     canonicalPath: ["slices", 0], source,
-    ...(source.reviewed_commit ? {
-      externalSources: SLICE_EXTERNAL,
-      sidecars: [externalSidecar("evidence", ["evidence_ref"], ["evidence_hash"]), externalSidecar("review", ["review_ref"], ["review_hash"])],
-      observations: [
-        { name: "evidence-head", source: "evidence", path: ["head_sha"], expected: SHA_B, consumer: "transitionRunSlice and PR readiness" },
-        { name: "reviewed-commit", source: "review", path: ["reviewed_commit"], expected: SHA_B, consumer: "transitionRunSlice, transitionSliceMerged, and PR readiness" },
-      ],
-    } : {}),
-    facts: [
-      fact(["id"], "backend"), fact(["stack"], "backend"), fact(["depends_on"], []), fact(["status"], variant), fact(["attempts"], source.attempts),
-      ...(source.branch ? [fact(["branch"], source.branch), fact(["worktree"], source.worktree)] : []),
-      ...(source.evidence_ref ? [fact(["evidence_ref"], source.evidence_ref), fact(["evidence_hash"], source.evidence_hash), fact(["review_ref"], source.review_ref), fact(["review_hash"], source.review_hash), fact(["reviewed_commit"], source.reviewed_commit)] : []),
-      ...(source.merge_commit ? [fact(["merge_commit"], source.merge_commit), fact(["updated_at"], source.updated_at)] : []),
-      ...(source.blocked_reason ? [fact(["blocked_reason"], source.blocked_reason)] : []),
-    ],
+    ...(variant === "blocked-ordinary" ? { tests: [
+      "test/durable-record-mutations.test.js: slice-blocked-ordinary mutation matrix",
+      "test/durable-record-mutations.test.js: executes every ordinary blocked-slice mutation through production authority consumers",
+    ] } : {}),
+    ...(Object.keys(externalSources).length ? { externalSources, sidecars, observations } : {}),
+    facts: exactFacts(source),
     requiredPath: ["id"], typePath: ["attempts"], targets,
   });
 }
@@ -2162,6 +2307,18 @@ export function createRepairCatalogBaseline(record) {
 
 function canonicalRunFixture(record) {
   if (record.canonicalPath.length === 0) return structuredClone(record.source);
+  if (record.id === "terminal-result-blocked-nonconvergence") {
+    const blockedSlice = RECORDS.find((candidate) => candidate.id === "slice-blocked")?.source;
+    if (!blockedSlice) throw new TypeError("terminal nonconvergence baseline requires the canonical blocked slice source");
+    return {
+      schema_version: 1,
+      run_id: "catalog-run",
+      status: "blocked",
+      gates: {},
+      slices: [structuredClone(blockedSlice)],
+      terminal_result: structuredClone(record.source),
+    };
+  }
   if (record.canonicalPath[0] === "terminal_result") {
     return {
       schema_version: 1,
@@ -2650,7 +2807,7 @@ function rejectSyntheticCanonicalKeys(record, path) {
     for (const key of ["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"]) forbidden.add(key);
   }
   if (record.authorityClassId === "slices-review-evidence-bindings") {
-    for (const key of ["review_binding", "attempt_reviews"]) forbidden.add(key);
+    forbidden.add("review_binding");
   }
   if (["validator-verdict-binding", "security-verdict-binding"].includes(record.id)) {
     for (const key of ["subject", "attempt", "report_ref", "reviewed_commit"]) forbidden.add(key);

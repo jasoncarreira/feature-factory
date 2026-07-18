@@ -619,13 +619,15 @@ Implementation status: safe context reuse is an orchestrator runtime behavior on
 
 The orchestrator may reuse a Task `task_id` inside a bounded remediation loop only for the implementer that owns the fix. Reuse is permitted only when every safety dimension is identical to the original dispatch:
 
-- Role is the same eligible implementer: `backend-builder`, `frontend-builder`, or `test-verifier`.
-- Subject ownership is unchanged: the same slice for a builder, or the same acceptance-test/integration test owner for `test-verifier`.
+- Role is the same eligible slice builder: `backend-builder` or `frontend-builder`.
+- Subject ownership is unchanged: the same slice.
 - Worktree and branch are unchanged.
 - The live orchestrator session is unchanged; `task_id` reuse is invalid after process restart, `factory resume`, detached relaunch, blocked-run continuation, or any handoff to a different orchestrator session.
 - The same bounded remediation loop is still active and has not exceeded its retry budget.
 
-If any dimension is unknown, ambiguous, stale, or mismatched, the orchestrator must omit `task_id` and launch a fresh Task. Reuse is an optimization for continuity of the implementer conversation, not authority to skip observation, evidence, tests, reviews, validation, security review, or remediation bounds.
+If any dimension is unknown, ambiguous, stale, or mismatched, the orchestrator must omit `task_id` and launch a fresh Task. `test-verifier` and every non-builder role always start fresh. Reuse is an optimization for continuity of the slice-builder conversation, not authority to skip observation, evidence, tests, reviews, validation, security review, or remediation bounds.
+
+Every checked ordinary slice-builder Task is synchronous. Starting a new attempt sets durable `dispatch_required`; the checked pre-hook then create-publishes an immutable per-run/slice/attempt claim and atomically binds its ref/hash into that slice. The plugin generates a random completion capability, stores only its hash in the claim, retains the capability outside the Task prompt/body, and gives it only to the matching synchronous after-hook. That hook requires exact callback role/prompt identity and a confirmed foreground result before it create-publishes the capability-authenticated closure and binds its ref/hash into the slice. Failed, cancelled, unknown, or promoted-background results leave the claim unresolved. Review publication retains the exact claim/closure tuple in that attempt's append-only history before a successor may replace the current tuple. An absent, invalid, or unbound closure is an active/unknown dispatch outcome: no review may publish, no attempt may advance, no same-slice attempt may dispatch, and no terminal or continuation route may reset it into another run. Claims, closures, and their `run.json` bindings are durable crash/restart fences but contain no `task_id`. Non-slice builder remediation routes remain fresh and use their own durable lifecycle authority rather than ordinary slice-dispatch markers.
 
 Review agents are not eligible for context reuse. `work-reviewer`, `implementation-validator`, and `security-reviewer` must start from a fresh Task every loop, must not receive a prior `task_id`, and remain read-only observers of the current worktree/result. This preserves independence for slice re-review, final implementation validation, and adversarial security review.
 
@@ -648,6 +650,8 @@ Explicit schema-v2 pre-PR full-plan command:
 ```sh
 feature-factory factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> --carry-forward
 ```
+
+`slice-review-nonconvergent` parents require this schema-v2 form. Omitting `--carry-forward` rejects before reservation, publication, or launch; schema v1 is not a downgrade route for terminal nonconvergence.
 
 `--carry-forward` is mutually exclusive with `--new-pr`. Unflagged and post-PR continuation stay schema v1; v2 is never selected implicitly.
 
