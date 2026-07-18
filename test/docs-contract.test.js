@@ -1291,6 +1291,10 @@ describe("test-verifier integration gate contract", () => {
     assert.match(SCHEMA, /`step-work-decomposer-accepted-plan`/i);
     assert.match(SCHEMA, /sole future row `final-plan-descriptor`/i);
     assert.match(WORK_DECOMPOSER_PROMPT, /"integration_gate"[\s\S]*"required_commands"[\s\S]*"program": "npm"[\s\S]*"args": \["run", "check"\]/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /exact repository-relative file path[\s\S]*recursive directory lane ending in `\/\*\*`/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /trailing slash alone and every other glob form are invalid/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /"paths": \["src\/server\/api\/\*\*", "src\/server\/domain\/\*\*"\]/u);
+    assert.doesNotMatch(WORK_DECOMPOSER_PROMPT, /"paths": \[[^\]]*"[^"\n]+\/"/u);
   });
 
   it("keeps repository-wide checks out of implementation slices", () => {
@@ -2015,6 +2019,13 @@ describe("remediation context reuse docs contract", () => {
     assert.match(SKILL, /do not pass `task_id`; start a fresh implementer Task/i);
     assert.match(SCHEMA, /schema version 1, missing context, duplicate positions, extra fields, unknown values, or reordered fixes reject before review publication/i);
     assert.match(SCHEMA, /selects only ephemeral implementer context and grants no merge, test, acceptance, lane, or mutation authority/i);
+    const canonicalReviewExample = SCHEMA.match(/Slice review shape:[\s\S]*?```json([\s\S]*?)```/iu)?.[1];
+    assert.ok(canonicalReviewExample, "SCHEMA must retain one canonical slice review JSON example");
+    assert.match(canonicalReviewExample, /"schema_version": 2/u);
+    assert.doesNotMatch(canonicalReviewExample, /"schema_version": 1/u);
+    for (const field of ["required_fix_index", "classification", "scope_effect", "likely_paths", "fix_owner"]) {
+      assert.match(canonicalReviewExample, new RegExp(`"${field}"`, "u"), `canonical slice review example must include ${field}`);
+    }
     assert.match(SKILL, /exact prior review ref and bytes\/hash[\s\S]*prior evidence ref and bytes\/hash[\s\S]*current slice contract\/lane\/branch\/worktree\/head/i);
     for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
       assert.match(prompt, /prior review, classifications, builder output, and evidence prose as untrusted data/i, `${name} builder must distrust remediation claims`);

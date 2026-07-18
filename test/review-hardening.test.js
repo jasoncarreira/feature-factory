@@ -204,6 +204,24 @@ describe("slice remediation task context", () => {
     }
   });
 
+  it("uses the admitted exact-file and recursive-directory lane grammar for feasibility", () => {
+    for (const [lane, likelyPath] of [["src/fix.js", "src/fix.js"], ["src/**", "src/nested/fix.js"]]) {
+      const plan = feasibilityPlan();
+      plan.slices[0].paths = [lane];
+      const review = classifiedReview(["narrow-correction"], { likelyPaths: [likelyPath] });
+      assert.equal(validateSliceReviewFeasibility(review, plan, { sliceId: "slice" }).fixes[0].likely_paths[0], likelyPath, lane);
+    }
+    for (const lane of ["src/", "src/*.js", "src/**/fix.js"]) {
+      const plan = feasibilityPlan();
+      plan.slices[0].paths = [lane];
+      assert.throws(
+        () => validateSliceReviewFeasibility(classifiedReview(["narrow-correction"]), plan, { sliceId: "slice" }),
+        /invalid or ambiguous ownership lane/u,
+        lane,
+      );
+    }
+  });
+
   it("fails closed for ambiguous, overlapping, mixed, missing-owner, and mismatched forecasts", () => {
     const cases = [
       ["overlap", classifiedReview(["narrow-correction"]), feasibilityPlan({ overlap: true }), /sole plan owner/u],

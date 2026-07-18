@@ -4,6 +4,7 @@ import { TextDecoder } from "node:util";
 import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency, sanitizePublicCostText } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
 import { PROCESS_EVIDENCE_FILE, processEvidenceProcessesDir, validateProcessEvidence } from "./process-evidence.js";
+import { validatePlanPath } from "./post-pr-ci.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
@@ -285,23 +286,17 @@ function validateLikelyRepositoryPaths(errors, paths, path) {
 }
 
 function isCanonicalConcreteRepositoryPath(value) {
-  if (typeof value !== "string" || value === "" || value !== value.trim() || value !== value.normalize("NFC") || Buffer.byteLength(value, "utf8") > 1024) return false;
-  if (value.startsWith("/") || /^[A-Za-z]:/u.test(value) || value.includes("\\") || /[\0-\x1f\x7f*?[\]{}]/u.test(value)) return false;
-  const segments = value.split("/");
-  return segments.length <= 64 && segments.every((part) => part !== "" && part !== "." && part !== ".." && Buffer.byteLength(part, "utf8") <= 255);
+  return validatePlanPath(value) === value && !value.endsWith("/**");
 }
 
 function canonicalPlanOwnershipLane(value, errors, path) {
-  if (typeof value !== "string") {
-    errors.push({ path, message: "must be a canonical concrete or recursive ownership lane" });
-    return null;
-  }
-  const recursive = value.endsWith("/**");
-  const base = recursive ? value.slice(0, -3) : value;
-  if (!isCanonicalConcreteRepositoryPath(base)) {
+  const canonical = validatePlanPath(value);
+  if (canonical === null) {
     errors.push({ path, message: `invalid or ambiguous ownership lane '${safeValidationIdentifier(value)}'` });
     return null;
   }
+  const recursive = canonical.endsWith("/**");
+  const base = recursive ? canonical.slice(0, -3) : canonical;
   return { base, recursive };
 }
 
@@ -2351,6 +2346,9 @@ function validatePlannedSlices(errors, slices, path, { enforceDependencyDepth })
     requiredTerminalSafeString(errors, slice, "id", `${path}[${index}].id`);
     requiredString(errors, slice, "stack", `${path}[${index}].stack`);
     validateStringArray(errors, slice.paths, `${path}[${index}].paths`, { required: true, nonEmpty: true });
+    if (Array.isArray(slice.paths)) {
+      for (const [laneIndex, lane] of slice.paths.entries()) canonicalPlanOwnershipLane(lane, errors, `${path}[${index}].paths[${laneIndex}]`);
+    }
     validateStringArray(errors, slice.depends_on, `${path}[${index}].depends_on`, { required: true, values: ids });
     validateStringArray(errors, slice.acceptance, `${path}[${index}].acceptance`, { required: true, nonEmpty: true });
     validateStringArray(errors, slice.test_plan, `${path}[${index}].test_plan`, { required: true, nonEmpty: true });

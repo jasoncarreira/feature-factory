@@ -1758,6 +1758,37 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("rejects trailing-slash and unsupported-glob plans before seed or acceptance", async () => {
+    for (const lane of ["src/", "src/*.js", "src/**/api.js"]) {
+      for (const route of ["seed", "accept"]) {
+        const fixture = createFixture(`invalid-plan-lane-${route}-${lane.replaceAll(/[^A-Za-z0-9]/gu, "-")}`);
+        const projection = [{ id: "backend", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
+        try {
+          mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
+          writeJson(join(fixture.runDir, "plan", "slices.json"), {
+            integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+            slices: [{ id: "backend", stack: "backend", paths: [lane], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test"] }],
+          });
+          const run = { ...baseRun(fixture.runId), slices: route === "seed" ? [] : projection };
+          if (route === "accept") {
+            mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+            writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE" });
+            run.steps = [{ agent: "work-decomposer", status: "running", attempts: 1 }];
+          }
+          writeJson(join(fixture.runDir, "run.json"), run);
+          const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+          const transition = route === "seed"
+            ? transitionSlicesSeed(fixture.runDir, projection, { from: "plan/slices.json" })
+            : transitionRunStep(fixture.runDir, "work-decomposer", { status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json" }, { mustExist: true });
+          await assert.rejects(transition, /invalid or ambiguous ownership lane/u, `${route}:${lane}`);
+          assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, `${route}:${lane}`);
+        } finally {
+          cleanup(fixture.repo);
+        }
+      }
+    }
+  });
+
   it("requires the exact run-relative plan source instead of projection-only seed authority", async () => {
     const fixture = createFixture("checked-slice-seed-source-required");
     const projection = [{ id: "backend", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];

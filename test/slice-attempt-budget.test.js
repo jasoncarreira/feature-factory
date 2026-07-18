@@ -124,7 +124,7 @@ describe("uniform slice attempt evidence", () => {
   it("keeps the plan and durable schema closed to a fixed limit of three", () => {
     const plan = {
       integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
-      slices: [{ id: "slice", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
+      slices: [{ id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
     };
     assert.equal(validateSlicesPlan(plan, { requireIntegrationGate: true }).slices.length, 1);
     assert.throws(() => validateSlicesPlan({ ...plan, slices: [{ ...plan.slices[0], max_attempts: 4 }] }), /max_attempts: is not allowed/u);

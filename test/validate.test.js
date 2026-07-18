@@ -55,6 +55,22 @@ describe("run schema and consistency", () => {
     );
   });
 
+  it("admits only exact-file and recursive-directory ownership lanes", () => {
+    for (const lane of ["src/server/api.js", "src/server/api/**"]) {
+      const plan = slicesPlan([{ ...plannedSlice("slice"), paths: [lane] }]);
+      assert.equal(validateSlicesPlan(plan), plan, lane);
+      assert.equal(plan.slices[0].paths[0], lane, `${lane} must remain byte-exact`);
+    }
+    for (const lane of ["src/server/api/", "src/server/*.js", "src/**/api.js", "src/server/{api,ui}.js", "src/server/api?.js"]) {
+      assert.throws(
+        () => validateSlicesPlan(slicesPlan([{ ...plannedSlice("slice"), paths: [lane] }])),
+        (error) => error instanceof ValidationError
+          && error.errors.some((item) => item.path === "plan.slices[0].paths[0]" && /invalid or ambiguous ownership lane/u.test(item.message)),
+        lane,
+      );
+    }
+  });
+
   it("enforces the closed versioned run envelope, top-level timestamps, and absolute worktree", () => {
     const allowedRunKeys = ["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"];
     const canonical = { ...runningRun(), created_at: "2026-07-08T11:00:00.000Z", updated_at: "2026-07-08T11:30:00.000Z", heartbeat_at: "2026-07-08T11:59:00.000Z", worktree: "/tmp/run" };

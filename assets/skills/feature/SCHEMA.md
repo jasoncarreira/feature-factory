@@ -1074,14 +1074,22 @@ Slice review shape:
 {
   "subject": "be-api",
   "attempt": 2,
-  "verdict": "APPROVE",
+  "verdict": "REJECT",
   "reviewed_commit": "1111111111111111111111111111111111111111",
   "convergence": "converging",
-  "remaining_fix_count": 0,
-  "required_fixes": [],
+  "remaining_fix_count": 1,
+  "required_fixes": ["Preserve the API error code when retrying the request."],
   "remediation_context": {
-    "schema_version": 1,
-    "fixes": []
+    "schema_version": 2,
+    "fixes": [
+      {
+        "required_fix_index": 0,
+        "classification": "narrow-correction",
+        "scope_effect": "in-lane",
+        "likely_paths": ["src/server/api/retry.js"],
+        "fix_owner": "be-api"
+      }
+    ]
   }
 }
 ```

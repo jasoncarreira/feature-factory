@@ -1960,6 +1960,72 @@ describe("continuation planning-artifact reuse", () => {
     } finally { cleanup(fixture.repo); }
   });
 
+  it("publishes and replays complete multi-attempt carry-forward history", async () => {
+    const fixture = createV2Fixture("multi-attempt-publication", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "multi-attempt-publication-next";
+    const launches = [];
+    try {
+      const history = configureMultiAttemptAcceptedSlice(fixture, "A");
+      const parentBytes = new Map(history.flatMap((entry) => [entry.evidence_ref, entry.review_ref])
+        .map((ref) => [ref, readFileSync(join(fixture.runDir, ref))]));
+      const launch = async (repo, args) => {
+        launches.push({ repo, payload: args.at(-1) });
+        return { status: "started", run_id: childRunId };
+      };
+      const options = {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        now: "2026-07-18T12:00:00.000Z",
+        foregroundLaunchFn: launch,
+      };
+
+      const result = await continueFactory(fixture.runId, options);
+      const accepted = result.payload.continuation.carry_forward.accepted_slices[0];
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+      const childSlice = child.slices.find((slice) => slice.id === "A");
+
+      assert.deepEqual(accepted.attempt_reviews, history);
+      assert.deepEqual(childSlice.attempt_reviews, history);
+      assert.equal(accepted.attempt_reviews[0].review_ref, "reviews/A.attempt-1.json");
+      assert.equal(accepted.attempt_reviews[1].review_ref, "reviews/A.attempt-2.json");
+      assert.notEqual(accepted.attempt_reviews[0].review_hash, accepted.attempt_reviews[1].review_hash);
+      assert.notEqual(accepted.attempt_reviews[0].evidence_hash, accepted.attempt_reviews[1].evidence_hash);
+      for (const [ref, bytes] of parentBytes) assert.deepEqual(readFileSync(join(childRunDir, ref)), bytes, ref);
+
+      const decoded = decodeFeatureCommandPayload(launches[0].payload, { repo: launches[0].repo });
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
+      assert.deepEqual(decoded.payload.continuation.carry_forward.accepted_slices[0].attempt_reviews, history);
+      const replay = await continueFactory(fixture.runId, options);
+      assert.deepEqual(replay.publication, { published: true, replayed: true });
+      const replayDecoded = decodeFeatureCommandPayload(launches[1].payload, { repo: launches[1].repo });
+      assert.equal(replayDecoded.ok, true, JSON.stringify(replayDecoded));
+      assert.deepEqual(replayDecoded.payload.continuation.carry_forward.accepted_slices[0].attempt_reviews, history);
+    } finally { cleanup(fixture.repo); }
+
+    for (const [label, mutate, expected] of [
+      ["historical deletion", (candidate) => rmSync(join(candidate.runDir, "reviews", "A.attempt-1.json")), /missing.*review|review.*missing/u],
+      ["historical byte drift", (candidate) => {
+        const path = join(candidate.runDir, "evidence", "A.attempt-1.json");
+        writeFileSync(path, `${readFileSync(path, "utf8")} `);
+      }, /history is stale|hashes are stale/u],
+      ["historical hash drift", (candidate) => updateRun(candidate, (run) => { run.slices[0].attempt_reviews[0].review_hash = `sha256:${"0".repeat(64)}`; }), /history is stale|hashes are stale/u],
+    ]) {
+      const candidate = createV2Fixture(`multi-attempt-${label.replaceAll(" ", "-")}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        configureMultiAttemptAcceptedSlice(candidate, "A");
+        mutate(candidate);
+        assert.throws(
+          () => buildContinuation(candidate.runId, { cwd: candidate.repo, review: "reviewer.json", runId: `${candidate.runId}-next`, carryForward: true }),
+          expected,
+          label,
+        );
+      } finally { cleanup(candidate.repo); }
+    }
+  });
+
   it("runs the full final recheck after candidate build and rejects every authority mutation without resources", () => {
     const cases = [
       ["parent", (fixture) => writeFileSync(join(fixture.runDir, "run.json"), `${readFileSync(join(fixture.runDir, "run.json"), "utf8")} `)],
@@ -3277,6 +3343,58 @@ function acceptedManifestRow(fixture, id) {
     review_ref: slice.review_ref, review_hash: slice.review_hash,
     reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit, attempt_reviews: structuredClone(slice.attempt_reviews),
   };
+}
+
+function configureMultiAttemptAcceptedSlice(fixture, id) {
+  const runPath = join(fixture.runDir, "run.json");
+  const run = JSON.parse(readFileSync(runPath, "utf8"));
+  const slice = run.slices.find((candidate) => candidate.id === id);
+  const reviewedCommit = slice.reviewed_commit;
+  const attemptOne = {
+    evidenceRef: `evidence/${id}.attempt-1.json`,
+    reviewRef: `reviews/${id}.attempt-1.json`,
+  };
+  const attemptTwo = {
+    evidenceRef: `evidence/${id}.attempt-2.json`,
+    reviewRef: `reviews/${id}.attempt-2.json`,
+  };
+  writeJson(join(fixture.runDir, attemptOne.evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, attemptOne.reviewRef), {
+    subject: id, attempt: 1, verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+    required_fixes: ["complete the first correction"],
+    remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: [`${id}.txt`], fix_owner: id }] },
+    reviewed_commit: reviewedCommit,
+  });
+  writeJson(join(fixture.runDir, attemptTwo.evidenceRef), { subject: id, attempt: 2, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, attemptTwo.reviewRef), {
+    subject: id, attempt: 2, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
+  });
+  const history = [
+    {
+      attempt: 1, evidence_ref: attemptOne.evidenceRef, evidence_hash: hashFile(join(fixture.runDir, attemptOne.evidenceRef)),
+      review_ref: attemptOne.reviewRef, review_hash: hashFile(join(fixture.runDir, attemptOne.reviewRef)), reviewed_commit: reviewedCommit,
+      verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+    },
+    {
+      attempt: 2, evidence_ref: attemptTwo.evidenceRef, evidence_hash: hashFile(join(fixture.runDir, attemptTwo.evidenceRef)),
+      review_ref: attemptTwo.reviewRef, review_hash: hashFile(join(fixture.runDir, attemptTwo.reviewRef)), reviewed_commit: reviewedCommit,
+      verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    },
+  ];
+  Object.assign(slice, {
+    attempts: 2,
+    attempt_reviews: history,
+    evidence_ref: history[1].evidence_ref,
+    evidence_hash: history[1].evidence_hash,
+    review_ref: history[1].review_ref,
+    review_hash: history[1].review_hash,
+    reviewed_commit: reviewedCommit,
+  });
+  rmSync(join(fixture.runDir, `evidence/${id}.json`));
+  rmSync(join(fixture.runDir, `reviews/${id}.json`));
+  writeJson(runPath, run);
+  return history;
 }
 
 function writeMergedSliceFixture(runDir, id, reviewedCommit) {

@@ -547,16 +547,16 @@ describe("merged-sibling repair", () => {
       writeJson(planPath, plan);
       await assert.rejects(
         report(fixture),
-        /outside owner slice/u,
-        "padded lane text must not expand repair ownership beyond the canonical grammar",
+        /invalid or ambiguous ownership lane/u,
+        "padded lane text must reject at plan admission",
       );
 
       owner.paths = ["src\\owner\\records.js"];
       writeJson(planPath, plan);
       await assert.rejects(
         report(fixture),
-        /plan lanes are not valid repository paths/u,
-        "malformed lane text fails the whole check closed",
+        /invalid or ambiguous ownership lane/u,
+        "malformed lane text rejects at plan admission",
       );
 
       owner.paths = ["src/owner/**"];
@@ -580,8 +580,8 @@ describe("merged-sibling repair", () => {
       writeJson(planPath, plan);
       await assert.rejects(
         report(fixture),
-        /outside owner slice/u,
-        "a glob shape the slice-lane grammar does not define must match nothing",
+        /invalid or ambiguous ownership lane/u,
+        "an unsupported glob rejects at plan admission",
       );
     } finally {
       cleanup(fixture);
