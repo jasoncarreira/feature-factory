@@ -19,6 +19,10 @@ describe("B4.3 checkpoint routing prompts", () => {
       assert.match(prompt, /content-addressed .*manifest|content-addresses and persists the deterministic checkpoint manifest/iu);
       assert.match(prompt, /stop .*slice.*branch\/worktree\/dispatch/iu);
       assert.match(prompt, /no model-authored plan file|trust only the content-addressed runtime manifest/iu);
+      assert.match(prompt, /boundary-open <run-id> terminal/iu);
+      assert.match(prompt, /--boundary-token <terminal-boundary\.token>/iu);
+      assert.match(prompt, /generation\/state[- ]hash/iu);
+      assert.match(prompt, /rejects .*pending.*steering.*heartbeat.*Gate 2.*test-verifier/iu);
     }
   });
 

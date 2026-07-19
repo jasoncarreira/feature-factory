@@ -81,7 +81,7 @@ Commands:
   factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> [--repo PATH] [--json]
   factory answer [--repo PATH] [--json] <run> <gate> <approve|stop|changes: ...>
   factory gate-decision <run> <gate> <pending|approved|changes_requested|stopped> [--artifact REF] [--question-ref REF] [--answer-ref REF|--answer TEXT] [--approval-source SOURCE] [--boundary-token TOKEN]
-  factory slices-seed <run-id> --from plan/slices.json
+  factory slices-seed <run-id> --from plan/slices.json [--boundary-token TOKEN]
   factory slice-status <run-id> <slice-id> <running|review|blocked> [--branch REF] [--worktree PATH] [--attempts N] [--evidence-ref REF] [--review-ref REF] [--reason TEXT]
   factory repair <run-id> <reported|repairing|review|merged|blocked> [--owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref REF] [--attempts N] [--review-ref REF --evidence-ref REF --commit SHA] [--merge-commit SHA --verification-ref REF] [--reason TEXT]
   factory step <run-id> <agent> <running|accepted|rejected|blocked> [--artifact-ref REF] [--evidence-ref REF] [--review-ref REF] [--attempts N]

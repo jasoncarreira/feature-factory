@@ -14,6 +14,7 @@ import {
   collectCleanupTargets,
   latestRunId,
   listRuns,
+  openSteeringBoundary,
   persistFactoryRunCreatedEnv,
   persistFactoryRunResumeEnv,
   recordCostUsage,
@@ -58,10 +59,16 @@ describe("factory public state operations", { concurrency: false }, () => {
       run.steps = [{ agent: "work-decomposer", status: "running", attempts: 1 }];
       run.terminal_result = null;
       writeJson(runFile, run);
+      const opened = await openSteeringBoundary(fixture.runId, "terminal", {
+        cwd: fixture.repo,
+        now: "2026-07-19T12:59:00.000Z",
+        token: "checkpoint-terminal",
+      });
 
       const result = await seedFactorySlices(fixture.runId, {
         cwd: fixture.repo,
         from: "plan/slices.json",
+        boundaryToken: opened.boundary.token,
         now: "2026-07-19T13:00:00.000Z",
       });
 

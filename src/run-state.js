@@ -2564,10 +2564,13 @@ async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = 
     assertNoUnresolvedSliceDispatches(runDir, current);
     assertCheckpointRoutingPreImplementation(current);
     assertCheckpointRoutingAuthorityCurrent(runDir, seedPlanAuthority, manifest, artifact, options);
+    const terminalBoundaryAuthority = observeCheckpointTerminalBoundaryAuthority(runDir, current, options);
     await publishCheckpointRoutingArtifact(runDir, manifest, artifact, seedPlanAuthority, options);
 
+    const terminalDraft = cloneJson(current);
+    consumeSteeringBoundary(terminalDraft, "terminal", options.boundaryToken);
     const next = validateRun({
-      ...cloneJson(current),
+      ...terminalDraft,
       status: "blocked",
       updated_at: timestamp(options.now),
       terminal_result: {
@@ -2580,6 +2583,9 @@ async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = 
       },
     });
     await writeSemanticRunJson(runDir, next, options, null, () => {
+      const observedRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+      assertCheckpointTerminalBoundaryAuthorityCurrent(runDir, observedRun, terminalBoundaryAuthority, options);
+      assertCheckpointRoutingPreImplementation(observedRun);
       assertCheckpointRoutingAuthorityCurrent(runDir, seedPlanAuthority, manifest, artifact, options);
       assertCheckpointRoutingArtifactCurrent(runDir, artifact);
     });
@@ -2592,9 +2598,36 @@ function assertCheckpointRoutingPreImplementation(run) {
   if ((run.steps || []).some((step) => step?.agent === "work-decomposer" && step.status === "accepted")) {
     throw new Error("checkpoint routing must occur before accepted work-decomposer state");
   }
+  if (run.gates?.brief !== undefined && run.gates?.brief !== null) {
+    throw new Error("checkpoint routing must occur before Gate 2 brief state is present");
+  }
+  const testVerifierSteps = (run.steps || []).filter((step) => step?.agent === "test-verifier");
+  const standardPlaceholder = { agent: "test-verifier", status: "blocked", attempts: 0 };
+  if (testVerifierSteps.length > 1 || (testVerifierSteps.length === 1 && !sameJson(testVerifierSteps[0], standardPlaceholder))) {
+    throw new Error("checkpoint routing permits only the repository-standard zero-attempt blocked test-verifier placeholder");
+  }
   if (run.validator != null || run.security_review != null || run.gates?.pre_pr != null || run.merged_slice_repair != null || run.special_builder_dispatch != null) {
     throw new Error("checkpoint routing must occur before implementation, panel, or pre-PR state");
   }
+}
+
+function observeCheckpointTerminalBoundaryAuthority(runDir, run, options) {
+  assertNoFreshHeartbeat(runDir, options, "checkpoint routing requires inactive heartbeat");
+  const draft = cloneJson(run);
+  consumeSteeringBoundary(draft, "terminal", options.boundaryToken);
+  const boundary = run.steering?.boundary;
+  return {
+    kind: boundary.kind,
+    token: boundary.token,
+    generation: boundary.generation,
+    state_hash: boundary.state_hash,
+    created_at: boundary.created_at,
+  };
+}
+
+function assertCheckpointTerminalBoundaryAuthorityCurrent(runDir, run, expected, options) {
+  const current = observeCheckpointTerminalBoundaryAuthority(runDir, run, options);
+  if (!sameJson(current, expected)) throw new Error("checkpoint terminal boundary authority changed before publication");
 }
 
 async function publishCheckpointRoutingArtifact(runDir, manifest, artifact, authority, options) {
@@ -2619,6 +2652,10 @@ function assertCheckpointRoutingReplay(runDir, run, authority, manifest, artifac
   if (run.terminal_result?.status !== "blocked" || run.terminal_result?.pr_url !== null
     || !sameJson(run.terminal_result?.artifacts, { checkpoint_routing: artifact.ref })) {
     throw new Error("checkpoint routing terminal result does not match exact routing artifact");
+  }
+  if (run.steering?.pending != null || run.steering?.uncheckpointed != null || run.steering?.boundary != null
+    || run.steering?.action_claim != null || run.steering?.pr_fence != null) {
+    throw new Error("checkpoint routing terminal result retained incompatible steering authority");
   }
   assertCheckpointRoutingAuthorityCurrent(runDir, authority, manifest, artifact, options);
   assertCheckpointRoutingArtifactCurrent(runDir, artifact);
