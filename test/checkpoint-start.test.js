@@ -946,6 +946,52 @@ describe("checked checkpoint child start", () => {
     }
   });
 
+  it("publishes final sidecar classes through exact launched checkpoint authority", async () => {
+    const special = await createCheckpointSpecialDispatchFixture("checkpoint-special-claim-launched", { claim: false });
+    try {
+      const context = await prepareSpecialBuilderTaskDispatch(special.fixture.repo, {
+        run_id: special.started.binding.child_run_id, route: "panel-remediation", agent: "backend-builder",
+      }, { claimDispatch: true, completionToken: "special-claim-token" });
+      const claimPath = join(special.runDir, context.dispatch_claim.ref);
+      const binding = readJson(special.runPath).special_builder_dispatch;
+      assert.equal(existsSync(claimPath), true);
+      assert.equal(binding.claim_ref, context.dispatch_claim.ref);
+      assert.equal(binding.claim_hash, hashFile(claimPath));
+    } finally {
+      rmSync(special.fixture.repo, { recursive: true, force: true });
+    }
+
+    const steeringFixture = createFixture("checkpoint-steering-launched");
+    try {
+      const started = await startFactoryCheckpoint(steeringFixture.parentRunId, "checkpoint-001", {
+        cwd: steeringFixture.repo, runId: "checkpoint-steering-launched-child", checkpointLaunchFn: (value) => value,
+      });
+      const runDir = join(steeringFixture.repo, ".opencode", "factory", started.binding.child_run_id);
+      const queued = await transitionSteeringQueued(runDir, "valid launched steering", { id: "launched" });
+      assert.equal(readFileSync(join(runDir, queued.steering.ref), "utf8").includes("valid launched steering"), true);
+      const consumed = await transitionSteeringConsumed(runDir, queued.steering);
+      const current = readJson(join(runDir, "run.json"));
+      assert.equal(existsSync(join(runDir, queued.steering.ref)), false);
+      assert.equal(current.steering.uncheckpointed.ref, consumed.steering.ref);
+      assert.equal(readFileSync(join(runDir, consumed.steering.ref), "utf8").includes("valid launched steering"), true);
+    } finally {
+      rmSync(steeringFixture.repo, { recursive: true, force: true });
+    }
+
+    const heartbeat = await createCheckpointSliceDispatchFixture("checkpoint-heartbeat-launched");
+    try {
+      const started = await startHeartbeat(heartbeat.started.binding.child_run_id, { phase: "builder-wave", intervalMs: 60000 }, { cwd: heartbeat.fixture.repo });
+      assert.equal(started.pid, process.pid);
+      const ticked = await runActiveHeartbeatTickForTest(heartbeat.started.binding.child_run_id, { cwd: heartbeat.fixture.repo });
+      assert.equal(ticked.continue, true);
+      assert.equal(readJson(join(heartbeat.runDir, "heartbeat.json")).pid, process.pid);
+      assert.equal(typeof readJson(heartbeat.runPath).heartbeat_at, "string");
+      await stopHeartbeat(heartbeat.started.binding.child_run_id, {}, { cwd: heartbeat.fixture.repo });
+    } finally {
+      rmSync(heartbeat.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
   it("publishes a gate answer through exact launched checkpoint authority", async () => {
     const fixture = createFixture("checkpoint-gate-answer-launched");
     try {
