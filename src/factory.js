@@ -740,11 +740,15 @@ export async function resumeFactory(runId, opts = {}) {
     const checked = assertCarryForwardResumeAuthority(repo, runDir, beforeRecovery, opts);
     if (TERMINAL_STATUSES.has(checked.status)) return { status: checked.status, run_id: checked.run_id, terminal_result: checked.terminal_result, launched: false };
   }
-  await reconcilePostPrCrash(runDir, opts);
+  const recovery = await reconcilePostPrCrash(runDir, opts);
   const run = readRunFile(join(runDir, "run.json"));
   assertRunClaimRoute(repo, run);
   assertResumeConfiguration(run, opts);
   if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, runDir, run, opts);
+  if (recovery.action === "closed-dispatch-dirty-worktree") {
+    return { status: "recovery-required", run_id: run.run_id, reason_code: "post-pr-closed-dispatch-dirty-worktree",
+      reason: "the worktree became dirty after the checked post-PR remediation dispatch closed; its remediation state and closure remain unconsumed" };
+  }
   if (!opts.dryRun) {
     const ownership = await existingRunOwnershipOutcome(runDir, run, { ...opts, repo });
     if (ownership) return ownership;
@@ -5104,24 +5108,7 @@ async function reconcilePostPrCrash(runDir, opts = {}) {
   if (!statusResult.ok) return terminalDispatchUnknown(runDir, run, opts);
   let snapshot;
   try { snapshot = parseGitStatusChanges(statusResult.stdout); } catch { return terminalDispatchUnknown(runDir, run, opts); }
-  if (snapshot.paths.length) {
-    const repeated = git(run.worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-    let repeatedSnapshot;
-    try { repeatedSnapshot = repeated.ok ? parseGitStatusChanges(repeated.stdout) : null; } catch { repeatedSnapshot = null; }
-    if (!repeatedSnapshot || !sameJsonValue(snapshot, repeatedSnapshot)) return terminalDispatchUnknown(runDir, run, opts);
-    const { paths, entries } = snapshot;
-    const plan = acceptedSlicesPlan(run);
-    const sliceId = remediation.owner.kind === "slice" ? remediation.owner.slice_id : null;
-    const lane = validateLane({ ownership: plan, lane: remediation.lane, sliceId, paths, changes: entries, hasSymlink: gitChangesHaveUnsafeMode(run.worktree, entries) });
-    if (typeof opts.afterPostPrRecoveryOwnership === "function") await opts.afterPostPrRecoveryOwnership({ kind: "dirty", lane: cloneJson(lane), paths: [...paths] });
-    if (!lane.ok) return terminalLaneViolation(runDir, run, opts, lane.reason, paths);
-    const next = cloneJson(run.post_pr);
-    next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.dispatch.status = "returned";
-    next.remediation.dispatch.returned_at = timestamp(opts.now); next.remediation.changes = { paths, entries, tree_hash: hashJson(entries) };
-    next.remediation.candidate_head_sha = run.special_builder_dispatch.completion_head;
-    await transitionPostPrState(runDir, next, opts);
-    return { action: "adopted-dirty-diff", paths };
-  }
+  if (snapshot.paths.length) return { action: "closed-dispatch-dirty-worktree" };
   const headResult = git(run.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
   const head = headResult.ok ? headResult.stdout.trim() : null;
   if (head && head !== remediation.baseline_head_sha && git(run.worktree, ["merge-base", "--is-ancestor", remediation.baseline_head_sha, head]).ok) {

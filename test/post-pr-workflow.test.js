@@ -496,26 +496,27 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
-  it("dirty recovery reaches ratified effective ownership despite raw-plan drift", async () => {
+  it("fails closed when a clean closed dispatch is followed by dirty recovery state", async () => {
     const fixture = createRevalidationFixture("post-pr-adopt-dirty");
     const ratifiedPath = "docs/recovered-dirty.md";
     try {
       await closeRecoverablePostPrDispatch(fixture, { ratifiedPath, candidatePath: "src/api.js" });
+      const before = readRun(fixture);
       mkdirSync(join(fixture.repo, "docs"), { recursive: true });
       writeFileSync(join(fixture.repo, ratifiedPath), "dirty ratified recovery\n");
-      let decisions = 0;
-      await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", afterPostPrRecoveryOwnership: ({ kind, lane, paths }) => {
-        decisions += 1;
-        assert.equal(kind, "dirty");
-        assert.deepEqual(lane, { ok: true });
-        assert.deepEqual(paths, [ratifiedPath]);
-        throw new Error("dirty-ownership-observed");
-      } }), /dirty-ownership-observed/u);
+      let launches = 0;
+      const result = await resumeFactory(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:05:00.000Z", foregroundLaunchFn: async () => { launches += 1; } });
       const run = readRun(fixture);
-      assert.equal(decisions, 1);
+      assert.equal(result.status, "recovery-required");
+      assert.equal(result.reason_code, "post-pr-closed-dispatch-dirty-worktree");
+      assert.equal(launches, 0);
       assert.equal(run.status, "running");
       assert.equal(run.post_pr.phase, "remediation-running");
-      assert.equal(run.special_builder_dispatch.route, "post-pr-remediation");
+      assert.deepEqual(run.post_pr.remediation, before.post_pr.remediation);
+      assert.equal(run.post_pr.remediation.candidate_head_sha, null);
+      assert.deepEqual(run.post_pr.remediation.changes.paths, []);
+      assert.deepEqual(run.special_builder_dispatch, before.special_builder_dispatch);
+      assert.equal(existsSync(join(fixture.runDir, run.special_builder_dispatch.closure_ref)), true);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
