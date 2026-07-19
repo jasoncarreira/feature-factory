@@ -48,6 +48,42 @@ import { git } from "../src/git.js";
 
 const NOW = "2026-07-08T12:00:00.000Z";
 const HASH = `sha256:${"a".repeat(64)}`;
+const CONTROL_PLANE_PATH_CASES = Object.freeze([
+  { name: "opencode-skills", path: ".opencode/skills/local/SKILL.md" },
+  { name: "opencode-agents", path: ".opencode/agents/security.md" },
+  { name: "opencode-other", path: ".opencode/runtime-policy.json" },
+  { name: "github-workflow", path: ".github/workflows/release.yml" },
+  { name: "github-action", path: ".github/actions/setup/action.yml" },
+  { name: "github-other", path: ".github/dependabot.yml" },
+  { name: "gitea-root", path: ".gitea/workflows/ci.yml" },
+  { name: "gitlab-root", path: ".gitlab/issue_templates/bug.md" },
+  { name: "circleci-root", path: ".circleci/config.yml" },
+  { name: "buildkite-root", path: ".buildkite/pipeline.yml" },
+  { name: "teamcity-root", path: ".teamcity/settings.kts" },
+  { name: "drone-directory", path: ".drone/pipeline.yml" },
+  { name: "woodpecker-directory", path: ".woodpecker/pipeline.yml" },
+  { name: "agents-instructions", path: "AGENTS.md" },
+  { name: "claude-instructions", path: "CLAUDE.md" },
+  { name: "codex-instructions", path: "CODEX.md" },
+  { name: "gemini-instructions", path: "GEMINI.md" },
+  { name: "copilot-instructions", path: "COPILOT.md" },
+  { name: "cursor-instructions", path: ".cursorrules" },
+  { name: "travis-provider", path: ".travis.yml" },
+  { name: "drone-provider", path: ".drone.yml" },
+  { name: "woodpecker-provider", path: ".woodpecker.yml" },
+  { name: "azure-provider", path: "azure-pipelines.yml" },
+  { name: "jenkins-provider", path: "Jenkinsfile" },
+  { name: "bitrise-provider", path: "bitrise.yml" },
+  { name: "appveyor-provider", path: "appveyor.yml" },
+  { name: "agent-assets", path: "assets/agent/new-agent.md" },
+  { name: "skill-assets", path: "assets/skills/new-skill/SKILL.md" },
+  { name: "command-assets", path: "assets/command/deploy.md" },
+  { name: "dependency-manifest", path: "package.json" },
+  { name: "build-manifest", path: "Makefile" },
+  { name: "deployment-manifest", path: "deploy/app.yaml" },
+  { name: "migration-artifact", path: "migrations/001.sql" },
+  { name: "generated-artifact", path: "dist/output.js" },
+]);
 
 describe("simplified run-state transitions", () => {
   it("approves gates through transition-time pending snapshot checks", async () => {
@@ -793,32 +829,32 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("rejects privileged integration conflicts unless the path has explicit declared plan ownership", async () => {
-    const declared = createFixture("integration-conflict-declared-workflow");
-    try {
-      initGitRepo(declared.repo, ["slice-branch"]);
-      const privilegedPath = ".github/workflows/release.yml";
-      prepareSliceMergeState(declared, { reviewedPath: privilegedPath, integrationConflict: true });
-      const context = await prepareSpecialBuilderTaskDispatch(declared.repo, { run_id: declared.runId, route: "integration-conflict", agent: "backend-builder" });
-      assert.deepEqual(context.authority.conflict.conflict_paths, [privilegedPath]);
-    } finally {
-      cleanup(declared.repo);
-    }
+  for (const { name, path: privilegedPath } of CONTROL_PLANE_PATH_CASES) {
+    it(`enforces centralized control-plane integration admission for ${name}`, async () => {
+      const declared = createFixture(`integration-declared-${name}`);
+      try {
+        initGitRepo(declared.repo, ["slice-branch"]);
+        prepareSliceMergeState(declared, { reviewedPath: privilegedPath, integrationConflict: true });
+        const context = await prepareSpecialBuilderTaskDispatch(declared.repo, { run_id: declared.runId, route: "integration-conflict", agent: "backend-builder" });
+        assert.deepEqual(context.authority.conflict.conflict_paths, [privilegedPath]);
+      } finally {
+        cleanup(declared.repo);
+      }
 
-    const fixture = createFixture("integration-conflict-undeclared-workflow");
-    try {
-      initGitRepo(fixture.repo, ["slice-branch"]);
-      const privilegedPath = ".github/workflows/release.yml";
-      prepareSliceMergeState(fixture, { reviewedPath: privilegedPath, integrationConflict: true });
-      makeConflictPathUndeclared(fixture, privilegedPath);
-      await assert.rejects(
-        prepareSpecialBuilderTaskDispatch(fixture.repo, { run_id: fixture.runId, route: "integration-conflict", agent: "backend-builder" }),
-        /privileged control-plane conflict path requires explicit declared plan ownership/u,
-      );
-    } finally {
-      cleanup(fixture.repo);
-    }
-  });
+      const undeclared = createFixture(`integration-undeclared-${name}`);
+      try {
+        initGitRepo(undeclared.repo, ["slice-branch"]);
+        prepareSliceMergeState(undeclared, { reviewedPath: privilegedPath, integrationConflict: true });
+        makeConflictPathUndeclared(undeclared, privilegedPath);
+        await assert.rejects(
+          prepareSpecialBuilderTaskDispatch(undeclared.repo, { run_id: undeclared.runId, route: "integration-conflict", agent: "backend-builder" }),
+          /privileged control-plane conflict path requires explicit declared plan ownership/u,
+        );
+      } finally {
+        cleanup(undeclared.repo);
+      }
+    });
+  }
 
   it("rejects a nonexistent merge commit instead of persisting caller text", async () => {
     const fixture = createFixture("slice-merge-nonexistent-commit");
@@ -2308,21 +2344,47 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("rejects APPROVE ratification outside newly added private regular files and for centralized privileged paths", async () => {
+  for (const { name, path: changedPath } of CONTROL_PLANE_PATH_CASES) {
+    it(`enforces centralized control-plane ownership ratification for ${name}`, async () => {
+      const fixture = createFixture(`ownership-control-plane-${name}`);
+      try {
+        initGitRepo(fixture.repo, ["slice-branch"]);
+        runGit(fixture.repo, ["checkout", "slice-branch"]);
+        writeJson(join(fixture.runDir, "run.json"), {
+          ...baseRun(fixture.runId), branch: "slice-branch", worktree: fixture.repo,
+          slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "pending", attempts: 0 }],
+        });
+        seedBuilderDispatchAuthority(fixture);
+        await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+        let reviewedCommit;
+        await closeBuilderDispatch(fixture, 1, () => {
+          mkdirSync(join(fixture.repo, ...changedPath.split("/").slice(0, -1)), { recursive: true });
+          writeFileSync(join(fixture.repo, changedPath), `${name}\n`);
+          runGit(fixture.repo, ["add", "-f", "--", changedPath]);
+          runGit(fixture.repo, ["commit", "-m", `change ${name} control-plane path`]);
+          reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+        });
+        mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+        writeJson(join(fixture.runDir, "evidence", "slice.json"), {
+          subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
+          ownership_disclosure: [{ path: changedPath, rationale: `The ${name} fixture probes centralized privileged-path enforcement.` }],
+        });
+        writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: [changedPath] }));
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" }),
+          /privileged control-plane path/u,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  }
+
+  it("rejects APPROVE ratification outside newly added private regular files", async () => {
     for (const [name, changedPath, addSibling, expected, kind = "file", disclosedPaths = [changedPath]] of [
       ["sibling", "test/sibling.test.js", true, /has declared plan ownership/u],
-      ["dependency-manifest", "package.json", false, /privileged control-plane path 'package\.json'/u],
-      ["workflow", ".github/workflows/release.yml", false, /privileged control-plane path/u],
-      ["action", ".github/actions/setup/action.yml", false, /privileged control-plane path/u],
-      ["ci-config", ".circleci/config.yml", false, /privileged control-plane path/u],
-      ["agent-control", "assets/agent/new-agent.md", false, /privileged control-plane path/u],
-      ["skill-control", "assets/skills/new-skill/SKILL.md", false, /privileged control-plane path/u],
-      ["command-control", "assets/command/deploy.md", false, /privileged control-plane path/u],
-      ["opencode-workflow", ".opencode/config/workflow.json", false, /privileged control-plane path/u],
-      ["build-manifest", "Makefile", false, /privileged control-plane path/u],
-      ["deployment", "deploy/app.yaml", false, /privileged control-plane path/u],
-      ["migration", "migrations/001.sql", false, /privileged control-plane path/u],
-      ["generated", "dist/output.js", false, /privileged control-plane path/u],
       ["modified", "docs/modified.md", false, /must be a newly added private regular file/u, "modify"],
       ["mode", "docs/mode.md", false, /must be a newly added private regular file/u, "mode"],
       ["symlink", "docs/link.md", false, /cannot ratify symlink or submodule path 'docs\/link\.md'/u, "symlink"],

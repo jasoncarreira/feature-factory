@@ -5107,9 +5107,11 @@ function observeIntegrationConflictAuthority(repository, runDir, run, options = 
     ...observeRenameCopyEndpoints(repository, bases[0], reviewedCommit, options, "integration-conflict reviewed parent diff"),
   ]);
 
-  const status = git(worktree, gitCleanlinessArgs());
+  const status = git(worktree, gitIntegrationConflictStatusArgs());
   const unmerged = git(worktree, ["ls-files", "-u", "-z"]);
-  if (!status.ok || !unmerged.ok || status.stdout === "" || unmerged.stdout === "") throw new Error("integration-conflict paths cannot be observed");
+  const untracked = git(worktree, gitIntegrationConflictUntrackedArgs());
+  if (!status.ok || !unmerged.ok || !untracked.ok || status.stdout === "" || unmerged.stdout === "") throw new Error("integration-conflict paths cannot be observed");
+  if (untracked.stdout !== "") throw new Error("integration-conflict dispatch rejects unrelated unstaged or untracked edits");
   const statusRecords = parseNulRecords(status.stdout, "integration-conflict status");
   const conflictPaths = [];
   let unsupportedConflictCode = false;
@@ -7009,6 +7011,18 @@ function observeGitPublicationAuthority(repoRoot, commands) {
 
 function gitCleanlinessArgs() {
   return ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", ":(exclude,top,glob).opencode/**"];
+}
+
+function gitIntegrationConflictStatusArgs() {
+  return ["status", "--porcelain=v1", "-z", "--untracked-files=no"];
+}
+
+function gitIntegrationConflictUntrackedArgs() {
+  return [
+    "ls-files", "--others", "--exclude-standard", "-z", "--", ".",
+    ":(exclude,top,glob).opencode/factory/**",
+    ":(exclude,top,glob).opencode/worktrees/**",
+  ];
 }
 
 function normalizePositiveInteger(value, fallback) {

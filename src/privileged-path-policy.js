@@ -12,9 +12,10 @@ const EXACT_PRIVILEGED_PATHS = new Set([
 ]);
 
 const PRIVILEGED_PREFIXES = [
-  ".github/workflows/", ".github/actions/", ".circleci/", ".buildkite/", ".gitlab/", ".azure-pipelines/", "ci/",
+  ".opencode/", ".github/", ".gitea/", ".gitlab/", ".circleci/", ".buildkite/", ".teamcity/",
+  ".drone/", ".woodpecker/", ".azure-pipelines/", ".jenkins/", ".bitrise/", ".appveyor/", ".travis/",
+  ".semaphore/", ".cirrus/", ".tekton/", "ci/",
   "assets/agent/", "assets/skills/", "assets/command/", "assets/commands/",
-  ".opencode/config/", ".opencode/workflow/", ".opencode/workflows/", ".opencode/plugins/", ".opencode/command/", ".opencode/commands/",
   "deploy/", "deployment/", "k8s/", "kubernetes/", "helm/", "charts/", "infra/", "terraform/",
   "dist/", "build/", "coverage/", "generated/",
 ];
@@ -22,14 +23,24 @@ const PRIVILEGED_PREFIXES = [
 const PRIVILEGED_SEGMENTS = new Set(["migrations", "migration", "migrate", "generated", "dist", "build", "coverage", "node_modules", ".yarn"]);
 const DEPENDENCY_OR_BUILD_BASENAME = /^(?:requirements(?:[._-][A-Za-z0-9_-]+)?\.txt|tsconfig(?:\.[^.]+)?\.json|(?:eslint|prettier|babel|webpack|vite|vitest|jest|rollup|esbuild|postcss|tailwind)\.config\.[A-Za-z0-9]+|Dockerfile(?:\.[A-Za-z0-9_-]+)?|.*\.(?:csproj|fsproj|vbproj|sln|tf|tfvars))$/u;
 const GENERATED_BASENAME = /(?:^|\.)generated\.[^/]+$/u;
+const ROOT_AGENT_INSTRUCTION_FILE = /^(?:agents?|claude|codex|gemini|copilot)(?:\.local)?\.md$/u;
+const ROOT_CI_FILES = new Set([
+  ".travis.yml", ".travis.yaml", ".drone.yml", ".drone.yaml", ".woodpecker.yml", ".woodpecker.yaml",
+  "azure-pipelines.yml", "azure-pipelines.yaml", "jenkinsfile", "bitrise.yml", "bitrise.yaml",
+  "appveyor.yml", "appveyor.yaml", "buildkite.yml", "buildkite.yaml", "circle.yml",
+  "semaphore.yml", "semaphore.yaml", ".cirrus.yml", ".cirrus.yaml",
+]);
 
 export function privilegedControlPlanePathReason(value) {
   if (typeof value !== "string" || value === "" || value.startsWith("/") || value.includes("\\") || value.includes("\0")) return "invalid-path";
   const segments = value.split("/");
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return "invalid-path";
   const basename = segments.at(-1);
+  const lowerValue = value.toLowerCase();
+  if (segments.length === 1 && (ROOT_AGENT_INSTRUCTION_FILE.test(lowerValue) || ROOT_CI_FILES.has(lowerValue) || lowerValue === ".cursorrules")) {
+    return "root-agent-or-ci-configuration";
+  }
   if (EXACT_PRIVILEGED_PATHS.has(value) || EXACT_PRIVILEGED_PATHS.has(basename)) return "dependency-build-deployment-manifest";
-  if ([".opencode/config.json", ".opencode/opencode.json", ".opencode/opencode.jsonc", ".opencode/workflow.json", ".opencode/workflow.yaml", ".opencode/workflow.yml"].includes(value)) return "control-plane-configuration";
   if (PRIVILEGED_PREFIXES.some((prefix) => value.startsWith(prefix))) return "control-plane-directory";
   if (segments.some((segment) => PRIVILEGED_SEGMENTS.has(segment))) return "migration-or-generated-artifact";
   if (DEPENDENCY_OR_BUILD_BASENAME.test(basename)) return "dependency-build-deployment-manifest";
