@@ -16,6 +16,7 @@ Review one subject at a time. Never edit, commit, fix, or delegate.
 - Observed evidence for build/test subjects.
 - Upstream inputs: story, technical brief, slice spec, worktree path, repo guidelines.
 - For a slice review, the current accepted slices plan, including every slice id and declared path lane.
+- For a slice review under a plan with `delivery_envelope`, the current delivery unit, its complete invariant-family, obligation, and verification-artifact lists, and current orchestrator-observed evidence refs, hashes, probes, and results.
 - On `attempt > 1`, the prior review ref, complete prior `required_fixes`, and the orchestrator-observed remediation delta.
 
 ## Ordered decision procedure
@@ -66,6 +67,8 @@ Follow these steps in order. If rules appear to conflict, the explicit precedenc
    - Every slice review JSON must contain closed `remediation_context: {schema_version: 2, fixes: [...]}` with exactly one ordered `{required_fix_index, classification, scope_effect, likely_paths, fix_owner}` entry for every `required_fixes` item. Schema version 1 and unstructured slice reviews always reject; there is no replay or publication compatibility path. Classification is exactly one of `architecture-replacement`, `ownership-amendment`, `parallel-authority-removal`, `schema-redesign`, `migration-redesign`, `wholesale-head-replacement`, `nonconvergent`, or `narrow-correction`. Use `narrow-correction` only when the same implementation context can safely amend the current approach. Every other class requires a fresh builder context. Mark review convergence `nonconvergent` exactly when at least one fix has classification `nonconvergent`.
    - `scope_effect` is exactly one of `in-lane`, `unowned-extension`, `sibling-owned`, or `contract-change`. `likely_paths` is a nonempty unique list of canonical concrete repository paths: repository-relative, NFC-normalized, and without globs, dot segments, backslashes, or absolute paths. `fix_owner` must equal an existing current-plan slice id. Classify mechanically against the accepted plan: `in-lane` means the reviewed slice is `fix_owner` and is the sole plan owner of every likely path; `unowned-extension` means the reviewed slice is `fix_owner`, every likely path has zero plan owners, and every path is forecast as a newly added private regular file outside the privileged/control-plane policy; `sibling-owned` means `fix_owner` differs from the reviewed slice and is the sole plan owner of every likely path; `contract-change` names a valid plan slice owner but claims no path authority. Workflow/action, CI, agent/skill/command, opencode configuration/workflow, dependency/lock/build/deployment, migration, and generated paths require declared ownership and are never `unowned-extension`. Never guess through ambiguous, overlapping, mixed, or mismatched ownership.
    - These fields are a feasibility forecast used in this existing review round before retry routing. They do not authorize editing, extend a builder lane, create durable effective paths, or replace observation and review of actual changed paths. Do not request or introduce another agent call to classify feasibility.
+   - **Invariant-family ledger for delivery-envelope plans:** emit `invariant_family_ledger` in the same slice review on every attempt. Build it independently from the current accepted plan and current observed evidence; never copy a prior ledger as a delta, omit an unchanged family, or rely on prior pass results. It contains exactly one disposition for every invariant family in the slice's current delivery unit and no other family. Each disposition selects a verification artifact linked to that family by a current obligation, executes that artifact's exact current `test_plan_entry`, binds the exact observed `evidence_ref` and SHA-256 `evidence_hash`, uses probe `{type:"verification-artifact",verification_artifact_id}` for that same artifact, records typed result `{type:"verification-result",outcome,summary}`, repeats the enclosing review's exact `reviewed_commit`, and records the complete current `unresolved_findings` list. `outcome` is exactly `pass`, `fail`, or `skipped`.
+   - APPROVE requires every current family disposition to have `outcome:"pass"` and zero unresolved findings. A REJECT ledger remains complete and may record `fail` or `skipped` plus explicit unresolved findings, but REJECT never grants review authority. Missing, duplicate, stale, unknown, wrong-artifact, or extra family dispositions are invalid. Changed evidence bytes require the new exact hash; changed current plan artifacts must be re-probed. The exact review bytes and disposition evidence preserve each attempt's history, so a later review cannot hide a changed artifact or regression. Produce this ledger in the existing review round; never request an extra reviewer round, and do not make admission or checkpoint decisions.
 
 ## Output
 
@@ -91,4 +94,49 @@ Return exactly this structure:
 
 **Required fixes (if REJECT):**
 1. [classification: <closed classification>] [scope_effect: <in-lane | unowned-extension | sibling-owned | contract-change>] [likely_paths: <canonical concrete repository paths>] [fix_owner: <existing plan slice id>] <specific fix>
+```
+
+For a slice review, append exactly one valid JSON object and no prose after it. The object is closed to the keys shown below. Under a delivery-envelope plan, `invariant_family_ledger` is required with exactly the closed keys shown; for a legacy plan without `delivery_envelope`, omit only that key. Every nested ledger object is also closed to the displayed keys.
+
+```json
+{
+  "subject": "<exact slice id>",
+  "attempt": 1,
+  "reviewed_commit": "<full 40-character lowercase Git SHA actually reviewed>",
+  "verdict": "APPROVE",
+  "convergence": "converging",
+  "remaining_fix_count": 0,
+  "required_fixes": [],
+  "ownership_ratification": {
+    "schema_version": 1,
+    "paths": []
+  },
+  "remediation_context": {
+    "schema_version": 2,
+    "fixes": []
+  },
+  "invariant_family_ledger": {
+    "schema_version": 1,
+    "delivery_unit_id": "<current delivery unit id>",
+    "dispositions": [
+      {
+        "invariant_family_id": "<current invariant family id>",
+        "verification_artifact_id": "<current obligation-mapped artifact id>",
+        "evidence_ref": "evidence/<current evidence file>.json",
+        "evidence_hash": "sha256:<64 lowercase hex characters from exact current bytes>",
+        "probe": {
+          "type": "verification-artifact",
+          "verification_artifact_id": "<same artifact id>"
+        },
+        "result": {
+          "type": "verification-result",
+          "outcome": "pass",
+          "summary": "<exact current result summary>"
+        },
+        "reviewed_commit": "<same exact reviewed_commit as the enclosing review>",
+        "unresolved_findings": []
+      }
+    ]
+  }
+}
 ```
