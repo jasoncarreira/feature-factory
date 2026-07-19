@@ -53,10 +53,19 @@ describe("factory public state operations", { concurrency: false }, () => {
     try {
       mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
       writeJson(join(fixture.runDir, "plan", "slices.json"), oversizedFactoryPlan());
+      mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+      writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
       const runFile = join(fixture.runDir, "run.json");
       const run = readJson(runFile);
       run.slices = [];
-      run.steps = [{ agent: "work-decomposer", status: "running", attempts: 1 }];
+      run.steps = [{
+        agent: "work-decomposer", status: "accepted", attempts: 1,
+        artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+        acceptance: {
+          artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(fixture.runDir, "plan", "slices.json")),
+          review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(fixture.runDir, "reviews", "work-decomposer.json")),
+        },
+      }];
       run.terminal_result = null;
       writeJson(runFile, run);
       const opened = await openSteeringBoundary(fixture.runId, "terminal", {
@@ -76,7 +85,7 @@ describe("factory public state operations", { concurrency: false }, () => {
       assert.equal(result.checkpoint_routing.checkpoint_count, 2);
       assert.equal(result.run.status, "blocked");
       assert.deepEqual(result.run.slices, []);
-      assert.equal(result.run.steps[0].status, "running");
+      assert.equal(result.run.steps[0].status, "accepted");
       assert.equal(result.run.terminal_result.reason, "oversized-plan-checkpoint-routing-required");
     } finally {
       cleanup(fixture.repo);

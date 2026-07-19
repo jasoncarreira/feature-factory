@@ -9,7 +9,7 @@ import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadVa
 import { transitionPanelVerdicts } from "../src/run-state.js";
 import { buildContinuation, cleanupRun, recoverDisruptedRun, resumeFactory } from "../src/factory.js";
 import { spawnSync } from "./helpers/git-fixture.js";
-import { passingInvariantFamilyLedger, withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
 const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
@@ -830,10 +830,16 @@ function createSpecialPanelDispatchFixture() {
   const reviewRef = "reviews/slice.panel-ready.json";
   writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: fixture.head });
   const evidenceHash = fileHash(join(fixture.runDir, evidenceRef));
+  const familyEvidenceRef = "evidence/slice.panel-family.json";
+  const familyEvidence = writeVerificationArtifactReceipt({
+    runDir: fixture.runDir, runId: run.run_id, plan, sliceId: "slice", attempt: 1, reviewedCommit: fixture.head,
+    artifactId: "fixture-artifact-1", evidenceRef: familyEvidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
+  });
   writeJson(join(fixture.runDir, reviewRef), {
     subject: "slice", attempt: 1, reviewed_commit: fixture.head, verdict: "APPROVE", convergence: "converging",
     remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] },
-    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: fixture.head, evidenceRef, evidenceHash }),
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: fixture.head, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
   });
   const reviewHash = fileHash(join(fixture.runDir, reviewRef));
   run.slices = [{

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { buildCheckpointRoutingManifest, CHECKPOINT_ROUTING_TERMINAL_REASON } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { transitionSlicesSeed, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
+import { transitionRunStep, transitionSlicesSeed, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
 import { hashValue } from "../src/refs.js";
 
 describe("B4.3 checkpoint routing", () => {
@@ -18,8 +18,8 @@ describe("B4.3 checkpoint routing", () => {
     ]);
     const admission = evaluateDeliveryEnvelopeAdmission({ plan });
     const planHash = hashBytes(`${JSON.stringify(plan)}\n`);
-    const first = buildCheckpointRoutingManifest({ plan, planHash, admissionResult: admission });
-    const second = buildCheckpointRoutingManifest({ plan: structuredClone(plan), planHash, admissionResult: structuredClone(admission) });
+    const first = buildCheckpointRoutingManifest({ plan, planHash, admissionResult: admission, decompositionAuthority: decompositionAuthority(planHash) });
+    const second = buildCheckpointRoutingManifest({ plan: structuredClone(plan), planHash, admissionResult: structuredClone(admission), decompositionAuthority: decompositionAuthority(planHash) });
 
     assert.deepEqual(second, first);
     assert.deepEqual(first.checkpoints.map((checkpoint) => checkpoint.request.acceptance_boundary.invariant_family.id), [
@@ -54,7 +54,30 @@ describe("B4.3 checkpoint routing", () => {
     }
   });
 
-  it("terminalizes an oversized parent before runnable slices or accepted decomposition and replays idempotently", async () => {
+  it("accepts the exact reviewed checkpoint plan before seeding without inventing slice authority", async () => {
+    const fixture = createRoutingFixture("checkpoint-acceptance", planWithSpecs([unitSpec("api", 2, 6)]));
+    try {
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.steps[0] = { agent: "work-decomposer", status: "running", attempts: 1 };
+      writeJson(join(fixture.runDir, "run.json"), run);
+
+      const accepted = await transitionRunStep(fixture.runDir, "work-decomposer", {
+        status: "accepted",
+        attempts: 1,
+        artifact_ref: "plan/slices.json",
+        review_ref: "reviews/work-decomposer.json",
+      }, { mustExist: true });
+
+      assert.equal(accepted.step.status, "accepted");
+      assert.equal(accepted.step.acceptance.artifact_hash, hashBytes(readFileSync(join(fixture.runDir, "plan", "slices.json"))));
+      assert.equal(accepted.step.acceptance.review_hash, hashBytes(readFileSync(join(fixture.runDir, "reviews", "work-decomposer.json"))));
+      assert.deepEqual(accepted.run.slices, []);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("terminalizes an oversized parent after accepted reviewed decomposition and before runnable slices, then replays idempotently", async () => {
     const fixture = createRoutingFixture("checkpoint-replay", planWithSpecs([unitSpec("api", 2, 6)]));
     try {
       const projection = pendingProjection(fixture.plan);
@@ -74,8 +97,9 @@ describe("B4.3 checkpoint routing", () => {
       assert.match(first.checkpoint_routing.ref, /^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u);
       assert.equal(hashBytes(readFileSync(join(fixture.runDir, first.checkpoint_routing.ref))), first.checkpoint_routing.hash);
       assert.deepEqual(persisted.slices, []);
-      assert.equal(persisted.steps[0].status, "running");
-      assert.equal(persisted.steps[0].acceptance, undefined);
+      assert.equal(persisted.steps[0].status, "accepted");
+      assert.equal(persisted.steps[0].acceptance.artifact_hash, manifest.source.plan_hash);
+      assert.equal(persisted.steps[0].acceptance.review_hash, manifest.source.decomposition_review_hash);
       assert.equal(persisted.steering.boundary, null);
       assert.equal(persisted.steering.pending, null);
       assert.equal(persisted.steering.uncheckpointed, null);
@@ -248,7 +272,7 @@ describe("B4.3 checkpoint routing", () => {
           checkpointRoutingHooks: { beforeArtifactCommit: () => writeJson(join(fixture.runDir, "plan", "slices.json"), raced) },
         }),
         (error) => error?.message === "protected file commit failed"
-          && error.cause?.message === "checkpoint routing plan authority changed before publication",
+          && /accepted work-decomposer plan ref\/hash does not match exact plan bytes|checkpoint routing plan authority changed before publication/u.test(error.cause?.message),
       );
 
       const run = readJson(join(fixture.runDir, "run.json"));
@@ -275,7 +299,7 @@ describe("B4.3 checkpoint routing", () => {
           atomicWriteHooks: { beforeCommit: () => writeJson(join(fixture.runDir, "plan", "slices.json"), raced) },
         }),
         (error) => error?.message === "protected file commit failed"
-          && error.cause?.message === "checkpoint routing plan authority changed before publication",
+          && /accepted work-decomposer plan ref\/hash does not match exact plan bytes|checkpoint routing plan authority changed before publication/u.test(error.cause?.message),
       );
       const artifactNames = readdirSync(join(fixture.runDir, "artifacts"));
       assert.equal(artifactNames.length, 1);
@@ -371,8 +395,13 @@ function createRoutingFixture(runId, plan) {
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "plan"), { recursive: true });
+  mkdirSync(join(runDir, "reviews"), { recursive: true });
   mkdirSync(join(runDir, "steering"), { recursive: true });
   writeJson(join(runDir, "plan", "slices.json"), plan);
+  const planHash = hashBytes(readFileSync(join(runDir, "plan", "slices.json")));
+  const review = { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] };
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), review);
+  const reviewHash = hashBytes(readFileSync(join(runDir, "reviews", "work-decomposer.json")));
   writeJson(join(runDir, "run.json"), {
     schema_version: 1,
     run_id: runId,
@@ -380,12 +409,31 @@ function createRoutingFixture(runId, plan) {
     gates: {},
     slices: [],
     steps: [
-      { agent: "work-decomposer", status: "running", attempts: 1 },
+      {
+        agent: "work-decomposer", status: "accepted", attempts: 1,
+        artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+        acceptance: {
+          artifact_ref: "plan/slices.json", artifact_hash: planHash,
+          review_ref: "reviews/work-decomposer.json", review_hash: reviewHash,
+        },
+      },
       { agent: "test-verifier", status: "blocked", attempts: 0 },
     ],
     terminal_result: null,
   });
   return { repo, runDir, runId, plan };
+}
+
+function decompositionAuthority(planHash) {
+  const review = { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] };
+  return {
+    plan_ref: "plan/slices.json",
+    plan_hash: planHash,
+    review_ref: "reviews/work-decomposer.json",
+    review_hash: hashBytes(`${JSON.stringify(review)}\n`),
+    attempt: 1,
+    review,
+  };
 }
 
 async function openTerminalBoundary(fixture) {

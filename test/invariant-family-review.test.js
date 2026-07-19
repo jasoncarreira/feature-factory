@@ -145,7 +145,7 @@ describe("B4.4 invariant-family review authority", () => {
         plan: deliveryPlan(),
         sliceId: "api",
         review: stale,
-        observeEvidence: (ref) => ({ ref, hash: `sha256:${"f".repeat(64)}` }),
+        observeEvidence: (ref, disposition) => ({ ...currentEvidence(ref, disposition), hash: `sha256:${"f".repeat(64)}` }),
       }),
       /evidence hash is stale for 'evidence\/api-behavior\.json'/u,
     );
@@ -154,7 +154,7 @@ describe("B4.4 invariant-family review authority", () => {
         plan: deliveryPlan(),
         sliceId: "api",
         review: sliceReview(),
-        observeEvidence: (ref) => ({ ref: `evidence/not-${ref.slice("evidence/".length)}`, hash: HASHES[ref] }),
+        observeEvidence: (ref, disposition) => ({ ...currentEvidence(ref, disposition), ref: `evidence/not-${ref.slice("evidence/".length)}` }),
       }),
       /evidence ref is not current for 'evidence\/api-behavior\.json'/u,
     );
@@ -200,10 +200,82 @@ describe("B4.4 invariant-family review authority", () => {
       observeEvidence: currentEvidence,
     }).reasons, ["invariant-family-disposition-missing:api-compatibility"]);
   });
+
+  it("rejects arbitrary, stale, cross-bound, wrong-command, and claimed-pass receipt evidence", () => {
+    const cases = [
+      ["arbitrary bytes", (observed) => { delete observed.receipt; }, /must be a checked execution receipt/u],
+      ["wrong subject", (observed) => { observed.receipt.subject = observed.receipt.slice_id = "other"; }, /subject\/slice is stale/u],
+      ["wrong attempt", (observed) => { observed.receipt.attempt = 2; }, /attempt is stale/u],
+      ["wrong head", (observed) => { observed.receipt.head_sha = "d".repeat(40); }, /reviewed HEAD is stale/u],
+      ["wrong artifact", (observed) => { observed.receipt.verification_artifact_id = observed.receipt.probe.verification_artifact_id = "api-security-tests"; }, /artifact id is stale/u],
+      ["wrong argv", (observed) => { observed.receipt.probe.args = ["--test", "test/other.test.js"]; }, /exact current verification artifact command/u],
+      ["claimed pass", (observed) => {
+        observed.receipt.status = "fail";
+        observed.receipt.review_ready = false;
+        observed.receipt.commands[0].status = "fail";
+        observed.receipt.commands[0].exit_code = 1;
+        observed.receipt.result = { type: "verification-result", outcome: "fail", summary: "Observed failure" };
+      }, /claimed result does not match/u],
+    ];
+    for (const [name, mutate, expected] of cases) {
+      assert.throws(() => evaluateInvariantFamilyReview({
+        plan: deliveryPlan(),
+        sliceId: "api",
+        review: sliceReview(),
+        observeEvidence(ref, disposition) {
+          const observed = currentEvidence(ref, disposition);
+          mutate(observed);
+          return observed;
+        },
+      }), expected, name);
+    }
+  });
 });
 
-function currentEvidence(ref) {
-  return { ref, hash: HASHES[ref] };
+function currentEvidence(ref, disposition) {
+  const artifact = deliveryPlan().delivery_envelope.delivery_units[0].verification_artifacts
+    .find((candidate) => candidate.id === disposition.verification_artifact_id);
+  const [program, ...args] = artifact.test_plan_entry.split(" ");
+  return { ref, hash: HASHES[ref], receipt: verificationReceipt({ disposition, artifact, program, args }) };
+}
+
+function verificationReceipt({ disposition, artifact, program, args }) {
+  const outcome = disposition.result.outcome;
+  return {
+    schema_version: 1,
+    kind: "checked-verification-artifact-execution-receipt",
+    subject: "api",
+    run_id: "review-run",
+    slice_id: "api",
+    attempt: 1,
+    claim_nonce: "123e4567-e89b-42d3-a456-426614174000",
+    plan_ref: "plan/slices.json",
+    plan_hash: `sha256:${"e".repeat(64)}`,
+    head_sha: COMMIT,
+    verification_artifact_id: artifact.id,
+    probe: {
+      type: "verification-artifact",
+      verification_artifact_id: artifact.id,
+      test_plan_index: artifact.test_plan_index,
+      test_plan_entry: artifact.test_plan_entry,
+      program,
+      args,
+    },
+    started_at: "2026-07-19T10:00:00.000Z",
+    completed_at: "2026-07-19T10:00:01.000Z",
+    duration_ms: 1000,
+    status: outcome,
+    review_ready: outcome === "pass",
+    commands: outcome === "skipped" ? [] : [{
+      index: 0, program, args, outcome: "exited", status: outcome, exit_code: outcome === "pass" ? 0 : 1, signal: null, error_code: null, duration_ms: 1000,
+      stdout: emptyStream(), stderr: emptyStream(),
+    }],
+    result: structuredClone(disposition.result),
+  };
+}
+
+function emptyStream() {
+  return { captured_bytes: 0, sha256: `sha256:${"0".repeat(64)}`, truncated: false };
 }
 
 function deliveryPlan() {

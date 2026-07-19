@@ -31,10 +31,12 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "plan-slices-json",
   "plan-v2-integration-gate",
   "plan-delivery-envelope-v1",
+  "checkpoint-routing-artifact-v1",
   "run-envelope-running",
   "run-envelope-terminal",
   "terminal-result-completed",
   "terminal-result-blocked",
+  "terminal-result-blocked-checkpoint-routing",
   "terminal-result-blocked-nonconvergence",
   "terminal-result-partial",
   "terminal-result-needs-human",
@@ -206,9 +208,30 @@ const DELIVERY_ENVELOPE_PLAN = Object.freeze({
 const DELIVERY_ENVELOPE_EXTERNAL = Object.freeze({
   plan: { ref: "plan/slices.json", bytes: `${JSON.stringify(DELIVERY_ENVELOPE_PLAN)}\n` },
 });
+const INVARIANT_RECEIPT = Object.freeze({
+  schema_version: 1,
+  kind: "checked-verification-artifact-execution-receipt",
+  subject: "backend",
+  run_id: "catalog-run",
+  slice_id: "backend",
+  attempt: 1,
+  claim_nonce: "123e4567-e89b-42d3-a456-426614174000",
+  plan_ref: "plan/slices.json",
+  plan_hash: hashBytes(DELIVERY_ENVELOPE_EXTERNAL.plan.bytes),
+  head_sha: SHA_B,
+  verification_artifact_id: "backend-tests",
+  probe: { type: "verification-artifact", verification_artifact_id: "backend-tests", test_plan_index: 0, test_plan_entry: "node --test test/backend.test.js", program: "node", args: ["--test", "test/backend.test.js"] },
+  started_at: NOW,
+  completed_at: "2026-07-16T12:00:01.000Z",
+  duration_ms: 1000,
+  status: "fail",
+  review_ready: false,
+  commands: [{ index: 0, program: "node", args: ["--test", "test/backend.test.js"], outcome: "exited", status: "fail", exit_code: 1, signal: null, error_code: null, duration_ms: 1000, stdout: { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false }, stderr: { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false } }],
+  result: { type: "verification-result", outcome: "fail", summary: "The observed probe failed" },
+});
 const INVARIANT_LEDGER_EXTERNAL = Object.freeze({
   plan: DELIVERY_ENVELOPE_EXTERNAL.plan,
-  evidence: { ref: "evidence/backend-family.json", bytes: "{\"subject\":\"backend\",\"family\":\"backend-behavior\",\"observed\":true}\n" },
+  evidence: { ref: "evidence/backend-family.json", bytes: `${JSON.stringify(INVARIANT_RECEIPT)}\n` },
 });
 const INVARIANT_FAMILY_LEDGER = Object.freeze({
   schema_version: 1,
@@ -224,6 +247,48 @@ const INVARIANT_FAMILY_LEDGER = Object.freeze({
     unresolved_findings: ["The family remains unresolved"],
   }],
 });
+const CHECKPOINT_PLAN = Object.freeze({
+  slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/backend-1.test.js", "node --test test/security-1.test.js", "node --test test/backend-2.test.js", "node --test test/security-2.test.js", "node --test test/backend-3.test.js", "node --test test/security-3.test.js"] }],
+  integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+  delivery_envelope: {
+    schema_version: 1,
+    delivery_units: [{
+      id: "backend-unit", slice_id: "backend",
+      invariant_families: [
+        { id: "backend-behavior", description: "Backend behavior remains stable" },
+        { id: "backend-security", description: "Backend security remains stable" },
+      ],
+      obligations: [
+        { id: "behavior-1", description: "Behavior 1", invariant_family_id: "backend-behavior", verification_artifact_id: "artifact-1" },
+        { id: "security-1", description: "Security 1", invariant_family_id: "backend-security", verification_artifact_id: "artifact-2" },
+        { id: "behavior-2", description: "Behavior 2", invariant_family_id: "backend-behavior", verification_artifact_id: "artifact-3" },
+        { id: "security-2", description: "Security 2", invariant_family_id: "backend-security", verification_artifact_id: "artifact-4" },
+        { id: "behavior-3", description: "Behavior 3", invariant_family_id: "backend-behavior", verification_artifact_id: "artifact-5" },
+        { id: "security-3", description: "Security 3", invariant_family_id: "backend-security", verification_artifact_id: "artifact-6" },
+      ],
+      verification_artifacts: [
+        { id: "artifact-1", test_plan_index: 0, test_plan_entry: "node --test test/backend-1.test.js" },
+        { id: "artifact-2", test_plan_index: 1, test_plan_entry: "node --test test/security-1.test.js" },
+        { id: "artifact-3", test_plan_index: 2, test_plan_entry: "node --test test/backend-2.test.js" },
+        { id: "artifact-4", test_plan_index: 3, test_plan_entry: "node --test test/security-2.test.js" },
+        { id: "artifact-5", test_plan_index: 4, test_plan_entry: "node --test test/backend-3.test.js" },
+        { id: "artifact-6", test_plan_index: 5, test_plan_entry: "node --test test/security-3.test.js" },
+      ],
+    }],
+  },
+});
+const CHECKPOINT_REVIEW = Object.freeze({ subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+const CHECKPOINT_EXTERNAL = Object.freeze({
+  plan: { ref: "plan/slices.json", bytes: `${JSON.stringify(CHECKPOINT_PLAN)}\n` },
+  review: { ref: "reviews/work-decomposer.json", bytes: `${JSON.stringify(CHECKPOINT_REVIEW)}\n` },
+});
+const CHECKPOINT_ADMISSION = Object.freeze({
+  schema_version: 1, extension: "delivery-envelope-admission", status: "active", grants_b4_authority: false, decision: "checkpoint",
+  reasons: ["checkpoint:mixed-invariant-families:unit=backend-unit:families=2:obligations=6"],
+});
+const CHECKPOINT_ROUTING_MANIFEST = Object.freeze(checkpointCatalogManifest());
+const CHECKPOINT_ROUTING_BYTES = `${JSON.stringify(CHECKPOINT_ROUTING_MANIFEST, null, 2)}\n`;
+const CHECKPOINT_ROUTING_REF = `artifacts/checkpoint-routing-${hashBytes(CHECKPOINT_ROUTING_BYTES).slice("sha256:".length)}.json`;
 const DECOMPOSITION_EXTERNAL = Object.freeze({
   plan: PLAN_V2_EXTERNAL.plan,
   review: { ref: "reviews/work-decomposer.json", bytes: "{\"subject\":\"work-decomposer\",\"attempt\":1,\"verdict\":\"APPROVE\",\"required_fixes\":[]}\n" },
@@ -300,6 +365,7 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "plan-slices-json",
     "plan-v2-integration-gate",
     "plan-delivery-envelope-v1",
+    "checkpoint-routing-artifact-v1",
     "final-plan-descriptor",
   ],
   "run-envelope-terminal-result": [
@@ -307,6 +373,7 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "run-envelope-terminal",
     "terminal-result-completed",
     "terminal-result-blocked",
+    "terminal-result-blocked-checkpoint-routing",
     "terminal-result-blocked-nonconvergence",
     "terminal-result-partial",
     "terminal-result-needs-human",
@@ -451,11 +518,13 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "plan-slices-json": "sktrhb",
   "plan-v2-integration-gate": "sktrhb",
   "plan-delivery-envelope-v1": "ktrhb",
+  "checkpoint-routing-artifact-v1": "t",
   "final-plan-descriptor": "",
   "run-envelope-running": "khbd",
   "run-envelope-terminal": "krhbd",
   "terminal-result-completed": "skthbd",
   "terminal-result-blocked": "sktrhbd",
+  "terminal-result-blocked-checkpoint-routing": "skthb",
   "terminal-result-blocked-nonconvergence": "skt",
   "terminal-result-partial": "sktrhbd",
   "terminal-result-needs-human": "sktrhbd",
@@ -583,11 +652,13 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["plan-slices-json", "989039b0b23d8bef1c9c50b80f4f80da94bb3c982834804154e688ae72e2790a"],
   ["plan-v2-integration-gate", "f901864d274e8cec07db9c3a5378ca67f7a5ba8e79382168e4949963b5ff51d9"],
   ["plan-delivery-envelope-v1", "ec33d7138f538b3b05f7da15d7011af571a5867113757f6a7fdd1eb6cccc9b33"],
+  ["checkpoint-routing-artifact-v1", "d4af0b2d7d6c6395f793169af6b07eb417ff764a84d8af02f4d2c922c6d29aa5"],
   ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
   ["terminal-result-completed", "624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c"],
   ["terminal-result-blocked", "681845bd946f1cb11d6f2d0a528946365756a79f2ce284179856360e3d9b631e"],
+  ["terminal-result-blocked-checkpoint-routing", "6f45b8cb4faa642b76d5c2d1a89131001fe7dbab5b432ec936cd6ad68faada34"],
   ["terminal-result-blocked-nonconvergence", "d97091392350f02165c01705c4aa4ba2f92e5727325622c9eade4d5cdc0021f6"],
   ["terminal-result-partial", "6726223fbe9f4850a9d6815d78ccf5b5fbbdfdebcd6bf5c7611ace16569b9705"],
   ["terminal-result-needs-human", "8b7d4e6f6533c6072da2e83300c1f2503055905c0bcf5d69a54a91196f6c2eef"],
@@ -617,7 +688,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["slice-pending", "8d4bbec759c17fb00ead204f403603e1185b430f21f0306f9bb240f7f79d4ec1"],
   ["slice-running", "af31fa943d166746d48207286fbc9dea216127b8120f77378949b166de73ea40"],
   ["slice-review", "cd4b857d8325ae2b3df6ca965b17efb3af46dec393f0de2fdf939c79c0e9a5a4"],
-  ["review-invariant-family-ledger-v1", "4f56bc12d982824ec86643d4ec5d2c0f8e6845b97a6223e38da3f92b0f9b9435"],
+  ["review-invariant-family-ledger-v1", "5e2258dbb6a6ee4385deb3e9894f6fd0c3e70d5d1644b612f2fe8e1088561e62"],
   ["slice-merged", "a0d8d809d6ef828beabe7a72cea680e665718ab60d6ba01ccd2aea21ab3e78f5"],
   ["slice-blocked-ordinary", "078fbc6eada3adc4a22f4a55b1667a003d84172ba772035c6746cb256dd9e0d5"],
   ["slice-blocked", "3ed8237beaad32f43ae5cad5a787fd5d148df9931a1baf42f95944516d2e7b00"],
@@ -717,11 +788,13 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["plan-slices-json", "3c923442fe75f188546037455e61dca6f3172bb766399c4df4289de2f1c6f726"],
   ["plan-v2-integration-gate", "135d4108dcdb1889bfff58b1da09163093be21b85c52d1a43f9a92c59fa17ec7"],
   ["plan-delivery-envelope-v1", "5b21d1bbbca72f06efdd0abbb80f11c793108767883405810d673d97fdfc3053"],
+  ["checkpoint-routing-artifact-v1", "0ae8734ab0b4101cb43d7167b9c2aac993f151be11a736d8c7d983c323ed726d"],
   ["final-plan-descriptor", "b8ef8dbfe1f1e54cae98fb0960aa315fe4479e33533b63d0a9e0b88f0df959da"],
   ["run-envelope-running", "0dfdf9c52ba1ee909070da85617630bbb0cac990f109bdc3c7f25c4f686276dd"],
   ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
   ["terminal-result-completed", "8156685012bdcf0072fc38331dd34c2ee2f0ac59c94d14418a0cadc3f92b84be"],
   ["terminal-result-blocked", "9e2aac2293e6a2aa0ff69725ec484565d1ba598e4f921be01c44267eaab6d231"],
+  ["terminal-result-blocked-checkpoint-routing", "2c8c39a212248223cbc907dac170f95ab50fdd34afa8a867f25fe1e3bc2fff89"],
   ["terminal-result-blocked-nonconvergence", "484c993240b44861d7d71c96e40fcf4008241b506d9b8f08105352beec069b1b"],
   ["terminal-result-partial", "c7c56d99562df246e6e5219fb7ca002924103fea7be86bc2cab1b8c04eada6f6"],
   ["terminal-result-needs-human", "f10e0e1b566924c9b223e63b30426d6004b3210b0be12d884c63ec42310af5b9"],
@@ -855,11 +928,13 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["plan-slices-json", "dd6fabc7def0955d82f37d30a53fc19e4e8cc8fa69fa445badbc3c051d4dd7b9"],
   ["plan-v2-integration-gate", "04a73897d61d2aa30a703989e59f809518642c2ca4b938dea7af0fd514102955"],
   ["plan-delivery-envelope-v1", "757895c9d66d0caac2026bb2f6c207b4bbd37d0b1a5f5f20c0fbb713878b1ec1"],
+  ["checkpoint-routing-artifact-v1", "6ea0ebe8f6e2eddf8cf46ae34d36383440bc870f8d5319ee08f4fc7679b9e3a1"],
   ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
   ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
   ["terminal-result-completed", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
   ["terminal-result-blocked", "2e50300aa3e14e8fd6c935f3dae3fa44dd388c6ff386091ecbc28109f82ad855"],
+  ["terminal-result-blocked-checkpoint-routing", "b25e76e0df288ea96dd3036c95675b7def55bb6c63184fab1745d739d37e53f2"],
   ["terminal-result-blocked-nonconvergence", "55003f673d92a1b474b02aafdc90b72853ce9f376934878d49307509fe122233"],
   ["terminal-result-partial", "b5808744bc1ae0146a9a59e9814be3d58712a04c0cfbaf6f5d1858ab698c7746"],
   ["terminal-result-needs-human", "4c5aee988d94853ac78432435d4b65f7ebe8720dfa0652b6c9eeb8ee30bd0581"],
@@ -889,7 +964,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["slice-pending", "0f66b96672a90c960a5cff760325c7e63a9a69dd95f19207406de97959afa113"],
   ["slice-running", "5c91f74e38cddbf6278e3ad48aa2e74392e3120b7680e747299cf315126ffc26"],
   ["slice-review", "c7128941b5660901d7c20c9f79a2f8676dc8bf22632fb32bf8e466b4215d5495"],
-  ["review-invariant-family-ledger-v1", "2987be29077909cbc08123b819474ad1ff6d6a3be62dad4f7e5bacf5893c7d0c"],
+  ["review-invariant-family-ledger-v1", "14dbc9a447354aff1688ced725fe5629d42d92211bf669c4c94a41945eeb73e4"],
   ["slice-merged", "bd160bb8e7d790ece4a840382ab5de8457b84962097642fdb9ff9b073d82d1b5"],
   ["slice-blocked-ordinary", "4d26b4b40fbd88131264c5dcf4186f8cc75aab6ef3344948ee5c97b681119756"],
   ["slice-blocked", "a43f8ee90d231336f11e9b72353c662d64dbd5ea2cba5bd9af828980f50628bc"],
@@ -1154,6 +1229,26 @@ const RECORDS = [
     ],
   }),
   recordEntry({
+    authorityClassId: "plan-slices-graph", id: "checkpoint-routing-artifact-v1", record: "artifacts/checkpoint-routing-<sha256>.json", variant: "reviewed oversized-plan checkpoint route",
+    writer: "transitionCheckpointRouting after accepted work-decomposer review observation",
+    readers: ["validateCheckpointRoutingManifest", "transitionCheckpointRouting replay", "factory checkpoint-start child admission"],
+    canonicalPath: ["artifacts", "checkpoint_routing"], source: structuredClone(CHECKPOINT_ROUTING_MANIFEST), externalSources: CHECKPOINT_EXTERNAL,
+    facts: exactFacts(CHECKPOINT_ROUTING_MANIFEST),
+    requiredPath: ["source", "plan_hash"], unknownPath: [], typePath: ["checkpoints"],
+    sidecars: [
+      externalSidecar("plan", ["source", "plan_ref"], ["source", "plan_hash"]),
+      externalSidecar("review", ["source", "decomposition_review_ref"], ["source", "decomposition_review_hash"]),
+    ],
+    targets: [
+      schema(["schema_version"]), kind(["kind"], "other-routing"),
+      ...externalSidecarTargets("plan", ["source", "plan_ref"], ["source", "plan_hash"]),
+      ...externalSidecarTargets("review", ["source", "decomposition_review_ref"], ["source", "decomposition_review_hash"]),
+      drift(["source"], "decomposition_attempt", "review_attempt"),
+      stale(["source", "decomposition_attempt"], 0),
+      cross(["checkpoints", 1], "prerequisite_checkpoint_id", "checkpoint-999"),
+    ],
+  }),
+  recordEntry({
     authorityClassId: "plan-slices-graph", id: "final-plan-descriptor", record: "final.plan.json descriptor", variant: "required descriptor",
     writer: "work-decomposer final plan write followed by reviewed planning acceptance",
     readers: ["work-reviewer decomposition review", "factory slices-seed descriptor consumption"],
@@ -1183,6 +1278,12 @@ const RECORDS = [
   }),
   terminalResultEntry("terminal-result-completed", "completed", { pr_url: "https://github.com/acme/repo/pull/7", pr_number: 7, pr_node_id: "PR_catalog_operation", repository: "acme/repo", operation_id: PR_OPERATION_ID, head_ref: "feature--catalog", head_sha: SHA_B, base_ref: "main", base_sha: SHA_A, draft: false, artifacts: { test_report: "artifacts/test-report.md" } }, [ref(["artifacts", "test_report"]), stale(["head_sha"], SHA_A), cross(["operation_id"], `ffpr-v1-${"e".repeat(64)}`)]),
   terminalResultEntry("terminal-result-blocked", "blocked", { reason: "review-blocked", summary: "Review blocked." }),
+  terminalResultEntry("terminal-result-blocked-checkpoint-routing", "blocked", {
+    reason: "oversized-plan-checkpoint-routing-required",
+    summary: "Oversized plan routed to 2 sequential independently shippable checkpoints.",
+    pr_url: null,
+    artifacts: { checkpoint_routing: CHECKPOINT_ROUTING_REF },
+  }, [ref(["artifacts", "checkpoint_routing"]), drift(["artifacts"], "checkpoint_routing", "routing"), stale(["reason"], "review-blocked")]),
   nonconvergenceTerminalResultEntry(),
   terminalResultEntry("terminal-result-partial", "partial", { reason: "partial-completion", summary: "Some work completed." }),
   terminalResultEntry("terminal-result-needs-human", "needs-human", { reason: "operator-reconciliation", summary: "Operator action required." }),
@@ -2353,6 +2454,26 @@ export function createDurableCatalogBaseline(record) {
   if (record.id === "plan-delivery-envelope-v1") {
     return structuredClone({ consumer: "validateSlicesPlan", plan: JSON.parse(record.externalSources.plan.bytes), externalSources: record.externalSources });
   }
+  if (record.id === "checkpoint-routing-artifact-v1") {
+    const plan = JSON.parse(record.externalSources.plan.bytes);
+    const review = JSON.parse(record.externalSources.review.bytes);
+    return structuredClone({
+      consumer: "validateCheckpointRoutingManifest",
+      manifest: record.source,
+      plan,
+      planHash: record.source.source.plan_hash,
+      admissionResult: record.source.source.admission_result,
+      decompositionAuthority: {
+        plan_ref: record.source.source.plan_ref,
+        plan_hash: record.source.source.plan_hash,
+        review_ref: record.source.source.decomposition_review_ref,
+        review_hash: record.source.source.decomposition_review_hash,
+        attempt: record.source.source.decomposition_attempt,
+        review,
+      },
+      externalSources: record.externalSources,
+    });
+  }
   if (record.id === "review-invariant-family-ledger-v1") {
     return structuredClone({ consumer: "evaluateInvariantFamilyReview", ledger: record.source, plan: JSON.parse(record.externalSources.plan.bytes), externalSources: record.externalSources });
   }
@@ -2983,6 +3104,57 @@ function hashBytes(value) {
 
 function hashCanonical(value) {
   return `sha256:${createHash("sha256").update(canonicalJson(value), "utf8").digest("hex")}`;
+}
+
+function checkpointCatalogManifest() {
+  const unit = CHECKPOINT_PLAN.delivery_envelope.delivery_units[0];
+  const checkpoints = unit.invariant_families.map((family, index) => {
+    const artifactIds = new Set(unit.obligations
+      .filter((obligation) => obligation.invariant_family_id === family.id)
+      .map((obligation) => obligation.verification_artifact_id));
+    const prerequisite = index === 0 ? null : `checkpoint-${String(index).padStart(3, "0")}`;
+    return {
+      id: `checkpoint-${String(index + 1).padStart(3, "0")}`,
+      ordinal: index + 1,
+      prerequisite_checkpoint_id: prerequisite,
+      request: {
+        run_kind: "fresh-normal-feature-run",
+        title: `Deliver ${family.description}`,
+        acceptance_boundary: {
+          delivery_unit_id: unit.id,
+          slice_id: "backend",
+          source_slice_dependencies: [],
+          paths: ["src/**"],
+          slice_acceptance: ["AC1"],
+          invariant_family: structuredClone(family),
+          obligations: unit.obligations.filter((obligation) => obligation.invariant_family_id === family.id).map((obligation) => structuredClone(obligation)),
+          verification_artifacts: unit.verification_artifacts.filter((artifact) => artifactIds.has(artifact.id)).map((artifact) => structuredClone(artifact)),
+        },
+        execution_boundary: { base_branch: "main", requires_merged_pr_from_checkpoint_id: prerequisite, scope: "this-checkpoint-whole-story" },
+        integration_test_verifier: { required: true, scope: "this-checkpoint-whole-story", required_commands: [{ program: "npm", args: ["run", "check"] }] },
+        whole_story_panels: [
+          { agent: "implementation-validator", required: true, scope: "this-checkpoint-whole-story" },
+          { agent: "security-reviewer", required: true, scope: "this-checkpoint-whole-story" },
+        ],
+        gate_3: { name: "pre_pr", required: true, scope: "this-checkpoint-whole-story" },
+        pull_request: { required: true, count: 1, scope: "this-checkpoint-whole-story" },
+      },
+    };
+  });
+  return {
+    schema_version: 1,
+    kind: "delivery-checkpoint-routing",
+    source: {
+      plan_ref: CHECKPOINT_EXTERNAL.plan.ref,
+      plan_hash: hashBytes(CHECKPOINT_EXTERNAL.plan.bytes),
+      decomposition_review_ref: CHECKPOINT_EXTERNAL.review.ref,
+      decomposition_review_hash: hashBytes(CHECKPOINT_EXTERNAL.review.bytes),
+      decomposition_attempt: 1,
+      admission_result: structuredClone(CHECKPOINT_ADMISSION),
+    },
+    sequencing: { mode: "strictly-sequential", base_branch: "main", next_checkpoint_rule: "Checkpoint N+1 may start only from main containing merged PR N." },
+    checkpoints,
+  };
 }
 
 function fact(path, expected) {

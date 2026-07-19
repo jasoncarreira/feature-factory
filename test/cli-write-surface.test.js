@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "./helpers/git-fixture.js";
-import { passingInvariantFamilyLedger, withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -187,10 +187,16 @@ describe("cli write surface", () => {
       writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedHead,
         ownership_disclosure: [{ path: "extension/slice.txt", rationale: "The slice requires this adjacent executable fixture." }] });
       const plan = readJson(join(runDir, "plan", "slices.json"));
+      const familyEvidenceRef = "evidence/slice.family.json";
+      const familyEvidence = writeVerificationArtifactReceipt({
+        runDir, runId: RUN_ID, plan, sliceId: "slice", attempt: 1, reviewedCommit: reviewedHead,
+        artifactId: "fixture-artifact-1", evidenceRef: familyEvidenceRef,
+        result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
+      });
       writeJson(join(runDir, "reviews", "slice.json"), {
         subject: "slice", verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [],
         ownership_ratification: { schema_version: 1, paths: ["extension/slice.txt"] }, remediation_context: { schema_version: 2, fixes: [] }, attempt: 1, reviewed_commit: reviewedHead,
-        invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: reviewedHead, evidenceRef: "evidence/slice.json", evidenceHash: hashFile(join(runDir, "evidence", "slice.json")) }),
+        invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: reviewedHead, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
       });
       runFactory(repo, ["slice-status", RUN_ID, "slice", "review", "--evidence-ref", "evidence/slice.json", "--review-ref", "reviews/slice.json", "--json"]);
       assert.deepEqual(readJson(join(runDir, "run.json")).slices[0].effective_paths, ["src/example.js", "extension/slice.txt"]);

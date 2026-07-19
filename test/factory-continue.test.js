@@ -16,7 +16,7 @@ import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun,
 import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, createDurableCatalogBaseline, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
-import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
 
@@ -1903,7 +1903,7 @@ describe("continuation planning-artifact reuse", () => {
 
     for (const [label, mutate, expected] of [
       ["plan", ({ parentRunDir }) => writeFileSync(join(parentRunDir, "plan", "slices.json"), "{\"slices\":[]}"), /bound plan|plan\/slices\.json|carry_forward/u],
-      ["sidecar", ({ parentRunDir }) => writeFileSync(join(parentRunDir, "reviews", "A.json"), "{}\n"), /parent_reviews bindings changed|hashes are stale|subject must match/u],
+      ["sidecar", ({ parentRunDir }) => writeFileSync(join(parentRunDir, "reviews", "A.json"), "{}\n"), /parent_(?:reviews|evidence) bindings changed|hashes are stale|subject must match/u],
       ["branch", ({ continuation }) => runGit(continuation.parent.worktree, ["commit", "--allow-empty", "-m", "branch drift"]), /branch\/commit binding is stale/u],
     ]) {
       const fixture = createV2Fixture(`recheck-${label}`, { accepted: ["A"], mergeOrder: ["A"] });
@@ -2852,7 +2852,7 @@ describe("continuation planning-artifact reuse", () => {
           cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
           afterCarryForwardPublish(state) { mutate(fixture, state); },
           foregroundLaunchFn: async () => { launches += 1; return { status: "started" }; },
-        }), /carry_forward authority changed|origin-base|stale-parent-base|bound plan|parent plan|parent run|branch|panel|claim|worktree|sidecar|review/u, label);
+        }), /carry_forward authority changed|origin-base|stale-parent-base|bound plan|parent plan|parent run|parent_evidence|branch|panel|claim|worktree|sidecar|review/u, label);
         assert.equal(launches, 0, label);
         assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json")), true, label);
       } finally { cleanup(fixture.repo); }
@@ -3328,13 +3328,15 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   const slices = plan.slices.map((planned) => {
     if (!accepted.includes(planned.id)) return { id: planned.id, stack: planned.stack, depends_on: planned.depends_on, declared_paths: [...planned.paths], effective_paths: [...planned.paths], status: "pending", attempts: 0 };
     const evidenceRef = `evidence/${planned.id}.json`;
+    const familyEvidenceRef = `evidence/${planned.id}.family.json`;
     const reviewRef = `reviews/${planned.id}.json`;
     writeJson(join(runDir, evidenceRef), { subject: planned.id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommits[planned.id] });
     const evidenceHash = hashFile(join(runDir, evidenceRef));
+    const familyEvidence = writeFamilyReceipt(runDir, runId, plan, planned.id, 1, reviewedCommits[planned.id], familyEvidenceRef);
     writeJson(join(runDir, reviewRef), {
       subject: planned.id, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
       required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommits[planned.id],
-      invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: planned.id, reviewedCommit: reviewedCommits[planned.id], evidenceRef, evidenceHash }),
+      invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: planned.id, reviewedCommit: reviewedCommits[planned.id], evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
     });
     const reviewHash = hashFile(join(runDir, reviewRef));
     const attemptReview = {
@@ -3413,14 +3415,16 @@ async function createConflictCarryForwardFixture(runId) {
   runGit(fixture.repo, ["push", "--force", "origin", `${integrationBaseline}:main`]);
 
   const evidenceRef = "evidence/A.json";
+  const familyEvidenceRef = "evidence/A.family.json";
   const reviewRef = "reviews/A.json";
   writeJson(join(fixture.runDir, evidenceRef), { subject: sliceId, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
   const evidenceHash = hashFile(join(fixture.runDir, evidenceRef));
   const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+  const familyEvidence = writeFamilyReceipt(fixture.runDir, runId, plan, sliceId, 1, reviewedCommit, familyEvidenceRef);
   writeJson(join(fixture.runDir, reviewRef), {
     subject: sliceId, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [],
     ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
-    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId, reviewedCommit, evidenceRef, evidenceHash }),
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId, reviewedCommit, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
   });
   const reviewHash = hashFile(join(fixture.runDir, reviewRef));
   const claimStem = createHash("sha256").update(`${runId}\0${sliceId}\0${1}`, "utf8").digest("hex");
@@ -3501,27 +3505,32 @@ function configureMultiAttemptAcceptedSlice(fixture, id) {
   const reviewedCommit = slice.reviewed_commit;
   const attemptOne = {
     evidenceRef: `evidence/${id}.attempt-1.json`,
+    familyEvidenceRef: `evidence/${id}.family-attempt-1.json`,
     reviewRef: `reviews/${id}.attempt-1.json`,
   };
   const attemptTwo = {
     evidenceRef: `evidence/${id}.attempt-2.json`,
+    familyEvidenceRef: `evidence/${id}.family-attempt-2.json`,
     reviewRef: `reviews/${id}.attempt-2.json`,
   };
   writeJson(join(fixture.runDir, attemptOne.evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+  const attemptOneFamily = writeFamilyReceipt(fixture.runDir, fixture.runId, plan, id, 1, reviewedCommit, attemptOne.familyEvidenceRef);
   writeJson(join(fixture.runDir, attemptOne.reviewRef), {
     subject: id, attempt: 1, verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
     required_fixes: ["complete the first correction"],
     ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: [`${id}.txt`], fix_owner: id }] },
     reviewed_commit: reviewedCommit,
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: id, reviewedCommit, evidenceRef: attemptOne.familyEvidenceRef, evidenceHash: attemptOneFamily.hash }),
   });
   writeJson(join(fixture.runDir, attemptTwo.evidenceRef), { subject: id, attempt: 2, status: "pass", review_ready: true, head_sha: reviewedCommit });
   const attemptTwoEvidenceHash = hashFile(join(fixture.runDir, attemptTwo.evidenceRef));
-  const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+  const attemptTwoFamily = writeFamilyReceipt(fixture.runDir, fixture.runId, plan, id, 2, reviewedCommit, attemptTwo.familyEvidenceRef);
   writeJson(join(fixture.runDir, attemptTwo.reviewRef), {
     subject: id, attempt: 2, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
     required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
-    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: id, reviewedCommit, evidenceRef: attemptTwo.evidenceRef, evidenceHash: attemptTwoEvidenceHash }),
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: id, reviewedCommit, evidenceRef: attemptTwo.familyEvidenceRef, evidenceHash: attemptTwoFamily.hash }),
   });
   const history = [
     {
@@ -3552,14 +3561,17 @@ function configureMultiAttemptAcceptedSlice(fixture, id) {
 
 function writeMergedSliceFixture(runDir, id, reviewedCommit) {
   const evidenceRef = `evidence/${id}.fixture.json`;
+  const familyEvidenceRef = `evidence/${id}.family-fixture.json`;
   const reviewRef = `reviews/${id}.fixture.json`;
   writeJson(join(runDir, evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
   const evidenceHash = hashFile(join(runDir, evidenceRef));
   const plan = JSON.parse(readFileSync(join(runDir, "plan", "slices.json"), "utf8"));
+  const runId = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8")).run_id;
+  const familyEvidence = writeFamilyReceipt(runDir, runId, plan, id, 1, reviewedCommit, familyEvidenceRef);
   writeJson(join(runDir, reviewRef), {
     subject: id, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
     required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
-    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: id, reviewedCommit, evidenceRef, evidenceHash }),
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: id, reviewedCommit, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
   });
   const reviewHash = hashFile(join(runDir, reviewRef));
   return {
@@ -3567,6 +3579,16 @@ function writeMergedSliceFixture(runDir, id, reviewedCommit) {
     reviewed_commit: reviewedCommit, merge_commit: reviewedCommit,
     attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
   };
+}
+
+function writeFamilyReceipt(runDir, runId, plan, sliceId, attempt, reviewedCommit, evidenceRef) {
+  const unit = plan.delivery_envelope.delivery_units.find((candidate) => candidate.slice_id === sliceId);
+  const family = unit.invariant_families[0];
+  const artifactId = unit.obligations.find((obligation) => obligation.invariant_family_id === family.id).verification_artifact_id;
+  return writeVerificationArtifactReceipt({
+    runDir, runId, plan, sliceId, attempt, reviewedCommit, artifactId, evidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: `${family.description} passed` },
+  });
 }
 
 function continuationEligibilityPostPr(phase, attempt = 0) {

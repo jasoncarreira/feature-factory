@@ -63,9 +63,9 @@ describe("B4 delivery-contract extension seams", () => {
     assert.throws(() => validateInvariantFamilyLedger(unknownKey), /authority: is not allowed/u);
   });
 
-  it("returns explicit typed inactive results that cannot grant B4 authority", () => {
+  it("keeps legacy admission inactive while applying active checked review policy", () => {
     const plan = deliveryPlan();
-    const review = { reviewed_commit: COMMIT, invariant_family_ledger: invariantFamilyLedger() };
+    const review = { subject: "api", attempt: 1, verdict: "REJECT", reviewed_commit: COMMIT, invariant_family_ledger: invariantFamilyLedger() };
     let observedRef = null;
     const admission = evaluateDeliveryEnvelopeAdmission({ plan });
     const reviewResult = evaluateInvariantFamilyReview({
@@ -74,7 +74,7 @@ describe("B4 delivery-contract extension seams", () => {
       review,
       observeEvidence(ref) {
         observedRef = ref;
-        return { ref, hash: HASH };
+        return { ref, hash: HASH, receipt: failedVerificationReceipt() };
       },
     });
 
@@ -88,9 +88,14 @@ describe("B4 delivery-contract extension seams", () => {
     assert.deepEqual(validateReviewExtensionResult(reviewResult), {
       schema_version: 1,
       extension: "invariant-family-review",
-      status: "inactive",
+      status: "active",
       grants_b4_authority: false,
-      reason: "b4-review-policy-inactive",
+      decision: "reject",
+      reasons: [
+        "review-verdict-reject",
+        "invariant-family-result-not-pass:api-behavior",
+        "invariant-family-unresolved-findings:api-behavior",
+      ],
     });
     assert.equal(observedRef, "evidence/api-family.json");
 
@@ -176,5 +181,40 @@ function invariantFamilyLedger() {
       reviewed_commit: COMMIT,
       unresolved_findings: ["Known failure remains"],
     }],
+  };
+}
+
+function failedVerificationReceipt() {
+  const stream = { captured_bytes: 0, sha256: `sha256:${"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`, truncated: false };
+  return {
+    schema_version: 1,
+    kind: "checked-verification-artifact-execution-receipt",
+    subject: "api",
+    run_id: "delivery-seam-run",
+    slice_id: "api",
+    attempt: 1,
+    claim_nonce: "123e4567-e89b-42d3-a456-426614174000",
+    plan_ref: "plan/slices.json",
+    plan_hash: `sha256:${"d".repeat(64)}`,
+    head_sha: COMMIT,
+    verification_artifact_id: "api-tests",
+    probe: {
+      type: "verification-artifact",
+      verification_artifact_id: "api-tests",
+      test_plan_index: 0,
+      test_plan_entry: "node --test test/api.test.js",
+      program: "node",
+      args: ["--test", "test/api.test.js"],
+    },
+    started_at: "2026-07-19T10:00:00.000Z",
+    completed_at: "2026-07-19T10:00:01.000Z",
+    duration_ms: 1000,
+    status: "fail",
+    review_ready: false,
+    commands: [{
+      index: 0, program: "node", args: ["--test", "test/api.test.js"], outcome: "exited", status: "fail",
+      exit_code: 1, signal: null, error_code: null, duration_ms: 1000, stdout: stream, stderr: stream,
+    }],
+    result: { type: "verification-result", outcome: "fail", summary: "The probe exposed a known failure" },
   };
 }

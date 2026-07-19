@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
-import { passingInvariantFamilyLedger, withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
 import {
@@ -274,8 +274,14 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
   writeJson(join(runDir, "plan", "slices.json"), plan);
   const sliceEvidenceRef = "evidence/slice.json";
   const sliceEvidenceHash = hashFile(join(runDir, sliceEvidenceRef));
+  const familyEvidenceRef = "evidence/slice.family.json";
+  const familyEvidence = writeVerificationArtifactReceipt({
+    runDir, runId, plan, sliceId: "slice", attempt: 1, reviewedCommit: head,
+    artifactId: "fixture-artifact-1", evidenceRef: familyEvidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
+  });
   const sliceReview = createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head });
-  sliceReview.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: head, evidenceRef: sliceEvidenceRef, evidenceHash: sliceEvidenceHash });
+  sliceReview.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: head, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash });
   writeJson(join(runDir, "reviews", "slice.json"), sliceReview);
   const briefHash = hashFile(join(runDir, "artifacts", "technical-brief.md"));
   const specReviewHash = hashFile(join(runDir, "reviews", "spec-writer.json"));

@@ -8,7 +8,7 @@ import { execFileSync } from "./helpers/git-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { publishSyntheticV2Parent } from "./helpers/v2-parent-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
-import { passingInvariantFamilyLedger, withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import {
   DURABLE_AUTHORITY_CATALOG,
   DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST,
@@ -30,6 +30,7 @@ import { cleanupRun, continueFactory, seedContinuationPlanningArtifacts } from "
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
 import { evaluateInvariantFamilyReview } from "../src/delivery-envelope/review-extension.js";
+import { validateCheckpointRoutingManifest } from "../src/delivery-envelope/checkpoint-routing.js";
 import {
   assertContinuationAuthorityCurrent,
   assertNoUnresolvedSliceDispatches,
@@ -932,11 +933,13 @@ describe("finite durable-authority catalog", () => {
     duplicateDisposition.push(B0M4_EXACT_CASES[0]);
     assert.throws(() => exactB0m4DispositionMap(duplicateDisposition), /duplicate exact B0M\.4 case/u);
     assert.throws(() => exactB0m4DispositionMap([{ ...B0M4_EXACT_CASES[0], consumer: "" }]), /literal consumer|concrete consumer and rejector/u);
-    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 126);
-    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 127);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 128);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 129);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("plan-v2-integration-gate"), true);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("plan-delivery-envelope-v1"), true);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("review-invariant-family-ledger-v1"), true);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("checkpoint-routing-artifact-v1"), true);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("terminal-result-blocked-checkpoint-routing"), true);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
     assert.deepEqual(
       DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records.map(({ id }) => id)).filter((id) => !DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes(id)),
@@ -1037,7 +1040,7 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 127);
+    assert.equal(recordCount, 129);
   });
 
   it("registers all B1R claim and receipt variants separately", () => {
@@ -1328,15 +1331,37 @@ describe("finite durable-authority catalog", () => {
       assert.throws(() => evaluateInvariantFamilyReview({
         plan: JSON.parse(mutationCase.externalSources.plan.bytes),
         sliceId: "backend",
-        review: { reviewed_commit: "b".repeat(40), invariant_family_ledger: mutationCase.record },
+        review: { subject: "backend", attempt: 1, reviewed_commit: "b".repeat(40), verdict: "REJECT", invariant_family_ledger: mutationCase.record },
         observeEvidence(ref) {
           const external = mutationCase.externalSources.evidence;
-          return { ref, hash: `sha256:${createHash("sha256").update(external.bytes).digest("hex")}` };
+          return { ref, hash: `sha256:${createHash("sha256").update(external.bytes).digest("hex")}`, receipt: JSON.parse(external.bytes) };
         },
       }), undefined, mutationCase.name);
     }
     assert.equal(envelopeCases.length, 7);
     assert.equal(ledgerCases.length, 10);
+  });
+
+  it("rejects every checkpoint-routing artifact mutation through reviewed source authority", () => {
+    const record = findRecord(DURABLE_AUTHORITY_CATALOG, "checkpoint-routing-artifact-v1");
+    for (const mutationCase of emitDurableRecordMutations(record.source, record.descriptor, record.externalSources)) {
+      assert.throws(() => {
+        const plan = JSON.parse(mutationCase.externalSources.plan.bytes);
+        const review = JSON.parse(mutationCase.externalSources.review.bytes);
+        const planHash = `sha256:${createHash("sha256").update(mutationCase.externalSources.plan.bytes).digest("hex")}`;
+        const reviewHash = `sha256:${createHash("sha256").update(mutationCase.externalSources.review.bytes).digest("hex")}`;
+        validateCheckpointRoutingManifest(mutationCase.record, {
+          plan,
+          planHash,
+          admissionResult: record.source.source.admission_result,
+          decompositionAuthority: {
+            plan_ref: "plan/slices.json", plan_hash: planHash,
+            review_ref: "reviews/work-decomposer.json", review_hash: reviewHash,
+            attempt: review.attempt, review,
+          },
+        });
+      }, undefined, mutationCase.name);
+    }
   });
 
   it("rejects every accepted work-decomposer plan/review mutation through its deciding consumers", () => {
@@ -1431,10 +1456,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 127 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 129 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 127);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 129);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -1752,7 +1777,7 @@ describe("finite durable-authority catalog", () => {
   it("binds every catalog row's source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
-    assert.equal(canonicalIds.length, 127);
+    assert.equal(canonicalIds.length, 129);
     assert.deepEqual(canonicalIds, requiredIds);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
@@ -1863,14 +1888,15 @@ describe("finite durable-authority catalog", () => {
         assert.deepEqual(evaluateInvariantFamilyReview({
           plan: baseline.plan,
           sliceId: "backend",
-          review: { reviewed_commit: "b".repeat(40), invariant_family_ledger: baseline.ledger },
-          observeEvidence: (ref) => ({ ref, hash: baseline.ledger.dispositions[0].evidence_hash }),
+          review: { subject: "backend", attempt: 1, reviewed_commit: "b".repeat(40), verdict: "REJECT", invariant_family_ledger: baseline.ledger },
+          observeEvidence: (ref) => ({ ref, hash: baseline.ledger.dispositions[0].evidence_hash, receipt: JSON.parse(baseline.externalSources.evidence.bytes) }),
         }), {
           schema_version: 1,
           extension: "invariant-family-review",
-          status: "inactive",
+          status: "active",
           grants_b4_authority: false,
-          reason: "b4-review-policy-inactive",
+          decision: "reject",
+          reasons: ["review-verdict-reject", "invariant-family-result-not-pass:backend-behavior", "invariant-family-unresolved-findings:backend-behavior"],
         });
       } else if (baseline.consumer === "final-plan-descriptor-contract") {
         assert.deepEqual(Object.keys(baseline.descriptor), ["schema_version", "kind", "created_at", "run_id", "descriptor"]);
@@ -1880,13 +1906,15 @@ describe("finite durable-authority catalog", () => {
         assert.equal(baseline.descriptor.descriptor.hash, `sha256:${createHash("sha256").update(baseline.externalSources.plan.bytes).digest("hex")}`);
       } else if (baseline.consumer === "validateTestExecutionReceipt") {
         assert.equal(validateTestExecutionReceipt(baseline.receipt), baseline.receipt, `${id} must use the exported closed receipt validator`);
+      } else if (baseline.consumer === "validateCheckpointRoutingManifest") {
+        assert.equal(validateCheckpointRoutingManifest(baseline.manifest, baseline), baseline.manifest, `${id} must use the production checkpoint manifest validator`);
       } else {
         assert.match(baseline.consumer, /^validateRun(?:\/checkRunConsistency)?$/u);
         assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
       }
     }
-    assert.equal(observedConsumers.size, 127);
-    assert.deepEqual([...observedConsumers.keys()].slice(0, 126), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
+    assert.equal(observedConsumers.size, 129);
+    assert.deepEqual([...observedConsumers.keys()].slice(0, 128), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
     assert.equal(observedConsumers.get("final-plan-descriptor"), "final-plan-descriptor-contract", "future-only final.plan is a descriptor contract, not claimed as current validateRun input");
   });
 
@@ -1970,7 +1998,7 @@ describe("finite durable-authority catalog", () => {
       "steering-pr-fence",
       "pr-created-result",
     ];
-    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-")).slice(0, 40), expectedIds);
+    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "checkpoint-routing-artifact-v1", "terminal-result-blocked-checkpoint-routing", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-")).slice(0, 40), expectedIds);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
     const continuationDispositions = exactB0m3ContinuationDispositionMap(B0M3_CONTINUATION_EXACT_CASES);
     const executedContinuationCases = [];
@@ -2952,10 +2980,16 @@ async function createCheckedClaimMutationFixture(root, record, index) {
   });
   writeJson(join(runDir, "plan", "slices.json"), plan);
   const sliceEvidenceHash = hashFileBytes(join(runDir, "evidence", "slice.json"));
+  const familyEvidenceRef = "evidence/slice.family.json";
+  const familyEvidence = writeVerificationArtifactReceipt({
+    runDir, runId, plan, sliceId: "slice", attempt: 1, reviewedCommit: head,
+    artifactId: "fixture-artifact-1", evidenceRef: familyEvidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
+  });
   writeJson(join(runDir, "reviews", "slice.json"), {
     subject: "slice", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [],
     ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head,
-    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: head, evidenceRef: "evidence/slice.json", evidenceHash: sliceEvidenceHash }),
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: head, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
   });
   const briefHash = hashFileBytes(join(runDir, "artifacts", "technical-brief.md"));
   const specReviewHash = hashFileBytes(join(runDir, "reviews", "spec-writer.json"));

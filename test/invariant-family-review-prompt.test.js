@@ -8,7 +8,7 @@ describe("B4.4 work-reviewer prompt", () => {
   it("requires a fresh complete current ledger in the existing review round", () => {
     for (const contract of [
       /emit `invariant_family_ledger` in the same slice review on every attempt/iu,
-      /independently from the current accepted plan and current observed evidence/iu,
+      /independently from the current accepted plan and current orchestrator-produced checked receipts/iu,
       /exactly one disposition for every invariant family.*no other family/isu,
       /never copy a prior ledger as a delta, omit an unchanged family, or rely on prior pass results/iu,
       /never request an extra reviewer round/iu,
@@ -18,11 +18,11 @@ describe("B4.4 work-reviewer prompt", () => {
   it("binds every closed disposition field to current evidence, artifact, result, and commit", () => {
     for (const contract of [
       /verification artifact linked to that family by a current obligation/iu,
-      /executes that artifact's exact current `test_plan_entry`/iu,
-      /exact observed `evidence_ref` and SHA-256 `evidence_hash`/iu,
+      /binds the exact create-only receipt produced by `factory artifact-execute/iu,
+      /receipt's run, slice, attempt, accepted plan hash, reviewed HEAD, artifact ID, exact parsed program\/argv, and observed process result/iu,
       /probe `\{type:"verification-artifact",verification_artifact_id\}` for that same artifact/iu,
       /typed result `\{type:"verification-result",outcome,summary\}`/iu,
-      /repeats the enclosing review's exact `reviewed_commit`/iu,
+      /repeats? the enclosing review's exact `reviewed_commit`/iu,
       /complete current `unresolved_findings` list/iu,
     ]) assert.match(PROMPT, contract);
   });
@@ -30,7 +30,7 @@ describe("B4.4 work-reviewer prompt", () => {
   it("states exact APPROVE and REJECT authority policy without admission or checkpoint policy", () => {
     assert.match(PROMPT, /APPROVE requires every current family disposition to have `outcome:"pass"` and zero unresolved findings/iu);
     assert.match(PROMPT, /REJECT ledger remains complete.*REJECT never grants review authority/isu);
-    assert.match(PROMPT, /Missing, duplicate, stale, unknown, wrong-artifact, or extra family dispositions are invalid/iu);
+    assert.match(PROMPT, /Missing, duplicate, stale, arbitrary, unknown, wrong-subject\/attempt\/HEAD\/plan\/artifact\/argv\/result, or extra family dispositions are invalid/iu);
     assert.match(PROMPT, /do not make admission or checkpoint decisions/iu);
   });
 

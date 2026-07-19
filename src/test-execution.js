@@ -1,11 +1,13 @@
 import { spawn as defaultSpawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   claimCheckedTestExecution,
+  claimCheckedVerificationArtifactExecution,
   completeCheckedTestExecution,
+  completeCheckedVerificationArtifactExecution,
   markCheckedTestExecutionUnknown,
 } from "./run-state.js";
-import { TEST_EXECUTION_STREAM_LIMIT_BYTES, validateTestExecutionReceipt } from "./validate.js";
+import { TEST_EXECUTION_STREAM_LIMIT_BYTES, validateTestExecutionReceipt, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 
 const COMMAND_TIMEOUT_MS = 300_000;
 const PROCESS_CLOSE_TIMEOUT_MS = 10_000;
@@ -53,6 +55,44 @@ export async function executeCheckedTestExecution(runDir, options = {}) {
     commands: results,
   });
   return completeCheckedTestExecution(runDir, claimed.claim, claimed.authority, receipt, options);
+}
+
+export async function executeCheckedVerificationArtifact(runDir, sliceId, artifactId, options = {}) {
+  const claimed = await claimCheckedVerificationArtifactExecution(runDir, sliceId, artifactId, options);
+  if (claimed.replayed) return claimed;
+  const startedMs = nowMs(options);
+  const startedAt = isoNow(options);
+  const command = { program: claimed.authority.probe.program, args: claimed.authority.probe.args };
+  const result = await executeCommand(command, 0, claimed.authority.worktree, checkedExecutionEnvironment(options.env ?? process.env), options);
+  const completedMs = nowMs(options);
+  const completedAt = isoNow(options);
+  const status = result.outcome === "exited" && result.exit_code === 0 && result.signal === null ? "pass" : "fail";
+  const receipt = validateVerificationArtifactExecutionReceipt({
+    schema_version: 1,
+    kind: "checked-verification-artifact-execution-receipt",
+    subject: claimed.authority.slice_id,
+    run_id: claimed.authority.run_id,
+    slice_id: claimed.authority.slice_id,
+    attempt: claimed.authority.attempt,
+    claim_nonce: options.nonce || randomUUID(),
+    plan_ref: claimed.authority.plan_ref,
+    plan_hash: claimed.authority.plan_hash,
+    head_sha: claimed.authority.head_sha,
+    verification_artifact_id: claimed.authority.verification_artifact_id,
+    probe: claimed.authority.probe,
+    started_at: startedAt,
+    completed_at: completedAt,
+    duration_ms: Math.max(0, completedMs - startedMs),
+    status,
+    review_ready: status === "pass",
+    commands: [result],
+    result: {
+      type: "verification-result",
+      outcome: status,
+      summary: status === "pass" ? "Verification artifact command passed" : "Verification artifact command failed",
+    },
+  });
+  return completeCheckedVerificationArtifactExecution(runDir, claimed.authority, receipt, options);
 }
 
 export function checkedExecutionEnvironment(source) {

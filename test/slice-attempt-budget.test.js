@@ -7,7 +7,7 @@ import { after, describe, it } from "node:test";
 import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { validateRun, validateSlicesPlan } from "../src/validate.js";
 import { spawnSync } from "./helpers/git-fixture.js";
-import { passingInvariantFamilyLedger, withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 describe("uniform slice attempt evidence", () => {
   it("advances one attempt at a time and appends exact review history", async () => {
@@ -689,7 +689,6 @@ async function publishReview(fixture, attempt, options) {
   const evidenceRef = `evidence/slice.attempt-${attempt}.json`;
   const reviewRef = `reviews/slice.attempt-${attempt}.json`;
   writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", status: "pass", review_ready: true, attempt, head_sha: head });
-  writeJson(join(fixture.runDir, "evidence", `slice.family-attempt-${attempt}.json`), { subject: "slice", attempt, invariant_family: "fixture-family-1", status: "pass" });
   writeJson(join(fixture.runDir, reviewRef), reviewRecord(fixture, attempt, options));
   return transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: attempt, evidence_ref: evidenceRef, review_ref: reviewRef });
 }
@@ -706,11 +705,14 @@ function commitSliceAttempt(fixture, attempt) {
 function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "converging", classifications, scopeEffect = "in-lane", likelyPaths = ["slice.txt"], fixOwner = "slice" }) {
   const reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
   const familyEvidenceRef = `evidence/slice.family-attempt-${attempt}.json`;
-  const familyEvidencePath = join(fixture.runDir, familyEvidenceRef);
-  if (!existsSync(familyEvidencePath)) {
-    writeJson(familyEvidencePath, { subject: "slice", attempt, invariant_family: "fixture-family-1", status: "pass" });
-  }
   const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+  const family = plan.delivery_envelope.delivery_units[0].invariant_families[0];
+  const artifactId = plan.delivery_envelope.delivery_units[0].obligations[0].verification_artifact_id;
+  const checkedFamilyEvidence = writeVerificationArtifactReceipt({
+    runDir: fixture.runDir, runId: "run", plan, sliceId: "slice", attempt, reviewedCommit,
+    artifactId, evidenceRef: familyEvidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: `${family.description} passed` },
+  });
   return {
     subject: "slice",
     attempt,
@@ -735,7 +737,7 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
       sliceId: "slice",
       reviewedCommit,
       evidenceRef: familyEvidenceRef,
-      evidenceHash: fileHash(familyEvidencePath),
+      evidenceHash: checkedFamilyEvidence.hash,
     }),
   };
 }

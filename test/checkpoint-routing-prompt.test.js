@@ -11,13 +11,13 @@ describe("B4.3 checkpoint routing prompts", () => {
     assert.match(DECOMPOSER, /factory, not this agent, deterministically routes it into checkpoint requests before implementation/iu);
     assert.match(DECOMPOSER, /do not emit .* checkpoint requests/iu);
     assert.match(DECOMPOSER, /stable dependency\/topological then unit\/family\/obligation\/artifact order/iu);
-    assert.match(DECOMPOSER, /must not seed runnable slices or proceed to slice branches, worktrees, dispatch, accepted decomposer state/iu);
+    assert.match(DECOMPOSER, /binds the exact same-attempt APPROVE decomposition review[\s\S]*must not seed runnable slices or proceed to Gate 2, slice branches, worktrees, dispatch/iu);
 
     for (const prompt of [SKILL, COMMAND]) {
       assert.match(prompt, /factory slices-seed <run-id> --from plan\/slices\.json --json/iu);
-      assert.match(prompt, /before .*accepted .*work-decomposer|before accepted decomposer state/iu);
+      assert.match(prompt, /checkpoint[\s\S]*same-attempt APPROVE[\s\S]*work-decomposer[\s\S]*(?:before routing|while slices remain empty|terminal)/iu);
       assert.match(prompt, /content-addressed .*manifest|content-addresses and persists the deterministic checkpoint manifest/iu);
-      assert.match(prompt, /stop .*slice.*branch\/worktree\/dispatch/iu);
+      assert.match(prompt, /stop .*slice.*branch\/worktree\/dispatch|before Gate 2, (?:runnable )?slice branch\/worktree\/dispatch/iu);
       assert.match(prompt, /no model-authored plan file|trust only the content-addressed runtime manifest/iu);
       assert.match(prompt, /boundary-open <run-id> terminal/iu);
       assert.match(prompt, /--boundary-token <terminal-boundary\.token>/iu);
@@ -36,7 +36,7 @@ describe("B4.3 checkpoint routing prompts", () => {
       assert.match(prompt, /one PR|exactly one PR/iu);
       assert.match(prompt, /checkpoint N\+1 .*only from `?main`? containing merged PR N/iu);
     }
-    assert.match(SKILL, /Never split this oversized parent with B1 continuation\/carry-forward, retained merged rows, a partial PR, a cross-run merge train, a join, or a shared final panel/iu);
+    assert.match(SKILL, /Never (?:split this oversized parent with |use )B1 continuation\/carry-forward, retained merged rows, a partial PR, a cross-run merge train, a join, or a shared final panel/iu);
     assert.match(COMMAND, /Never use continuation\/carry-forward, retained merged rows, a partial PR, a cross-run merge train, a join, or a shared final panel/iu);
   });
 });

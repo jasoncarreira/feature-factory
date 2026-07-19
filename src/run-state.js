@@ -11,7 +11,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
@@ -20,6 +20,7 @@ import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission
 import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
 import { validateAdmissionExtensionResult, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
+import { parseVerificationCommand } from "./delivery-envelope/verification-command.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -1407,6 +1408,85 @@ export async function completeCheckedTestExecution(runDir, expectedClaim, expect
   }, options);
 }
 
+export async function claimCheckedVerificationArtifactExecution(runDir, sliceId, artifactId, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const run = await readRunJson(runDir);
+    const authority = observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options);
+    const resolved = resolveEvidenceRef(runDir, authority.receipt_ref, { mustExist: false });
+    if (existsSync(resolved.path)) {
+      const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectFile(resolved.path, "checked verification artifact receipt"));
+      assertVerificationArtifactReceiptMatches(receipt, authority);
+      return { replayed: true, authority, receipt, receipt_hash: hashFile(resolved.path, { mode: "raw" }) };
+    }
+    return { replayed: false, authority };
+  }, options);
+}
+
+export async function completeCheckedVerificationArtifactExecution(runDir, expectedAuthority, receiptInput, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const run = await readRunJson(runDir);
+    const current = observeVerificationArtifactExecutionAuthority(runDir, run, expectedAuthority.slice_id, expectedAuthority.verification_artifact_id, options);
+    if (!sameJson(current, expectedAuthority)) throw new Error("checked verification artifact authority changed before receipt publication");
+    const receipt = validateVerificationArtifactExecutionReceipt(cloneJson(receiptInput));
+    assertVerificationArtifactReceiptMatches(receipt, current);
+    const resolved = resolveEvidenceRef(runDir, current.receipt_ref, { mustExist: false });
+    await writeProtectedJsonAtomic(runDir, current.receipt_ref, receipt, {
+      commit: "create-only",
+      hooks: {
+        beforeCommit: () => {
+          const observedRun = validateRun(parseJsonObjectFile(join(runDir, RUN_FILE), "verification artifact run.json"));
+          const observed = observeVerificationArtifactExecutionAuthority(runDir, observedRun, current.slice_id, current.verification_artifact_id, options);
+          if (!sameJson(observed, current)) throw new Error("checked verification artifact authority changed before receipt commit");
+        },
+      },
+    });
+    return { replayed: false, authority: current, receipt, receipt_hash: hashFile(resolved.path, { mode: "raw" }) };
+  }, options);
+}
+
+function observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options) {
+  if (run.status !== "running") throw new Error("checked verification artifact execution requires a running run");
+  const slice = (run.slices || []).find((candidate) => candidate?.id === sliceId);
+  if (!slice || slice.status !== "running" || !Number.isInteger(slice.attempts) || slice.attempts < 1) {
+    throw new Error(`checked verification artifact execution requires running slice '${sliceId}' at a positive attempt`);
+  }
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+  const unit = decomposition.plan.delivery_envelope?.delivery_units.find((candidate) => candidate.slice_id === sliceId);
+  const artifact = unit?.verification_artifacts.find((candidate) => candidate.id === artifactId);
+  if (!artifact) throw new Error(`verification artifact '${artifactId}' is not current for slice '${sliceId}'`);
+  const gitAuthority = observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
+  const command = parseVerificationCommand(artifact.test_plan_entry);
+  return {
+    run_id: run.run_id,
+    slice_id: sliceId,
+    attempt: slice.attempts,
+    plan_ref: PLAN_SLICES_REF,
+    plan_hash: decomposition.plan_hash,
+    head_sha: gitAuthority.head,
+    verification_artifact_id: artifact.id,
+    probe: {
+      type: "verification-artifact",
+      verification_artifact_id: artifact.id,
+      test_plan_index: artifact.test_plan_index,
+      test_plan_entry: artifact.test_plan_entry,
+      program: command.program,
+      args: command.args,
+    },
+    worktree: gitAuthority.worktree,
+    receipt_ref: `evidence/${sliceId}.artifact-${artifact.id}.attempt-${slice.attempts}.json`,
+  };
+}
+
+function assertVerificationArtifactReceiptMatches(receipt, authority) {
+  for (const key of ["run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id"]) {
+    if (receipt[key] !== authority[key]) throw new Error(`checked verification artifact receipt ${key} is stale`);
+  }
+  if (receipt.subject !== authority.slice_id || !sameJson(receipt.probe, authority.probe)) {
+    throw new Error("checked verification artifact receipt probe is stale");
+  }
+  if (receipt.status !== receipt.result.outcome) throw new Error("checked verification artifact receipt result is stale");
+}
+
 export async function markCheckedTestExecutionUnknown(runDir, expectedClaim, reason, options = {}) {
   if (!TEST_EXECUTION_UNKNOWN_REASONS.has(reason)) throw new Error("unknown checked execution reason is invalid");
   return withRunJsonLock(runDir, async () => {
@@ -2055,6 +2135,13 @@ function assertContinuationContext(parentFile, parentRun, continuation) {
   for (const step of parentRun.steps || []) if (stringValue(step?.evidence_ref)) evidenceRefs.push(step.evidence_ref);
   for (const slice of parentRun.slices || []) if (stringValue(slice?.evidence_ref)) evidenceRefs.push(slice.evidence_ref);
   for (const slice of parentRun.slices || []) for (const review of slice?.attempt_reviews || []) if (stringValue(review?.evidence_ref)) evidenceRefs.push(review.evidence_ref);
+  const sliceReviewRefs = (parentRun.slices || []).flatMap((slice) => [slice?.review_ref, ...(slice?.attempt_reviews || []).map((review) => review?.review_ref)]);
+  for (const reviewRef of new Set(sliceReviewRefs.filter(stringValue))) {
+    const review = parseJsonObjectFile(resolveReviewRef(parentDir, reviewRef).path, "continuation slice review");
+    for (const disposition of review.invariant_family_ledger?.dispositions || []) {
+      if (stringValue(disposition?.evidence_ref)) evidenceRefs.push(disposition.evidence_ref);
+    }
+  }
   if (stringValue(parentRun.post_pr?.remediation?.failure_evidence_ref)) evidenceRefs.push(parentRun.post_pr.remediation.failure_evidence_ref);
   for (const binding of parentRun.post_pr?.evidence_refs || []) if (stringValue(binding?.ref)) evidenceRefs.push(binding.ref);
   const expectedEvidence = bindUniqueContinuationRefs(parentDir, evidenceRefs, "evidence", "evidence", resolveEvidenceRef);
@@ -2319,16 +2406,35 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
   if (step.agent === "work-decomposer") {
     if (step.artifact_ref !== PLAN_SLICES_REF) throw new Error(`accepted work-decomposer step requires artifact_ref exactly '${PLAN_SLICES_REF}'`);
     if (!stringValue(step.review_ref)) throw new Error("accepted work-decomposer step requires review_ref");
-    const planAuthority = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, run?.slices, { ...options, requireIntegrationGate: true, enforceDependencyDepth: false });
+    const unprojectedAuthority = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, null, { ...options, requireIntegrationGate: true, enforceDependencyDepth: false });
+    const checkpoint = unprojectedAuthority.admission_extension.decision === "checkpoint";
+    if (checkpoint && Array.isArray(run?.slices) && run.slices.length > 0) {
+      throw new Error("checkpoint work-decomposer acceptance requires an unseeded slice projection");
+    }
+    const planAuthority = checkpoint
+      ? unprojectedAuthority
+      : observePlanSourceAuthority(runDir, PLAN_SLICES_REF, run?.slices, { ...options, requireIntegrationGate: true, enforceDependencyDepth: false });
     const review = resolveReviewRef(runDir, step.review_ref, { mustExist: true });
     const reviewHash = hashFile(review.path);
+    const reviewValue = parseJsonObjectFile(review.path, "accepted work-decomposer review");
+    if (checkpoint && (reviewValue.subject !== "work-decomposer" || reviewValue.attempt !== step.attempts || reviewValue.verdict !== "APPROVE")) {
+      throw new Error("checkpoint work-decomposer acceptance requires an exact same-attempt APPROVE decomposition review");
+    }
     step.acceptance = {
       artifact_ref: PLAN_SLICES_REF,
       artifact_hash: planAuthority.plan_hash,
       review_ref: step.review_ref,
       review_hash: reviewHash,
     };
-    return { plan_hash: planAuthority.plan_hash, review_ref: step.review_ref, review_hash: reviewHash, admission_extension: planAuthority.admission_extension };
+    return {
+      plan_hash: planAuthority.plan_hash,
+      review_ref: step.review_ref,
+      review_hash: reviewHash,
+      attempt: step.attempts,
+      review: reviewValue,
+      admission_extension: planAuthority.admission_extension,
+      allow_unseeded_checkpoint: checkpoint,
+    };
   }
   const artifactRef = typeof step.artifact_ref === "string" ? step.artifact_ref.trim() : "";
   if (!artifactRef) {
@@ -2542,18 +2648,22 @@ export function readSlicesSeedPlan(runDir, from, options = {}) {
 }
 
 async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = {}) {
-  const manifest = buildCheckpointRoutingManifest({
-    plan: seedPlanAuthority.plan,
-    planHash: seedPlanAuthority.plan_hash,
-    admissionResult: seedPlanAuthority.admission_extension,
-  });
-  const artifact = checkpointRoutingArtifact(manifest);
-
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    const decompositionAuthority = observeAcceptedDecompositionAuthority(runDir, current, { ...options, requireIntegrationGate: true, allowUnseededCheckpoint: true, requireApprovingReview: true });
+    if (decompositionAuthority.plan_hash !== seedPlanAuthority.plan_hash) {
+      throw new Error("checkpoint routing accepted decomposition does not bind the exact requested plan bytes");
+    }
+    const manifest = buildCheckpointRoutingManifest({
+      plan: seedPlanAuthority.plan,
+      planHash: seedPlanAuthority.plan_hash,
+      admissionResult: seedPlanAuthority.admission_extension,
+      decompositionAuthority,
+    });
+    const artifact = checkpointRoutingArtifact(manifest);
     const replay = current.status === "blocked" && current.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON;
     if (replay) {
-      assertCheckpointRoutingReplay(runDir, current, seedPlanAuthority, manifest, artifact, options);
+      assertCheckpointRoutingReplay(runDir, current, decompositionAuthority, manifest, artifact, options);
       return checkpointRoutingResult(current, manifest, artifact, false);
     }
 
@@ -2563,9 +2673,9 @@ async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = 
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     assertNoUnresolvedSliceDispatches(runDir, current);
     assertCheckpointRoutingPreImplementation(current);
-    assertCheckpointRoutingAuthorityCurrent(runDir, seedPlanAuthority, manifest, artifact, options);
+    assertCheckpointRoutingAuthorityCurrent(runDir, current, decompositionAuthority, manifest, artifact, options);
     const terminalBoundaryAuthority = observeCheckpointTerminalBoundaryAuthority(runDir, current, options);
-    await publishCheckpointRoutingArtifact(runDir, manifest, artifact, seedPlanAuthority, options);
+    await publishCheckpointRoutingArtifact(runDir, current, manifest, artifact, decompositionAuthority, options);
 
     const terminalDraft = cloneJson(current);
     consumeSteeringBoundary(terminalDraft, "terminal", options.boundaryToken);
@@ -2586,7 +2696,7 @@ async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = 
       const observedRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
       assertCheckpointTerminalBoundaryAuthorityCurrent(runDir, observedRun, terminalBoundaryAuthority, options);
       assertCheckpointRoutingPreImplementation(observedRun);
-      assertCheckpointRoutingAuthorityCurrent(runDir, seedPlanAuthority, manifest, artifact, options);
+      assertCheckpointRoutingAuthorityCurrent(runDir, observedRun, decompositionAuthority, manifest, artifact, options);
       assertCheckpointRoutingArtifactCurrent(runDir, artifact);
     });
     return checkpointRoutingResult(next, manifest, artifact, true);
@@ -2595,9 +2705,8 @@ async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = 
 
 function assertCheckpointRoutingPreImplementation(run) {
   if (Array.isArray(run.slices) && run.slices.length > 0) throw new Error("checkpoint routing must occur before slice seeding");
-  if ((run.steps || []).some((step) => step?.agent === "work-decomposer" && step.status === "accepted")) {
-    throw new Error("checkpoint routing must occur before accepted work-decomposer state");
-  }
+  const decompositionSteps = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
+  if (decompositionSteps.length !== 1 || decompositionSteps[0].status !== "accepted") throw new Error("checkpoint routing requires accepted work-decomposer state");
   if (run.gates?.brief !== undefined && run.gates?.brief !== null) {
     throw new Error("checkpoint routing must occur before Gate 2 brief state is present");
   }
@@ -2630,7 +2739,7 @@ function assertCheckpointTerminalBoundaryAuthorityCurrent(runDir, run, expected,
   if (!sameJson(current, expected)) throw new Error("checkpoint terminal boundary authority changed before publication");
 }
 
-async function publishCheckpointRoutingArtifact(runDir, manifest, artifact, authority, options) {
+async function publishCheckpointRoutingArtifact(runDir, run, manifest, artifact, authority, options) {
   const path = join(runDir, artifact.ref);
   if (existsSync(path)) {
     assertCheckpointRoutingArtifactCurrent(runDir, artifact);
@@ -2641,7 +2750,7 @@ async function publishCheckpointRoutingArtifact(runDir, manifest, artifact, auth
     hooks: {
       beforeCommit: async () => {
         await options.checkpointRoutingHooks?.beforeArtifactCommit?.();
-        assertCheckpointRoutingAuthorityCurrent(runDir, authority, manifest, artifact, options);
+        assertCheckpointRoutingAuthorityCurrent(runDir, run, authority, manifest, artifact, options);
       },
     },
   });
@@ -2657,17 +2766,18 @@ function assertCheckpointRoutingReplay(runDir, run, authority, manifest, artifac
     || run.steering?.action_claim != null || run.steering?.pr_fence != null) {
     throw new Error("checkpoint routing terminal result retained incompatible steering authority");
   }
-  assertCheckpointRoutingAuthorityCurrent(runDir, authority, manifest, artifact, options);
+  assertCheckpointRoutingAuthorityCurrent(runDir, run, authority, manifest, artifact, options);
   assertCheckpointRoutingArtifactCurrent(runDir, artifact);
 }
 
-function assertCheckpointRoutingAuthorityCurrent(runDir, expected, manifest, artifact, options) {
-  const current = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, null, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true });
-  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash
-    || !sameJson(current.admission_extension, expected.admission_extension)) {
+function assertCheckpointRoutingAuthorityCurrent(runDir, run, expected, manifest, artifact, options) {
+  const current = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true, allowUnseededCheckpoint: true, requireApprovingReview: true });
+  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref
+    || current.review_hash !== expected.review_hash || current.attempt !== expected.attempt
+    || !sameJson(current.review, expected.review) || !sameJson(current.admission_extension, expected.admission_extension)) {
     throw new Error("checkpoint routing plan authority changed before publication");
   }
-  const rebuilt = buildCheckpointRoutingManifest({ plan: current.plan, planHash: current.plan_hash, admissionResult: current.admission_extension });
+  const rebuilt = buildCheckpointRoutingManifest({ plan: current.plan, planHash: current.plan_hash, admissionResult: current.admission_extension, decompositionAuthority: current });
   const rebuiltArtifact = checkpointRoutingArtifact(rebuilt);
   if (!sameJson(rebuilt, manifest) || !sameJson(rebuiltArtifact, artifact)) {
     throw new Error("checkpoint routing manifest changed before publication");
@@ -2716,7 +2826,7 @@ function assertSeedPlanAuthorityCurrent(runDir, projection, options, expected) {
 
 export function observeAcceptedDecompositionAuthority(runDir, run, options = {}) {
   if (options.requireForIntegrationGatePlan === true && !existsSync(join(resolve(runDir), "plan", "slices.json"))) return null;
-  const source = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, run.slices, {
+  const source = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, options.allowUnseededCheckpoint === true ? null : run.slices, {
     ...options,
     enforceDependencyDepth: false,
     requireIntegrationGate: options.requireIntegrationGate === true,
@@ -2736,12 +2846,21 @@ export function observeAcceptedDecompositionAuthority(runDir, run, options = {})
   const review = resolveReviewRef(runDir, step.review_ref, { mustExist: true });
   const reviewHash = hashFile(review.path);
   if (reviewHash !== step.acceptance.review_hash) throw new Error("accepted work-decomposer review bytes changed after acceptance");
-  return { ...source, attempts: step.attempts, review_ref: step.review_ref, review_hash: reviewHash };
+  const reviewValue = parseJsonObjectFile(review.path, "accepted work-decomposer review");
+  if (options.requireApprovingReview === true
+    && (reviewValue.subject !== "work-decomposer" || reviewValue.attempt !== step.attempts || reviewValue.verdict !== "APPROVE")) {
+    throw new Error("accepted work-decomposer review must be an exact same-attempt APPROVE decomposition review");
+  }
+  return { ...source, plan_ref: PLAN_SLICES_REF, attempt: step.attempts, attempts: step.attempts, review_ref: step.review_ref, review_hash: reviewHash, review: reviewValue };
 }
 
 function assertAcceptedDecompositionAuthorityCurrent(runDir, run, expected) {
-  const current = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+  const current = observeAcceptedDecompositionAuthority(runDir, run, {
+    requireIntegrationGate: true,
+    allowUnseededCheckpoint: expected.allow_unseeded_checkpoint === true,
+  });
   if (current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref || current.review_hash !== expected.review_hash
+    || current.attempt !== expected.attempt || !sameJson(current.review, expected.review)
     || !sameJson(current.admission_extension, expected.admission_extension)) {
     throw new Error("accepted work-decomposer plan authority changed before run.json publication");
   }
@@ -4429,7 +4548,7 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
   if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error(`slice '${sliceId}' merge requires a clean integration worktree`);
   const reviewedCommit = observed.binding.reviewed_commit;
   const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
-  const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, decomposition.plan, sliceId, observed.review);
+  const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, run, decomposition, sliceId, observed.review);
   assertApprovingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension, "merge");
   const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, sliceGit, decomposition, options);
   if (!sameJson(slice.effective_paths, ownership.effective_paths)) throw new Error(`slice '${sliceId}' effective ownership changed after review`);
@@ -4512,7 +4631,7 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
   if (observed.evidence.head_sha !== gitAuthority.head) throw new Error(`slice '${sliceId}' evidence head_sha must equal the current slice head`);
   if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
   if (dispatch && dispatch.completion_head !== gitAuthority.head) throw new Error(`slice '${sliceId}' reviewed head must equal the checked Task completion head`);
-  const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, decomposition.plan, sliceId, observed.review);
+  const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, run, decomposition, sliceId, observed.review);
   assertPublishingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension);
   const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, gitAuthority, decomposition, options);
   return {
@@ -4542,10 +4661,13 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
   };
 }
 
-function observeReviewExtensionEvidence(runDir, ref) {
+function observeReviewExtensionEvidence(runDir, ref, expectedHash) {
   const resolved = resolveEvidenceRef(runDir, ref, { mustExist: true });
   const bytes = readRegularNonEmptyFile(resolved.path, `invariant family ledger evidence '${ref}'`);
-  return { ref, hash: sha256Bytes(bytes) };
+  const hash = sha256Bytes(bytes);
+  if (expectedHash !== undefined && hash !== expectedHash) throw new Error(`invariant family ledger evidence hash is stale for '${ref}'`);
+  const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectBytes(bytes, `invariant family ledger evidence '${ref}'`));
+  return { ref, hash, receipt };
 }
 
 function observeInvariantFamilyLedgerEvidence(runDir, sliceId, review) {
@@ -4553,19 +4675,24 @@ function observeInvariantFamilyLedgerEvidence(runDir, sliceId, review) {
   if (!Array.isArray(dispositions)) return;
   for (const disposition of dispositions) {
     const ref = requireNonEmptyString(disposition?.evidence_ref, `slice '${sliceId}' invariant family ledger evidence_ref`);
-    const observed = observeReviewExtensionEvidence(runDir, ref);
+    const observed = observeReviewExtensionEvidence(runDir, ref, disposition.evidence_hash);
     if (observed.hash !== disposition.evidence_hash) {
       throw new Error(`slice '${sliceId}' invariant family ledger evidence hash is stale for '${ref}'`);
     }
   }
 }
 
-function observeInvariantFamilyReviewAuthority(runDir, plan, sliceId, review) {
+function observeInvariantFamilyReviewAuthority(runDir, run, decomposition, sliceId, review) {
   return validateReviewExtensionResult(evaluateInvariantFamilyReview({
-    plan,
+    plan: decomposition.plan,
     sliceId,
     review,
-    observeEvidence: (ref) => observeReviewExtensionEvidence(runDir, ref),
+    observeEvidence: (ref) => {
+      const observed = observeReviewExtensionEvidence(runDir, ref);
+      if (observed.receipt.run_id !== run.run_id) throw new Error("invariant family ledger checked receipt run id is stale");
+      if (observed.receipt.plan_hash !== decomposition.plan_hash) throw new Error("invariant family ledger checked receipt plan hash is stale");
+      return observed;
+    },
   }));
 }
 

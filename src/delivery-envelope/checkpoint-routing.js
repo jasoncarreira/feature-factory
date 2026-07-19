@@ -6,9 +6,10 @@ export const CHECKPOINT_ROUTING_TERMINAL_REASON = "oversized-plan-checkpoint-rou
 
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 
-export function buildCheckpointRoutingManifest({ plan, planHash, admissionResult } = {}) {
+export function buildCheckpointRoutingManifest({ plan, planHash, admissionResult, decompositionAuthority } = {}) {
   assertCheckpointAdmission(admissionResult);
   if (!HASH_PATTERN.test(planHash ?? "")) throw new Error("checkpoint routing requires the hash of exact plan bytes");
+  assertApprovingDecompositionAuthority(decompositionAuthority, planHash);
   if (!plan || !Array.isArray(plan.slices) || !Array.isArray(plan.delivery_envelope?.delivery_units)) {
     throw new Error("checkpoint routing requires a validated delivery-envelope plan");
   }
@@ -77,8 +78,11 @@ export function buildCheckpointRoutingManifest({ plan, planHash, admissionResult
     schema_version: 1,
     kind: CHECKPOINT_ROUTING_KIND,
     source: {
-      plan_ref: CHECKPOINT_ROUTING_PLAN_REF,
+      plan_ref: decompositionAuthority.plan_ref,
       plan_hash: planHash,
+      decomposition_review_ref: decompositionAuthority.review_ref,
+      decomposition_review_hash: decompositionAuthority.review_hash,
+      decomposition_attempt: decompositionAuthority.attempt,
       admission_result: clone(admissionResult),
     },
     sequencing: {
@@ -90,6 +94,16 @@ export function buildCheckpointRoutingManifest({ plan, planHash, admissionResult
   };
 }
 
+function assertApprovingDecompositionAuthority(authority, planHash) {
+  if (!authority || authority.plan_ref !== CHECKPOINT_ROUTING_PLAN_REF || authority.plan_hash !== planHash
+    || !HASH_PATTERN.test(authority.review_hash ?? "") || typeof authority.review_ref !== "string"
+    || !authority.review_ref.startsWith("reviews/") || !Number.isInteger(authority.attempt) || authority.attempt < 1
+    || authority.review?.subject !== "work-decomposer" || authority.review?.attempt !== authority.attempt
+    || authority.review?.verdict !== "APPROVE") {
+    throw new Error("checkpoint routing requires exact approving decomposition review authority bound to the plan bytes");
+  }
+}
+
 export function checkpointRoutingArtifact(manifest) {
   const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
   const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -98,6 +112,14 @@ export function checkpointRoutingArtifact(manifest) {
     hash,
     ref: `artifacts/checkpoint-routing-${hash.slice("sha256:".length)}.json`,
   };
+}
+
+export function validateCheckpointRoutingManifest(manifest, { plan, planHash, admissionResult, decompositionAuthority } = {}) {
+  const expected = buildCheckpointRoutingManifest({ plan, planHash, admissionResult, decompositionAuthority });
+  if (JSON.stringify(manifest) !== JSON.stringify(expected)) {
+    throw new Error("checkpoint routing manifest does not match exact reviewed plan authority");
+  }
+  return manifest;
 }
 
 function assertCheckpointAdmission(result) {

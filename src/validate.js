@@ -68,7 +68,7 @@ export const POST_PR_TERMINAL_REASONS = Object.freeze({
 const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
-const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "special_builder_dispatch", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
+const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "special_builder_dispatch", "continuation", "checkpoint", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
 const PLAN_KEYS = new Set(["slices", "integration_gate", "delivery_envelope"]);
 const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
 const INTEGRATION_GATE_KEYS = new Set(["required_commands"]);
@@ -87,11 +87,15 @@ const HANDOFF_RECEIPT_KEYS = new Set(["schema_version", "kind", "gate", "approva
 const STEP_KEYS = new Set(["agent", "status", "attempts", "artifact_ref", "review_ref", "evidence_ref", "acceptance", "inherited_acceptance", "execution_claim", "execution_claim_hash"]);
 const STEP_ACCEPTANCE_KEYS = new Set(["artifact_ref", "artifact_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_head_sha"]);
 const STEP_INHERITED_ACCEPTANCE_KEYS = new Set(["from_run_id", "parent_spec_review_ref", "artifact_hash", "review_hash"]);
+const CHECKPOINT_CHILD_KEYS = new Set(["schema_version", "kind", "parent_run_id", "parent_run_ref", "parent_run_hash", "manifest_ref", "manifest_hash", "checkpoint_id", "checkpoint_ordinal", "child_run_id", "base_ref", "base_commit", "predecessor_checkpoint_id", "predecessor_child_run_id", "predecessor_merge_commit"]);
 const TEST_EXECUTION_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "receipt_ref", "claimed_at"]);
 const TEST_EXECUTION_CLAIM_COMPLETED_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
 const TEST_EXECUTION_CLAIM_UNKNOWN_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "failed_at", "reason"]);
 const TEST_EXECUTION_UNKNOWN_REASONS = new Set(["process-outcome-indeterminate", "authority-changed", "receipt-publication-indeterminate"]);
 const TEST_EXECUTION_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands"]);
+const VERIFICATION_ARTIFACT_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "slice_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "probe", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands", "result"]);
+const VERIFICATION_ARTIFACT_PROBE_KEYS = new Set(["type", "verification_artifact_id", "test_plan_index", "test_plan_entry", "program", "args"]);
+const VERIFICATION_ARTIFACT_RESULT_KEYS = new Set(["type", "outcome", "summary"]);
 const TEST_EXECUTION_COMMAND_RESULT_KEYS = new Set(["index", "program", "args", "outcome", "status", "exit_code", "signal", "error_code", "duration_ms", "stdout", "stderr"]);
 const TEST_EXECUTION_STREAM_KEYS = new Set(["captured_bytes", "sha256", "truncated"]);
 const TEST_EXECUTION_OUTCOMES = new Set(["exited", "signaled", "timeout", "output-limit", "launch-error"]);
@@ -364,6 +368,7 @@ export function validateRun(run) {
   validateMergedSliceRepair(errors, run, "run.merged_slice_repair");
   validateSpecialBuilderDispatch(errors, run.special_builder_dispatch, "run.special_builder_dispatch");
   validateContinuation(errors, run, "run.continuation");
+  validateCheckpointChildBinding(errors, run.checkpoint, "run.checkpoint", run.run_id);
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
 
@@ -378,6 +383,42 @@ export function validateRun(run) {
 
   if (errors.length) fail(errors);
   return run;
+}
+
+export function validateCheckpointChildBinding(errorsOrBinding, valueOrOptions, path = "checkpoint", runId) {
+  const standalone = !Array.isArray(errorsOrBinding);
+  const errors = standalone ? [] : errorsOrBinding;
+  const value = standalone ? errorsOrBinding : valueOrOptions;
+  const expectedRunId = standalone ? valueOrOptions?.runId : runId;
+  if (value === undefined || value === null) return standalone ? null : undefined;
+  if (!isRecord(value)) {
+    errors.push({ path, message: "must be an object" });
+    if (standalone) fail(errors);
+    return;
+  }
+  allowedKeys(errors, value, CHECKPOINT_CHILD_KEYS, path);
+  requiredInteger(errors, value, "schema_version", `${path}.schema_version`);
+  if (value.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredEnum(errors, value, "kind", new Set(["delivery-checkpoint-child"]), `${path}.kind`);
+  for (const key of ["parent_run_id", "parent_run_ref", "manifest_ref", "checkpoint_id", "child_run_id", "base_ref"]) requiredString(errors, value, key, `${path}.${key}`);
+  for (const key of ["parent_run_hash", "manifest_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
+  requiredFullGitSha(errors, value, "base_commit", `${path}.base_commit`);
+  boundedInteger(errors, value, "checkpoint_ordinal", 1, Number.MAX_SAFE_INTEGER, `${path}.checkpoint_ordinal`);
+  if (stringValue(expectedRunId) && value.child_run_id !== expectedRunId) errors.push({ path: `${path}.child_run_id`, message: "must equal run.run_id" });
+  if (stringValue(value.parent_run_id) && value.parent_run_ref !== `.opencode/factory/${value.parent_run_id}/run.json`) errors.push({ path: `${path}.parent_run_ref`, message: "must be the exact parent run ref" });
+  if (!/^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u.test(value.manifest_ref ?? "")) errors.push({ path: `${path}.manifest_ref`, message: "must be a content-addressed checkpoint routing artifact ref" });
+  for (const key of ["predecessor_checkpoint_id", "predecessor_child_run_id", "predecessor_merge_commit"]) {
+    if (!Object.hasOwn(value, key)) errors.push({ path: `${path}.${key}`, message: "is required" });
+  }
+  if (value.checkpoint_ordinal === 1) {
+    for (const key of ["predecessor_checkpoint_id", "predecessor_child_run_id", "predecessor_merge_commit"]) if (value[key] !== null) errors.push({ path: `${path}.${key}`, message: "must be null for checkpoint ordinal 1" });
+  } else if (Number.isInteger(value.checkpoint_ordinal) && value.checkpoint_ordinal > 1) {
+    requiredString(errors, value, "predecessor_checkpoint_id", `${path}.predecessor_checkpoint_id`);
+    requiredString(errors, value, "predecessor_child_run_id", `${path}.predecessor_child_run_id`);
+    requiredFullGitSha(errors, value, "predecessor_merge_commit", `${path}.predecessor_merge_commit`);
+  }
+  if (standalone && errors.length) fail(errors);
+  return standalone ? value : undefined;
 }
 
 export function validateCostAttributionEntries(entries, runId) {
@@ -462,6 +503,67 @@ export function validateTestExecutionReceipt(receipt) {
     const passing = receipt.commands.every((result) => result?.outcome === "exited" && result?.exit_code === 0 && result?.signal === null && result?.status === "pass");
     if (receipt.status !== (passing ? "pass" : "fail")) errors.push({ path: "receipt.status", message: "must equal the aggregate command result status" });
     if (receipt.review_ready !== passing) errors.push({ path: "receipt.review_ready", message: "must equal true exactly when every command passes" });
+  }
+  if (Number.isFinite(Date.parse(receipt.started_at || "")) && Number.isFinite(Date.parse(receipt.completed_at || ""))
+    && Date.parse(receipt.completed_at) < Date.parse(receipt.started_at)) errors.push({ path: "receipt.completed_at", message: "must not precede started_at" });
+  if (errors.length) fail(errors);
+  return receipt;
+}
+
+export function validateVerificationArtifactExecutionReceipt(receipt) {
+  const errors = [];
+  if (!isRecord(receipt)) return fail([{ path: "receipt", message: "must be an object" }]);
+  allowedKeys(errors, receipt, VERIFICATION_ARTIFACT_RECEIPT_KEYS, "receipt");
+  requiredInteger(errors, receipt, "schema_version", "receipt.schema_version");
+  if (receipt.schema_version !== 1) errors.push({ path: "receipt.schema_version", message: "must equal 1" });
+  requiredString(errors, receipt, "kind", "receipt.kind");
+  if (receipt.kind !== "checked-verification-artifact-execution-receipt") errors.push({ path: "receipt.kind", message: "must equal checked-verification-artifact-execution-receipt" });
+  requiredString(errors, receipt, "subject", "receipt.subject");
+  requiredString(errors, receipt, "slice_id", "receipt.slice_id");
+  if (stringValue(receipt.subject) && stringValue(receipt.slice_id) && receipt.subject !== receipt.slice_id) errors.push({ path: "receipt.subject", message: "must equal receipt.slice_id" });
+  requiredString(errors, receipt, "run_id", "receipt.run_id");
+  boundedInteger(errors, receipt, "attempt", 1, Number.MAX_SAFE_INTEGER, "receipt.attempt");
+  requiredString(errors, receipt, "claim_nonce", "receipt.claim_nonce");
+  if (!isUuidV4(receipt.claim_nonce)) errors.push({ path: "receipt.claim_nonce", message: "must be a UUID v4" });
+  requiredString(errors, receipt, "plan_ref", "receipt.plan_ref");
+  if (receipt.plan_ref !== PLAN_SLICES_REF) errors.push({ path: "receipt.plan_ref", message: `must equal ${PLAN_SLICES_REF}` });
+  requiredHash(errors, receipt, "plan_hash", "receipt.plan_hash");
+  requiredFullGitSha(errors, receipt, "head_sha", "receipt.head_sha");
+  requiredString(errors, receipt, "verification_artifact_id", "receipt.verification_artifact_id");
+  requiredTimestamp(errors, receipt, "started_at", "receipt.started_at");
+  requiredTimestamp(errors, receipt, "completed_at", "receipt.completed_at");
+  boundedInteger(errors, receipt, "duration_ms", 0, Number.MAX_SAFE_INTEGER, "receipt.duration_ms");
+  requiredEnum(errors, receipt, "status", new Set(["pass", "fail", "skipped"]), "receipt.status");
+  if (typeof receipt.review_ready !== "boolean") errors.push({ path: "receipt.review_ready", message: "must be a boolean" });
+
+  if (!isRecord(receipt.probe)) errors.push({ path: "receipt.probe", message: "must be an object" });
+  else {
+    allowedKeys(errors, receipt.probe, VERIFICATION_ARTIFACT_PROBE_KEYS, "receipt.probe");
+    if (receipt.probe.type !== "verification-artifact") errors.push({ path: "receipt.probe.type", message: "must equal verification-artifact" });
+    requiredString(errors, receipt.probe, "verification_artifact_id", "receipt.probe.verification_artifact_id");
+    if (receipt.probe.verification_artifact_id !== receipt.verification_artifact_id) errors.push({ path: "receipt.probe.verification_artifact_id", message: "must equal receipt.verification_artifact_id" });
+    boundedInteger(errors, receipt.probe, "test_plan_index", 0, Number.MAX_SAFE_INTEGER, "receipt.probe.test_plan_index");
+    requiredString(errors, receipt.probe, "test_plan_entry", "receipt.probe.test_plan_entry");
+    validateIntegrationProgram(errors, receipt.probe.program, "receipt.probe.program");
+    validateIntegrationArgs(errors, receipt.probe.args, "receipt.probe.args");
+  }
+  if (!isRecord(receipt.result)) errors.push({ path: "receipt.result", message: "must be an object" });
+  else {
+    allowedKeys(errors, receipt.result, VERIFICATION_ARTIFACT_RESULT_KEYS, "receipt.result");
+    if (receipt.result.type !== "verification-result") errors.push({ path: "receipt.result.type", message: "must equal verification-result" });
+    requiredEnum(errors, receipt.result, "outcome", new Set(["pass", "fail", "skipped"]), "receipt.result.outcome");
+    requiredString(errors, receipt.result, "summary", "receipt.result.summary");
+    if (receipt.result.outcome !== receipt.status) errors.push({ path: "receipt.result.outcome", message: "must equal receipt.status" });
+  }
+  if (!Array.isArray(receipt.commands)) errors.push({ path: "receipt.commands", message: "must be an array" });
+  else if (receipt.status === "skipped") {
+    if (receipt.commands.length !== 0 || receipt.review_ready !== false) errors.push({ path: "receipt.commands", message: "skipped requires zero commands and review_ready false" });
+  } else {
+    if (receipt.commands.length !== 1) errors.push({ path: "receipt.commands", message: "pass or fail requires exactly one command result" });
+    else validateTestExecutionCommandResult(errors, receipt.commands[0], 0);
+    const passing = receipt.commands.length === 1 && receipt.commands[0]?.outcome === "exited" && receipt.commands[0]?.exit_code === 0 && receipt.commands[0]?.signal === null && receipt.commands[0]?.status === "pass";
+    if (receipt.status !== (passing ? "pass" : "fail")) errors.push({ path: "receipt.status", message: "must equal the observed command result status" });
+    if (receipt.review_ready !== passing) errors.push({ path: "receipt.review_ready", message: "must equal true exactly for an observed passing command" });
   }
   if (Number.isFinite(Date.parse(receipt.started_at || "")) && Number.isFinite(Date.parse(receipt.completed_at || ""))
     && Date.parse(receipt.completed_at) < Date.parse(receipt.started_at)) errors.push({ path: "receipt.completed_at", message: "must not precede started_at" });
@@ -2805,6 +2907,17 @@ function validateTerminalResult(errors, run, path) {
   if (run.terminal_result.status && run.terminal_result.status !== run.status) errors.push({ path: `${path}.status`, message: `must match run.status '${run.status}'` });
   if (run.terminal_result.run_id && run.terminal_result.run_id !== run.run_id) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
   if (["blocked", "partial", "needs-human"].includes(run.status) && !stringValue(run.terminal_result.reason)) errors.push({ path: `${path}.reason`, message: `is required for ${run.status}` });
+  if (run.terminal_result.reason === "oversized-plan-checkpoint-routing-required") {
+    const artifacts = run.terminal_result.artifacts;
+    const keys = isRecord(artifacts) ? Object.keys(artifacts) : [];
+    if (run.status !== "blocked" || run.terminal_result.status !== "blocked" || run.pr_url != null || run.terminal_result.pr_url !== null) {
+      errors.push({ path, message: "checkpoint routing requires an exact pre-PR blocked terminal result" });
+    }
+    if (keys.length !== 1 || keys[0] !== "checkpoint_routing"
+      || !/^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u.test(artifacts?.checkpoint_routing ?? "")) {
+      errors.push({ path: `${path}.artifacts`, message: "checkpoint routing requires exactly one content-addressed checkpoint_routing artifact" });
+    }
+  }
   if (run.terminal_result.status === "completed") validateCompletedTerminalPrTuple(errors, run, path);
 }
 
