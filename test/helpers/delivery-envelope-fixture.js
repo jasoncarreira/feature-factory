@@ -93,7 +93,29 @@ export function writeVerificationArtifactReceipt({ runDir, runId, plan, sliceId,
   const bytes = `${JSON.stringify(receipt, null, 2)}\n`;
   mkdirSync(dirname(join(runDir, evidenceRef)), { recursive: true });
   writeFileSync(join(runDir, evidenceRef), bytes);
-  return { ref: evidenceRef, hash: hashBytes(bytes), receipt };
+  const hash = hashBytes(bytes);
+  const claim = {
+    schema_version: 1,
+    kind: "checked-verification-artifact-execution-claim",
+    state: "completed",
+    nonce: receipt.claim_nonce,
+    run_id: receipt.run_id,
+    slice_id: receipt.slice_id,
+    attempt: receipt.attempt,
+    plan_ref: receipt.plan_ref,
+    plan_hash: receipt.plan_hash,
+    head_sha: receipt.head_sha,
+    verification_artifact_id: receipt.verification_artifact_id,
+    probe: receipt.probe,
+    receipt_ref: evidenceRef,
+    claimed_at: "2026-07-19T09:59:59.000Z",
+    completed_at: receipt.completed_at,
+    status: receipt.status,
+    receipt_hash: hash,
+  };
+  const claimRef = `${evidenceRef.slice(0, -5)}.claim.json`;
+  writeFileSync(join(runDir, claimRef), `${JSON.stringify(claim, null, 2)}\n`);
+  return { ref: evidenceRef, hash, receipt, claim_ref: claimRef, claim };
 }
 
 function emptyStream() {

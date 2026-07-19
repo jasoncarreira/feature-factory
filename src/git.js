@@ -83,6 +83,21 @@ export function createTwoRefsAtomicallyNoReplace(cwd, verify, first, second, opt
   return git(cwd, ["update-ref", "--no-deref", "--stdin"], { ...options, input });
 }
 
+export function updateTwoRefsAtomically(cwd, verify, first, second, options = {}) {
+  const required = normalizeRefOid(verify, "required verify ref");
+  const updates = [normalizeRefTransition(first, "first update ref"), normalizeRefTransition(second, "second update ref")];
+  if (new Set([required.ref, ...updates.map((update) => update.ref)]).size !== 3) throw new Error("atomic ref transaction requires three distinct direct refs");
+  const input = [
+    "start",
+    `verify ${required.ref} ${required.oid}`,
+    ...updates.map(({ ref, oid, oldOid }) => `update ${ref} ${oid} ${oldOid}`),
+    "prepare",
+    "commit",
+    "",
+  ].join("\n");
+  return git(cwd, ["update-ref", "--no-deref", "--stdin"], { ...options, input });
+}
+
 export function repoRoot(cwd = process.cwd(), options = {}) {
   const key = resolve(requireNonEmptyString(cwd, "cwd"));
   if (!options.noCache && repoRootCache.has(key)) return repoRootCache.get(key);
@@ -111,6 +126,13 @@ function normalizeRefOid(value, label) {
   }
   if (!/^[a-f0-9]{40}$/u.test(oid) || oid === ZERO_OID) throw new Error(`${label} oid must be a nonzero full lowercase object id`);
   return { ref, oid };
+}
+
+function normalizeRefTransition(value, label) {
+  const next = normalizeRefOid(value, label);
+  const oldOid = requireNonEmptyString(value.oldOid, `${label} oldOid`);
+  if (!/^[a-f0-9]{40}$/u.test(oldOid) || oldOid === ZERO_OID) throw new Error(`${label} oldOid must be a nonzero full lowercase object id`);
+  return { ...next, oldOid };
 }
 
 function clampPositiveInteger(value, fallback, maximum) {

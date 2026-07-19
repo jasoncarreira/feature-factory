@@ -1,6 +1,6 @@
 import { validateDeliveryEnvelope, validateInvariantFamilyLedger, validateReviewExtensionResult } from "./extensions.js";
 import { evaluateReviewLedger } from "./review-ledger.js";
-import { validateVerificationArtifactExecutionReceipt } from "../validate.js";
+import { validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../validate.js";
 import { parseVerificationCommand } from "./verification-command.js";
 
 export function evaluateInvariantFamilyReview({ plan, sliceId, review, observeEvidence } = {}) {
@@ -57,11 +57,13 @@ export function evaluateInvariantFamilyReview({ plan, sliceId, review, observeEv
 }
 
 function assertCheckedDispositionReceipt({ deliveryEnvelope, sliceId, review, disposition, observed }) {
+  let claim;
   let receipt;
   try {
+    claim = validateVerificationArtifactExecutionClaim(observed?.claim);
     receipt = validateVerificationArtifactExecutionReceipt(observed?.receipt);
   } catch (error) {
-    throw new Error(`invariant family ledger evidence '${disposition.evidence_ref}' must be a checked execution receipt: ${error.message}`);
+    throw new Error(`invariant family ledger evidence '${disposition.evidence_ref}' must have a completed checked execution claim and receipt: ${error.message}`);
   }
   const unit = deliveryEnvelope.delivery_units.find((candidate) => candidate.slice_id === sliceId);
   const artifact = unit?.verification_artifacts.find((candidate) => candidate.id === disposition.verification_artifact_id);
@@ -77,5 +79,12 @@ function assertCheckedDispositionReceipt({ deliveryEnvelope, sliceId, review, di
   }
   if (receipt.status !== disposition.result.outcome || JSON.stringify(receipt.result) !== JSON.stringify(disposition.result)) {
     throw new Error("invariant family ledger claimed result does not match the observed checked execution result");
+  }
+  if (claim.state !== "completed" || claim.status !== receipt.status || claim.receipt_hash !== observed.hash
+    || claim.nonce !== receipt.claim_nonce || claim.run_id !== receipt.run_id || claim.slice_id !== receipt.slice_id
+    || claim.attempt !== receipt.attempt || claim.plan_ref !== receipt.plan_ref || claim.plan_hash !== receipt.plan_hash
+    || claim.head_sha !== receipt.head_sha || claim.verification_artifact_id !== receipt.verification_artifact_id
+    || claim.receipt_ref !== disposition.evidence_ref || JSON.stringify(claim.probe) !== JSON.stringify(receipt.probe)) {
+    throw new Error("invariant family ledger checked execution claim is not the exact completed authority for the observed receipt");
   }
 }

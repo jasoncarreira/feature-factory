@@ -294,6 +294,7 @@ function normalizePrOperationPullRequest(value) {
   if (response.state === "open" && mergedAt !== null) throw new Error("GitHub PR operation state and merged_at are contradictory");
   const head = normalizePrOperationSide(response.head, "head");
   const base = normalizePrOperationSide(response.base, "base");
+  const mergeCommitSha = response.merge_commit_sha == null ? null : requireFullGitSha(response.merge_commit_sha, "GitHub PR operation merge_commit_sha");
   const tuple = pullRequestUrlTuple(url);
   if (tuple.number !== number || tuple.repository !== base.repository) throw new Error("GitHub PR operation URL tuple is contradictory");
   return Object.freeze({
@@ -305,6 +306,7 @@ function normalizePrOperationPullRequest(value) {
     body: response.body,
     state: response.state === "open" ? "open" : mergedAt === null ? "closed" : "merged",
     merged_at: mergedAt,
+    merge_commit_sha: mergeCommitSha,
     head_ref: head.ref,
     head_sha: head.sha,
     head_repository: head.repository,

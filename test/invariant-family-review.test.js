@@ -5,8 +5,8 @@ import { evaluateInvariantFamilyReview } from "../src/delivery-envelope/review-e
 
 const COMMIT = "b".repeat(40);
 const HASHES = Object.freeze({
-  "evidence/api-behavior.json": `sha256:${"a".repeat(64)}`,
-  "evidence/api-security.json": `sha256:${"c".repeat(64)}`,
+  "evidence/api.artifact-api-tests.attempt-1.json": `sha256:${"a".repeat(64)}`,
+  "evidence/api.artifact-api-security-tests.attempt-1.json": `sha256:${"c".repeat(64)}`,
 });
 
 describe("B4.4 invariant-family review authority", () => {
@@ -95,7 +95,7 @@ describe("B4.4 invariant-family review authority", () => {
     review.verdict = "REJECT";
     review.invariant_family_ledger.dispositions[1].result = {
       type: "verification-result",
-      outcome: "skipped",
+      outcome: "fail",
       summary: "Security probe could not complete",
     };
     review.invariant_family_ledger.dispositions[1].unresolved_findings = ["Security probe remains unresolved"];
@@ -147,7 +147,7 @@ describe("B4.4 invariant-family review authority", () => {
         review: stale,
         observeEvidence: (ref, disposition) => ({ ...currentEvidence(ref, disposition), hash: `sha256:${"f".repeat(64)}` }),
       }),
-      /evidence hash is stale for 'evidence\/api-behavior\.json'/u,
+      /evidence hash is stale for 'evidence\/api\.artifact-api-tests\.attempt-1\.json'/u,
     );
     assert.throws(
       () => evaluateInvariantFamilyReview({
@@ -156,7 +156,7 @@ describe("B4.4 invariant-family review authority", () => {
         review: sliceReview(),
         observeEvidence: (ref, disposition) => ({ ...currentEvidence(ref, disposition), ref: `evidence/not-${ref.slice("evidence/".length)}` }),
       }),
-      /evidence ref is not current for 'evidence\/api-behavior\.json'/u,
+      /evidence ref is not current for 'evidence\/api\.artifact-api-tests\.attempt-1\.json'/u,
     );
   });
 
@@ -203,11 +203,14 @@ describe("B4.4 invariant-family review authority", () => {
 
   it("rejects arbitrary, stale, cross-bound, wrong-command, and claimed-pass receipt evidence", () => {
     const cases = [
-      ["arbitrary bytes", (observed) => { delete observed.receipt; }, /must be a checked execution receipt/u],
+      ["arbitrary bytes", (observed) => { delete observed.receipt; }, /completed checked execution claim and receipt/u],
+      ["missing claim", (observed) => { delete observed.claim; }, /completed checked execution claim and receipt/u],
+      ["active claim", (observed) => { observed.claim.state = "active"; delete observed.claim.completed_at; delete observed.claim.status; delete observed.claim.receipt_hash; }, /exact completed authority/u],
+      ["wrong claim nonce", (observed) => { observed.claim.nonce = "123e4567-e89b-42d3-a456-426614174001"; }, /exact completed authority/u],
       ["wrong subject", (observed) => { observed.receipt.subject = observed.receipt.slice_id = "other"; }, /subject\/slice is stale/u],
       ["wrong attempt", (observed) => { observed.receipt.attempt = 2; }, /attempt is stale/u],
       ["wrong head", (observed) => { observed.receipt.head_sha = "d".repeat(40); }, /reviewed HEAD is stale/u],
-      ["wrong artifact", (observed) => { observed.receipt.verification_artifact_id = observed.receipt.probe.verification_artifact_id = "api-security-tests"; }, /artifact id is stale/u],
+      ["wrong artifact", (observed) => { observed.receipt.verification_artifact_id = observed.receipt.probe.verification_artifact_id = "api-security-tests"; }, /artifact id is stale|completed checked execution claim/u],
       ["wrong argv", (observed) => { observed.receipt.probe.args = ["--test", "test/other.test.js"]; }, /exact current verification artifact command/u],
       ["claimed pass", (observed) => {
         observed.receipt.status = "fail";
@@ -236,7 +239,18 @@ function currentEvidence(ref, disposition) {
   const artifact = deliveryPlan().delivery_envelope.delivery_units[0].verification_artifacts
     .find((candidate) => candidate.id === disposition.verification_artifact_id);
   const [program, ...args] = artifact.test_plan_entry.split(" ");
-  return { ref, hash: HASHES[ref], receipt: verificationReceipt({ disposition, artifact, program, args }) };
+  const receipt = verificationReceipt({ disposition, artifact, program, args });
+  return { ref, hash: HASHES[ref], receipt, claim: verificationClaim(ref, HASHES[ref], receipt) };
+}
+
+function verificationClaim(receiptRef, receiptHash, receipt) {
+  return {
+    schema_version: 1, kind: "checked-verification-artifact-execution-claim", state: "completed",
+    nonce: receipt.claim_nonce, run_id: receipt.run_id, slice_id: receipt.slice_id, attempt: receipt.attempt,
+    plan_ref: receipt.plan_ref, plan_hash: receipt.plan_hash, head_sha: receipt.head_sha,
+    verification_artifact_id: receipt.verification_artifact_id, probe: receipt.probe, receipt_ref: receiptRef,
+    claimed_at: "2026-07-16T11:59:59.000Z", completed_at: receipt.completed_at, status: receipt.status, receipt_hash: receiptHash,
+  };
 }
 
 function verificationReceipt({ disposition, artifact, program, args }) {
@@ -320,8 +334,8 @@ function sliceReview() {
       schema_version: 1,
       delivery_unit_id: "api-unit",
       dispositions: [
-        disposition("api-behavior", "api-tests", "evidence/api-behavior.json", "API behavior tests passed"),
-        disposition("api-security", "api-security-tests", "evidence/api-security.json", "API security tests passed"),
+        disposition("api-behavior", "api-tests", "evidence/api.artifact-api-tests.attempt-1.json", "API behavior tests passed"),
+        disposition("api-security", "api-security-tests", "evidence/api.artifact-api-security-tests.attempt-1.json", "API security tests passed"),
       ],
     },
   };

@@ -32,6 +32,11 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "plan-v2-integration-gate",
   "plan-delivery-envelope-v1",
   "checkpoint-routing-artifact-v1",
+  "checkpoint-child-binding-v1",
+  "checkpoint-reservation-reserved",
+  "checkpoint-reservation-launching",
+  "checkpoint-reservation-launched",
+  "checkpoint-reservation-unknown",
   "run-envelope-running",
   "run-envelope-terminal",
   "terminal-result-completed",
@@ -78,6 +83,13 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "slice-running",
   "slice-review",
   "review-invariant-family-ledger-v1",
+  "verification-artifact-claim-active",
+  "verification-artifact-claim-completed-pass",
+  "verification-artifact-claim-completed-fail",
+  "verification-artifact-claim-unknown-process",
+  "verification-artifact-claim-unknown-receipt",
+  "verification-artifact-execution-receipt-pass",
+  "verification-artifact-execution-receipt-fail",
   "slice-merged",
   "slice-blocked-ordinary",
   "slice-blocked",
@@ -229,9 +241,21 @@ const INVARIANT_RECEIPT = Object.freeze({
   commands: [{ index: 0, program: "node", args: ["--test", "test/backend.test.js"], outcome: "exited", status: "fail", exit_code: 1, signal: null, error_code: null, duration_ms: 1000, stdout: { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false }, stderr: { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false } }],
   result: { type: "verification-result", outcome: "fail", summary: "The observed probe failed" },
 });
+const VERIFICATION_ARTIFACT_RECEIPT_PASS = deepFreeze({ ...structuredClone(INVARIANT_RECEIPT), status: "pass", review_ready: true, commands: [{ ...structuredClone(INVARIANT_RECEIPT.commands[0]), status: "pass", exit_code: 0 }], result: { type: "verification-result", outcome: "pass", summary: "The observed probe passed" } });
+const VERIFICATION_ARTIFACT_CLAIM_BASE = Object.freeze({
+  schema_version: 1, kind: "checked-verification-artifact-execution-claim", state: "active",
+  nonce: INVARIANT_RECEIPT.claim_nonce, run_id: INVARIANT_RECEIPT.run_id, slice_id: INVARIANT_RECEIPT.slice_id,
+  attempt: INVARIANT_RECEIPT.attempt, plan_ref: INVARIANT_RECEIPT.plan_ref, plan_hash: INVARIANT_RECEIPT.plan_hash,
+  head_sha: INVARIANT_RECEIPT.head_sha, verification_artifact_id: INVARIANT_RECEIPT.verification_artifact_id,
+  probe: INVARIANT_RECEIPT.probe, receipt_ref: "evidence/backend.artifact-backend-tests.attempt-1.json", claimed_at: NOW,
+});
 const INVARIANT_LEDGER_EXTERNAL = Object.freeze({
   plan: DELIVERY_ENVELOPE_EXTERNAL.plan,
-  evidence: { ref: "evidence/backend-family.json", bytes: `${JSON.stringify(INVARIANT_RECEIPT)}\n` },
+  evidence: { ref: VERIFICATION_ARTIFACT_CLAIM_BASE.receipt_ref, bytes: `${JSON.stringify(INVARIANT_RECEIPT)}\n` },
+  claim: {
+    ref: `${VERIFICATION_ARTIFACT_CLAIM_BASE.receipt_ref.slice(0, -5)}.claim.json`,
+    bytes: `${JSON.stringify({ ...VERIFICATION_ARTIFACT_CLAIM_BASE, state: "completed", completed_at: INVARIANT_RECEIPT.completed_at, status: INVARIANT_RECEIPT.status, receipt_hash: hashBytes(`${JSON.stringify(INVARIANT_RECEIPT)}\n`) })}\n`,
+  },
 });
 const INVARIANT_FAMILY_LEDGER = Object.freeze({
   schema_version: 1,
@@ -246,6 +270,12 @@ const INVARIANT_FAMILY_LEDGER = Object.freeze({
     reviewed_commit: SHA_B,
     unresolved_findings: ["The family remains unresolved"],
   }],
+});
+const CHECKPOINT_CHILD_BINDING = deepFreeze({
+  schema_version: 1, kind: "delivery-checkpoint-child", parent_run_id: "catalog-parent", parent_run_ref: ".opencode/factory/catalog-parent/run.json",
+  parent_run_hash: HASH_A, manifest_ref: `artifacts/checkpoint-routing-${"b".repeat(64)}.json`, manifest_hash: HASH_B,
+  checkpoint_id: "checkpoint-001", checkpoint_ordinal: 1, child_run_id: "catalog-child", base_ref: "refs/heads/main", base_commit: SHA_A,
+  predecessor_checkpoint_id: null, predecessor_child_run_id: null, predecessor_merge_commit: null,
 });
 const CHECKPOINT_PLAN = Object.freeze({
   slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/backend-1.test.js", "node --test test/security-1.test.js", "node --test test/backend-2.test.js", "node --test test/security-2.test.js", "node --test test/backend-3.test.js", "node --test test/security-3.test.js"] }],
@@ -366,6 +396,11 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "plan-v2-integration-gate",
     "plan-delivery-envelope-v1",
     "checkpoint-routing-artifact-v1",
+    "checkpoint-child-binding-v1",
+    "checkpoint-reservation-reserved",
+    "checkpoint-reservation-launching",
+    "checkpoint-reservation-launched",
+    "checkpoint-reservation-unknown",
     "final-plan-descriptor",
   ],
   "run-envelope-terminal-result": [
@@ -410,6 +445,13 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "slice-running",
     "slice-review",
     "review-invariant-family-ledger-v1",
+    "verification-artifact-claim-active",
+    "verification-artifact-claim-completed-pass",
+    "verification-artifact-claim-completed-fail",
+    "verification-artifact-claim-unknown-process",
+    "verification-artifact-claim-unknown-receipt",
+    "verification-artifact-execution-receipt-pass",
+    "verification-artifact-execution-receipt-fail",
     "slice-merged",
     "slice-blocked-ordinary",
     "slice-blocked",
@@ -519,6 +561,11 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "plan-v2-integration-gate": "sktrhb",
   "plan-delivery-envelope-v1": "ktrhb",
   "checkpoint-routing-artifact-v1": "t",
+  "checkpoint-child-binding-v1": "tb",
+  "checkpoint-reservation-reserved": "b",
+  "checkpoint-reservation-launching": "b",
+  "checkpoint-reservation-launched": "b",
+  "checkpoint-reservation-unknown": "b",
   "final-plan-descriptor": "",
   "run-envelope-running": "khbd",
   "run-envelope-terminal": "krhbd",
@@ -555,6 +602,13 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "slice-running": "sktd",
   "slice-review": "skt",
   "review-invariant-family-ledger-v1": "kt",
+  "verification-artifact-claim-active": "b",
+  "verification-artifact-claim-completed-pass": "b",
+  "verification-artifact-claim-completed-fail": "b",
+  "verification-artifact-claim-unknown-process": "b",
+  "verification-artifact-claim-unknown-receipt": "b",
+  "verification-artifact-execution-receipt-pass": "b",
+  "verification-artifact-execution-receipt-fail": "b",
   "slice-merged": "sk",
   "slice-blocked-ordinary": "skt",
   "slice-blocked": "skt",
@@ -653,6 +707,11 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["plan-v2-integration-gate", "f901864d274e8cec07db9c3a5378ca67f7a5ba8e79382168e4949963b5ff51d9"],
   ["plan-delivery-envelope-v1", "ec33d7138f538b3b05f7da15d7011af571a5867113757f6a7fdd1eb6cccc9b33"],
   ["checkpoint-routing-artifact-v1", "d4af0b2d7d6c6395f793169af6b07eb417ff764a84d8af02f4d2c922c6d29aa5"],
+  ["checkpoint-child-binding-v1", "3eb58e355f053b42959aec3787ab636caf85483c6c6e372154c817abf91ef45f"],
+  ["checkpoint-reservation-reserved", "805aab0b811e3cc6adb6365e7f1c1f8ead10eae71a92b649d6e45052a0b608c7"],
+  ["checkpoint-reservation-launching", "a8308e45e943e73f29af488a74c602da9def040c540e7f2ebc93ba10f7a8843b"],
+  ["checkpoint-reservation-launched", "c9065a57fd94515700f58f66a9272e65fd2a41d77f0c8a091072d56162dadda1"],
+  ["checkpoint-reservation-unknown", "21e825dda1d5c966c50b1227d9ab41f3c0a238b19574c48f4ef75514b1e2cda5"],
   ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
@@ -688,7 +747,14 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["slice-pending", "8d4bbec759c17fb00ead204f403603e1185b430f21f0306f9bb240f7f79d4ec1"],
   ["slice-running", "af31fa943d166746d48207286fbc9dea216127b8120f77378949b166de73ea40"],
   ["slice-review", "cd4b857d8325ae2b3df6ca965b17efb3af46dec393f0de2fdf939c79c0e9a5a4"],
-  ["review-invariant-family-ledger-v1", "5e2258dbb6a6ee4385deb3e9894f6fd0c3e70d5d1644b612f2fe8e1088561e62"],
+  ["review-invariant-family-ledger-v1", "a12af40d7f3010b6650891769239049f3a1c7da1f4e066b1139c67feed4f22db"],
+  ["verification-artifact-claim-active", "90ef74da538c20ea12d27f7eca2d98462444bbbe44feb01eef03ce94f0cfd22a"],
+  ["verification-artifact-claim-completed-pass", "5d12d5fc7c6593f5c16270eaf1487d60c41b0240b1ce0f389bed7624d3f53b2d"],
+  ["verification-artifact-claim-completed-fail", "8090e2326d3f10fd37198e4c863884cd674c24a7a478ec1a3b4fa3eb9d3b3d87"],
+  ["verification-artifact-claim-unknown-process", "fe5e7d08ed5e5d00141cba63b5650dedaa8e3142a6a29eae4330e45c28515d81"],
+  ["verification-artifact-claim-unknown-receipt", "8923106490d25f0d3d4f4e461ba1ef370c8ac47d53844aabd5d50c9857e9c18b"],
+  ["verification-artifact-execution-receipt-pass", "501cbf3c84c9264108289c4f8222a5523179f725875531c028d9c19ecad896fe"],
+  ["verification-artifact-execution-receipt-fail", "11fee9930a501c2bddfe56a40eb539fe13559aaaad4e22712f8525a0cc043bcb"],
   ["slice-merged", "a0d8d809d6ef828beabe7a72cea680e665718ab60d6ba01ccd2aea21ab3e78f5"],
   ["slice-blocked-ordinary", "078fbc6eada3adc4a22f4a55b1667a003d84172ba772035c6746cb256dd9e0d5"],
   ["slice-blocked", "3ed8237beaad32f43ae5cad5a787fd5d148df9931a1baf42f95944516d2e7b00"],
@@ -789,6 +855,11 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["plan-v2-integration-gate", "135d4108dcdb1889bfff58b1da09163093be21b85c52d1a43f9a92c59fa17ec7"],
   ["plan-delivery-envelope-v1", "5b21d1bbbca72f06efdd0abbb80f11c793108767883405810d673d97fdfc3053"],
   ["checkpoint-routing-artifact-v1", "0ae8734ab0b4101cb43d7167b9c2aac993f151be11a736d8c7d983c323ed726d"],
+  ["checkpoint-child-binding-v1", "7a62f638ecff3d0e90ea483f247f87214af183f9e8f36009f19deefecf77ef3a"],
+  ["checkpoint-reservation-reserved", "9e605eb1376fed887d26859af664c277b2c7a17d9504bdb37538c70233fc6c0c"],
+  ["checkpoint-reservation-launching", "23cc7b407d7fed19aa884eebfd27b9eb5b6098d26cd2e812cb9c12226cd659e5"],
+  ["checkpoint-reservation-launched", "dba10e4b5135d4460041e36a2b447d4b6d0063714599f64b7b9573ace711f97f"],
+  ["checkpoint-reservation-unknown", "01074f21b5306df92431cfe472e92ed39262c0db0f9f12a50e2a2189ce76f3ce"],
   ["final-plan-descriptor", "b8ef8dbfe1f1e54cae98fb0960aa315fe4479e33533b63d0a9e0b88f0df959da"],
   ["run-envelope-running", "0dfdf9c52ba1ee909070da85617630bbb0cac990f109bdc3c7f25c4f686276dd"],
   ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
@@ -825,6 +896,13 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["slice-running", "beab1f224a3723cf005fb260d8d79a7f53b5083458b165cc5bcc98ffc40c5645"],
   ["slice-review", "f3032a106a15dda6324ea24d196196f8629cd57d1fc53a5e1e9f1f8c528d6b51"],
   ["review-invariant-family-ledger-v1", "c63d47a42fc7e6f72beb10013c9c9fbb6c3288c94961d93a2962838d11bffe7b"],
+  ["verification-artifact-claim-active", "b5fd7830a00455f012fd9952e7467f43fd7c08f6ed6fa1b4bc4cc6c6dddc8d73"],
+  ["verification-artifact-claim-completed-pass", "e293a8272cf22526036b7e175c127c034748b91596e62c30a288d8537d48be19"],
+  ["verification-artifact-claim-completed-fail", "d80b2f5da4585c351a0c18135c3e5d2f89ffa1873fe5793de15396ea89a4e19f"],
+  ["verification-artifact-claim-unknown-process", "7b36b5d5284d66151abd68e8b29f904ec21906928053ecd4cd53837fb27b266e"],
+  ["verification-artifact-claim-unknown-receipt", "d4dc5df0dd8af5699ea698cec80767f893c4da1ca2a7a28249e2133bb68bb6af"],
+  ["verification-artifact-execution-receipt-pass", "eb56cc7de822f9a1eb8dae7dc42f1e5aaa335250947fdbc8c9a0e6e53e2cf01a"],
+  ["verification-artifact-execution-receipt-fail", "66186bd360945295d591cc8f2bd012485062b297553b9f3d2244dcf15675be5c"],
   ["slice-merged", "a36bfb5c4e168c8015eae87263ca562eba651051261c41d03441a1b87bf23e3e"],
   ["slice-blocked-ordinary", "bc27e546fad0fae0b3d3408199d29e0d1e492fdcc074f42d6707cde54f3cd0c3"],
   ["slice-blocked", "c566d2365a70e36e1616952e990317196ab85647c672afb731af20e402d1ceba"],
@@ -929,6 +1007,11 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["plan-v2-integration-gate", "04a73897d61d2aa30a703989e59f809518642c2ca4b938dea7af0fd514102955"],
   ["plan-delivery-envelope-v1", "757895c9d66d0caac2026bb2f6c207b4bbd37d0b1a5f5f20c0fbb713878b1ec1"],
   ["checkpoint-routing-artifact-v1", "6ea0ebe8f6e2eddf8cf46ae34d36383440bc870f8d5319ee08f4fc7679b9e3a1"],
+  ["checkpoint-child-binding-v1", "c28b2a3ab160a2bc392f0253b00edd56343a469b3d18d9080b6779556dbca62d"],
+  ["checkpoint-reservation-reserved", "10fee7196cc80a06642a24b897f88b31771f06619a294fb585123e2c05018469"],
+  ["checkpoint-reservation-launching", "cf9506aaad7c5ed50a9cd163a4ac26799835e6e62eec6994054e283ca04196c4"],
+  ["checkpoint-reservation-launched", "476b530836dbe093ff1639a209e78e00b2859cdc0a9a663e2ee9da105c4608f0"],
+  ["checkpoint-reservation-unknown", "7c58411f1e3fb9c9b4d012ec48ecf7baf94599d19532b9c90b09d048692b218e"],
   ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
   ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
@@ -964,7 +1047,14 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["slice-pending", "0f66b96672a90c960a5cff760325c7e63a9a69dd95f19207406de97959afa113"],
   ["slice-running", "5c91f74e38cddbf6278e3ad48aa2e74392e3120b7680e747299cf315126ffc26"],
   ["slice-review", "c7128941b5660901d7c20c9f79a2f8676dc8bf22632fb32bf8e466b4215d5495"],
-  ["review-invariant-family-ledger-v1", "14dbc9a447354aff1688ced725fe5629d42d92211bf669c4c94a41945eeb73e4"],
+  ["review-invariant-family-ledger-v1", "a60883d9ddac368dec467214c17c39a2f855b60ca2d69838a5c8f09e58c99c8a"],
+  ["verification-artifact-claim-active", "e64df439ff98307ad58a5b12a2dbf8d485684aeb230c9a55d69f458160e22d7b"],
+  ["verification-artifact-claim-completed-pass", "8575174cfc4a4e8b84071db0136aa0dbf9be7f771fbc1911ef7cdd791eb335f5"],
+  ["verification-artifact-claim-completed-fail", "262a9490128e912c7f21d48e48a763506c8d0afb64c3bc2567ea9440206cd219"],
+  ["verification-artifact-claim-unknown-process", "782a52789696b477083026f812dd8309683a2d071f58af157cc8169882859ac6"],
+  ["verification-artifact-claim-unknown-receipt", "1d12d4c61007d202cf0a083b4cf006e97a04afd5a5eedf32bf965efeb3ead91b"],
+  ["verification-artifact-execution-receipt-pass", "c50cefb3c0c86b0ffa28a2ae05203d8662554b0480b22a83a23ec8131d3d0451"],
+  ["verification-artifact-execution-receipt-fail", "9bfcdaba7778238809bcd51fa148b7360516cd3730606cc4f3eeebd993a8d852"],
   ["slice-merged", "bd160bb8e7d790ece4a840382ab5de8457b84962097642fdb9ff9b073d82d1b5"],
   ["slice-blocked-ordinary", "4d26b4b40fbd88131264c5dcf4186f8cc75aab6ef3344948ee5c97b681119756"],
   ["slice-blocked", "a43f8ee90d231336f11e9b72353c662d64dbd5ea2cba5bd9af828980f50628bc"],
@@ -1248,6 +1338,11 @@ const RECORDS = [
       cross(["checkpoints", 1], "prerequisite_checkpoint_id", "checkpoint-999"),
     ],
   }),
+  checkpointChildBindingEntry(),
+  checkpointReservationEntry("checkpoint-reservation-reserved", "reserved"),
+  checkpointReservationEntry("checkpoint-reservation-launching", "launching"),
+  checkpointReservationEntry("checkpoint-reservation-launched", "launched"),
+  checkpointReservationEntry("checkpoint-reservation-unknown", "unknown"),
   recordEntry({
     authorityClassId: "plan-slices-graph", id: "final-plan-descriptor", record: "final.plan.json descriptor", variant: "required descriptor",
     writer: "work-decomposer final plan write followed by reviewed planning acceptance",
@@ -1337,6 +1432,13 @@ const RECORDS = [
       cross(["dispositions", 0, "invariant_family_id"], "other-family"),
     ],
   }),
+  verificationArtifactClaimEntry("verification-artifact-claim-active", "active"),
+  verificationArtifactClaimEntry("verification-artifact-claim-completed-pass", "completed-pass"),
+  verificationArtifactClaimEntry("verification-artifact-claim-completed-fail", "completed-fail"),
+  verificationArtifactClaimEntry("verification-artifact-claim-unknown-process", "unknown-process"),
+  verificationArtifactClaimEntry("verification-artifact-claim-unknown-receipt", "unknown-receipt"),
+  verificationArtifactReceiptEntry("verification-artifact-execution-receipt-pass", "pass"),
+  verificationArtifactReceiptEntry("verification-artifact-execution-receipt-fail", "fail"),
   sliceEntry("slice-merged", "merged"),
   sliceEntry("slice-blocked-ordinary", "blocked-ordinary"),
   sliceEntry("slice-blocked", "blocked"),
@@ -1821,6 +1923,67 @@ function testExecutionReceipt(variant) {
     claim_nonce: TEST_EXECUTION_NONCE, plan_ref: "plan/slices.json", plan_hash: hashBytes(PLAN_V2_EXTERNAL.plan.bytes), head_sha: SHA_B,
     started_at: NOW, completed_at: NOW, duration_ms: 1, status: passing ? "pass" : "fail", review_ready: passing, commands: [result],
   };
+}
+
+function checkpointChildBindingEntry() {
+  const source = structuredClone(CHECKPOINT_CHILD_BINDING);
+  return recordEntry({
+    authorityClassId: "plan-slices-graph", id: "checkpoint-child-binding-v1", record: "run.json.checkpoint", variant: "reviewed checkpoint child binding",
+    writer: "factory checkpoint-start exact reviewed binding publication",
+    readers: ["validateCheckpointChildBinding", "factory checkpoint predecessor authority", "feature command payload checkpoint admission", "checkpoint child resume authority"],
+    canonicalPath: ["checkpoint"], source, facts: exactFacts(source), requiredPath: ["kind"], typePath: ["checkpoint_ordinal"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-checkpoint"), ref(["parent_run_ref"]), hash(["parent_run_hash"]), drift([], "checkpoint_id", "route_id"), stale(["checkpoint_ordinal"], 0), cross(["child_run_id"], "other-child")],
+  });
+}
+
+function checkpointReservationEntry(id, state) {
+  const source = {
+    schema_version: 1, kind: "delivery-checkpoint-child-reservation", state,
+    nonce: "123e4567-e89b-42d3-a456-426614174000", binding: structuredClone(CHECKPOINT_CHILD_BINDING), reserved_at: NOW,
+  };
+  if (state === "launching") source.launching_at = NOW;
+  if (state === "launched") source.launched_at = NOW;
+  if (state === "unknown") { source.failed_at = NOW; source.reason = "launch-outcome-indeterminate"; }
+  return recordEntry({
+    authorityClassId: "plan-slices-graph", id, record: "refs/opencode/checkpoint-targets|checkpoint-routes/<sha256>", variant: state,
+    writer: state === "reserved" ? "reserveCheckpointChild atomic no-replace two-ref transaction" : "transitionCheckpointReservation atomic two-ref compare-and-swap",
+    readers: ["validateCheckpointReservationClaim", "factory checkpoint-start retry/adoption/reconciliation", "feature command payload checkpoint authority", "checkpoint child resume authority"],
+    canonicalPath: ["checkpoint_reservation", state], source, facts: exactFacts(source), requiredPath: ["state"], typePath: ["binding", "checkpoint_ordinal"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-reservation"), time([state === "reserved" ? "reserved_at" : state === "unknown" ? "failed_at" : `${state}_at`]), ref(["binding", "parent_run_ref"]), hash(["binding", "parent_run_hash"]), drift([], "state", "reservation_state"), stale(["binding", "checkpoint_ordinal"], 0), cross(["binding", "child_run_id"], "other-child")],
+  });
+}
+
+function verificationArtifactClaimEntry(id, variant) {
+  const source = structuredClone(VERIFICATION_ARTIFACT_CLAIM_BASE);
+  const completed = variant.startsWith("completed-");
+  const unknown = variant.startsWith("unknown-");
+  source.state = completed ? "completed" : unknown ? "unknown" : "active";
+  if (completed) {
+    const receipt = variant.endsWith("pass") ? VERIFICATION_ARTIFACT_RECEIPT_PASS : INVARIANT_RECEIPT;
+    Object.assign(source, { completed_at: NOW, status: receipt.status, receipt_hash: hashBytes(`${JSON.stringify(receipt)}\n`) });
+  }
+  if (unknown) {
+    Object.assign(source, { failed_at: NOW, reason: variant === "unknown-process" ? "process-outcome-indeterminate" : "receipt-publication-indeterminate" });
+    if (variant === "unknown-receipt") Object.assign(source, { status: INVARIANT_RECEIPT.status, receipt_hash: hashBytes(`${JSON.stringify(INVARIANT_RECEIPT)}\n`) });
+  }
+  return recordEntry({
+    authorityClassId: "slices-review-evidence-bindings", id, record: "evidence/<slice>.artifact-<id>.attempt-N.claim.json", variant,
+    writer: completed ? "completeCheckedVerificationArtifactExecution protected claim closure" : unknown ? "markCheckedVerificationArtifactExecutionUnknown protected fail-closed transition" : "claimCheckedVerificationArtifactExecution create-only pre-spawn publication",
+    readers: ["validateVerificationArtifactExecutionClaim", "executeCheckedVerificationArtifact replay/retry refusal", "observeReviewExtensionEvidence", "evaluateInvariantFamilyReview completed claim authority"],
+    canonicalPath: ["evidence", id], source, facts: exactFacts(source), requiredPath: ["state"], typePath: ["attempt"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-claim"), time([completed ? "completed_at" : unknown ? "failed_at" : "claimed_at"]), ref(["receipt_ref"]), target("wrong-hash", ["plan_hash"], "plan hash", { value: "sha256:invalid" }), drift([], "state", "claim_state"), stale(["attempt"], 0), cross(["verification_artifact_id"], "other-artifact")],
+  });
+}
+
+function verificationArtifactReceiptEntry(id, variant) {
+  const source = structuredClone(variant === "pass" ? VERIFICATION_ARTIFACT_RECEIPT_PASS : INVARIANT_RECEIPT);
+  return recordEntry({
+    authorityClassId: "slices-review-evidence-bindings", id, record: "evidence/<slice>.artifact-<id>.attempt-N.json", variant,
+    writer: "completeCheckedVerificationArtifactExecution create-only receipt publication",
+    readers: ["validateVerificationArtifactExecutionReceipt", "executeCheckedVerificationArtifact replay", "observeReviewExtensionEvidence", "evaluateInvariantFamilyReview exact claim/receipt authority"],
+    canonicalPath: ["evidence", id], source, facts: exactFacts(source), requiredPath: ["kind"], typePath: ["attempt"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-receipt"), time(["completed_at"]), ref(["plan_ref"]), target("wrong-hash", ["plan_hash"], "plan hash", { value: "sha256:invalid" }), drift([], "kind", "record_kind"), stale(["attempt"], 0), cross(["verification_artifact_id"], "other-artifact")],
+  });
 }
 
 function workDecomposerAcceptedEntry() {
@@ -2474,8 +2637,20 @@ export function createDurableCatalogBaseline(record) {
       externalSources: record.externalSources,
     });
   }
+  if (record.id === "checkpoint-child-binding-v1") {
+    return structuredClone({ consumer: "validateCheckpointChildBinding", binding: record.source, expectedRunId: record.source.child_run_id, externalSources: {} });
+  }
+  if (record.id.startsWith("checkpoint-reservation-")) {
+    return structuredClone({ consumer: "validateCheckpointReservationClaim", reservation: record.source, expectedBinding: record.source.binding, externalSources: {} });
+  }
   if (record.id === "review-invariant-family-ledger-v1") {
     return structuredClone({ consumer: "evaluateInvariantFamilyReview", ledger: record.source, plan: JSON.parse(record.externalSources.plan.bytes), externalSources: record.externalSources });
+  }
+  if (record.id.startsWith("verification-artifact-claim-")) {
+    return structuredClone({ consumer: "validateVerificationArtifactExecutionClaim", claim: record.source, externalSources: {} });
+  }
+  if (record.id.startsWith("verification-artifact-execution-receipt-")) {
+    return structuredClone({ consumer: "validateVerificationArtifactExecutionReceipt", receipt: record.source, externalSources: {} });
   }
   if (record.id === "final-plan-descriptor") {
     return structuredClone({ consumer: "final-plan-descriptor-contract", descriptor: record.source, externalSources: record.externalSources ?? {} });

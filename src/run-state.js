@@ -11,7 +11,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
@@ -1412,23 +1412,61 @@ export async function claimCheckedVerificationArtifactExecution(runDir, sliceId,
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
     const authority = observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options);
-    const resolved = resolveEvidenceRef(runDir, authority.receipt_ref, { mustExist: false });
-    if (existsSync(resolved.path)) {
-      const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectFile(resolved.path, "checked verification artifact receipt"));
-      assertVerificationArtifactReceiptMatches(receipt, authority);
-      return { replayed: true, authority, receipt, receipt_hash: hashFile(resolved.path, { mode: "raw" }) };
+    const claimRef = verificationArtifactClaimRef(authority.receipt_ref);
+    const claimResolved = resolveEvidenceRef(runDir, claimRef, { mustExist: false });
+    const receiptResolved = resolveEvidenceRef(runDir, authority.receipt_ref, { mustExist: false });
+    if (existsSync(claimResolved.path)) {
+      const claim = validateVerificationArtifactExecutionClaim(parseJsonObjectFile(claimResolved.path, "checked verification artifact claim"));
+      assertVerificationArtifactClaimMatches(claim, authority);
+      if (claim.state === "active") throw operatorReconciliationRequired("checked verification artifact execution claim is active");
+      if (claim.state === "unknown") throw operatorReconciliationRequired("checked verification artifact execution outcome is unknown");
+      const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectFile(receiptResolved.path, "checked verification artifact receipt"));
+      assertVerificationArtifactReceiptMatches(receipt, authority, claim);
+      const receiptHash = hashFile(receiptResolved.path, { mode: "raw" });
+      if (claim.receipt_hash !== receiptHash || claim.status !== receipt.status) throw new Error("completed checked verification artifact claim is stale");
+      return { replayed: true, authority, claim, claim_ref: claimRef, receipt, receipt_hash: receiptHash };
     }
-    return { replayed: false, authority };
+    if (existsSync(receiptResolved.path)) throw new Error("checked verification artifact unclaimed receipt already exists without a claim");
+    const claim = validateVerificationArtifactExecutionClaim({
+      schema_version: 1,
+      kind: "checked-verification-artifact-execution-claim",
+      state: "active",
+      nonce: options.nonce || randomUUID(),
+      run_id: authority.run_id,
+      slice_id: authority.slice_id,
+      attempt: authority.attempt,
+      plan_ref: authority.plan_ref,
+      plan_hash: authority.plan_hash,
+      head_sha: authority.head_sha,
+      verification_artifact_id: authority.verification_artifact_id,
+      probe: authority.probe,
+      receipt_ref: authority.receipt_ref,
+      claimed_at: timestamp(options.now),
+    });
+    await writeProtectedJsonAtomic(runDir, claimRef, claim, {
+      commit: "create-only",
+      hooks: {
+        beforeCommit: () => {
+          if (existsSync(receiptResolved.path)) throw new Error("checked verification artifact receipt appeared before claim publication");
+          const observedRun = validateRun(parseJsonObjectFile(join(runDir, RUN_FILE), "verification artifact claim run.json"));
+          const observed = observeVerificationArtifactExecutionAuthority(runDir, observedRun, sliceId, artifactId, options);
+          if (!sameJson(observed, authority)) throw new Error("checked verification artifact authority changed before claim publication");
+        },
+      },
+    });
+    return { replayed: false, authority, claim, claim_ref: claimRef };
   }, options);
 }
 
-export async function completeCheckedVerificationArtifactExecution(runDir, expectedAuthority, receiptInput, options = {}) {
+export async function completeCheckedVerificationArtifactExecution(runDir, expectedClaim, expectedAuthority, receiptInput, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
     const current = observeVerificationArtifactExecutionAuthority(runDir, run, expectedAuthority.slice_id, expectedAuthority.verification_artifact_id, options);
     if (!sameJson(current, expectedAuthority)) throw new Error("checked verification artifact authority changed before receipt publication");
+    const claimRef = verificationArtifactClaimRef(current.receipt_ref);
+    assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, current);
     const receipt = validateVerificationArtifactExecutionReceipt(cloneJson(receiptInput));
-    assertVerificationArtifactReceiptMatches(receipt, current);
+    assertVerificationArtifactReceiptMatches(receipt, current, expectedClaim);
     const resolved = resolveEvidenceRef(runDir, current.receipt_ref, { mustExist: false });
     await writeProtectedJsonAtomic(runDir, current.receipt_ref, receipt, {
       commit: "create-only",
@@ -1437,10 +1475,43 @@ export async function completeCheckedVerificationArtifactExecution(runDir, expec
           const observedRun = validateRun(parseJsonObjectFile(join(runDir, RUN_FILE), "verification artifact run.json"));
           const observed = observeVerificationArtifactExecutionAuthority(runDir, observedRun, current.slice_id, current.verification_artifact_id, options);
           if (!sameJson(observed, current)) throw new Error("checked verification artifact authority changed before receipt commit");
+          assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, current);
         },
       },
     });
-    return { replayed: false, authority: current, receipt, receipt_hash: hashFile(resolved.path, { mode: "raw" }) };
+    const receiptHash = hashFile(resolved.path, { mode: "raw" });
+    if (typeof options.afterArtifactReceiptPublication === "function") await options.afterArtifactReceiptPublication({ claim: cloneJson(expectedClaim), authority: current, receipt, receipt_hash: receiptHash });
+    const completed = validateVerificationArtifactExecutionClaim({
+      ...cloneJson(expectedClaim), state: "completed", completed_at: receipt.completed_at, status: receipt.status, receipt_hash: receiptHash,
+    });
+    await writeProtectedJsonAtomic(runDir, claimRef, completed, { hooks: { beforeCommit: () => {
+      assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, current);
+      const exactReceipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectFile(resolved.path, "checked verification artifact receipt"));
+      if (!sameJson(exactReceipt, receipt) || hashFile(resolved.path, { mode: "raw" }) !== receiptHash) throw new Error("checked verification artifact receipt changed before claim completion");
+    } } });
+    return { replayed: false, authority: current, claim: completed, claim_ref: claimRef, receipt, receipt_hash: receiptHash };
+  }, options);
+}
+
+export async function markCheckedVerificationArtifactExecutionUnknown(runDir, expectedClaim, expectedAuthority, reason, options = {}) {
+  if (!["process-outcome-indeterminate", "receipt-publication-indeterminate"].includes(reason)) throw new Error("checked verification artifact unknown reason is invalid");
+  return withRunJsonLock(runDir, async () => {
+    const claimRef = verificationArtifactClaimRef(expectedAuthority.receipt_ref);
+    assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, expectedAuthority);
+    const receiptResolved = resolveEvidenceRef(runDir, expectedAuthority.receipt_ref, { mustExist: false });
+    let receiptBinding = {};
+    if (existsSync(receiptResolved.path)) {
+      const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectFile(receiptResolved.path, "checked verification artifact receipt"));
+      assertVerificationArtifactReceiptMatches(receipt, expectedAuthority, expectedClaim);
+      receiptBinding = { status: receipt.status, receipt_hash: hashFile(receiptResolved.path, { mode: "raw" }) };
+    }
+    const unknown = validateVerificationArtifactExecutionClaim({
+      ...cloneJson(expectedClaim), state: "unknown", failed_at: timestamp(options.now), reason, ...receiptBinding,
+    });
+    await writeProtectedJsonAtomic(runDir, claimRef, unknown, { hooks: { beforeCommit: () => {
+      assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, expectedAuthority);
+    } } });
+    return { claim: unknown, claim_ref: claimRef };
   }, options);
 }
 
@@ -1477,14 +1548,35 @@ function observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, art
   };
 }
 
-function assertVerificationArtifactReceiptMatches(receipt, authority) {
+function assertVerificationArtifactReceiptMatches(receipt, authority, claim) {
   for (const key of ["run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id"]) {
     if (receipt[key] !== authority[key]) throw new Error(`checked verification artifact receipt ${key} is stale`);
   }
   if (receipt.subject !== authority.slice_id || !sameJson(receipt.probe, authority.probe)) {
     throw new Error("checked verification artifact receipt probe is stale");
   }
+  if (!isRecord(claim) || receipt.claim_nonce !== claim.nonce) throw new Error("checked verification artifact receipt nonce does not match the exact active claim");
   if (receipt.status !== receipt.result.outcome) throw new Error("checked verification artifact receipt result is stale");
+}
+
+function verificationArtifactClaimRef(receiptRef) {
+  if (typeof receiptRef !== "string" || !receiptRef.endsWith(".json")) throw new Error("checked verification artifact receipt ref is invalid");
+  return `${receiptRef.slice(0, -5)}.claim.json`;
+}
+
+function assertVerificationArtifactClaimMatches(claim, authority) {
+  for (const key of ["run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "receipt_ref"]) {
+    if (claim[key] !== authority[key]) throw new Error(`checked verification artifact claim ${key} is stale`);
+  }
+  if (!sameJson(claim.probe, authority.probe)) throw new Error("checked verification artifact claim probe is stale");
+}
+
+function assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, authority) {
+  const resolved = resolveEvidenceRef(runDir, claimRef);
+  const observed = validateVerificationArtifactExecutionClaim(parseJsonObjectFile(resolved.path, "checked verification artifact claim"));
+  assertVerificationArtifactClaimMatches(observed, authority);
+  if (observed.state !== "active" || !sameJson(observed, expectedClaim)) throw operatorReconciliationRequired("active checked verification artifact execution claim changed or is missing");
+  return observed;
 }
 
 export async function markCheckedTestExecutionUnknown(runDir, expectedClaim, reason, options = {}) {
@@ -2139,7 +2231,7 @@ function assertContinuationContext(parentFile, parentRun, continuation) {
   for (const reviewRef of new Set(sliceReviewRefs.filter(stringValue))) {
     const review = parseJsonObjectFile(resolveReviewRef(parentDir, reviewRef).path, "continuation slice review");
     for (const disposition of review.invariant_family_ledger?.dispositions || []) {
-      if (stringValue(disposition?.evidence_ref)) evidenceRefs.push(disposition.evidence_ref);
+      if (stringValue(disposition?.evidence_ref)) evidenceRefs.push(disposition.evidence_ref, verificationArtifactClaimRef(disposition.evidence_ref));
     }
   }
   if (stringValue(parentRun.post_pr?.remediation?.failure_evidence_ref)) evidenceRefs.push(parentRun.post_pr.remediation.failure_evidence_ref);
@@ -4218,16 +4310,17 @@ function assertPrCreatedSliceState(runDir, run) {
 
 export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, policy = {}) {
   const continuationEligible = run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation";
+  const checkpointEligible = run?.checkpoint?.schema_version === 1 && run.checkpoint.kind === "delivery-checkpoint-child";
   const conflicts = integrationConflictSlices(run);
   const conflictEligible = conflicts.length > 0;
-  if (!continuationEligible && !conflictEligible) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2 child or delegated integration conflict");
+  if (!continuationEligible && !checkpointEligible && !conflictEligible) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2/checkpoint child or delegated integration conflict");
   const repository = resolve(runDir, "../../..");
   const target = run.continuation?.target;
   if (resolve(runDir) !== resolve(directFactoryRoot(repository), run.run_id)
     || (continuationEligible && (target?.run_id !== run.run_id || target?.branch !== run.branch || resolve(target?.worktree || "") !== resolve(run.worktree || "")))) {
     throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution run identity does not match the published schema-v2 target");
   }
-  if (run.status !== "running") throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
+  if (run.status !== "running" && !(policy.allowTerminalCompleted === true && run.status === "completed")) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
   if (policy.skipLocalAuthority !== true) {
     if (continuationEligible) assertV2LocalPublishedAuthority(runDir, run, options);
     if (conflictEligible) assertSliceIntegrationConflictsCurrent(runDir, run, options);
@@ -4268,11 +4361,11 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
   };
 }
 
-export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step = uniqueTestVerifierStep(run), authority = null) {
+export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step = uniqueTestVerifierStep(run), authority = null, options = {}) {
   const claim = step?.execution_claim;
   if (!isRecord(claim) || claim.state !== "completed") throw new Error("schema-v2 test authority requires a completed checked execution claim");
   if (step.execution_claim_hash !== hashValue(claim)) throw new Error("completed checked execution claim hash is stale");
-  const currentAuthority = authority || observeCheckedTestExecutionAuthority(runDir, run, { runDir }, { allowCompleted: true, skipLocalAuthority: true });
+  const currentAuthority = authority || observeCheckedTestExecutionAuthority(runDir, run, { ...options, runDir }, { allowCompleted: true, skipLocalAuthority: true, allowTerminalCompleted: options.allowTerminalCompleted === true });
   if (claim.run_id !== run.run_id || claim.attempt !== step.attempts || claim.plan_ref !== currentAuthority.plan_ref
     || claim.plan_hash !== currentAuthority.plan_hash || claim.head_sha !== currentAuthority.head_sha) throw new Error("completed checked execution claim no longer matches current authority");
   const receipt = resolveEvidenceRef(runDir, claim.receipt_ref);
@@ -4370,7 +4463,7 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
   const artifact = resolveArtifactRef(runDir, step.artifact_ref);
   const evidence = resolveEvidenceRef(runDir, step.evidence_ref);
   const review = resolveReviewRef(runDir, step.review_ref);
-  const checked = observeCompletedCheckedTestExecutionAuthority(runDir, run, step);
+  const checked = observeCompletedCheckedTestExecutionAuthority(runDir, run, step, null, options);
   const evidenceValue = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, "schema-v2 test-verifier receipt"));
   const reviewValue = parseJsonObjectFile(review.path, "schema-v2 test-verifier review");
   const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "schema-v2 test-verifier acceptance");
@@ -4395,6 +4488,28 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
     review: reviewValue,
     integration: { branch: integration.branch, worktree: integration.worktree, head: integration.head, clean: true },
   };
+}
+
+export function assertCompletedCheckpointChildAuthority(runDir, run, options = {}) {
+  if (run?.status !== "completed" || run.terminal_result?.status !== "completed" || run.checkpoint?.kind !== "delivery-checkpoint-child") {
+    throw new Error("checkpoint predecessor requires a completed checkpoint child terminal result");
+  }
+  const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
+  if ((run.slices || []).length === 0 || incomplete.length > 0) throw new Error(`checkpoint predecessor requires all slices merged through the full normal pipeline${incomplete.length ? `: ${incomplete.join(", ")}` : ""}`);
+  const step = uniqueTestVerifierStep(run);
+  if (!step || step.status !== "accepted" || !Number.isInteger(step.attempts) || step.attempts < 1 || !isRecord(step.acceptance)) {
+    throw new Error("checkpoint predecessor requires fresh accepted test-verifier authority");
+  }
+  const testAuthority = observeV2TestVerifierAuthority(runDir, run, step, { ...options, allowTerminalCompleted: true });
+  if (!sameJson(step.acceptance, testAuthority.acceptance)) throw new Error("checkpoint predecessor test-verifier acceptance bytes or head are stale");
+  if (run.gates?.pre_pr?.status !== "approved") throw new Error("checkpoint predecessor requires Gate 3 pre_pr approval");
+  if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
+    throw new Error("checkpoint predecessor requires exact-head validator and security approval");
+  }
+  const panels = assertPanelReviewBindingsCurrent(runDir, run);
+  const slices = assertPrCreatedSliceState(runDir, run);
+  if (run.terminal_result.head_sha !== testAuthority.integration.head) throw new Error("checkpoint predecessor terminal PR head is stale");
+  return { test: testAuthority, panels, slices, head_sha: testAuthority.integration.head };
 }
 
 function assertV2PrePrGateAuthority(runDir, run, sink, expected = null) {
@@ -4667,7 +4782,10 @@ function observeReviewExtensionEvidence(runDir, ref, expectedHash) {
   const hash = sha256Bytes(bytes);
   if (expectedHash !== undefined && hash !== expectedHash) throw new Error(`invariant family ledger evidence hash is stale for '${ref}'`);
   const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectBytes(bytes, `invariant family ledger evidence '${ref}'`));
-  return { ref, hash, receipt };
+  const claimRef = verificationArtifactClaimRef(ref);
+  const claimResolved = resolveEvidenceRef(runDir, claimRef);
+  const claim = validateVerificationArtifactExecutionClaim(parseJsonObjectFile(claimResolved.path, `invariant family ledger claim '${claimRef}'`));
+  return { ref, hash, receipt, claim_ref: claimRef, claim };
 }
 
 function observeInvariantFamilyLedgerEvidence(runDir, sliceId, review) {

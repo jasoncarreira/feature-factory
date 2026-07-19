@@ -74,7 +74,8 @@ describe("B4 delivery-contract extension seams", () => {
       review,
       observeEvidence(ref) {
         observedRef = ref;
-        return { ref, hash: HASH, receipt: failedVerificationReceipt() };
+        const receipt = failedVerificationReceipt();
+        return { ref, hash: HASH, receipt, claim: completedVerificationClaim(ref, receipt) };
       },
     });
 
@@ -216,5 +217,15 @@ function failedVerificationReceipt() {
       exit_code: 1, signal: null, error_code: null, duration_ms: 1000, stdout: stream, stderr: stream,
     }],
     result: { type: "verification-result", outcome: "fail", summary: "The probe exposed a known failure" },
+  };
+}
+
+function completedVerificationClaim(receiptRef, receipt) {
+  return {
+    schema_version: 1, kind: "checked-verification-artifact-execution-claim", state: "completed",
+    nonce: receipt.claim_nonce, run_id: receipt.run_id, slice_id: receipt.slice_id, attempt: receipt.attempt,
+    plan_ref: receipt.plan_ref, plan_hash: receipt.plan_hash, head_sha: receipt.head_sha,
+    verification_artifact_id: receipt.verification_artifact_id, probe: receipt.probe, receipt_ref: receiptRef,
+    claimed_at: "2026-07-19T09:59:59.000Z", completed_at: receipt.completed_at, status: receipt.status, receipt_hash: HASH,
   };
 }

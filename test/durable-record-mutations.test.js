@@ -25,7 +25,7 @@ import {
   emitDurableRecordMutations,
   renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
-import { checkRunConsistency, validateRun, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
+import { checkRunConsistency, validateCheckpointChildBinding, validateCheckpointReservationClaim, validateRun, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
 import { cleanupRun, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
@@ -933,8 +933,14 @@ describe("finite durable-authority catalog", () => {
     duplicateDisposition.push(B0M4_EXACT_CASES[0]);
     assert.throws(() => exactB0m4DispositionMap(duplicateDisposition), /duplicate exact B0M\.4 case/u);
     assert.throws(() => exactB0m4DispositionMap([{ ...B0M4_EXACT_CASES[0], consumer: "" }]), /literal consumer|concrete consumer and rejector/u);
-    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 128);
-    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 129);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 140);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 141);
+    for (const id of [
+      "verification-artifact-claim-active", "verification-artifact-claim-completed-pass", "verification-artifact-claim-completed-fail",
+      "verification-artifact-claim-unknown-process", "verification-artifact-claim-unknown-receipt", "verification-artifact-execution-receipt-pass",
+      "verification-artifact-execution-receipt-fail", "checkpoint-child-binding-v1", "checkpoint-reservation-reserved",
+      "checkpoint-reservation-launching", "checkpoint-reservation-launched", "checkpoint-reservation-unknown",
+    ]) assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes(id), true, `${id} must be production-covered`);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("plan-v2-integration-gate"), true);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("plan-delivery-envelope-v1"), true);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("review-invariant-family-ledger-v1"), true);
@@ -1040,7 +1046,7 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 129);
+    assert.equal(recordCount, 141);
   });
 
   it("registers all B1R claim and receipt variants separately", () => {
@@ -1456,10 +1462,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 129 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 141 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 129);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 141);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -1777,7 +1783,7 @@ describe("finite durable-authority catalog", () => {
   it("binds every catalog row's source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
-    assert.equal(canonicalIds.length, 129);
+    assert.equal(canonicalIds.length, 141);
     assert.deepEqual(canonicalIds, requiredIds);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
@@ -1889,7 +1895,7 @@ describe("finite durable-authority catalog", () => {
           plan: baseline.plan,
           sliceId: "backend",
           review: { subject: "backend", attempt: 1, reviewed_commit: "b".repeat(40), verdict: "REJECT", invariant_family_ledger: baseline.ledger },
-          observeEvidence: (ref) => ({ ref, hash: baseline.ledger.dispositions[0].evidence_hash, receipt: JSON.parse(baseline.externalSources.evidence.bytes) }),
+          observeEvidence: (ref) => ({ ref, hash: baseline.ledger.dispositions[0].evidence_hash, receipt: JSON.parse(baseline.externalSources.evidence.bytes), claim: JSON.parse(baseline.externalSources.claim.bytes) }),
         }), {
           schema_version: 1,
           extension: "invariant-family-review",
@@ -1908,14 +1914,45 @@ describe("finite durable-authority catalog", () => {
         assert.equal(validateTestExecutionReceipt(baseline.receipt), baseline.receipt, `${id} must use the exported closed receipt validator`);
       } else if (baseline.consumer === "validateCheckpointRoutingManifest") {
         assert.equal(validateCheckpointRoutingManifest(baseline.manifest, baseline), baseline.manifest, `${id} must use the production checkpoint manifest validator`);
+      } else if (baseline.consumer === "validateCheckpointChildBinding") {
+        assert.equal(validateCheckpointChildBinding(baseline.binding, { runId: baseline.expectedRunId }), baseline.binding);
+      } else if (baseline.consumer === "validateCheckpointReservationClaim") {
+        assert.equal(validateCheckpointReservationClaim(baseline.reservation, { expectedBinding: baseline.expectedBinding }), baseline.reservation);
+      } else if (baseline.consumer === "validateVerificationArtifactExecutionClaim") {
+        assert.equal(validateVerificationArtifactExecutionClaim(baseline.claim), baseline.claim);
+      } else if (baseline.consumer === "validateVerificationArtifactExecutionReceipt") {
+        assert.equal(validateVerificationArtifactExecutionReceipt(baseline.receipt), baseline.receipt);
       } else {
         assert.match(baseline.consumer, /^validateRun(?:\/checkRunConsistency)?$/u);
         assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
       }
     }
-    assert.equal(observedConsumers.size, 129);
-    assert.deepEqual([...observedConsumers.keys()].slice(0, 128), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
+    assert.equal(observedConsumers.size, 141);
+    assert.deepEqual([...observedConsumers.keys()].slice(0, 140), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
     assert.equal(observedConsumers.get("final-plan-descriptor"), "final-plan-descriptor-contract", "future-only final.plan is a descriptor contract, not claimed as current validateRun input");
+  });
+
+  it("rejects every checkpoint and verification-artifact authority mutation through its production validator", () => {
+    const ids = [
+      "checkpoint-child-binding-v1", "checkpoint-reservation-reserved", "checkpoint-reservation-launching", "checkpoint-reservation-launched", "checkpoint-reservation-unknown",
+      "verification-artifact-claim-active", "verification-artifact-claim-completed-pass", "verification-artifact-claim-completed-fail",
+      "verification-artifact-claim-unknown-process", "verification-artifact-claim-unknown-receipt",
+      "verification-artifact-execution-receipt-pass", "verification-artifact-execution-receipt-fail",
+    ];
+    for (const id of ids) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const baseline = createDurableCatalogBaseline(record);
+      for (const mutationCase of emitDurableRecordMutations(record.source, record.descriptor, record.externalSources)) {
+        const invoke = baseline.consumer === "validateCheckpointChildBinding"
+          ? () => validateCheckpointChildBinding(mutationCase.record, { runId: baseline.expectedRunId, expectedBinding: baseline.binding })
+          : baseline.consumer === "validateCheckpointReservationClaim"
+            ? () => validateCheckpointReservationClaim(mutationCase.record, { expectedBinding: baseline.expectedBinding })
+            : baseline.consumer === "validateVerificationArtifactExecutionClaim"
+              ? () => validateVerificationArtifactExecutionClaim(mutationCase.record)
+              : () => validateVerificationArtifactExecutionReceipt(mutationCase.record);
+        assert.throws(invoke, validationErrorFor(mutationCase.name), mutationCase.name);
+      }
+    }
   });
 
   it("executes every nonconvergence terminal mutation through schema or exact sidecar consistency", () => {
@@ -1998,7 +2035,7 @@ describe("finite durable-authority catalog", () => {
       "steering-pr-fence",
       "pr-created-result",
     ];
-    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "checkpoint-routing-artifact-v1", "terminal-result-blocked-checkpoint-routing", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-")).slice(0, 40), expectedIds);
+    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "checkpoint-routing-artifact-v1", "checkpoint-child-binding-v1", "checkpoint-reservation-reserved", "checkpoint-reservation-launching", "checkpoint-reservation-launched", "checkpoint-reservation-unknown", "terminal-result-blocked-checkpoint-routing", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-") && !id.startsWith("verification-artifact-")).slice(0, 40), expectedIds);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
     const continuationDispositions = exactB0m3ContinuationDispositionMap(B0M3_CONTINUATION_EXACT_CASES);
     const executedContinuationCases = [];

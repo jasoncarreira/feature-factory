@@ -1,10 +1,11 @@
 import { spawn as defaultSpawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   claimCheckedTestExecution,
   claimCheckedVerificationArtifactExecution,
   completeCheckedTestExecution,
   completeCheckedVerificationArtifactExecution,
+  markCheckedVerificationArtifactExecutionUnknown,
   markCheckedTestExecutionUnknown,
 } from "./run-state.js";
 import { TEST_EXECUTION_STREAM_LIMIT_BYTES, validateTestExecutionReceipt, validateVerificationArtifactExecutionReceipt } from "./validate.js";
@@ -60,10 +61,18 @@ export async function executeCheckedTestExecution(runDir, options = {}) {
 export async function executeCheckedVerificationArtifact(runDir, sliceId, artifactId, options = {}) {
   const claimed = await claimCheckedVerificationArtifactExecution(runDir, sliceId, artifactId, options);
   if (claimed.replayed) return claimed;
+  if (typeof options.afterArtifactClaim === "function") await options.afterArtifactClaim({ claim: claimed.claim, authority: claimed.authority });
   const startedMs = nowMs(options);
   const startedAt = isoNow(options);
   const command = { program: claimed.authority.probe.program, args: claimed.authority.probe.args };
-  const result = await executeCommand(command, 0, claimed.authority.worktree, checkedExecutionEnvironment(options.env ?? process.env), options);
+  let result;
+  try {
+    result = await executeCommand(command, 0, claimed.authority.worktree, checkedExecutionEnvironment(options.env ?? process.env), options);
+    if (typeof options.afterArtifactProcess === "function") await options.afterArtifactProcess({ claim: claimed.claim, authority: claimed.authority, result });
+  } catch (error) {
+    await markCheckedVerificationArtifactExecutionUnknown(runDir, claimed.claim, claimed.authority, "process-outcome-indeterminate", options);
+    throw executionError("VERIFICATION_ARTIFACT_OPERATOR_RECONCILIATION_REQUIRED", `checked verification artifact process outcome requires operator reconciliation: ${error.message}`);
+  }
   const completedMs = nowMs(options);
   const completedAt = isoNow(options);
   const status = result.outcome === "exited" && result.exit_code === 0 && result.signal === null ? "pass" : "fail";
@@ -74,7 +83,7 @@ export async function executeCheckedVerificationArtifact(runDir, sliceId, artifa
     run_id: claimed.authority.run_id,
     slice_id: claimed.authority.slice_id,
     attempt: claimed.authority.attempt,
-    claim_nonce: options.nonce || randomUUID(),
+    claim_nonce: claimed.claim.nonce,
     plan_ref: claimed.authority.plan_ref,
     plan_hash: claimed.authority.plan_hash,
     head_sha: claimed.authority.head_sha,
@@ -92,7 +101,16 @@ export async function executeCheckedVerificationArtifact(runDir, sliceId, artifa
       summary: status === "pass" ? "Verification artifact command passed" : "Verification artifact command failed",
     },
   });
-  return completeCheckedVerificationArtifactExecution(runDir, claimed.authority, receipt, options);
+  try {
+    return await completeCheckedVerificationArtifactExecution(runDir, claimed.claim, claimed.authority, receipt, options);
+  } catch (error) {
+    try {
+      await markCheckedVerificationArtifactExecutionUnknown(runDir, claimed.claim, claimed.authority, "receipt-publication-indeterminate", options);
+    } catch (reconciliationError) {
+      throw executionError("VERIFICATION_ARTIFACT_OPERATOR_RECONCILIATION_REQUIRED", `checked verification artifact receipt/claim completion requires operator reconciliation: ${error.message}; ${reconciliationError.message}`);
+    }
+    throw executionError("VERIFICATION_ARTIFACT_OPERATOR_RECONCILIATION_REQUIRED", `checked verification artifact receipt/claim completion requires operator reconciliation: ${error.message}`);
+  }
 }
 
 export function checkedExecutionEnvironment(source) {

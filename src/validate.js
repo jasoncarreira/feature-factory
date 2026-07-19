@@ -88,12 +88,17 @@ const STEP_KEYS = new Set(["agent", "status", "attempts", "artifact_ref", "revie
 const STEP_ACCEPTANCE_KEYS = new Set(["artifact_ref", "artifact_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_head_sha"]);
 const STEP_INHERITED_ACCEPTANCE_KEYS = new Set(["from_run_id", "parent_spec_review_ref", "artifact_hash", "review_hash"]);
 const CHECKPOINT_CHILD_KEYS = new Set(["schema_version", "kind", "parent_run_id", "parent_run_ref", "parent_run_hash", "manifest_ref", "manifest_hash", "checkpoint_id", "checkpoint_ordinal", "child_run_id", "base_ref", "base_commit", "predecessor_checkpoint_id", "predecessor_child_run_id", "predecessor_merge_commit"]);
+const CHECKPOINT_RESERVATION_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "binding", "reserved_at"]);
+const CHECKPOINT_RESERVATION_STATE_KEYS = Object.freeze({ reserved: new Set(CHECKPOINT_RESERVATION_COMMON_KEYS), launching: new Set([...CHECKPOINT_RESERVATION_COMMON_KEYS, "launching_at"]), launched: new Set([...CHECKPOINT_RESERVATION_COMMON_KEYS, "launched_at"]), unknown: new Set([...CHECKPOINT_RESERVATION_COMMON_KEYS, "failed_at", "reason"]) });
 const TEST_EXECUTION_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "receipt_ref", "claimed_at"]);
 const TEST_EXECUTION_CLAIM_COMPLETED_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
 const TEST_EXECUTION_CLAIM_UNKNOWN_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "failed_at", "reason"]);
 const TEST_EXECUTION_UNKNOWN_REASONS = new Set(["process-outcome-indeterminate", "authority-changed", "receipt-publication-indeterminate"]);
 const TEST_EXECUTION_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands"]);
 const VERIFICATION_ARTIFACT_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "slice_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "probe", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands", "result"]);
+const VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "probe", "receipt_ref", "claimed_at"]);
+const VERIFICATION_ARTIFACT_CLAIM_COMPLETED_KEYS = new Set([...VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
+const VERIFICATION_ARTIFACT_CLAIM_UNKNOWN_KEYS = new Set([...VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS, "failed_at", "reason", "status", "receipt_hash"]);
 const VERIFICATION_ARTIFACT_PROBE_KEYS = new Set(["type", "verification_artifact_id", "test_plan_index", "test_plan_entry", "program", "args"]);
 const VERIFICATION_ARTIFACT_RESULT_KEYS = new Set(["type", "outcome", "summary"]);
 const TEST_EXECUTION_COMMAND_RESULT_KEYS = new Set(["index", "program", "args", "outcome", "status", "exit_code", "signal", "error_code", "duration_ms", "stdout", "stderr"]);
@@ -390,6 +395,7 @@ export function validateCheckpointChildBinding(errorsOrBinding, valueOrOptions, 
   const errors = standalone ? [] : errorsOrBinding;
   const value = standalone ? errorsOrBinding : valueOrOptions;
   const expectedRunId = standalone ? valueOrOptions?.runId : runId;
+  const expectedBinding = standalone ? valueOrOptions?.expectedBinding : null;
   if (value === undefined || value === null) return standalone ? null : undefined;
   if (!isRecord(value)) {
     errors.push({ path, message: "must be an object" });
@@ -405,6 +411,7 @@ export function validateCheckpointChildBinding(errorsOrBinding, valueOrOptions, 
   requiredFullGitSha(errors, value, "base_commit", `${path}.base_commit`);
   boundedInteger(errors, value, "checkpoint_ordinal", 1, Number.MAX_SAFE_INTEGER, `${path}.checkpoint_ordinal`);
   if (stringValue(expectedRunId) && value.child_run_id !== expectedRunId) errors.push({ path: `${path}.child_run_id`, message: "must equal run.run_id" });
+  if (expectedBinding && hashValue(value) !== hashValue(expectedBinding)) errors.push({ path, message: "must equal the exact expected checkpoint binding" });
   if (stringValue(value.parent_run_id) && value.parent_run_ref !== `.opencode/factory/${value.parent_run_id}/run.json`) errors.push({ path: `${path}.parent_run_ref`, message: "must be the exact parent run ref" });
   if (!/^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u.test(value.manifest_ref ?? "")) errors.push({ path: `${path}.manifest_ref`, message: "must be a content-addressed checkpoint routing artifact ref" });
   for (const key of ["predecessor_checkpoint_id", "predecessor_child_run_id", "predecessor_merge_commit"]) {
@@ -419,6 +426,30 @@ export function validateCheckpointChildBinding(errorsOrBinding, valueOrOptions, 
   }
   if (standalone && errors.length) fail(errors);
   return standalone ? value : undefined;
+}
+
+export function validateCheckpointReservationClaim(value, { expectedBinding } = {}) {
+  const errors = [];
+  if (!isRecord(value)) return fail([{ path: "reservation", message: "must be an object" }]);
+  const keys = CHECKPOINT_RESERVATION_STATE_KEYS[value.state] ?? CHECKPOINT_RESERVATION_COMMON_KEYS;
+  allowedKeys(errors, value, keys, "reservation");
+  requiredInteger(errors, value, "schema_version", "reservation.schema_version");
+  if (value.schema_version !== 1) errors.push({ path: "reservation.schema_version", message: "must equal 1" });
+  requiredEnum(errors, value, "kind", new Set(["delivery-checkpoint-child-reservation"]), "reservation.kind");
+  requiredEnum(errors, value, "state", new Set(Object.keys(CHECKPOINT_RESERVATION_STATE_KEYS)), "reservation.state");
+  requiredString(errors, value, "nonce", "reservation.nonce");
+  if (!isUuidV4(value.nonce)) errors.push({ path: "reservation.nonce", message: "must be a UUID v4" });
+  requiredTimestamp(errors, value, "reserved_at", "reservation.reserved_at");
+  validateCheckpointChildBinding(errors, value.binding, "reservation.binding", value.binding?.child_run_id);
+  if (expectedBinding && hashValue(value.binding) !== hashValue(expectedBinding)) errors.push({ path: "reservation.binding", message: "must equal the exact expected checkpoint binding" });
+  if (value.state === "launching") requiredTimestamp(errors, value, "launching_at", "reservation.launching_at");
+  if (value.state === "launched") requiredTimestamp(errors, value, "launched_at", "reservation.launched_at");
+  if (value.state === "unknown") {
+    requiredTimestamp(errors, value, "failed_at", "reservation.failed_at");
+    requiredEnum(errors, value, "reason", new Set(["launch-outcome-indeterminate"]), "reservation.reason");
+  }
+  if (errors.length) fail(errors);
+  return value;
 }
 
 export function validateCostAttributionEntries(entries, runId) {
@@ -536,17 +567,7 @@ export function validateVerificationArtifactExecutionReceipt(receipt) {
   requiredEnum(errors, receipt, "status", new Set(["pass", "fail", "skipped"]), "receipt.status");
   if (typeof receipt.review_ready !== "boolean") errors.push({ path: "receipt.review_ready", message: "must be a boolean" });
 
-  if (!isRecord(receipt.probe)) errors.push({ path: "receipt.probe", message: "must be an object" });
-  else {
-    allowedKeys(errors, receipt.probe, VERIFICATION_ARTIFACT_PROBE_KEYS, "receipt.probe");
-    if (receipt.probe.type !== "verification-artifact") errors.push({ path: "receipt.probe.type", message: "must equal verification-artifact" });
-    requiredString(errors, receipt.probe, "verification_artifact_id", "receipt.probe.verification_artifact_id");
-    if (receipt.probe.verification_artifact_id !== receipt.verification_artifact_id) errors.push({ path: "receipt.probe.verification_artifact_id", message: "must equal receipt.verification_artifact_id" });
-    boundedInteger(errors, receipt.probe, "test_plan_index", 0, Number.MAX_SAFE_INTEGER, "receipt.probe.test_plan_index");
-    requiredString(errors, receipt.probe, "test_plan_entry", "receipt.probe.test_plan_entry");
-    validateIntegrationProgram(errors, receipt.probe.program, "receipt.probe.program");
-    validateIntegrationArgs(errors, receipt.probe.args, "receipt.probe.args");
-  }
+  validateVerificationArtifactProbe(errors, receipt.probe, receipt.verification_artifact_id, "receipt.probe");
   if (!isRecord(receipt.result)) errors.push({ path: "receipt.result", message: "must be an object" });
   else {
     allowedKeys(errors, receipt.result, VERIFICATION_ARTIFACT_RESULT_KEYS, "receipt.result");
@@ -569,6 +590,58 @@ export function validateVerificationArtifactExecutionReceipt(receipt) {
     && Date.parse(receipt.completed_at) < Date.parse(receipt.started_at)) errors.push({ path: "receipt.completed_at", message: "must not precede started_at" });
   if (errors.length) fail(errors);
   return receipt;
+}
+
+export function validateVerificationArtifactExecutionClaim(claim) {
+  const errors = [];
+  if (!isRecord(claim)) return fail([{ path: "claim", message: "must be an object" }]);
+  const keys = claim.state === "completed" ? VERIFICATION_ARTIFACT_CLAIM_COMPLETED_KEYS
+    : claim.state === "unknown" ? VERIFICATION_ARTIFACT_CLAIM_UNKNOWN_KEYS : VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS;
+  allowedKeys(errors, claim, keys, "claim");
+  requiredInteger(errors, claim, "schema_version", "claim.schema_version");
+  if (claim.schema_version !== 1) errors.push({ path: "claim.schema_version", message: "must equal 1" });
+  requiredEnum(errors, claim, "kind", new Set(["checked-verification-artifact-execution-claim"]), "claim.kind");
+  requiredEnum(errors, claim, "state", new Set(["active", "completed", "unknown"]), "claim.state");
+  requiredString(errors, claim, "nonce", "claim.nonce");
+  if (!isUuidV4(claim.nonce)) errors.push({ path: "claim.nonce", message: "must be a UUID v4" });
+  for (const key of ["run_id", "slice_id", "plan_ref", "verification_artifact_id", "receipt_ref"]) requiredString(errors, claim, key, `claim.${key}`);
+  if (typeof claim.receipt_ref === "string" && (!/^evidence\/[A-Za-z0-9._-]+\.json$/u.test(claim.receipt_ref) || claim.receipt_ref.includes(".."))) errors.push({ path: "claim.receipt_ref", message: "must be a safe evidence JSON ref" });
+  boundedInteger(errors, claim, "attempt", 1, Number.MAX_SAFE_INTEGER, "claim.attempt");
+  if (claim.plan_ref !== PLAN_SLICES_REF) errors.push({ path: "claim.plan_ref", message: `must equal ${PLAN_SLICES_REF}` });
+  requiredHash(errors, claim, "plan_hash", "claim.plan_hash");
+  requiredFullGitSha(errors, claim, "head_sha", "claim.head_sha");
+  requiredTimestamp(errors, claim, "claimed_at", "claim.claimed_at");
+  validateVerificationArtifactProbe(errors, claim.probe, claim.verification_artifact_id, "claim.probe");
+  if (claim.state === "completed") {
+    requiredTimestamp(errors, claim, "completed_at", "claim.completed_at");
+    requiredEnum(errors, claim, "status", new Set(["pass", "fail"]), "claim.status");
+    requiredHash(errors, claim, "receipt_hash", "claim.receipt_hash");
+  } else if (claim.state === "unknown") {
+    requiredTimestamp(errors, claim, "failed_at", "claim.failed_at");
+    requiredEnum(errors, claim, "reason", new Set(["process-outcome-indeterminate", "receipt-publication-indeterminate"]), "claim.reason");
+    const hasReceipt = claim.receipt_hash !== undefined || claim.status !== undefined;
+    if (hasReceipt) {
+      requiredHash(errors, claim, "receipt_hash", "claim.receipt_hash");
+      requiredEnum(errors, claim, "status", new Set(["pass", "fail"]), "claim.status");
+    }
+  }
+  if (errors.length) fail(errors);
+  return claim;
+}
+
+function validateVerificationArtifactProbe(errors, probe, artifactId, path) {
+  if (!isRecord(probe)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  allowedKeys(errors, probe, VERIFICATION_ARTIFACT_PROBE_KEYS, path);
+  if (probe.type !== "verification-artifact") errors.push({ path: `${path}.type`, message: "must equal verification-artifact" });
+  requiredString(errors, probe, "verification_artifact_id", `${path}.verification_artifact_id`);
+  if (probe.verification_artifact_id !== artifactId) errors.push({ path: `${path}.verification_artifact_id`, message: `must equal ${path.startsWith("receipt.") ? "receipt" : "claim"}.verification_artifact_id` });
+  boundedInteger(errors, probe, "test_plan_index", 0, Number.MAX_SAFE_INTEGER, `${path}.test_plan_index`);
+  requiredString(errors, probe, "test_plan_entry", `${path}.test_plan_entry`);
+  validateIntegrationProgram(errors, probe.program, `${path}.program`);
+  validateIntegrationArgs(errors, probe.args, `${path}.args`);
 }
 
 function validateTestExecutionCommandResult(errors, result, index) {

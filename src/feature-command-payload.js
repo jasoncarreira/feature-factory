@@ -213,7 +213,8 @@ function assertCheckpointReservationAuthority(repo, binding) {
   const claim = git(repo, ["cat-file", "blob", child.stdout.trim()]);
   if (!claim.ok) throw new Error("checkpoint reservation claim is unreadable");
   const value = JSON.parse(claim.stdout);
-  if (value.schema_version !== 1 || value.kind !== "delivery-checkpoint-child-claim"
+  if (value.schema_version !== 1 || value.kind !== "delivery-checkpoint-child-reservation"
+    || !["reserved", "launching", "launched"].includes(value.state)
     || !isDeepStrictEqual(value.binding, binding)) throw new Error("checkpoint reservation claim is stale");
 }
 

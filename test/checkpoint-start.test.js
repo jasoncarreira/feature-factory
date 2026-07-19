@@ -9,6 +9,10 @@ import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../sr
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
 import { startFactoryCheckpoint } from "../src/factory.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
+import { hashValue } from "../src/refs.js";
+import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
+import { validateRun } from "../src/validate.js";
+import { passingInvariantFamilyLedger, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 describe("checked checkpoint child start", () => {
   it("binds ordinal 1 to exact reviewed parent, manifest, request, and current main with no-replace reservations", async () => {
@@ -77,12 +81,136 @@ describe("checked checkpoint child start", () => {
       );
       const second = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-002", {
         cwd: fixture.repo, runId: "checkpoint-child-two", predecessorMergeCommit: mergeCommit,
+        observePredecessorPrOperation: async () => canonicalMergedObservation(fixture, { binding: first.binding, mergeCommit }),
         checkpointLaunchFn: (value) => value,
       });
       assert.equal(second.binding.predecessor_checkpoint_id, "checkpoint-001");
       assert.equal(second.binding.predecessor_child_run_id, "checkpoint-child-one");
       assert.equal(second.binding.predecessor_merge_commit, mergeCommit);
       assert.equal(second.binding.base_commit, mergeCommit);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a shape-valid completed predecessor that skipped the normal pipeline", async () => {
+    const fixture = createFixture("checkpoint-parent-incomplete");
+    try {
+      const first = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-child-incomplete", checkpointLaunchFn: (value) => value,
+      });
+      git(fixture.repo, ["checkout", "-b", "checkpoint-child-incomplete"]);
+      writeFileSync(join(fixture.repo, "incomplete.txt"), "incomplete\n");
+      git(fixture.repo, ["add", "incomplete.txt"]);
+      git(fixture.repo, ["commit", "-m", "incomplete checkpoint child"]);
+      const childHead = git(fixture.repo, ["rev-parse", "HEAD"]);
+      git(fixture.repo, ["checkout", "main"]);
+      git(fixture.repo, ["merge", "--no-ff", "checkpoint-child-incomplete", "-m", "merge incomplete child"]);
+      const mergeCommit = git(fixture.repo, ["rev-parse", "HEAD"]);
+      publishCompletedChild(fixture, first.binding, childHead, { completePipeline: false });
+
+      await assert.rejects(startFactoryCheckpoint(fixture.parentRunId, "checkpoint-002", {
+        cwd: fixture.repo, runId: "checkpoint-child-two", predecessorMergeCommit: mergeCommit,
+        checkpointLaunchFn: (value) => value,
+      }), /full normal pipeline|merged slices|test-verifier|Gate 3/u);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers an exact reservation after a crash before launch without duplicating launch", async () => {
+    const fixture = createFixture("checkpoint-parent-reservation-recovery");
+    let launches = 0;
+    try {
+      await assert.rejects(startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo,
+        runId: "checkpoint-recovery-child",
+        beforeCheckpointLaunch: () => { throw new Error("injected pre-launch crash"); },
+        checkpointLaunchFn: (value) => { launches += 1; return value; },
+      }), /injected pre-launch crash/u);
+      const recovered = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo,
+        runId: "checkpoint-recovery-child",
+        checkpointLaunchFn: (value) => { launches += 1; return value; },
+      });
+      assert.equal(recovered.binding.child_run_id, "checkpoint-recovery-child");
+      assert.equal(launches, 1);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("admits only one launch when exact reservation contenders race after observation", async () => {
+    const fixture = createFixture("checkpoint-parent-reservation-race");
+    let releaseFirst;
+    let firstReserved;
+    let launches = 0;
+    const reserved = new Promise((resolve) => { firstReserved = resolve; });
+    const release = new Promise((resolve) => { releaseFirst = resolve; });
+    try {
+      const first = startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-race-child",
+        beforeCheckpointLaunch: async () => { firstReserved(); await release; },
+        checkpointLaunchFn: (value) => { launches += 1; return value; },
+      });
+      await reserved;
+      const second = startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-race-child",
+        checkpointLaunchFn: (value) => { launches += 1; return value; },
+      });
+      await second;
+      releaseFirst();
+      await assert.rejects(first, /changed concurrently|state transition/u);
+      assert.equal(launches, 1);
+    } finally {
+      releaseFirst?.();
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("adopts an exact completed child without launching it again", async () => {
+    const fixture = createFixture("checkpoint-parent-child-adoption");
+    let launches = 0;
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-adopted-child", checkpointLaunchFn: (value) => { launches += 1; return value; },
+      });
+      git(fixture.repo, ["branch", "checkpoint-adopted-child"]);
+      publishCompletedChild(fixture, started.binding, fixture.baseCommit, { completePipeline: false });
+      const adopted = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-adopted-child", checkpointLaunchFn: (value) => { launches += 1; return value; },
+      });
+      assert.equal(adopted.replayed, true);
+      assert.equal(adopted.adopted, true);
+      assert.equal(launches, 1);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a local-only predecessor merge when canonical GitHub observation is absent", async () => {
+    const fixture = createFixture("checkpoint-parent-local-only");
+    try {
+      const predecessor = await createCompletedPredecessor(fixture, "checkpoint-child-local-only");
+      await assert.rejects(startFactoryCheckpoint(fixture.parentRunId, "checkpoint-002", {
+        cwd: fixture.repo, runId: "checkpoint-child-two", predecessorMergeCommit: predecessor.mergeCommit,
+        observePredecessorPrOperation: async () => ({ disposition: "absent", reason: null, pull_request: null }),
+        checkpointLaunchFn: (value) => value,
+      }), /canonical.*pull request|GitHub.*merged|remote.*merge/u);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects canonical remote merge divergence from the exact predecessor merge commit", async () => {
+    const fixture = createFixture("checkpoint-parent-remote-divergence");
+    try {
+      const predecessor = await createCompletedPredecessor(fixture, "checkpoint-child-divergent");
+      await assert.rejects(startFactoryCheckpoint(fixture.parentRunId, "checkpoint-002", {
+        cwd: fixture.repo, runId: "checkpoint-child-two", predecessorMergeCommit: predecessor.mergeCommit,
+        observePredecessorPrOperation: async () => canonicalMergedObservation(fixture, predecessor, "f".repeat(40)),
+        checkpointLaunchFn: (value) => value,
+      }), /canonical.*merge commit|remote.*diverg/u);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
     }
@@ -150,9 +278,71 @@ function createFixture(parentRunId) {
   return { repo, parentRunId, parentRunDir, baseCommit, plan, manifest, artifact };
 }
 
-function publishCompletedChild(fixture, binding, headSha) {
+function publishCompletedChild(fixture, binding, headSha, { completePipeline = true } = {}) {
   const runDir = join(fixture.repo, ".opencode", "factory", binding.child_run_id);
   mkdirSync(runDir, { recursive: true });
+  if (completePipeline) {
+    const worktree = join(fixture.repo, ".opencode", "worktrees", binding.child_run_id);
+    mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+    git(fixture.repo, ["worktree", "add", worktree, binding.child_run_id]);
+    for (const directory of ["plan", "reviews", "evidence", "artifacts"]) mkdirSync(join(runDir, directory), { recursive: true });
+    const plan = {
+      slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --version"] }],
+      integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+      delivery_envelope: { schema_version: 1, delivery_units: [{ id: "backend-unit", slice_id: "backend", invariant_families: [{ id: "behavior", description: "Behavior" }], obligations: [{ id: "behavior-check", description: "Check behavior", invariant_family_id: "behavior", verification_artifact_id: "backend-tests" }], verification_artifacts: [{ id: "backend-tests", test_plan_index: 0, test_plan_entry: "node --version" }] }] },
+    };
+    writeJson(join(runDir, "plan", "slices.json"), plan);
+    writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+    writeJson(join(runDir, "evidence", "backend.json"), { subject: "backend", attempt: 1, status: "pass", review_ready: true, head_sha: headSha });
+    const familyEvidence = writeVerificationArtifactReceipt({
+      runDir, runId: binding.child_run_id, plan, sliceId: "backend", attempt: 1, reviewedCommit: headSha,
+      artifactId: "backend-tests", evidenceRef: "evidence/backend-family.json",
+      result: { type: "verification-result", outcome: "pass", summary: "Behavior passed" },
+    });
+    const sliceReview = createSliceReviewRecord({ subject: "backend", attempt: 1, reviewedCommit: headSha });
+    sliceReview.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "backend", reviewedCommit: headSha, evidenceRef: familyEvidence.ref, evidenceHash: familyEvidence.hash });
+    writeJson(join(runDir, "reviews", "backend.json"), sliceReview);
+    writeFileSync(join(runDir, "artifacts", "test-report.md"), "# Test report\n\nPASS\n");
+    const receiptRef = "evidence/test-verifier.attempt-1.json";
+    const claim = {
+      schema_version: 1, kind: "checked-test-execution-claim", state: "active", nonce: "123e4567-e89b-42d3-a456-426614174000",
+      run_id: binding.child_run_id, attempt: 1, plan_ref: "plan/slices.json", plan_hash: hashFile(join(runDir, "plan", "slices.json")),
+      head_sha: headSha, receipt_ref: receiptRef, claimed_at: "2026-07-19T10:00:00.000Z",
+    };
+    const stream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false };
+    const receipt = {
+      schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: binding.child_run_id,
+      attempt: 1, claim_nonce: claim.nonce, plan_ref: claim.plan_ref, plan_hash: claim.plan_hash, head_sha: headSha,
+      started_at: "2026-07-19T10:00:00.000Z", completed_at: "2026-07-19T10:00:01.000Z", duration_ms: 1000,
+      status: "pass", review_ready: true,
+      commands: [{ index: 0, program: "npm", args: ["run", "check"], outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 1000, stdout: stream, stderr: stream }],
+    };
+    writeJson(join(runDir, receiptRef), receipt);
+    const completedClaim = { ...claim, state: "completed", completed_at: receipt.completed_at, status: "pass", receipt_hash: hashFile(join(runDir, receiptRef)) };
+    writeJson(join(runDir, "reviews", "test-verifier.json"), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: headSha });
+    writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
+    writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: binding.child_run_id, attempt: 1, verdict: "GO", reviewed_head_sha: headSha });
+    writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: binding.child_run_id, attempt: 1, verdict: "PASS", reviewed_head_sha: headSha });
+    const evidenceRef = "evidence/backend.json"; const reviewRef = "reviews/backend.json";
+    const testReviewRef = "reviews/test-verifier.json"; const testArtifactRef = "artifacts/test-report.md";
+    const attemptReview = createSliceAttemptReview({ evidenceRef, evidenceHash: hashFile(join(runDir, evidenceRef)), reviewRef, reviewHash: hashFile(join(runDir, reviewRef)), reviewedCommit: headSha });
+    const run = {
+      schema_version: 1, run_id: binding.child_run_id, status: "completed", base_ref: binding.base_ref, base_commit: binding.base_commit,
+      branch: binding.child_run_id, worktree, gates: { pre_pr: { status: "approved" } }, checkpoint: binding,
+      slices: [{ id: "backend", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: hashFile(join(runDir, evidenceRef)), review_ref: reviewRef, review_hash: hashFile(join(runDir, reviewRef)), reviewed_commit: headSha, merge_commit: headSha }],
+      steps: [
+        { agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json", acceptance: { artifact_ref: "plan/slices.json", artifact_hash: claim.plan_hash, review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(runDir, "reviews", "work-decomposer.json")) } },
+        { agent: "test-verifier", status: "accepted", attempts: 1, artifact_ref: testArtifactRef, evidence_ref: receiptRef, review_ref: testReviewRef, execution_claim: completedClaim, execution_claim_hash: hashValue(completedClaim), acceptance: { artifact_ref: testArtifactRef, artifact_hash: hashFile(join(runDir, testArtifactRef)), evidence_ref: receiptRef, evidence_hash: hashFile(join(runDir, receiptRef)), review_ref: testReviewRef, review_hash: hashFile(join(runDir, testReviewRef)), reviewed_head_sha: headSha } },
+      ],
+      validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFile(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFile(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: headSha },
+      security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFile(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: headSha },
+      pr_url: "https://github.com/acme/repo/pull/1",
+      terminal_result: { status: "completed", run_id: binding.child_run_id, reason: null, summary: "PR created.", artifacts: {}, pr_url: "https://github.com/acme/repo/pull/1", pr_number: 1, pr_node_id: "PR_checkpoint_1", repository: "acme/repo", operation_id: `ffpr-v1-${"d".repeat(64)}`, head_ref: binding.child_run_id, head_sha: headSha, base_ref: "main", base_sha: binding.base_commit, draft: false },
+    };
+    validateRun(run);
+    writeJson(join(runDir, "run.json"), run);
+    return;
+  }
   writeJson(join(runDir, "run.json"), {
     schema_version: 1, run_id: binding.child_run_id, status: "completed", branch: binding.child_run_id,
     worktree: join(fixture.repo, ".opencode", "worktrees", binding.child_run_id), gates: {}, checkpoint: binding,
@@ -164,6 +354,36 @@ function publishCompletedChild(fixture, binding, headSha) {
       base_ref: "main", base_sha: binding.base_commit, draft: false,
     },
   });
+}
+
+async function createCompletedPredecessor(fixture, childRunId) {
+  const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+    cwd: fixture.repo, runId: childRunId, checkpointLaunchFn: (value) => value,
+  });
+  git(fixture.repo, ["checkout", "-b", childRunId]);
+  writeFileSync(join(fixture.repo, `${childRunId}.txt`), "child\n");
+  git(fixture.repo, ["add", `${childRunId}.txt`]);
+  git(fixture.repo, ["commit", "-m", `checkpoint child ${childRunId}`]);
+  const childHead = git(fixture.repo, ["rev-parse", "HEAD"]);
+  git(fixture.repo, ["checkout", "main"]);
+  git(fixture.repo, ["merge", "--no-ff", childRunId, "-m", `merge ${childRunId}`]);
+  const mergeCommit = git(fixture.repo, ["rev-parse", "HEAD"]);
+  publishCompletedChild(fixture, started.binding, childHead);
+  return { binding: started.binding, childHead, mergeCommit };
+}
+
+function canonicalMergedObservation(fixture, predecessor, mergeCommitSha = predecessor.mergeCommit) {
+  const terminal = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", predecessor.binding.child_run_id, "run.json"), "utf8")).terminal_result;
+  return {
+    disposition: "merged", reason: null,
+    pull_request: {
+      pr_url: terminal.pr_url, pr_number: terminal.pr_number, pr_node_id: terminal.pr_node_id,
+      repository: terminal.repository, draft: terminal.draft, state: "merged", merged_at: "2026-07-19T12:00:00Z",
+      head_ref: terminal.head_ref, head_sha: terminal.head_sha, head_repository: terminal.repository,
+      base_ref: terminal.base_ref, base_sha: terminal.base_sha, base_repository: terminal.repository,
+      merge_commit_sha: mergeCommitSha,
+    },
+  };
 }
 
 function checkpointPlan() {

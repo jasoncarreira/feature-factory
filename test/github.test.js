@@ -267,7 +267,7 @@ test("builds the complete exact state-all operation GET and classifies exact mar
   for (const [state, mergedAt, disposition] of [["open", null, "open"], ["closed", "2026-07-17T12:30:00Z", "merged"], ["closed", null, "closed"]]) {
     const result = await observePullRequestOperation({ ...operationIdentity(), observePage: () => included([operationPull({ state, merged_at: mergedAt })]) });
     assert.equal(result.disposition, disposition);
-    assert.deepEqual(Object.keys(result.pull_request), ["pr_url", "pr_number", "pr_node_id", "repository", "draft", "body", "state", "merged_at", "head_ref", "head_sha", "head_repository", "base_ref", "base_sha", "base_repository"]);
+    assert.deepEqual(Object.keys(result.pull_request), ["pr_url", "pr_number", "pr_node_id", "repository", "draft", "body", "state", "merged_at", "merge_commit_sha", "head_ref", "head_sha", "head_repository", "base_ref", "base_sha", "base_repository"]);
     assert.equal(result.pull_request.pr_node_id, "PR_kwDO_operation");
   }
 });
