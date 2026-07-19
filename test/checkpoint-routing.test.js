@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { buildCheckpointRoutingManifest, CHECKPOINT_ROUTING_TERMINAL_REASON } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
+import { runCliCommand } from "../src/cli.js";
 import { listRuns, status, validateState } from "../src/factory.js";
 import { transitionRunStep, transitionSlicesSeed, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
 import { hashValue } from "../src/refs.js";
@@ -411,6 +412,19 @@ describe("B4.3 checkpoint routing", () => {
     }
   });
 
+  for (const [name, tamper] of checkpointTerminalAuthorityCases()) {
+    it(`fails closed through status, list, API validation, and validate command for terminal authority ${name}`, async () => {
+      const fixture = await createFiveWaveTerminalFixture(`checkpoint-terminal-matrix-${name}`);
+      try {
+        await assertExactCheckpointTerminalDiagnostics(fixture, name);
+        tamper(fixture);
+        await assertInvalidCheckpointTerminalDiagnostics(fixture, name);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("fails closed for a missing envelope instead of manufacturing a checkpoint route", async () => {
     const invalid = planWithSpecs([unitSpec("api")]);
     delete invalid.delivery_envelope;
@@ -480,6 +494,133 @@ function createRoutingFixture(runId, plan) {
     terminal_result: null,
   });
   return { repo, runDir, runId, plan };
+}
+
+function checkpointTerminalAuthorityCases() {
+  return [
+    ["plan-absent", (fixture) => rmSync(join(fixture.runDir, "plan", "slices.json"))],
+    ["plan-symlink", (fixture) => replaceWithSymlink(join(fixture.runDir, "plan", "slices.json"))],
+    ["plan-invalid-bytes", (fixture) => writeFileSync(join(fixture.runDir, "plan", "slices.json"), "{not json\n")],
+    ["plan-valid-byte-drift", (fixture) => {
+      const plan = readJson(join(fixture.runDir, "plan", "slices.json"));
+      plan.delivery_envelope.delivery_units[0].invariant_families[0].description = "drifted plan bytes";
+      writeJson(join(fixture.runDir, "plan", "slices.json"), plan);
+    }],
+    ["review-absent", (fixture) => rmSync(join(fixture.runDir, "reviews", "work-decomposer.json"))],
+    ["review-drift", (fixture) => {
+      const review = readJson(join(fixture.runDir, "reviews", "work-decomposer.json"));
+      review.required_fixes = ["drifted review bytes"];
+      writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), review);
+    }],
+    ["manifest-absent", (fixture) => rmSync(fixture.manifestPath)],
+    ["manifest-symlink", (fixture) => replaceWithSymlink(fixture.manifestPath)],
+    ["manifest-invalid-bytes", (fixture) => writeFileSync(fixture.manifestPath, "{not json\n")],
+    ["manifest-valid-byte-drift", (fixture) => {
+      const manifest = readJson(fixture.manifestPath);
+      manifest.source.plan_hash = `sha256:${"f".repeat(64)}`;
+      writeJson(fixture.manifestPath, manifest);
+    }],
+    ["terminal-artifact-ref-mismatch", (fixture) => mutateTerminal(fixture, (terminal) => {
+      terminal.artifacts.checkpoint_routing = "artifacts/not-a-checkpoint-routing-manifest.json";
+    })],
+    ["terminal-artifact-hash-mismatch", (fixture) => {
+      const manifest = readJson(fixture.manifestPath);
+      manifest.source.plan_hash = `sha256:${"e".repeat(64)}`;
+      writeJson(fixture.manifestPath, manifest);
+    }],
+    ["terminal-reason-mismatch", (fixture) => mutateTerminal(fixture, (terminal) => { terminal.reason = "ordinary-blocked-lookalike"; })],
+    ["accepted-step-plan-hash-mismatch", (fixture) => mutateAcceptedStep(fixture, (step) => {
+      step.acceptance.artifact_hash = `sha256:${"d".repeat(64)}`;
+    })],
+    ["accepted-step-review-hash-mismatch", (fixture) => mutateAcceptedStep(fixture, (step) => {
+      step.acceptance.review_hash = `sha256:${"c".repeat(64)}`;
+    })],
+    ["deterministic-admission-manifest-mismatch", (fixture) => rewriteManifestWithCurrentAddress(fixture, (manifest) => {
+      manifest.sequencing.next_checkpoint_rule = "checkpoint ordering is caller-defined";
+    })],
+  ];
+}
+
+async function createFiveWaveTerminalFixture(runId) {
+  const plan = planWithSpecs([
+    unitSpec("wave-5", 1, 1, ["wave-4"]), unitSpec("wave-1"), unitSpec("wave-3", 1, 1, ["wave-2"]),
+    unitSpec("wave-2", 1, 1, ["wave-1"]), unitSpec("wave-4", 1, 1, ["wave-3"]),
+  ]);
+  const fixture = createRoutingFixture(runId, plan);
+  const boundary = await openTerminalBoundary(fixture);
+  const routed = await transitionSlicesSeed(fixture.runDir, pendingProjection(plan), { from: "plan/slices.json", boundaryToken: boundary.token });
+  return { ...fixture, manifestRef: routed.checkpoint_routing.ref, manifestPath: join(fixture.runDir, routed.checkpoint_routing.ref) };
+}
+
+async function assertExactCheckpointTerminalDiagnostics(fixture, label) {
+  const publicStatus = status(fixture.runId, { cwd: fixture.repo });
+  const publicList = listRuns({ cwd: fixture.repo }).find((item) => item.run_id === fixture.runId);
+  const publicValidation = validateState(fixture.runId, { cwd: fixture.repo });
+  const commandValidation = await validateCommand(fixture);
+  assert.equal(publicStatus.status, "blocked", `${label} status control`);
+  assert.equal(publicList.status, "blocked", `${label} list control`);
+  assert.equal(publicValidation.runs[0].checks.every((check) => check.ok), true, `${label} API checks control: ${JSON.stringify(publicValidation)}`);
+  assert.equal(commandValidation.runs[0].checks.every((check) => check.ok), true, `${label} validate command checks control: ${JSON.stringify(commandValidation)}`);
+}
+
+async function assertInvalidCheckpointTerminalDiagnostics(fixture, label) {
+  const publicStatus = status(fixture.runId, { cwd: fixture.repo });
+  const publicList = listRuns({ cwd: fixture.repo }).find((item) => item.run_id === fixture.runId);
+  const publicValidation = validateState(fixture.runId, { cwd: fixture.repo });
+  const commandValidation = await validateCommand(fixture);
+  assert.equal(publicStatus.status, "invalid", `${label} status`);
+  assert.equal(publicList.status, "invalid", `${label} list`);
+  assert.equal(publicValidation.ok, false, `${label} API validation`);
+  assert.equal(publicValidation.runs[0].ok, false, `${label} API run validation`);
+  assert.equal(publicValidation.runs[0].checks.some((check) => !check.ok), true, `${label} API failed authority check`);
+  assert.equal(commandValidation.ok, false, `${label} validate command`);
+  assert.equal(commandValidation.runs[0].ok, false, `${label} validate command run`);
+  assert.equal(commandValidation.runs[0].checks.some((check) => !check.ok), true, `${label} validate command failed authority check`);
+}
+
+async function validateCommand(fixture) {
+  const output = [];
+  const originalLog = console.log;
+  const originalExitCode = process.exitCode;
+  try {
+    console.log = (...values) => output.push(values.join(" "));
+    process.exitCode = undefined;
+    await runCliCommand(["factory", "validate", fixture.runId, "--json"], { factoryOptions: { cwd: fixture.repo } });
+    return JSON.parse(output.at(-1));
+  } finally {
+    console.log = originalLog;
+    process.exitCode = originalExitCode;
+  }
+}
+
+function mutateTerminal(fixture, mutate) {
+  const path = join(fixture.runDir, "run.json");
+  const run = readJson(path);
+  mutate(run.terminal_result);
+  writeJson(path, run);
+}
+
+function mutateAcceptedStep(fixture, mutate) {
+  const path = join(fixture.runDir, "run.json");
+  const run = readJson(path);
+  mutate(run.steps.find((step) => step.agent === "work-decomposer"));
+  writeJson(path, run);
+}
+
+function rewriteManifestWithCurrentAddress(fixture, mutate) {
+  const manifest = readJson(fixture.manifestPath);
+  mutate(manifest);
+  const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
+  const ref = `artifacts/checkpoint-routing-${hashBytes(bytes).slice("sha256:".length)}.json`;
+  writeFileSync(join(fixture.runDir, ref), bytes);
+  mutateTerminal(fixture, (terminal) => { terminal.artifacts.checkpoint_routing = ref; });
+}
+
+function replaceWithSymlink(path) {
+  const target = `${path}.target`;
+  writeFileSync(target, readFileSync(path));
+  rmSync(path);
+  symlinkSync(target, path);
 }
 
 function decompositionAuthority(planHash) {
