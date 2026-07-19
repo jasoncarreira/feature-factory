@@ -1301,6 +1301,9 @@ describe("test-verifier integration gate contract", () => {
     const contract = [README, SPEC, DURABLE_AUTHORITY_LEDGER, SCHEMA, SPEC_WRITER_PROMPT].join("\n");
     const planSchema = markdownSection(SCHEMA, "plan/slices.json");
     const reviewSchema = SCHEMA;
+    const schemaCatalog = markdownSection(SCHEMA, "Durable Authority Integrity Catalog");
+    const planAuthorityRow = markdownTableRow(schemaCatalog, "Plan and slices graph");
+    const reviewAuthorityRow = markdownTableRow(schemaCatalog, "Slices and review/evidence bindings");
 
     assert.match(planSchema, /optional `delivery_envelope`/i);
     assert.match(planSchema, /schema version 1[\s\S]*exact plan-slice order[\s\S]*exactly one per slice/i);
@@ -1317,7 +1320,12 @@ describe("test-verifier integration gate contract", () => {
     assert.match(SCHEMA, /predeclared active shape[\s\S]*admit\|checkpoint[\s\S]*approve\|reject/i);
     assert.match(SCHEMA, /B4\.2 can activate only the admission evaluator file[\s\S]*B4\.4 can activate only the review evaluator file/i);
     assert.match(contract, /do not (?:create|invent)[\s\S]*(?:second|another) run root|do not (?:create|invent)[\s\S]*(?:second|another) plan\/review hash chain/i);
-    assert.match(SCHEMA, /`plan-delivery-envelope-v1`[\s\S]*`review-invariant-family-ledger-v1`/i);
+    assert.equal(planAuthorityRow.entryIds.includes("plan-delivery-envelope-v1"), true, "Plan and slices graph row must register plan-delivery-envelope-v1");
+    assert.equal(planAuthorityRow.entryIds.includes("review-invariant-family-ledger-v1"), false, "Plan and slices graph row must not absorb the review ledger");
+    assert.match(planAuthorityRow.decisionSurface, /delivery-unit\/family\/obligation\/artifact identity[\s\S]*typed admission-extension decision/i);
+    assert.equal(reviewAuthorityRow.entryIds.includes("review-invariant-family-ledger-v1"), true, "Slices and review/evidence bindings row must register review-invariant-family-ledger-v1");
+    assert.equal(reviewAuthorityRow.entryIds.includes("plan-delivery-envelope-v1"), false, "Slices and review/evidence bindings row must not absorb the plan envelope");
+    assert.match(reviewAuthorityRow.decisionSurface, /delivery-unit\/family\/artifact mapping[\s\S]*evidence ref\/hash[\s\S]*typed probe\/result[\s\S]*reviewed commit[\s\S]*unresolved findings[\s\S]*typed review-extension decision/i);
   });
 
   it("keeps repository-wide checks out of implementation slices", () => {
@@ -2792,6 +2800,20 @@ function markdownSection(text, heading) {
   const bodyStart = match.index + match[0].length;
   const nextHeading = new RegExp(`^#{1,${level}} \\S.*$`, "mu").exec(text.slice(bodyStart));
   return text.slice(match.index, nextHeading ? bodyStart + nextHeading.index : text.length);
+}
+
+function markdownTableRow(text, authorityClass) {
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("|") || !line.endsWith("|")) continue;
+    const cells = line.slice(1, -1).split("|").map((cell) => cell.trim());
+    if (cells[0] !== authorityClass) continue;
+    assert.equal(cells.length, 3, `${authorityClass} authority table row must have exactly three cells`);
+    return {
+      entryIds: [...cells[1].matchAll(/`([^`]+)`/gu)].map((match) => match[1]),
+      decisionSurface: cells[2],
+    };
+  }
+  assert.fail(`missing authority table row ${authorityClass}`);
 }
 
 function readDoc(relativePath) {
