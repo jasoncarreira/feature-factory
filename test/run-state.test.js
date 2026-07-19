@@ -1851,6 +1851,7 @@ describe("simplified run-state transitions", () => {
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: attemptOneHead,
         ownership_disclosure: [{ path: "extension/feature.txt", rationale: "The slice implementation requires the adjacent feature entry point." }] });
       writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), createV2SliceReviewRecord({
+        runDir: fixture.runDir, evidenceRef: "evidence/slice.attempt-1.json",
         subject: "slice", attempt: 1, reviewedCommit: attemptOneHead, verdict: "REJECT", requiredFixes: ["adjust implementation"],
         scopeEffect: "unowned-extension", likelyPaths: ["extension/feature.txt"],
       }));
@@ -2186,6 +2187,66 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("rejects REJECT review publication without an invariant-family ledger and mutates nothing", async () => {
+    const fixture = createFixture("reject-publication-missing-ledger");
+    try {
+      const prepared = await prepareRejectReviewPublication(fixture);
+      delete prepared.review.invariant_family_ledger;
+      writeJson(prepared.reviewPath, prepared.review);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        publishPreparedSliceReview(fixture),
+        /publication requires complete current invariant-family review ledger: invariant-family-ledger-required/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects REJECT review publication with a missing family disposition and mutates nothing", async () => {
+    const fixture = createFixture("reject-publication-missing-family");
+    try {
+      const prepared = await prepareRejectReviewPublication(fixture);
+      prepared.review.invariant_family_ledger.dispositions = [];
+      writeJson(prepared.reviewPath, prepared.review);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        publishPreparedSliceReview(fixture),
+        /publication requires complete current invariant-family review ledger: invariant-family-disposition-missing:fixture-family-1/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("publishes a complete failing REJECT ledger without granting merge authority", async () => {
+    const fixture = createFixture("reject-publication-complete-failing-ledger");
+    try {
+      const prepared = await prepareRejectReviewPublication(fixture);
+      const [disposition] = prepared.review.invariant_family_ledger.dispositions;
+      disposition.result = { type: "verification-result", outcome: "fail", summary: "The invariant failed" };
+      disposition.unresolved_findings = ["The invariant remains unresolved"];
+      writeJson(prepared.reviewPath, prepared.review);
+
+      const published = await publishPreparedSliceReview(fixture);
+      assert.equal(published.slice.status, "review");
+      assert.equal(published.slice.review_ref, "reviews/slice.json");
+      assert.equal(published.slice.review_hash, hashFile(prepared.reviewPath));
+      const beforeMerge = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionSliceMerged(fixture.runDir, "slice", { merge_commit: "abc123" }),
+        /merge requires APPROVE review/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeMerge);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rehashes accepted decomposition before test-verifier dispatch", async () => {
     const fixture = createFixture("test-verifier-decomposition-recheck");
     const projection = [writeModernReviewedSlice(fixture.runDir, "backend", { status: "merged", mergeCommit: "abc123" })];
@@ -2378,7 +2439,7 @@ describe("simplified run-state transitions", () => {
         /must equal 2/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeV1Publication);
-      writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head, verdict: "REJECT", requiredFixes: ["fix the rejected slice"] }));
+      writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice-1.json", subject: "slice", attempt: 1, reviewedCommit: head, verdict: "REJECT", requiredFixes: ["fix the rejected slice"] }));
       await transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice-1.json", review_ref: "reviews/slice-1.json" });
       await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1 }), /advance exactly to attempt 2/u);
       const retry = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 });
@@ -2426,6 +2487,8 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
       writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({
+        runDir: fixture.runDir,
+        evidenceRef: "evidence/slice-1.json",
         subject: "slice",
         attempt: 1,
         reviewedCommit: head,
@@ -3813,6 +3876,48 @@ function seedBuilderDispatchAuthority(fixture) {
   writeJson(join(fixture.runDir, "run.json"), run);
 }
 
+async function prepareRejectReviewPublication(fixture) {
+  initGitRepo(fixture.repo, ["slice-branch"]);
+  runGit(fixture.repo, ["checkout", "slice-branch"]);
+  const reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  seedBuilderDispatchAuthority(fixture);
+  await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+  await closeBuilderDispatch(fixture, 1);
+  mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+  mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+  const evidenceRef = "evidence/slice.json";
+  const familyEvidenceRef = "evidence/slice.family.json";
+  const reviewPath = join(fixture.runDir, "reviews", "slice.json");
+  writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, familyEvidenceRef), { subject: "slice", invariant_family: "fixture-family-1", status: "observed" });
+  const plan = readJson(join(fixture.runDir, "plan", "slices.json"));
+  const review = createV2SliceReviewRecord({
+    subject: "slice",
+    verdict: "REJECT",
+    attempt: 1,
+    reviewedCommit,
+    requiredFixes: ["Repair the rejected invariant"],
+  });
+  review.invariant_family_ledger = passingInvariantFamilyLedger({
+    plan,
+    sliceId: "slice",
+    reviewedCommit,
+    evidenceRef: familyEvidenceRef,
+    evidenceHash: hashFile(join(fixture.runDir, familyEvidenceRef)),
+  });
+  writeJson(reviewPath, review);
+  return { review, reviewPath };
+}
+
+function publishPreparedSliceReview(fixture) {
+  return transitionRunSlice(fixture.runDir, "slice", {
+    status: "review",
+    attempts: 1,
+    evidence_ref: "evidence/slice.json",
+    review_ref: "reviews/slice.json",
+  });
+}
+
 function createV2SliceReviewRecord({ runDir, evidenceRef, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice", ...input } = {}) {
   const review = createSliceReviewRecord(input);
   review.remediation_context = {
@@ -3824,7 +3929,7 @@ function createV2SliceReviewRecord({ runDir, evidenceRef, scopeEffect = "in-lane
       fix_owner: fixOwner,
     })),
   };
-  if (review.verdict === "APPROVE" && runDir && evidenceRef) {
+  if (["APPROVE", "REJECT"].includes(review.verdict) && runDir && evidenceRef) {
     const plan = readJson(join(runDir, "plan", "slices.json"));
     const familyEvidenceRef = evidenceRef.replace(/\.json$/u, ".family.json");
     writeJson(join(runDir, familyEvidenceRef), { subject: review.subject, attempt: review.attempt, invariant_family: "fixture-family", status: "pass" });

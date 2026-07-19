@@ -4357,7 +4357,7 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
   if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
   if (dispatch && dispatch.completion_head !== gitAuthority.head) throw new Error(`slice '${sliceId}' reviewed head must equal the checked Task completion head`);
   const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, decomposition.plan, sliceId, observed.review);
-  assertApprovingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension, "publication");
+  assertPublishingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension);
   const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, gitAuthority, decomposition, options);
   return {
     ...observed,
@@ -4417,6 +4417,27 @@ function assertApprovingInvariantFamilyReviewAuthority(plan, sliceId, review, ex
   if (plan?.delivery_envelope === undefined || review?.verdict !== "APPROVE") return;
   if (extension.status !== "active" || extension.decision !== "approve" || extension.grants_b4_authority !== true) {
     throw new Error(`slice '${sliceId}' ${boundary} requires active approving invariant-family review authority: ${extension.reasons?.join(", ") || "authority-not-granted"}`);
+  }
+}
+
+function assertPublishingInvariantFamilyReviewAuthority(plan, sliceId, review, extension) {
+  if (plan?.delivery_envelope === undefined) return;
+  if (review?.verdict === "APPROVE") {
+    assertApprovingInvariantFamilyReviewAuthority(plan, sliceId, review, extension, "publication");
+    return;
+  }
+  if (review?.verdict !== "REJECT") return;
+  const reasons = Array.isArray(extension.reasons) ? extension.reasons : [];
+  const incompleteReasons = reasons.filter((reason) => reason !== "review-verdict-reject"
+    && !reason.startsWith("invariant-family-result-not-pass:")
+    && !reason.startsWith("invariant-family-unresolved-findings:"));
+  const completeReject = extension.status === "active"
+    && extension.decision === "reject"
+    && extension.grants_b4_authority === false
+    && reasons.includes("review-verdict-reject")
+    && incompleteReasons.length === 0;
+  if (!completeReject) {
+    throw new Error(`slice '${sliceId}' publication requires complete current invariant-family review ledger: ${incompleteReasons.join(", ") || "reject-authority-invalid"}`);
   }
 }
 
