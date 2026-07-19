@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const CHECKPOINT_ROUTING_KIND = "delivery-checkpoint-routing";
+export const CHECKPOINT_ROUTING_KIND = "delivery-checkpoint-routing-manifest";
 export const CHECKPOINT_ROUTING_PLAN_REF = "plan/slices.json";
 export const CHECKPOINT_ROUTING_TERMINAL_REASON = "oversized-plan-checkpoint-routing-required";
 

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
@@ -54,6 +54,7 @@ Commands:
   doctor [--local] [--profiles] [--telemetry] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
   factory checkpoint-start <parent-run-id> <checkpoint-id> --run-id <child-run-id> [--predecessor-merge-commit SHA] [start options]
+  factory checkpoint-close <parent-run-id> [--json]  Close the final checkpoint route after its canonical PR merge
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--carry-forward|--new-pr] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory cancel <run-id> [--json]
@@ -208,6 +209,10 @@ async function factory(args, dependencies = {}) {
     print(result, opts);
     if (result && typeof result === "object" && result.ok === false) process.exitCode = 1;
     return;
+  }
+  if (sub === "checkpoint-close") {
+    if (positional.length !== 1) throw new Error("factory checkpoint-close requires exactly <parent-run-id>");
+    return print(await closeFactoryCheckpointRoute(positional[0], opts), opts);
   }
   if (sub === "resume-check") {
     if (positional.length !== 1) throw new Error("factory resume-check requires exactly one <run-id>");

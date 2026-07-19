@@ -5,11 +5,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { runCliCommand } from "../src/cli.js";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { resumeFactory, startFactoryCheckpoint } from "../src/factory.js";
-import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
+import { closeFactoryCheckpointRoute, continueFactory, resumeFactory, startFactoryCheckpoint } from "../src/factory.js";
+import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
+import { transitionRunStep } from "../src/run-state.js";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { validateRun } from "../src/validate.js";
 import { passingInvariantFamilyLedger, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
@@ -34,10 +36,19 @@ describe("checked checkpoint child start", () => {
       assert.equal(launched.binding.predecessor_checkpoint_id, null);
       assert.deepEqual(launched.payload.checkpoint, launched.binding);
       assert.deepEqual(launched.payload.checkpoint_request, fixture.manifest.checkpoints[0].request);
+      assert.equal(launched.payload.checkpoint_reservation.state, "launching");
+      assert.equal(checkpointReservationClaim(fixture, launched.binding).state, "launched");
       assert.match(launched.commandArgs.at(-1), /^ffpayload-v1:/u);
       const decoded = decodeFeatureCommandPayload(launched.commandArgs.at(-1), { repo: fixture.repo });
-      assert.equal(decoded.ok, true);
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
       assert.deepEqual(decoded.payload.checkpoint, launched.binding);
+      assert.equal(decoded.payload.checkpoint_reservation.worktree, launched.payload.checkpoint_reservation.worktree);
+      const incompleteReservation = structuredClone(launched.payload);
+      delete incompleteReservation.checkpoint_reservation.worktree;
+      assert.deepEqual(decodeFeatureCommandPayload(encodeFeatureCommandPayload(incompleteReservation), { repo: fixture.repo }), {
+        ok: false,
+        reason: "invalid-checkpoint-authority",
+      });
 
       const routeRef = `refs/opencode/checkpoint-routes/${createHash("sha256").update(`${fixture.parentRunId}\0checkpoint-001`, "utf8").digest("hex")}`;
       git(fixture.repo, ["update-ref", "-d", routeRef]);
@@ -87,12 +98,122 @@ describe("checked checkpoint child start", () => {
           assert.equal(git(fixture.repo, ["rev-parse", "refs/heads/checkpoint-prepared-child"]), remoteMain);
           const worktree = join(fixture.repo, ".opencode", "worktrees", "checkpoint-prepared-child");
           assert.equal(git(worktree, ["rev-parse", "HEAD"]), remoteMain);
+          const bootstrap = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", "checkpoint-prepared-child", "run.json"), "utf8"));
+          assert.equal(bootstrap.checkpoint.child_run_id, "checkpoint-prepared-child");
+          assert.equal(bootstrap.base_commit, remoteMain);
+          assert.equal(bootstrap.branch, "checkpoint-prepared-child");
+          assert.equal(bootstrap.worktree, value.reservation.claim.worktree);
           return value;
         },
       });
       assert.equal(started.binding.base_commit, remoteMain);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically blocks branch drift after remote observation and launches nothing", async () => {
+    const fixture = createFixture("checkpoint-parent-prelaunch-branch-race");
+    let launches = 0;
+    try {
+      await assert.rejects(startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo,
+        runId: "checkpoint-prelaunch-branch-race",
+        beforeCheckpointLaunchCas: () => {
+          const base = git(fixture.repo, ["rev-parse", "refs/heads/checkpoint-prelaunch-branch-race"]);
+          const tree = git(fixture.repo, ["rev-parse", `${base}^{tree}`]);
+          const raced = git(fixture.repo, ["commit-tree", tree, "-p", base, "-m", "branch race"]);
+          git(fixture.repo, ["update-ref", "refs/heads/checkpoint-prelaunch-branch-race", raced, base]);
+        },
+        checkpointLaunchFn: (value) => { launches += 1; return value; },
+      }), /prelaunch branch|transaction|concurrently|worktree.*HEAD|branch/u);
+      assert.equal(launches, 0);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks registered-worktree dirt after remote observation and launches nothing", async () => {
+    const fixture = createFixture("checkpoint-parent-prelaunch-worktree-race");
+    let launches = 0;
+    try {
+      await assert.rejects(startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo,
+        runId: "checkpoint-prelaunch-worktree-race",
+        beforeCheckpointLaunchCas: ({ candidate }) => writeFileSync(join(candidate.child_worktree, "raced.txt"), "race\n"),
+        checkpointLaunchFn: (value) => { launches += 1; return value; },
+      }), /worktree must be clean/u);
+      assert.equal(launches, 0);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("excludes checkpoint-routing parents from every ordinary continuation mode before target side effects", () => {
+    for (const route of [{}, { carryForward: true }, { newPr: true }]) {
+      const fixture = createFixture(`checkpoint-parent-no-continuation-${Object.keys(route)[0] || "v1"}`);
+      const child = `forbidden-${Object.keys(route)[0] || "v1"}`;
+      try {
+        assert.throws(() => continueFactory(fixture.parentRunId, { cwd: fixture.repo, runId: child, review: "reviews/work-decomposer.json", ...route }), /excluded from every ordinary continuation route/u);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", child)), false);
+        assert.equal(gitResult(fixture.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${child}`]).ok, false);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("accepts checkpoint test-verifier only from the complete exact passing checked execution tuple", async () => {
+    for (const variant of ["absent", "fail", "stale", "wrong-command", "pass"]) {
+      const fixture = createFixture(`checkpoint-test-acceptance-${variant}`);
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-test-acceptance-${variant}-child`, checkpointLaunchFn: (value) => value,
+        });
+        publishCompletedChild(fixture, started.binding, started.binding.base_commit);
+        const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+        const runPath = join(runDir, "run.json");
+        const run = JSON.parse(readFileSync(runPath, "utf8"));
+        run.status = "running";
+        run.pr_url = null;
+        run.terminal_result = null;
+        const step = run.steps.find((candidate) => candidate.agent === "test-verifier");
+        step.status = "running";
+        delete step.acceptance;
+        if (variant === "absent") {
+          delete step.execution_claim;
+          delete step.execution_claim_hash;
+        } else if (variant === "fail") {
+          step.status = "rejected";
+          step.execution_claim.status = "fail";
+          step.execution_claim_hash = hashValue(step.execution_claim);
+        } else if (variant === "stale") {
+          const receiptPath = join(runDir, step.evidence_ref);
+          const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+          receipt.completed_at = "2026-07-19T10:00:02.000Z";
+          writeJson(receiptPath, receipt);
+        } else if (variant === "wrong-command") {
+          const receiptPath = join(runDir, step.evidence_ref);
+          const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+          receipt.commands[0].program = "pnpm";
+          writeJson(receiptPath, receipt);
+          step.execution_claim.receipt_hash = hashFile(receiptPath);
+          step.execution_claim_hash = hashValue(step.execution_claim);
+        }
+        writeJson(runPath, run);
+        const transition = () => transitionRunStep(runDir, "test-verifier", (current) => ({ ...current, status: "accepted" }), { repoRoot: fixture.repo });
+        if (variant === "pass") {
+          const accepted = await transition();
+          assert.equal(accepted.step.status, "accepted");
+          assert.equal(accepted.step.acceptance.evidence_ref, "evidence/test-verifier.attempt-1.json");
+          assert.equal(accepted.step.acceptance.reviewed_head_sha, started.binding.base_commit);
+          assert.equal(accepted.step.execution_claim.status, "pass");
+        } else {
+          await assert.rejects(transition, /completed checked execution|running at the same positive attempt|receipt hash is stale|commands differ|exactly pass/u, variant);
+        }
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
     }
   });
 
@@ -113,6 +234,23 @@ describe("checked checkpoint child start", () => {
         slices: [],
         steps: [],
       }), /base_ref.*checkpoint|base_commit.*checkpoint/u);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects alternate checkpoint branch and worktree identities", () => {
+    const fixture = createFixture("checkpoint-parent-alternate-identity");
+    try {
+      const binding = checkpointBinding(fixture, "checkpoint-alternate-identity-child");
+      const base = {
+        schema_version: 1, run_id: binding.child_run_id, status: "running",
+        base_ref: binding.base_ref, base_commit: binding.base_commit, branch: binding.child_run_id,
+        worktree: join(fixture.repo, ".opencode", "worktrees", binding.child_run_id), checkpoint: binding,
+        gates: {}, slices: [], steps: [],
+      };
+      assert.throws(() => validateRun({ ...base, branch: "alternate-branch" }), /run\.branch.*checkpoint\.child_run_id/u);
+      assert.throws(() => validateRun({ ...base, worktree: "relative-worktree" }), /registered checkpoint reservation worktree/u);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
     }
@@ -354,7 +492,7 @@ describe("checked checkpoint child start", () => {
     }
   });
 
-  it("adopts an existing child from a matching pre-existing launching reservation", async () => {
+  it("refuses to infer launch success from an existing child and launching reservation", async () => {
     const fixture = createFixture("checkpoint-parent-launching-adoption");
     let launches = 0;
     try {
@@ -363,12 +501,9 @@ describe("checked checkpoint child start", () => {
       });
       rewriteCheckpointReservation(fixture, started.binding, "launching");
       publishCompletedChild(fixture, started.binding, fixture.baseCommit, { completePipeline: false });
-      const adopted = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+      await assert.rejects(startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
         cwd: fixture.repo, runId: "checkpoint-launching-adoption-child", checkpointLaunchFn: (value) => { launches += 1; return value; },
-      });
-      assert.equal(adopted.replayed, true);
-      assert.equal(adopted.adopted, true);
-      assert.equal(adopted.reservation.claim.state, "launched");
+      }), /launch outcome is indeterminate/u);
       assert.equal(launches, 1);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
@@ -571,6 +706,113 @@ describe("checked checkpoint child start", () => {
     }
   });
 
+  it("final closure rejects absent, open, closed-unmerged, wrong-head, wrong-repository, and nonancestor PR authority", async () => {
+    for (const [label, observation] of [
+      ["absent", () => ({ disposition: "absent", reason: null, pull_request: null })],
+      ["open", (route) => ({ ...route.observation, disposition: "open" })],
+      ["closed", (route) => ({ ...route.observation, disposition: "closed" })],
+      ["wrong-head", (route) => ({ ...route.observation, pull_request: { ...route.observation.pull_request, head_sha: fixtureCommit(route.fixture) } })],
+      ["wrong-repository", (route) => ({ ...route.observation, pull_request: { ...route.observation.pull_request, repository: "other/repo" } })],
+      ["nonancestor", (route) => ({ ...route.observation, pull_request: { ...route.observation.pull_request, merge_commit_sha: route.fixture.baseCommit } })],
+    ]) {
+      const route = await createCompletedFinalRoute(`checkpoint-final-reject-${label}`);
+      try {
+        await assert.rejects(closeFactoryCheckpointRoute(route.fixture.parentRunId, {
+          cwd: route.fixture.repo,
+          observePredecessorPrOperation: async () => observation(route),
+        }), /merged pull request|head_sha|repository|contain the exact child head|ancestor/u, label);
+        assert.equal(checkpointFinalClosureRef(route.fixture), null, label);
+      } finally {
+        rmSync(route.fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("create-publishes and exactly replays final checkpoint closure", async () => {
+    const route = await createCompletedFinalRoute("checkpoint-final-success");
+    try {
+      const options = { cwd: route.fixture.repo, observePredecessorPrOperation: async () => route.observation };
+      const first = await closeFactoryCheckpointRoute(route.fixture.parentRunId, options);
+      const replay = await closeFactoryCheckpointRoute(route.fixture.parentRunId, options);
+      assert.equal(first.status, "closed");
+      assert.equal(first.replayed, false);
+      assert.equal(first.closure.kind, "delivery-checkpoint-final-closure");
+      assert.equal(first.closure.final_checkpoint_id, "checkpoint-002");
+      assert.equal(first.closure.child_run_id, route.final.binding.child_run_id);
+      assert.equal(first.closure.merge_commit, route.mergeCommit);
+      assert.equal(replay.replayed, true);
+      assert.deepEqual(replay.closure, first.closure);
+    } finally {
+      rmSync(route.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("wires factory checkpoint-close to the create-only final closure transition", async () => {
+    const route = await createCompletedFinalRoute("checkpoint-final-cli");
+    const output = [];
+    const originalLog = console.log;
+    let publications = 0;
+    try {
+      console.log = (...values) => output.push(values.join(" "));
+      await runCliCommand(["factory", "checkpoint-close", route.fixture.parentRunId, "--json"], {
+        factoryOptions: {
+          cwd: route.fixture.repo,
+          observePredecessorPrOperation: async () => route.observation,
+          beforeCheckpointFinalClosureCommit: () => { publications += 1; },
+        },
+      });
+      const result = JSON.parse(output.at(-1));
+      assert.equal(publications, 1);
+      assert.equal(result.status, "closed");
+      assert.equal(result.replayed, false);
+      assert.equal(result.closure.child_run_id, route.final.binding.child_run_id);
+      assert.equal(result.ref, "[redacted]");
+      assert.match(checkpointFinalClosureRef(route.fixture), /^[0-9a-f]{40}$/u);
+    } finally {
+      console.log = originalLog;
+      rmSync(route.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes final closure contenders to one exact terminal record", async () => {
+    const route = await createCompletedFinalRoute("checkpoint-final-contention");
+    try {
+      const options = { cwd: route.fixture.repo, observePredecessorPrOperation: async () => route.observation };
+      const results = await Promise.all([
+        closeFactoryCheckpointRoute(route.fixture.parentRunId, options),
+        closeFactoryCheckpointRoute(route.fixture.parentRunId, options),
+      ]);
+      assert.deepEqual(results.map((result) => result.replayed).sort(), [false, true]);
+      assert.equal(results[0].ref, results[1].ref);
+      assert.deepEqual(results[0].closure, results[1].closure);
+    } finally {
+      rmSync(route.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects remote-main and child-branch races before final closure publication", async () => {
+    for (const race of ["remote", "branch"]) {
+      const route = await createCompletedFinalRoute(`checkpoint-final-race-${race}`);
+      try {
+        await assert.rejects(closeFactoryCheckpointRoute(route.fixture.parentRunId, {
+          cwd: route.fixture.repo,
+          observePredecessorPrOperation: async () => route.observation,
+          beforeCheckpointFinalClosureCommit: () => {
+            if (race === "remote") advanceRemoteMain(route.fixture, "final-close-race.txt");
+            else {
+              const ref = `refs/heads/${route.final.binding.child_run_id}`;
+              const head = git(route.fixture.repo, ["rev-parse", ref]);
+              git(route.fixture.repo, ["update-ref", ref, route.final.binding.base_commit, head]);
+            }
+          },
+        }), /remote main changed|final child manifest changed|transaction|concurrently|branch/u, race);
+        assert.equal(checkpointFinalClosureRef(route.fixture), null, race);
+      } finally {
+        rmSync(route.fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("rejects reviewed source or manifest drift inside the reservation interval", async () => {
     const fixture = createFixture("checkpoint-parent-race");
     try {
@@ -643,7 +885,7 @@ function publishCompletedChild(fixture, binding, headSha, { completePipeline = t
   const runDir = join(fixture.repo, ".opencode", "factory", binding.child_run_id);
   mkdirSync(runDir, { recursive: true });
   if (completePipeline) {
-    const worktree = join(fixture.repo, ".opencode", "worktrees", binding.child_run_id);
+    const worktree = checkpointReservationClaim(fixture, binding).worktree;
     if (!existsSync(worktree)) {
       mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
       git(fixture.repo, ["worktree", "add", worktree, binding.child_run_id]);
@@ -708,7 +950,7 @@ function publishCompletedChild(fixture, binding, headSha, { completePipeline = t
   }
   writeJson(join(runDir, "run.json"), {
     schema_version: 1, run_id: binding.child_run_id, status: "completed", created_at: new Date(Date.now() + 1000).toISOString(), branch: binding.child_run_id,
-    worktree: join(fixture.repo, ".opencode", "worktrees", binding.child_run_id), base_ref: binding.base_ref, base_commit: binding.base_commit, gates: {}, checkpoint: binding,
+    worktree: checkpointReservationClaim(fixture, binding).worktree, base_ref: binding.base_ref, base_commit: binding.base_commit, gates: {}, checkpoint: binding,
     pr_url: "https://github.com/acme/repo/pull/1",
     terminal_result: {
       status: "completed", run_id: binding.child_run_id, reason: null, summary: "PR created.", artifacts: {},
@@ -754,6 +996,38 @@ async function createCompletedPredecessor(fixture, childRunId, { pushMain = true
   if (pushMain) git(fixture.repo, ["push", "origin", "main"]);
   publishCompletedChild(fixture, started.binding, childHead);
   return { binding: started.binding, childHead, mergeCommit };
+}
+
+async function createCompletedFinalRoute(label) {
+  const fixture = createFixture(label);
+  const predecessor = await createCompletedPredecessor(fixture, `${label}-one`);
+  const final = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-002", {
+    cwd: fixture.repo,
+    runId: `${label}-two`,
+    predecessorMergeCommit: predecessor.mergeCommit,
+    observePredecessorPrOperation: async () => canonicalMergedObservation(fixture, predecessor),
+    checkpointLaunchFn: (value) => value,
+  });
+  writeFileSync(join(final.child_worktree, `${label}.txt`), "final\n");
+  git(final.child_worktree, ["add", `${label}.txt`]);
+  git(final.child_worktree, ["commit", "-m", `final checkpoint ${label}`]);
+  const childHead = git(final.child_worktree, ["rev-parse", "HEAD"]);
+  git(fixture.repo, ["merge", "--no-ff", final.binding.child_run_id, "-m", `merge ${label}`]);
+  const mergeCommit = git(fixture.repo, ["rev-parse", "HEAD"]);
+  git(fixture.repo, ["push", "origin", "main"]);
+  publishCompletedChild(fixture, final.binding, childHead);
+  const observation = canonicalMergedObservation(fixture, { binding: final.binding, mergeCommit });
+  return { fixture, predecessor, final, childHead, mergeCommit, observation };
+}
+
+function checkpointFinalClosureRef(fixture) {
+  const ref = `refs/opencode/checkpoint-final-closures/${createHash("sha256").update(fixture.parentRunId, "utf8").digest("hex")}`;
+  const result = gitResult(fixture.repo, ["rev-parse", "--verify", ref]);
+  return result.ok ? result.stdout.trim() : null;
+}
+
+function fixtureCommit(fixture) {
+  return git(fixture.repo, ["rev-parse", "refs/heads/main^1"]);
 }
 
 function canonicalMergedObservation(fixture, predecessor, mergeCommitSha = predecessor.mergeCommit) {
@@ -853,6 +1127,12 @@ function rewriteCheckpointReservation(fixture, binding, state, overrides = {}) {
   const nextOid = git(fixture.repo, ["hash-object", "-w", "--stdin"], { input: `${JSON.stringify(claim)}\n` });
   git(fixture.repo, ["update-ref", childRef, nextOid, oid]);
   git(fixture.repo, ["update-ref", routeRef, nextOid, oid]);
+}
+
+function checkpointReservationClaim(fixture, binding) {
+  const { childRef } = checkpointReservationRefs(fixture, binding);
+  const oid = git(fixture.repo, ["rev-parse", "--verify", childRef]);
+  return JSON.parse(git(fixture.repo, ["cat-file", "blob", oid]));
 }
 
 function advanceRemoteMain(fixture, filename, { diverge = false } = {}) {

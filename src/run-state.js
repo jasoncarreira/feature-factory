@@ -11,7 +11,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateCheckpointChildBinding, validateCheckpointReservationClaim, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
@@ -19,7 +19,7 @@ import { isPrivilegedControlPlanePath, privilegedControlPlanePathReason } from "
 import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
 import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
 import { validateAdmissionExtensionResult, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
-import { buildCheckpointRoutingManifest, checkpointRoutingArtifact, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
+import { buildCheckpointRoutingManifest, checkpointRoutingArtifact, CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
 import { parseVerificationCommand } from "./delivery-envelope/verification-command.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -1517,6 +1517,7 @@ export async function markCheckedVerificationArtifactExecutionUnknown(runDir, ex
 
 function observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options) {
   if (run.status !== "running") throw new Error("checked verification artifact execution requires a running run");
+  assertCheckpointLocalPublishedAuthority(runDir, run, options);
   const slice = (run.slices || []).find((candidate) => candidate?.id === sliceId);
   if (!slice || slice.status !== "running" || !Number.isInteger(slice.attempts) || slice.attempts < 1) {
     throw new Error(`checked verification artifact execution requires running slice '${sliceId}' at a positive attempt`);
@@ -2450,7 +2451,7 @@ function assertDraftSpecReuseAttempt(run, step, priorStep) {
 
 function assertTestVerifierIntegrationGate(run, step, priorStep) {
   if (step?.agent !== "test-verifier") return;
-  if ((run.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.status === "accepted") {
+  if ((run.continuation?.schema_version === 2 || run.checkpoint?.kind === "delivery-checkpoint-child" || integrationConflictSlices(run).length > 0) && step.status === "accepted") {
     if (priorStep?.status !== "running" || !Number.isInteger(step.attempts) || step.attempts < 1 || step.attempts !== priorStep.attempts) {
       throw new Error("schema-v2 test-verifier acceptance must transition from running at the same positive attempt");
     }
@@ -2491,7 +2492,7 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
   if (!step) return null;
   delete step.acceptance;
   if (step.status !== "accepted") return null;
-  if ((run?.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.agent === "test-verifier") {
+  if ((run?.continuation?.schema_version === 2 || run?.checkpoint?.kind === "delivery-checkpoint-child" || integrationConflictSlices(run).length > 0) && step.agent === "test-verifier") {
     step.acceptance = observeV2TestVerifierAuthority(runDir, run, step, options).acceptance;
     return null;
   }
@@ -4308,6 +4309,59 @@ function assertPrCreatedSliceState(runDir, run) {
   });
 }
 
+export function assertCheckpointLocalPublishedAuthority(runDir, run, options = {}, expected = null) {
+  if (run?.checkpoint?.kind !== "delivery-checkpoint-child") return null;
+  const binding = validateCheckpointChildBinding(run.checkpoint, { runId: run.run_id });
+  const repository = resolve(runDir, "../../..");
+  if (resolve(runDir) !== resolve(directFactoryRoot(repository), binding.child_run_id)) throw new Error("checkpoint child run directory differs from its reserved identity");
+  if (run.base_ref !== binding.base_ref || run.base_commit !== binding.base_commit || run.branch !== binding.child_run_id || run.continuation != null) {
+    throw new Error("checkpoint child base/branch/continuation identity is stale");
+  }
+  const childRef = `refs/opencode/checkpoint-targets/${createHash("sha256").update(binding.child_run_id, "utf8").digest("hex")}`;
+  const routeRef = `refs/opencode/checkpoint-routes/${createHash("sha256").update(`${binding.parent_run_id}\0${binding.checkpoint_id}`, "utf8").digest("hex")}`;
+  const child = authorityGit(options, repository, ["rev-parse", "--verify", childRef]);
+  const route = authorityGit(options, repository, ["rev-parse", "--verify", routeRef]);
+  if (!child.ok || !route.ok || child.stdout.trim() !== route.stdout.trim()) throw new Error("checkpoint child reservation refs are missing or cross-bound");
+  const claimBlob = authorityGit(options, repository, ["cat-file", "blob", child.stdout.trim()]);
+  if (!claimBlob.ok) throw new Error("checkpoint child reservation claim is unreadable");
+  const claim = validateCheckpointReservationClaim(JSON.parse(claimBlob.stdout), { expectedBinding: binding });
+  if (!["launching", "launched"].includes(claim.state)) throw new Error("checkpoint child execution requires launching or launched reservation authority");
+  if (resolve(run.worktree || "") !== resolve(claim.worktree)) throw new Error(`checkpoint child run.worktree differs from its exact reservation worktree: ${resolve(run.worktree || "")} != ${resolve(claim.worktree)}`);
+  const branch = authorityGit(options, repository, ["rev-parse", "--verify", `refs/heads/${binding.child_run_id}^{commit}`]);
+  const head = branch.ok ? branch.stdout.trim() : "";
+  if (!/^[0-9a-f]{40}$/u.test(head) || !authorityGit(options, repository, ["merge-base", "--is-ancestor", binding.base_commit, head]).ok) {
+    throw new Error("checkpoint child branch no longer descends from its exact reserved base");
+  }
+  const worktree = checkWorktreeIdentity(repository, claim.worktree, { branch: binding.child_run_id, head }, options.gitOptions || {});
+  if (!worktree.ok) throw new Error(`checkpoint child registered reservation worktree is stale: ${worktree.reason}`);
+  const worktreeHead = authorityGit(options, claim.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!worktreeHead.ok || worktreeHead.stdout.trim() !== head) throw new Error("checkpoint child worktree HEAD differs from its exact branch");
+  const parentPath = resolve(repository, binding.parent_run_ref);
+  const manifestPath = resolve(dirname(parentPath), binding.manifest_ref);
+  assertNoSymlinkPath(repository, parentPath, "checkpoint parent run");
+  assertNoSymlinkPath(repository, manifestPath, "checkpoint routing manifest");
+  if (hashFile(parentPath) !== binding.parent_run_hash || hashFile(manifestPath) !== binding.manifest_hash) throw new Error("checkpoint child parent/manifest binding is stale");
+  const manifest = parseJsonObjectFile(manifestPath, "checkpoint routing manifest");
+  if (manifest.kind !== CHECKPOINT_ROUTING_KIND) throw new Error("checkpoint routing manifest discriminator is stale");
+  const selected = manifest.checkpoints?.find((candidate) => candidate?.id === binding.checkpoint_id && candidate.ordinal === binding.checkpoint_ordinal);
+  const commands = selected?.request?.integration_test_verifier?.required_commands;
+  if (!selected || !Array.isArray(commands) || commands.length === 0) throw new Error("checkpoint selected manifest request has no integration test authority");
+  const observed = {
+    binding_hash: hashValue(binding),
+    reservation_oid: child.stdout.trim(),
+    reservation: cloneJson(claim),
+    parent_hash: binding.parent_run_hash,
+    manifest_hash: binding.manifest_hash,
+    request: cloneJson(selected.request),
+    commands: cloneJson(commands),
+    branch: binding.child_run_id,
+    worktree: worktree.worktree,
+    head,
+  };
+  if (expected && !sameJson(observed, expected)) throw new Error("checkpoint child local authority changed before publication");
+  return observed;
+}
+
 export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, policy = {}) {
   const continuationEligible = run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation";
   const checkpointEligible = run?.checkpoint?.schema_version === 1 && run.checkpoint.kind === "delivery-checkpoint-child";
@@ -4323,6 +4377,7 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
   if (run.status !== "running" && !(policy.allowTerminalCompleted === true && run.status === "completed")) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
   if (policy.skipLocalAuthority !== true) {
     if (continuationEligible) assertV2LocalPublishedAuthority(runDir, run, options);
+    if (checkpointEligible) assertCheckpointLocalPublishedAuthority(runDir, run, options);
     if (conflictEligible) assertSliceIntegrationConflictsCurrent(runDir, run, options);
   }
   const step = uniqueTestVerifierStep(run);
@@ -4351,7 +4406,9 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
     plan_ref: PLAN_SLICES_REF,
     plan_hash: decomposition.plan_hash,
     plan_bytes: decomposition.plan_bytes.toString("base64"),
-    commands: cloneJson(decomposition.plan.integration_gate.required_commands),
+    commands: checkpointEligible
+      ? assertCheckpointLocalPublishedAuthority(runDir, run, options).commands
+      : cloneJson(decomposition.plan.integration_gate.required_commands),
     decomposition_review_ref: decomposition.review_ref,
     decomposition_review_hash: decomposition.review_hash,
     branch: integration.branch,
@@ -4441,17 +4498,18 @@ function testExecutionError(code, message) {
 }
 
 function assertV2FreshDownstreamAuthority(runDir, run, sink, expected = null) {
-  if (run.continuation?.schema_version !== 2) return null;
+  if (run.continuation?.schema_version !== 2 && run.checkpoint?.kind !== "delivery-checkpoint-child") return null;
+  const route = run.checkpoint?.kind === "delivery-checkpoint-child" ? "checkpoint" : "schema-v2";
   const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
-  if (incomplete.length) throw new Error(`schema-v2 downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
+  if (incomplete.length) throw new Error(`${route} downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
   const step = (run.steps || []).find((candidate) => candidate?.agent === "test-verifier");
   if (!step || step.status !== "accepted" || !Number.isInteger(step.attempts) || step.attempts < 1 || !isRecord(step.acceptance)) {
-    throw new Error(`schema-v2 downstream authority requires fresh accepted test-verifier authority before ${sink}`);
+    throw new Error(`${route} downstream authority requires fresh accepted test-verifier authority before ${sink}`);
   }
   const authority = observeV2TestVerifierAuthority(runDir, run, step, { runDir });
-  if (!sameJson(step.acceptance, authority.acceptance)) throw new Error("schema-v2 test-verifier acceptance bytes or head are stale");
+  if (!sameJson(step.acceptance, authority.acceptance)) throw new Error(`${route} test-verifier acceptance bytes or head are stale`);
   const observed = { step: cloneJson(step), ...authority };
-  if (expected && !sameJson(observed, expected)) throw new Error(`schema-v2 downstream authority changed before ${sink} publication`);
+  if (expected && !sameJson(observed, expected)) throw new Error(`checked downstream authority changed before ${sink} publication`);
   return observed;
 }
 
@@ -4470,7 +4528,8 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
   if (step.evidence_ref !== checked.claim.receipt_ref || hashFile(evidence.path, { mode: "raw" }) !== checked.receipt_hash || !sameJson(evidenceValue, checked.receipt)) throw new Error("schema-v2 test-verifier evidence must be the exact completed checked receipt");
   if (checked.claim.status !== "pass" || evidenceValue.status !== "pass" || evidenceValue.review_ready !== true) throw new Error("schema-v2 test-verifier acceptance requires a completed passing checked receipt");
   const planAuthority = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
-  const expectedCommands = planAuthority.plan.integration_gate.required_commands;
+  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, options);
+  const expectedCommands = checkpointAuthority?.commands ?? planAuthority.plan.integration_gate.required_commands;
   if (evidenceValue.commands.length !== expectedCommands.length || evidenceValue.commands.some((result, index) => result.program !== expectedCommands[index].program || !sameJson(result.args, expectedCommands[index].args) || result.status !== "pass")) throw new Error("schema-v2 test-verifier receipt commands must exactly pass every accepted plan command in order");
   if (evidenceValue.head_sha !== integration.head) throw new Error("schema-v2 test-verifier evidence head_sha must equal the current clean child branch/worktree HEAD");
   if (reviewValue.subject !== "test-verifier" || reviewValue.attempt !== step.attempts || String(reviewValue.verdict || "").toUpperCase() !== "APPROVE") {
@@ -4484,7 +4543,7 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
       review_ref: step.review_ref, review_hash: hashFile(review.path), reviewed_head_sha: integration.head,
     },
     evidence: evidenceValue,
-    plan: { ref: PLAN_SLICES_REF, hash: planAuthority.plan_hash, commands: cloneJson(planAuthority.plan.integration_gate.required_commands) },
+    plan: { ref: PLAN_SLICES_REF, hash: planAuthority.plan_hash, commands: cloneJson(expectedCommands) },
     review: reviewValue,
     integration: { branch: integration.branch, worktree: integration.worktree, head: integration.head, clean: true },
   };
@@ -4513,7 +4572,7 @@ export function assertCompletedCheckpointChildAuthority(runDir, run, options = {
 }
 
 function assertV2PrePrGateAuthority(runDir, run, sink, expected = null) {
-  if (run.continuation?.schema_version !== 2) return null;
+  if (run.continuation?.schema_version !== 2 && run.checkpoint?.kind !== "delivery-checkpoint-child") return null;
   const freshTestAuthority = assertV2FreshDownstreamAuthority(runDir, run, sink);
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
     throw new Error(`schema-v2 pre-PR gate requires fresh passing child panels before ${sink}`);

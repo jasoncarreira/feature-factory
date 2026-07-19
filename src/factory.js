@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
 import { assertCompletedCheckpointChildAuthority, assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, readSlicesSeedPlan, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
-import { parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildBinding, validateCheckpointReservationClaim, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildBinding, validateCheckpointFinalClosure, validateCheckpointReservationClaim, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
-import { createThreeRefsAtomicallyNoReplace, createTwoRefsAtomicallyNoReplace, git, repoRoot, updateTwoRefsAtomically, updateTwoRefsAtomicallyNoVerify } from "./git.js";
+import { createRefAtomicallyNoReplaceWithVerifications, createThreeRefsAtomicallyNoReplace, createTwoRefsAtomicallyNoReplace, git, repoRoot, updateTwoRefsAtomically, updateTwoRefsAtomicallyNoVerify, updateTwoRefsAtomicallyWithVerifications } from "./git.js";
 import { checkWorktreeIdentity, createOrRecoverWorktree, deriveExpectedWorktreePath, parseWorktreeListPorcelain } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
@@ -293,47 +293,52 @@ export async function startFactoryCheckpoint(parentRunId, checkpointId, opts = {
       }
       const existingChild = existingChildren[0] ?? null;
       const reservation = reserveCheckpointChild(repo, parent, canonicalBase, binding, opts, { existingChild });
+      const bootstrapRecovery = Boolean(existingChild && reservation.claim.state === "reserved" && isExactCheckpointBootstrap(existingChild.run, binding, reservation));
       const childWorktree = !existingChild && reservation.claim.state === "reserved"
         ? prepareCheckpointChildWorktree(repo, binding, reservation, opts)
-        : existingChild?.run?.worktree ?? null;
+        : reservation.claim.worktree;
+      if (!existingChild) publishCheckpointChildBootstrap(repo, binding, reservation, opts);
+      else if (bootstrapRecovery) assertCheckpointPublishedChild(repo, binding, reservation, opts, { requireBaseHead: true });
       return {
         binding, request: cloneJson(checkpoint.request), checkpoint, manifest, reservation, existing_child: existingChild,
-        canonical_base: checkpointBaseIdentity(canonicalBase), parent_base_commit: parent.base_commit, child_worktree: childWorktree,
+        canonical_base: checkpointBaseIdentity(canonicalBase), parent_base_commit: parent.base_commit, child_worktree: childWorktree, bootstrap_recovery: bootstrapRecovery,
       };
     });
   }, opts);
 
-  const payload = featureCommandPayload(`Start reviewed delivery checkpoint '${candidate.binding.checkpoint_id}' from parent '${parentRunId}'.`, { ...opts, requestedRunId: childRunId });
-  payload.checkpoint = candidate.binding;
-  payload.checkpoint_request = candidate.request;
-  const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
-  if (opts.model) commandArgs.push("--model", opts.model);
-  commandArgs.push(encodeFeatureCommandPayload(payload));
   if (candidate.reservation.claim.state === "unknown") throw new Error("checkpoint reservation outcome is unknown and requires operator reconciliation");
-  if (candidate.existing_child) {
-    if (!["launching", "launched"].includes(candidate.reservation.claim.state)) throw new Error("existing checkpoint child requires a matching pre-existing launching or launched reservation");
-    const reservation = candidate.reservation.claim.state === "launched" ? candidate.reservation : transitionCheckpointReservation(repo, candidate.reservation, "launched", opts);
-    return { repo, commandArgs, payload, ...candidate, reservation, replayed: true, adopted: true };
+  if (candidate.existing_child && !candidate.bootstrap_recovery) {
+    if (candidate.reservation.claim.state !== "launched") throw new Error("existing checkpoint child launch outcome is indeterminate and requires operator reconciliation");
+    const envelope = checkpointLaunchEnvelope(repo, parentRunId, childRunId, candidate, candidate.reservation, opts);
+    assertCheckpointPublishedChild(repo, candidate.binding, candidate.reservation, opts);
+    return { repo, ...envelope, ...candidate, reservation: candidate.reservation, replayed: true, adopted: true };
   }
   if (candidate.reservation.claim.state === "launched") {
-    return { repo, commandArgs, payload, ...candidate, replayed: true, adopted: false };
+    const envelope = checkpointLaunchEnvelope(repo, parentRunId, childRunId, candidate, candidate.reservation, opts);
+    assertCheckpointPublishedChild(repo, candidate.binding, candidate.reservation, opts);
+    return { repo, ...envelope, ...candidate, replayed: true, adopted: false };
   }
   if (candidate.reservation.claim.state === "launching") throw new Error("checkpoint launch outcome is indeterminate and requires operator reconciliation");
-  if (typeof opts.beforeCheckpointLaunch === "function") await opts.beforeCheckpointLaunch({ repo, commandArgs, payload, ...candidate });
+  const preview = checkpointLaunchEnvelope(repo, parentRunId, childRunId, candidate, candidate.reservation, opts);
+  if (typeof opts.beforeCheckpointLaunch === "function") await opts.beforeCheckpointLaunch({ repo, ...preview, ...candidate });
   const launching = await withCanonicalCheckpointBase(repo, { base_ref: candidate.binding.base_ref, base_commit: candidate.parent_base_commit }, opts, "pre-launch", (currentBase) => {
     assertSameCheckpointBase(currentBase, candidate.canonical_base);
-    return transitionCheckpointReservation(repo, candidate.reservation, "launching", opts, null, currentBase);
+    if (typeof opts.beforeCheckpointLaunchCas === "function") opts.beforeCheckpointLaunchCas({ repo, candidate, currentBase });
+    assertCheckpointPrelaunchWorktree(repo, candidate.binding, candidate.reservation);
+    return transitionCheckpointReservation(repo, candidate.reservation, "launching", opts, null, currentBase, { verifyBranchAtBase: true });
   });
+  const envelope = checkpointLaunchEnvelope(repo, parentRunId, childRunId, candidate, launching, opts);
   let result;
   try {
-    if (typeof opts.checkpointLaunchFn === "function") result = await opts.checkpointLaunchFn({ repo, commandArgs, payload, ...candidate, reservation: launching });
+    if (typeof opts.checkpointLaunchFn === "function") result = await opts.checkpointLaunchFn({ repo, ...envelope, ...candidate, reservation: launching });
     else {
       seedRepoSkill(repo);
       if (opts.detached) {
         const runDir = join(factoryRoot(repo), childRunId);
-        result = await startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: childRunId, runDir }), env: factoryLaunchEnv(opts) });
-      } else result = await runForegroundFactory(repo, commandArgs, { ...opts, env: factoryLaunchEnv(opts) });
+        result = await startDetached(repo, envelope.commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: childRunId, runDir }), env: factoryLaunchEnv(opts) });
+      } else result = await runForegroundFactory(repo, envelope.commandArgs, { ...opts, env: factoryLaunchEnv(opts) });
     }
+    assertCheckpointLaunchOutcome(repo, candidate.binding, launching, result, opts);
   } catch (error) {
     try { transitionCheckpointReservation(repo, launching, "unknown", opts, "launch-outcome-indeterminate"); }
     catch (transitionError) { throw new Error(`checkpoint launch and reservation reconciliation both failed: ${error.message}; ${transitionError.message}`); }
@@ -341,6 +346,132 @@ export async function startFactoryCheckpoint(parentRunId, checkpointId, opts = {
   }
   transitionCheckpointReservation(repo, launching, "launched", opts);
   return result;
+}
+
+export async function closeFactoryCheckpointRoute(parentRunId, opts = {}) {
+  const repo = repoRoot(opts.cwd || process.cwd());
+  const parentRunDir = resolve(directFactoryRoot(repo), parentRunId);
+  if (dirname(parentRunDir) !== directFactoryRoot(repo)) throw new Error("checkpoint final closure parent run id is invalid");
+  return withRunJsonLock(parentRunDir, async () => {
+    const parentPath = join(parentRunDir, "run.json");
+    const parent = readRunFile(parentPath);
+    if (parent.run_id !== parentRunId || parent.status !== "blocked" || parent.terminal_result?.reason !== CHECKPOINT_ROUTING_TERMINAL_REASON
+      || parent.pr_url != null || parent.terminal_result?.pr_url !== null) throw new Error("checkpoint final closure requires the exact blocked routing parent");
+    const manifestRef = parent.terminal_result.artifacts?.checkpoint_routing;
+    const manifestPath = resolve(parentRunDir, manifestRef || "invalid");
+    assertRegularFile(manifestPath, "checkpoint final closure routing manifest");
+    const manifestHash = sha256File(manifestPath);
+    if (manifestRef !== `artifacts/checkpoint-routing-${manifestHash.slice("sha256:".length)}.json`) throw new Error("checkpoint final closure manifest content address is stale");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const decomposition = observeAcceptedDecompositionAuthority(parentRunDir, parent, { ...opts, requireIntegrationGate: true, allowUnseededCheckpoint: true, requireApprovingReview: true });
+    validateCheckpointRoutingManifest(manifest, { plan: decomposition.plan, planHash: decomposition.plan_hash, admissionResult: decomposition.admission_extension, decompositionAuthority: decomposition });
+    const finalCheckpoint = manifest.checkpoints?.at(-1);
+    if (!finalCheckpoint || finalCheckpoint.ordinal !== manifest.checkpoints.length) throw new Error("checkpoint final closure manifest has no exact final checkpoint");
+    const candidates = observeCheckpointChildren(repo, parentRunId).filter((entry) => hasCheckpointChildBinding(parentRunId, finalCheckpoint, manifestRef, manifestHash, entry));
+    if (candidates.length !== 1) throw new Error("checkpoint final closure requires exactly one final checkpoint child");
+    return withCanonicalCheckpointBase(repo, parent, opts, "final-closure", async (canonicalBase) => {
+      let published;
+      await observeCompletedCheckpointChild(repo, parentRunId, candidates[0], canonicalBase, {
+        ...opts,
+        consumeCompletedCheckpoint: async (completed) => {
+          published = await publishCheckpointFinalClosure(repo, parent, parentPath, manifestRef, manifestHash, finalCheckpoint, canonicalBase, completed, opts);
+        },
+      });
+      return published;
+    });
+  }, opts);
+}
+
+async function publishCheckpointFinalClosure(repo, parent, parentPath, manifestRef, manifestHash, finalCheckpoint, canonicalBase, completed, opts) {
+  if (completed.run.continuation != null) throw new Error("checkpoint final closure forbids continuation state");
+  const terminal = completed.run.terminal_result;
+  const pr = completed.observation.pull_request;
+  const childRef = `refs/opencode/checkpoint-targets/${createHash("sha256").update(completed.binding.child_run_id, "utf8").digest("hex")}`;
+  const routeRef = `refs/opencode/checkpoint-routes/${createHash("sha256").update(`${parent.run_id}\0${completed.binding.checkpoint_id}`, "utf8").digest("hex")}`;
+  const reservation = git(repo, ["rev-parse", "--verify", childRef]);
+  if (!reservation.ok) throw new Error("checkpoint final closure launched reservation is missing");
+  const closureRef = `refs/opencode/checkpoint-final-closures/${createHash("sha256").update(parent.run_id, "utf8").digest("hex")}`;
+  const existing = readCheckpointFinalClosure(repo, closureRef);
+  const closure = validateCheckpointFinalClosure({
+    schema_version: 1,
+    kind: "delivery-checkpoint-final-closure",
+    parent_run_id: parent.run_id,
+    parent_run_hash: sha256File(parentPath),
+    manifest_ref: manifestRef,
+    manifest_hash: manifestHash,
+    final_checkpoint_id: finalCheckpoint.id,
+    final_checkpoint_ordinal: finalCheckpoint.ordinal,
+    child_run_id: completed.run.run_id,
+    child_run_hash: completed.run_hash,
+    reservation_oid: reservation.stdout.trim(),
+    pr_url: terminal.pr_url,
+    pr_number: terminal.pr_number,
+    pr_node_id: terminal.pr_node_id,
+    repository: terminal.repository,
+    operation_id: terminal.operation_id,
+    head_ref: terminal.head_ref,
+    head_sha: terminal.head_sha,
+    base_ref: terminal.base_ref,
+    base_sha: terminal.base_sha,
+    draft: terminal.draft,
+    merge_commit: completed.merge_commit,
+    remote_main_ref: canonicalBase.ref,
+    remote_main_commit: canonicalBase.commit,
+    closed_at: existing?.closed_at ?? timestamp(opts.now),
+  });
+  if (existing) {
+    if (hashValue(existing) !== hashValue(closure)) throw new Error("checkpoint final closure conflicts with existing terminal authority");
+    return { status: "closed", replayed: true, ref: closureRef, closure: existing };
+  }
+  if (typeof opts.beforeCheckpointFinalClosureCommit === "function") await opts.beforeCheckpointFinalClosureCommit({ closure: cloneJson(closure), ref: closureRef });
+  const advertised = git(repo, ["ls-remote", "--exit-code", "--refs", "origin", canonicalBase.ref]);
+  if (exactRemoteRefOid(advertised, canonicalBase.ref) !== canonicalBase.commit) throw new Error("canonical remote main changed before checkpoint final closure publication");
+  const currentRun = readRunFile(resolve(directFactoryRoot(repo), completed.run.run_id, "run.json"));
+  if (sha256File(resolve(directFactoryRoot(repo), completed.run.run_id, "run.json")) !== completed.run_hash || hashValue(currentRun) !== hashValue(completed.run)) {
+    throw new Error("checkpoint final child manifest changed before closure publication");
+  }
+  const observer = typeof opts.observePredecessorPrOperation === "function" ? opts.observePredecessorPrOperation : observePullRequestOperation;
+  const reobserved = await observer({
+    repositoryRoot: repo, cwd: repo, account: completed.run.github_account, repository: terminal.repository,
+    operation_id: terminal.operation_id, head_ref: terminal.head_ref, head_sha: terminal.head_sha,
+    base_ref: terminal.base_ref, base_sha: terminal.base_sha, draft: terminal.draft,
+  });
+  if (hashValue(reobserved) !== hashValue(completed.observation)) throw new Error("checkpoint final canonical GitHub observation changed before closure publication");
+  const bytes = canonicalJsonBytes(closure);
+  const written = git(repo, ["hash-object", "-w", "--stdin"], { input: bytes });
+  const oid = written.stdout.trim();
+  if (!written.ok || !FULL_COMMIT_PATTERN.test(oid)) throw new Error("checkpoint final closure blob could not be written");
+  const transaction = createRefAtomicallyNoReplaceWithVerifications(repo, [
+    { ref: canonicalBase.temporary_ref, oid: canonicalBase.commit },
+    { ref: childRef, oid: closure.reservation_oid },
+    { ref: routeRef, oid: closure.reservation_oid },
+    { ref: `refs/heads/${closure.child_run_id}`, oid: closure.head_sha },
+  ], { ref: closureRef, oid }, opts.finalClosureRefSpawnSync ? { spawnSync: opts.finalClosureRefSpawnSync } : {});
+  if (!transaction.ok) {
+    const winner = readCheckpointFinalClosure(repo, closureRef);
+    if (!winner || hashValue(winner) !== hashValue(closure)) throw new Error("checkpoint final closure changed concurrently before create-only publication");
+    return { status: "closed", replayed: true, ref: closureRef, closure: winner };
+  }
+  return { status: "closed", replayed: false, ref: closureRef, closure };
+}
+
+function readCheckpointFinalClosure(repo, ref) {
+  const oid = git(repo, ["rev-parse", "--verify", ref]);
+  if (!oid.ok) return null;
+  const blob = git(repo, ["cat-file", "blob", oid.stdout.trim()]);
+  if (!blob.ok) throw new Error("checkpoint final closure ref is unreadable");
+  return validateCheckpointFinalClosure(JSON.parse(blob.stdout));
+}
+
+function checkpointLaunchEnvelope(repo, parentRunId, childRunId, candidate, reservation, opts) {
+  const payload = featureCommandPayload(`Start reviewed delivery checkpoint '${candidate.binding.checkpoint_id}' from parent '${parentRunId}'.`, { ...opts, requestedRunId: childRunId });
+  payload.checkpoint = candidate.binding;
+  payload.checkpoint_reservation = reservation.claim;
+  payload.checkpoint_request = candidate.request;
+  const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
+  if (opts.model) commandArgs.push("--model", opts.model);
+  commandArgs.push(encodeFeatureCommandPayload(payload));
+  return { payload, commandArgs };
 }
 
 async function withCanonicalCheckpointBase(repo, parent, opts, phase, consume) {
@@ -436,10 +567,13 @@ function hasCheckpointChildBinding(parentRunId, checkpoint, manifestRef, manifes
 }
 
 async function observeCompletedCheckpointChild(repo, parentRunId, entry, canonicalBase, opts) {
-  const { run, binding, runPath } = entry;
-  if (run.continuation != null) throw new Error(`checkpoint predecessor '${run.run_id}' must complete its own full normal pipeline`);
-  observeLaunchedCheckpointReservation(repo, parentRunId, binding);
+  const { binding, runPath } = entry;
   const runDir = dirname(runPath);
+  return withRunJsonLock(runDir, async () => {
+  const run = readRunFile(runPath);
+  const currentBinding = validateCheckpointChildBinding(run.checkpoint, { runId: run.run_id, expectedBinding: binding });
+  if (run.continuation != null) throw new Error(`checkpoint predecessor '${run.run_id}' must complete its own full normal pipeline`);
+  observeLaunchedCheckpointReservation(repo, parentRunId, currentBinding);
   assertCompletedCheckpointChildAuthority(runDir, run, { ...opts, runDir });
   const terminal = run.terminal_result;
   if (!stringValue(terminal?.pr_url) || !FULL_COMMIT_PATTERN.test(terminal?.head_sha ?? "") || !FULL_COMMIT_PATTERN.test(terminal?.base_sha ?? "") || !stringValue(terminal?.operation_id)) {
@@ -470,13 +604,19 @@ async function observeCompletedCheckpointChild(repo, parentRunId, entry, canonic
     || !git(repo, ["merge-base", "--is-ancestor", mergeCommit, canonicalBase.commit]).ok) {
     throw new Error("canonical predecessor PR merge commit must contain the exact child head and be an ancestor of canonical remote main");
   }
-  return { run_id: run.run_id, checkpoint_id: binding.checkpoint_id, merge_commit: mergeCommit, observation };
+  const reobserved = readRunFile(runPath);
+  if (hashValue(reobserved) !== hashValue(run)) throw new Error(`checkpoint predecessor '${run.run_id}' changed while its completion authority was consumed`);
+  const completed = { run_id: run.run_id, checkpoint_id: currentBinding.checkpoint_id, merge_commit: mergeCommit, observation, run, binding: currentBinding, run_hash: sha256File(runPath) };
+  if (typeof opts.consumeCompletedCheckpoint === "function") await opts.consumeCompletedCheckpoint(completed);
+  return completed;
+  }, opts);
 }
 
 function reserveCheckpointChild(repo, parent, base, binding, opts, { existingChild = null } = {}) {
   const childRef = `refs/opencode/checkpoint-targets/${createHash("sha256").update(binding.child_run_id, "utf8").digest("hex")}`;
   const routeRef = `refs/opencode/checkpoint-routes/${createHash("sha256").update(`${parent.run_id}\0${binding.checkpoint_id}`, "utf8").digest("hex")}`;
   const branchRef = `refs/heads/${binding.child_run_id}`;
+  const expectedWorktree = deriveExpectedWorktreePath(repo, binding.child_run_id);
   const existingChildRef = git(repo, ["rev-parse", "--verify", childRef]);
   const existingRouteRef = git(repo, ["rev-parse", "--verify", routeRef]);
   if (existingChildRef.ok || existingRouteRef.ok) {
@@ -485,12 +625,13 @@ function reserveCheckpointChild(repo, parent, base, binding, opts, { existingChi
     const observed = readCheckpointReservationClaim(repo, existingOid, binding);
     if (hashValue(observed.binding) !== hashValue(binding)) throw new Error("checkpoint child id or checkpoint route is already reserved by a conflicting binding");
     assertCheckpointChildBranch(repo, branchRef, binding.base_commit, observed.state);
-    if (existingChild) assertReservationPredatesExistingChild(observed, existingChild.run);
+    if (resolve(observed.worktree) !== resolve(existingChild?.run?.worktree || observed.worktree)) throw new Error("checkpoint child run worktree differs from its exact reservation worktree");
+    if (existingChild && observed.state !== "reserved") assertReservationPredatesExistingChild(observed, existingChild.run);
     return { childRef, routeRef, branchRef, oid: existingOid, claim: observed, base: checkpointBaseIdentity(base) };
   }
   if (existingChild) throw new Error("existing checkpoint child requires a matching pre-existing reservation; a fresh reservation cannot be created around it");
   assertStartRunIdAvailable(repo, binding.child_run_id);
-  const claim = checkpointReservationClaim(binding, "reserved", opts);
+  const claim = checkpointReservationClaim(binding, "reserved", opts, null, null, expectedWorktree);
   const bytes = canonicalJsonBytes(claim);
   const written = git(repo, ["hash-object", "-w", "--stdin"], { input: bytes });
   const oid = written.stdout.trim();
@@ -519,7 +660,7 @@ function assertCheckpointChildBranch(repo, branchRef, baseCommit, reservationSta
 }
 
 function prepareCheckpointChildWorktree(repo, binding, reservation, opts) {
-  const worktree = deriveExpectedWorktreePath(repo, binding.child_run_id);
+  const worktree = reservation.claim.worktree;
   const prepared = createOrRecoverWorktree(repo, worktree, {
     branch: binding.child_run_id,
     head: binding.base_commit,
@@ -533,6 +674,98 @@ function prepareCheckpointChildWorktree(repo, binding, reservation, opts) {
   const head = git(prepared.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
   if (!head.ok || head.stdout.trim() !== binding.base_commit) throw new Error("checkpoint child worktree HEAD must equal the exact fetched base commit");
   return identity.worktree;
+}
+
+function checkpointBootstrapRun(binding, reservation, opts = {}) {
+  const now = timestamp(opts.now);
+  return validateRun({
+    schema_version: 1,
+    run_id: binding.child_run_id,
+    status: "running",
+    created_at: now,
+    updated_at: now,
+    base_ref: binding.base_ref,
+    base_commit: binding.base_commit,
+    branch: binding.child_run_id,
+    worktree: reservation.claim.worktree,
+    checkpoint: cloneJson(binding),
+    gates: {},
+    slices: [],
+    steps: [],
+    pr_url: null,
+  });
+}
+
+function publishCheckpointChildBootstrap(repo, binding, reservation, opts = {}) {
+  const runDir = resolve(directFactoryRoot(repo), binding.child_run_id);
+  if (dirname(runDir) !== directFactoryRoot(repo)) throw new Error("checkpoint child run directory is invalid");
+  if (!existsSync(runDir)) mkdirSync(runDir, { mode: 0o700 });
+  const entry = lstatSync(runDir);
+  if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error("checkpoint child run directory is unsafe");
+  const runPath = join(runDir, "run.json");
+  const bootstrap = checkpointBootstrapRun(binding, reservation, opts);
+  try {
+    writeFileSync(runPath, `${JSON.stringify(bootstrap, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = readRunFile(runPath);
+    if (!isExactCheckpointBootstrap(existing, binding, reservation)) throw new Error("checkpoint child bootstrap conflicts with existing run state");
+  }
+  return assertCheckpointPublishedChild(repo, binding, reservation, opts, { requireBaseHead: true });
+}
+
+function isExactCheckpointBootstrap(run, binding, reservation) {
+  if (!run || run.status !== "running" || run.run_id !== binding.child_run_id || run.branch !== binding.child_run_id
+    || resolve(run.worktree || "") !== resolve(reservation.claim.worktree) || run.base_ref !== binding.base_ref || run.base_commit !== binding.base_commit
+    || hashValue(run.checkpoint) !== hashValue(binding) || run.continuation != null || run.pr_url !== null
+    || !Array.isArray(run.slices) || run.slices.length !== 0 || !Array.isArray(run.steps) || run.steps.length !== 0
+    || !run.gates || Object.keys(run.gates).length !== 0) return false;
+  const allowed = new Set(["schema_version", "run_id", "status", "created_at", "updated_at", "base_ref", "base_commit", "branch", "worktree", "checkpoint", "gates", "slices", "steps", "pr_url"]);
+  return Object.keys(run).every((key) => allowed.has(key));
+}
+
+function assertCheckpointPublishedChild(repo, binding, reservation, opts = {}, policy = {}) {
+  const runDir = resolve(directFactoryRoot(repo), binding.child_run_id);
+  const runPath = join(runDir, "run.json");
+  assertRegularFile(runPath, "checkpoint child run manifest");
+  const run = readRunFile(runPath);
+  if (run.run_id !== binding.child_run_id || run.branch !== binding.child_run_id || run.base_ref !== binding.base_ref
+    || run.base_commit !== binding.base_commit || resolve(run.worktree || "") !== resolve(reservation.claim.worktree)
+    || hashValue(run.checkpoint) !== hashValue(binding) || run.continuation != null) {
+    throw new Error("checkpoint child manifest identity differs from its exact reservation");
+  }
+  const branch = git(repo, ["rev-parse", "--verify", `refs/heads/${binding.child_run_id}^{commit}`]);
+  const head = branch.ok ? branch.stdout.trim() : "";
+  if (!FULL_COMMIT_PATTERN.test(head) || !git(repo, ["merge-base", "--is-ancestor", binding.base_commit, head]).ok) {
+    throw new Error("checkpoint child branch no longer descends from its reserved base");
+  }
+  if (policy.requireBaseHead === true && head !== binding.base_commit) throw new Error("checkpoint prelaunch branch must remain at its reserved base");
+  const worktree = checkWorktreeIdentity(repo, reservation.claim.worktree, { branch: binding.child_run_id, head });
+  if (!worktree.ok) throw new Error(`checkpoint child registered worktree identity is invalid: ${worktree.reason}`);
+  const worktreeHead = git(reservation.claim.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!worktreeHead.ok || worktreeHead.stdout.trim() !== head) throw new Error("checkpoint child worktree HEAD differs from its branch");
+  if (policy.requireClean === true) {
+    const status = git(reservation.claim.worktree, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    if (!status.ok || status.stdout !== "") throw new Error("checkpoint child worktree must be clean before launch");
+  }
+  return { run, head, worktree: worktree.worktree };
+}
+
+function assertCheckpointPrelaunchWorktree(repo, binding, reservation) {
+  return assertCheckpointPublishedChild(repo, binding, reservation, {}, { requireBaseHead: true, requireClean: true });
+}
+
+function assertCheckpointLaunchOutcome(repo, binding, reservation, result, opts = {}) {
+  const published = assertCheckpointPublishedChild(repo, binding, reservation, opts);
+  if (typeof opts.checkpointLaunchFn === "function") return published;
+  if (opts.detached) {
+    if (result?.status !== "started" || result.run_id !== binding.child_run_id || !Number.isInteger(result.pid) || result.pid <= 0) {
+      throw new Error("checkpoint detached launch returned no owned process outcome");
+    }
+    const evidence = inspectProcessEvidence(resolve(directFactoryRoot(repo), binding.child_run_id), { runId: binding.child_run_id, inspectorFn: opts.inspectorFn || opts.processInspectorFn });
+    if (!evidence?.ok) throw new Error("checkpoint detached launch has no exact owned process evidence");
+  }
+  return published;
 }
 
 function assertReservationPredatesExistingChild(claim, run) {
@@ -556,10 +789,10 @@ function observeLaunchedCheckpointReservation(repo, parentRunId, binding) {
   return claim;
 }
 
-function checkpointReservationClaim(binding, state, opts, prior = null, reason = null) {
+function checkpointReservationClaim(binding, state, opts, prior = null, reason = null, worktree = null) {
   const now = timestamp(opts.now);
   const common = prior ? { ...cloneJson(prior), state } : {
-    schema_version: 1, kind: "delivery-checkpoint-child-reservation", state, nonce: opts.checkpointReservationNonce || randomUUID(), binding: cloneJson(binding), reserved_at: now,
+    schema_version: 1, kind: "delivery-checkpoint-child-reservation", state, nonce: opts.checkpointReservationNonce || randomUUID(), binding: cloneJson(binding), worktree: resolve(worktree), reserved_at: now,
   };
   for (const key of ["launching_at", "launched_at", "failed_at", "reason"]) delete common[key];
   if (state === "launching") common.launching_at = now;
@@ -577,7 +810,7 @@ function readCheckpointReservationClaim(repo, oid, expectedBinding = null) {
   return validateCheckpointReservationClaim(value, expectedBinding ? { expectedBinding } : {});
 }
 
-function transitionCheckpointReservation(repo, reservation, state, opts, reason = null, verifiedBase = null) {
+function transitionCheckpointReservation(repo, reservation, state, opts, reason = null, verifiedBase = null, policy = {}) {
   const currentChild = git(repo, ["rev-parse", "--verify", reservation.childRef]);
   const currentRoute = git(repo, ["rev-parse", "--verify", reservation.routeRef]);
   if (!currentChild.ok || !currentRoute.ok || currentChild.stdout.trim() !== reservation.oid || currentRoute.stdout.trim() !== reservation.oid) {
@@ -588,8 +821,13 @@ function transitionCheckpointReservation(repo, reservation, state, opts, reason 
   const oid = written.stdout.trim();
   if (!written.ok || !FULL_COMMIT_PATTERN.test(oid)) throw new Error("checkpoint reservation transition blob could not be written");
   const updates = [{ ref: reservation.childRef, oid, oldOid: reservation.oid }, { ref: reservation.routeRef, oid, oldOid: reservation.oid }];
-  const transaction = verifiedBase
-    ? updateTwoRefsAtomically(repo, { ref: verifiedBase.temporary_ref, oid: verifiedBase.commit }, updates[0], updates[1], opts.refTransactionSpawnSync ? { spawnSync: opts.refTransactionSpawnSync } : {})
+  const transaction = verifiedBase && policy.verifyBranchAtBase === true
+    ? updateTwoRefsAtomicallyWithVerifications(repo, [
+        { ref: verifiedBase.temporary_ref, oid: verifiedBase.commit },
+        { ref: reservation.branchRef, oid: reservation.claim.binding.base_commit },
+      ], updates[0], updates[1], opts.refTransactionSpawnSync ? { spawnSync: opts.refTransactionSpawnSync } : {})
+    : verifiedBase
+      ? updateTwoRefsAtomically(repo, { ref: verifiedBase.temporary_ref, oid: verifiedBase.commit }, updates[0], updates[1], opts.refTransactionSpawnSync ? { spawnSync: opts.refTransactionSpawnSync } : {})
     : updateTwoRefsAtomicallyNoVerify(repo, updates[0], updates[1], opts.refTransactionSpawnSync ? { spawnSync: opts.refTransactionSpawnSync } : {});
   if (!transaction.ok) throw new Error("checkpoint reservation changed concurrently before state transition");
   return { ...reservation, oid, claim };
@@ -1078,6 +1316,7 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 export function continueFactory(parentRunId, opts = {}) {
   assertPostPrCliOptions(opts, { command: "factory continue" });
   const repo = repoRoot(opts.cwd || process.cwd());
+  assertNotCheckpointRoutingParent(repo, parentRunId);
   const carryForwardConfig = opts.carryForward === true ? resolveCarryForwardConfiguration(repo, opts) : null;
   const allocationReplay = opts.carryForward === true && !opts.dryRun;
   const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo, carryForwardConfig, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
@@ -1127,6 +1366,18 @@ export function continueFactory(parentRunId, opts = {}) {
   commandArgs.push(encodeFeatureCommandPayload(payload));
   if (opts.detached) return startDetached(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: continuation.target.run_id, runDir: join(factoryRoot(repo), continuation.target.run_id) }), env: launchEnv });
   return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
+}
+
+function assertNotCheckpointRoutingParent(repo, parentRunId) {
+  const runDir = resolve(directFactoryRoot(repo), parentRunId);
+  if (dirname(runDir) !== directFactoryRoot(repo)) throw new Error("continuation parent run id is invalid");
+  const runPath = join(runDir, "run.json");
+  if (!existsSync(runPath)) return;
+  const parent = readRunFile(runPath);
+  if (parent.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON
+    || stringValue(parent.terminal_result?.artifacts?.checkpoint_routing)) {
+    throw new Error("checkpoint-routing parents are excluded from every ordinary continuation route; use factory checkpoint-start");
+  }
 }
 
 export async function resumeFactory(runId, opts = {}) {
@@ -5023,7 +5274,11 @@ function buildResumePayload(run, opts) {
       ...(run.post_pr?.policy ? { post_pr_policy: cloneJson(run.post_pr.policy) } : {}),
     },
     steering,
-    ...(run.checkpoint ? { checkpoint: cloneJson(run.checkpoint), checkpoint_request: checkpointRequestForRun(opts.repo, run.checkpoint) } : {}),
+    ...(run.checkpoint ? {
+      checkpoint: cloneJson(run.checkpoint),
+      checkpoint_reservation: checkpointReservationForRun(opts.repo, run.checkpoint),
+      checkpoint_request: checkpointRequestForRun(opts.repo, run.checkpoint),
+    } : {}),
   };
 }
 
@@ -5033,6 +5288,13 @@ function checkpointRequestForRun(repo, binding) {
   const checkpoint = manifest.checkpoints?.find((candidate) => candidate?.id === binding.checkpoint_id);
   if (!checkpoint || checkpoint.ordinal !== binding.checkpoint_ordinal) throw new Error("checkpoint resume request binding is stale");
   return cloneJson(checkpoint.request);
+}
+
+function checkpointReservationForRun(repo, binding) {
+  const childRef = `refs/opencode/checkpoint-targets/${createHash("sha256").update(binding.child_run_id, "utf8").digest("hex")}`;
+  const oid = git(repo, ["rev-parse", "--verify", childRef]);
+  if (!oid.ok) throw new Error("checkpoint resume reservation is missing");
+  return cloneJson(readCheckpointReservationClaim(repo, oid.stdout.trim(), binding));
 }
 
 async function assertRunClaimRoute(repo, run, opts = {}) {
@@ -5073,7 +5335,9 @@ async function assertCheckpointRunAuthority(repo, run, opts = {}) {
   if (!["reserved", "launching", "launched"].includes(value.state) || hashValue(value.binding) !== hashValue(binding)) {
     throw new Error("checkpoint child reservation claim is stale");
   }
-  assertCheckpointChildBranch(repo, `refs/heads/${binding.child_run_id}`, binding.base_commit, value.state);
+  const reservation = { childRef, routeRef, branchRef: `refs/heads/${binding.child_run_id}`, oid: childOid.stdout.trim(), claim: value };
+  assertCheckpointChildBranch(repo, reservation.branchRef, binding.base_commit, value.state);
+  assertCheckpointPublishedChild(repo, binding, reservation, opts);
   await withCanonicalCheckpointBase(repo, { base_ref: binding.base_ref, base_commit: binding.base_commit }, opts, "resume", (remoteMain) => {
     if (remoteMain.commit !== binding.base_commit && value.state !== "launched") {
       throw new Error("checkpoint base is stale before implementation launch; start a fresh checkpoint from current canonical remote main");

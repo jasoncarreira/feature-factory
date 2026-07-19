@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { validateCheckpointChildBinding, validateRun } from "./validate.js";
+import { validateCheckpointChildBinding, validateCheckpointReservationClaim, validateRun } from "./validate.js";
 import { normalizePostPrCiDriverOverride } from "./config.js";
 import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, assertPublishedCarryForwardRunById, inspectContinuationRouteSchema } from "./run-state.js";
 import { git } from "./git.js";
@@ -89,9 +89,10 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   const hasContinuation = payload.continuation !== undefined && payload.continuation !== null;
   const hasCheckpoint = payload.checkpoint !== undefined && payload.checkpoint !== null;
   const hasCheckpointRequest = payload.checkpoint_request !== undefined && payload.checkpoint_request !== null;
+  const hasCheckpointReservation = payload.checkpoint_reservation !== undefined && payload.checkpoint_reservation !== null;
   if (hasResume !== hasSteering) return { ok: false, reason: "incomplete-resume-route" };
   if (hasResume && hasContinuation) return { ok: false, reason: "ambiguous-route" };
-  if (hasCheckpoint !== hasCheckpointRequest) return { ok: false, reason: "incomplete-checkpoint-route" };
+  if (hasCheckpoint !== hasCheckpointRequest || hasCheckpoint !== hasCheckpointReservation) return { ok: false, reason: "incomplete-checkpoint-route" };
   if (hasCheckpoint && hasContinuation) return { ok: false, reason: "ambiguous-route" };
   if (driver.run_id !== undefined && driver.run_id !== null && (hasResume || hasContinuation)) return { ok: false, reason: "invalid-driver-run-id-route" };
   if (hasContinuation && plainObject(payload.continuation?.target) && safeRunId(payload.continuation.target.run_id) && Number.isInteger(payload.continuation.schema_version)) {
@@ -131,9 +132,10 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
     try {
       const expectedRunId = hasResume ? payload.resume?.run_id : driver.run_id;
       normalized.checkpoint = cloneJson(validateCheckpointChildBinding(payload.checkpoint, { runId: expectedRunId }));
+      normalized.checkpoint_reservation = cloneJson(validateCheckpointReservationClaim(payload.checkpoint_reservation, { expectedBinding: normalized.checkpoint }));
       if (!plainObject(payload.checkpoint_request)) return { ok: false, reason: "invalid-checkpoint-request" };
       normalized.checkpoint_request = cloneJson(payload.checkpoint_request);
-      assertCheckpointPayloadAuthority(options.repo, normalized.checkpoint, normalized.checkpoint_request, { resume: hasResume });
+      assertCheckpointPayloadAuthority(options.repo, normalized.checkpoint, normalized.checkpoint_reservation, normalized.checkpoint_request, { resume: hasResume });
     } catch {
       return { ok: false, reason: "invalid-checkpoint-authority" };
     }
@@ -180,7 +182,7 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   return { ok: true, payload: normalized };
 }
 
-function assertCheckpointPayloadAuthority(repoInput, binding, request, { resume }) {
+function assertCheckpointPayloadAuthority(repoInput, binding, reservation, request, { resume }) {
   const repo = resolve(repoInput || process.cwd());
   const parentPath = resolve(repo, binding.parent_run_ref);
   if (parentPath !== resolve(repo, ".opencode", "factory", binding.parent_run_id, "run.json")) throw new Error("checkpoint parent path mismatch");
@@ -195,7 +197,7 @@ function assertCheckpointPayloadAuthority(repoInput, binding, request, { resume 
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   const checkpoint = manifest.checkpoints?.find((candidate) => candidate?.id === binding.checkpoint_id);
   if (!checkpoint || checkpoint.ordinal !== binding.checkpoint_ordinal || !isDeepStrictEqual(checkpoint.request, request)) throw new Error("checkpoint request mismatch");
-  assertCheckpointReservationAuthority(repo, binding);
+  assertCheckpointReservationAuthority(repo, binding, reservation);
   if (resume) {
     const childPath = resolve(repo, ".opencode", "factory", binding.child_run_id, "run.json");
     assertRegularFile(childPath);
@@ -204,7 +206,7 @@ function assertCheckpointPayloadAuthority(repoInput, binding, request, { resume 
   }
 }
 
-function assertCheckpointReservationAuthority(repo, binding) {
+function assertCheckpointReservationAuthority(repo, binding, expected) {
   const childRef = `refs/opencode/checkpoint-targets/${createHash("sha256").update(binding.child_run_id, "utf8").digest("hex")}`;
   const routeRef = `refs/opencode/checkpoint-routes/${createHash("sha256").update(`${binding.parent_run_id}\0${binding.checkpoint_id}`, "utf8").digest("hex")}`;
   const child = git(repo, ["rev-parse", "--verify", childRef]);
@@ -212,10 +214,13 @@ function assertCheckpointReservationAuthority(repo, binding) {
   if (!child.ok || !route.ok || child.stdout.trim() !== route.stdout.trim()) throw new Error("checkpoint reservation authority is missing or cross-bound");
   const claim = git(repo, ["cat-file", "blob", child.stdout.trim()]);
   if (!claim.ok) throw new Error("checkpoint reservation claim is unreadable");
-  const value = JSON.parse(claim.stdout);
-  if (value.schema_version !== 1 || value.kind !== "delivery-checkpoint-child-reservation"
-    || !["reserved", "launching", "launched"].includes(value.state)
-    || !isDeepStrictEqual(value.binding, binding)) throw new Error("checkpoint reservation claim is stale");
+  const value = validateCheckpointReservationClaim(JSON.parse(claim.stdout), { expectedBinding: binding });
+  const exact = isDeepStrictEqual(value, expected);
+  const launchedFromPayload = expected.state === "launching" && value.state === "launched"
+    && value.schema_version === expected.schema_version && value.kind === expected.kind && value.nonce === expected.nonce
+    && value.worktree === expected.worktree && value.reserved_at === expected.reserved_at
+    && isDeepStrictEqual(value.binding, expected.binding);
+  if (!["reserved", "launching", "launched"].includes(value.state) || (!exact && !launchedFromPayload)) throw new Error("checkpoint reservation claim is stale");
 }
 
 function assertRegularFile(path) {

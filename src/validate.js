@@ -88,8 +88,9 @@ const STEP_KEYS = new Set(["agent", "status", "attempts", "artifact_ref", "revie
 const STEP_ACCEPTANCE_KEYS = new Set(["artifact_ref", "artifact_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_head_sha"]);
 const STEP_INHERITED_ACCEPTANCE_KEYS = new Set(["from_run_id", "parent_spec_review_ref", "artifact_hash", "review_hash"]);
 const CHECKPOINT_CHILD_KEYS = new Set(["schema_version", "kind", "parent_run_id", "parent_run_ref", "parent_run_hash", "manifest_ref", "manifest_hash", "checkpoint_id", "checkpoint_ordinal", "child_run_id", "base_ref", "base_commit", "predecessor_checkpoint_id", "predecessor_child_run_id", "predecessor_merge_commit"]);
-const CHECKPOINT_RESERVATION_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "binding", "reserved_at"]);
+const CHECKPOINT_RESERVATION_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "binding", "worktree", "reserved_at"]);
 const CHECKPOINT_RESERVATION_STATE_KEYS = Object.freeze({ reserved: new Set(CHECKPOINT_RESERVATION_COMMON_KEYS), launching: new Set([...CHECKPOINT_RESERVATION_COMMON_KEYS, "launching_at"]), launched: new Set([...CHECKPOINT_RESERVATION_COMMON_KEYS, "launched_at"]), unknown: new Set([...CHECKPOINT_RESERVATION_COMMON_KEYS, "failed_at", "reason"]) });
+const CHECKPOINT_FINAL_CLOSURE_KEYS = new Set(["schema_version", "kind", "parent_run_id", "parent_run_hash", "manifest_ref", "manifest_hash", "final_checkpoint_id", "final_checkpoint_ordinal", "child_run_id", "child_run_hash", "reservation_oid", "pr_url", "pr_number", "pr_node_id", "repository", "operation_id", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "merge_commit", "remote_main_ref", "remote_main_commit", "closed_at"]);
 const TEST_EXECUTION_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "receipt_ref", "claimed_at"]);
 const TEST_EXECUTION_CLAIM_COMPLETED_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
 const TEST_EXECUTION_CLAIM_UNKNOWN_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "failed_at", "reason"]);
@@ -377,6 +378,9 @@ export function validateRun(run) {
   if (isRecord(run.checkpoint)) {
     if (run.base_ref !== run.checkpoint.base_ref) errors.push({ path: "run.base_ref", message: "must equal run.checkpoint.base_ref" });
     if (run.base_commit !== run.checkpoint.base_commit) errors.push({ path: "run.base_commit", message: "must equal run.checkpoint.base_commit" });
+    if (run.branch !== run.checkpoint.child_run_id) errors.push({ path: "run.branch", message: "must equal run.checkpoint.child_run_id" });
+    if (!isAbsolute(run.worktree ?? "")) errors.push({ path: "run.worktree", message: "must be the absolute registered checkpoint reservation worktree" });
+    if (run.continuation !== undefined && run.continuation !== null) errors.push({ path: "run.continuation", message: "is forbidden for checkpoint children" });
   }
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
@@ -442,6 +446,8 @@ export function validateCheckpointReservationClaim(value, { expectedBinding } = 
   if (value.schema_version !== 1) errors.push({ path: "reservation.schema_version", message: "must equal 1" });
   requiredEnum(errors, value, "kind", new Set(["delivery-checkpoint-child-reservation"]), "reservation.kind");
   requiredEnum(errors, value, "state", new Set(Object.keys(CHECKPOINT_RESERVATION_STATE_KEYS)), "reservation.state");
+  requiredString(errors, value, "worktree", "reservation.worktree");
+  if (!isAbsolute(value.worktree ?? "")) errors.push({ path: "reservation.worktree", message: "must be absolute" });
   requiredString(errors, value, "nonce", "reservation.nonce");
   if (!isUuidV4(value.nonce)) errors.push({ path: "reservation.nonce", message: "must be a UUID v4" });
   requiredTimestamp(errors, value, "reserved_at", "reservation.reserved_at");
@@ -453,6 +459,28 @@ export function validateCheckpointReservationClaim(value, { expectedBinding } = 
     requiredTimestamp(errors, value, "failed_at", "reservation.failed_at");
     requiredEnum(errors, value, "reason", new Set(["launch-outcome-indeterminate"]), "reservation.reason");
   }
+  if (errors.length) fail(errors);
+  return value;
+}
+
+export function validateCheckpointFinalClosure(value) {
+  const errors = [];
+  if (!isRecord(value)) return fail([{ path: "checkpoint_final_closure", message: "must be an object" }]);
+  allowedKeys(errors, value, CHECKPOINT_FINAL_CLOSURE_KEYS, "checkpoint_final_closure");
+  requiredInteger(errors, value, "schema_version", "checkpoint_final_closure.schema_version");
+  if (value.schema_version !== 1) errors.push({ path: "checkpoint_final_closure.schema_version", message: "must equal 1" });
+  requiredEnum(errors, value, "kind", new Set(["delivery-checkpoint-final-closure"]), "checkpoint_final_closure.kind");
+  for (const key of ["parent_run_id", "manifest_ref", "final_checkpoint_id", "child_run_id", "pr_url", "pr_node_id", "repository", "operation_id", "head_ref", "base_ref", "remote_main_ref"]) requiredString(errors, value, key, `checkpoint_final_closure.${key}`);
+  for (const key of ["parent_run_hash", "manifest_hash", "child_run_hash"]) requiredHash(errors, value, key, `checkpoint_final_closure.${key}`);
+  for (const key of ["reservation_oid", "head_sha", "base_sha", "merge_commit", "remote_main_commit"]) requiredFullGitSha(errors, value, key, `checkpoint_final_closure.${key}`);
+  boundedInteger(errors, value, "final_checkpoint_ordinal", 1, Number.MAX_SAFE_INTEGER, "checkpoint_final_closure.final_checkpoint_ordinal");
+  boundedInteger(errors, value, "pr_number", 1, Number.MAX_SAFE_INTEGER, "checkpoint_final_closure.pr_number");
+  if (typeof value.draft !== "boolean") errors.push({ path: "checkpoint_final_closure.draft", message: "must be a boolean" });
+  if (!/^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u.test(value.manifest_ref ?? "")) errors.push({ path: "checkpoint_final_closure.manifest_ref", message: "must be a content-addressed checkpoint routing artifact ref" });
+  if (HASH_PATTERN.test(value.manifest_hash ?? "") && value.manifest_ref !== `artifacts/checkpoint-routing-${value.manifest_hash.slice("sha256:".length)}.json`) errors.push({ path: "checkpoint_final_closure.manifest_ref", message: "must match manifest_hash" });
+  if (stringValue(value.child_run_id) && value.head_ref !== value.child_run_id) errors.push({ path: "checkpoint_final_closure.head_ref", message: "must equal child_run_id" });
+  if (value.remote_main_ref !== "refs/heads/main") errors.push({ path: "checkpoint_final_closure.remote_main_ref", message: "must equal refs/heads/main" });
+  requiredTimestamp(errors, value, "closed_at", "checkpoint_final_closure.closed_at");
   if (errors.length) fail(errors);
   return value;
 }
@@ -2891,12 +2919,13 @@ function validateStepRelationships(errors, run, step, path) {
     if (stringValue(step.review_ref) && stringValue(acceptance.review_ref) && step.review_ref !== acceptance.review_ref) errors.push({ path: `${path}.acceptance.review_ref`, message: "must match step review_ref" });
     if (!stringValue(step.artifact_ref)) errors.push({ path: `${path}.artifact_ref`, message: "is required when acceptance is present" });
   }
-  if (run.continuation?.schema_version === 2 && step.agent === "test-verifier") {
-    if (!isRecord(acceptance)) errors.push({ path: `${path}.acceptance`, message: "is required for accepted schema-v2 test-verifier" });
+  if ((run.continuation?.schema_version === 2 || run.checkpoint?.kind === "delivery-checkpoint-child") && step.agent === "test-verifier") {
+    const route = run.checkpoint?.kind === "delivery-checkpoint-child" ? "checkpoint" : "schema-v2";
+    if (!isRecord(acceptance)) errors.push({ path: `${path}.acceptance`, message: `is required for accepted ${route} test-verifier` });
     else for (const key of ["artifact_ref", "artifact_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_head_sha"]) {
-      if (acceptance[key] === undefined || acceptance[key] === null) errors.push({ path: `${path}.acceptance.${key}`, message: "is required for accepted schema-v2 test-verifier" });
+      if (acceptance[key] === undefined || acceptance[key] === null) errors.push({ path: `${path}.acceptance.${key}`, message: `is required for accepted ${route} test-verifier` });
     }
-    if (!isRecord(claim) || claim.state !== "completed" || claim.status !== "pass") errors.push({ path: `${path}.execution_claim`, message: "must be a completed passing checked execution claim for accepted schema-v2 test-verifier" });
+    if (!isRecord(claim) || claim.state !== "completed" || claim.status !== "pass") errors.push({ path: `${path}.execution_claim`, message: `must be a completed passing checked execution claim for accepted ${route} test-verifier` });
   }
   const inherited = step.inherited_acceptance;
   if (isRecord(inherited)) {

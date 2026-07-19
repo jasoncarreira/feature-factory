@@ -37,6 +37,7 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "checkpoint-reservation-launching",
   "checkpoint-reservation-launched",
   "checkpoint-reservation-unknown",
+  "checkpoint-final-closure-v1",
   "run-envelope-running",
   "run-envelope-terminal",
   "terminal-result-completed",
@@ -319,6 +320,33 @@ const CHECKPOINT_ADMISSION = Object.freeze({
 const CHECKPOINT_ROUTING_MANIFEST = Object.freeze(checkpointCatalogManifest());
 const CHECKPOINT_ROUTING_BYTES = `${JSON.stringify(CHECKPOINT_ROUTING_MANIFEST, null, 2)}\n`;
 const CHECKPOINT_ROUTING_REF = `artifacts/checkpoint-routing-${hashBytes(CHECKPOINT_ROUTING_BYTES).slice("sha256:".length)}.json`;
+const CHECKPOINT_FINAL_CLOSURE = deepFreeze({
+  schema_version: 1,
+  kind: "delivery-checkpoint-final-closure",
+  parent_run_id: "catalog-parent",
+  parent_run_hash: HASH_A,
+  manifest_ref: CHECKPOINT_ROUTING_REF,
+  manifest_hash: hashBytes(CHECKPOINT_ROUTING_BYTES),
+  final_checkpoint_id: "checkpoint-002",
+  final_checkpoint_ordinal: 2,
+  child_run_id: "catalog-child",
+  child_run_hash: HASH_B,
+  reservation_oid: SHA_A,
+  pr_url: "https://github.com/acme/repo/pull/7",
+  pr_number: 7,
+  pr_node_id: "PR_catalog_operation",
+  repository: "acme/repo",
+  operation_id: PR_OPERATION_ID,
+  head_ref: "catalog-child",
+  head_sha: SHA_B,
+  base_ref: "main",
+  base_sha: SHA_A,
+  draft: false,
+  merge_commit: SHA_C,
+  remote_main_ref: "refs/heads/main",
+  remote_main_commit: SHA_C,
+  closed_at: NOW,
+});
 const DECOMPOSITION_EXTERNAL = Object.freeze({
   plan: PLAN_V2_EXTERNAL.plan,
   review: { ref: "reviews/work-decomposer.json", bytes: "{\"subject\":\"work-decomposer\",\"attempt\":1,\"verdict\":\"APPROVE\",\"required_fixes\":[]}\n" },
@@ -401,6 +429,7 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "checkpoint-reservation-launching",
     "checkpoint-reservation-launched",
     "checkpoint-reservation-unknown",
+    "checkpoint-final-closure-v1",
     "final-plan-descriptor",
   ],
   "run-envelope-terminal-result": [
@@ -566,6 +595,7 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "checkpoint-reservation-launching": "b",
   "checkpoint-reservation-launched": "b",
   "checkpoint-reservation-unknown": "b",
+  "checkpoint-final-closure-v1": "b",
   "final-plan-descriptor": "",
   "run-envelope-running": "khbd",
   "run-envelope-terminal": "krhbd",
@@ -706,18 +736,19 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["plan-slices-json", "989039b0b23d8bef1c9c50b80f4f80da94bb3c982834804154e688ae72e2790a"],
   ["plan-v2-integration-gate", "f901864d274e8cec07db9c3a5378ca67f7a5ba8e79382168e4949963b5ff51d9"],
   ["plan-delivery-envelope-v1", "ec33d7138f538b3b05f7da15d7011af571a5867113757f6a7fdd1eb6cccc9b33"],
-  ["checkpoint-routing-artifact-v1", "d4af0b2d7d6c6395f793169af6b07eb417ff764a84d8af02f4d2c922c6d29aa5"],
+  ["checkpoint-routing-artifact-v1", "a3b65ae5fcc4618641a3b64520de4122e9d0aa2933717e406a668795ba04fd8e"],
   ["checkpoint-child-binding-v1", "3eb58e355f053b42959aec3787ab636caf85483c6c6e372154c817abf91ef45f"],
-  ["checkpoint-reservation-reserved", "805aab0b811e3cc6adb6365e7f1c1f8ead10eae71a92b649d6e45052a0b608c7"],
-  ["checkpoint-reservation-launching", "a8308e45e943e73f29af488a74c602da9def040c540e7f2ebc93ba10f7a8843b"],
-  ["checkpoint-reservation-launched", "b1f55a12e62bc2198ae2fb0304cab622f27575c1037216332156e6c154507ae2"],
-  ["checkpoint-reservation-unknown", "21e825dda1d5c966c50b1227d9ab41f3c0a238b19574c48f4ef75514b1e2cda5"],
+  ["checkpoint-reservation-reserved", "01128f4627582386ed84a979f99494a3c2635461699e2a389adb94d70c957c8f"],
+  ["checkpoint-reservation-launching", "b4df74264288cc973763fc65b6cf0773eba9eaebe357bfb6ded447779cca2dbd"],
+  ["checkpoint-reservation-launched", "efe6b269585abaad1fd478ca6ee93d8e70d613b635afce9b6f3eaa81a8c80341"],
+  ["checkpoint-reservation-unknown", "6a4a5b264956cad802332a5cc4ca0140df696c727f2c271683eb72e52a64ab65"],
+  ["checkpoint-final-closure-v1", "7928cb8e2fc54d7f10a24be7f994b51ed04a715278a5503cb4db74d59c279075"],
   ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
   ["terminal-result-completed", "624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c"],
   ["terminal-result-blocked", "681845bd946f1cb11d6f2d0a528946365756a79f2ce284179856360e3d9b631e"],
-  ["terminal-result-blocked-checkpoint-routing", "6f45b8cb4faa642b76d5c2d1a89131001fe7dbab5b432ec936cd6ad68faada34"],
+  ["terminal-result-blocked-checkpoint-routing", "840d8e4f3e4259a53c9ae8e5178a582be523a7e2f924b3ffa3b77502b3bdfb0d"],
   ["terminal-result-blocked-nonconvergence", "d97091392350f02165c01705c4aa4ba2f92e5727325622c9eade4d5cdc0021f6"],
   ["terminal-result-partial", "6726223fbe9f4850a9d6815d78ccf5b5fbbdfdebcd6bf5c7611ace16569b9705"],
   ["terminal-result-needs-human", "8b7d4e6f6533c6072da2e83300c1f2503055905c0bcf5d69a54a91196f6c2eef"],
@@ -856,10 +887,11 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["plan-delivery-envelope-v1", "5b21d1bbbca72f06efdd0abbb80f11c793108767883405810d673d97fdfc3053"],
   ["checkpoint-routing-artifact-v1", "0ae8734ab0b4101cb43d7167b9c2aac993f151be11a736d8c7d983c323ed726d"],
   ["checkpoint-child-binding-v1", "7a62f638ecff3d0e90ea483f247f87214af183f9e8f36009f19deefecf77ef3a"],
-  ["checkpoint-reservation-reserved", "9e605eb1376fed887d26859af664c277b2c7a17d9504bdb37538c70233fc6c0c"],
-  ["checkpoint-reservation-launching", "23cc7b407d7fed19aa884eebfd27b9eb5b6098d26cd2e812cb9c12226cd659e5"],
-  ["checkpoint-reservation-launched", "dba10e4b5135d4460041e36a2b447d4b6d0063714599f64b7b9573ace711f97f"],
-  ["checkpoint-reservation-unknown", "01074f21b5306df92431cfe472e92ed39262c0db0f9f12a50e2a2189ce76f3ce"],
+  ["checkpoint-reservation-reserved", "008e7e18b98b974c9e6f20ece9a1f908f54f681be5a60e7cc8db193d4962f4d8"],
+  ["checkpoint-reservation-launching", "d63246baa030c0e1e95448acdc2ba9f91fdeba1c3c38b6ad1609a0f9e7ffb994"],
+  ["checkpoint-reservation-launched", "5a21f05e4da468042cf482d2ad01b9b7a4ad3b604775bdf12129da77cb45f848"],
+  ["checkpoint-reservation-unknown", "21b583b8d4f76a2ca4ad12a63831d190aa4c5e2a15c4d512629edd69db921657"],
+  ["checkpoint-final-closure-v1", "52ba59d7d88d03133b16ab44654967a99844dabd2982d6a4cce0f0fed6264882"],
   ["final-plan-descriptor", "b8ef8dbfe1f1e54cae98fb0960aa315fe4479e33533b63d0a9e0b88f0df959da"],
   ["run-envelope-running", "0dfdf9c52ba1ee909070da85617630bbb0cac990f109bdc3c7f25c4f686276dd"],
   ["run-envelope-terminal", "7e1272e9374eb193833d700f54b15b5453e92a8475a8f942c72f6f64ca5645cd"],
@@ -1006,18 +1038,19 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["plan-slices-json", "dd6fabc7def0955d82f37d30a53fc19e4e8cc8fa69fa445badbc3c051d4dd7b9"],
   ["plan-v2-integration-gate", "04a73897d61d2aa30a703989e59f809518642c2ca4b938dea7af0fd514102955"],
   ["plan-delivery-envelope-v1", "757895c9d66d0caac2026bb2f6c207b4bbd37d0b1a5f5f20c0fbb713878b1ec1"],
-  ["checkpoint-routing-artifact-v1", "6ea0ebe8f6e2eddf8cf46ae34d36383440bc870f8d5319ee08f4fc7679b9e3a1"],
+  ["checkpoint-routing-artifact-v1", "d9a3275ea47538c9dc558ae2c29b943eb247806859c0e5df792a01adf8c4fa65"],
   ["checkpoint-child-binding-v1", "c28b2a3ab160a2bc392f0253b00edd56343a469b3d18d9080b6779556dbca62d"],
-  ["checkpoint-reservation-reserved", "10fee7196cc80a06642a24b897f88b31771f06619a294fb585123e2c05018469"],
-  ["checkpoint-reservation-launching", "cf9506aaad7c5ed50a9cd163a4ac26799835e6e62eec6994054e283ca04196c4"],
-  ["checkpoint-reservation-launched", "476b530836dbe093ff1639a209e78e00b2859cdc0a9a663e2ee9da105c4608f0"],
-  ["checkpoint-reservation-unknown", "7c58411f1e3fb9c9b4d012ec48ecf7baf94599d19532b9c90b09d048692b218e"],
+  ["checkpoint-reservation-reserved", "d8d4ec75f721827af468dbb64582c5e4e638ccc216c4d6deae9ab00efb107f96"],
+  ["checkpoint-reservation-launching", "8a8e6e99aedf14ee5f4b41c6b1ed0942ac738dd59922855afae69a1345141494"],
+  ["checkpoint-reservation-launched", "f33668b8427d6436f50d230b6d3fe4d050dd25825b0372dce675a3677063af0a"],
+  ["checkpoint-reservation-unknown", "6329b78fa8e71203a3f28b61a1eb2c9fd51567309a1b3f1fc902fd381a83a72e"],
+  ["checkpoint-final-closure-v1", "d9381ebf8dc287635ee5ef6474b67985ef25409456c0139c3c45906d2dd8f13d"],
   ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
   ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
   ["terminal-result-completed", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
   ["terminal-result-blocked", "2e50300aa3e14e8fd6c935f3dae3fa44dd388c6ff386091ecbc28109f82ad855"],
-  ["terminal-result-blocked-checkpoint-routing", "b25e76e0df288ea96dd3036c95675b7def55bb6c63184fab1745d739d37e53f2"],
+  ["terminal-result-blocked-checkpoint-routing", "7bb099e2614c7d9fa5d6b8377d1638cff7c305492fa2e06c3de5f0e8b6f8bba2"],
   ["terminal-result-blocked-nonconvergence", "55003f673d92a1b474b02aafdc90b72853ce9f376934878d49307509fe122233"],
   ["terminal-result-partial", "b5808744bc1ae0146a9a59e9814be3d58712a04c0cfbaf6f5d1858ab698c7746"],
   ["terminal-result-needs-human", "4c5aee988d94853ac78432435d4b65f7ebe8720dfa0652b6c9eeb8ee30bd0581"],
@@ -1343,6 +1376,14 @@ const RECORDS = [
   checkpointReservationEntry("checkpoint-reservation-launching", "launching"),
   checkpointReservationEntry("checkpoint-reservation-launched", "launched"),
   checkpointReservationEntry("checkpoint-reservation-unknown", "unknown"),
+  recordEntry({
+    authorityClassId: "plan-slices-graph", id: "checkpoint-final-closure-v1", record: "refs/opencode/checkpoint-final-closures/<sha256>", variant: "final merged checkpoint terminal closure",
+    writer: "factory checkpoint-close checked create-only ref transaction",
+    readers: ["validateCheckpointFinalClosure", "factory checkpoint-close replay and contention", "checkpoint route terminal audit"],
+    canonicalPath: ["checkpoint_final_closure"], source: structuredClone(CHECKPOINT_FINAL_CLOSURE), facts: exactFacts(CHECKPOINT_FINAL_CLOSURE),
+    requiredPath: ["kind"], typePath: ["final_checkpoint_ordinal"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-closure"), time(["closed_at"]), ref(["manifest_ref"]), hash(["manifest_hash"]), drift([], "kind", "closure_kind"), stale(["remote_main_ref"], "refs/heads/stale"), cross(["child_run_id"], "other-child")],
+  }),
   recordEntry({
     authorityClassId: "plan-slices-graph", id: "final-plan-descriptor", record: "final.plan.json descriptor", variant: "required descriptor",
     writer: "work-decomposer final plan write followed by reviewed planning acceptance",
@@ -1939,7 +1980,7 @@ function checkpointChildBindingEntry() {
 function checkpointReservationEntry(id, state) {
   const source = {
     schema_version: 1, kind: "delivery-checkpoint-child-reservation", state,
-    nonce: "123e4567-e89b-42d3-a456-426614174000", binding: structuredClone(CHECKPOINT_CHILD_BINDING), reserved_at: NOW,
+    nonce: "123e4567-e89b-42d3-a456-426614174000", binding: structuredClone(CHECKPOINT_CHILD_BINDING), worktree: "/tmp/catalog-child", reserved_at: NOW,
   };
   if (state === "launching") source.launching_at = NOW;
   if (state === "launched") source.launched_at = NOW;
@@ -1949,7 +1990,7 @@ function checkpointReservationEntry(id, state) {
     writer: state === "reserved" ? "reserveCheckpointChild atomic no-replace two-ref transaction" : "transitionCheckpointReservation atomic two-ref compare-and-swap",
     readers: ["validateCheckpointReservationClaim", "factory checkpoint-start retry/adoption/reconciliation", "feature command payload checkpoint authority", "checkpoint child resume authority", ...(state === "launched" ? ["factory completed checkpoint predecessor authority"] : [])],
     canonicalPath: ["checkpoint_reservation", state], source, facts: exactFacts(source), requiredPath: ["state"], typePath: ["binding", "checkpoint_ordinal"],
-    targets: [schema(["schema_version"]), kind(["kind"], "other-reservation"), time([state === "reserved" ? "reserved_at" : state === "unknown" ? "failed_at" : `${state}_at`]), ref(["binding", "parent_run_ref"]), hash(["binding", "parent_run_hash"]), drift([], "state", "reservation_state"), stale(["binding", "checkpoint_ordinal"], 0), cross(["binding", "child_run_id"], "other-child")],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-reservation"), time([state === "reserved" ? "reserved_at" : state === "unknown" ? "failed_at" : `${state}_at`]), ref(["worktree"]), hash(["binding", "parent_run_hash"]), drift([], "state", "reservation_state"), stale(["binding", "checkpoint_ordinal"], 0), cross(["binding", "child_run_id"], "other-child")],
   });
 }
 
@@ -2643,6 +2684,9 @@ export function createDurableCatalogBaseline(record) {
   if (record.id.startsWith("checkpoint-reservation-")) {
     return structuredClone({ consumer: "validateCheckpointReservationClaim", reservation: record.source, expectedBinding: record.source.binding, externalSources: {} });
   }
+  if (record.id === "checkpoint-final-closure-v1") {
+    return structuredClone({ consumer: "validateCheckpointFinalClosure", closure: record.source, externalSources: {} });
+  }
   if (record.id === "review-invariant-family-ledger-v1") {
     return structuredClone({ consumer: "evaluateInvariantFamilyReview", ledger: record.source, plan: JSON.parse(record.externalSources.plan.bytes), externalSources: record.externalSources });
   }
@@ -3318,7 +3362,7 @@ function checkpointCatalogManifest() {
   });
   return {
     schema_version: 1,
-    kind: "delivery-checkpoint-routing",
+    kind: "delivery-checkpoint-routing-manifest",
     source: {
       plan_ref: CHECKPOINT_EXTERNAL.plan.ref,
       plan_hash: hashBytes(CHECKPOINT_EXTERNAL.plan.bytes),
