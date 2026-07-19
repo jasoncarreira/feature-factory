@@ -2501,7 +2501,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 
   await withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
-    assertCheckpointLocalPublishedAuthority(runDir, run, opts, null, ["launched"]);
+    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, opts, null, ["launched"]);
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     assertHeartbeatStartable(run);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, opts);
@@ -2520,9 +2520,25 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
       last_tick_at: startedAt,
       interval_ms: intervalMs,
     });
-    assertV2LocalPublishedAuthority(runDir, run, opts, v2Authority);
-    writeHeartbeatFile(heartbeatFile, heartbeat);
-    writeSemanticRunJsonAtomic(runDir, join(runDir, "run.json"), validateRun({ ...run, heartbeat_at: startedAt }), opts, v2Authority);
+    let sidecarMutation = null;
+    try {
+      sidecarMutation = commitHeartbeatSidecar(runDir, heartbeatFile, heartbeat, run, opts, checkpointAuthority, v2Authority);
+      writeSemanticRunJsonAtomic(
+        runDir,
+        join(runDir, "run.json"),
+        validateRun({ ...run, heartbeat_at: startedAt }),
+        opts,
+        v2Authority,
+        () => {
+          opts.heartbeatAtomicWriteHooks?.beforeRunCommit?.();
+          assertHeartbeatMutationAuthority(runDir, run, opts, checkpointAuthority, v2Authority);
+          assertHeartbeatSidecarOwned(heartbeatFile, sidecarMutation.published);
+        },
+      );
+    } catch (error) {
+      if (sidecarMutation) restoreOwnedHeartbeatSidecar(heartbeatFile, sidecarMutation);
+      throwCheckpointPublicationCause(error);
+    }
   }, opts);
 
   const runtime = createHeartbeatRuntime(runDir, heartbeat, opts);
@@ -5792,34 +5808,46 @@ async function heartbeatTick(runtime, lockOptions = {}) {
       const runPath = join(runtime.runDir, "run.json");
       const runResult = tryReadRunFile(runPath);
       if (runResult.error) {
-        writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        if (!runFileClaimsCheckpointChild(runPath)) {
+          writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        }
         return { continue: false, reason: "missing-or-invalid-run" };
       }
 
       const run = runResult.value;
-      assertCheckpointLocalPublishedAuthority(runtime.runDir, run, lockOptions, null, ["launched"]);
+      const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runtime.runDir, run, lockOptions, null, ["launched"]);
       assertNoPendingSpecialBuilderDispatches(runtime.runDir, run);
+      const v2Authority = assertV2LocalPublishedAuthority(runtime.runDir, run, lockOptions);
       if (run.steering?.pr_fence) return { continue: false, reason: "pre-pr-fence-active" };
       if (TERMINAL_STATUSES.has(run.status)) {
-        writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        commitHeartbeatSidecar(runtime.runDir, heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }), run, lockOptions, checkpointAuthority, v2Authority);
         return { continue: false, reason: "terminal-status" };
       }
       const protectedGate = pendingProtectedGate(run);
       if (protectedGate) {
-        writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        commitHeartbeatSidecar(runtime.runDir, heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }), run, lockOptions, checkpointAuthority, v2Authority);
         return { continue: false, reason: "protected-gate-pending" };
       }
       if (!hasInFlightHeartbeatWork(run)) {
-        writeHeartbeatFile(heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }));
+        commitHeartbeatSidecar(runtime.runDir, heartbeatPath(runtime.runDir), validateHeartbeatState({ ...heartbeat.value, pid: null }), run, lockOptions, checkpointAuthority, v2Authority);
         return { continue: false, reason: "no-in-flight-work" };
       }
 
       const nextHeartbeat = validateHeartbeatState({ ...heartbeat.value, pid: process.pid, last_tick_at: now });
       const nextRun = validateRun({ ...run, heartbeat_at: now });
-      const v2Authority = assertV2LocalPublishedAuthority(runtime.runDir, run, lockOptions);
-      assertV2LocalPublishedAuthority(runtime.runDir, run, lockOptions, v2Authority);
-      writeHeartbeatFile(heartbeatPath(runtime.runDir), nextHeartbeat);
-      writeSemanticRunJsonAtomic(runtime.runDir, runPath, nextRun, lockOptions, v2Authority);
+      const heartbeatFile = heartbeatPath(runtime.runDir);
+      let sidecarMutation = null;
+      try {
+        sidecarMutation = commitHeartbeatSidecar(runtime.runDir, heartbeatFile, nextHeartbeat, run, lockOptions, checkpointAuthority, v2Authority);
+        writeSemanticRunJsonAtomic(runtime.runDir, runPath, nextRun, lockOptions, v2Authority, () => {
+          lockOptions.heartbeatAtomicWriteHooks?.beforeRunCommit?.();
+          assertHeartbeatMutationAuthority(runtime.runDir, run, lockOptions, checkpointAuthority, v2Authority);
+          assertHeartbeatSidecarOwned(heartbeatFile, sidecarMutation.published);
+        });
+      } catch (error) {
+        if (sidecarMutation) restoreOwnedHeartbeatSidecar(heartbeatFile, sidecarMutation);
+        throwCheckpointPublicationCause(error);
+      }
       runtime.lockTimeouts = 0;
       return { continue: true, reason: null };
     }, heartbeatTickLockOptions(runtime, lockOptions));
@@ -5833,7 +5861,7 @@ async function heartbeatTick(runtime, lockOptions = {}) {
 }
 
 function heartbeatTickLockOptions(runtime, lockOptions = {}) {
-  const allowed = ["lockHooks", "retryDelayMs", "staleLockMs", "missingOwnerStealMs", "processAliveFn"];
+  const allowed = ["lockHooks", "retryDelayMs", "staleLockMs", "missingOwnerStealMs", "processAliveFn", "heartbeatAtomicWriteHooks"];
   const options = { timeoutMs: lockOptions.timeoutMs ?? runtime.tickTimeoutMs };
   for (const key of allowed) {
     if (lockOptions[key] !== undefined) options[key] = lockOptions[key];
@@ -5888,6 +5916,80 @@ function tryReadHeartbeatFile(file) {
 function writeHeartbeatFile(file, heartbeat) {
   const next = validateHeartbeatState(heartbeat);
   writeJsonAtomic(file, next);
+}
+
+function commitHeartbeatSidecar(runDir, file, heartbeat, expectedRun, options, checkpointAuthority, v2Authority) {
+  const previous = observeHeartbeatSidecar(file);
+  options.heartbeatAtomicWriteHooks?.beforeSidecarCommit?.();
+  assertHeartbeatMutationAuthority(runDir, expectedRun, options, checkpointAuthority, v2Authority);
+  writeHeartbeatFile(file, heartbeat);
+  const published = observeHeartbeatSidecar(file);
+  if (!published.exists) throw new Error("heartbeat sidecar publication is missing");
+  const mutation = { previous, published };
+  try {
+    options.heartbeatAtomicWriteHooks?.afterSidecarCommit?.();
+    assertHeartbeatMutationAuthority(runDir, expectedRun, options, checkpointAuthority, v2Authority);
+    return mutation;
+  } catch (error) {
+    restoreOwnedHeartbeatSidecar(file, mutation);
+    throw error;
+  }
+}
+
+function assertHeartbeatMutationAuthority(runDir, expectedRun, options, checkpointAuthority, v2Authority) {
+  const current = readRunFile(join(runDir, "run.json"));
+  if (JSON.stringify(current) !== JSON.stringify(expectedRun)) throw new Error("heartbeat run authority changed during sidecar publication");
+  if (checkpointAuthority) assertCheckpointLocalPublishedAuthority(runDir, current, options, checkpointAuthority, ["launched"]);
+  if (v2Authority) assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
+  assertNoPendingSpecialBuilderDispatches(runDir, current);
+}
+
+function observeHeartbeatSidecar(file) {
+  if (!existsSync(file)) return { exists: false, bytes: null, dev: null, ino: null };
+  const identity = lstatSync(file);
+  if (identity.isSymbolicLink() || !identity.isFile()) throw new Error(`heartbeat sidecar is not a regular file: ${file}`);
+  return { exists: true, bytes: readFileSync(file), dev: identity.dev, ino: identity.ino };
+}
+
+function runFileClaimsCheckpointChild(file) {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"))?.checkpoint?.kind === "delivery-checkpoint-child";
+  } catch {
+    return true;
+  }
+}
+
+function assertHeartbeatSidecarOwned(file, expected) {
+  const current = observeHeartbeatSidecar(file);
+  if (!current.exists || current.dev !== expected.dev || current.ino !== expected.ino || !current.bytes.equals(expected.bytes)) {
+    throw new Error("heartbeat sidecar ownership changed before run publication");
+  }
+}
+
+function restoreOwnedHeartbeatSidecar(file, mutation) {
+  assertHeartbeatSidecarOwned(file, mutation.published);
+  if (!mutation.previous.exists) {
+    rmSync(file, { force: true });
+    return;
+  }
+  writeRawAtomic(file, mutation.previous.bytes);
+  const restored = observeHeartbeatSidecar(file);
+  if (!restored.exists || !restored.bytes.equals(mutation.previous.bytes)) throw new Error("heartbeat sidecar rollback could not be verified");
+}
+
+function writeRawAtomic(file, bytes) {
+  const temp = `${file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    writeFileSync(temp, bytes);
+    renameSync(temp, file);
+  } finally {
+    if (existsSync(temp)) rmSync(temp, { force: true });
+  }
+}
+
+function throwCheckpointPublicationCause(error) {
+  if (/checkpoint child (?:mutation|reservation|local authority)/u.test(error?.cause?.message || "")) throw error.cause;
+  throw error;
 }
 
 function withHeartbeatLiveness(heartbeat, opts = {}) {
@@ -6769,7 +6871,7 @@ function writeJsonAtomic(file, value, options = {}) {
   }
 }
 
-function writeSemanticRunJsonAtomic(runDir, file, value, options = {}, expected = null) {
+function writeSemanticRunJsonAtomic(runDir, file, value, options = {}, expected = null, beforeReplace = null) {
   const checkpointCurrent = readRunFile(file);
   const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, checkpointCurrent, options, null, ["launched"]);
   const assertSpecialDispatch = () => assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(file));
@@ -6777,6 +6879,7 @@ function writeSemanticRunJsonAtomic(runDir, file, value, options = {}, expected 
   const authority = assertV2LocalPublishedAuthority(runDir, value, options, expected);
   writeJsonAtomic(file, value, {
     beforeReplace: () => {
+      beforeReplace?.();
       assertSpecialDispatch();
       if (authority) assertV2LocalPublishedAuthority(runDir, value, options, authority);
       if (checkpointAuthority) {

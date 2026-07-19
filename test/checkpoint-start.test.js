@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import { runCliCommand } from "../src/cli.js";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { buildContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, continueFactory, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startFactoryCheckpoint, startHeartbeat, stopHeartbeat, writeGateAnswer } from "../src/factory.js";
+import { buildContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, continueFactory, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, runActiveHeartbeatTickForTest, startFactoryCheckpoint, startHeartbeat, stopHeartbeat, writeGateAnswer } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
 import { completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, heartbeatOnce, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
@@ -815,6 +815,133 @@ describe("checked checkpoint child start", () => {
         assert.deepEqual(readFileSync(runPath), before, `${mode} run.json`);
       } finally {
         rmSync(prepared.fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("guards special dispatch claim publication before and after create", async () => {
+    for (const mode of ["reserved", "launching", "unknown", "missing", "cross-bound", "pre-create", "post-create", "binding-failure"]) {
+      const prepared = await createCheckpointSpecialDispatchFixture(`checkpoint-special-claim-${mode}`, { claim: false });
+      try {
+        const { fixture, started, runDir, runPath } = prepared;
+        const before = readFileSync(runPath);
+        if (["reserved", "launching", "unknown", "missing", "cross-bound"].includes(mode)) setCheckpointAuthorityVariant(fixture, started.binding, mode);
+        await assert.rejects(prepareSpecialBuilderTaskDispatch(fixture.repo, {
+          run_id: started.binding.child_run_id, route: "panel-remediation", agent: "backend-builder",
+        }, {
+          claimDispatch: true,
+          completionToken: "special-claim-token",
+          specialDispatchClaimAtomicWriteHooks: mode === "pre-create"
+            ? { beforeCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+            : mode === "post-create"
+              ? { afterCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+              : undefined,
+          atomicWriteHooks: mode === "binding-failure" ? { beforeCommit: () => { throw new Error("injected binding failure"); } } : undefined,
+        }), mode === "binding-failure" ? /injected binding failure|protected file commit failed/u : /checkpoint child (?:mutation|reservation|local authority)/u, mode);
+        assert.deepEqual(dispatchFiles(runDir), [], mode);
+        assert.deepEqual(readFileSync(runPath), before, `${mode} run.json`);
+      } finally {
+        rmSync(prepared.fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("restores checkpoint steering queue sidecars across admission and create races", async () => {
+    for (const mode of ["reserved", "launching", "unknown", "missing", "cross-bound", "pre-create", "post-create", "binding-failure"]) {
+      const fixture = createFixture(`checkpoint-steering-queue-${mode}`);
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-steering-queue-${mode}-child`, checkpointLaunchFn: (value) => value,
+        });
+        const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+        const runPath = join(runDir, "run.json");
+        const before = readFileSync(runPath);
+        const steeringDirExisted = existsSync(join(runDir, "steering"));
+        if (["reserved", "launching", "unknown", "missing", "cross-bound"].includes(mode)) setCheckpointAuthorityVariant(fixture, started.binding, mode);
+        await assert.rejects(transitionSteeringQueued(runDir, "must roll back", {
+          id: `queue-${mode}`,
+          steeringQueueAtomicWriteHooks: mode === "pre-create"
+            ? { beforeCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+            : mode === "post-create"
+              ? { afterCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+              : undefined,
+          atomicWriteHooks: mode === "binding-failure" ? { beforeCommit: () => { throw new Error("injected binding failure"); } } : undefined,
+        }), mode === "binding-failure" ? /injected binding failure|protected file commit failed/u : /checkpoint child (?:mutation|reservation|local authority)/u, mode);
+        assert.deepEqual(steeringFiles(runDir), [], mode);
+        assert.equal(existsSync(join(runDir, "steering")), steeringDirExisted, `${mode} steering directory layout`);
+        assert.deepEqual(readFileSync(runPath), before, `${mode} run.json`);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("restores checkpoint steering consume layout across admission and rename races", async () => {
+    for (const mode of ["reserved", "launching", "unknown", "missing", "cross-bound", "pre-rename", "post-rename", "binding-failure"]) {
+      const fixture = createFixture(`checkpoint-steering-consume-${mode}`);
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-steering-consume-${mode}-child`, checkpointLaunchFn: (value) => value,
+        });
+        const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+        const runPath = join(runDir, "run.json");
+        const queued = await transitionSteeringQueued(runDir, "must remain pending", { id: `consume-${mode}` });
+        const pendingPath = join(runDir, queued.steering.ref);
+        const beforeRun = readFileSync(runPath);
+        const beforePending = readFileSync(pendingPath);
+        if (["reserved", "launching", "unknown", "missing", "cross-bound"].includes(mode)) setCheckpointAuthorityVariant(fixture, started.binding, mode);
+        await assert.rejects(transitionSteeringConsumed(runDir, queued.steering, {
+          steeringConsumeRenameHooks: mode === "pre-rename"
+            ? { beforeRename: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+            : mode === "post-rename"
+              ? { afterRename: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+              : undefined,
+          atomicWriteHooks: mode === "binding-failure" ? { beforeCommit: () => { throw new Error("injected binding failure"); } } : undefined,
+        }), mode === "binding-failure" ? /injected binding failure|protected file commit failed/u : /checkpoint child (?:mutation|reservation|local authority)/u, mode);
+        assert.deepEqual(steeringFiles(runDir), [queued.steering.ref.slice("steering/".length)], mode);
+        assert.deepEqual(readFileSync(pendingPath), beforePending, `${mode} pending bytes`);
+        assert.deepEqual(readFileSync(runPath), beforeRun, `${mode} run.json`);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("restores checkpoint heartbeat sidecars across start and tick publication races", async () => {
+    for (const operation of ["start", "tick"]) {
+      for (const mode of ["reserved", "launching", "unknown", "missing", "cross-bound", "pre-write", "post-write", "run-publication", "binding-failure"]) {
+        const prepared = await createCheckpointSliceDispatchFixture(`checkpoint-heartbeat-${operation}-${mode}`);
+        try {
+          const { fixture, started, runDir, runPath } = prepared;
+          const heartbeatPath = join(runDir, "heartbeat.json");
+          if (operation === "tick") await startHeartbeat(started.binding.child_run_id, { phase: "builder-wave", intervalMs: 60000 }, { cwd: fixture.repo });
+          const beforeRun = readFileSync(runPath);
+          const beforeHeartbeat = existsSync(heartbeatPath) ? readFileSync(heartbeatPath) : null;
+          if (["reserved", "launching", "unknown", "missing", "cross-bound"].includes(mode)) setCheckpointAuthorityVariant(fixture, started.binding, mode);
+          const options = {
+            cwd: fixture.repo,
+            heartbeatAtomicWriteHooks: mode === "pre-write"
+              ? { beforeSidecarCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+              : mode === "post-write"
+                ? { afterSidecarCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+                : mode === "run-publication"
+                  ? { beforeRunCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") }
+                  : mode === "binding-failure"
+                    ? { beforeRunCommit: () => { throw new Error("injected binding failure"); } }
+                  : undefined,
+          };
+          if (operation === "start") {
+            await assert.rejects(startHeartbeat(started.binding.child_run_id, { phase: "builder-wave", intervalMs: 60000 }, options), mode === "binding-failure" ? /injected binding failure/u : /checkpoint child (?:mutation|reservation|local authority)/u, `${operation} ${mode}`);
+          } else {
+            const result = await runActiveHeartbeatTickForTest(started.binding.child_run_id, options);
+            assert.match(result.reason, mode === "binding-failure" ? /injected binding failure/u : /checkpoint child (?:mutation|reservation|local authority)/u, `${operation} ${mode}`);
+          }
+          assert.deepEqual(readFileSync(runPath), beforeRun, `${operation} ${mode} run.json`);
+          assert.equal(existsSync(heartbeatPath), beforeHeartbeat !== null, `${operation} ${mode} heartbeat layout`);
+          if (beforeHeartbeat !== null) assert.deepEqual(readFileSync(heartbeatPath), beforeHeartbeat, `${operation} ${mode} heartbeat bytes`);
+        } finally {
+          rmSync(prepared.fixture.repo, { recursive: true, force: true });
+        }
       }
     }
   });
@@ -1722,7 +1849,7 @@ async function createCheckpointSliceDispatchFixture(label, { claim = false } = {
   return { fixture, started, runDir, runPath, marker, context };
 }
 
-async function createCheckpointSpecialDispatchFixture(label) {
+async function createCheckpointSpecialDispatchFixture(label, { claim = true } = {}) {
   const fixture = createFixture(label);
   const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
     cwd: fixture.repo, runId: `${label}-child`, checkpointLaunchFn: (value) => value,
@@ -1742,19 +1869,26 @@ async function createCheckpointSpecialDispatchFixture(label) {
   run.validator.review_hash = hashFile(validatorReviewPath);
   validateRun(run);
   writeJson(runPath, run);
-  const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
+  const context = claim ? await prepareSpecialBuilderTaskDispatch(fixture.repo, {
     run_id: started.binding.child_run_id, route: "panel-remediation", agent: "backend-builder",
-  }, { claimDispatch: true, completionToken: "special-claim-token" });
-  mkdirSync(join(started.child_worktree, "src"), { recursive: true });
-  writeFileSync(join(started.child_worktree, "src", "special-fix.txt"), "fixed\n");
-  git(started.child_worktree, ["add", "src/special-fix.txt"]);
-  git(started.child_worktree, ["commit", "-m", `special closure ${label}`]);
+  }, { claimDispatch: true, completionToken: "special-claim-token" }) : null;
+  if (claim) {
+    mkdirSync(join(started.child_worktree, "src"), { recursive: true });
+    writeFileSync(join(started.child_worktree, "src", "special-fix.txt"), "fixed\n");
+    git(started.child_worktree, ["add", "src/special-fix.txt"]);
+    git(started.child_worktree, ["commit", "-m", `special closure ${label}`]);
+  }
   return { fixture, started, runDir, runPath, context };
 }
 
 function dispatchFiles(runDir) {
   const dispatchDir = join(runDir, "dispatch");
   return existsSync(dispatchDir) ? readdirSync(dispatchDir).sort() : [];
+}
+
+function steeringFiles(runDir) {
+  const steeringDir = join(runDir, "steering");
+  return existsSync(steeringDir) ? readdirSync(steeringDir).sort() : [];
 }
 
 async function createCompletedPredecessor(fixture, childRunId, { pushMain = true } = {}) {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
-import { lstat, open, readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
@@ -569,7 +569,7 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
   const text = requireNonEmptyString(message, "steering message");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
+    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
@@ -584,8 +584,10 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
     const id = safeSteeringId(options.id || randomUUID());
     const ref = `steering/pending-${safeTimestamp(createdAt)}-${id}.json`;
     const resolved = resolveSteeringRef(runDir, ref, { mustExist: false });
-    await mkdir(dirname(resolved.path), { recursive: true });
-    if (existsSync(resolved.path)) throw new Error(`steering ref already exists: ${ref}`);
+    const steeringDir = dirname(resolved.path);
+    const steeringDirExisted = existsSync(steeringDir);
+    await mkdir(steeringDir, { recursive: true });
+    const createdDirectory = steeringDirExisted ? null : await observeCreatedDirectory(steeringDir);
     const steeringFile = {
       schema_version: 1,
       kind: "operator-steering",
@@ -596,29 +598,57 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
       created_at: createdAt,
       source: "factory steer",
     };
-    assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
-    await writeJsonAtomically(resolved.path, steeringFile);
-    const fileHash = hashFile(resolved.path, { mode: "raw" });
-    const metadata = { id, ref, hash: fileHash, message_chars: text.length, created_at: createdAt };
-    const history = Array.isArray(current.steering?.history) ? cloneJson(current.steering.history) : [];
-    history.push({ event: "queued", ...metadata });
-    const next = validateRun({
-      ...cloneJson(current),
-      updated_at: createdAt,
-      steering: {
-        schema_version: 1,
-        generation: steeringGeneration(current) + 1,
-        pending: metadata,
-        uncheckpointed: null,
-        boundary: null,
-        action_claim: null,
-        last_action: cloneJson(current.steering?.last_action ?? null),
-        pr_fence: null,
-        history,
-      },
-    });
-    await writeSemanticRunJson(runDir, next, options, v2Authority);
-    return { updated: true, status: next.status, run: next, steering: metadata };
+    const assertPublicationAuthority = () => {
+      const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+      if (!sameJson(observed, current)) throw new Error("steering queue run authority changed before publication");
+      if (checkpointAuthority) assertCheckpointLocalPublishedAuthority(runDir, observed, options, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
+      if (v2Authority) assertV2LocalPublishedAuthority(runDir, observed, options, v2Authority);
+    };
+    let publication = null;
+    let fileHash = null;
+    try {
+      if (existsSync(resolved.path)) throw new Error(`steering ref already exists: ${ref}`);
+      publication = await publishDispatchRecord(runDir, ref, steeringFile, {
+        hooks: publicationBeforeCommitHooks(options.steeringQueueAtomicWriteHooks),
+        beforeCommit: assertPublicationAuthority,
+        existsMessage: `steering ref already exists: ${ref}`,
+      });
+      fileHash = hashFile(resolved.path, { mode: "raw" });
+      const metadata = { id, ref, hash: fileHash, message_chars: text.length, created_at: createdAt };
+      const history = Array.isArray(current.steering?.history) ? cloneJson(current.steering.history) : [];
+      history.push({ event: "queued", ...metadata });
+      const next = validateRun({
+        ...cloneJson(current),
+        updated_at: createdAt,
+        steering: {
+          schema_version: 1,
+          generation: steeringGeneration(current) + 1,
+          pending: metadata,
+          uncheckpointed: null,
+          boundary: null,
+          action_claim: null,
+          last_action: cloneJson(current.steering?.last_action ?? null),
+          pr_fence: null,
+          history,
+        },
+      });
+      await options.steeringQueueAtomicWriteHooks?.afterCommit?.();
+      assertPublicationAuthority();
+      await writeSemanticRunJson(runDir, next, options, v2Authority, () => {
+        assertPublicationAuthority();
+        if (hashFile(resolved.path, { mode: "raw" }) !== fileHash) throw new Error("steering queue sidecar changed before run binding");
+      });
+      return { updated: true, status: next.status, run: next, steering: metadata };
+    } catch (error) {
+      if (publication) {
+        await removeOwnedFailedDispatchPublication(runDir, ref, publication, (observed) => {
+          const pending = observed?.steering?.pending;
+          return pending?.ref === ref && pending?.hash === fileHash;
+        });
+      }
+      await removeOwnedEmptyDirectory(createdDirectory);
+      throwCheckpointPublicationCause(error);
+    }
   }, options);
 }
 
@@ -627,7 +657,7 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
+    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
@@ -689,12 +719,25 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
         history,
       },
     });
-    if (!source.consumedRef) {
-      const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
-      assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
-      await rename(source.path, consumedResolved.path);
+    let moved = null;
+    try {
+      if (!source.consumedRef) {
+        const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
+        await options.steeringConsumeRenameHooks?.beforeRename?.();
+        assertSteeringMutationAuthority(runDir, current, options, checkpointAuthority, v2Authority);
+        moved = await renameOwnedSteeringSidecar(source.path, consumedResolved.path, pending.hash);
+        assertOwnedSteeringSidecarMove(moved);
+        await options.steeringConsumeRenameHooks?.afterRename?.();
+        assertSteeringMutationAuthority(runDir, current, options, checkpointAuthority, v2Authority);
+      }
+      await writeSemanticRunJson(runDir, next, options, v2Authority, () => {
+        assertSteeringMutationAuthority(runDir, current, options, checkpointAuthority, v2Authority);
+        if (moved) assertOwnedSteeringSidecarMove(moved);
+      });
+    } catch (error) {
+      if (moved) await restoreOwnedSteeringSidecarMove(moved);
+      throwCheckpointPublicationCause(error);
     }
-    await writeSemanticRunJson(runDir, next, options, v2Authority);
     const steering = {
       kind: "operator-steering-consumed",
       trust: "untrusted-operator-data",
@@ -5310,7 +5353,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
   if (dirname(runDir) !== factoryRoot) throw new Error("special builder Task dispatch run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
+    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     if (run.run_id !== request.run_id || run.status !== "running") throw new Error("special builder Task dispatch requires the exact current running run");
@@ -5398,7 +5441,8 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
       const dispatchDir = join(runDir, "dispatch");
       await mkdir(dispatchDir, { recursive: true });
       assertNoSymlinkPath(runDir, dispatchDir, "special builder dispatch claim directory");
-      const claimPath = join(dispatchDir, claimName);
+      const claimRef = `dispatch/${claimName}`;
+      const claimPath = join(runDir, claimRef);
       const closureRef = `dispatch/${claimName.slice(0, -5)}.closed.json`;
       const claim = {
         schema_version: 1,
@@ -5417,28 +5461,43 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
         closure_ref: closureRef,
         ...(request.route === "integration-conflict" ? integrationConflictClaimFields(authority.conflict) : {}),
       };
-      try {
-        await writeFile(claimPath, `${JSON.stringify(claim, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-      } catch (error) {
-        if (error?.code === "EEXIST") throw new Error("special builder Task dispatch is already claimed for this exact route instance");
-        throw error;
-      }
-      assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
-      const claimRef = `dispatch/${claimName}`;
-      const claimHash = hashFile(claimPath);
-      const next = cloneJson(run);
-      next.special_builder_dispatch = {
-        schema_version: 1, route: request.route, instance, agent: request.agent, claim_ref: claimRef, claim_hash: claimHash,
-        ...(request.route === "integration-conflict" ? { owner_slice_id: authority.conflict.effective_owner.slice_id } : {}),
-      };
-      next.updated_at = timestamp(options.now);
-      const assertClaimAuthority = () => {
+      const assertPublicationAuthority = () => {
+        if (checkpointAuthority) {
+          const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+          assertCheckpointLocalPublishedAuthority(runDir, currentRun, { ...options, repoRoot: repository }, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
+        }
         assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
-        const currentClaim = observeSpecialDispatchClaim(runDir, claimRef);
-        if (currentClaim.hash !== claimHash) throw new Error("special builder Task dispatch claim changed before run binding");
       };
-      await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClaimAuthority);
-      context.dispatch_claim = { ref: claimRef, hash: claimHash, closure_ref: closureRef };
+      const publication = await publishDispatchRecord(runDir, claimRef, claim, {
+        hooks: publicationBeforeCommitHooks(options.specialDispatchClaimAtomicWriteHooks),
+        beforeCommit: assertPublicationAuthority,
+        existsMessage: "special builder Task dispatch is already claimed for this exact route instance",
+      });
+      let claimHash = null;
+      try {
+        claimHash = hashFile(claimPath);
+        const next = cloneJson(run);
+        next.special_builder_dispatch = {
+          schema_version: 1, route: request.route, instance, agent: request.agent, claim_ref: claimRef, claim_hash: claimHash,
+          ...(request.route === "integration-conflict" ? { owner_slice_id: authority.conflict.effective_owner.slice_id } : {}),
+        };
+        next.updated_at = timestamp(options.now);
+        const assertClaimAuthority = () => {
+          assertPublicationAuthority();
+          const currentClaim = observeSpecialDispatchClaim(runDir, claimRef);
+          if (currentClaim.hash !== claimHash) throw new Error("special builder Task dispatch claim changed before run binding");
+        };
+        await options.specialDispatchClaimAtomicWriteHooks?.afterCommit?.();
+        assertClaimAuthority();
+        await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClaimAuthority);
+        context.dispatch_claim = { ref: claimRef, hash: claimHash, closure_ref: closureRef };
+      } catch (error) {
+        await removeOwnedFailedDispatchPublication(runDir, claimRef, publication, (current) => {
+          const binding = current?.special_builder_dispatch;
+          return binding?.claim_ref === claimRef && binding?.claim_hash === claimHash;
+        });
+        throwCheckpointPublicationCause(error);
+      }
     }
     return context;
   }, options);
@@ -6219,13 +6278,14 @@ async function publishDispatchRecord(runDir, ref, value, options = {}) {
 
 async function removeOwnedFailedDispatchPublication(runDir, ref, publication, isBound) {
   if (!publication?.created) return;
-  let current;
+  let current = null;
   try {
     current = await readRunJson(runDir);
   } catch {
-    return;
+    // The run may be the failed authority source; filesystem ownership below
+    // remains sufficient to remove only this operation's unbound publication.
   }
-  if (typeof isBound === "function" && isBound(current)) return;
+  if (current && typeof isBound === "function" && isBound(current)) return;
   const path = resolve(runDir, ref);
   let identity;
   try {
@@ -6236,6 +6296,86 @@ async function removeOwnedFailedDispatchPublication(runDir, ref, publication, is
   if (identity.isSymbolicLink() || !identity.isFile() || identity.dev !== publication.dev || identity.ino !== publication.ino
     || hashFile(path) !== publication.hash) return;
   await rm(path, { force: true });
+}
+
+async function observeCreatedDirectory(path) {
+  const identity = await lstat(path);
+  if (identity.isSymbolicLink() || !identity.isDirectory()) throw new Error("created sidecar directory is not a regular directory");
+  return { path, dev: identity.dev, ino: identity.ino };
+}
+
+async function removeOwnedEmptyDirectory(owned) {
+  if (!owned) return;
+  let identity;
+  try {
+    identity = await lstat(owned.path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (identity.isSymbolicLink() || !identity.isDirectory() || identity.dev !== owned.dev || identity.ino !== owned.ino) return;
+  try {
+    await rmdir(owned.path);
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "ENOTEMPTY") throw error;
+  }
+}
+
+function publicationBeforeCommitHooks(value) {
+  if (!isRecord(value)) return undefined;
+  const { afterCommit: _afterCommit, ...hooks } = value;
+  return hooks;
+}
+
+function assertSteeringMutationAuthority(runDir, expectedRun, options, checkpointAuthority, v2Authority) {
+  const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+  if (!sameJson(current, expectedRun)) throw new Error("steering run authority changed during sidecar mutation");
+  if (checkpointAuthority) assertCheckpointLocalPublishedAuthority(runDir, current, options, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
+  if (v2Authority) assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
+}
+
+async function renameOwnedSteeringSidecar(sourcePath, destinationPath, expectedHash) {
+  if (existsSync(destinationPath)) throw new Error("consumed steering destination already exists");
+  const source = await lstat(sourcePath);
+  if (source.isSymbolicLink() || !source.isFile() || hashFile(sourcePath, { mode: "raw" }) !== expectedHash) {
+    throw new Error("pending steering source changed before rename");
+  }
+  const moved = { sourcePath, destinationPath, dev: source.dev, ino: source.ino, hash: expectedHash };
+  await rename(sourcePath, destinationPath);
+  return moved;
+}
+
+function assertOwnedSteeringSidecarMove(moved) {
+  if (existsSync(moved.sourcePath)) throw new Error("pending steering source reappeared during rename");
+  const destination = lstatSync(moved.destinationPath);
+  if (destination.isSymbolicLink() || !destination.isFile() || destination.dev !== moved.dev || destination.ino !== moved.ino
+    || hashFile(moved.destinationPath, { mode: "raw" }) !== moved.hash) {
+    throw new Error("consumed steering destination changed during rename");
+  }
+}
+
+async function restoreOwnedSteeringSidecarMove(moved) {
+  if (existsSync(moved.sourcePath)) {
+    const source = lstatSync(moved.sourcePath);
+    if (!source.isSymbolicLink() && source.isFile() && source.dev === moved.dev && source.ino === moved.ino
+      && hashFile(moved.sourcePath, { mode: "raw" }) === moved.hash && !existsSync(moved.destinationPath)) return;
+    throw new Error("steering rollback refused to replace a successor pending sidecar");
+  }
+  const destination = lstatSync(moved.destinationPath);
+  if (destination.isSymbolicLink() || !destination.isFile() || destination.dev !== moved.dev || destination.ino !== moved.ino
+    || hashFile(moved.destinationPath, { mode: "raw" }) !== moved.hash) {
+    throw new Error("steering rollback refused to move a successor consumed sidecar");
+  }
+  await rename(moved.destinationPath, moved.sourcePath);
+  const restored = lstatSync(moved.sourcePath);
+  if (restored.dev !== moved.dev || restored.ino !== moved.ino || hashFile(moved.sourcePath, { mode: "raw" }) !== moved.hash) {
+    throw new Error("steering rollback could not verify the restored pending sidecar");
+  }
+}
+
+function throwCheckpointPublicationCause(error) {
+  if (/checkpoint child (?:mutation|reservation|local authority)/u.test(error?.cause?.message || "")) throw error.cause;
+  throw error;
 }
 
 function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expectedRun, expectedContext, options = {}) {
