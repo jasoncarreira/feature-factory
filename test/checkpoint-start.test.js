@@ -819,6 +819,76 @@ describe("checked checkpoint child start", () => {
     }
   });
 
+  it("publishes a gate answer through exact launched checkpoint authority", async () => {
+    const fixture = createFixture("checkpoint-gate-answer-launched");
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-gate-answer-launched-child", checkpointLaunchFn: (value) => value,
+      });
+      const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+      mkdirSync(join(runDir, "artifacts"), { recursive: true });
+      mkdirSync(join(runDir, "gates"), { recursive: true });
+      writeFileSync(join(runDir, "artifacts", "brief.md"), "# Brief\n");
+      writeFileSync(join(runDir, "gates", "brief.question.md"), "Approve?\n");
+      await transitionGateDecision(runDir, "brief", { status: "pending", artifact: "artifacts/brief.md", question_ref: "gates/brief.question.md", answer_ref: "gates/brief.answer" });
+      const runPath = join(runDir, "run.json");
+      const before = readFileSync(runPath);
+      const result = writeGateAnswer(started.binding.child_run_id, "brief", "approve", { cwd: fixture.repo });
+      assert.equal(result.answer, "approve");
+      assert.equal(readFileSync(join(runDir, "gates", "brief.answer"), "utf8"), "approve\n");
+      assert.deepEqual(readFileSync(runPath), before);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes and binds slice dispatch claim and closure through exact launched checkpoint authority", async () => {
+    const prepared = await createCheckpointSliceDispatchFixture("checkpoint-slice-sidecars-launched");
+    try {
+      const context = await prepareSliceBuilderTaskDispatch(prepared.fixture.repo, prepared.marker, {
+        claimDispatch: true, completionToken: "slice-claim-token",
+      });
+      const claimPath = join(prepared.runDir, context.dispatch_claim.ref);
+      const claimed = readJson(prepared.runPath).slices[0];
+      assert.equal(existsSync(claimPath), true);
+      assert.equal(claimed.dispatch_claim_ref, context.dispatch_claim.ref);
+      assert.equal(claimed.dispatch_claim_hash, hashFile(claimPath));
+      git(prepared.started.child_worktree, ["commit", "--allow-empty", "-m", "slice sidecar closure"]);
+      const closure = await completeSliceBuilderTaskDispatch(prepared.fixture.repo, {
+        ...prepared.marker,
+        claim_ref: context.dispatch_claim.ref,
+        claim_hash: context.dispatch_claim.hash,
+        completion_token: "slice-claim-token",
+      });
+      const closed = readJson(prepared.runPath).slices[0];
+      assert.equal(existsSync(join(prepared.runDir, closure.closure_ref)), true);
+      assert.equal(closed.dispatch_closure_ref, closure.closure_ref);
+      assert.equal(closed.dispatch_closure_hash, hashFile(join(prepared.runDir, closure.closure_ref)));
+    } finally {
+      rmSync(prepared.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes and binds special dispatch closure through exact launched checkpoint authority", async () => {
+    const prepared = await createCheckpointSpecialDispatchFixture("checkpoint-special-sidecar-launched");
+    try {
+      const closure = await completeSpecialBuilderTaskDispatch(prepared.fixture.repo, {
+        run_id: prepared.started.binding.child_run_id,
+        route: "panel-remediation",
+        agent: "backend-builder",
+        claim_ref: prepared.context.dispatch_claim.ref,
+        claim_hash: prepared.context.dispatch_claim.hash,
+        completion_token: "special-claim-token",
+      });
+      const current = readJson(prepared.runPath).special_builder_dispatch;
+      assert.equal(existsSync(join(prepared.runDir, closure.closure_ref)), true);
+      assert.equal(current.closure_ref, closure.closure_ref);
+      assert.equal(current.closure_hash, hashFile(join(prepared.runDir, closure.closure_ref)));
+    } finally {
+      rmSync(prepared.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
   it("blocks direct slice transitions across every non-launched checkpoint authority state", async () => {
     for (const state of ["reserved", "launching", "unknown", "missing", "cross-bound"]) {
       const fixture = createFixture(`checkpoint-slice-${state}`);
