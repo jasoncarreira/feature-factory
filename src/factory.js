@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertCheckpointLocalPublishedAuthority, assertCompletedCheckpointChildAuthority, assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, readSlicesSeedPlan, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertCheckpointLocalPublishedAuthority, assertCompletedCheckpointChildAuthority, assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildBinding, validateCheckpointFinalClosure, validateCheckpointReservationClaim, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -23,6 +23,7 @@ import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffected
 import { hashValue } from "./refs.js";
 import { resolvePostPrCiPolicy } from "./config.js";
 import { validateCheckpointRoutingManifest, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
+import { verificationArtifactExecutionClaimRef } from "./verification-artifact-refs.js";
 import { canonicalGithubRepositoryFromOrigin, observePullRequestOperation } from "./github.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -2468,6 +2469,12 @@ export async function seedFactorySlices(runId, opts = {}) {
   return transitionSlicesSeed(runDir, slices, opts);
 }
 
+export function probeFactorySlices(runId, opts = {}) {
+  const runDir = resolveRunDir(runId, opts);
+  if (opts.from !== "plan/slices.json") throw new Error("factory slices-probe --from must be exactly plan/slices.json");
+  return probeSlicesPlanAdmission(runDir, opts);
+}
+
 export function heartbeatStatus(runId, opts = {}) {
   const file = heartbeatPath(resolveHeartbeatRunDir(runId, opts));
   if (!existsSync(file)) return null;
@@ -4005,7 +4012,7 @@ function collectCarryForwardPublicationInputs(parentRunDir, continuation) {
           throw new Error(`carry-forward invariant-family receipt binding is missing or stale: ${disposition.evidence_ref}`);
         }
         add(binding.ref, readExactCarryForwardFile(parentRunDir, binding.ref, binding.hash));
-        const claimRef = verificationArtifactClaimRefForReceipt(binding.ref);
+        const claimRef = verificationArtifactExecutionClaimRef(binding.ref);
         const claimBinding = continuation.parent_evidence.find((item) => item.ref === claimRef);
         if (!claimBinding) throw new Error(`carry-forward invariant-family claim binding is missing: ${claimRef}`);
         add(claimBinding.ref, readExactCarryForwardFile(parentRunDir, claimBinding.ref, claimBinding.hash));
@@ -4758,17 +4765,12 @@ function collectContinuationParentEvidence(parentRunDir, parentRun) {
     const review = resolveContinuationReview(parentRunDir, reviewRef);
     const value = readReviewJson(review.path);
     for (const disposition of value.invariant_family_ledger?.dispositions || []) {
-      if (stringValue(disposition?.evidence_ref)) refs.push(disposition.evidence_ref, verificationArtifactClaimRefForReceipt(disposition.evidence_ref));
+      if (stringValue(disposition?.evidence_ref)) refs.push(disposition.evidence_ref, verificationArtifactExecutionClaimRef(disposition.evidence_ref));
     }
   }
   if (stringValue(parentRun.post_pr?.remediation?.failure_evidence_ref)) refs.push(parentRun.post_pr.remediation.failure_evidence_ref);
   for (const binding of Array.isArray(parentRun.post_pr?.evidence_refs) ? parentRun.post_pr.evidence_refs : []) if (stringValue(binding?.ref)) refs.push(binding.ref);
   return hashUniqueParentRefs(parentRunDir, refs, "evidence", "evidence");
-}
-
-function verificationArtifactClaimRefForReceipt(receiptRef) {
-  if (!stringValue(receiptRef) || !receiptRef.endsWith(".json")) throw new Error("verification artifact receipt ref is invalid");
-  return `${receiptRef.slice(0, -5)}.claim.json`;
 }
 
 function collectContinuationParentReviews(parentRunDir, parentRun) {

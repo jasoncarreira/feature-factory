@@ -1206,11 +1206,18 @@ describe("decomposition depth contract", () => {
   });
 
   it("branches checked admission while binding reviewed checkpoint authority before routing", () => {
-    assert.match(
-      SKILL,
-      /active admission probe[\s\S]*For `admit`, it seeds first[\s\S]*For `checkpoint`[\s\S]*same-attempt APPROVE review first/i,
-      "SKILL must preserve admitted seed-before-acceptance while binding reviewed checkpoint authority before routing",
-    );
+    for (const [name, text] of [["SKILL", SKILL], ["command", COMMAND]]) {
+      assert.match(text, /slices-probe[\s\S]*typed[^\n]*decision[^\n]*reasons[^\n]*plan_hash/i, `${name} must use the typed non-mutating probe`);
+      assert.match(text, /`admit`[\s\S]*slices-seed[\s\S]*accepted `work-decomposer`[^\n]*after/i, `${name} must seed admit before acceptance`);
+      assert.match(text, /`checkpoint`[\s\S]*same-attempt[^\n]*APPROVE[\s\S]*slices remain empty[\s\S]*terminal[- ]boundary[\s\S]*slices-seed/i, `${name} must accept checkpoint before token-bound routing`);
+    }
+  });
+
+  it("documents encoded verification artifact refs without losing receipt subject identity", () => {
+    for (const [name, text] of [["SCHEMA", SCHEMA], ["README", README]]) {
+      assert.match(text, /SHA-256 base64url[\s\S]*(?:UTF-8|UTF8)[\s\S]*(?:slice|artifact)/i, `${name} must document canonical encoded refs`);
+      assert.match(text, /(?:preserve|retain)[^\n]*(?:subject|original identity)/i, `${name} must retain semantic identity inside records`);
+    }
   });
 
   it("states that a grandfathered already-seeded deeper graph remains runnable", () => {

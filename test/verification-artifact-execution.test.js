@@ -7,6 +7,8 @@ import { describe, it } from "node:test";
 import { execFileSync, spawn } from "./helpers/git-fixture.js";
 import { claimCheckedVerificationArtifactExecution, completeCheckedVerificationArtifactExecution } from "../src/run-state.js";
 import { executeCheckedVerificationArtifact } from "../src/test-execution.js";
+import { evaluateInvariantFamilyReview } from "../src/delivery-envelope/review-extension.js";
+import { verificationArtifactExecutionClaimRef, verificationArtifactExecutionReceiptRef } from "../src/verification-artifact-refs.js";
 
 describe("checked verification artifact execution", () => {
   it("executes the exact current artifact command and publishes a current closed receipt", async () => {
@@ -164,9 +166,80 @@ describe("checked verification artifact execution", () => {
       rmSync(fixture.repo, { recursive: true, force: true });
     }
   });
+
+  it("encodes arbitrary valid UTF-8 slice ids into safe deterministic refs consumed by the review ledger", async () => {
+    for (const [index, sliceId] of ["slice with spaces", "スライス", "feature/api", ".."].entries()) {
+      const fixture = createArtifactFixture(`artifact-utf8-${index}`, { sliceId });
+      try {
+        const result = await executeCheckedVerificationArtifact(fixture.runDir, sliceId, "slice-tests", { env: process.env });
+        const receiptRef = result.authority.receipt_ref;
+        const claimRef = verificationArtifactExecutionClaimRef(receiptRef);
+        assert.match(receiptRef, /^evidence\/verification-artifact-[A-Za-z0-9_-]+-[A-Za-z0-9_-]+\.attempt-1\.json$/u, sliceId);
+        assert.equal(receiptRef.includes(sliceId), false, sliceId);
+        assert.equal(receiptRef.includes(".."), false, sliceId);
+        assert.equal(receiptRef.slice("evidence/".length).includes("/"), false, sliceId);
+        assert.equal(result.receipt.subject, sliceId);
+        assert.equal(result.receipt.slice_id, sliceId);
+        const claim = JSON.parse(readFileSync(join(fixture.runDir, claimRef), "utf8"));
+        const review = {
+          subject: sliceId,
+          attempt: 1,
+          verdict: "APPROVE",
+          reviewed_commit: fixture.head,
+          invariant_family_ledger: {
+            schema_version: 1,
+            delivery_unit_id: "slice-unit",
+            dispositions: [{
+              invariant_family_id: "slice-family",
+              verification_artifact_id: "slice-tests",
+              evidence_ref: receiptRef,
+              evidence_hash: result.receipt_hash,
+              reviewed_commit: fixture.head,
+              probe: { type: "verification-artifact", verification_artifact_id: "slice-tests" },
+              result: result.receipt.result,
+              unresolved_findings: [],
+            }],
+          },
+        };
+        const decision = evaluateInvariantFamilyReview({
+          plan: fixture.plan,
+          sliceId,
+          review,
+          observeEvidence: () => ({ ref: receiptRef, hash: result.receipt_hash, claim, receipt: result.receipt }),
+        });
+        assert.equal(decision.decision, "approve", sliceId);
+        assert.equal(decision.grants_b4_authority, true, sliceId);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("uses collision-resistant fixed-width refs without path traversal", () => {
+    const ids = ["a/b", "a..b", "a b", "a_b", "é", "e\u0301"];
+    const refs = ids.map((id) => verificationArtifactExecutionReceiptRef(id, "slice-tests", 1));
+    assert.equal(new Set(refs).size, ids.length);
+    assert.equal(
+      verificationArtifactExecutionReceiptRef("slice with spaces", "slice-tests", 1),
+      "evidence/verification-artifact-qW_xvjINZNuc7EGr2NFcVkot_-YkPHmxbNHJJtGD0vo-mw4JNZac6NmXnN-QNcr-JAB_BVSYDp4k_tkGlc390pA.attempt-1.json",
+    );
+    assert.equal(
+      verificationArtifactExecutionReceiptRef("slice", "../artifact", 2),
+      "evidence/verification-artifact-A_2wZdlW8_uczYXaGxU5jwCplYtxUUXr-Rbdkf17Y2E-YBARmcUO_28Qt5wQKxX5cP4bJCJ09U3amrj-5t_vK-0.attempt-2.json",
+    );
+    assert.equal(
+      verificationArtifactExecutionClaimRef("evidence/api.artifact-api-tests.attempt-1.json"),
+      "evidence/api.artifact-api-tests.attempt-1.claim.json",
+    );
+    for (const ref of refs) {
+      assert.match(ref, /^evidence\/verification-artifact-[A-Za-z0-9_-]{43}-[A-Za-z0-9_-]{43}\.attempt-1\.json$/u);
+      assert.equal(ref.includes(".."), false);
+      assert.equal(ref.slice("evidence/".length).includes("/"), false);
+    }
+  });
 });
 
-function createArtifactFixture(runId) {
+function createArtifactFixture(runId, { sliceId = "slice" } = {}) {
   const repo = mkdtempSync(join(tmpdir(), "verification-artifact-fixture-"));
   git(repo, ["init", "-b", "slice-branch"]);
   git(repo, ["config", "user.email", "test@example.com"]);
@@ -177,10 +250,10 @@ function createArtifactFixture(runId) {
   const runDir = join(repo, ".opencode", "factory", runId);
   for (const directory of ["plan", "reviews", "evidence"]) mkdirSync(join(runDir, directory), { recursive: true });
   const plan = {
-    slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["node --version"] }],
+    slices: [{ id: sliceId, stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["node --version"] }],
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     delivery_envelope: { schema_version: 1, delivery_units: [{
-      id: "slice-unit", slice_id: "slice", invariant_families: [{ id: "slice-family", description: "Slice behavior" }],
+      id: "slice-unit", slice_id: sliceId, invariant_families: [{ id: "slice-family", description: "Slice behavior" }],
       obligations: [{ id: "slice-obligation", description: "Verify behavior", invariant_family_id: "slice-family", verification_artifact_id: "slice-tests" }],
       verification_artifacts: [{ id: "slice-tests", test_plan_index: 0, test_plan_entry: "node --version" }],
     }] },
@@ -189,13 +262,13 @@ function createArtifactFixture(runId) {
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
   writeJson(join(runDir, "run.json"), {
     schema_version: 1, run_id: runId, status: "running", branch: "slice-branch", worktree: repo, gates: {},
-    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["README.md"], effective_paths: ["README.md"], status: "running", attempts: 1, branch: "slice-branch", worktree: repo }],
+    slices: [{ id: sliceId, stack: "backend", depends_on: [], declared_paths: ["README.md"], effective_paths: ["README.md"], status: "running", attempts: 1, branch: "slice-branch", worktree: repo }],
     steps: [{ agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json", acceptance: {
       artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(runDir, "plan", "slices.json")),
       review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(runDir, "reviews", "work-decomposer.json")),
     } }],
   });
-  return { repo, runDir, runId, head: git(repo, ["rev-parse", "HEAD"]), planHash: hashFile(join(runDir, "plan", "slices.json")) };
+  return { repo, runDir, runId, head: git(repo, ["rev-parse", "HEAD"]), plan, planHash: hashFile(join(runDir, "plan", "slices.json")) };
 }
 
 function artifactAuthority(fixture) {
@@ -203,7 +276,7 @@ function artifactAuthority(fixture) {
     run_id: fixture.runId, slice_id: "slice", attempt: 1, plan_ref: "plan/slices.json", plan_hash: fixture.planHash,
     head_sha: fixture.head, verification_artifact_id: "slice-tests",
     probe: { type: "verification-artifact", verification_artifact_id: "slice-tests", test_plan_index: 0, test_plan_entry: "node --version", program: "node", args: ["--version"] },
-    worktree: fixture.repo, receipt_ref: "evidence/slice.artifact-slice-tests.attempt-1.json",
+    worktree: fixture.repo, receipt_ref: verificationArtifactExecutionReceiptRef("slice", "slice-tests", 1),
   };
 }
 

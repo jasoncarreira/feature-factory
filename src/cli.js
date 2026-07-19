@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
@@ -84,6 +84,7 @@ Commands:
   factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> [--repo PATH] [--json]
   factory answer [--repo PATH] [--json] <run> <gate> <approve|stop|changes: ...>
   factory gate-decision <run> <gate> <pending|approved|changes_requested|stopped> [--artifact REF] [--question-ref REF] [--answer-ref REF|--answer TEXT] [--approval-source SOURCE] [--boundary-token TOKEN]
+  factory slices-probe <run-id> --from plan/slices.json [--json]
   factory slices-seed <run-id> --from plan/slices.json [--boundary-token TOKEN]
   factory slice-status <run-id> <slice-id> <running|review|blocked> [--branch REF] [--worktree PATH] [--attempts N] [--evidence-ref REF] [--review-ref REF] [--reason TEXT]
   factory repair <run-id> <reported|repairing|review|merged|blocked> [--owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref REF] [--attempts N] [--review-ref REF --evidence-ref REF --commit SHA] [--merge-commit SHA --verification-ref REF] [--reason TEXT]
@@ -255,6 +256,7 @@ async function factory(args, dependencies = {}) {
   if (sub === "provenance" && positional[0] === "review-dispatch") return provenanceReviewDispatch(rest);
   if (sub === "env" || sub === "provenance") return env(rest);
   if (sub === "gate-decision") return gateDecision(rest, dependencies);
+  if (sub === "slices-probe") return slicesProbe(rest);
   if (sub === "slices-seed") return slicesSeed(rest);
   if (sub === "slice-status") return sliceStatus(rest);
   if (sub === "repair") return repairStatus(rest);
@@ -813,6 +815,17 @@ async function slicesSeed(args) {
   const from = requiredOption(opts.from, "--from", "factory slices-seed");
   if (from !== "plan/slices.json") throw new Error("factory slices-seed --from must be exactly plan/slices.json");
   return print(await seedFactorySlices(runId, { ...opts, from }), opts);
+}
+
+async function slicesProbe(args) {
+  assertOnlyCommandOptions(args, new Set(["--from", "--repo", "--json"]), "factory slices-probe");
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) throw new Error("factory slices-probe requires exactly one <run-id>");
+  const from = requiredOption(opts.from, "--from", "factory slices-probe");
+  if (from !== "plan/slices.json") throw new Error("factory slices-probe --from must be exactly plan/slices.json");
+  return print(probeFactorySlices(runId, { ...opts, from }), opts);
 }
 
 async function sliceStatus(args) {

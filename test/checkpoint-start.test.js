@@ -1519,6 +1519,43 @@ describe("checked checkpoint child start", () => {
     }
   });
 
+  it("normalizes checkpoint PR base authority through the full child pipeline and final closure", async () => {
+    const fixture = createFixture("checkpoint-pr-base-normalization");
+    try {
+      const first = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-pr-base-normalization-one", checkpointLaunchFn: (value) => value,
+      });
+      const firstCompleted = await driveCheckpointChildThroughPr(fixture, first, 41);
+      git(fixture.repo, ["merge", "--no-ff", first.binding.child_run_id, "-m", "merge normalized checkpoint one"]);
+      const firstMerge = git(fixture.repo, ["rev-parse", "HEAD"]);
+      git(fixture.repo, ["push", "origin", "main"]);
+
+      const second = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-002", {
+        cwd: fixture.repo,
+        runId: "checkpoint-pr-base-normalization-two",
+        predecessorMergeCommit: firstMerge,
+        observePredecessorPrOperation: async () => canonicalMergedObservation(fixture, { binding: first.binding, mergeCommit: firstMerge }),
+        checkpointLaunchFn: (value) => value,
+      });
+      assert.equal(firstCompleted.terminal_result.base_ref, "main");
+      const secondCompleted = await driveCheckpointChildThroughPr(fixture, second, 42);
+      git(fixture.repo, ["merge", "--no-ff", second.binding.child_run_id, "-m", "merge normalized checkpoint two"]);
+      const secondMerge = git(fixture.repo, ["rev-parse", "HEAD"]);
+      git(fixture.repo, ["push", "origin", "main"]);
+
+      const closed = await closeFactoryCheckpointRoute(fixture.parentRunId, {
+        cwd: fixture.repo,
+        observePredecessorPrOperation: async () => canonicalMergedObservation(fixture, { binding: second.binding, mergeCommit: secondMerge }),
+      });
+      assert.equal(secondCompleted.terminal_result.base_ref, "main");
+      assert.equal(closed.status, "closed");
+      assert.equal(closed.closure.child_run_id, second.binding.child_run_id);
+      assert.equal(closed.closure.merge_commit, secondMerge);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
   it("final closure rejects absent, open, closed-unmerged, wrong-head, wrong-repository, and nonancestor PR authority", async () => {
     for (const [label, observation] of [
       ["absent", () => ({ disposition: "absent", reason: null, pull_request: null })],
@@ -1972,6 +2009,100 @@ async function createCompletedFinalRoute(label) {
   publishCompletedChild(fixture, final.binding, childHead);
   const observation = canonicalMergedObservation(fixture, { binding: final.binding, mergeCommit });
   return { fixture, predecessor, final, childHead, mergeCommit, observation };
+}
+
+async function driveCheckpointChildThroughPr(fixture, started, prNumber) {
+  const marker = `checkpoint-pr-${prNumber}.txt`;
+  writeFileSync(join(started.child_worktree, marker), `${prNumber}\n`);
+  git(started.child_worktree, ["add", marker]);
+  git(started.child_worktree, ["commit", "-m", `checkpoint PR ${prNumber}`]);
+  const head = git(started.child_worktree, ["rev-parse", "HEAD"]);
+  git(fixture.repo, ["push", "origin", `${started.binding.child_run_id}:refs/heads/${started.binding.child_run_id}`]);
+  publishCompletedChild(fixture, started.binding, head);
+  const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+  const runPath = join(runDir, "run.json");
+  const run = readJson(runPath);
+  run.status = "running";
+  run.pr_url = null;
+  run.terminal_result = null;
+  run.github_account = "acme";
+  run.pr_mode = "ready";
+  run.max_retries = 3;
+  run.gates = {};
+  run.validator = null;
+  run.security_review = null;
+  const testStep = run.steps.find((step) => step.agent === "test-verifier");
+  testStep.status = "running";
+  delete testStep.acceptance;
+  writeJson(runPath, run);
+
+  const checked = await transitionRunStep(runDir, "test-verifier", { status: "accepted", attempts: 1 }, { repoRoot: fixture.repo });
+  assert.equal(checked.step.acceptance.reviewed_head_sha, head);
+  const panels = await transitionPanelVerdicts(runDir, {
+    validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+    security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+  }, { repoRoot: fixture.repo });
+  assert.equal(panels.run.security_review.verdict, "PASS");
+
+  mkdirSync(join(runDir, "gates"), { recursive: true });
+  writeFileSync(join(runDir, "gates", "pre_pr.question.md"), "Create PR?\n");
+  await transitionGateDecision(runDir, "pre_pr", {
+    status: "pending", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md",
+  }, { repoRoot: fixture.repo });
+  const boundary = await transitionSteeringBoundaryOpened(runDir, "gate", { token: `checkpoint-pr-gate-${prNumber}`, repoRoot: fixture.repo });
+  const approved = await transitionGateDecision(runDir, "pre_pr", {
+    status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md", answer: "approve",
+  }, { boundaryToken: boundary.boundary.token, repoRoot: fixture.repo });
+  assert.equal(approved.run.gates.pre_pr.status, "approved");
+
+  const remoteQueries = [];
+  const gitFn = (cwd, args) => {
+    if (args[0] === "ls-remote") remoteQueries.push([...args]);
+    return gitResult(cwd, args);
+  };
+  const fenced = await transitionPrePrFenceEstablished(runDir, { repoRoot: fixture.repo, token: `checkpoint-pr-fence-${prNumber}`, gitFn });
+  assert.equal(fenced.fence.base_ref, "main");
+  assert.equal(readJson(runPath).base_ref, "refs/heads/main");
+  assert.equal(remoteQueries.every((args) => args.at(-1) === "refs/heads/main" || args.at(-1) === `refs/heads/${started.binding.child_run_id}`), true);
+  assert.equal(remoteQueries.some((args) => args.at(-1) === "refs/heads/refs/heads/main"), false);
+
+  const observePrOperation = async (identity) => ({
+    disposition: "open",
+    reason: null,
+    pull_request: {
+      pr_url: `https://github.com/acme/repo/pull/${prNumber}`,
+      pr_number: prNumber,
+      pr_node_id: `PR_checkpoint_${prNumber}`,
+      repository: identity.repository,
+      draft: identity.draft,
+      state: "open",
+      merged_at: null,
+      merge_commit_sha: null,
+      head_ref: identity.head_ref,
+      head_sha: identity.head_sha,
+      head_repository: identity.repository,
+      base_ref: identity.base_ref,
+      base_sha: identity.base_sha,
+      base_repository: identity.repository,
+    },
+  });
+  await assert.rejects(transitionPrCreated(runDir, {}, {
+    repoRoot: fixture.repo,
+    fenceToken: fenced.fence.token,
+    gitFn,
+    observePrOperation: async (identity) => {
+      const observed = await observePrOperation(identity);
+      observed.pull_request.base_ref = "refs/heads/main";
+      return observed;
+    },
+  }), /base_ref does not match the fenced operation/u);
+  assert.equal(readJson(runPath).steering.pr_fence.token, fenced.fence.token);
+  const completed = await transitionPrCreated(runDir, {}, {
+    repoRoot: fixture.repo, fenceToken: fenced.fence.token, gitFn, observePrOperation,
+  });
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.terminal_result.base_ref, "main");
+  return completed;
 }
 
 function checkpointFinalClosureRef(fixture) {

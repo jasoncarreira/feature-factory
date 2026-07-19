@@ -21,6 +21,7 @@ import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extens
 import { validateAdmissionExtensionResult, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact, CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
 import { parseVerificationCommand } from "./delivery-envelope/verification-command.js";
+import { verificationArtifactExecutionClaimRef, verificationArtifactExecutionReceiptRef } from "./verification-artifact-refs.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -1467,7 +1468,7 @@ export async function claimCheckedVerificationArtifactExecution(runDir, sliceId,
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
     const authority = observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options);
-    const claimRef = verificationArtifactClaimRef(authority.receipt_ref);
+    const claimRef = verificationArtifactExecutionClaimRef(authority.receipt_ref);
     const claimResolved = resolveEvidenceRef(runDir, claimRef, { mustExist: false });
     const receiptResolved = resolveEvidenceRef(runDir, authority.receipt_ref, { mustExist: false });
     if (existsSync(claimResolved.path)) {
@@ -1518,7 +1519,7 @@ export async function completeCheckedVerificationArtifactExecution(runDir, expec
     const run = await readRunJson(runDir);
     const current = observeVerificationArtifactExecutionAuthority(runDir, run, expectedAuthority.slice_id, expectedAuthority.verification_artifact_id, options);
     if (!sameJson(current, expectedAuthority)) throw new Error("checked verification artifact authority changed before receipt publication");
-    const claimRef = verificationArtifactClaimRef(current.receipt_ref);
+    const claimRef = verificationArtifactExecutionClaimRef(current.receipt_ref);
     assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, current);
     const receipt = validateVerificationArtifactExecutionReceipt(cloneJson(receiptInput));
     assertVerificationArtifactReceiptMatches(receipt, current, expectedClaim);
@@ -1551,7 +1552,7 @@ export async function completeCheckedVerificationArtifactExecution(runDir, expec
 export async function markCheckedVerificationArtifactExecutionUnknown(runDir, expectedClaim, expectedAuthority, reason, options = {}) {
   if (!["process-outcome-indeterminate", "receipt-publication-indeterminate"].includes(reason)) throw new Error("checked verification artifact unknown reason is invalid");
   return withRunJsonLock(runDir, async () => {
-    const claimRef = verificationArtifactClaimRef(expectedAuthority.receipt_ref);
+    const claimRef = verificationArtifactExecutionClaimRef(expectedAuthority.receipt_ref);
     assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, expectedAuthority);
     const receiptResolved = resolveEvidenceRef(runDir, expectedAuthority.receipt_ref, { mustExist: false });
     let receiptBinding = {};
@@ -1600,7 +1601,7 @@ function observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, art
       args: command.args,
     },
     worktree: gitAuthority.worktree,
-    receipt_ref: `evidence/${sliceId}.artifact-${artifact.id}.attempt-${slice.attempts}.json`,
+    receipt_ref: verificationArtifactExecutionReceiptRef(sliceId, artifact.id, slice.attempts),
   };
 }
 
@@ -1613,11 +1614,6 @@ function assertVerificationArtifactReceiptMatches(receipt, authority, claim) {
   }
   if (!isRecord(claim) || receipt.claim_nonce !== claim.nonce) throw new Error("checked verification artifact receipt nonce does not match the exact active claim");
   if (receipt.status !== receipt.result.outcome) throw new Error("checked verification artifact receipt result is stale");
-}
-
-function verificationArtifactClaimRef(receiptRef) {
-  if (typeof receiptRef !== "string" || !receiptRef.endsWith(".json")) throw new Error("checked verification artifact receipt ref is invalid");
-  return `${receiptRef.slice(0, -5)}.claim.json`;
 }
 
 function assertVerificationArtifactClaimMatches(claim, authority) {
@@ -2287,7 +2283,7 @@ function assertContinuationContext(parentFile, parentRun, continuation) {
   for (const reviewRef of new Set(sliceReviewRefs.filter(stringValue))) {
     const review = parseJsonObjectFile(resolveReviewRef(parentDir, reviewRef).path, "continuation slice review");
     for (const disposition of review.invariant_family_ledger?.dispositions || []) {
-      if (stringValue(disposition?.evidence_ref)) evidenceRefs.push(disposition.evidence_ref, verificationArtifactClaimRef(disposition.evidence_ref));
+      if (stringValue(disposition?.evidence_ref)) evidenceRefs.push(disposition.evidence_ref, verificationArtifactExecutionClaimRef(disposition.evidence_ref));
     }
   }
   if (stringValue(parentRun.post_pr?.remediation?.failure_evidence_ref)) evidenceRefs.push(parentRun.post_pr.remediation.failure_evidence_ref);
@@ -2793,6 +2789,23 @@ export async function transitionSlicesSeed(runDir, slices, options = {}) {
 
 export function readSlicesSeedPlan(runDir, from, options = {}) {
   return observePlanSourceAuthority(runDir, from, null, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true }).plan;
+}
+
+export function probeSlicesPlanAdmission(runDir, options = {}) {
+  const source = observePlanSourceAuthority(runDir, options.from, null, {
+    ...options,
+    enforceDependencyDepth: false,
+    requireIntegrationGate: true,
+  });
+  const admission = source.admission_extension;
+  if (admission.status !== "active" || !["admit", "checkpoint"].includes(admission.decision)) {
+    throw new Error("factory slices-probe requires an active delivery-envelope admission decision");
+  }
+  return Object.freeze({
+    decision: admission.decision,
+    reasons: Object.freeze([...admission.reasons]),
+    plan_hash: source.plan_hash,
+  });
 }
 
 async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = {}) {
@@ -4932,7 +4945,7 @@ function observeReviewExtensionEvidence(runDir, ref, expectedHash) {
   const hash = sha256Bytes(bytes);
   if (expectedHash !== undefined && hash !== expectedHash) throw new Error(`invariant family ledger evidence hash is stale for '${ref}'`);
   const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectBytes(bytes, `invariant family ledger evidence '${ref}'`));
-  const claimRef = verificationArtifactClaimRef(ref);
+  const claimRef = verificationArtifactExecutionClaimRef(ref);
   const claimResolved = resolveEvidenceRef(runDir, claimRef);
   const claim = validateVerificationArtifactExecutionClaim(parseJsonObjectFile(claimResolved.path, `invariant family ledger claim '${claimRef}'`));
   return { ref, hash, receipt, claim_ref: claimRef, claim };
@@ -7681,7 +7694,7 @@ function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR o
   if (!origin.ok || !stringValue(origin.stdout) || origin.stdout.trim().includes("\n")) throw new Error(`${label} requires exactly one canonical GitHub origin`);
   const repository = canonicalGithubRepositoryFromOrigin(origin.stdout.trim());
   const headRef = requireNonEmptyString(run.branch, "run.branch");
-  const baseRef = requireNonEmptyString(run.base_ref, "run.base_ref");
+  const baseRef = localPrBaseRef(run);
   if (!run.pr_mode || !["draft", "ready"].includes(run.pr_mode)) throw new Error(`${label} requires persisted run.pr_mode`);
   const headSha = observeExactRemoteHead(options, integration.repository, headRef, label);
   const baseSha = observeExactRemoteHead(options, integration.repository, baseRef, label);
@@ -7689,6 +7702,16 @@ function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR o
   if (requireNonEmptyString(run.base_commit, "run.base_commit") !== baseSha) throw new Error(`${label} requires run.base_commit equal to the exact origin base head`);
   if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", baseSha, headSha]).ok) throw new Error(`${label} requires the origin base to be an ancestor of the origin head`);
   return { repository, origin: origin.stdout.trim(), head_ref: headRef, head_sha: headSha, base_ref: baseRef, base_sha: baseSha, draft: run.pr_mode === "draft", integration };
+}
+
+function localPrBaseRef(run) {
+  const configured = requireNonEmptyString(run.base_ref, "run.base_ref");
+  if (run.checkpoint?.kind !== "delivery-checkpoint-child") return configured;
+  const prefix = "refs/heads/";
+  if (!configured.startsWith(prefix) || configured.length === prefix.length || configured.slice(prefix.length).includes("/")) {
+    throw new Error("checkpoint PR operation requires canonical refs/heads/<branch> base authority");
+  }
+  return configured.slice(prefix.length);
 }
 
 function observeExactRemoteHead(options, repository, ref, label) {
