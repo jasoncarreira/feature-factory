@@ -83,6 +83,23 @@ export function createTwoRefsAtomicallyNoReplace(cwd, verify, first, second, opt
   return git(cwd, ["update-ref", "--no-deref", "--stdin"], { ...options, input });
 }
 
+export function createThreeRefsAtomicallyNoReplace(cwd, verify, first, second, third, options = {}) {
+  const required = normalizeRefOid(verify, "required verify ref");
+  const updates = [normalizeRefOid(first, "first create ref"), normalizeRefOid(second, "second create ref"), normalizeRefOid(third, "third create ref")];
+  if (new Set([required.ref, ...updates.map((update) => update.ref)]).size !== 4) {
+    throw new Error("atomic ref transaction requires four distinct direct refs");
+  }
+  const input = [
+    "start",
+    `verify ${required.ref} ${required.oid}`,
+    ...updates.map(({ ref, oid }) => `update ${ref} ${oid} ${ZERO_OID}`),
+    "prepare",
+    "commit",
+    "",
+  ].join("\n");
+  return git(cwd, ["update-ref", "--no-deref", "--stdin"], { ...options, input });
+}
+
 export function updateTwoRefsAtomically(cwd, verify, first, second, options = {}) {
   const required = normalizeRefOid(verify, "required verify ref");
   const updates = [normalizeRefTransition(first, "first update ref"), normalizeRefTransition(second, "second update ref")];

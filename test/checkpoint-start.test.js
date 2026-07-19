@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "./helpers/git-fixture.js";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { startFactoryCheckpoint } from "../src/factory.js";
+import { resumeFactory, startFactoryCheckpoint } from "../src/factory.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
@@ -57,18 +57,146 @@ describe("checked checkpoint child start", () => {
     }
   });
 
+  it("normalizes a normal Step 0 parent base_ref of main to canonical remote refs/heads/main", async () => {
+    const fixture = createFixture("checkpoint-parent-short-main");
+    try {
+      const path = join(fixture.parentRunDir, "run.json");
+      const parent = JSON.parse(readFileSync(path, "utf8"));
+      parent.base_ref = "main";
+      writeJson(path, parent);
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-short-main-child", checkpointLaunchFn: (value) => value,
+      });
+      assert.equal(started.binding.base_ref, "refs/heads/main");
+      assert.equal(started.binding.base_commit, fixture.baseCommit);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("prepares the checkpoint child branch and worktree at freshly fetched remote main despite stale local main", async () => {
+    const fixture = createFixture("checkpoint-parent-prepared-child");
+    try {
+      const localMain = git(fixture.repo, ["rev-parse", "refs/heads/main"]);
+      const remoteMain = advanceRemoteMain(fixture, "prepared-child-base.txt");
+      assert.notEqual(remoteMain, localMain);
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo,
+        runId: "checkpoint-prepared-child",
+        checkpointLaunchFn: (value) => {
+          assert.equal(git(fixture.repo, ["rev-parse", "refs/heads/checkpoint-prepared-child"]), remoteMain);
+          const worktree = join(fixture.repo, ".opencode", "worktrees", "checkpoint-prepared-child");
+          assert.equal(git(worktree, ["rev-parse", "HEAD"]), remoteMain);
+          return value;
+        },
+      });
+      assert.equal(started.binding.base_commit, remoteMain);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects checkpoint runs whose top-level base differs from run.checkpoint", () => {
+    const fixture = createFixture("checkpoint-parent-mismatched-top-base");
+    try {
+      const binding = checkpointBinding(fixture, "checkpoint-mismatched-top-base-child");
+      assert.throws(() => validateRun({
+        schema_version: 1,
+        run_id: binding.child_run_id,
+        status: "running",
+        base_ref: "main",
+        base_commit: "f".repeat(40),
+        branch: binding.child_run_id,
+        worktree: join(fixture.repo, ".opencode", "worktrees", binding.child_run_id),
+        checkpoint: binding,
+        gates: {},
+        slices: [],
+        steps: [],
+      }), /base_ref.*checkpoint|base_commit.*checkpoint/u);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("resumes a valid remote-based checkpoint when local main is stale", async () => {
+    const fixture = createFixture("checkpoint-parent-resume-stale-local");
+    try {
+      const localMain = git(fixture.repo, ["rev-parse", "refs/heads/main"]);
+      const remoteMain = advanceRemoteMain(fixture, "resume-remote-base.txt");
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-resume-stale-local", checkpointLaunchFn: (value) => value,
+      });
+      publishRunningCheckpointChild(fixture, started);
+      assert.equal(git(fixture.repo, ["rev-parse", "refs/heads/main"]), localMain);
+      assert.equal(started.binding.base_commit, remoteMain);
+      const resumed = await resumeFactory(started.binding.child_run_id, { cwd: fixture.repo, dryRun: true });
+      assert.equal(resumed.status, "dry-run");
+      assert.equal(resumed.payload.checkpoint.base_commit, remoteMain);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a stale checkpoint before implementation when canonical remote main advances", async () => {
+    const fixture = createFixture("checkpoint-parent-resume-prelaunch-advance");
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-resume-prelaunch-advance", checkpointLaunchFn: (value) => value,
+      });
+      rewriteCheckpointReservation(fixture, started.binding, "reserved");
+      publishRunningCheckpointChild(fixture, started);
+      advanceRemoteMain(fixture, "prelaunch-advance.txt");
+      await assert.rejects(resumeFactory(started.binding.child_run_id, { cwd: fixture.repo, dryRun: true }), /checkpoint base is stale before implementation launch/u);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves launched checkpoint identity across remote-main advance without rebasing", async () => {
+    const fixture = createFixture("checkpoint-parent-resume-launched-advance");
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-resume-launched-advance", checkpointLaunchFn: (value) => value,
+      });
+      publishRunningCheckpointChild(fixture, started);
+      const originalBase = started.binding.base_commit;
+      const remoteMain = advanceRemoteMain(fixture, "launched-advance.txt");
+      const resumed = await resumeFactory(started.binding.child_run_id, { cwd: fixture.repo, dryRun: true });
+      assert.equal(resumed.status, "dry-run");
+      assert.notEqual(remoteMain, originalBase);
+      assert.equal(resumed.payload.checkpoint.base_commit, originalBase);
+      assert.equal(git(fixture.repo, ["rev-parse", `refs/heads/${started.binding.child_run_id}`]), originalBase);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("routes divergent remote main safely without changing launched checkpoint identity", async () => {
+    const fixture = createFixture("checkpoint-parent-resume-divergent-main");
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-resume-divergent-main", checkpointLaunchFn: (value) => value,
+      });
+      publishRunningCheckpointChild(fixture, started);
+      const branchHead = git(fixture.repo, ["rev-parse", `refs/heads/${started.binding.child_run_id}`]);
+      advanceRemoteMain(fixture, "resume-divergence.txt", { diverge: true });
+      await assert.rejects(resumeFactory(started.binding.child_run_id, { cwd: fixture.repo, dryRun: true }), /diverged.*persisted checkpoint base.*preserve the run identity/u);
+      assert.equal(git(fixture.repo, ["rev-parse", `refs/heads/${started.binding.child_run_id}`]), branchHead);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
   it("requires every predecessor completed normal PR and a verified merge commit on current main", async () => {
     const fixture = createFixture("checkpoint-parent-two");
     try {
       const first = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
         cwd: fixture.repo, runId: "checkpoint-child-one", checkpointLaunchFn: (value) => value,
       });
-      git(fixture.repo, ["checkout", "-b", "checkpoint-child-one"]);
-      writeFileSync(join(fixture.repo, "child.txt"), "child\n");
-      git(fixture.repo, ["add", "child.txt"]);
-      git(fixture.repo, ["commit", "-m", "checkpoint child"]);
-      const childHead = git(fixture.repo, ["rev-parse", "HEAD"]);
-      git(fixture.repo, ["checkout", "main"]);
+      writeFileSync(join(first.child_worktree, "child.txt"), "child\n");
+      git(first.child_worktree, ["add", "child.txt"]);
+      git(first.child_worktree, ["commit", "-m", "checkpoint child"]);
+      const childHead = git(first.child_worktree, ["rev-parse", "HEAD"]);
       git(fixture.repo, ["merge", "--no-ff", "checkpoint-child-one", "-m", "merge checkpoint child"]);
       const mergeCommit = git(fixture.repo, ["rev-parse", "HEAD"]);
       git(fixture.repo, ["push", "origin", "main"]);
@@ -100,12 +228,10 @@ describe("checked checkpoint child start", () => {
       const first = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
         cwd: fixture.repo, runId: "checkpoint-child-incomplete", checkpointLaunchFn: (value) => value,
       });
-      git(fixture.repo, ["checkout", "-b", "checkpoint-child-incomplete"]);
-      writeFileSync(join(fixture.repo, "incomplete.txt"), "incomplete\n");
-      git(fixture.repo, ["add", "incomplete.txt"]);
-      git(fixture.repo, ["commit", "-m", "incomplete checkpoint child"]);
-      const childHead = git(fixture.repo, ["rev-parse", "HEAD"]);
-      git(fixture.repo, ["checkout", "main"]);
+      writeFileSync(join(first.child_worktree, "incomplete.txt"), "incomplete\n");
+      git(first.child_worktree, ["add", "incomplete.txt"]);
+      git(first.child_worktree, ["commit", "-m", "incomplete checkpoint child"]);
+      const childHead = git(first.child_worktree, ["rev-parse", "HEAD"]);
       git(fixture.repo, ["merge", "--no-ff", "checkpoint-child-incomplete", "-m", "merge incomplete child"]);
       const mergeCommit = git(fixture.repo, ["rev-parse", "HEAD"]);
       publishCompletedChild(fixture, first.binding, childHead, { completePipeline: false });
@@ -216,7 +342,6 @@ describe("checked checkpoint child start", () => {
       const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
         cwd: fixture.repo, runId: "checkpoint-adopted-child", checkpointLaunchFn: (value) => { launches += 1; return value; },
       });
-      git(fixture.repo, ["branch", "checkpoint-adopted-child"]);
       publishCompletedChild(fixture, started.binding, fixture.baseCommit, { completePipeline: false });
       const adopted = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
         cwd: fixture.repo, runId: "checkpoint-adopted-child", checkpointLaunchFn: (value) => { launches += 1; return value; },
@@ -237,7 +362,6 @@ describe("checked checkpoint child start", () => {
         cwd: fixture.repo, runId: "checkpoint-launching-adoption-child", checkpointLaunchFn: (value) => { launches += 1; return value; },
       });
       rewriteCheckpointReservation(fixture, started.binding, "launching");
-      git(fixture.repo, ["branch", "checkpoint-launching-adoption-child"]);
       publishCompletedChild(fixture, started.binding, fixture.baseCommit, { completePipeline: false });
       const adopted = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
         cwd: fixture.repo, runId: "checkpoint-launching-adoption-child", checkpointLaunchFn: (value) => { launches += 1; return value; },
@@ -257,7 +381,6 @@ describe("checked checkpoint child start", () => {
       const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
         cwd: fixture.repo, runId: "checkpoint-fresh-adoption-child", checkpointLaunchFn: (value) => value,
       });
-      git(fixture.repo, ["branch", "checkpoint-fresh-adoption-child"]);
       publishCompletedChild(fixture, started.binding, fixture.baseCommit, { completePipeline: false });
       deleteCheckpointReservation(fixture, started.binding);
       await assert.rejects(startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
@@ -277,7 +400,6 @@ describe("checked checkpoint child start", () => {
       const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
         cwd: fixture.repo, runId: "checkpoint-late-adoption-child", checkpointLaunchFn: (value) => value,
       });
-      git(fixture.repo, ["branch", "checkpoint-late-adoption-child"]);
       publishCompletedChild(fixture, started.binding, fixture.baseCommit, { completePipeline: false });
       const run = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", started.binding.child_run_id, "run.json"), "utf8"));
       const late = new Date(Date.parse(run.created_at) + 1000).toISOString();
@@ -522,8 +644,10 @@ function publishCompletedChild(fixture, binding, headSha, { completePipeline = t
   mkdirSync(runDir, { recursive: true });
   if (completePipeline) {
     const worktree = join(fixture.repo, ".opencode", "worktrees", binding.child_run_id);
-    mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
-    git(fixture.repo, ["worktree", "add", worktree, binding.child_run_id]);
+    if (!existsSync(worktree)) {
+      mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+      git(fixture.repo, ["worktree", "add", worktree, binding.child_run_id]);
+    }
     for (const directory of ["plan", "reviews", "evidence", "artifacts"]) mkdirSync(join(runDir, directory), { recursive: true });
     const plan = {
       slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --version"] }],
@@ -584,7 +708,7 @@ function publishCompletedChild(fixture, binding, headSha, { completePipeline = t
   }
   writeJson(join(runDir, "run.json"), {
     schema_version: 1, run_id: binding.child_run_id, status: "completed", created_at: new Date(Date.now() + 1000).toISOString(), branch: binding.child_run_id,
-    worktree: join(fixture.repo, ".opencode", "worktrees", binding.child_run_id), gates: {}, checkpoint: binding,
+    worktree: join(fixture.repo, ".opencode", "worktrees", binding.child_run_id), base_ref: binding.base_ref, base_commit: binding.base_commit, gates: {}, checkpoint: binding,
     pr_url: "https://github.com/acme/repo/pull/1",
     terminal_result: {
       status: "completed", run_id: binding.child_run_id, reason: null, summary: "PR created.", artifacts: {},
@@ -595,16 +719,36 @@ function publishCompletedChild(fixture, binding, headSha, { completePipeline = t
   });
 }
 
+function publishRunningCheckpointChild(fixture, started) {
+  const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+  mkdirSync(runDir, { recursive: true });
+  const run = {
+    schema_version: 1,
+    run_id: started.binding.child_run_id,
+    status: "running",
+    created_at: new Date(Date.now() + 1000).toISOString(),
+    base_ref: started.binding.base_ref,
+    base_commit: started.binding.base_commit,
+    branch: started.binding.child_run_id,
+    worktree: started.child_worktree,
+    checkpoint: started.binding,
+    gates: {},
+    slices: [],
+    steps: [],
+  };
+  validateRun(run);
+  writeJson(join(runDir, "run.json"), run);
+  return run;
+}
+
 async function createCompletedPredecessor(fixture, childRunId, { pushMain = true } = {}) {
   const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
     cwd: fixture.repo, runId: childRunId, checkpointLaunchFn: (value) => value,
   });
-  git(fixture.repo, ["checkout", "-b", childRunId]);
-  writeFileSync(join(fixture.repo, `${childRunId}.txt`), "child\n");
-  git(fixture.repo, ["add", `${childRunId}.txt`]);
-  git(fixture.repo, ["commit", "-m", `checkpoint child ${childRunId}`]);
-  const childHead = git(fixture.repo, ["rev-parse", "HEAD"]);
-  git(fixture.repo, ["checkout", "main"]);
+  writeFileSync(join(started.child_worktree, `${childRunId}.txt`), "child\n");
+  git(started.child_worktree, ["add", `${childRunId}.txt`]);
+  git(started.child_worktree, ["commit", "-m", `checkpoint child ${childRunId}`]);
+  const childHead = git(started.child_worktree, ["rev-parse", "HEAD"]);
   git(fixture.repo, ["merge", "--no-ff", childRunId, "-m", `merge ${childRunId}`]);
   const mergeCommit = git(fixture.repo, ["rev-parse", "HEAD"]);
   if (pushMain) git(fixture.repo, ["push", "origin", "main"]);
@@ -665,6 +809,26 @@ function checkpointReservationRefs(fixture, binding) {
   return {
     childRef: `refs/opencode/checkpoint-targets/${createHash("sha256").update(binding.child_run_id, "utf8").digest("hex")}`,
     routeRef: `refs/opencode/checkpoint-routes/${createHash("sha256").update(`${fixture.parentRunId}\0${binding.checkpoint_id}`, "utf8").digest("hex")}`,
+  };
+}
+
+function checkpointBinding(fixture, childRunId) {
+  return {
+    schema_version: 1,
+    kind: "delivery-checkpoint-child",
+    parent_run_id: fixture.parentRunId,
+    parent_run_ref: `.opencode/factory/${fixture.parentRunId}/run.json`,
+    parent_run_hash: hashFile(join(fixture.parentRunDir, "run.json")),
+    manifest_ref: fixture.artifact.ref,
+    manifest_hash: fixture.artifact.hash,
+    checkpoint_id: "checkpoint-001",
+    checkpoint_ordinal: 1,
+    child_run_id: childRunId,
+    base_ref: "refs/heads/main",
+    base_commit: fixture.baseCommit,
+    predecessor_checkpoint_id: null,
+    predecessor_child_run_id: null,
+    predecessor_merge_commit: null,
   };
 }
 

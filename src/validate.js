@@ -374,6 +374,10 @@ export function validateRun(run) {
   validateSpecialBuilderDispatch(errors, run.special_builder_dispatch, "run.special_builder_dispatch");
   validateContinuation(errors, run, "run.continuation");
   validateCheckpointChildBinding(errors, run.checkpoint, "run.checkpoint", run.run_id);
+  if (isRecord(run.checkpoint)) {
+    if (run.base_ref !== run.checkpoint.base_ref) errors.push({ path: "run.base_ref", message: "must equal run.checkpoint.base_ref" });
+    if (run.base_commit !== run.checkpoint.base_commit) errors.push({ path: "run.base_commit", message: "must equal run.checkpoint.base_commit" });
+  }
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
 
@@ -409,6 +413,7 @@ export function validateCheckpointChildBinding(errorsOrBinding, valueOrOptions, 
   for (const key of ["parent_run_id", "parent_run_ref", "manifest_ref", "checkpoint_id", "child_run_id", "base_ref"]) requiredString(errors, value, key, `${path}.${key}`);
   for (const key of ["parent_run_hash", "manifest_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
   requiredFullGitSha(errors, value, "base_commit", `${path}.base_commit`);
+  if (value.base_ref !== "refs/heads/main") errors.push({ path: `${path}.base_ref`, message: "must equal canonical remote refs/heads/main" });
   boundedInteger(errors, value, "checkpoint_ordinal", 1, Number.MAX_SAFE_INTEGER, `${path}.checkpoint_ordinal`);
   if (stringValue(expectedRunId) && value.child_run_id !== expectedRunId) errors.push({ path: `${path}.child_run_id`, message: "must equal run.run_id" });
   if (expectedBinding && hashValue(value) !== hashValue(expectedBinding)) errors.push({ path, message: "must equal the exact expected checkpoint binding" });
