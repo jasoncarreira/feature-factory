@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   TERMINAL_RUN_STATUSES,
+  claimsCheckpointRoutingParent,
   pendingProtectedGate,
   validateFactoryLock,
   validateHeartbeatState,
@@ -230,11 +231,25 @@ function terminalRunItem(run, options) {
 }
 
 function inspectSidecars(runDir, checkedAt, run) {
+  const slicesPlanPath = join(runDir, "plan", "slices.json");
+  if (claimsCheckpointRoutingParent(runDir, run) && !existsSync(slicesPlanPath)) {
+    return diagnosticItem("invalid-run-state", {
+      checkedAt,
+      authoritative: false,
+      message: "Factory sidecar state is invalid: checkpoint-routing plan must be a regular file",
+      evidence: {
+        source: "plan/slices.json",
+        run_dir: runDir,
+        path: slicesPlanPath,
+        error: "checkpoint-routing plan must be a regular file",
+      },
+    });
+  }
   const checks = [
     { path: join(runDir, HEARTBEAT_FILE), source: HEARTBEAT_FILE, validator: validateHeartbeatState },
     { path: join(runDir, "factory.lock"), source: "factory.lock", validator: validateFactoryLock },
     { path: join(runDir, PROCESS_EVIDENCE_FILE), source: PROCESS_EVIDENCE_FILE, validator: (value) => validateProcessSidecar(value, { runDir, runId: run.run_id }), failClosed: true },
-    { path: join(runDir, "plan", "slices.json"), source: "plan/slices.json", validator: (value) => validateRunSlicesPlanAuthority(runDir, run, value) },
+    { path: slicesPlanPath, source: "plan/slices.json", validator: (value) => validateRunSlicesPlanAuthority(runDir, run, value) },
   ];
   for (const check of checks) {
     if (!existsSync(check.path)) continue;

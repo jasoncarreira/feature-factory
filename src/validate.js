@@ -9,7 +9,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
 import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
 import { DeliveryContractValidationError, validateAdmissionExtensionResult, validateInvariantFamilyLedger, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
-import { CHECKPOINT_ROUTING_TERMINAL_REASON, validateCheckpointRoutingManifest } from "./delivery-envelope/checkpoint-routing.js";
+import { CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON, validateCheckpointRoutingManifest } from "./delivery-envelope/checkpoint-routing.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -819,16 +819,27 @@ export function runSlicesMatchPlan(run, plan) {
 
 export function validateRunSlicesPlanAuthority(runDir, run, plan) {
   const validated = validateSlicesPlan(plan, { enforceDependencyDepth: false });
-  if (claimsCheckpointRoutingParent(run)) {
+  if (claimsCheckpointRoutingParent(runDir, run)) {
     assertExactCheckpointRoutingParent(runDir, run, validated);
     return validated;
   }
   return validateSlicesPlan(validated, { enforceDependencyDepth: !runSlicesMatchPlan(run, validated) });
 }
 
-function claimsCheckpointRoutingParent(run) {
-  return run?.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON
-    || isRecord(run?.terminal_result?.artifacts) && Object.hasOwn(run.terminal_result.artifacts, "checkpoint_routing");
+export function claimsCheckpointRoutingParent(runDir, run) {
+  const artifacts = run?.terminal_result?.artifacts;
+  if (run?.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON
+    || isRecord(artifacts) && Object.hasOwn(artifacts, "checkpoint_routing")) return true;
+  if (!isRecord(artifacts)) return false;
+  return Object.values(artifacts).some((ref) => {
+    if (!stringValue(ref)) return false;
+    try {
+      const artifact = resolveArtifactRef(runDir, ref);
+      return JSON.parse(readFileSync(artifact.path, "utf8"))?.kind === CHECKPOINT_ROUTING_KIND;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function assertExactCheckpointRoutingParent(runDir, run, plan) {
