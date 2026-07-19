@@ -937,7 +937,15 @@ describe("checked checkpoint child start", () => {
   it("serializes final closure contenders to one exact terminal record", async () => {
     const route = await createCompletedFinalRoute("checkpoint-final-contention");
     try {
-      const options = { cwd: route.fixture.repo, observePredecessorPrOperation: async () => route.observation };
+      // The production default is intentionally short; both contenders need a
+      // bounded test window because the first holds this fixture's run lock
+      // across checked Git/GitHub observations under full-suite load.
+      const options = {
+        cwd: route.fixture.repo,
+        observePredecessorPrOperation: async () => route.observation,
+        timeoutMs: 15_000,
+        retryDelayMs: 25,
+      };
       const results = await Promise.all([
         closeFactoryCheckpointRoute(route.fixture.parentRunId, options),
         closeFactoryCheckpointRoute(route.fixture.parentRunId, options),
