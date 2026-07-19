@@ -136,6 +136,27 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
+  it("terminalizes exact duplicate durable owners after claiming observation without stranding that action", async () => {
+    const fixture = createFixture("post-pr-duplicate-owner");
+    try {
+      updateRunFile(fixture, (run) => {
+        run.slices.push({ id: "ui", stack: "frontend", depends_on: [], declared_paths: ["src/api.js"], effective_paths: ["src/api.js"], status: "pending", attempts: 0 });
+      });
+      const result = await postPrObserve(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z", executeGithub: async ({ args }) => {
+        if (args[0] === "auth") return { exitCode: 0, stdout: "", stderr: "" };
+        if (args[0] === "pr") return { exitCode: 0, stderr: "", stdout: JSON.stringify({ headRefOid: SHA, isDraft: false, reviewDecision: null, reviews: [], state: "OPEN", statusCheckRollup: [{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }] }) };
+        if (args[0] === "api") return { exitCode: 0, stderr: "", stdout: `HTTP/2 200\n\n${JSON.stringify([{ filename: "src/api.js", status: "modified" }])}` };
+        throw new Error(`unexpected GitHub operation: ${args.join(" ")}`);
+      } });
+      const run = readRun(fixture);
+      assert.equal(result.status, "needs-human");
+      assert.equal(run.terminal_result.reason, "post-pr-owner-ambiguous");
+      assert.equal(run.steering.last_action.kind, "terminal");
+      assert.equal(run.steering.action_claim, null);
+      assert.equal(run.steering.boundary, null);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
   it("routes the same ratified path through panel attribution and local-red re-attribution", async () => {
     const fixture = createPanelRecoveryFixture("post-pr-ratified-panel", "validator");
     const ratifiedPath = "docs/ratified-api.md";
@@ -156,6 +177,33 @@ describe("post-PR workflow orchestration", () => {
       assert.equal(run.post_pr.remediation.owner.slice_id, "api");
       assert.equal(run.post_pr.remediation.route, "backend-builder");
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("uses ratified effective ownership through panel-remediation dispatch and completion", async () => {
+    const success = createRunStatePanelFixture("panel-special-ratified");
+    try {
+      const context = await prepareSpecialBuilderTaskDispatch(success.repo, { run_id: success.runId, route: "panel-remediation", agent: "backend-builder" }, { claimDispatch: true, completionToken: "panel-ratified" });
+      assert.deepEqual(context.authority.ownership.slices.find((slice) => slice.id === "api").effective_paths, ["src/api/**", success.ratifiedPath]);
+      writeRepoFileAndCommit(success.repo, success.ratifiedPath, "ratified panel repair\n", "ratified panel repair");
+      const closed = await completeSpecialBuilderTaskDispatch(success.repo, { run_id: success.runId, route: "panel-remediation", agent: "backend-builder", claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash, completion_token: "panel-ratified" });
+      assert.equal(closed.owner_slice_id, "api");
+    } finally { rmSync(success.repo, { recursive: true, force: true }); }
+
+    const overlap = createRunStatePanelFixture("panel-special-overlap", { overlap: true });
+    try {
+      const context = await prepareSpecialBuilderTaskDispatch(overlap.repo, { run_id: overlap.runId, route: "panel-remediation", agent: "backend-builder" }, { claimDispatch: true, completionToken: "panel-overlap" });
+      writeRepoFileAndCommit(overlap.repo, overlap.ratifiedPath, "ambiguous panel repair\n", "ambiguous panel repair");
+      await assert.rejects(completeSpecialBuilderTaskDispatch(overlap.repo, { run_id: overlap.runId, route: "panel-remediation", agent: "backend-builder", claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash, completion_token: "panel-overlap" }), /exactly one unambiguous slice owner/u);
+    } finally { rmSync(overlap.repo, { recursive: true, force: true }); }
+
+    const rename = createRunStatePanelFixture("panel-special-rename", { renameSource: true });
+    try {
+      const context = await prepareSpecialBuilderTaskDispatch(rename.repo, { run_id: rename.runId, route: "panel-remediation", agent: "backend-builder" }, { claimDispatch: true, completionToken: "panel-rename" });
+      mkdirSync(join(rename.repo, "docs"), { recursive: true });
+      runGit(rename.repo, ["mv", "src/ui/source.js", rename.ratifiedPath]);
+      runGit(rename.repo, ["commit", "-m", "rename into ratified lane"]);
+      await assert.rejects(completeSpecialBuilderTaskDispatch(rename.repo, { run_id: rename.runId, route: "panel-remediation", agent: "backend-builder", claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash, completion_token: "panel-rename" }), /exactly one unambiguous slice owner/u);
+    } finally { rmSync(rename.repo, { recursive: true, force: true }); }
   });
 
   it("discards a due observer result when steering changes its bound state", async () => {
@@ -236,9 +284,15 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
-  it("consumes a plugin-closed post-PR dispatch before opening revalidation steering", async () => {
+  it("accepts normal ratified-path remediation despite conflicting raw-plan drift", async () => {
     const fixture = createRevalidationFixture("post-pr-checked-revalidating");
+    const ratifiedPath = "docs/ratified-remediation.md";
     try {
+      installRatifiedApiOwnership(fixture, ratifiedPath, fixture.baseline);
+      writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+        { id: "api", stack: "backend", paths: ["src/stale-api.js"], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
+        { id: "ui", stack: "frontend", paths: [ratifiedPath], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
+      ] });
       updateRunFile(fixture, (run) => {
         run.post_pr.phase = "remediation-running";
         Object.assign(run.post_pr.remediation, {
@@ -254,7 +308,11 @@ describe("post-PR workflow orchestration", () => {
       const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
         run_id: fixture.runId, route: "post-pr-remediation", agent: "backend-builder",
       }, { claimDispatch: true, completionToken: "post-pr-revalidating-token" });
-      runGit(fixture.repo, ["reset", "--hard", fixture.candidate]);
+      mkdirSync(join(fixture.repo, "docs"), { recursive: true });
+      writeFileSync(join(fixture.repo, ratifiedPath), "ratified remediation\n");
+      runGit(fixture.repo, ["add", ratifiedPath]);
+      runGit(fixture.repo, ["commit", "-m", "ratified remediation"]);
+      fixture.candidate = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
       await completeSpecialBuilderTaskDispatch(fixture.repo, {
         run_id: fixture.runId, route: "post-pr-remediation", agent: "backend-builder",
         claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash,
@@ -262,8 +320,12 @@ describe("post-PR workflow orchestration", () => {
       });
       const remediationEvidencePath = join(fixture.runDir, "evidence", "post-pr-remediation.attempt-1.json");
       const remediationEvidence = JSON.parse(readFileSync(remediationEvidencePath, "utf8"));
-      remediationEvidence.changes = [{ source: "commit", status: "modified", index_status: null, worktree_status: null, path: "src/api.js", previous_path: null, old_mode: null, new_mode: null }];
+      remediationEvidence.candidate_head_sha = fixture.candidate;
+      remediationEvidence.changed_paths = [ratifiedPath];
+      remediationEvidence.changes = [{ source: "commit", status: "added", index_status: null, worktree_status: null, path: ratifiedPath, previous_path: null, old_mode: null, new_mode: null }];
       remediationEvidence.diff_hash = hashValue(remediationEvidence.changes);
+      remediationEvidence.commands = remediationEvidence.commands.map((command) => ({ ...command, head_sha: fixture.candidate }));
+      remediationEvidence.commit = fixture.candidate;
       writeJson(remediationEvidencePath, remediationEvidence);
       await assert.rejects(
         transitionPostPrState(fixture.runDir, structuredClone(readRun(fixture).post_pr)),
@@ -412,41 +474,48 @@ describe("post-PR workflow orchestration", () => {
     }
   });
 
-  it("terminalizes an unclaimed clean descendant after a crashed started dispatch", async () => {
+  it("clean-descendant recovery reaches ratified effective ownership despite raw-plan drift", async () => {
     const fixture = createRevalidationFixture("post-pr-adopt-descendant");
+    const ratifiedPath = "docs/recovered-descendant.md";
     try {
-      updateRunFile(fixture, (run) => {
-        run.post_pr.phase = "remediation-running";
-        Object.assign(run.post_pr.remediation, { stage: "running", candidate_head_sha: null, remediation_evidence_ref: null, remediation_evidence_hash: null, changes: { paths: [], tree_hash: null } });
-        Object.assign(run.post_pr.remediation.dispatch, { status: "running", returned_at: null });
-      });
-      await assert.rejects(
-        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" }),
-        /terminal-run/u,
-      );
+      await closeRecoverablePostPrDispatch(fixture, { ratifiedPath, candidatePath: ratifiedPath });
+      let decisions = 0;
+      await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", afterPostPrRecoveryOwnership: ({ kind, lane, paths }) => {
+        decisions += 1;
+        assert.equal(kind, "descendant");
+        assert.deepEqual(lane, { ok: true });
+        assert.deepEqual(paths, [ratifiedPath]);
+      } });
       const run = readRun(fixture);
-      assert.equal(run.status, "needs-human");
-      assert.equal(run.terminal_result.reason, "post-pr-dispatch-start-unknown");
+      assert.equal(decisions, 1);
+      assert.equal(run.status, "running");
+      assert.equal(run.post_pr.phase, "committed");
+      assert.deepEqual(run.post_pr.remediation.changes.paths, [ratifiedPath]);
+      assert.equal(run.post_pr.remediation.candidate_head_sha, fixture.candidate);
+      assert.equal(run.special_builder_dispatch, undefined);
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
-  it("terminalizes an unclaimed dirty diff after a crashed started dispatch", async () => {
+  it("dirty recovery reaches ratified effective ownership despite raw-plan drift", async () => {
     const fixture = createRevalidationFixture("post-pr-adopt-dirty");
+    const ratifiedPath = "docs/recovered-dirty.md";
     try {
-      runGit(fixture.repo, ["reset", "--hard", fixture.baseline]);
-      writeFileSync(join(fixture.repo, "src", "api.js"), "export const value = 3;\n");
-      updateRunFile(fixture, (run) => {
-        run.post_pr.phase = "remediation-running";
-        Object.assign(run.post_pr.remediation, { stage: "running", candidate_head_sha: null, remediation_evidence_ref: null, remediation_evidence_hash: null, changes: { paths: [], tree_hash: null } });
-        Object.assign(run.post_pr.remediation.dispatch, { status: "running", returned_at: null });
-      });
-      await assert.rejects(
-        resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z" }),
-        /terminal-run/u,
-      );
+      await closeRecoverablePostPrDispatch(fixture, { ratifiedPath, candidatePath: "src/api.js" });
+      mkdirSync(join(fixture.repo, "docs"), { recursive: true });
+      writeFileSync(join(fixture.repo, ratifiedPath), "dirty ratified recovery\n");
+      let decisions = 0;
+      await assert.rejects(resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:05:00.000Z", afterPostPrRecoveryOwnership: ({ kind, lane, paths }) => {
+        decisions += 1;
+        assert.equal(kind, "dirty");
+        assert.deepEqual(lane, { ok: true });
+        assert.deepEqual(paths, [ratifiedPath]);
+        throw new Error("dirty-ownership-observed");
+      } }), /dirty-ownership-observed/u);
       const run = readRun(fixture);
-      assert.equal(run.status, "needs-human");
-      assert.equal(run.terminal_result.reason, "post-pr-dispatch-start-unknown");
+      assert.equal(decisions, 1);
+      assert.equal(run.status, "running");
+      assert.equal(run.post_pr.phase, "remediation-running");
+      assert.equal(run.special_builder_dispatch.route, "post-pr-remediation");
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
@@ -1054,6 +1123,94 @@ function installRatifiedApiOwnership(fixture, ratifiedPath, reviewedCommit) {
     Object.assign(api, { declared_paths: ["src/api.js"], effective_paths: ["src/api.js", ratifiedPath], status: "merged", attempts: 1, attempt_reviews: [attemptReview],
       evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, merge_commit: reviewedCommit });
   });
+}
+
+async function closeRecoverablePostPrDispatch(fixture, { ratifiedPath, candidatePath }) {
+  installRatifiedApiOwnership(fixture, ratifiedPath, fixture.baseline);
+  writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+    { id: "api", stack: "backend", paths: ["src/stale-api.js"], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
+    { id: "ui", stack: "frontend", paths: [ratifiedPath], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
+  ] });
+  updateRunFile(fixture, (run) => {
+    run.post_pr.phase = "remediation-running";
+    Object.assign(run.post_pr.remediation, { stage: "running", candidate_head_sha: null, remediation_evidence_ref: null, remediation_evidence_hash: null, changes: { paths: [], entries: [], tree_hash: null } });
+    Object.assign(run.post_pr.remediation.dispatch, { status: "running", returned_at: null });
+  });
+  runGit(fixture.repo, ["reset", "--hard", fixture.baseline]);
+  const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: fixture.runId, route: "post-pr-remediation", agent: "backend-builder",
+  }, { claimDispatch: true, completionToken: `recover-${fixture.runId}` });
+  if (candidatePath === ratifiedPath) {
+    mkdirSync(join(fixture.repo, "docs"), { recursive: true });
+    writeFileSync(join(fixture.repo, ratifiedPath), "ratified descendant recovery\n");
+    runGit(fixture.repo, ["add", ratifiedPath]);
+    runGit(fixture.repo, ["commit", "-m", "ratified recovery"]);
+  } else {
+    runGit(fixture.repo, ["reset", "--hard", fixture.candidate]);
+  }
+  fixture.candidate = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  await completeSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: fixture.runId, route: "post-pr-remediation", agent: "backend-builder",
+    claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash,
+    completion_token: `recover-${fixture.runId}`,
+  });
+}
+
+function createRunStatePanelFixture(runId, { overlap = false, renameSource = false } = {}) {
+  const repo = mkdtempSync(join(tmpdir(), "panel-special-"));
+  runGit(repo, ["init", "-b", "main"]);
+  runGit(repo, ["config", "user.email", "test@example.com"]);
+  runGit(repo, ["config", "user.name", "Test"]);
+  writeFileSync(join(repo, ".gitignore"), ".opencode/\n");
+  writeFileSync(join(repo, "README.md"), "panel fixture\n");
+  if (renameSource) {
+    mkdirSync(join(repo, "src", "ui"), { recursive: true });
+    writeFileSync(join(repo, "src", "ui", "source.js"), "rename source\n");
+  }
+  runGit(repo, ["add", "."]);
+  runGit(repo, ["commit", "-m", "panel fixture"]);
+  const head = gitOutput(repo, ["rev-parse", "HEAD"]);
+  const runDir = join(repo, ".opencode", "factory", runId);
+  for (const directory of ["plan", "evidence", "reviews", "artifacts"]) mkdirSync(join(runDir, directory), { recursive: true });
+  const ratifiedPath = "docs/panel-ratified.md";
+  const plannedSlices = [
+    { id: "api", stack: "backend", paths: ["src/api/**"], depends_on: [], acceptance: ["api"], test_plan: ["node --test"] },
+    { id: "ui", stack: "frontend", paths: overlap ? [ratifiedPath] : ["src/ui/**"], depends_on: [], acceptance: ["ui"], test_plan: ["node --test"] },
+  ];
+  writeJson(join(runDir, "plan", "slices.json"), { slices: plannedSlices });
+  const slices = plannedSlices.map((planned) => {
+    const ratifiedPaths = planned.id === "api" ? [ratifiedPath] : [];
+    const evidenceRef = `evidence/${planned.id}.json`;
+    const reviewRef = `reviews/${planned.id}.json`;
+    writeJson(join(runDir, evidenceRef), { subject: planned.id, attempt: 1, status: "pass", review_ready: true, head_sha: head });
+    writeJson(join(runDir, reviewRef), { subject: planned.id, attempt: 1, reviewed_commit: head, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: ratifiedPaths }, remediation_context: { schema_version: 2, fixes: [] } });
+    const evidenceHash = fileHash(join(runDir, evidenceRef));
+    const reviewHash = fileHash(join(runDir, reviewRef));
+    const effectivePaths = [...planned.paths, ...ratifiedPaths];
+    return { id: planned.id, stack: planned.stack, depends_on: [], declared_paths: [...planned.paths], effective_paths: effectivePaths, status: "merged", attempts: 1,
+      attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, diff_base_commit: head, ratified_paths: ratifiedPaths, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+      evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head };
+  });
+  const reportRef = "artifacts/validation-report.md";
+  const validatorRef = "reviews/implementation-validator.json";
+  const securityRef = "reviews/security-reviewer.json";
+  writeFileSync(join(runDir, reportRef), "NO-GO\n");
+  writeJson(join(runDir, validatorRef), { subject: "main", attempt: 1, verdict: "NO-GO", reviewed_head_sha: head, required_fixes: ["repair"] });
+  writeJson(join(runDir, securityRef), { subject: "main", attempt: 1, verdict: "BLOCK", reviewed_head_sha: head, required_fixes: ["harden"] });
+  writeJson(join(runDir, "run.json"), {
+    schema_version: 1, run_id: runId, status: "running", branch: "main", worktree: repo, gates: {}, steps: [], slices,
+    validator: { verdict: "NO-GO", report: reportRef, review_ref: validatorRef, report_hash: fileHash(join(runDir, reportRef)), review_hash: fileHash(join(runDir, validatorRef)), reviewed_head_sha: head },
+    security_review: { verdict: "BLOCK", review_ref: securityRef, review_hash: fileHash(join(runDir, securityRef)), reviewed_head_sha: head },
+  });
+  return { repo, runDir, runId, ratifiedPath, head };
+}
+
+function writeRepoFileAndCommit(repo, relativePath, contents, message) {
+  mkdirSync(join(repo, relativePath.split("/").slice(0, -1).join("/")), { recursive: true });
+  writeFileSync(join(repo, relativePath), contents);
+  runGit(repo, ["add", relativePath]);
+  runGit(repo, ["commit", "-m", message]);
+  return gitOutput(repo, ["rev-parse", "HEAD"]);
 }
 
 function setBoundValidator(fixture, { verdict, paths }) {

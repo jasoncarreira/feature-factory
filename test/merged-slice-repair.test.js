@@ -62,6 +62,16 @@ describe("merged-sibling repair", () => {
       const reported = await report(fixture, { defect_path: ratifiedPath });
       assert.equal(reported.merged_slice_repair.owner_slice_id, "owner");
       assert.equal(reported.merged_slice_repair.defect_path, ratifiedPath);
+      await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 }, { repoRoot: fixture.repo });
+      const repairHead = await commitRepairFix(fixture, [ratifiedPath]);
+      writeJson(join(fixture.runDir, "evidence", "repair-attempt.json"), { subject: "repair:owner", changed_paths: [ratifiedPath] });
+      recordReview(fixture, "repair-ratified", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
+      const reviewed = await review(fixture, "repair-ratified", repairHead);
+      assert.equal(reviewed.merged_slice_repair.status, "review");
+      writeJson(join(fixture.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
+      const merged = await merge(fixture, { merge_commit: repairHead });
+      assert.equal(merged.merged_slice_repair.status, "merged");
+      assert.equal(merged.merged_slice_repair.merge_commit, repairHead);
 
       const overlapping = createFixture();
       try {
@@ -71,7 +81,7 @@ describe("merged-sibling repair", () => {
         sibling.declared_paths = [ratifiedPath];
         sibling.effective_paths = [ratifiedPath];
         writeJson(join(overlapping.runDir, "run.json"), run);
-        await assert.rejects(report(overlapping, { defect_path: ratifiedPath }), /duplicate effective ownership path/u);
+        await assert.rejects(report(overlapping, { defect_path: ratifiedPath }), /outside owner slice/u);
       } finally { cleanup(overlapping); }
     } finally { cleanup(fixture); }
   });

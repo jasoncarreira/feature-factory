@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -733,7 +733,8 @@ export async function resumeFactory(runId, opts = {}) {
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const beforeRecovery = readRunFile(join(runDir, "run.json"));
   assertRunClaimRoute(repo, beforeRecovery);
-  assertNoPendingSpecialBuilderDispatches(runDir, beforeRecovery);
+  if (hasClosedPostPrRecoveryDispatch(beforeRecovery)) assertNoUnresolvedSpecialBuilderDispatches(runDir, beforeRecovery);
+  else assertNoPendingSpecialBuilderDispatches(runDir, beforeRecovery);
   assertResumeConfiguration(beforeRecovery, opts);
   if (beforeRecovery.continuation?.schema_version === 2) {
     const checked = assertCarryForwardResumeAuthority(repo, runDir, beforeRecovery, opts);
@@ -1253,7 +1254,7 @@ async function finishObservedVerdict(repo, runDir, run, normalized, opts) {
   const binding = publishRunJsonEvidence(runDir, `evidence/post-pr-ci.attempt-${attempt}.json`, evidence);
   assertPostPrActionFresh(runDir, ownerAction);
   if (ownership.disposition !== "route") {
-    return postPrTerminal(runDir, run, "needs-human", ownership.reason === "changed-files-incomplete" ? "post-pr-metadata-unsafe" : "post-pr-owner-ambiguous", { ...opts, expectedCurrentHash: ownerAction.state_hash }, { latest_evidence: binding.ref });
+    return postPrTerminal(runDir, run, "needs-human", ownership.reason === "changed-files-incomplete" ? "post-pr-metadata-unsafe" : "post-pr-owner-ambiguous", { ...opts, expectedCurrentHash: ownerAction.state_hash });
   }
   const max = Number.isInteger(run.max_retries) ? run.max_retries : 3;
   if (run.post_pr.attempt >= max) return exhaustPostPr(runDir, run, { ...withoutExpectedHash(opts), expectedCurrentHash: ownerAction.state_hash }, binding);
@@ -5097,6 +5098,7 @@ async function reconcilePostPrCrash(runDir, opts = {}) {
   if (heartbeat.error || heartbeat.value && heartbeatBlocksReplacement(heartbeat.value, timestamp(opts.now), opts)) return { action: "heartbeat-active" };
   const remediation = run.post_pr.remediation;
   if (!run.special_builder_dispatch) return terminalDispatchUnknown(runDir, run, opts);
+  assertNoUnresolvedSpecialBuilderDispatches(runDir, run);
   if (!stringValue(run.worktree)) return terminalDispatchUnknown(runDir, run, opts);
   const statusResult = git(run.worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
   if (!statusResult.ok) return terminalDispatchUnknown(runDir, run, opts);
@@ -5111,10 +5113,12 @@ async function reconcilePostPrCrash(runDir, opts = {}) {
     const plan = acceptedSlicesPlan(run);
     const sliceId = remediation.owner.kind === "slice" ? remediation.owner.slice_id : null;
     const lane = validateLane({ ownership: plan, lane: remediation.lane, sliceId, paths, changes: entries, hasSymlink: gitChangesHaveUnsafeMode(run.worktree, entries) });
+    if (typeof opts.afterPostPrRecoveryOwnership === "function") await opts.afterPostPrRecoveryOwnership({ kind: "dirty", lane: cloneJson(lane), paths: [...paths] });
     if (!lane.ok) return terminalLaneViolation(runDir, run, opts, lane.reason, paths);
     const next = cloneJson(run.post_pr);
     next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.dispatch.status = "returned";
     next.remediation.dispatch.returned_at = timestamp(opts.now); next.remediation.changes = { paths, entries, tree_hash: hashJson(entries) };
+    next.remediation.candidate_head_sha = run.special_builder_dispatch.completion_head;
     await transitionPostPrState(runDir, next, opts);
     return { action: "adopted-dirty-diff", paths };
   }
@@ -5126,6 +5130,7 @@ async function reconcilePostPrCrash(runDir, opts = {}) {
     if (!diff.paths.length) return terminalDispatchUnknown(runDir, run, opts);
     const plan = acceptedSlicesPlan(run); const sliceId = remediation.owner.kind === "slice" ? remediation.owner.slice_id : null;
     const lane = validateLane({ ownership: plan, lane: remediation.lane, sliceId, paths: diff.paths, changes: diff.changes, hasSymlink: gitChangesHaveUnsafeMode(run.worktree, diff.changes) });
+    if (typeof opts.afterPostPrRecoveryOwnership === "function") await opts.afterPostPrRecoveryOwnership({ kind: "descendant", lane: cloneJson(lane), paths: [...diff.paths] });
     if (!lane.ok) return terminalLaneViolation(runDir, run, opts, lane.reason, diff.paths);
     const next = cloneJson(run.post_pr);
     next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.dispatch.status = "returned"; next.remediation.dispatch.returned_at = timestamp(opts.now);
@@ -5141,6 +5146,18 @@ async function reconcilePostPrCrash(runDir, opts = {}) {
 function newPostPrJob(activity, attempt) {
   return { dispatch_id: `${activity}-${attempt}-${randomUUID()}`, status: "planned", action_token: null, steering_generation: null, started_at: null, returned_at: null,
     result_ref: null, result_hash: null, verdict: null, transient_error_count: 0, next_retry_at: null, last_error: null };
+}
+
+function hasClosedPostPrRecoveryDispatch(run) {
+  const binding = run.special_builder_dispatch;
+  return run.post_pr?.phase === "remediation-running"
+    && run.post_pr?.remediation?.dispatch?.status === "running"
+    && binding?.route === "post-pr-remediation"
+    && stringValue(binding.claim_ref)
+    && stringValue(binding.claim_hash)
+    && stringValue(binding.closure_ref)
+    && stringValue(binding.closure_hash)
+    && /^[0-9a-f]{40}$/u.test(binding.completion_head || "");
 }
 
 async function reconcilePostPrRevalidation(runDir, initialRun, opts) {

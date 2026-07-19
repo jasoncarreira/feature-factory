@@ -175,8 +175,15 @@ describe("untrusted metadata, paths, ownership, and evidence", () => {
       [{ id: "api", stack: "backend", effective_paths: ["src/*"] }],
       [{ id: "api", stack: "backend", effective_paths: ["src/**", "src/**"] }],
       [{ id: "api", stack: "backend", effective_paths: ["src/**"] }, { id: "api", stack: "frontend", effective_paths: ["ui/**"] }],
-      [{ id: "api", stack: "backend", effective_paths: ["src/**"] }, { id: "ui", stack: "frontend", effective_paths: ["src/**"] }],
     ]) assert.throws(() => createOwnershipIndex(malformed));
+    const duplicateLane = createOwnershipIndex([
+      { id: "api", stack: "backend", effective_paths: ["shared.txt"] },
+      { id: "ui", stack: "frontend", effective_paths: ["shared.txt"] },
+    ]);
+    assert.deepEqual(duplicateLane.owners("shared.txt").map((slice) => slice.id), ["api", "ui"]);
+    assert.equal(classifyOwnership({ ownership: duplicateLane, paths: ["shared.txt"], failingCheckNames: [], complete: true }).reason, "path-owner-ambiguous");
+    assert.equal(classifyOwnership({ ownership: duplicateLane, paths: ["shared.txt"], failingCheckNames: ["api"], complete: true }).reason, "check-file-conflict");
+    assert.equal(validateLane({ ownership: duplicateLane, lane: "slice", sliceId: "api", paths: ["shared.txt"] }).ok, false);
   });
 
   it("hard-stops overlap, rename endpoints, delete, generated, symlink, and incomplete authority", () => {

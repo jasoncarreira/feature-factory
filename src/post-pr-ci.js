@@ -710,7 +710,6 @@ function sliceIdsInName(name, slices) { return slices.filter((slice) => new RegE
 function validateSlices(slices) {
   if (!Array.isArray(slices)) throw new Error("ownership slices must be an array");
   const ids = new Set();
-  const paths = new Set();
   return Object.freeze(slices.map((slice) => {
     if (!slice || typeof slice !== "object" || Array.isArray(slice) || Object.hasOwn(slice, "paths")
       || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(slice.id) || !Object.hasOwn(STACK_ROUTES, slice.stack)
@@ -723,10 +722,6 @@ function validateSlices(slices) {
       return canonical;
     });
     if (new Set(effectivePaths).size !== effectivePaths.length) throw new Error(`duplicate effective ownership path for slice '${slice.id}'`);
-    for (const path of effectivePaths) {
-      if (paths.has(path)) throw new Error(`duplicate effective ownership path '${path}' across slices`);
-      paths.add(path);
-    }
     return Object.freeze({ id: slice.id, stack: slice.stack, effective_paths: Object.freeze(effectivePaths) });
   }));
 }
