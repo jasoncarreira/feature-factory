@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertCompletedCheckpointChildAuthority, assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, readSlicesSeedPlan, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertCheckpointLocalPublishedAuthority, assertCompletedCheckpointChildAuthority, assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, readSlicesSeedPlan, resolveGateAnswerTarget, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildBinding, validateCheckpointFinalClosure, validateCheckpointReservationClaim, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -56,6 +56,7 @@ const CONTINUATION_PARENT_ARTIFACT_REFS = [
   { kind: "pr_body", ref: "artifacts/pr-body.md" },
 ];
 const CARRY_FORWARD_ALLOCATION_REPLAY = Symbol("carry-forward-allocation-replay");
+const CHECKPOINT_FOREGROUND_SPAWN_HOOK = Symbol("checkpoint-foreground-spawn-hook");
 // Planning artifacts the parent already had accepted. A blocked-run continuation
 // reuses these verbatim instead of regenerating story/research/spec from scratch.
 // Outcome artifacts (test-report, validation-report, pr-body) are intentionally
@@ -331,6 +332,16 @@ export async function startFactoryCheckpoint(parentRunId, checkpointId, opts = {
   });
   const envelope = checkpointLaunchEnvelope(repo, parentRunId, childRunId, candidate, launching, opts);
   let result;
+  let launched = null;
+  const publishLaunched = (spawnedChild = null) => {
+    if (launched) return launched;
+    if (spawnedChild !== null && (!Number.isInteger(spawnedChild.pid) || spawnedChild.pid <= 0)) {
+      throw new Error("checkpoint foreground launch returned no owned process identity");
+    }
+    assertCheckpointPublishedChild(repo, candidate.binding, launching, opts);
+    launched = transitionCheckpointReservation(repo, launching, "launched", opts);
+    return launched;
+  };
   try {
     if (typeof opts.checkpointLaunchFn === "function") result = await opts.checkpointLaunchFn({ repo, ...envelope, ...candidate, reservation: launching });
     else {
@@ -338,15 +349,16 @@ export async function startFactoryCheckpoint(parentRunId, checkpointId, opts = {
       if (opts.detached) {
         const runDir = join(factoryRoot(repo), childRunId);
         result = await startDetached(repo, envelope.commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: childRunId, runDir }), env: factoryLaunchEnv(opts) });
-      } else result = await runForegroundFactory(repo, envelope.commandArgs, { ...opts, env: factoryLaunchEnv(opts) });
+      } else result = await runForegroundFactory(repo, envelope.commandArgs, { ...opts, env: factoryLaunchEnv(opts), [CHECKPOINT_FOREGROUND_SPAWN_HOOK]: publishLaunched });
     }
     assertCheckpointLaunchOutcome(repo, candidate.binding, launching, result, opts);
   } catch (error) {
+    if (launched) throw error;
     try { transitionCheckpointReservation(repo, launching, "unknown", opts, "launch-outcome-indeterminate"); }
     catch (transitionError) { throw new Error(`checkpoint launch and reservation reconciliation both failed: ${error.message}; ${transitionError.message}`); }
     throw error;
   }
-  transitionCheckpointReservation(repo, launching, "launched", opts);
+  publishLaunched();
   return result;
 }
 
@@ -755,7 +767,11 @@ function publishCheckpointChildBootstrap(repo, binding, reservation, opts = {}) 
     const existing = readRunFile(runPath);
     if (!isExactCheckpointBootstrap(existing, binding, reservation)) throw new Error("checkpoint child bootstrap conflicts with existing run state");
   }
-  return assertCheckpointPublishedChild(repo, binding, reservation, opts, { requireBaseHead: true });
+  const published = assertCheckpointPublishedChild(repo, binding, reservation, opts, { requireBaseHead: true });
+  // Bootstrap is the create-only reserved-state exception. No generic writer
+  // receives this allowance; checkpoint-start owns the reservation transition.
+  assertCheckpointLocalPublishedAuthority(runDir, published.run, opts, null, ["reserved"]);
+  return published;
 }
 
 function isExactCheckpointBootstrap(run, binding, reservation) {
@@ -1297,6 +1313,7 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
   return withRunJsonLock(runDir, async () => {
     const runPath = join(runDir, "run.json");
     const current = readRunFile(runPath);
+    assertCheckpointLocalPublishedAuthority(runDir, current, { ...opts, repoRoot: factoryRepoFromRunDir(runDir) }, null, ["launched"]);
     if (TERMINAL_STATUSES.has(current.status)) return recoveryEnvelope(current, {
       ok: false,
       durable: true,
@@ -2324,6 +2341,8 @@ export async function recordSteeringConflict(runId, input, opts = {}) {
 }
 
 export async function cancelFactoryRun(runId, opts = {}) {
+  // Cancellation is intentionally sidecar-only: checkpoint mutation authority
+  // guards run.json separately, while owned process/heartbeat evidence may stop.
   if (!stringValue(runId)) throw new Error("factory cancel requires exactly one <run-id>");
   const target = resolveCancelRunDir(runId, opts);
   const result = await cancelProcessFromEvidence(target.runDir, { ...opts, runId: target.runId });
@@ -2482,6 +2501,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 
   await withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
+    assertCheckpointLocalPublishedAuthority(runDir, run, opts, null, ["launched"]);
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     assertHeartbeatStartable(run);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, opts);
@@ -2522,6 +2542,8 @@ export async function stopHeartbeat(runId, config = {}, opts = {}) {
 }
 
 export async function stopHeartbeatInRunDir(runDir, opts = {}) {
+  // Stopping liveness updates heartbeat.json only and never grants authority to
+  // mutate a checkpoint child's run.json.
   const heartbeatFile = heartbeatPath(runDir);
   if (!existsSync(heartbeatFile)) return null;
   const stoppedAt = timestamp(opts.now);
@@ -2789,6 +2811,7 @@ export async function cleanupRun(runId, opts = {}) {
   }
   return withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
+    assertCheckpointCleanupForbidden(run);
     assertNoUnreconciledTestExecution(run);
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     if (!TERMINAL_STATUSES.has(run.status) && !opts.force) {
@@ -2822,6 +2845,12 @@ export function collectCleanupTargets(run) {
   };
 }
 
+function assertCheckpointCleanupForbidden(run) {
+  if (run?.checkpoint?.kind === "delivery-checkpoint-child") {
+    throw new Error("checkpoint child cleanup is forbidden without an explicit checked cleanup route; lineage and reservation refs must be preserved");
+  }
+}
+
 // The caller owns the run-json lock. Public single-run cleanup uses the legacy
 // result contract; sweep mode uses compare-and-delete and retains the run
 // directory whenever a target operation fails.
@@ -2831,6 +2860,7 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
     throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
   }
   const durableRun = readRunFile(join(runDir, "run.json"));
+  assertCheckpointCleanupForbidden(durableRun);
   assertNoUnreconciledTestExecution(durableRun);
   assertNoPendingSpecialBuilderDispatches(runDir, durableRun);
   const targets = collectCleanupTargets(run);
@@ -4907,6 +4937,17 @@ function runForegroundFactory(repo, commandArgs, opts = {}) {
     }
     child.stdout.pipe(writer.stdout);
     child.stderr.pipe(writer.stderr);
+    child.once("spawn", () => {
+      const onSpawn = opts[CHECKPOINT_FOREGROUND_SPAWN_HOOK];
+      if (settled || typeof onSpawn !== "function") return;
+      try {
+        onSpawn(child);
+      } catch (error) {
+        settled = true;
+        if (typeof child.kill === "function") child.kill("SIGTERM");
+        rejectRun(error);
+      }
+    });
     child.once("error", (error) => {
       if (settled) return;
       settled = true;
@@ -5748,6 +5789,7 @@ async function heartbeatTick(runtime, lockOptions = {}) {
       }
 
       const run = runResult.value;
+      assertCheckpointLocalPublishedAuthority(runtime.runDir, run, lockOptions, null, ["launched"]);
       assertNoPendingSpecialBuilderDispatches(runtime.runDir, run);
       if (run.steering?.pr_fence) return { continue: false, reason: "pre-pr-fence-active" };
       if (TERMINAL_STATUSES.has(run.status)) {
@@ -6720,6 +6762,8 @@ function writeJsonAtomic(file, value, options = {}) {
 }
 
 function writeSemanticRunJsonAtomic(runDir, file, value, options = {}, expected = null) {
+  const checkpointCurrent = readRunFile(file);
+  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, checkpointCurrent, options, null, ["launched"]);
   const assertSpecialDispatch = () => assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(file));
   assertSpecialDispatch();
   const authority = assertV2LocalPublishedAuthority(runDir, value, options, expected);
@@ -6727,12 +6771,16 @@ function writeSemanticRunJsonAtomic(runDir, file, value, options = {}, expected 
     beforeReplace: () => {
       assertSpecialDispatch();
       if (authority) assertV2LocalPublishedAuthority(runDir, value, options, authority);
+      if (checkpointAuthority) {
+        assertCheckpointLocalPublishedAuthority(runDir, readRunFile(file), options, checkpointAuthority, ["launched"]);
+      }
     },
   });
 }
 
 async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
   const runDir = resolveRunDir(runId, opts);
+  if (eventKind === "created") await waitForCheckpointLaunchBeforeStartupMutation(runDir, opts);
   const snapshot = await collectRunDebugSnapshot({
     cwd: factoryRepoFromRunDir(runDir),
     driverKind: opts.driverKind,
@@ -6766,6 +6814,22 @@ async function persistFactoryRunEnv(runId, eventKind, opts = {}) {
     writeSemanticRunJsonAtomic(runDir, runPath, next, opts, v2Authority);
     return next.debug_snapshot;
   }, opts);
+}
+
+async function waitForCheckpointLaunchBeforeStartupMutation(runDir, opts = {}) {
+  const initial = readRunFile(join(runDir, "run.json"));
+  if (initial?.checkpoint?.kind !== "delivery-checkpoint-child") return;
+  const timeoutMs = Number.isInteger(opts.checkpointLaunchWaitMs) && opts.checkpointLaunchWaitMs >= 0
+    ? opts.checkpointLaunchWaitMs
+    : 15000;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const run = readRunFile(join(runDir, "run.json"));
+    const authority = assertCheckpointLocalPublishedAuthority(runDir, run, opts, null, ["launching", "launched"]);
+    if (authority.reservation.state === "launched") return;
+    if (Date.now() >= deadline) throw new Error("checkpoint child startup mutation requires launched reservation authority");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
 }
 
 function nextProvenance(current, event, eventKind) {

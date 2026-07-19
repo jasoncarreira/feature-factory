@@ -40,6 +40,7 @@ const LOCK_DIR = "run-json.lock";
 const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
 const HEARTBEAT_FILE = "heartbeat.json";
+const CHECKPOINT_GENERIC_MUTATION_STATES = Object.freeze(["launched"]);
 const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
 const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
 const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
@@ -568,6 +569,7 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
   const text = requireNonEmptyString(message, "steering message");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
@@ -625,6 +627,7 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
@@ -709,6 +712,7 @@ export async function transitionSteeringAcknowledged(runDir, input, options = {}
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot acknowledge steering`);
@@ -757,6 +761,7 @@ export async function transitionSteeringConflict(runDir, input, options = {}) {
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot record steering conflict`);
@@ -807,6 +812,7 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
   const boundaryKind = normalizeSteeringBoundaryKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-open ${boundaryKind}`);
@@ -837,6 +843,7 @@ export async function transitionSteeringBoundaryCrossed(runDir, kind, token, opt
   if (!STEERING_ACTION_KINDS.has(boundaryKind)) throw new Error("boundary-cross supports dispatch, remediation, terminal, post-pr-observe, or post-pr-push");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-cross ${boundaryKind}`);
@@ -871,6 +878,7 @@ export async function transitionSteeringActionClosed(runDir, kind, token, option
   const actionKind = normalizeSteeringActionKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertSteeringBoundaryClear(current, "action-close");
@@ -890,6 +898,7 @@ async function transitionSteeringActionResolved(runDir, kind, token, outcome, op
   const actionKind = normalizeSteeringActionKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     const claim = assertSteeringActionClaim(current, actionKind, token);
@@ -923,6 +932,7 @@ async function transitionSteeringActionResolved(runDir, kind, token, outcome, op
 export async function transitionPrePrFenceEstablished(runDir, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
@@ -984,6 +994,7 @@ export async function transitionPrCreated(runDir, input = {}, options = {}) {
 async function reconcilePrOperation(runDir, token, mode, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
@@ -1281,6 +1292,7 @@ export async function transitionCostUsage(runDir, input, options = {}) {
 export async function transitionRecoverOrphan(runDir, reason = "orphaned factory run", options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.status !== "running") throw new Error(`recover requires a running run, found '${current.status}'`);
@@ -1517,7 +1529,7 @@ export async function markCheckedVerificationArtifactExecutionUnknown(runDir, ex
 
 function observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options) {
   if (run.status !== "running") throw new Error("checked verification artifact execution requires a running run");
-  assertCheckpointLocalPublishedAuthority(runDir, run, options);
+  assertCheckpointLocalPublishedAuthority(runDir, run, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
   const slice = (run.slices || []).find((candidate) => candidate?.id === sliceId);
   if (!slice || slice.status !== "running" || !Number.isInteger(slice.attempts) || slice.attempts < 1) {
     throw new Error(`checked verification artifact execution requires running slice '${sliceId}' at a positive attempt`);
@@ -3047,6 +3059,7 @@ export async function heartbeatOnce(runDir, { now } = {}, options = {}) {
 
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     if (isRecord(current.steering?.pr_fence)) throw new Error("heartbeat tick rejected: active pre-PR fence");
     if (TERMINAL_RUN_STATUSES.has(current.status)) return { updated: false, reason: "terminal-status", status: current.status, run: current };
@@ -3071,6 +3084,7 @@ export function hasInFlightHeartbeatWork(run) {
 
 async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}) {
   const current = await readRunJson(runDir);
+  assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
   assertExpectedCurrentHash(current, options.expectedCurrentHash);
   assertRunJsonWriterAllowed(current, "run.json transition", { allowPrePrFence: hooks.prCreated === true });
   const v2AdmissionAuthority = assertV2LocalPublishedAuthority(runDir, current, options);
@@ -3278,18 +3292,34 @@ function assertScopedAuthorityTransitions(current, next, hooks = {}) {
 }
 
 async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace = null) {
+  const checkpointCurrent = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(
+    runDir,
+    checkpointCurrent,
+    options,
+    null,
+    CHECKPOINT_GENERIC_MUTATION_STATES,
+  );
   const assertSpecialDispatches = options.allowUnresolvedSpecialDispatch === true ? null : () => {
     const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
     if (options.allowPendingSpecialDispatch === true) assertNoUnresolvedSpecialBuilderDispatches(runDir, current);
     else assertNoPendingSpecialBuilderDispatches(runDir, current);
   };
   if (assertSpecialDispatches) assertSpecialDispatches();
-  const protectedBeforeReplace = beforeReplace || assertSpecialDispatches ? () => {
+  const assertCheckpointAuthority = checkpointAuthority ? () => {
+    const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+    assertCheckpointLocalPublishedAuthority(runDir, observed, options, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
+  } : null;
+  const protectedBeforeReplace = beforeReplace || assertSpecialDispatches || assertCheckpointAuthority ? () => {
     if (beforeReplace) {
       const observed = beforeReplace();
-      if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => assertSpecialDispatches?.());
+      if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => {
+        assertSpecialDispatches?.();
+        assertCheckpointAuthority?.();
+      });
     }
     if (assertSpecialDispatches) assertSpecialDispatches();
+    if (assertCheckpointAuthority) assertCheckpointAuthority();
   } : null;
   const fsOps = typeof protectedBeforeReplace === "function"
     ? {
@@ -3304,6 +3334,14 @@ async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace =
 }
 
 async function writeSemanticRunJson(runDir, next, options = {}, expected = null, beforeReplace = null) {
+  const checkpointCurrent = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(
+    runDir,
+    checkpointCurrent,
+    options,
+    null,
+    CHECKPOINT_GENERIC_MUTATION_STATES,
+  );
   const authority = assertV2LocalPublishedAuthority(runDir, next, options, expected);
   const assertTerminalDispatches = TERMINAL_RUN_STATUSES.has(next.status) ? () => {
     const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
@@ -3314,9 +3352,13 @@ async function writeSemanticRunJson(runDir, next, options = {}, expected = null,
     runDir,
     next,
     options,
-    authority || beforeReplace || assertTerminalDispatches ? () => {
+    authority || checkpointAuthority || beforeReplace || assertTerminalDispatches ? () => {
       if (beforeReplace) beforeReplace();
       if (authority) assertV2LocalPublishedAuthority(runDir, next, options, authority);
+      if (checkpointAuthority) {
+        const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+        assertCheckpointLocalPublishedAuthority(runDir, observed, options, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
+      }
       if (assertTerminalDispatches) assertTerminalDispatches();
     } : null,
   );
@@ -4309,8 +4351,12 @@ function assertPrCreatedSliceState(runDir, run) {
   });
 }
 
-export function assertCheckpointLocalPublishedAuthority(runDir, run, options = {}, expected = null) {
+export function assertCheckpointLocalPublishedAuthority(runDir, run, options = {}, expected = null, allowedStates = CHECKPOINT_GENERIC_MUTATION_STATES) {
   if (run?.checkpoint?.kind !== "delivery-checkpoint-child") return null;
+  if (!Array.isArray(allowedStates) || allowedStates.length === 0
+    || allowedStates.some((state) => !["reserved", "launching", "launched", "unknown"].includes(state))) {
+    throw new Error("checkpoint child authority requires explicit recognized allowed states");
+  }
   const binding = validateCheckpointChildBinding(run.checkpoint, { runId: run.run_id });
   const repository = resolve(runDir, "../../..");
   if (resolve(runDir) !== resolve(directFactoryRoot(repository), binding.child_run_id)) throw new Error("checkpoint child run directory differs from its reserved identity");
@@ -4325,7 +4371,9 @@ export function assertCheckpointLocalPublishedAuthority(runDir, run, options = {
   const claimBlob = authorityGit(options, repository, ["cat-file", "blob", child.stdout.trim()]);
   if (!claimBlob.ok) throw new Error("checkpoint child reservation claim is unreadable");
   const claim = validateCheckpointReservationClaim(JSON.parse(claimBlob.stdout), { expectedBinding: binding });
-  if (!["launching", "launched"].includes(claim.state)) throw new Error("checkpoint child execution requires launching or launched reservation authority");
+  if (!allowedStates.includes(claim.state)) {
+    throw new Error(`checkpoint child mutation requires reservation state ${allowedStates.join(" or ")}, found ${claim.state}`);
+  }
   if (resolve(run.worktree || "") !== resolve(claim.worktree)) throw new Error(`checkpoint child run.worktree differs from its exact reservation worktree: ${resolve(run.worktree || "")} != ${resolve(claim.worktree)}`);
   const branch = authorityGit(options, repository, ["rev-parse", "--verify", `refs/heads/${binding.child_run_id}^{commit}`]);
   const head = branch.ok ? branch.stdout.trim() : "";
@@ -4377,7 +4425,7 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
   if (run.status !== "running" && !(policy.allowTerminalCompleted === true && run.status === "completed")) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
   if (policy.skipLocalAuthority !== true) {
     if (continuationEligible) assertV2LocalPublishedAuthority(runDir, run, options);
-    if (checkpointEligible) assertCheckpointLocalPublishedAuthority(runDir, run, options);
+    if (checkpointEligible) assertCheckpointLocalPublishedAuthority(runDir, run, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     if (conflictEligible) assertSliceIntegrationConflictsCurrent(runDir, run, options);
   }
   const step = uniqueTestVerifierStep(run);
@@ -4407,7 +4455,7 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
     plan_hash: decomposition.plan_hash,
     plan_bytes: decomposition.plan_bytes.toString("base64"),
     commands: checkpointEligible
-      ? assertCheckpointLocalPublishedAuthority(runDir, run, options).commands
+      ? assertCheckpointLocalPublishedAuthority(runDir, run, options, null, CHECKPOINT_GENERIC_MUTATION_STATES).commands
       : cloneJson(decomposition.plan.integration_gate.required_commands),
     decomposition_review_ref: decomposition.review_ref,
     decomposition_review_hash: decomposition.review_hash,
@@ -4528,7 +4576,7 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
   if (step.evidence_ref !== checked.claim.receipt_ref || hashFile(evidence.path, { mode: "raw" }) !== checked.receipt_hash || !sameJson(evidenceValue, checked.receipt)) throw new Error("schema-v2 test-verifier evidence must be the exact completed checked receipt");
   if (checked.claim.status !== "pass" || evidenceValue.status !== "pass" || evidenceValue.review_ready !== true) throw new Error("schema-v2 test-verifier acceptance requires a completed passing checked receipt");
   const planAuthority = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
-  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, options);
+  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
   const expectedCommands = checkpointAuthority?.commands ?? planAuthority.plan.integration_gate.required_commands;
   if (evidenceValue.commands.length !== expectedCommands.length || evidenceValue.commands.some((result, index) => result.program !== expectedCommands[index].program || !sameJson(result.args, expectedCommands[index].args) || result.status !== "pass")) throw new Error("schema-v2 test-verifier receipt commands must exactly pass every accepted plan command in order");
   if (evidenceValue.head_sha !== integration.head) throw new Error("schema-v2 test-verifier evidence head_sha must equal the current clean child branch/worktree HEAD");
@@ -5248,6 +5296,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
   if (dirname(runDir) !== factoryRoot) throw new Error("special builder Task dispatch run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
+    assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     if (run.run_id !== request.run_id || run.status !== "running") throw new Error("special builder Task dispatch requires the exact current running run");
