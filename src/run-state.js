@@ -5128,6 +5128,7 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
   if (dirname(runDir) !== factoryRoot) throw new Error("slice builder Task dispatch run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
+    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     if (run.run_id !== request.run_id || run.status !== "running") throw new Error("slice builder Task dispatch requires the exact current running run");
     const slice = (run.slices || []).find((candidate) => candidate?.id === request.slice_id);
@@ -5235,7 +5236,8 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
       await mkdir(dispatchDir, { recursive: true });
       assertNoSymlinkPath(runDir, dispatchDir, "slice builder dispatch claim directory");
       const claimName = sliceDispatchClaimName(run.run_id, slice.id, slice.attempts);
-      const claimPath = join(dispatchDir, claimName);
+      const claimRef = `dispatch/${claimName}`;
+      const claimPath = join(runDir, claimRef);
       const closureRef = `dispatch/${claimName.slice(0, -5)}.closed.json`;
       const claim = {
         schema_version: 1,
@@ -5252,13 +5254,17 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
         claimed_at: timestamp(options.now),
         closure_ref: closureRef,
       };
-      try {
-        await writeFile(claimPath, `${JSON.stringify(claim, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-      } catch (error) {
-        if (error?.code === "EEXIST") throw new Error("slice builder Task dispatch is already claimed for this exact run/slice/attempt");
-        throw error;
-      }
-      const claimRef = `dispatch/${claimName}`;
+      const publication = await publishDispatchRecord(runDir, claimRef, claim, {
+        hooks: options.sliceDispatchClaimAtomicWriteHooks,
+        beforeCommit: () => {
+          if (checkpointAuthority) {
+            const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+            assertCheckpointLocalPublishedAuthority(runDir, currentRun, { ...options, repoRoot: repository }, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
+          }
+          assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
+        },
+        existsMessage: "slice builder Task dispatch is already claimed for this exact run/slice/attempt",
+      });
       const claimHash = hashFile(claimPath);
       const next = cloneJson(run);
       const nextSlice = next.slices.find((candidate) => candidate?.id === slice.id);
@@ -5273,8 +5279,16 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
         const currentClaim = observeSliceDispatchClaim(runDir, run.run_id, nextSlice, nextSlice.attempts);
         if (!currentClaim || currentClaim.ref !== claimRef || currentClaim.hash !== claimHash) throw new Error("slice builder Task dispatch claim changed before run binding");
       };
-      assertPublicationAuthority();
-      await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertPublicationAuthority);
+      try {
+        assertPublicationAuthority();
+        await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertPublicationAuthority);
+      } catch (error) {
+        await removeOwnedFailedDispatchPublication(runDir, claimRef, publication, (current) => {
+          const currentSlice = current.slices?.find((candidate) => candidate?.id === slice.id);
+          return currentSlice?.dispatch_claim_ref === claimRef && currentSlice?.dispatch_claim_hash === claimHash;
+        });
+        throw error;
+      }
       context.dispatch_claim = { ref: claimRef, hash: claimHash, closure_ref: closureRef, head };
     }
     return context;
@@ -5439,6 +5453,7 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
   const runDir = resolve(directFactoryRoot(repository), request.run_id);
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
+    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     const observed = observeSpecialDispatchClaim(runDir, request.claim_ref);
     if (observed.hash !== request.claim_hash || observed.claim.run_id !== run.run_id || observed.claim.route !== request.route || observed.claim.agent !== request.agent) {
@@ -5468,7 +5483,6 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
     const conflictProof = observed.claim.route === "integration-conflict"
       ? observeIntegrationConflictCompletionProof(repository, run, observed.claim, completionHead, options)
       : null;
-    const closurePath = resolve(runDir, observed.claim.closure_ref);
     const closure = {
       schema_version: 1,
       kind: "checked-special-builder-dispatch-closure",
@@ -5489,11 +5503,16 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
       ...(panelOwnerSliceId ? { owner_slice_id: panelOwnerSliceId } : {}),
       ...(conflictProof ? { owner_slice_id: observed.claim.effective_owner.slice_id, integration_proof: conflictProof } : {}),
     };
-    try {
-      await writeFile(closurePath, `${JSON.stringify(closure, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-    }
+    const publication = await publishDispatchRecord(runDir, observed.claim.closure_ref, closure, {
+      hooks: options.specialDispatchClosureAtomicWriteHooks,
+      allowExisting: true,
+      beforeCommit: () => {
+        if (checkpointAuthority) {
+          const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+          assertCheckpointLocalPublishedAuthority(runDir, currentRun, { ...options, repoRoot: repository }, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
+        }
+      },
+    });
     const closed = observeClosedSpecialDispatch(runDir, observed);
     if (closed.completion_head !== completionHead) throw new Error("special builder Task completion conflicts with a closure for another HEAD");
     const next = cloneJson(run);
@@ -5511,7 +5530,15 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
       const currentClosed = observeClosedSpecialDispatch(runDir, currentClaim);
       if (!sameJson(currentClosed, closed)) throw new Error("special builder Task completion closure changed before run binding");
     };
-    await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClosureAuthority);
+    try {
+      await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClosureAuthority);
+    } catch (error) {
+      await removeOwnedFailedDispatchPublication(runDir, observed.claim.closure_ref, publication, (current) => {
+        const binding = current.special_builder_dispatch;
+        return binding?.closure_ref === closed.closure_ref && binding?.closure_hash === closed.closure_hash;
+      });
+      throw error;
+    }
     return closed;
   }, options);
 }
@@ -6076,6 +6103,7 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
   if (dirname(runDir) !== factoryRoot) throw new Error("slice builder Task completion run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
+    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     if (run.status !== "running" || run.run_id !== request.run_id) throw new Error("slice builder Task completion requires the exact running run");
     const slice = (run.slices || []).find((candidate) => candidate?.id === request.slice_id);
@@ -6096,7 +6124,6 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
     if (!git(repository, ["merge-base", "--is-ancestor", observed.claim.head, completionHead]).ok) {
       throw new Error("slice builder Task completion HEAD must descend from the dispatch claim HEAD");
     }
-    const closurePath = resolve(runDir, observed.claim.closure_ref);
     const closure = {
       schema_version: 1,
       kind: "checked-slice-builder-dispatch-closure",
@@ -6114,10 +6141,17 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
       completion_token: request.completion_token,
       returned_at: timestamp(options.now),
     };
-    try {
-      await writeFile(closurePath, `${JSON.stringify(closure, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
+    const publication = await publishDispatchRecord(runDir, observed.claim.closure_ref, closure, {
+      hooks: options.sliceDispatchClosureAtomicWriteHooks,
+      allowExisting: true,
+      beforeCommit: () => {
+        if (checkpointAuthority) {
+          const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+          assertCheckpointLocalPublishedAuthority(runDir, currentRun, { ...options, repoRoot: repository }, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
+        }
+      },
+    });
+    if (!publication.created) {
       const existing = observeClosedSliceDispatch(runDir, observed);
       if (!existing || existing.claim_ref !== observed.ref || existing.claim_hash !== observed.hash) throw new Error("slice builder Task completion conflicts with an existing closure");
     }
@@ -6143,10 +6177,65 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
         throw new Error("slice builder Task completion Git authority changed before closure binding");
       }
     };
-    assertClosureAuthority();
-    await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertClosureAuthority);
+    try {
+      assertClosureAuthority();
+      await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertClosureAuthority);
+    } catch (error) {
+      await removeOwnedFailedDispatchPublication(runDir, observed.claim.closure_ref, publication, (current) => {
+        const currentSlice = current.slices?.find((candidate) => candidate?.id === slice.id);
+        return currentSlice?.dispatch_closure_ref === closed.closure_ref && currentSlice?.dispatch_closure_hash === closed.closure_hash;
+      });
+      throw error;
+    }
     return observeClosedSliceDispatchIfClaimed(runDir, run.run_id, nextSlice, { required: true });
   }, options);
+}
+
+async function publishDispatchRecord(runDir, ref, value, options = {}) {
+  const externalHooks = isRecord(options.hooks) ? options.hooks : {};
+  const externalBeforeCommit = externalHooks.beforeCommit;
+  try {
+    await writeProtectedJsonAtomic(runDir, ref, value, {
+      commit: "create-only",
+      hooks: {
+        ...externalHooks,
+        beforeCommit: async () => {
+          if (typeof externalBeforeCommit === "function") await externalBeforeCommit();
+          if (typeof options.beforeCommit === "function") await options.beforeCommit();
+        },
+      },
+    });
+  } catch (error) {
+    if (/checkpoint child (?:mutation|reservation|local authority)/u.test(error?.cause?.message || "")) throw error.cause;
+    if (error?.code !== "TARGET_EXISTS") throw error;
+    if (!options.allowExisting) throw new Error(options.existsMessage || "dispatch publication already exists");
+    return { created: false, ref };
+  }
+  const path = resolve(runDir, ref);
+  const identity = await lstat(path);
+  if (identity.isSymbolicLink() || !identity.isFile()) throw new Error("dispatch publication target is not a regular file");
+  return { created: true, ref, path, dev: identity.dev, ino: identity.ino, hash: hashFile(path) };
+}
+
+async function removeOwnedFailedDispatchPublication(runDir, ref, publication, isBound) {
+  if (!publication?.created) return;
+  let current;
+  try {
+    current = await readRunJson(runDir);
+  } catch {
+    return;
+  }
+  if (typeof isBound === "function" && isBound(current)) return;
+  const path = resolve(runDir, ref);
+  let identity;
+  try {
+    identity = await lstat(path);
+  } catch {
+    return;
+  }
+  if (identity.isSymbolicLink() || !identity.isFile() || identity.dev !== publication.dev || identity.ino !== publication.ino
+    || hashFile(path) !== publication.hash) return;
+  await rm(path, { force: true });
 }
 
 function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expectedRun, expectedContext, options = {}) {

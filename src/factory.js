@@ -2578,13 +2578,20 @@ export function writeGateAnswer(runId, gate, answer, opts = {}) {
   if (!answer) throw new Error("answer is required: approve, changes: ..., or stop");
   const runDir = resolveGateAnswerRunDir(runId, opts);
   const run = readRunFile(join(runDir, "run.json"));
+  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, opts, null, ["launched"]);
   const pending = pendingGate(run);
   if (pending && gateName !== pending) throw new Error(`gate '${gateName}' is not pending; current pending gate is '${pending}'`);
   if (!pending) throw new Error("run has no pending gate");
   const gateState = run.gates?.[gateName];
   const target = resolveGateAnswerTarget(runDir, gateName, gateState);
   const normalized = normalizeAnswer(answer);
-  writeGateAnswerFileAtomically(target.gatesDir, target.answerPath, normalized + "\n");
+  writeGateAnswerFileAtomically(target.gatesDir, target.answerPath, normalized + "\n", () => {
+    opts.gateAnswerAtomicWriteHooks?.beforeCommit?.();
+    if (checkpointAuthority) {
+      const observed = readRunFile(join(runDir, "run.json"));
+      assertCheckpointLocalPublishedAuthority(runDir, observed, opts, checkpointAuthority, ["launched"]);
+    }
+  });
   return { run_id: run.run_id, gate: gateName, answer: normalized, path: target.answerPath };
 }
 
@@ -5110,7 +5117,7 @@ function resolveGateAnswerRunDir(runId, opts = {}) {
   return resolveExistingDirectory(resolveRunDir(runId, opts), "run directory");
 }
 
-function writeGateAnswerFileAtomically(gatesDir, answerPath, contents) {
+function writeGateAnswerFileAtomically(gatesDir, answerPath, contents, beforeReplace = null) {
   const temp = createGateAnswerTempFile(gatesDir);
 
   try {
@@ -5119,6 +5126,7 @@ function writeGateAnswerFileAtomically(gatesDir, answerPath, contents) {
     } finally {
       closeSync(temp.fd);
     }
+    beforeReplace?.();
     renameSync(temp.path, answerPath);
   } finally {
     if (existsSync(temp.path)) rmSync(temp.path, { force: true });

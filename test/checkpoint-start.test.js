@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "./helpers/git-fixture.js";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { runCliCommand } from "../src/cli.js";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { buildContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, continueFactory, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startFactoryCheckpoint, startHeartbeat, stopHeartbeat } from "../src/factory.js";
+import { buildContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, continueFactory, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startFactoryCheckpoint, startHeartbeat, stopHeartbeat, writeGateAnswer } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
-import { heartbeatOnce, transitionGateDecision, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
+import { completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, heartbeatOnce, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { validateRun } from "../src/validate.js";
 import { passingInvariantFamilyLedger, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
@@ -715,6 +715,106 @@ describe("checked checkpoint child start", () => {
         assert.deepEqual(readFileSync(runPath), before, `${state} run.json`);
       } finally {
         rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("guards checkpoint gate-answer publication at admission and the create race", async () => {
+    for (const mode of ["reserved", "launching", "unknown", "missing", "cross-bound", "race"]) {
+      const fixture = createFixture(`checkpoint-gate-answer-${mode}`);
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-gate-answer-${mode}-child`, checkpointLaunchFn: (value) => value,
+        });
+        const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+        mkdirSync(join(runDir, "artifacts"), { recursive: true });
+        mkdirSync(join(runDir, "gates"), { recursive: true });
+        writeFileSync(join(runDir, "artifacts", "brief.md"), "# Brief\n");
+        writeFileSync(join(runDir, "gates", "brief.question.md"), "Approve?\n");
+        await transitionGateDecision(runDir, "brief", { status: "pending", artifact: "artifacts/brief.md", question_ref: "gates/brief.question.md", answer_ref: "gates/brief.answer" });
+        const runPath = join(runDir, "run.json");
+        const before = readFileSync(runPath);
+        const answerPath = join(runDir, readJson(runPath).gates.brief.answer_ref);
+        if (mode !== "race") setCheckpointAuthorityVariant(fixture, started.binding, mode);
+        assert.throws(() => writeGateAnswer(started.binding.child_run_id, "brief", "approve", {
+          cwd: fixture.repo,
+          gateAnswerAtomicWriteHooks: mode === "race" ? { beforeCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") } : undefined,
+        }), /checkpoint child (?:mutation|reservation)/u, mode);
+        assert.equal(existsSync(answerPath), false, mode);
+        assert.deepEqual(readFileSync(runPath), before, `${mode} run.json`);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("guards slice dispatch claim publication at admission and the create race", async () => {
+    for (const mode of ["reserved", "launching", "unknown", "missing", "cross-bound", "race"]) {
+      const prepared = await createCheckpointSliceDispatchFixture(`checkpoint-slice-claim-${mode}`);
+      try {
+        const { fixture, started, runDir, runPath } = prepared;
+        const before = readFileSync(runPath);
+        if (mode !== "race") setCheckpointAuthorityVariant(fixture, started.binding, mode);
+        await assert.rejects(prepareSliceBuilderTaskDispatch(fixture.repo, prepared.marker, {
+          claimDispatch: true,
+          completionToken: "slice-claim-token",
+          sliceDispatchClaimAtomicWriteHooks: mode === "race" ? { beforeCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") } : undefined,
+        }), /checkpoint child (?:mutation|reservation)/u, mode);
+        assert.deepEqual(dispatchFiles(runDir), [], mode);
+        assert.deepEqual(readFileSync(runPath), before, `${mode} run.json`);
+      } finally {
+        rmSync(prepared.fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("guards slice dispatch closure publication at admission and the create race", async () => {
+    for (const mode of ["reserved", "launching", "unknown", "missing", "cross-bound", "race"]) {
+      const prepared = await createCheckpointSliceDispatchFixture(`checkpoint-slice-closure-${mode}`, { claim: true });
+      try {
+        const { fixture, started, runDir, runPath, context } = prepared;
+        git(started.child_worktree, ["commit", "--allow-empty", "-m", `slice closure ${mode}`]);
+        const before = readFileSync(runPath);
+        const closurePath = join(runDir, context.dispatch_claim.closure_ref);
+        if (mode !== "race") setCheckpointAuthorityVariant(fixture, started.binding, mode);
+        await assert.rejects(completeSliceBuilderTaskDispatch(fixture.repo, {
+          ...prepared.marker,
+          claim_ref: context.dispatch_claim.ref,
+          claim_hash: context.dispatch_claim.hash,
+          completion_token: "slice-claim-token",
+        }, {
+          sliceDispatchClosureAtomicWriteHooks: mode === "race" ? { beforeCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") } : undefined,
+        }), /checkpoint child (?:mutation|reservation)/u, mode);
+        assert.equal(existsSync(closurePath), false, mode);
+        assert.deepEqual(readFileSync(runPath), before, `${mode} run.json`);
+      } finally {
+        rmSync(prepared.fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("guards special dispatch closure publication at admission and the create race", async () => {
+    for (const mode of ["reserved", "launching", "unknown", "missing", "cross-bound", "race"]) {
+      const prepared = await createCheckpointSpecialDispatchFixture(`checkpoint-special-closure-${mode}`);
+      try {
+        const { fixture, started, runDir, runPath, context } = prepared;
+        const before = readFileSync(runPath);
+        const closurePath = join(runDir, context.dispatch_claim.closure_ref);
+        if (mode !== "race") setCheckpointAuthorityVariant(fixture, started.binding, mode);
+        await assert.rejects(completeSpecialBuilderTaskDispatch(fixture.repo, {
+          run_id: started.binding.child_run_id,
+          route: "panel-remediation",
+          agent: "backend-builder",
+          claim_ref: context.dispatch_claim.ref,
+          claim_hash: context.dispatch_claim.hash,
+          completion_token: "special-claim-token",
+        }, {
+          specialDispatchClosureAtomicWriteHooks: mode === "race" ? { beforeCommit: () => setCheckpointAuthorityVariant(fixture, started.binding, "unknown") } : undefined,
+        }), /checkpoint child (?:mutation|reservation)/u, mode);
+        assert.equal(existsSync(closurePath), false, mode);
+        assert.deepEqual(readFileSync(runPath), before, `${mode} run.json`);
+      } finally {
+        rmSync(prepared.fixture.repo, { recursive: true, force: true });
       }
     }
   });
@@ -1511,6 +1611,80 @@ function publishRunningCheckpointChild(fixture, started) {
   validateRun(run);
   writeJson(join(runDir, "run.json"), run);
   return run;
+}
+
+async function createCheckpointSliceDispatchFixture(label, { claim = false } = {}) {
+  const fixture = createFixture(label);
+  const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+    cwd: fixture.repo, runId: `${label}-child`, checkpointLaunchFn: (value) => value,
+  });
+  const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+  const runPath = join(runDir, "run.json");
+  for (const directory of ["plan", "reviews", "artifacts"]) mkdirSync(join(runDir, directory), { recursive: true });
+  const plan = {
+    slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --version"] }],
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    delivery_envelope: { schema_version: 1, delivery_units: [{ id: "backend-unit", slice_id: "backend", invariant_families: [{ id: "behavior", description: "Behavior" }], obligations: [{ id: "behavior-check", description: "Check behavior", invariant_family_id: "behavior", verification_artifact_id: "backend-tests" }], verification_artifacts: [{ id: "backend-tests", test_plan_index: 0, test_plan_entry: "node --version" }] }] },
+  };
+  writeJson(join(runDir, "plan", "slices.json"), plan);
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "# Technical brief\n");
+  writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+  const run = readJson(runPath);
+  run.slices = [{
+    id: "backend", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"],
+    status: "running", attempts: 1, branch: started.binding.child_run_id, worktree: started.child_worktree,
+  }];
+  run.steps = [
+    {
+      agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
+      acceptance: { artifact_ref: "plan/slices.json", artifact_hash: hashFile(join(runDir, "plan", "slices.json")), review_ref: "reviews/work-decomposer.json", review_hash: hashFile(join(runDir, "reviews", "work-decomposer.json")) },
+    },
+    {
+      agent: "spec-writer", status: "accepted", attempts: 1, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
+      acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: hashFile(join(runDir, "artifacts", "technical-brief.md")), review_ref: "reviews/spec-writer.json", review_hash: hashFile(join(runDir, "reviews", "spec-writer.json")) },
+    },
+  ];
+  validateRun(run);
+  writeJson(runPath, run);
+  const marker = { run_id: started.binding.child_run_id, slice_id: "backend", attempt: 1, agent: "backend-builder" };
+  const context = claim ? await prepareSliceBuilderTaskDispatch(fixture.repo, marker, { claimDispatch: true, completionToken: "slice-claim-token" }) : null;
+  return { fixture, started, runDir, runPath, marker, context };
+}
+
+async function createCheckpointSpecialDispatchFixture(label) {
+  const fixture = createFixture(label);
+  const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+    cwd: fixture.repo, runId: `${label}-child`, checkpointLaunchFn: (value) => value,
+  });
+  publishCompletedChild(fixture, started.binding, started.binding.base_commit);
+  const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+  const runPath = join(runDir, "run.json");
+  const run = readJson(runPath);
+  const validatorReviewPath = join(runDir, "reviews", "implementation-validator.json");
+  const validatorReview = readJson(validatorReviewPath);
+  validatorReview.verdict = "NO-GO";
+  writeJson(validatorReviewPath, validatorReview);
+  run.status = "running";
+  run.pr_url = null;
+  run.terminal_result = null;
+  run.validator.verdict = "NO-GO";
+  run.validator.review_hash = hashFile(validatorReviewPath);
+  validateRun(run);
+  writeJson(runPath, run);
+  const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: started.binding.child_run_id, route: "panel-remediation", agent: "backend-builder",
+  }, { claimDispatch: true, completionToken: "special-claim-token" });
+  mkdirSync(join(started.child_worktree, "src"), { recursive: true });
+  writeFileSync(join(started.child_worktree, "src", "special-fix.txt"), "fixed\n");
+  git(started.child_worktree, ["add", "src/special-fix.txt"]);
+  git(started.child_worktree, ["commit", "-m", `special closure ${label}`]);
+  return { fixture, started, runDir, runPath, context };
+}
+
+function dispatchFiles(runDir) {
+  const dispatchDir = join(runDir, "dispatch");
+  return existsSync(dispatchDir) ? readdirSync(dispatchDir).sort() : [];
 }
 
 async function createCompletedPredecessor(fixture, childRunId, { pushMain = true } = {}) {
