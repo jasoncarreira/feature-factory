@@ -6,6 +6,9 @@ import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./en
 import { PROCESS_EVIDENCE_FILE, processEvidenceProcessesDir, validateProcessEvidence } from "./process-evidence.js";
 import { validatePlanPath } from "./post-pr-ci.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
+import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
+import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
+import { DeliveryContractValidationError, validateAdmissionExtensionResult, validateInvariantFamilyLedger, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -66,7 +69,7 @@ const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "special_builder_dispatch", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
-const PLAN_KEYS = new Set(["slices", "integration_gate"]);
+const PLAN_KEYS = new Set(["slices", "integration_gate", "delivery_envelope"]);
 const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
 const INTEGRATION_GATE_KEYS = new Set(["required_commands"]);
 const INTEGRATION_GATE_COMMAND_KEYS = new Set(["program", "args"]);
@@ -156,6 +159,10 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
   const errors = [];
   const path = "review";
   if (!isRecord(review)) fail([{ path, message: "must be an object" }]);
+  appendDeliveryContractErrors(errors, () => validateInvariantFamilyLedger(review.invariant_family_ledger, {
+    reviewedCommit: review.reviewed_commit,
+  }));
+  appendDeliveryContractErrors(errors, () => validateReviewExtensionResult(evaluateInvariantFamilyReview({ sliceId, review })));
   if (!Array.isArray(review.required_fixes)) errors.push({ path: `${path}.required_fixes`, message: "must be an array" });
   const fixes = Array.isArray(review.required_fixes) ? review.required_fixes : [];
   const canonicalFixes = fixes.map((fix) => typeof fix === "string" ? fix.trim().normalize("NFC") : null);
@@ -230,6 +237,12 @@ export function sliceReviewTaskContext(review, options = {}) {
 export function validateSliceReviewFeasibility(review, plan, { sliceId = "slice" } = {}) {
   validateSliceReviewResult(review, { sliceId });
   validateSlicesPlan(plan, { enforceDependencyDepth: false });
+  try {
+    validateReviewExtensionResult(evaluateInvariantFamilyReview({ plan, sliceId, review }));
+  } catch (error) {
+    if (error instanceof DeliveryContractValidationError) fail(error.errors);
+    throw error;
+  }
   const byId = new Map(plan.slices.map((slice) => [slice.id, slice]));
   if (!byId.has(sliceId)) {
     fail([{ path: "review.subject", message: `reviewed slice '${sliceId}' must exist in the current plan` }]);
@@ -388,8 +401,18 @@ export function validateSlicesPlan(plan, { enforceDependencyDepth = true, requir
   if (!Array.isArray(plan.slices)) errors.push({ path: "plan.slices", message: "must be an array" });
   else validatePlannedSlices(errors, plan.slices, "plan.slices", { enforceDependencyDepth });
   validateIntegrationGate(errors, plan.integration_gate, "plan.integration_gate", { required: requireIntegrationGate });
+  appendDeliveryContractErrors(errors, () => validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan })));
   if (errors.length) fail(errors);
   return plan;
+}
+
+function appendDeliveryContractErrors(errors, operation) {
+  try {
+    operation();
+  } catch (error) {
+    if (error instanceof DeliveryContractValidationError) errors.push(...error.errors);
+    else throw error;
+  }
 }
 
 export function parseSlicesPlanBytes(bytes, { label = PLAN_SLICES_REF, ...validationOptions } = {}) {

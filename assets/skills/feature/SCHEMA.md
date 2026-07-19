@@ -601,7 +601,7 @@ Changes to `DURABLE_AUTHORITY_METADATA_MANIFEST`, `DURABLE_AUTHORITY_DESCRIPTOR_
 
 The canonical-source manifest covers 123 registered catalog variants: 122 production-covered rows and the sole future row `final-plan-descriptor`. The prior 111-row B1C inventory remains intact; B1R adds six claim variants (`active`, completed pass/fail, and unknown process/authority/receipt-publication reasons) plus six receipt variants (pass, nonzero exit, signal, launch error, timeout, and output limit). The manifest includes legacy plan/slices, the v2 required-command plan variant, its exact accepted work-decomposer plan/review binding, checked execution claims and receipts, the future-only `final.plan` descriptor, running and terminal run envelopes, every terminal-result variant, `steering-pr-fence`, the PR-created result, existing continuation rows and parent sidecars, all post-PR rows, and all PR79 repair rows. The manifest remains an inventory oracle rather than an automatic production-coverage claim. Every applicable generated mutation of `plan-v2-integration-gate` is rejected by fatal creation-mode plan decoding/validation and checked `factory slices-seed`. Every work-decomposer accepted-binding ref/hash/external-byte/source mutation is rejected by step validation, consistency, test-verifier dispatch, or schema-v2 construction/publication/adoption/replay/resume/downstream checks. The seven B0M.1 rows above pass their named exported validator or checked transition for every applicable generated mutation. B0MR.1 additionally gives production-consumer coverage to exactly `slice-review`, `slice-merged`, `validator-verdict-binding`, and `security-verdict-binding`. B0MR.2 amends the universal completed/PR-created tuple and registers the successor PR fence through its checked transition. Every applicable generated B1R claim and receipt mutation is rejected by the closed validators and exact claim/plan/head/command binding consumer. `final.plan` remains explicitly future-only and descriptor-only: its descriptor kind/ref/hash and external plan bytes are tested without claiming production coverage or claiming that current `validateRun` consumes it. Final-plan, continuation, and checked receipt fixture bytes are external fixture sources, never persisted `sidecar_bytes`.
 
-B2 supersedes the preceding B1R inventory count: the current canonical-source manifest has 125 variants, 124 production-covered rows plus `final-plan-descriptor`. B2 adds `terminal-result-blocked-nonconvergence`, independently catalogs ordinary and nonconvergent blocked slices, and extends slice rows with attempt-history and checked-dispatch authority; their generated mutations reach schema validation, exact sidecar consistency, checked slice/merge transitions, or the unresolved-dispatch terminal/continuation guard.
+B4.1 supersedes the preceding B2 inventory count: the current canonical-source manifest has 127 variants, 126 production-covered rows plus the sole future row `final-plan-descriptor`. B2 added `terminal-result-blocked-nonconvergence`, independently cataloged ordinary and nonconvergent blocked slices, and extended slice rows with attempt-history and checked-dispatch authority. B4.1 adds the production-covered `plan-delivery-envelope-v1` and `review-invariant-family-ledger-v1` variants; every generated mutation reaches the shared validators, typed extension evaluators, checked seed/accepted-plan observation, or checked review-publication evidence re-observation.
 
 Post-PR `changes-observed`, `committed`, `revalidating`, `validated`, `push-pending`, and `remote-confirmed` phase rows each bind five independent authority targets: remediation-evidence ref drift, hash drift, actual file-byte drift, stale candidate-head identity, and cross-bound candidate-head identity. `checkRunConsistency` consumes the ref/hash/file bindings, while exported `transitionPostPrState` consumes the candidate identity and once-bound remediation bindings. Completeness rejects deletion or substitution of any target, so none of those phases can pass with an unbound `candidate_head_sha`, `remediation_evidence_ref`, `remediation_evidence_hash`, or remediation-evidence file.
 
@@ -1111,6 +1111,31 @@ Slice review shape:
 }
 ```
 
+B4.1 also reserves optional closed `invariant_family_ledger` schema v1 on a slice review:
+
+```json
+{
+  "schema_version": 1,
+  "delivery_unit_id": "be-api-unit",
+  "dispositions": [
+    {
+      "invariant_family_id": "api-behavior",
+      "verification_artifact_id": "api-tests",
+      "evidence_ref": "evidence/be-api-family.json",
+      "evidence_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "probe": { "type": "verification-artifact", "verification_artifact_id": "api-tests" },
+      "result": { "type": "verification-result", "outcome": "pass", "summary": "Focused API tests passed" },
+      "reviewed_commit": "1111111111111111111111111111111111111111",
+      "unresolved_findings": []
+    }
+  ]
+}
+```
+
+The ledger root and every nested object are closed. `outcome` is `pass`, `fail`, or `skipped`; B4.1 validates shape and references but applies no pass policy. `delivery_unit_id` must identify the current slice's delivery unit. A disposition family and artifact must exist in that unit and be paired by at least one obligation; family dispositions are unique. Evidence refs stay under `evidence/`, hashes are SHA-256, every probe names the same artifact as its disposition, every disposition commit equals the enclosing review `reviewed_commit`, and unresolved findings are unique trimmed NFC-normalized control-free strings. Slice-review publication resolves and hashes disposition evidence, while the existing exact review hash binds the ledger itself. Both are re-observed before replacement. The field may be omitted until B4.4 activation; if supplied it must validate, and the inactive review evaluator always returns `grants_b4_authority:false`.
+
+Both B4 extension result slots use schema version 1 and are closed. Before activation they are exactly `{schema_version,extension,status:"inactive",grants_b4_authority:false,reason}` with extension-specific fixed reason. The predeclared active shape is exactly `{schema_version,extension,status:"active",grants_b4_authority,decision,reasons}` with a nonempty unique canonical reasons array. Admission decisions are `admit|checkpoint` and grant authority exactly for `admit`; review decisions are `approve|reject` and grant authority exactly for `approve`. B4.2 can activate only the admission evaluator file and B4.4 can activate only the review evaluator file without changing this shared schema or the opposite policy lane.
+
 `reviews/implementation-validator.json` shape:
 
 ```json
@@ -1234,6 +1259,18 @@ Create the fence only after the final steering checkpoint, Gate 3 approval, and 
       { "program": "npm", "args": ["run", "check"] }
     ]
   },
+  "delivery_envelope": {
+    "schema_version": 1,
+    "delivery_units": [
+      {
+        "id": "be-api-unit",
+        "slice_id": "be-api",
+        "invariant_families": [{ "id": "api-behavior", "description": "API behavior remains stable" }],
+        "obligations": [{ "id": "api-response-obligation", "description": "Return the specified response", "invariant_family_id": "api-behavior", "verification_artifact_id": "api-tests" }],
+        "verification_artifacts": [{ "id": "api-tests", "test_plan_index": 0, "test_plan_entry": "npm test -- api" }]
+      }
+    ]
+  },
   "slices": [
     {
       "id": "be-api",
@@ -1247,7 +1284,9 @@ Create the fence only after the final steering checkpoint, Gate 3 approval, and 
 }
 ```
 
-The plan root is closed to `slices` plus optional `integration_gate`. Compatibility reads keep a legacy v1 plan without `integration_gate` valid, but every newly produced/seeded plan and every schema-v2 carry-forward plan requires it. A plan without it is ineligible for schema-v2 construction, publication, adoption, local mutation, and replay. Every planned slice is closed to exactly `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`; unknown keys have no legacy fallback. `paths` is a nonempty unique list of canonical exact-file or recursive-directory ownership lanes. A stale or non-existent `depends_on` identity is invalid.
+The plan root is closed to `slices` plus optional `integration_gate` and optional `delivery_envelope`. Compatibility reads keep a legacy v1 plan without `integration_gate` valid, but every newly produced/seeded plan and every schema-v2 carry-forward plan requires it. A plan without it is ineligible for schema-v2 construction, publication, adoption, local mutation, and replay. Every planned slice is closed to exactly `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`; unknown keys have no legacy fallback. `paths` is a nonempty unique list of canonical exact-file or recursive-directory ownership lanes. A stale or non-existent `depends_on` identity is invalid.
+
+`delivery_envelope`, when present, is schema version 1 and closed to `schema_version` plus `delivery_units`. Units occur in exact plan-slice order and there is exactly one per slice. Each closed unit has exactly `id`, `slice_id`, `invariant_families`, `obligations`, and `verification_artifacts`; each array is nonempty. Unit, family, obligation, and artifact IDs are lowercase kebab-case (at most 64 characters) and globally unique within each namespace. Families are closed `{id,description}` records. Obligations are closed `{id,description,invariant_family_id,verification_artifact_id}` records and reference one family plus one artifact in that unit. Artifacts are closed `{id,test_plan_index,test_plan_entry}` records; indexes are distinct non-negative indexes into the unit slice's `test_plan`, and `test_plan_entry` exactly equals the indexed string. During B4.1 this root may be omitted, but any supplied value must validate. The typed admission evaluator is explicitly inactive with `grants_b4_authority:false`; it defines no threshold, checkpoint route, attempt extension, or active ledger semantics.
 
 `integration_gate` is closed to exactly `required_commands`. The value is an ordered list of 1-32 closed entries containing exactly `program` and `args`; these are structured argv, never shell text. `program` must equal its trimmed form, contain 1-255 UTF-8 bytes, and contain no NUL/control character. `args` contains 0-64 strings per command; every arg is at most 4096 UTF-8 bytes and contains no NUL. The JSON-encoded `required_commands` list is at most 65,536 UTF-8 bytes. The exact entry `{ "program": "npm", "args": ["run", "check"] }` occurs exactly once and is final. Preceding entries are named acceptance commands. JSON and list order are authoritative; human `plan.md` text mirrors them only. Existing plan raw bytes, `carry_forward.plan_hash`, and publication byte equality bind the complete object and command order without a second command hash.
 

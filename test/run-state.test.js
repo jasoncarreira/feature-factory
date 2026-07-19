@@ -2086,6 +2086,84 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("observes inactive delivery extensions at seed and re-observes ledger evidence before review publication", async () => {
+    const fixture = createFixture("delivery-extension-publication");
+    const planPath = join(fixture.runDir, "plan", "slices.json");
+    const familyEvidencePath = join(fixture.runDir, "evidence", "slice-family.json");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      runGit(fixture.repo, ["checkout", "slice-branch"]);
+      const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId), branch: "slice-branch", worktree: fixture.repo, slices: [],
+      });
+      const projection = [{ id: "slice", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
+      writeSeedPlan(fixture.runDir, projection);
+      const plan = readJson(planPath);
+      plan.delivery_envelope = {
+        schema_version: 1,
+        delivery_units: [{
+          id: "slice-unit",
+          slice_id: "slice",
+          invariant_families: [{ id: "slice-behavior", description: "Slice behavior" }],
+          obligations: [{ id: "slice-obligation", description: "Meet the slice contract", invariant_family_id: "slice-behavior", verification_artifact_id: "slice-test" }],
+          verification_artifacts: [{ id: "slice-test", test_plan_index: 0, test_plan_entry: "test slice" }],
+        }],
+      };
+      writeJson(planPath, plan);
+      const seeded = await transitionSlicesSeed(fixture.runDir, projection, { from: "plan/slices.json" });
+      assert.deepEqual(seeded.run.slices[0].declared_paths, ["slice.txt"]);
+
+      seedBuilderDispatchAuthority(fixture);
+      const seededPlan = readJson(planPath);
+      seededPlan.delivery_envelope = plan.delivery_envelope;
+      seededPlan.delivery_envelope.delivery_units[0].verification_artifacts[0].test_plan_entry = "node --test";
+      writeJson(planPath, seededPlan);
+      const acceptedRun = readJson(join(fixture.runDir, "run.json"));
+      acceptedRun.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+      acceptedRun.slices = seeded.run.slices.map((slice) => ({ ...slice, declared_paths: ["src/**"], effective_paths: ["src/**"] }));
+      writeJson(join(fixture.runDir, "run.json"), acceptedRun);
+
+      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+      await closeBuilderDispatch(fixture, 1);
+      mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+      writeJson(familyEvidencePath, { subject: "slice", family: "slice-behavior", observed: true });
+      writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
+      const review = createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head });
+      review.invariant_family_ledger = {
+        schema_version: 1,
+        delivery_unit_id: "slice-unit",
+        dispositions: [{
+          invariant_family_id: "slice-behavior",
+          verification_artifact_id: "slice-test",
+          evidence_ref: "evidence/slice-family.json",
+          evidence_hash: hashFile(familyEvidencePath),
+          probe: { type: "verification-artifact", verification_artifact_id: "slice-test" },
+          result: { type: "verification-result", outcome: "fail", summary: "Failure is structurally valid while policy is inactive" },
+          reviewed_commit: head,
+          unresolved_findings: ["B4.4 will decide pass policy"],
+        }],
+      };
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), review);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionRunSlice(fixture.runDir, "slice", {
+        status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+      }, {
+        atomicWriteHooks: { beforeCommit: () => writeJson(familyEvidencePath, { subject: "slice", family: "slice-behavior", observed: false }) },
+      }), /protected file commit failed/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+
+      writeJson(familyEvidencePath, { subject: "slice", family: "slice-behavior", observed: true });
+      const published = await transitionRunSlice(fixture.runDir, "slice", {
+        status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+      });
+      assert.equal(published.slice.status, "review");
+      assert.equal(published.slice.review_hash, hashFile(join(fixture.runDir, "reviews", "slice.json")));
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rehashes accepted decomposition before test-verifier dispatch", async () => {
     const fixture = createFixture("test-verifier-decomposition-recheck");
     const projection = [writeModernReviewedSlice(fixture.runDir, "backend", { status: "merged", mergeCommit: "abc123" })];

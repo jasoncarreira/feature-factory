@@ -16,6 +16,9 @@ import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
 import { isPrivilegedControlPlanePath, privilegedControlPlanePathReason } from "./privileged-path-policy.js";
+import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
+import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
+import { validateAdmissionExtensionResult, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -2324,7 +2327,7 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
       review_ref: step.review_ref,
       review_hash: reviewHash,
     };
-    return { plan_hash: planAuthority.plan_hash, review_ref: step.review_ref, review_hash: reviewHash };
+    return { plan_hash: planAuthority.plan_hash, review_ref: step.review_ref, review_hash: reviewHash, admission_extension: planAuthority.admission_extension };
   }
   const artifactRef = typeof step.artifact_ref === "string" ? step.artifact_ref.trim() : "";
   if (!artifactRef) {
@@ -2544,13 +2547,14 @@ function observePlanSourceAuthority(runDir, from, slices, options = {}) {
     enforceDependencyDepth: options.enforceDependencyDepth !== false,
     requireIntegrationGate: options.requireIntegrationGate === true,
   });
+  const admissionExtension = validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan }));
   if (slices) assertPlanSlicesMatch(plan, slices, { requirePendingProjection: options.requirePendingProjection === true });
-  return { path: planPath, plan, plan_bytes: bytes, plan_hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+  return { path: planPath, plan, plan_bytes: bytes, plan_hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`, admission_extension: admissionExtension };
 }
 
 function assertSeedPlanAuthorityCurrent(runDir, projection, options, expected) {
   const current = observePlanSourceAuthority(runDir, options.from, projection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
-  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash) throw new Error("slice seed plan authority changed before run.json publication");
+  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash || !sameJson(current.admission_extension, expected.admission_extension)) throw new Error("slice seed plan authority changed before run.json publication");
 }
 
 export function observeAcceptedDecompositionAuthority(runDir, run, options = {}) {
@@ -2580,7 +2584,8 @@ export function observeAcceptedDecompositionAuthority(runDir, run, options = {})
 
 function assertAcceptedDecompositionAuthorityCurrent(runDir, run, expected) {
   const current = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
-  if (current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref || current.review_hash !== expected.review_hash) {
+  if (current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref || current.review_hash !== expected.review_hash
+    || !sameJson(current.admission_extension, expected.admission_extension)) {
     throw new Error("accepted work-decomposer plan authority changed before run.json publication");
   }
 }
@@ -4346,6 +4351,12 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
   if (observed.evidence.head_sha !== gitAuthority.head) throw new Error(`slice '${sliceId}' evidence head_sha must equal the current slice head`);
   if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
   if (dispatch && dispatch.completion_head !== gitAuthority.head) throw new Error(`slice '${sliceId}' reviewed head must equal the checked Task completion head`);
+  const reviewExtension = validateReviewExtensionResult(evaluateInvariantFamilyReview({
+    plan: decomposition.plan,
+    sliceId,
+    review: observed.review,
+    observeEvidence: (ref) => observeReviewExtensionEvidence(runDir, ref),
+  }));
   const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, gitAuthority, decomposition, options);
   return {
     ...observed,
@@ -4370,7 +4381,14 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
     git: gitAuthority,
     dispatch,
     ownership,
+    review_extension: reviewExtension,
   };
+}
+
+function observeReviewExtensionEvidence(runDir, ref) {
+  const resolved = resolveEvidenceRef(runDir, ref, { mustExist: true });
+  const bytes = readRegularNonEmptyFile(resolved.path, `invariant family ledger evidence '${ref}'`);
+  return { ref, hash: sha256Bytes(bytes) };
 }
 
 function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, decomposition, options = {}) {

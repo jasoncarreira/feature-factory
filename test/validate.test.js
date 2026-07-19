@@ -9,7 +9,7 @@ import { createRunRecord } from "./helpers/run-record-fixture.js";
 import { recomputeCostAttribution } from "../src/cost-attribution.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
 import { hashValue } from "../src/refs.js";
-import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
+import { MAX_SLICE_DEPENDENCY_WAVES, ValidationError, checkRunConsistency, validateCostAttributionEntries, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
 
 const HASH = `sha256:${"a".repeat(64)}`;
 const TERMINAL_CURRENCY_PAYLOADS = Object.freeze([
@@ -53,6 +53,45 @@ describe("run schema and consistency", () => {
       () => validateSlicesPlan({ slices: [plannedSlice("root"), plannedSlice("leaf", ["stale-slice"])] }),
       (error) => error instanceof ValidationError && error.message.includes("unknown dependency 'stale-slice'"),
     );
+  });
+
+  it("validates optional delivery envelopes and invariant-family ledgers without granting pass authority", () => {
+    const plan = slicesPlan([plannedSlice("slice")]);
+    plan.delivery_envelope = {
+      schema_version: 1,
+      delivery_units: [{
+        id: "slice-unit",
+        slice_id: "slice",
+        invariant_families: [{ id: "slice-behavior", description: "Slice behavior" }],
+        obligations: [{ id: "slice-obligation", description: "Meet the slice contract", invariant_family_id: "slice-behavior", verification_artifact_id: "slice-test" }],
+        verification_artifacts: [{ id: "slice-test", test_plan_index: 0, test_plan_entry: "node --test" }],
+      }],
+    };
+    assert.equal(validateSlicesPlan(plan), plan);
+    assert.deepEqual(Object.keys(plan).sort(), ["delivery_envelope", "slices"]);
+
+    const review = createSliceReviewRecord({ reviewedCommit: "b".repeat(40) });
+    review.invariant_family_ledger = {
+      schema_version: 1,
+      delivery_unit_id: "slice-unit",
+      dispositions: [{
+        invariant_family_id: "slice-behavior",
+        verification_artifact_id: "slice-test",
+        evidence_ref: "evidence/slice-family.json",
+        evidence_hash: HASH,
+        probe: { type: "verification-artifact", verification_artifact_id: "slice-test" },
+        result: { type: "verification-result", outcome: "skipped", summary: "Probe was intentionally skipped" },
+        reviewed_commit: "b".repeat(40),
+        unresolved_findings: ["Probe remains unresolved"],
+      }],
+    };
+    assert.equal(validateSliceReviewResult(review).verdict, "APPROVE");
+    assert.doesNotThrow(() => validateSliceReviewFeasibility(review, plan, { sliceId: "slice" }));
+
+    const unknownFamily = structuredClone(review);
+    unknownFamily.invariant_family_ledger.dispositions[0].invariant_family_id = "other-family";
+    assert.throws(() => validateSliceReviewFeasibility(unknownFamily, plan, { sliceId: "slice" }), /must reference an invariant family in the ledger delivery unit/u);
+    assert.throws(() => validateSliceReviewFeasibility(review, slicesPlan([plannedSlice("slice")]), { sliceId: "slice" }), /requires a delivery_envelope on the current plan/u);
   });
 
   it("admits only exact-file and recursive-directory ownership lanes", () => {
