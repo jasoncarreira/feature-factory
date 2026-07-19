@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import { runCliCommand } from "../src/cli.js";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { closeFactoryCheckpointRoute, continueFactory, resumeFactory, startFactoryCheckpoint } from "../src/factory.js";
+import { buildContinuation, closeFactoryCheckpointRoute, continueFactory, resumeFactory, startFactoryCheckpoint } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
 import { transitionRunStep } from "../src/run-state.js";
@@ -238,6 +238,36 @@ describe("checked checkpoint child start", () => {
       } finally {
         rmSync(fixture.repo, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("excludes checkpoint children from every continuation construction path before side effects", async () => {
+    const fixture = createFixture("checkpoint-child-no-continuation");
+    let launches = 0;
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-child-no-continuation-parent", checkpointLaunchFn: (value) => value,
+      });
+      const variants = [
+        ["direct-build", () => buildContinuation(started.binding.child_run_id, { cwd: fixture.repo, runId: "forbidden-direct-build", review: "reviews/work-decomposer.json" })],
+        ["dry-schema1", () => continueFactory(started.binding.child_run_id, { cwd: fixture.repo, runId: "forbidden-dry-schema1", review: "reviews/work-decomposer.json", dryRun: true, postPrWaitMinutes: 1 })],
+        ["schema1", () => continueFactory(started.binding.child_run_id, { cwd: fixture.repo, runId: "forbidden-schema1", review: "reviews/work-decomposer.json", foregroundLaunchFn: () => { launches += 1; } })],
+        ["carry-forward", () => continueFactory(started.binding.child_run_id, { cwd: fixture.repo, runId: "forbidden-carry-forward", review: "reviews/work-decomposer.json", carryForward: true, dryRun: true, ghAccountOccurrences: 2 })],
+        ["allocation-replay", () => continueFactory(started.binding.child_run_id, { cwd: fixture.repo, runId: "forbidden-allocation-replay", review: "reviews/work-decomposer.json", carryForward: true, foregroundLaunchFn: () => { launches += 1; } })],
+        ["new-pr", () => continueFactory(started.binding.child_run_id, { cwd: fixture.repo, runId: "forbidden-new-pr", review: "reviews/work-decomposer.json", newPr: true, foregroundLaunchFn: () => { launches += 1; } })],
+      ];
+      for (const [label, invoke] of variants) {
+        const target = `forbidden-${label}`;
+        assert.throws(invoke, /checkpoint child runs are excluded from every ordinary continuation route/u, label);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", target)), false, label);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "worktrees", target)), false, label);
+        assert.equal(gitResult(fixture.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${target}`]).ok, false, label);
+        const targetRef = `refs/opencode/continuation-targets/${createHash("sha256").update(target, "utf8").digest("hex")}`;
+        assert.equal(gitResult(fixture.repo, ["show-ref", "--verify", "--quiet", targetRef]).ok, false, label);
+      }
+      assert.equal(launches, 0);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
     }
   });
 
@@ -825,6 +855,58 @@ describe("checked checkpoint child start", () => {
     }
   });
 
+  it("exactly replays stored final closure after canonical remote main advances by descendants", async () => {
+    const route = await createCompletedFinalRoute("checkpoint-final-descendant-replay");
+    try {
+      const options = { cwd: route.fixture.repo, observePredecessorPrOperation: async () => route.observation };
+      const first = await closeFactoryCheckpointRoute(route.fixture.parentRunId, options);
+      const originalRefOid = checkpointFinalClosureRef(route.fixture);
+      const storedRemoteMain = first.closure.remote_main_commit;
+      const storedClosedAt = first.closure.closed_at;
+      advanceRemoteMain(route.fixture, "final-descendant-replay.txt");
+      const replay = await closeFactoryCheckpointRoute(route.fixture.parentRunId, options);
+      assert.equal(replay.replayed, true);
+      assert.deepEqual(replay.closure, first.closure);
+      assert.equal(replay.closure.remote_main_commit, storedRemoteMain);
+      assert.equal(replay.closure.closed_at, storedClosedAt);
+      assert.equal(checkpointFinalClosureRef(route.fixture), originalRefOid);
+    } finally {
+      rmSync(route.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects final closure replay when canonical remote main diverges from stored authority", async () => {
+    const route = await createCompletedFinalRoute("checkpoint-final-replay-divergence");
+    try {
+      const options = { cwd: route.fixture.repo, observePredecessorPrOperation: async () => route.observation };
+      await closeFactoryCheckpointRoute(route.fixture.parentRunId, options);
+      const originalRefOid = checkpointFinalClosureRef(route.fixture);
+      replaceRemoteMainFrom(route.fixture, route.fixture.baseCommit, "final-replay-divergence.txt");
+      await assert.rejects(closeFactoryCheckpointRoute(route.fixture.parentRunId, options), /ancestor|stored final closure|canonical predecessor PR merge commit/u);
+      assert.equal(checkpointFinalClosureRef(route.fixture), originalRefOid);
+    } finally {
+      rmSync(route.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent descendant final closure replays to exact stored authority", async () => {
+    const route = await createCompletedFinalRoute("checkpoint-final-concurrent-replay");
+    try {
+      const options = { cwd: route.fixture.repo, observePredecessorPrOperation: async () => route.observation };
+      const first = await closeFactoryCheckpointRoute(route.fixture.parentRunId, options);
+      advanceRemoteMain(route.fixture, "final-concurrent-replay.txt");
+      const replays = await Promise.all([
+        closeFactoryCheckpointRoute(route.fixture.parentRunId, options),
+        closeFactoryCheckpointRoute(route.fixture.parentRunId, options),
+      ]);
+      assert.deepEqual(replays.map((result) => result.replayed), [true, true]);
+      assert.deepEqual(replays[0].closure, first.closure);
+      assert.deepEqual(replays[1].closure, first.closure);
+    } finally {
+      rmSync(route.fixture.repo, { recursive: true, force: true });
+    }
+  });
+
   it("wires factory checkpoint-close to the create-only final closure transition", async () => {
     const route = await createCompletedFinalRoute("checkpoint-final-cli");
     const output = [];
@@ -1226,6 +1308,25 @@ function advanceRemoteMain(fixture, filename, { diverge = false } = {}) {
     git(clone, ["commit", "-m", `remote ${filename}`]);
     const commit = git(clone, ["rev-parse", "HEAD"]);
     git(clone, ["push", ...(diverge ? ["--force"] : []), "origin", "HEAD:main"]);
+    return commit;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function replaceRemoteMainFrom(fixture, baseCommit, filename) {
+  const root = mkdtempSync(join(tmpdir(), "checkpoint-remote-replace-"));
+  const clone = join(root, "clone");
+  try {
+    git(root, ["clone", fixture.originPath, clone]);
+    git(clone, ["config", "user.email", "remote@example.com"]);
+    git(clone, ["config", "user.name", "Remote"]);
+    git(clone, ["checkout", "--detach", baseCommit]);
+    writeFileSync(join(clone, filename), `${filename}\n`);
+    git(clone, ["add", filename]);
+    git(clone, ["commit", "-m", `replace remote ${filename}`]);
+    const commit = git(clone, ["rev-parse", "HEAD"]);
+    git(clone, ["push", "--force", "origin", "HEAD:main"]);
     return commit;
   } finally {
     rmSync(root, { recursive: true, force: true });

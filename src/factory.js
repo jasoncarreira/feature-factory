@@ -392,6 +392,13 @@ async function publishCheckpointFinalClosure(repo, parent, parentPath, manifestR
   if (!reservation.ok) throw new Error("checkpoint final closure launched reservation is missing");
   const closureRef = `refs/opencode/checkpoint-final-closures/${createHash("sha256").update(parent.run_id, "utf8").digest("hex")}`;
   const existing = readCheckpointFinalClosure(repo, closureRef);
+  if (existing) {
+    assertCheckpointFinalClosureReplayAuthority(repo, existing, {
+      parent, parentPath, manifestRef, manifestHash, finalCheckpoint, canonicalBase, completed, terminal, pr,
+      reservationOid: reservation.stdout.trim(),
+    });
+    return { status: "closed", replayed: true, ref: closureRef, closure: existing };
+  }
   const closure = validateCheckpointFinalClosure({
     schema_version: 1,
     kind: "delivery-checkpoint-final-closure",
@@ -417,12 +424,8 @@ async function publishCheckpointFinalClosure(repo, parent, parentPath, manifestR
     merge_commit: completed.merge_commit,
     remote_main_ref: canonicalBase.ref,
     remote_main_commit: canonicalBase.commit,
-    closed_at: existing?.closed_at ?? timestamp(opts.now),
+    closed_at: timestamp(opts.now),
   });
-  if (existing) {
-    if (hashValue(existing) !== hashValue(closure)) throw new Error("checkpoint final closure conflicts with existing terminal authority");
-    return { status: "closed", replayed: true, ref: closureRef, closure: existing };
-  }
   if (typeof opts.beforeCheckpointFinalClosureCommit === "function") await opts.beforeCheckpointFinalClosureCommit({ closure: cloneJson(closure), ref: closureRef });
   const advertised = git(repo, ["ls-remote", "--exit-code", "--refs", "origin", canonicalBase.ref]);
   if (exactRemoteRefOid(advertised, canonicalBase.ref) !== canonicalBase.commit) throw new Error("canonical remote main changed before checkpoint final closure publication");
@@ -453,6 +456,45 @@ async function publishCheckpointFinalClosure(repo, parent, parentPath, manifestR
     return { status: "closed", replayed: true, ref: closureRef, closure: winner };
   }
   return { status: "closed", replayed: false, ref: closureRef, closure };
+}
+
+function assertCheckpointFinalClosureReplayAuthority(repo, closure, authority) {
+  const { parent, parentPath, manifestRef, manifestHash, finalCheckpoint, canonicalBase, completed, terminal, pr, reservationOid } = authority;
+  const expected = {
+    schema_version: 1,
+    kind: "delivery-checkpoint-final-closure",
+    parent_run_id: parent.run_id,
+    parent_run_hash: sha256File(parentPath),
+    manifest_ref: manifestRef,
+    manifest_hash: manifestHash,
+    final_checkpoint_id: finalCheckpoint.id,
+    final_checkpoint_ordinal: finalCheckpoint.ordinal,
+    child_run_id: completed.run.run_id,
+    child_run_hash: completed.run_hash,
+    reservation_oid: reservationOid,
+    pr_url: terminal.pr_url,
+    pr_number: terminal.pr_number,
+    pr_node_id: terminal.pr_node_id,
+    repository: terminal.repository,
+    operation_id: terminal.operation_id,
+    head_ref: terminal.head_ref,
+    head_sha: terminal.head_sha,
+    base_ref: terminal.base_ref,
+    base_sha: terminal.base_sha,
+    draft: terminal.draft,
+    merge_commit: completed.merge_commit,
+    remote_main_ref: canonicalBase.ref,
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    if (closure[key] !== value) throw new Error(`checkpoint final closure stored ${key} authority is stale`);
+  }
+  if (pr.merge_commit_sha !== closure.merge_commit) throw new Error("checkpoint final closure stored merge authority is stale");
+  for (const [label, commit] of [["merge", closure.merge_commit], ["remote main", closure.remote_main_commit]]) {
+    const resolved = git(repo, ["rev-parse", "--verify", `${commit}^{commit}`]);
+    if (!resolved.ok || resolved.stdout.trim() !== commit || !git(repo, ["merge-base", "--is-ancestor", commit, canonicalBase.commit]).ok) {
+      throw new Error(`checkpoint final closure stored ${label} commit must remain an ancestor of canonical remote main`);
+    }
+  }
 }
 
 function readCheckpointFinalClosure(repo, ref) {
@@ -1314,12 +1356,10 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 }
 
 export function continueFactory(parentRunId, opts = {}) {
-  assertPostPrCliOptions(opts, { command: "factory continue" });
   const repo = repoRoot(opts.cwd || process.cwd());
-  assertNotCheckpointRoutingParent(repo, parentRunId);
-  const carryForwardConfig = opts.carryForward === true ? resolveCarryForwardConfiguration(repo, opts) : null;
   const allocationReplay = opts.carryForward === true && !opts.dryRun;
-  const continuation = buildContinuation(parentRunId, { ...opts, cwd: repo, carryForwardConfig, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
+  const { continuation, carryForwardConfig } = buildContinuationCandidate(parentRunId, { ...opts, cwd: repo, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
+  assertPostPrCliOptions(opts, { command: "factory continue" });
   const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
   if (!opts.dryRun) acquireContinuationTargetReservation(repo, continuation);
 
@@ -1368,12 +1408,10 @@ export function continueFactory(parentRunId, opts = {}) {
   return runForegroundFactory(repo, commandArgs, { ...opts, env: launchEnv });
 }
 
-function assertNotCheckpointRoutingParent(repo, parentRunId) {
-  const runDir = resolve(directFactoryRoot(repo), parentRunId);
-  if (dirname(runDir) !== directFactoryRoot(repo)) throw new Error("continuation parent run id is invalid");
-  const runPath = join(runDir, "run.json");
-  if (!existsSync(runPath)) return;
-  const parent = readRunFile(runPath);
+function assertOrdinaryContinuationParent(parent) {
+  if (parent.checkpoint?.kind === "delivery-checkpoint-child") {
+    throw new Error("checkpoint child runs are excluded from every ordinary continuation route");
+  }
   if (parent.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON
     || stringValue(parent.terminal_result?.artifacts?.checkpoint_routing)) {
     throw new Error("checkpoint-routing parents are excluded from every ordinary continuation route; use factory checkpoint-start");
@@ -3344,12 +3382,17 @@ function tryReadPublicRun(file, opts = {}) {
 }
 
 export function buildContinuation(parentRunId, opts = {}) {
+  return buildContinuationCandidate(parentRunId, opts).continuation;
+}
+
+function buildContinuationCandidate(parentRunId, opts = {}) {
   if (!stringValue(parentRunId)) throw new Error("factory continue requires exactly one <blocked-run-id>");
   const repo = repoRoot(opts.cwd || process.cwd());
   const parentRunDir = resolveRunDir(parentRunId, { ...opts, cwd: repo });
   const parentRunFile = join(parentRunDir, "run.json");
   lstatRequiredNoSymlinks(repo, parentRunFile, "parent run.json", "parent run.json must not contain symlinks");
   const parentRun = readRunFile(parentRunFile);
+  assertOrdinaryContinuationParent(parentRun);
   assertNoUnresolvedSliceDispatches(parentRunDir, parentRun);
   assertNoPendingSpecialBuilderDispatches(parentRunDir, parentRun);
   if (parentRun.status !== "blocked") {
@@ -3455,7 +3498,7 @@ export function buildContinuation(parentRunId, opts = {}) {
       ...(publishedReplay ? { targetPublished: true, childRunDir: join(factoryRoot(repo), targetRunId) } : {}),
     });
   }
-  return continuation;
+  return { continuation, carryForwardConfig };
 }
 
 export function assertContinuationBindingsCurrent(repo, parentRunDir, continuation, options = {}) {
