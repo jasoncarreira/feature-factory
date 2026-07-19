@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
 import {
@@ -265,20 +266,24 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
   writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", attempt: 1, verdict: "APPROVE" });
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE" });
   writeJson(join(runDir, "reviews", "validator.json"), { subject: "parent", attempt: 1, verdict: "NO-GO" });
-  writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass" });
-  writeJson(join(runDir, "reviews", "slice.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head }));
-  const plan = {
+  writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
+  const plan = withDeliveryEnvelope({
     slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["checked"] }],
     integration_gate: { required_commands: commands },
-  };
+  });
   writeJson(join(runDir, "plan", "slices.json"), plan);
+  const sliceEvidenceRef = "evidence/slice.json";
+  const sliceEvidenceHash = hashFile(join(runDir, sliceEvidenceRef));
+  const sliceReview = createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head });
+  sliceReview.invariant_family_ledger = passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: head, evidenceRef: sliceEvidenceRef, evidenceHash: sliceEvidenceHash });
+  writeJson(join(runDir, "reviews", "slice.json"), sliceReview);
   const briefHash = hashFile(join(runDir, "artifacts", "technical-brief.md"));
   const specReviewHash = hashFile(join(runDir, "reviews", "spec-writer.json"));
   const planHash = hashFile(join(runDir, "plan", "slices.json"));
   const decompositionReviewHash = hashFile(join(runDir, "reviews", "work-decomposer.json"));
   const validatorReviewHash = hashFile(join(runDir, "reviews", "validator.json"));
-  const sliceEvidenceRef = "evidence/slice.json"; const sliceReviewRef = "reviews/slice.json";
-  const sliceEvidenceHash = hashFile(join(runDir, sliceEvidenceRef)); const sliceReviewHash = hashFile(join(runDir, sliceReviewRef));
+  const sliceReviewRef = "reviews/slice.json";
+  const sliceReviewHash = hashFile(join(runDir, sliceReviewRef));
   const sliceAttemptReview = createSliceAttemptReview({ evidenceRef: sliceEvidenceRef, evidenceHash: sliceEvidenceHash, reviewRef: sliceReviewRef, reviewHash: sliceReviewHash, reviewedCommit: head });
   const policy = { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } };
   const continuation = {

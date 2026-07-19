@@ -9,6 +9,7 @@ import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadVa
 import { transitionPanelVerdicts } from "../src/run-state.js";
 import { buildContinuation, cleanupRun, recoverDisruptedRun, resumeFactory } from "../src/factory.js";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 
 const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
 const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
@@ -779,10 +780,10 @@ function createBuilderDispatchFixture() {
   mkdirSync(join(runDir, "evidence"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
-  writeJson(join(runDir, "plan", "slices.json"), {
+  writeJson(join(runDir, "plan", "slices.json"), withDeliveryEnvelope({
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [{ id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
-  });
+  }));
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
   writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
   writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted brief\n", "utf8");
@@ -828,11 +829,12 @@ function createSpecialPanelDispatchFixture() {
   const evidenceRef = "evidence/slice.panel-ready.json";
   const reviewRef = "reviews/slice.panel-ready.json";
   writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: fixture.head });
+  const evidenceHash = fileHash(join(fixture.runDir, evidenceRef));
   writeJson(join(fixture.runDir, reviewRef), {
     subject: "slice", attempt: 1, reviewed_commit: fixture.head, verdict: "APPROVE", convergence: "converging",
     remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] },
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: fixture.head, evidenceRef, evidenceHash }),
   });
-  const evidenceHash = fileHash(join(fixture.runDir, evidenceRef));
   const reviewHash = fileHash(join(fixture.runDir, reviewRef));
   run.slices = [{
     id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1,

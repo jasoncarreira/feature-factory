@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { withDeliveryEnvelope } from "./delivery-envelope-fixture.js";
 
 const HASH_A = `sha256:${"a".repeat(64)}`;
 const HASH_B = `sha256:${"b".repeat(64)}`;
@@ -181,8 +182,12 @@ const POST_PR_EXTERNAL = Object.freeze({
 const PLAN_EXTERNAL = Object.freeze({
   plan: { ref: "plan/slices.json", bytes: "{\"slices\":[{\"id\":\"B0.2\",\"stack\":\"backend\",\"paths\":[\"src/**\"],\"depends_on\":[],\"acceptance\":[\"AC2\"],\"test_plan\":[\"node --test\"]},{\"id\":\"B0.3\",\"stack\":\"backend\",\"paths\":[\"test/**\"],\"depends_on\":[\"B0.2\"],\"acceptance\":[\"AC3\"],\"test_plan\":[\"node --test\"]}]}\n" },
 });
+const PLAN_V2 = withDeliveryEnvelope({
+  slices: [{ id: "B1C", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/acceptance.test.js"] }],
+  integration_gate: { required_commands: [{ program: "node", args: ["--test", "test/acceptance.test.js"] }, { program: "npm", args: ["run", "check"] }] },
+});
 const PLAN_V2_EXTERNAL = Object.freeze({
-  plan: { ref: "plan/slices.json", bytes: "{\"slices\":[{\"id\":\"B1C\",\"stack\":\"backend\",\"paths\":[\"src/**\"],\"depends_on\":[],\"acceptance\":[\"AC1\"],\"test_plan\":[\"node --test test/acceptance.test.js\"]}],\"integration_gate\":{\"required_commands\":[{\"program\":\"node\",\"args\":[\"--test\",\"test/acceptance.test.js\"]},{\"program\":\"npm\",\"args\":[\"run\",\"check\"]}]}}\n" },
+  plan: { ref: "plan/slices.json", bytes: `${JSON.stringify(PLAN_V2)}\n` },
 });
 const DELIVERY_ENVELOPE_PLAN = Object.freeze({
   slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/backend.test.js"] }],
@@ -576,7 +581,7 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
 // authority facts, and complete sidecar descriptors, in that order. They are not derived from RECORDS.
 export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["plan-slices-json", "989039b0b23d8bef1c9c50b80f4f80da94bb3c982834804154e688ae72e2790a"],
-  ["plan-v2-integration-gate", "4e3972913ea1304af33b23a9beb234878e1aa4be6e1a7929440098dab8829538"],
+  ["plan-v2-integration-gate", "f901864d274e8cec07db9c3a5378ca67f7a5ba8e79382168e4949963b5ff51d9"],
   ["plan-delivery-envelope-v1", "ec33d7138f538b3b05f7da15d7011af571a5867113757f6a7fdd1eb6cccc9b33"],
   ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
@@ -595,20 +600,20 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["step-rejected", "d54549ecdbbda07370535e204db33722a56d1d958fa36af9e977fec2f2dc9f2b"],
   ["step-blocked", "d3a8fc846c39704346d34938951062d884fb3e03eedb522bfd4e15161c26885a"],
   ["step-accepted", "a10f57321f62fb099ae381316e62a2c089a83a89f160178400e7f3d994b1c699"],
-  ["step-work-decomposer-accepted-plan", "46f6d0bf7382613418da268823e0ef0a13649ab5ff7b33eee306f4b0c6ecab8a"],
+  ["step-work-decomposer-accepted-plan", "038c873dc0b98ebbc95349ad3a0e0b6808a0ece4a398636ed6dc73aaf5d47432"],
   ["step-inherited-acceptance", "c995fe9943a2898b6f9405e2a427f3de3b61d198f6d7b9d2edf46f177ff4f0f9"],
-  ["test-execution-claim-active", "c46fb9721a54c68a7f7106e28d167c2d2d5f4742ab3a86dd2a2d0c295d855148"],
-  ["test-execution-claim-completed-pass", "77d5df2e1a78d7919cdc550c2e7548089937432667622d8000d7e35a8acc3628"],
-  ["test-execution-claim-completed-fail", "901ce70597b4b00a16bb33ca8a4f7e9b3a470b137f3f285c317dfdb4ecb38d10"],
-  ["test-execution-claim-unknown-process-outcome-indeterminate", "b03decd53b81a41e4a1e37551c75ea5f795190ebe6160625672256bc430f37c1"],
-  ["test-execution-claim-unknown-authority-changed", "e00811f4e2fa8c9d8f070948b50d8f40281e52b1e6fca7fe2c99ca92c319e606"],
-  ["test-execution-claim-unknown-receipt-publication-indeterminate", "68ec6266a0135bcf5fb6e72e0546c31df5e08f729cdc44864c90506f931f5c02"],
-  ["test-execution-receipt-pass", "bc3ff7d82ff7af8c1943ab4005f70b3d58e1e7d249f1d6d819d94862da0de9d5"],
-  ["test-execution-receipt-failed-nonzero-exit", "cec982375db591d524859a0b68a0b621b583511cd447c61139e8a5343c4f13a4"],
-  ["test-execution-receipt-failed-signal", "098ab671186126021d108bd738029c75748e5daa6e74838f7ddf4df79498d0cc"],
-  ["test-execution-receipt-failed-launch-error", "11fe1658bc1b0c4c29758109d41f7289ea50ab137ade91fba13a04e7c4760418"],
-  ["test-execution-receipt-failed-timeout", "aba412c7a4df3bcc573775c40a8bed3da7c94cf794f656e935da0d197d35d409"],
-  ["test-execution-receipt-failed-output-limit", "d0f033038f69b998693a6511b192ee39530c36d94a6854646d13f0180e3a664d"],
+  ["test-execution-claim-active", "08430ac336f37dfbf7acc418c245c44feab2e896df6eac2a4ab76e2655a46e48"],
+  ["test-execution-claim-completed-pass", "07a86eb1a92150e6f8653c7fb94974cf1a28b737c82b6ee04805fd433ebe4348"],
+  ["test-execution-claim-completed-fail", "33c4adf669ce123b20d127a02d2807ebd252cd637ad240bba600f1620c85d88d"],
+  ["test-execution-claim-unknown-process-outcome-indeterminate", "94b1ea8bb563fc79ff80e29cc41491dbc8b6b5466f0a915dfe9bb0f77e5622d1"],
+  ["test-execution-claim-unknown-authority-changed", "9e8ae6cf877ad3550a5e64561c1808f08699ef7a39db9a4161bce233a5c6a7a3"],
+  ["test-execution-claim-unknown-receipt-publication-indeterminate", "68059dd9f2e2f7043d4d8105ce470337266d3bbd754e124bd96de34b5ddcff77"],
+  ["test-execution-receipt-pass", "71b572bf189aa916a5687308bbe3f12770e64c68f8bec8677c7a168704df79e1"],
+  ["test-execution-receipt-failed-nonzero-exit", "12d2691d93a629f2e06ad82a5595ed6483a34c021a527fb63c38bf4048903a56"],
+  ["test-execution-receipt-failed-signal", "a1d10c7fcefced69d956914c522a0b4f0cc691118558988624904ecf50278bd6"],
+  ["test-execution-receipt-failed-launch-error", "3a72dd6fc46c9e72851a0c7606933b0ea466487336cdad389af5471a957be2b0"],
+  ["test-execution-receipt-failed-timeout", "5965d0f46e1ee946a18a6888abe2cc229b771b2bd4a79faf85d4d05bc9746bcc"],
+  ["test-execution-receipt-failed-output-limit", "091ea91f8b1f6e56b31a71e085ec28c246738addcb5cf2dab841799db9fa5ee0"],
   ["slice-pending", "8d4bbec759c17fb00ead204f403603e1185b430f21f0306f9bb240f7f79d4ec1"],
   ["slice-running", "af31fa943d166746d48207286fbc9dea216127b8120f77378949b166de73ea40"],
   ["slice-review", "cd4b857d8325ae2b3df6ca965b17efb3af46dec393f0de2fdf939c79c0e9a5a4"],
@@ -848,7 +853,7 @@ const CANONICAL_SOURCE_RECORD_ID_SET = new Set(CANONICAL_SOURCE_RECORD_IDS);
 // literals rather than values derived from RECORDS or DURABLE_AUTHORITY_CATALOG.
 export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["plan-slices-json", "dd6fabc7def0955d82f37d30a53fc19e4e8cc8fa69fa445badbc3c051d4dd7b9"],
-  ["plan-v2-integration-gate", "b940206e8a4add6cee008305f694091dfadfb2fcddb12e8ffde34cae44ddcfe4"],
+  ["plan-v2-integration-gate", "04a73897d61d2aa30a703989e59f809518642c2ca4b938dea7af0fd514102955"],
   ["plan-delivery-envelope-v1", "757895c9d66d0caac2026bb2f6c207b4bbd37d0b1a5f5f20c0fbb713878b1ec1"],
   ["final-plan-descriptor", "13b61642b831dd2fba59dd83bf897de443216d567b56ee8a952080d9f81a7568"],
   ["run-envelope-running", "f98a34215fdd5d0b2c4861bab4c6e6be104439e358a8e737095618955f227594"],
@@ -867,20 +872,20 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["step-rejected", "4012aaf36e583d5636a126cdc40a36ddc3fabf32e1a150503dd6ee62d317fd87"],
   ["step-blocked", "8d9ce53c44e2bccca8b3555f4906bedf95fc91de76ee37fd886d47ad64942ad6"],
   ["step-accepted", "29ad392882b94a0bc78a5b0bac4df748cae19d80965e6a0c62cc758df8fd89c0"],
-  ["step-work-decomposer-accepted-plan", "013523cc9576c74c21c46d3a59c8e9df1bda254971423d0519923f14dc1fe71e"],
+  ["step-work-decomposer-accepted-plan", "0264d34693e1a28e16ec07bdcaebef205292990f47a20eb53a29fe3e329e8cf3"],
   ["step-inherited-acceptance", "ba9a7a06a122aa68917e10675cf6b2ec97eab054ab7f40353904ef16ef226657"],
-  ["test-execution-claim-active", "4a28465ee4bf8ae2aa775e59e6be0c399926cf34e6a485ef2d99c03d43abec87"],
-  ["test-execution-claim-completed-pass", "a8976d1047f4915d9ef47f7367ce40b89bc381504987eccad0988d78f1719f07"],
-  ["test-execution-claim-completed-fail", "232b87ab924b9b4a27c38165c4be79370a4fff2fe8bc1192476fa93b9c8c3040"],
-  ["test-execution-claim-unknown-process-outcome-indeterminate", "86eb7ef4a735925cb12b2e4685c3cdeb2d2b51cfb62a499704582f96e04e4127"],
-  ["test-execution-claim-unknown-authority-changed", "e1561c254d7767202c70d9d07ca056014ee2168918370303f2997ea0c6ab18d6"],
-  ["test-execution-claim-unknown-receipt-publication-indeterminate", "c95c353de36a9719b74d9711f5dc92f19b432a2284ad2902b7cf1580f801d033"],
-  ["test-execution-receipt-pass", "51a2006fc63ead36b0728846d574ee8ad86f806555bebc89c60ba3d06f3eca15"],
-  ["test-execution-receipt-failed-nonzero-exit", "56bb07696d55efdfcd054c84b1914ea7b8d674afc360c0318ae5c90054c046f6"],
-  ["test-execution-receipt-failed-signal", "3caa57455fd8f7210f479d6004705dbdb6b47ce064a58b7834f8be5ec9e624ee"],
-  ["test-execution-receipt-failed-launch-error", "1320ebcb723f155eb795d8f91caf528d7fed2fb3e93f02d91a815c89f6f63008"],
-  ["test-execution-receipt-failed-timeout", "5d77cdf0868afcf860e9fd1ec0cd985d0b4d4c2a9603e1efeb55c94e37f24bf4"],
-  ["test-execution-receipt-failed-output-limit", "9f258d14925eb587cbe96ddfb9c0a1c7f6144c9bca3d7f8a73a07fa638fa328c"],
+  ["test-execution-claim-active", "53f417c63413d52035e9efc2a7c718e6727410bb98651df6a4d13cdd9c23d694"],
+  ["test-execution-claim-completed-pass", "277fe2389d8992030069c248100f6325bf4e559ca8ee89a64e4b3bb5149e7cf5"],
+  ["test-execution-claim-completed-fail", "c03612048913c263b94d6ab8145ec2541e3c29cbeb1a350abe79ee4e675c56c3"],
+  ["test-execution-claim-unknown-process-outcome-indeterminate", "18a5baee0e6c59a9f8df701b92a726fa26d2b1b7d540f9c28a4cd63e40ece410"],
+  ["test-execution-claim-unknown-authority-changed", "24a1ffcfad6130fcc6efd64bef8c34ae54c5d35e8941bdad00f9ab1b2e54165c"],
+  ["test-execution-claim-unknown-receipt-publication-indeterminate", "757882f5a11fff7e508f0512ec2b244193fb8bdbfdbeeef94ec1cea4404078fd"],
+  ["test-execution-receipt-pass", "216e29ab03321e502e7f11f9d5f9fafba7a169a334b43f01d0a44239b932ea43"],
+  ["test-execution-receipt-failed-nonzero-exit", "b380f5786b134a4ab1d23b0b69c9456658c0bc4367f3178eae438b09e9426312"],
+  ["test-execution-receipt-failed-signal", "c913ae58c43a5afcec6b6d62500d7799574bad7c24f13d034fa6dc4017e14e85"],
+  ["test-execution-receipt-failed-launch-error", "b1cfd6df559733cba81588e3e66c0062fd92281e4e8eff3305d4a38e13e8846e"],
+  ["test-execution-receipt-failed-timeout", "b5ab34c8391d36072cb1992aa2e69043215e391d2215daa5a19eecbf7f8a729a"],
+  ["test-execution-receipt-failed-output-limit", "63b89f33f3ebc6a7795136f0dd99eec4d0b5c6615ad4236a8b77bf341699f88e"],
   ["slice-pending", "0f66b96672a90c960a5cff760325c7e63a9a69dd95f19207406de97959afa113"],
   ["slice-running", "5c91f74e38cddbf6278e3ad48aa2e74392e3120b7680e747299cf315126ffc26"],
   ["slice-review", "c7128941b5660901d7c20c9f79a2f8676dc8bf22632fb32bf8e466b4215d5495"],

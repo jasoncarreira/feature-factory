@@ -2417,6 +2417,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
           if (priorSlice.status === "review") throw new Error(`slice '${priorSlice.id}' review binding is write-once; return to running before publishing another review`);
           assertNoBindingFields(slices[sliceIndex], SLICE_REVIEW_BINDING_KEYS, `slice '${priorSlice.id}' review binding`);
           reviewPlanAuthority = observeAcceptedDecompositionAuthority(runDir, draft, { ...options, requireIntegrationGate: true });
+          assertSliceAttemptHistoryCurrent(runDir, priorSlice.id, priorSlice);
           nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], reviewPlanAuthority, options);
           validateSliceReviewFeasibility(nextReviewAuthority.review, reviewPlanAuthority.plan, { sliceId: slices[sliceIndex].id });
           Object.assign(slices[sliceIndex], nextReviewAuthority.binding);
@@ -4272,6 +4273,8 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
   if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error(`slice '${sliceId}' merge requires a clean integration worktree`);
   const reviewedCommit = observed.binding.reviewed_commit;
   const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+  const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, decomposition.plan, sliceId, observed.review);
+  assertApprovingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension, "merge");
   const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, sliceGit, decomposition, options);
   if (!sameJson(slice.effective_paths, ownership.effective_paths)) throw new Error(`slice '${sliceId}' effective ownership changed after review`);
   const integrationConflict = run.special_builder_dispatch?.route === "integration-conflict"
@@ -4290,6 +4293,7 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
     integration_conflict: integrationConflict,
     ownership,
     dispatch,
+    review_extension: reviewExtension,
     review_authority: { ...observed, git: sliceGit },
   };
 }
@@ -4307,6 +4311,7 @@ function observeSliceReviewSidecars(runDir, sliceId, slice) {
   const review = resolveReviewRef(runDir, requireNonEmptyString(slice.review_ref, "review_ref"));
   const reviewBytes = readRegularNonEmptyFile(review.path, `slice '${sliceId}' review_ref`);
   const reviewJson = parseJsonObjectBytes(reviewBytes, `slice '${sliceId}' review_ref`);
+  observeInvariantFamilyLedgerEvidence(runDir, sliceId, reviewJson);
   if (evidenceJson.subject !== sliceId) throw new Error(`slice '${sliceId}' evidence subject must match slice id`);
   if (evidenceJson.status !== "pass" || evidenceJson.review_ready !== true) throw new Error(`slice '${sliceId}' evidence must be pass and review_ready`);
   if (reviewJson.subject !== sliceId) throw new Error(`slice '${sliceId}' review subject must match slice id`);
@@ -4351,12 +4356,8 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
   if (observed.evidence.head_sha !== gitAuthority.head) throw new Error(`slice '${sliceId}' evidence head_sha must equal the current slice head`);
   if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
   if (dispatch && dispatch.completion_head !== gitAuthority.head) throw new Error(`slice '${sliceId}' reviewed head must equal the checked Task completion head`);
-  const reviewExtension = validateReviewExtensionResult(evaluateInvariantFamilyReview({
-    plan: decomposition.plan,
-    sliceId,
-    review: observed.review,
-    observeEvidence: (ref) => observeReviewExtensionEvidence(runDir, ref),
-  }));
+  const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, decomposition.plan, sliceId, observed.review);
+  assertApprovingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension, "publication");
   const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, gitAuthority, decomposition, options);
   return {
     ...observed,
@@ -4389,6 +4390,34 @@ function observeReviewExtensionEvidence(runDir, ref) {
   const resolved = resolveEvidenceRef(runDir, ref, { mustExist: true });
   const bytes = readRegularNonEmptyFile(resolved.path, `invariant family ledger evidence '${ref}'`);
   return { ref, hash: sha256Bytes(bytes) };
+}
+
+function observeInvariantFamilyLedgerEvidence(runDir, sliceId, review) {
+  const dispositions = review?.invariant_family_ledger?.dispositions;
+  if (!Array.isArray(dispositions)) return;
+  for (const disposition of dispositions) {
+    const ref = requireNonEmptyString(disposition?.evidence_ref, `slice '${sliceId}' invariant family ledger evidence_ref`);
+    const observed = observeReviewExtensionEvidence(runDir, ref);
+    if (observed.hash !== disposition.evidence_hash) {
+      throw new Error(`slice '${sliceId}' invariant family ledger evidence hash is stale for '${ref}'`);
+    }
+  }
+}
+
+function observeInvariantFamilyReviewAuthority(runDir, plan, sliceId, review) {
+  return validateReviewExtensionResult(evaluateInvariantFamilyReview({
+    plan,
+    sliceId,
+    review,
+    observeEvidence: (ref) => observeReviewExtensionEvidence(runDir, ref),
+  }));
+}
+
+function assertApprovingInvariantFamilyReviewAuthority(plan, sliceId, review, extension, boundary) {
+  if (plan?.delivery_envelope === undefined || review?.verdict !== "APPROVE") return;
+  if (extension.status !== "active" || extension.decision !== "approve" || extension.grants_b4_authority !== true) {
+    throw new Error(`slice '${sliceId}' ${boundary} requires active approving invariant-family review authority: ${extension.reasons?.join(", ") || "authority-not-granted"}`);
+  }
 }
 
 function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, decomposition, options = {}) {

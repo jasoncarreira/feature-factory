@@ -1148,7 +1148,7 @@ describe("bounded agent depth contract", () => {
 
 describe("decomposition depth contract", () => {
   it("requires the decomposer and reviewer to enforce a four-wave maximum with depth secondary to width", () => {
-    assert.match(WORK_DECOMPOSER_PROMPT, /longest dependency path may span at most four waves; a root slice is wave 1/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /longest dependency path(?: admitted as one run)? may span at most four waves; a root slice is wave 1/i);
     // The old "combine into one coherent slice rather than a fourth wave" collapse rule that
     // produced god-slices must be gone; a fourth wave is now allowed to keep width bounded.
     assert.doesNotMatch(WORK_DECOMPOSER_PROMPT, /combine tightly serialized work into one coherent slice instead of creating a fourth wave/i);
@@ -1164,13 +1164,11 @@ describe("decomposition depth contract", () => {
     assert.match(SKILL, /keep every slice within the per-slice width budget \(one dominant hard concern/i);
   });
 
-  it("escalates to REDESIGN-REQUIRED via the canonical durable terminal sequence", () => {
-    assert.match(WORK_DECOMPOSER_PROMPT, /Redesign escalation \(width and depth both bounded\)/i);
-    assert.match(WORK_DECOMPOSER_PROMPT, /REDESIGN-REQUIRED/);
-    assert.match(WORK_REVIEWER_PROMPT, /the correct decomposition output is `REDESIGN-REQUIRED`, not a god-slice/i);
-    // needs-human must go through the durable terminal writer (heartbeat stop, steering
-    // checkpoint, terminal boundary), not an ad-hoc status write.
-    assert.match(SKILL, /If `work-decomposer` returns `REDESIGN-REQUIRED`[\s\S]*factory terminal <run-id> needs-human --reason TEXT --boundary-token/i);
+  it("routes over-depth plans through the deterministic delivery-envelope checkpoint", () => {
+    assert.match(WORK_DECOMPOSER_PROMPT, /Deterministic admission route/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /routes `checkpoint`[\s\S]*dependency graph exceeds four waves/i);
+    assert.match(WORK_DECOMPOSER_PROMPT, /Do not emit[\s\S]*`REDESIGN-REQUIRED` substitute/i);
+    assert.match(WORK_REVIEWER_PROMPT, /do not make admission or checkpoint decisions/i);
   });
 
   it("defers implementation-grade artifacts out of the spec stage (altitude)", () => {
@@ -1263,7 +1261,7 @@ describe("producer self-check contract", () => {
 describe("test-verifier integration gate contract", () => {
   it("requires every authoritative argv entry with no prose or shell-command fallback", () => {
     for (const [name, text] of [["SKILL", SKILL], ["test-verifier", TEST_VERIFIER_PROMPT], ["work-decomposer", WORK_DECOMPOSER_PROMPT]]) {
-      assert.match(text, /every ordered.*\{program,args\}.*exactly|every.*\{program,args\}.*in order/is, `${name} must require every ordered entry`);
+      assert.match(text, /every ordered.*\{program,args\}.*(?:exactly|same order)|every.*\{program,args\}.*in order/is, `${name} must require every ordered entry`);
       assert.match(text, /no (?:singular )?canonical command|not (?:a )?singular canonical command/i, `${name} must reject singular-command fallback`);
       assert.match(text, /no.*(?:shell text|`cmd`)|never.*(?:shell text|`cmd`)/i, `${name} must reject shell-text cmd fallback`);
       assert.match(text, /human.*mirror.*all entr(?:y|ies)|all entr(?:y|ies).*human.*mirror/i, `${name} must mirror every JSON entry`);
