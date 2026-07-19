@@ -106,7 +106,7 @@ describe("checked checkpoint child start", () => {
     }
   });
 
-  it("rejects shape-valid forged launch payloads and launched reservations with no verified child manifest", async () => {
+  it("rejects a shape-valid forged initial checkpoint reservation payload", async () => {
     const fixture = createFixture("checkpoint-parent-payload-authority");
     try {
       const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
@@ -122,7 +122,18 @@ describe("checked checkpoint child start", () => {
         reason: "invalid-checkpoint-authority",
       });
       assert.deepEqual(checkpointReservationClaim(fixture, started.binding), claimBefore);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
 
+  it("rejects a launched checkpoint reservation that no longer has its verified child manifest", async () => {
+    const fixture = createFixture("checkpoint-parent-missing-launched-child");
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-missing-launched-child", checkpointLaunchFn: (value) => value,
+      });
+      const runPath = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id, "run.json");
       rmSync(runPath, { force: true });
       assert.deepEqual(decodeFeatureCommandPayload(started.commandArgs.at(-1), { repo: fixture.repo }), {
         ok: false,
