@@ -8,7 +8,7 @@ import { git, repoRoot } from "./git.js";
 import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
 import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
-import { normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
+import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
 import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
@@ -4875,11 +4875,15 @@ function observePriorPanelDispatchAuthority(repository, runDir, run, priorHead) 
 function observePanelRemediationOwnership(runDir, run, agent) {
   const planPath = join(runDir, PLAN_SLICES_REF);
   const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
-  const merged = new Set((run.slices || []).filter((slice) => slice?.status === "merged").map((slice) => slice.id));
-  const slices = plan.slices.map((slice) => ({ id: slice.id, stack: slice.stack, paths: cloneJson(slice.paths || []) }));
-  if (slices.some((slice) => !merged.has(slice.id))) throw new Error("panel remediation ownership requires every planned slice to be merged");
-  if (!slices.some((slice) => `${slice.stack}-builder` === agent)) throw new Error("panel remediation agent has no eligible merged slice owner");
-  return { plan: exactAuthorityFile(planPath), slices };
+  const durableById = new Map((run.slices || []).map((slice) => [slice?.id, slice]));
+  for (const planned of plan.slices) {
+    const slice = durableById.get(planned.id);
+    if (!slice || slice.status !== "merged") throw new Error("panel remediation ownership requires every planned slice to be merged");
+  }
+  const slices = (run.slices || []).map((slice) => ({ id: slice?.id, stack: slice?.stack, effective_paths: cloneJson(slice?.effective_paths) }));
+  const ownership = createOwnershipIndex(slices);
+  if (!ownership.slices.some((slice) => `${slice.stack}-builder` === agent)) throw new Error("panel remediation agent has no eligible merged slice owner");
+  return { plan: exactAuthorityFile(planPath), slices: cloneJson(ownership.slices), effective_lanes: cloneJson(ownership.effectiveLanes) };
 }
 
 function derivePanelRemediationOwner(repository, claim, completionHead, ownership) {
@@ -4887,13 +4891,14 @@ function derivePanelRemediationOwner(repository, claim, completionHead, ownershi
   if (!result.ok) throw new Error("panel remediation changed paths are not observable");
   const paths = result.stdout.split("\0").filter(Boolean).map((path) => normalizeRepositoryPath(path));
   if (paths.length === 0) throw new Error("panel remediation must commit an observable change");
-  const owners = ownership.slices.filter((slice) => {
-    const lanes = (slice.paths || []).map((lane) => validatePlanPath(lane)).filter(Boolean);
-    return paths.every((path) => lanes.some((lane) => repairPathWithinLane(path, lane)));
-  });
-  if (owners.length !== 1) throw new Error("panel remediation changes must derive exactly one unambiguous slice owner");
-  if (`${owners[0].stack}-builder` !== claim.agent) throw new Error("panel remediation agent must match the derived slice owner stack");
-  return owners[0].id;
+  const index = createOwnershipIndex(ownership.slices);
+  const pathOwners = paths.map((path) => index.owners(path));
+  if (pathOwners.some((owners) => owners.length !== 1)) throw new Error("panel remediation changes must derive exactly one unambiguous slice owner");
+  const ownerIds = new Set(pathOwners.map(([owner]) => owner.id));
+  if (ownerIds.size !== 1) throw new Error("panel remediation changes must derive exactly one unambiguous slice owner");
+  const owner = index.slices.find((slice) => slice.id === [...ownerIds][0]);
+  if (`${owner.stack}-builder` !== claim.agent) throw new Error("panel remediation agent must match the derived slice owner stack");
+  return owner.id;
 }
 
 function observeCarryForwardNonconvergencePrior(repository, runDir, run, slice) {
@@ -5784,7 +5789,7 @@ function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
   if (request.status === "reported") return reportedMergedSliceRepair(runDir, run, current, request, stampedAt);
   if (!current) throw new Error("merged-slice repair must be reported before any other transition");
   if (request.status === "repairing") return repairingMergedSliceRepair(runDir, run, current, request, stampedAt, options);
-  if (request.status === "review") return reviewMergedSliceRepair(runDir, current, request, stampedAt, options);
+  if (request.status === "review") return reviewMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   if (request.status === "merged") return mergedMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   return { ...current, status: "blocked", reason: request.reason, updated_at: stampedAt };
 }
@@ -5806,11 +5811,10 @@ function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
   if (!consumerDeps.includes(owner.id)) {
     throw new Error(`repair consumer '${consumer.id}' must directly depend on owner '${owner.id}'`);
   }
-  // Owner-lane authority is bound at report time: every later transition
-  // re-verifies plan/slices.json against this hash, so the lane can never be
-  // widened, narrowed, or replaced mid-incident.
+  // The accepted plan remains freshness-bound at report time while lane
+  // authority comes only from the owner's durable effective paths.
   const planHash = hashFile(join(runDir, "plan", "slices.json"));
-  assertRepairPathInOwnerLane(runDir, owner.id, request.defect_path, planHash);
+  assertRepairPathInOwnerLane(runDir, run, owner.id, request.defect_path, planHash);
   const evidence = resolveEvidenceRef(runDir, request.evidence_ref);
   const evidenceJson = parseJsonObjectFile(evidence.path, "repair evidence_ref");
   if (evidenceJson.subject !== consumer.id) {
@@ -5880,7 +5884,7 @@ function assertRepairOriginalEvidenceIntact(runDir, current) {
   }
 }
 
-function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = {}) {
+function reviewMergedSliceRepair(runDir, run, current, request, stampedAt, options = {}) {
   // Recording a review from `review` again is allowed ONLY as a byte-identical
   // idempotent re-record (crash recovery). The binding is write-once per
   // attempt: a bound REJECT can never be replaced by a different review — a
@@ -5908,7 +5912,7 @@ function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = 
   if (!baselineContained.ok) throw new Error("repair reviewed commit must contain the observed attempt baseline");
   const observedPaths = observeRepairChangedPaths(repoRoot, baseline, reviewedSha);
   for (const observedPath of observedPaths) {
-    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(observedPath), current.plan_hash);
+    assertRepairPathInOwnerLane(runDir, run, current.owner_slice_id, normalizeRepairDefectPath(observedPath), current.plan_hash);
   }
   const reviewJson = parseJsonObjectFile(review.path, "repair review_ref");
   if (reviewJson.subject !== `repair:${current.owner_slice_id}`) {
@@ -5923,7 +5927,7 @@ function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = 
   // stale verdict written for another attempt or commit can never be
   // re-paired with code the reviewer did not see.
   assertRepairReviewBinding(reviewJson, current.attempts, reviewedSha);
-  const repairEvidence = assertRepairChangedPathsInOwnerLane(runDir, current, request.repair_evidence_ref, observedPaths);
+  const repairEvidence = assertRepairChangedPathsInOwnerLane(runDir, run, current, request.repair_evidence_ref, observedPaths);
   return {
     ...current,
     status: "review",
@@ -5958,9 +5962,9 @@ function observeRepairChangedPaths(repoRoot, fromCommit, toCommit) {
 
 // Lane confinement is observed, not declared: the orchestrator records the
 // repair diff's actual changed paths as evidence, every one of them must fall
-// inside the owner's bound plan lane, and the recorded list must equal the
+// inside the owner's bound durable lane, and the recorded list must equal the
 // git-observed diff — a claim that diverges from git is rejected outright.
-function assertRepairChangedPathsInOwnerLane(runDir, current, evidenceRef, observedPaths) {
+function assertRepairChangedPathsInOwnerLane(runDir, run, current, evidenceRef, observedPaths) {
   const evidence = resolveEvidenceRef(runDir, evidenceRef);
   const evidenceJson = parseJsonObjectFile(evidence.path, "repair evidence_ref");
   if (evidenceJson.subject !== `repair:${current.owner_slice_id}`) {
@@ -5971,7 +5975,7 @@ function assertRepairChangedPathsInOwnerLane(runDir, current, evidenceRef, obser
     throw new Error("repair attempt evidence must record the observed non-empty changed_paths list");
   }
   for (const changedPath of changedPaths) {
-    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(changedPath), current.plan_hash);
+    assertRepairPathInOwnerLane(runDir, run, current.owner_slice_id, normalizeRepairDefectPath(changedPath), current.plan_hash);
   }
   const recorded = [...new Set(changedPaths.map((path) => normalizeRepairDefectPath(path)))].sort();
   const observed = [...new Set(observedPaths)].sort();
@@ -6027,7 +6031,7 @@ function mergedMergedSliceRepair(runDir, run, current, request, stampedAt, optio
   }
   const mergedPaths = observeRepairChangedPaths(repoRoot, baseline, mergeSha);
   for (const mergedPath of mergedPaths) {
-    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(mergedPath), current.plan_hash);
+    assertRepairPathInOwnerLane(runDir, run, current.owner_slice_id, normalizeRepairDefectPath(mergedPath), current.plan_hash);
   }
   // The original consumer reproduction must now pass, on observed evidence.
   const verification = resolveEvidenceRef(runDir, request.verification_ref);
@@ -6087,7 +6091,7 @@ function assertRepairQuiescence(run, action) {
   if (busy) throw new Error(`cannot ${action} while slice '${busy.id}' is ${busy.status}; quiesce slice work first`);
 }
 
-function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath, expectedPlanHash) {
+function assertRepairPathInOwnerLane(runDir, run, ownerSliceId, defectPath, expectedPlanHash) {
   const planPath = join(runDir, "plan", "slices.json");
   if (requireNonEmptyString(expectedPlanHash, "repair plan_hash") !== hashFile(planPath)) {
     throw new Error("plan/slices.json no longer matches the lane authority bound when the repair was reported");
@@ -6095,23 +6099,13 @@ function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath, expectedP
   const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
   const planned = (Array.isArray(plan.slices) ? plan.slices : []).find((slice) => slice?.id === ownerSliceId);
   if (!planned) throw new Error(`repair owner slice '${ownerSliceId}' is missing from plan/slices.json`);
-  let lanes;
-  try {
-    lanes = (Array.isArray(planned.paths) ? planned.paths : []).map((lane) => validatePlanPath(lane));
-  } catch {
-    throw new Error(`repair owner slice '${ownerSliceId}' plan lanes are not valid repository paths`);
-  }
-  if (!lanes.filter(Boolean).some((lane) => repairPathWithinLane(defectPath, lane))) {
+  const durable = (Array.isArray(run.slices) ? run.slices : []).map((slice) => ({ id: slice?.id, stack: slice?.stack, effective_paths: slice?.effective_paths }));
+  const owner = (run.slices || []).find((slice) => slice?.id === ownerSliceId);
+  if (!owner || owner.status !== "merged") throw new Error(`repair owner slice '${ownerSliceId}' must retain merged ownership authority`);
+  const owners = createOwnershipIndex(durable).owners(defectPath);
+  if (owners.length !== 1 || owners[0].id !== ownerSliceId) {
     throw new Error(`repair defect path '${defectPath}' is outside owner slice '${ownerSliceId}' lanes`);
   }
-}
-
-// Lane matching reuses the canonical plan-path grammar (post-pr-ci
-// validatePlanPath/sliceOwnsPath): a lane is either `<dir>/**` or an exact
-// file path, lane text is never locally normalized, and any other shape
-// matches nothing.
-function repairPathWithinLane(path, lane) {
-  return lane.endsWith("/**") ? path.startsWith(lane.slice(0, -2)) : path === lane;
 }
 
 function normalizePrCreatedTerminalResult(run, request, operation, overrides = {}) {

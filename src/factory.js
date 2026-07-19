@@ -19,7 +19,7 @@ import { createSanitizedLineWriter } from "./hardening/line-output.js";
 import { projectFreeformData, renderErrorForTerminal } from "./hardening/output-policy.js";
 import { publicLivenessBoolean, probeLegacyBooleanLiveness, probeProcessLiveness } from "./hardening/process-verification.js";
 import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
-import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyOwnership, decideObservationSchedule, decideTransientSchedule, emitAffectedJson, fetchChangedFiles, inspectPanelRunnerReturn, isPollDue, normalizePullRequestResponse, normalizeRepositoryPath, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane, PostPrCiError } from "./post-pr-ci.js";
+import { affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyOwnership, createOwnershipIndex, decideObservationSchedule, decideTransientSchedule, emitAffectedJson, fetchChangedFiles, inspectPanelRunnerReturn, isPollDue, normalizePullRequestResponse, normalizeRepositoryPath, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane, PostPrCiError } from "./post-pr-ci.js";
 import { hashValue } from "./refs.js";
 import { resolvePostPrCiPolicy } from "./config.js";
 
@@ -1228,13 +1228,13 @@ async function finishObservedVerdict(repo, runDir, run, normalized, opts) {
 
   const ownerAction = await claimPostPrAction(runDir, "post-pr-observe", { ...opts, expectedCurrentHash: opts.expectedCurrentHash });
   const failingChecks = normalized.checks.checks.filter((check) => check.verdict === "red");
-  const plan = acceptedSlicesPlan(runDir, run);
+  const plan = acceptedSlicesPlan(run);
   let changed = { paths: [], changes: [], complete: true };
-  let ownership = classifyOwnership({ slices: plan.slices, failingCheckNames: failingChecks.map((check) => check.name), paths: [] });
+  let ownership = classifyOwnership({ ownership: plan, failingCheckNames: failingChecks.map((check) => check.name), paths: [] });
   if (ownership.disposition !== "route" || ownership.owner?.kind === "integration") {
     try {
       changed = await fetchChangedFiles(githubOperationInput(repo, run, opts, persistedPrIdentity(run)));
-      ownership = classifyOwnership({ slices: plan.slices, failingCheckNames: failingChecks.map((check) => check.name), ...changed });
+      ownership = classifyOwnership({ ownership: plan, failingCheckNames: failingChecks.map((check) => check.name), ...changed });
     } catch (error) {
       ownership = { disposition: "needs-human", owner: null, route: null, lane: null, reason: "changed-files-incomplete" };
     }
@@ -1369,9 +1369,9 @@ async function markPostPrRevalidating(runDir, run, opts) {
   const actualPaths = actualDiff.paths;
   if (!sameStringArray(paths, actualPaths)) throw new Error("remediation evidence changed_paths must exactly match the committed baseline diff");
   if (!sameJsonValue(evidence.value.changes, actualDiff.changes) || evidence.value.diff_hash !== hashJson(actualDiff.changes)) throw new Error("remediation evidence changes/diff_hash must exactly bind the committed baseline diff");
-  const plan = acceptedSlicesPlan(runDir, run);
-  const slice = run.post_pr.remediation.owner.kind === "slice" ? plan.slices.find((item) => item.id === run.post_pr.remediation.owner.slice_id) : null;
-  const lane = validateLane({ lane: run.post_pr.remediation.lane, slice, paths, changes: evidence.value.changes });
+  const plan = acceptedSlicesPlan(run);
+  const sliceId = run.post_pr.remediation.owner.kind === "slice" ? run.post_pr.remediation.owner.slice_id : null;
+  const lane = validateLane({ ownership: plan, lane: run.post_pr.remediation.lane, sliceId, paths, changes: evidence.value.changes });
   let next = cloneJson(run.post_pr);
   next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.dispatch.status = "returned"; next.remediation.dispatch.returned_at = timestamp(opts.now);
   next.remediation.changes = { paths, entries: actualDiff.changes, tree_hash: hashJson(actualDiff.changes) }; next.remediation.candidate_head_sha = candidate; next.remediation.remediation_evidence_ref = ref; next.remediation.remediation_evidence_hash = evidence.hash;
@@ -5108,9 +5108,9 @@ async function reconcilePostPrCrash(runDir, opts = {}) {
     try { repeatedSnapshot = repeated.ok ? parseGitStatusChanges(repeated.stdout) : null; } catch { repeatedSnapshot = null; }
     if (!repeatedSnapshot || !sameJsonValue(snapshot, repeatedSnapshot)) return terminalDispatchUnknown(runDir, run, opts);
     const { paths, entries } = snapshot;
-    const plan = acceptedSlicesPlan(runDir, run);
-    const slice = remediation.owner.kind === "slice" ? plan.slices.find((item) => item.id === remediation.owner.slice_id) : null;
-    const lane = validateLane({ lane: remediation.lane, slice, paths, changes: entries, hasSymlink: gitChangesHaveUnsafeMode(run.worktree, entries) });
+    const plan = acceptedSlicesPlan(run);
+    const sliceId = remediation.owner.kind === "slice" ? remediation.owner.slice_id : null;
+    const lane = validateLane({ ownership: plan, lane: remediation.lane, sliceId, paths, changes: entries, hasSymlink: gitChangesHaveUnsafeMode(run.worktree, entries) });
     if (!lane.ok) return terminalLaneViolation(runDir, run, opts, lane.reason, paths);
     const next = cloneJson(run.post_pr);
     next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.dispatch.status = "returned";
@@ -5124,8 +5124,8 @@ async function reconcilePostPrCrash(runDir, opts = {}) {
     let diff;
     try { diff = committedChangedDiff(run.worktree, remediation.baseline_head_sha, head); } catch { return terminalDispatchUnknown(runDir, run, opts); }
     if (!diff.paths.length) return terminalDispatchUnknown(runDir, run, opts);
-    const plan = acceptedSlicesPlan(runDir, run); const slice = remediation.owner.kind === "slice" ? plan.slices.find((item) => item.id === remediation.owner.slice_id) : null;
-    const lane = validateLane({ lane: remediation.lane, slice, paths: diff.paths, changes: diff.changes, hasSymlink: gitChangesHaveUnsafeMode(run.worktree, diff.changes) });
+    const plan = acceptedSlicesPlan(run); const sliceId = remediation.owner.kind === "slice" ? remediation.owner.slice_id : null;
+    const lane = validateLane({ ownership: plan, lane: remediation.lane, sliceId, paths: diff.paths, changes: diff.changes, hasSymlink: gitChangesHaveUnsafeMode(run.worktree, diff.changes) });
     if (!lane.ok) return terminalLaneViolation(runDir, run, opts, lane.reason, diff.paths);
     const next = cloneJson(run.post_pr);
     next.phase = "changes-observed"; next.remediation.stage = "changes-observed"; next.remediation.dispatch.status = "returned"; next.remediation.dispatch.returned_at = timestamp(opts.now);
@@ -5325,13 +5325,13 @@ async function publishPanelRecoveryResult(runDir, run, activity, inspected, opts
   }
   const attribution = snapshot.ok ? canonicalizePanelAffectedPaths(snapshot.value, run.worktree) : { ok: false, category: "missing-paths", paths: [], hash: affectedPathsHash([]) };
   if (!attribution.ok) return terminalPanelAttribution(runDir, run, activity, attribution, opts);
-  const owner = classifyPanelOwner(runDir, run, attribution.paths, activity, inspected.verdict);
+  const owner = classifyPanelOwner(acceptedSlicesPlan(run), attribution.paths, activity, inspected.verdict);
   if (!owner.ok) return terminalPanelAttribution(runDir, run, activity, { ...owner, hash: attribution.hash }, opts);
   if (activity === "security" && remediation.revalidation.validator_review_ref) {
     try {
       const validator = readBoundRunJson(runDir, remediation.revalidation.validator_review_ref, "reviews");
       const validatorPaths = canonicalizePanelAffectedPaths(validator.value.affected_paths, run.worktree);
-      const validatorOwner = validatorPaths.ok ? classifyPanelOwner(runDir, run, validatorPaths.paths, "validator", validator.value.verdict) : validatorPaths;
+      const validatorOwner = validatorPaths.ok ? classifyPanelOwner(acceptedSlicesPlan(run), validatorPaths.paths, "validator", validator.value.verdict) : validatorPaths;
       if (!validatorOwner.ok || validatorOwner.identity !== owner.identity) return terminalPanelAttribution(runDir, run, "combined", { category: "owner-conflict", hash: affectedPathsHash([...new Set([...(validatorPaths.paths || []), ...attribution.paths])].sort(byteSort)) }, opts);
     } catch { return postPrTerminal(runDir, run, "needs-human", "post-pr-metadata-unsafe", opts); }
   }
@@ -5355,11 +5355,10 @@ function publishRunBytes(runDir, ref, bytes) {
   return { ref, hash: sha256File(path) };
 }
 
-function classifyPanelOwner(runDir, run, paths, activity, verdict) {
-  const slices = acceptedSlicesPlan(runDir, run).slices;
+function classifyPanelOwner(ownership, paths, activity, verdict) {
   const identities = [];
   for (const path of paths) {
-    const matches = slices.filter((slice) => slice.paths.some((accepted) => accepted === path || accepted.endsWith("/**") && path.startsWith(accepted.slice(0, -2))));
+    const matches = ownership.owners(path);
     if (matches.length > 1) return { ok: false, category: "mixed-owner", paths };
     if (matches.length === 1) identities.push(`slice:${matches[0].id}`);
     else if (path.startsWith("test/") || path.startsWith(".github/workflows/")) identities.push("integration:test-verifier");
@@ -5398,7 +5397,7 @@ async function bindPublishedPostPrJob(runDir, run, activity, opts) {
       }
       const attribution = canonicalizePanelAffectedPaths(binding.value.affected_paths, run.worktree);
       if (!attribution.ok) return terminalPanelAttribution(runDir, run, activity, attribution, opts);
-      const owner = classifyPanelOwner(runDir, run, attribution.paths, activity, classified.verdict); if (!owner.ok) return terminalPanelAttribution(runDir, run, activity, { ...owner, hash: attribution.hash }, opts);
+      const owner = classifyPanelOwner(acceptedSlicesPlan(run), attribution.paths, activity, classified.verdict); if (!owner.ok) return terminalPanelAttribution(runDir, run, activity, { ...owner, hash: attribution.hash }, opts);
       const next = cloneJson(run.post_pr); Object.assign(next.remediation.revalidation.jobs[activity], { status: "bound", returned_at: binding.value.completed_at, result_ref: binding.ref, result_hash: binding.hash, verdict: classified.verdict });
       if (activity === "validator") { Object.assign(next.remediation.revalidation, { validator_review_ref: binding.ref, validator_review_hash: binding.hash, validator_verdict: classified.verdict }); next.remediation.revalidation.jobs.security ||= newPostPrJob("security", run.post_pr.attempt); }
       else Object.assign(next.remediation.revalidation, { security_review_ref: binding.ref, security_review_hash: binding.hash, security_verdict: classified.verdict });
@@ -5440,7 +5439,8 @@ async function evaluateBoundPostPrPanels(runDir, run, opts) {
     validateRecoveryPanelArtifact(run, validator, "validator"); validateRecoveryPanelArtifact(run, security, "security");
     const validatorPaths = canonicalizePanelAffectedPaths(validator.value.affected_paths, run.worktree); const securityPaths = canonicalizePanelAffectedPaths(security.value.affected_paths, run.worktree);
     if (!validatorPaths.ok || !securityPaths.ok) return terminalPanelAttribution(runDir, run, !validatorPaths.ok ? "validator" : "security", !validatorPaths.ok ? validatorPaths : securityPaths, opts);
-    const validatorOwner = classifyPanelOwner(runDir, run, validatorPaths.paths, "validator", validator.value.verdict); const securityOwner = classifyPanelOwner(runDir, run, securityPaths.paths, "security", security.value.verdict);
+    const ownership = acceptedSlicesPlan(run);
+    const validatorOwner = classifyPanelOwner(ownership, validatorPaths.paths, "validator", validator.value.verdict); const securityOwner = classifyPanelOwner(ownership, securityPaths.paths, "security", security.value.verdict);
     if (!validatorOwner.ok || !securityOwner.ok) return terminalPanelAttribution(runDir, run, !validatorOwner.ok ? "validator" : "security", !validatorOwner.ok ? { ...validatorOwner, hash: validatorPaths.hash } : { ...securityOwner, hash: securityPaths.hash }, opts);
     paths = [...new Set([...validatorPaths.paths, ...securityPaths.paths])].sort(byteSort);
     if (validatorOwner.identity !== securityOwner.identity) return terminalPanelAttribution(runDir, run, "combined", { category: "owner-conflict", hash: affectedPathsHash(paths) }, opts);
@@ -5468,7 +5468,7 @@ async function reserveLocalRedRemediation(runDir, run, opts, paths, ownership, v
 }
 
 function panelIdentityAttribution(runDir, run, paths) {
-  const classified = classifyOwnership({ slices: acceptedSlicesPlan(runDir, run).slices, paths, failingCheckNames: [], complete: true });
+  const classified = classifyOwnership({ ownership: acceptedSlicesPlan(run), paths, failingCheckNames: [], complete: true });
   if (classified.disposition !== "route") throw new Error("panel owner became unsafe");
   return classified;
 }
@@ -5502,13 +5502,13 @@ async function reconstructFailureEvidence(repo, runDir, run, attempt, opts) {
   const observation = run.post_pr.observation; const snapshot = observation?.snapshot;
   if (observation?.last_check_verdict !== "red" || snapshot?.head_sha !== observation.expected_head_sha || !Array.isArray(snapshot?.checks?.checks)) throw new Error("authoritative red snapshot is unavailable");
   const failingChecks = snapshot.checks.checks.filter((check) => check.verdict === "red");
-  const plan = acceptedSlicesPlan(runDir, run);
+  const plan = acceptedSlicesPlan(run);
   let changed = { paths: [], changes: [], complete: true };
-  let ownership = classifyOwnership({ slices: plan.slices, failingCheckNames: failingChecks.map((check) => check.name), paths: [] });
+  let ownership = classifyOwnership({ ownership: plan, failingCheckNames: failingChecks.map((check) => check.name), paths: [] });
   if (ownership.disposition !== "route" || ownership.owner?.kind === "integration") {
     changed = await fetchChangedFiles(githubOperationInput(repo, run, opts, persistedPrIdentity(run)));
     if (changed.complete !== true) throw new Error("changed files are incomplete");
-    ownership = classifyOwnership({ slices: plan.slices, failingCheckNames: failingChecks.map((check) => check.name), ...changed });
+    ownership = classifyOwnership({ ownership: plan, failingCheckNames: failingChecks.map((check) => check.name), ...changed });
   }
   if (ownership.disposition !== "route") throw new Error("failure ownership is unsafe");
   const identity = persistedPrIdentity(run);
@@ -5611,11 +5611,9 @@ function durableErrorClass(value) {
   return ["timeout", "network", "rate-limit", "server", "account-auth", "permission", "not-found", "protocol", "command"].includes(value) ? value : "command";
 }
 
-function acceptedSlicesPlan(runDir, run) {
-  const file = join(runDir, "plan", "slices.json");
-  if (existsSync(file)) return parseSlicesPlanBytes(readFileSync(file), { label: "accepted plan/slices.json" });
-  const slices = (Array.isArray(run.slices) ? run.slices : []).filter((slice) => stringValue(slice?.id) && Array.isArray(slice.paths)).map((slice) => ({ id: slice.id, stack: slice.stack, paths: slice.paths }));
-  return { slices };
+function acceptedSlicesPlan(run) {
+  const slices = (Array.isArray(run.slices) ? run.slices : []).map((slice) => ({ id: slice?.id, stack: slice?.stack, effective_paths: slice?.effective_paths }));
+  return createOwnershipIndex(slices);
 }
 
 function publishRunJsonEvidence(runDir, ref, value) {
@@ -5714,13 +5712,13 @@ function validatePanelReview(run, binding, candidate, kind) {
 function assertPanelAffectedPathAttribution(runDir, run, validatorPaths, securityPaths) {
   const paths = [...new Set([...normalizedAffectedPaths(validatorPaths, "validator affected_paths"), ...normalizedAffectedPaths(securityPaths, "security affected_paths")])].sort(byteSort);
   if (!paths.length) return;
-  const attribution = classifyOwnership({ slices: acceptedSlicesPlan(runDir, run).slices, paths, failingCheckNames: [], complete: true });
+  const attribution = classifyOwnership({ ownership: acceptedSlicesPlan(run), paths, failingCheckNames: [], complete: true });
   if (attribution.disposition !== "route") throw new Error("panel affected_paths are mixed, unsafe, or ambiguously owned");
 }
 
 function reattributeFailure(runDir, run, evidence) {
   const paths = normalizedAffectedPaths(evidence.affected_paths, "failure affected_paths");
-  const attribution = classifyOwnership({ slices: acceptedSlicesPlan(runDir, run).slices, paths, failingCheckNames: [], complete: true });
+  const attribution = classifyOwnership({ ownership: acceptedSlicesPlan(run), paths, failingCheckNames: [], complete: true });
   if ((evidence.panel === "security" || evidence.finding_source === "security") && evidence.verdict === "red" && attribution.owner?.kind !== "slice") return { disposition: "needs-human" };
   return attribution;
 }

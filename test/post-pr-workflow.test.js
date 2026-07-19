@@ -114,6 +114,50 @@ describe("post-PR workflow orchestration", () => {
     } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
   });
 
+  it("routes a reviewer-ratified path from durable ownership despite conflicting raw-plan drift", async () => {
+    const fixture = createFixture("post-pr-ratified-changed-file");
+    const ratifiedPath = "docs/ratified-api.md";
+    try {
+      installRatifiedApiOwnership(fixture, ratifiedPath, SHA);
+      writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+        { id: "api", stack: "backend", paths: ["src/stale-api/**"], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
+        { id: "ui", stack: "frontend", paths: [ratifiedPath], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
+      ] });
+      const result = await postPrObserve(fixture.runId, { cwd: fixture.repo, now: "2026-07-12T12:00:30.000Z", executeGithub: async ({ args }) => {
+        if (args[0] === "auth") return { exitCode: 0, stdout: "", stderr: "" };
+        if (args[0] === "pr") return { exitCode: 0, stderr: "", stdout: JSON.stringify({ headRefOid: SHA, isDraft: false, reviewDecision: null, reviews: [], state: "OPEN", statusCheckRollup: [{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }] }) };
+        if (args[0] === "api") return { exitCode: 0, stderr: "", stdout: `HTTP/2 200\n\n${JSON.stringify([{ filename: ratifiedPath, status: "modified" }])}` };
+        throw new Error(`unexpected GitHub operation: ${args.join(" ")}`);
+      } });
+      assert.equal(result.action, "remediation-planned");
+      assert.equal(result.owner.slice_id, "api");
+      assert.equal(result.owner.method, "changed-files");
+      assert.equal(result.route, "backend-builder");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("routes the same ratified path through panel attribution and local-red re-attribution", async () => {
+    const fixture = createPanelRecoveryFixture("post-pr-ratified-panel", "validator");
+    const ratifiedPath = "docs/ratified-api.md";
+    const dispatches = [];
+    try {
+      configurePanelPlan(fixture);
+      installRatifiedApiOwnership(fixture, ratifiedPath, fixture.candidate);
+      writeJson(join(fixture.runDir, "plan", "slices.json"), { slices: [
+        { id: "api", stack: "backend", paths: ["src/stale-api.js"], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
+        { id: "ui", stack: "frontend", paths: [ratifiedPath], depends_on: [], acceptance: ["stale"], test_plan: ["node --test"] },
+      ] });
+      await dispatchWorkflowPanel(fixture, "validator", { verdict: "NO-GO", affected_paths: [ratifiedPath] }, dispatches);
+      await dispatchWorkflowPanel(fixture, "security", { verdict: "PASS", affected_paths: [ratifiedPath] }, dispatches);
+      await resumeFactory(fixture.runId, { cwd: fixture.repo, dryRun: true, now: "2026-07-12T12:07:00.000Z" });
+      const run = readRun(fixture);
+      assert.deepEqual(dispatches, ["validator", "security"]);
+      assert.equal(run.post_pr.phase, "remediation-planned");
+      assert.equal(run.post_pr.remediation.owner.slice_id, "api");
+      assert.equal(run.post_pr.remediation.route, "backend-builder");
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
   it("discards a due observer result when steering changes its bound state", async () => {
     const fixture = createFixture("post-pr-steering-race");
     try {
@@ -805,6 +849,7 @@ function createFixture(runId, { nextPollAt = "2026-07-12T12:00:00.000Z", reviewe
   const review = reviewer ? { required: true, reviewer_login: reviewer, source: "driver" } : { required: false, reviewer_login: null, source: "none" };
   writeFileSync(join(runDir, "run.json"), `${JSON.stringify({
     schema_version: 1, run_id: runId, status: "running", max_retries: 3, github_account: "octocat", branch: "feature", worktree: repo, base_ref: "main", base_commit: SHA, pr_url: "https://github.com/acme/widgets/pull/7", pr_mode: "ready", gates: {},
+    slices: [{ id: "api", stack: "backend", depends_on: [], declared_paths: ["src/api.js"], effective_paths: ["src/api.js"], status: "pending", attempts: 0 }],
     post_pr: { schema_version: 1, policy: { enabled: true, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review }, phase: "observing", attempt: 0,
       observation: { epoch: 1, expected_head_sha: SHA, started_at: "2026-07-12T12:00:00.000Z", deadline_at: "2026-07-12T13:00:00.000Z", next_poll_at: nextPollAt, poll_count: 0, unchanged_count: 0, current_interval_ms: 30000, consecutive_transient_errors: 0, last_observed_at: null, last_fingerprint: null, last_check_verdict: "not_started", last_review_verdict: reviewer ? "pending" : "not_required", last_verdict: "pending", last_error: null, review_request: reviewer ? { status: requested ? "requested" : "pending", attempts: requested ? 1 : 0, requested_at: requested ? "2026-07-12T11:59:00.000Z" : null } : null, snapshot: null },
       remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null,
@@ -871,6 +916,7 @@ function createRevalidationFixture(runId) {
   const remediationHash = fileHash(join(runDir, "evidence", "post-pr-remediation.attempt-1.json"));
   writeJson(join(runDir, "run.json"), {
     schema_version: 1, run_id: runId, status: "running", max_retries: 3, github_account: "octocat", branch: "main", worktree: repo, pr_url: "https://github.com/acme/widgets/pull/7", pr_mode: "ready", gates: {},
+    slices: [{ id: "api", stack: "backend", depends_on: [], declared_paths: ["src/api.js"], effective_paths: ["src/api.js"], status: "pending", attempts: 0 }],
     post_pr: { schema_version: 1, policy: { enabled: true, wait_ms: 3600000, initial_poll_ms: 30000, max_poll_ms: 120000, check_start_grace_ms: 300000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } }, phase: "revalidating", attempt: 1,
       observation: { epoch: 1, expected_head_sha: baseline, started_at: "2026-07-12T12:00:00.000Z", deadline_at: "2026-07-12T13:00:00.000Z", next_poll_at: "2026-07-12T12:01:00.000Z", poll_count: 1, unchanged_count: 0, current_interval_ms: 30000, consecutive_transient_errors: 0, last_observed_at: "2026-07-12T12:00:30.000Z", last_fingerprint: `sha256:${"1".repeat(64)}`, last_check_verdict: "red", last_review_verdict: "not_required", last_verdict: "red", last_error: null, review_request: null, snapshot: null },
       remediation: { schema_version: 1, attempt: 1, reason_code: "check-red", failure_fingerprint: `sha256:${"2".repeat(64)}`, failed_head_sha: baseline, failure_evidence_ref: failureEvidenceRef, failure_evidence_hash: failureHash, owner, route: "backend-builder", lane: "slice", stage: "revalidating", baseline_head_sha: baseline, dispatch: { id: "dispatch-1", status: "returned", role: "backend-builder", subject: "api", started_at: "2026-07-12T12:01:00.000Z", returned_at: "2026-07-12T12:02:00.000Z" }, changes: { paths: ["src/api.js"], tree_hash: `sha256:${"3".repeat(64)}` }, candidate_head_sha: candidate, remediation_evidence_ref: "evidence/post-pr-remediation.attempt-1.json", remediation_evidence_hash: remediationHash, revalidation: { canonical_evidence_ref: null, canonical_evidence_hash: null, canonical_verdict: null, validator_review_ref: null, validator_review_hash: null, validator_verdict: null, security_review_ref: null, security_review_hash: null, security_verdict: null }, push: { status: "not-ready", remote_before_sha: null, local_head_sha: null, remote_after_sha: null, consecutive_transient_errors: 0, next_retry_at: null, pushed_at: null } },
@@ -981,6 +1027,33 @@ function configurePanelPlan(fixture) {
     { id: "api", stack: "backend", paths: ["src/api.js"], depends_on: [], acceptance: ["API works"], test_plan: ["node --test"] },
     { id: "ui", stack: "frontend", paths: ["src/ui.js"], depends_on: [], acceptance: ["UI works"], test_plan: ["node --test"] },
   ] });
+  updateRunFile(fixture, (run) => {
+    run.slices = [
+      { id: "api", stack: "backend", depends_on: [], declared_paths: ["src/api.js"], effective_paths: ["src/api.js"], status: "pending", attempts: 0 },
+      { id: "ui", stack: "frontend", depends_on: [], declared_paths: ["src/ui.js"], effective_paths: ["src/ui.js"], status: "pending", attempts: 0 },
+    ];
+  });
+}
+
+function installRatifiedApiOwnership(fixture, ratifiedPath, reviewedCommit) {
+  mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+  mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+  const evidenceRef = "evidence/api-slice.json";
+  const reviewRef = "reviews/api-slice.json";
+  writeJson(join(fixture.runDir, evidenceRef), { subject: "api", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, reviewRef), {
+    subject: "api", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], reviewed_commit: reviewedCommit,
+    ownership_ratification: { schema_version: 1, paths: [ratifiedPath] }, remediation_context: { schema_version: 2, fixes: [] },
+  });
+  const evidenceHash = fileHash(join(fixture.runDir, evidenceRef));
+  const reviewHash = fileHash(join(fixture.runDir, reviewRef));
+  const attemptReview = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit,
+    diff_base_commit: reviewedCommit, ratified_paths: [ratifiedPath], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
+  updateRunFile(fixture, (run) => {
+    const api = run.slices.find((slice) => slice.id === "api");
+    Object.assign(api, { declared_paths: ["src/api.js"], effective_paths: ["src/api.js", ratifiedPath], status: "merged", attempts: 1, attempt_reviews: [attemptReview],
+      evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, merge_commit: reviewedCommit });
+  });
 }
 
 function setBoundValidator(fixture, { verdict, paths }) {

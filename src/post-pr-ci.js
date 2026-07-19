@@ -26,6 +26,7 @@ const OWNERSHIP_REASONS = new Set(["review-changes-requested", "check-owner-ambi
   "unsafe-path-or-change", "check-file-conflict", "unknown-slice-stack", "path-owner-ambiguous", "integration-fallback", "check-slice-id", "changed-files"]);
 const PANEL_VERDICTS = Object.freeze({ validator: new Set(["GO", "GO-WITH-NITS", "NO-GO"]), security: new Set(["PASS", "BLOCK"]) });
 const AFFECTED_LIMITS = Object.freeze({ depth: 32, occurrences: 8_192, entries: 8_192, arrayLength: 4_096, stringBytes: 4_096, totalStringBytes: 1_048_576, emittedBytes: 1_048_576 });
+const OWNERSHIP_INDEXES = new WeakSet();
 export const EMPTY_AFFECTED_PATHS_HASH = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 export class PostPrCiError extends Error {
@@ -419,8 +420,40 @@ export function normalizeRepositoryPath(value) {
   return value;
 }
 
+/**
+ * Build the sole post-PR ownership authority from durable effective-path
+ * projections. Raw plan `paths` are deliberately rejected: callers must
+ * explicitly project the reviewed `run.slices[].effective_paths` authority.
+ */
+export function createOwnershipIndex(slices) {
+  if (!Array.isArray(slices) || slices.length === 0) throw new Error("ownership slices must be a nonempty array");
+  const projectedSlices = validateSlices(slices);
+  const byId = new Map(projectedSlices.map((slice) => [slice.id, slice]));
+  const effectiveLanes = Object.freeze(projectedSlices.flatMap((slice) => slice.effective_paths.map((path) => Object.freeze({
+    slice_id: slice.id,
+    stack: slice.stack,
+    path,
+  }))));
+  const index = {
+    slices: projectedSlices,
+    effectiveLanes,
+    owners(pathValue) {
+      const path = ownershipLookupPath(pathValue);
+      return Object.freeze(projectedSlices.filter((slice) => sliceOwnsPath(slice, path)));
+    },
+    owns(sliceValue, pathValue) {
+      const id = typeof sliceValue === "string" ? sliceValue : sliceValue?.id;
+      if (typeof id !== "string" || !byId.has(id)) throw new Error("ownership slice is not in the validated index");
+      return sliceOwnsPath(byId.get(id), ownershipLookupPath(pathValue));
+    },
+  };
+  OWNERSHIP_INDEXES.add(index);
+  return Object.freeze(index);
+}
+
 export function classifyOwnership(input) {
-  const slices = validateSlices(input.slices);
+  const ownership = requireOwnershipIndex(input.ownership);
+  const slices = ownership.slices;
   if (input.reviewVerdict === "red") return unsafe("review-changes-requested");
   const failingNames = (input.failingCheckNames ?? []).map((name) => rawMetadata(name));
   const nameOwners = failingNames.map((name) => sliceIdsInName(name, slices));
@@ -434,13 +467,16 @@ export function classifyOwnership(input) {
     const ids = new Set(nameOwners.map(([id]) => id));
     if (ids.size === 1) {
       const slice = slices.find((candidate) => candidate.id === [...ids][0]);
-      if (paths.length && paths.some((path) => !sliceOwnsPath(slice, path))) return unsafe("check-file-conflict");
+      if (paths.length && paths.some((path) => {
+        const owners = ownership.owners(path);
+        return !ownership.owns(slice, path) || owners.length !== 1 || owners[0].id !== slice.id;
+      })) return unsafe("check-file-conflict");
       return routeSlice(slice, "check-slice-id", paths);
     }
     return unsafe("check-owner-conflict");
   }
   if (paths.length) {
-    const owners = paths.map((path) => slices.filter((slice) => sliceOwnsPath(slice, path)).map((slice) => slice.id));
+    const owners = paths.map((path) => ownership.owners(path).map((slice) => slice.id));
     if (owners.every((matches) => matches.length === 1) && new Set(owners.map(([id]) => id)).size === 1) {
       const slice = slices.find((candidate) => candidate.id === owners[0][0]);
       if (nameOwners.some((matches) => matches.length && !matches.includes(slice.id))) return unsafe("check-file-conflict");
@@ -453,13 +489,24 @@ export function classifyOwnership(input) {
 }
 
 export function validateLane(input) {
+  const ownership = requireOwnershipIndex(input.ownership);
   const paths = (input.paths ?? []).map(normalizeRepositoryPath);
   const changes = input.changes ?? [];
-  if (input.hasRename || input.hasDelete || input.hasGenerated || input.hasSymlink || changes.some((change) => !["modified", "added", "untracked", "deleted", "renamed", "copied"].includes(change?.status))) return { ok: false, reason: "unsafe-change-kind" };
+  if (input.complete === false || input.invalid === true || input.hasRename || input.hasDelete || input.hasGenerated || input.hasSymlink
+    || changes.some((change) => change?.previous_path || ["deleted", "removed", "renamed", "generated", "symlink"].includes(String(change?.status).toLowerCase())
+      || !["modified", "added", "untracked", "copied"].includes(change?.status))) return { ok: false, reason: "unsafe-change-kind" };
   if (input.lane === "test") return paths.every(isTestLanePath) ? { ok: true } : { ok: false, reason: "path-outside-test-lane" };
-  if (input.lane !== "slice" || !input.slice) return { ok: false, reason: "invalid-lane" };
-  const slice = validateSlices([input.slice])[0];
-  return paths.every((path) => sliceOwnsPath(slice, path)) ? { ok: true } : { ok: false, reason: "path-outside-slice-lane" };
+  if (input.lane !== "slice" || typeof input.sliceId !== "string") return { ok: false, reason: "invalid-lane" };
+  let soleOwner = true;
+  try {
+    soleOwner = paths.every((path) => {
+      const owners = ownership.owners(path);
+      return ownership.owns(input.sliceId, path) && owners.length === 1 && owners[0].id === input.sliceId;
+    });
+  } catch {
+    return { ok: false, reason: "invalid-lane" };
+  }
+  return soleOwner ? { ok: true } : { ok: false, reason: "path-outside-slice-lane" };
 }
 
 export function buildFailureEvidenceInput(input) {
@@ -660,7 +707,29 @@ function compareReviewLatest(left, right) { return right._submitted - left._subm
 function checkName(entry) { const name = entry?.name ?? entry?.context; if (typeof name !== "string" || name === "") throw protocol("check name is required"); return name; }
 function rawMetadata(value) { return typeof value === "string" ? value : decodeCanonicalMetadata(value); }
 function sliceIdsInName(name, slices) { return slices.filter((slice) => new RegExp(`(^|[^A-Za-z0-9_-])${escapeRegex(slice.id)}(?=$|[^A-Za-z0-9_-])`, "u").test(name)).map((slice) => slice.id); }
-function validateSlices(slices) { if (!Array.isArray(slices)) throw new Error("slices must be an array"); return slices.map((slice) => { if (!slice || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(slice.id) || !Array.isArray(slice.paths)) throw new Error("invalid slice"); return { ...slice, paths: slice.paths.map(validatePlanPath) }; }); }
+function validateSlices(slices) {
+  if (!Array.isArray(slices)) throw new Error("ownership slices must be an array");
+  const ids = new Set();
+  const paths = new Set();
+  return Object.freeze(slices.map((slice) => {
+    if (!slice || typeof slice !== "object" || Array.isArray(slice) || Object.hasOwn(slice, "paths")
+      || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(slice.id) || !Object.hasOwn(STACK_ROUTES, slice.stack)
+      || !Array.isArray(slice.effective_paths) || slice.effective_paths.length === 0) throw new Error("invalid durable ownership slice");
+    if (ids.has(slice.id)) throw new Error(`duplicate ownership slice id '${slice.id}'`);
+    ids.add(slice.id);
+    const effectivePaths = slice.effective_paths.map((path) => {
+      const canonical = validatePlanPath(path);
+      if (canonical !== path) throw new Error(`invalid effective ownership path for slice '${slice.id}'`);
+      return canonical;
+    });
+    if (new Set(effectivePaths).size !== effectivePaths.length) throw new Error(`duplicate effective ownership path for slice '${slice.id}'`);
+    for (const path of effectivePaths) {
+      if (paths.has(path)) throw new Error(`duplicate effective ownership path '${path}' across slices`);
+      paths.add(path);
+    }
+    return Object.freeze({ id: slice.id, stack: slice.stack, effective_paths: Object.freeze(effectivePaths) });
+  }));
+}
 export function validatePlanPath(path) {
   if (typeof path !== "string" || path === "" || path !== path.trim() || path !== path.normalize("NFC")) return null;
   const recursive = path.endsWith("/**");
@@ -673,7 +742,15 @@ export function validatePlanPath(path) {
   }
   return recursive ? `${base}/**` : base;
 }
-function sliceOwnsPath(slice, path) { return slice.paths.filter(Boolean).some((accepted) => accepted.endsWith("/**") ? path.startsWith(accepted.slice(0, -2)) : path === accepted); }
+function requireOwnershipIndex(value) { if (!value || !OWNERSHIP_INDEXES.has(value)) throw new Error("a validated ownership index is required"); return value; }
+function ownershipLookupPath(value) {
+  if (typeof value !== "string" || value === "" || value !== value.normalize("NFC") || Buffer.byteLength(value, "utf8") > 4_096
+    || value.startsWith("/") || /^[A-Za-z]:/u.test(value) || value.includes("\\") || /[\0-\x1f\x7f]/u.test(value)) throw protocol("invalid repository path");
+  const segments = value.split("/");
+  if (segments.length > 64 || segments.some((part) => part === "" || part === "." || part === "..")) throw protocol("invalid repository path");
+  return value;
+}
+function sliceOwnsPath(slice, path) { return slice.effective_paths.some((accepted) => accepted.endsWith("/**") ? path.startsWith(accepted.slice(0, -2)) : path === accepted); }
 function routeSlice(slice, method, paths = []) { const route = STACK_ROUTES[slice.stack]; if (!route) return unsafe("unknown-slice-stack"); const selected = paths.length ? sortPaths(paths)[0] : null; return { disposition: "route", owner: { kind: "slice", slice_id: slice.id, stack: slice.stack, path_b64url: selected === null ? null : Buffer.from(selected).toString("base64url"), method }, route, lane: "slice", reason: method }; }
 function integration(paths = []) { const selected = paths.length ? sortPaths(paths)[0] : null; return { disposition: "route", owner: { kind: "integration", slice_id: null, stack: "test", path_b64url: selected === null ? null : Buffer.from(selected).toString("base64url"), method: "integration" }, route: "test-verifier", lane: "test", reason: "integration-fallback" }; }
 function unsafe(reason) { return { disposition: "needs-human", owner: null, route: null, lane: null, reason }; }

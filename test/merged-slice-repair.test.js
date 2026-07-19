@@ -49,6 +49,33 @@ describe("merged-sibling repair", () => {
     }
   });
 
+  it("uses merged durable effective ownership for ratified repair paths and blocks sibling overlap", async () => {
+    const fixture = createFixture();
+    const ratifiedPath = "docs/ratified-owner.md";
+    try {
+      ratifyOwnerPath(fixture, ratifiedPath);
+      const stalePlan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+      stalePlan.slices.find((slice) => slice.id === "owner").paths = ["src/stale-owner/**"];
+      writeJson(join(fixture.runDir, "plan", "slices.json"), stalePlan);
+      assert.doesNotThrow(() => validateRun(readRun(fixture)));
+
+      const reported = await report(fixture, { defect_path: ratifiedPath });
+      assert.equal(reported.merged_slice_repair.owner_slice_id, "owner");
+      assert.equal(reported.merged_slice_repair.defect_path, ratifiedPath);
+
+      const overlapping = createFixture();
+      try {
+        ratifyOwnerPath(overlapping, ratifiedPath);
+        const run = readRun(overlapping);
+        const sibling = run.slices.find((slice) => slice.id === "other");
+        sibling.declared_paths = [ratifiedPath];
+        sibling.effective_paths = [ratifiedPath];
+        writeJson(join(overlapping.runDir, "run.json"), run);
+        await assert.rejects(report(overlapping, { defect_path: ratifiedPath }), /duplicate effective ownership path/u);
+      } finally { cleanup(overlapping); }
+    } finally { cleanup(fixture); }
+  });
+
   it("enforces quiescence, monotonic attempts, and the two-attempt ceiling", async () => {
     const fixture = createFixture();
     try {
@@ -892,6 +919,20 @@ function createFixture() {
   writeJson(join(runDir, "evidence", "passing.json"), { subject: "consumer", status: "pass" });
   writeJson(join(runDir, "evidence", "repair-attempt.json"), { subject: "repair:owner", changed_paths: ["src/owner/records.js", "test/owner.test.js"] });
   return { repo, runDir, featureCommit, mainOnlyCommit };
+}
+
+function ratifyOwnerPath(fixture, ratifiedPath) {
+  const runPath = join(fixture.runDir, "run.json");
+  const run = readRun(fixture);
+  const owner = run.slices.find((slice) => slice.id === "owner");
+  const reviewPath = join(fixture.runDir, owner.review_ref);
+  writeJson(reviewPath, createSliceReviewRecord({ subject: "owner", attempt: owner.attempts, reviewedCommit: owner.reviewed_commit, ratifiedPaths: [ratifiedPath] }));
+  const reviewHash = hashFile(reviewPath);
+  owner.review_hash = reviewHash;
+  owner.effective_paths = [...owner.declared_paths, ratifiedPath];
+  owner.attempt_reviews.at(-1).review_hash = reviewHash;
+  owner.attempt_reviews.at(-1).ratified_paths = [ratifiedPath];
+  writeJson(runPath, run);
 }
 
 function git(repo, args) {
