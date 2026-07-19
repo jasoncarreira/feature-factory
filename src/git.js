@@ -98,6 +98,19 @@ export function updateTwoRefsAtomically(cwd, verify, first, second, options = {}
   return git(cwd, ["update-ref", "--no-deref", "--stdin"], { ...options, input });
 }
 
+export function updateTwoRefsAtomicallyNoVerify(cwd, first, second, options = {}) {
+  const updates = [normalizeRefTransition(first, "first update ref"), normalizeRefTransition(second, "second update ref")];
+  if (updates[0].ref === updates[1].ref) throw new Error("atomic ref transaction requires two distinct direct refs");
+  const input = [
+    "start",
+    ...updates.map(({ ref, oid, oldOid }) => `update ${ref} ${oid} ${oldOid}`),
+    "prepare",
+    "commit",
+    "",
+  ].join("\n");
+  return git(cwd, ["update-ref", "--no-deref", "--stdin"], { ...options, input });
+}
+
 export function repoRoot(cwd = process.cwd(), options = {}) {
   const key = resolve(requireNonEmptyString(cwd, "cwd"));
   if (!options.noCache && repoRootCache.has(key)) return repoRootCache.get(key);

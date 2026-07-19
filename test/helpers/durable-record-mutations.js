@@ -710,7 +710,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["checkpoint-child-binding-v1", "3eb58e355f053b42959aec3787ab636caf85483c6c6e372154c817abf91ef45f"],
   ["checkpoint-reservation-reserved", "805aab0b811e3cc6adb6365e7f1c1f8ead10eae71a92b649d6e45052a0b608c7"],
   ["checkpoint-reservation-launching", "a8308e45e943e73f29af488a74c602da9def040c540e7f2ebc93ba10f7a8843b"],
-  ["checkpoint-reservation-launched", "c9065a57fd94515700f58f66a9272e65fd2a41d77f0c8a091072d56162dadda1"],
+  ["checkpoint-reservation-launched", "b1f55a12e62bc2198ae2fb0304cab622f27575c1037216332156e6c154507ae2"],
   ["checkpoint-reservation-unknown", "21e825dda1d5c966c50b1227d9ab41f3c0a238b19574c48f4ef75514b1e2cda5"],
   ["final-plan-descriptor", "28d0d6753da27ed172de3e89d5257c2bac238ed4f93f9a124411e6c1f80d7943"],
   ["run-envelope-running", "707c057f31eeb1213ea82cf16229bb1de2097c2961956eee0a6d0c32bccc6b3d"],
@@ -1947,7 +1947,7 @@ function checkpointReservationEntry(id, state) {
   return recordEntry({
     authorityClassId: "plan-slices-graph", id, record: "refs/opencode/checkpoint-targets|checkpoint-routes/<sha256>", variant: state,
     writer: state === "reserved" ? "reserveCheckpointChild atomic no-replace two-ref transaction" : "transitionCheckpointReservation atomic two-ref compare-and-swap",
-    readers: ["validateCheckpointReservationClaim", "factory checkpoint-start retry/adoption/reconciliation", "feature command payload checkpoint authority", "checkpoint child resume authority"],
+    readers: ["validateCheckpointReservationClaim", "factory checkpoint-start retry/adoption/reconciliation", "feature command payload checkpoint authority", "checkpoint child resume authority", ...(state === "launched" ? ["factory completed checkpoint predecessor authority"] : [])],
     canonicalPath: ["checkpoint_reservation", state], source, facts: exactFacts(source), requiredPath: ["state"], typePath: ["binding", "checkpoint_ordinal"],
     targets: [schema(["schema_version"]), kind(["kind"], "other-reservation"), time([state === "reserved" ? "reserved_at" : state === "unknown" ? "failed_at" : `${state}_at`]), ref(["binding", "parent_run_ref"]), hash(["binding", "parent_run_hash"]), drift([], "state", "reservation_state"), stale(["binding", "checkpoint_ordinal"], 0), cross(["binding", "child_run_id"], "other-child")],
   });
