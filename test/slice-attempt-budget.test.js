@@ -660,6 +660,7 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
     convergence,
     remaining_fix_count: fixes.length,
     required_fixes: fixes,
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: {
       schema_version: 2,
       fixes: fixes.map((_, required_fix_index) => ({
@@ -729,7 +730,7 @@ function createFixture(name) {
       acceptance: { artifact_ref: "plan/slices.json", artifact_hash: planHash, review_ref: "reviews/work-decomposer.json", review_hash: decompositionReviewHash },
     }],
     gates: {},
-    slices: [{ id: "slice", stack: "backend", depends_on: [], status: "pending", attempts: 0 }],
+    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "pending", attempts: 0 }],
   });
   return { repo, runDir };
 }

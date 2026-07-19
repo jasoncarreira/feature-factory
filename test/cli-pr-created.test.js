@@ -118,7 +118,7 @@ function createFixture(runId, disposition = "open") {
   const evidenceHash = hashFile(join(runDir, evidenceRef)); const reviewHash = hashFile(join(runDir, reviewRef));
   const attemptReview = createSliceAttemptReview({ evidenceRef, evidenceHash, reviewRef, reviewHash, reviewedCommit: head });
   writeJson(runPath, { schema_version: 1, run_id: runId, status: "running", base_ref: "main", base_commit: base, branch: "feature-branch", worktree: repo, github_account: "jasoncarreira", pr_mode: "ready", pr_url: null,
-    gates: { pre_pr: { status: "approved" } }, slices: [{ id: "slice", status: "merged", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head }],
+    gates: { pre_pr: { status: "approved" } }, slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "merged", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head }],
     validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFile(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFile(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
     security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFile(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head }, terminal_result: null });
   writeFakeGh(repo, disposition);

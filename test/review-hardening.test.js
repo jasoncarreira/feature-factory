@@ -21,6 +21,7 @@ function classifiedReview(classifications, { convergence = "converging", schemaV
     convergence,
     required_fixes: classifications.map((_, index) => `fix-${index + 1}`),
     remaining_fix_count: classifications.length,
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: {
       schema_version: schemaVersion,
       fixes: classifications.map((classification, required_fix_index) => ({
@@ -63,7 +64,7 @@ describe("steering consume crash recovery", () => {
 describe("slice merge transition guard", () => {
   it("rejects direct status merged writes through transitionRunSlice", async () => {
     const runDir = createRunDir("slice-merged-guard", {
-      slices: [{ id: "s1", status: "running", attempts: 1 }],
+      slices: [{ id: "s1", declared_paths: ["s1.txt"], effective_paths: ["s1.txt"], status: "running", attempts: 1 }],
     });
     try {
       await assert.rejects(
@@ -79,14 +80,14 @@ describe("slice merge transition guard", () => {
   it("refuses to roll a merged slice back to running/review/blocked via transitionRunSlice", async () => {
     const reviewedCommit = "c".repeat(40);
     const evidence = { subject: "s1", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit };
-    const review = { subject: "s1", attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] } };
+    const review = { subject: "s1", attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] } };
     const evidenceHash = jsonHash(evidence);
     const reviewHash = jsonHash(review);
     const runDir = createRunDir("slice-merged-immutable", {
       slices: [{
-        id: "s1", status: "merged", merge_commit: "abc1234", review_ref: "reviews/s1.json", review_hash: reviewHash,
+        id: "s1", declared_paths: ["s1.txt"], effective_paths: ["s1.txt"], status: "merged", merge_commit: "abc1234", review_ref: "reviews/s1.json", review_hash: reviewHash,
         evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, reviewed_commit: reviewedCommit, attempts: 1,
-        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, review_ref: "reviews/s1.json", review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, review_ref: "reviews/s1.json", review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
       }],
     });
     try {

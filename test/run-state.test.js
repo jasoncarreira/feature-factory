@@ -2206,6 +2206,158 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("rejects ambiguous APPROVE ratification claimed by two sibling plan lanes without mutating the run", async () => {
+    const fixture = createFixture("ownership-ratification-ambiguous-siblings");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      runGit(fixture.repo, ["checkout", "slice-branch"]);
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId), branch: "slice-branch", worktree: fixture.repo,
+        slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "pending", attempts: 0 }],
+      });
+      seedBuilderDispatchAuthority(fixture);
+      const planPath = join(fixture.runDir, "plan", "slices.json");
+      const plan = readJson(planPath);
+      plan.slices.push(
+        { id: "sibling-a", stack: "backend", paths: ["docs/**"], depends_on: [], acceptance: ["a"], test_plan: ["a"] },
+        { id: "sibling-b", stack: "backend", paths: ["docs/ambiguous.md"], depends_on: [], acceptance: ["b"], test_plan: ["b"] },
+      );
+      writeJson(planPath, plan);
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.slices.push(
+        { id: "sibling-a", stack: "backend", depends_on: [], declared_paths: ["docs/**"], effective_paths: ["docs/**"], status: "pending", attempts: 0 },
+        { id: "sibling-b", stack: "backend", depends_on: [], declared_paths: ["docs/ambiguous.md"], effective_paths: ["docs/ambiguous.md"], status: "pending", attempts: 0 },
+      );
+      run.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+      writeJson(join(fixture.runDir, "run.json"), run);
+      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+      let reviewedCommit;
+      await closeBuilderDispatch(fixture, 1, () => {
+        mkdirSync(join(fixture.repo, "docs"), { recursive: true });
+        writeFileSync(join(fixture.repo, "docs", "ambiguous.md"), "ambiguous\n");
+        runGit(fixture.repo, ["add", "docs/ambiguous.md"]);
+        runGit(fixture.repo, ["commit", "-m", "change ambiguous path"]);
+        reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      });
+      mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+      writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: ["docs/ambiguous.md"] }));
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" }),
+        /ambiguous plan ownership[\s\S]*sibling-a[\s\S]*sibling-b/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("resets approved ratified ownership on review-to-blocked while rejecting caller-authored ownership", async () => {
+    const fixture = createFixture("approved-ratification-blocked-reset");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      runGit(fixture.repo, ["checkout", "slice-branch"]);
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId), branch: "slice-branch", worktree: fixture.repo,
+        slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "pending", attempts: 0 }],
+      });
+      seedBuilderDispatchAuthority(fixture);
+      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+      let reviewedCommit;
+      await closeBuilderDispatch(fixture, 1, () => {
+        writeFileSync(join(fixture.repo, "adjacent.txt"), "ratified\n");
+        runGit(fixture.repo, ["add", "adjacent.txt"]);
+        runGit(fixture.repo, ["commit", "-m", "change ratified adjacent path"]);
+        reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      });
+      mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+      writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: ["adjacent.txt"] }));
+      await transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" });
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")).slices[0].effective_paths, ["src/**", "adjacent.txt"]);
+      const beforeMutation = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "stopped", effective_paths: ["src/**", "caller.txt"] }),
+        /effective_paths is managed by checked review publication/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeMutation);
+
+      const blocked = await transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "stopped" });
+      assert.deepEqual(blocked.slice.effective_paths, ["src/**"]);
+      assert.deepEqual(blocked.slice.attempt_reviews[0].ratified_paths, ["adjacent.txt"]);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("re-observes accepted plan and slice HEAD at review publication commit time", async () => {
+    for (const [name, mutate, expected] of [
+      ["plan", (fixture) => {
+        const planPath = join(fixture.runDir, "plan", "slices.json");
+        const plan = readJson(planPath);
+        plan.slices[0].acceptance = ["raced plan"];
+        writeJson(planPath, plan);
+      }, /plan ref\/hash does not match exact plan bytes|review authority changed|commit failed/u],
+      ["head", (fixture) => {
+        writeFileSync(join(fixture.repo, "src-race.txt"), "moved\n");
+        runGit(fixture.repo, ["add", "src-race.txt"]);
+        runGit(fixture.repo, ["commit", "-m", "move slice head during publication"]);
+      }, /current branch head differs from checked slice head|reviewed_commit must equal the current slice head|review authority changed|commit failed/u],
+    ]) {
+      const fixture = createFixture(`slice-review-publication-${name}-race`);
+      try {
+        initGitRepo(fixture.repo, ["slice-branch"]);
+        runGit(fixture.repo, ["checkout", "slice-branch"]);
+        writeJson(join(fixture.runDir, "run.json"), {
+          ...baseRun(fixture.runId), branch: "slice-branch", worktree: fixture.repo,
+          slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "pending", attempts: 0 }],
+        });
+        seedBuilderDispatchAuthority(fixture);
+        await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+        await closeBuilderDispatch(fixture, 1);
+        const reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+        mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+        writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
+        writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit }));
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" }, {
+            atomicWriteHooks: { beforeCommit: () => mutate(fixture) },
+          }),
+          expected,
+          name,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("re-observes accepted plan at merge publication commit time", async () => {
+    const fixture = createFixture("slice-merge-plan-publication-race");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      const prepared = prepareSliceMergeState(fixture);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(transitionSliceMerged(fixture.runDir, "slice", { merge_commit: prepared.mergeCommit }, {
+        atomicWriteHooks: { beforeCommit() {
+          const planPath = join(fixture.runDir, "plan", "slices.json");
+          const plan = readJson(planPath);
+          plan.slices[0].acceptance = ["raced merge plan"];
+          writeJson(planPath, plan);
+        } },
+      }), /plan ref\/hash does not match exact plan bytes|merge authority changed|commit failed/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("re-observes slice sidecars at merge commit time and leaves the fence reusable", async () => {
     const fixture = createFixture("slice-merge-sidecar-race");
     try {

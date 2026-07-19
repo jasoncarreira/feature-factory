@@ -1479,11 +1479,11 @@ describe("finite durable-authority catalog", () => {
       },
     };
     const expectedDigests = {
-      "terminal-result-blocked-nonconvergence": ["e6a9286a1c4fcdd541621649bfd49378d36ed51d45c84400098e1511c5767687", "484c993240b44861d7d71c96e40fcf4008241b506d9b8f08105352beec069b1b", "14f393a215fcdd7410b6030e6fc3a2448e9e4c6635b5bf830ae6a4f9d843cbfb"],
-      "slice-running": ["4643d7feda2aec0a65367792c879fd11ac8ff385317356990e866967595b5aee", "beab1f224a3723cf005fb260d8d79a7f53b5083458b165cc5bcc98ffc40c5645", "ab8b06098386b7d5ca8ffb67fea577d4174fa961a945fa9f7179cbd448171a0a"],
-      "slice-review": ["9d4974e8bf94101a2b8a5befced5b9ba57c8a6e0a7026be2986d303e66ef0210", "f3032a106a15dda6324ea24d196196f8629cd57d1fc53a5e1e9f1f8c528d6b51", "5bf07b76dffccf27da6e1cc3b92e40d79b7a2134a6ffe83d5c13a63f0bed78c6"],
-      "slice-merged": ["dcbc32b1065038e3d0dfae63efc9958f449bfb3058b45956e9c812ddc6925fe7", "a36bfb5c4e168c8015eae87263ca562eba651051261c41d03441a1b87bf23e3e", "55cc1727a80c4ab964a896ef20a6b6bf34985f8ec4779bc816b41c453f0c2167"],
-      "slice-blocked": ["92c67de66396ab30c7e8a71bdb3a3a278fcef954a7b37182ffd7c19525bd1335", "c566d2365a70e36e1616952e990317196ab85647c672afb731af20e402d1ceba", "7a5f4c71dab812dd69e3c810ca632e55274770e020afd1ba8e221d5dace36d83"],
+      "terminal-result-blocked-nonconvergence": ["d97091392350f02165c01705c4aa4ba2f92e5727325622c9eade4d5cdc0021f6", "484c993240b44861d7d71c96e40fcf4008241b506d9b8f08105352beec069b1b", "55003f673d92a1b474b02aafdc90b72853ce9f376934878d49307509fe122233"],
+      "slice-running": ["af31fa943d166746d48207286fbc9dea216127b8120f77378949b166de73ea40", "beab1f224a3723cf005fb260d8d79a7f53b5083458b165cc5bcc98ffc40c5645", "5c91f74e38cddbf6278e3ad48aa2e74392e3120b7680e747299cf315126ffc26"],
+      "slice-review": ["cd4b857d8325ae2b3df6ca965b17efb3af46dec393f0de2fdf939c79c0e9a5a4", "f3032a106a15dda6324ea24d196196f8629cd57d1fc53a5e1e9f1f8c528d6b51", "c7128941b5660901d7c20c9f79a2f8676dc8bf22632fb32bf8e466b4215d5495"],
+      "slice-merged": ["a0d8d809d6ef828beabe7a72cea680e665718ab60d6ba01ccd2aea21ab3e78f5", "a36bfb5c4e168c8015eae87263ca562eba651051261c41d03441a1b87bf23e3e", "bd160bb8e7d790ece4a840382ab5de8457b84962097642fdb9ff9b073d82d1b5"],
+      "slice-blocked": ["3ed8237beaad32f43ae5cad5a787fd5d148df9931a1baf42f95944516d2e7b00", "c566d2365a70e36e1616952e990317196ab85647c672afb731af20e402d1ceba", "a43f8ee90d231336f11e9b72353c662d64dbd5ea2cba5bd9af828980f50628bc"],
     };
     for (const [id, digests] of Object.entries(expectedDigests)) {
       const current = findRecord(DURABLE_AUTHORITY_CATALOG, id);
@@ -2065,9 +2065,9 @@ describe("finite durable-authority catalog", () => {
       assert.match(source.dispatch_closure_ref, /^dispatch\/[0-9a-f]{64}\.closed\.json$/u);
       assert.match(source.dispatch_closure_hash, /^sha256:[0-9a-f]{64}$/u);
     }
-    assert.deepEqual(Object.keys(slices[2].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "evidence_hash", "review_hash", "reviewed_commit"]);
-    assert.deepEqual(Object.keys(slices[3].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "evidence_hash", "review_hash", "reviewed_commit", "merge_commit", "updated_at"]);
-    assert.deepEqual(Object.keys(slices[4].source), ["id", "stack", "depends_on", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "blocked_reason"]);
+    assert.deepEqual(Object.keys(slices[2].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "evidence_hash", "review_hash", "reviewed_commit"]);
+    assert.deepEqual(Object.keys(slices[3].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "evidence_hash", "review_hash", "reviewed_commit", "merge_commit", "updated_at"]);
+    assert.deepEqual(Object.keys(slices[4].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "blocked_reason"]);
     assert.deepEqual(Object.keys(slices[5].source), Object.keys(slices[4].source));
 
     assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "validator-verdict-binding").source), ["verdict", "report", "review_ref", "report_hash", "review_hash", "reviewed_head_sha"]);
@@ -2849,7 +2849,7 @@ function createPrOperationTransitionFixture(root, family, safeName) {
   for (const dir of ["artifacts", "evidence", "reviews"]) mkdirSync(join(runDir, dir), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "validation-report.md"), "GO\n");
   writeJson(join(runDir, "evidence", "backend.json"), { subject: "backend", attempt: 1, status: "pass", review_ready: true, head_sha: head });
-  writeJson(join(runDir, "reviews", "backend.json"), { subject: "backend", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head });
+  writeJson(join(runDir, "reviews", "backend.json"), { subject: "backend", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head });
   writeJson(join(runDir, "reviews", "implementation-validator.json"), { subject: "main", attempt: 1, verdict: "GO", reviewed_head_sha: head });
   writeJson(join(runDir, "reviews", "security-reviewer.json"), { subject: "main", attempt: 1, verdict: "PASS", reviewed_head_sha: head });
   writeJson(runFile, createRunRecord({
@@ -2870,7 +2870,7 @@ function createPrOperationTransitionFixture(root, family, safeName) {
 
 function materializeSliceSidecars(runDir, subject, reviewedHead = "b".repeat(40)) {
   writeJson(join(runDir, "evidence", "backend.json"), { subject, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedHead });
-  writeJson(join(runDir, "reviews", "backend.json"), { subject, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedHead });
+  writeJson(join(runDir, "reviews", "backend.json"), { subject, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedHead });
 }
 
 function initCatalogGit(repo) {
@@ -2901,7 +2901,7 @@ async function createCheckedClaimMutationFixture(root, record, index) {
   writeJson(join(runDir, "reviews", "validator.json"), { subject: "parent", attempt: 1, verdict: "NO-GO" });
   writeJson(join(runDir, "reviews", "test-verifier.attempt-1.json"), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
   writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
-  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head });
+  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head });
   const plan = {
     slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["checked"] }],
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
@@ -3091,7 +3091,7 @@ function createRepairTransitionFixture() {
   });
   writeJson(join(runDir, "evidence", "consumer-failure.json"), { subject: "consumer", status: "fail" });
   writeJson(join(runDir, "evidence", "owner.json"), { subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: baselineCommit });
-  writeJson(join(runDir, "reviews", "owner.json"), { subject: "owner", attempt: 1, reviewed_commit: baselineCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] } });
+  writeJson(join(runDir, "reviews", "owner.json"), { subject: "owner", attempt: 1, reviewed_commit: baselineCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] } });
   writeJson(join(runDir, "run.json"), createRunRecord({
     run_id: "repair-run",
     branch: "repair-feature",
@@ -3099,7 +3099,7 @@ function createRepairTransitionFixture() {
     steps: [],
     slices: [
       { ...modernMergedSlice(runDir, "owner", baselineCommit), stack: "backend", depends_on: [] },
-      { id: "consumer", stack: "backend", depends_on: ["owner"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
+      { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
     ],
   }));
   return { repo, runDir, baselineCommit };
@@ -3168,9 +3168,9 @@ function modernMergedSlice(runDir, id, reviewedCommit) {
   const evidenceHash = hashFileBytes(join(runDir, evidenceRef));
   const reviewHash = hashFileBytes(join(runDir, reviewRef));
   return {
-    id, status: "merged", attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+    id, declared_paths: [id === "slice" ? "README.md" : `src/${id}/**`], effective_paths: [id === "slice" ? "README.md" : `src/${id}/**`], status: "merged", attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
     reviewed_commit: reviewedCommit, merge_commit: reviewedCommit,
-    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
   };
 }
 

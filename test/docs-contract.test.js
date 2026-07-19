@@ -1759,7 +1759,8 @@ describe("implemented v2 reviewed carry-forward docs contract", () => {
     for (const text of [design, futureSchema]) {
       assert.match(text, /closed to exactly `scope`, `plan_ref`, `plan_hash`, `start_commit`, `accepted_slices`, and `remaining_slice_ids`/i);
       assert.match(text, /`scope` is exactly `full-remaining-plan`|`scope: "full-remaining-plan"`/i);
-      assert.match(text, /closed to exactly `id`, `attempts`, (?:exact )?`attempt_reviews`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`/i);
+      assert.match(text, /closed to exactly `id`, `declared_paths`, `effective_paths`, `attempts`, (?:exact )?`attempt_reviews`, `evidence_ref`, `evidence_hash`, `review_ref`, `review_hash`, `reviewed_commit`, and `merge_commit`/i);
+      assert.match(text, /ownership arrays[^.]*exact immutable parent values/i);
       assert.match(text, /`accepted_slices` contains every parent slice whose status is exactly `merged`, in PLAN order/i);
       assert.match(text, /`remaining_slice_ids` contains every nonmerged slice ID, in PLAN order/i);
       assert.match(text, /unique[\s\S]*disjoint[\s\S]*set union[\s\S]*exactly[\s\S]*(?:complete `slices\[\]\.id` set|full plan)/i);
@@ -2022,7 +2023,8 @@ describe("remediation context reuse docs contract", () => {
     const canonicalReviewExample = SCHEMA.match(/Slice review shape:[\s\S]*?```json([\s\S]*?)```/iu)?.[1];
     assert.ok(canonicalReviewExample, "SCHEMA must retain one canonical slice review JSON example");
     assert.match(canonicalReviewExample, /"schema_version": 2/u);
-    assert.doesNotMatch(canonicalReviewExample, /"schema_version": 1/u);
+    assert.match(canonicalReviewExample, /"ownership_ratification"\s*:\s*\{\s*"schema_version": 1/u);
+    assert.doesNotMatch(canonicalReviewExample, /"remediation_context"\s*:\s*\{\s*"schema_version": 1/u);
     for (const field of ["required_fix_index", "classification", "scope_effect", "likely_paths", "fix_owner"]) {
       assert.match(canonicalReviewExample, new RegExp(`"${field}"`, "u"), `canonical slice review example must include ${field}`);
     }

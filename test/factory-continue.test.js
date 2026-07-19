@@ -26,7 +26,7 @@ describe("factory continue", () => {
       const head = gitStdout(fixture.repo, ["rev-parse", `${fixture.runId}^{commit}`]);
       const worktree = join(fixture.repo, ".opencode", "worktrees", fixture.runId);
       updateRun(fixture, (run) => {
-        run.slices = [{ id: "slice", stack: "backend", depends_on: [], status: "running", attempts: 1, branch: fixture.runId, worktree, dispatch_required: true }];
+        run.slices = [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1, branch: fixture.runId, worktree, dispatch_required: true }];
       });
       const claimStem = createHash("sha256").update(`${fixture.runId}\0slice\0${1}`, "utf8").digest("hex");
       mkdirSync(join(fixture.runDir, "dispatch"), { recursive: true });
@@ -190,7 +190,7 @@ describe("factory continue", () => {
         reviewRef: "reviews/api-slice-review.json",
         review: createReviewRecord({ subject: "api-slice", verdict: undefined, required_fixes: undefined, summary: "slice review blocks continuation" }),
         patchRun(run) {
-          run.slices = [{ id: "api-slice", status: "blocked", review_ref: "reviews/api-slice-review.json", blocked_reason: "slice review blocks continuation" }];
+          run.slices = [{ id: "api-slice", declared_paths: ["api-slice.txt"], effective_paths: ["api-slice.txt"], status: "blocked", attempts: 0, review_ref: "reviews/api-slice-review.json", blocked_reason: "slice review blocks continuation" }];
         },
         expected: { kind: "slice", source: "run.slices.api-slice.review_ref", subject: "api-slice" },
         expectedReviews: ["reviews/api-slice-review.json", "reviews/reviewer.json"],
@@ -224,7 +224,7 @@ describe("factory continue", () => {
       writeJson(join(fixture.runDir, "evidence", "a-slice.json"), { ok: false, source: "slice" });
       updateRun(fixture, (run) => {
         run.steps = [{ agent: "spec-writer", status: "blocked", evidence_ref: "evidence/z-step.json" }];
-        run.slices = [{ id: "api-slice", status: "blocked", evidence_ref: "evidence/a-slice.json", blocked_reason: "slice evidence blocks continuation" }];
+        run.slices = [{ id: "api-slice", declared_paths: ["api-slice.txt"], effective_paths: ["api-slice.txt"], status: "blocked", attempts: 0, evidence_ref: "evidence/a-slice.json", blocked_reason: "slice evidence blocks continuation" }];
       });
 
       const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "parent-evidence-next", dryRun: true });
@@ -1688,6 +1688,7 @@ describe("continuation planning-artifact reuse", () => {
       writeJson(join(fixture.runDir, reviewRef), {
         subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
         remaining_fix_count: 1, required_fixes: ["rewritten after terminalization"],
+        ownership_ratification: { schema_version: 1, paths: [] },
         remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "nonconvergent", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
       });
       assert.throws(
@@ -1698,6 +1699,7 @@ describe("continuation planning-artifact reuse", () => {
       writeJson(join(fixture.runDir, priorReviewRef), {
         subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
         remaining_fix_count: 1, required_fixes: ["rewritten earlier history"],
+        ownership_ratification: { schema_version: 1, paths: [] },
         remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
       });
       assert.throws(
@@ -2690,7 +2692,7 @@ describe("continuation planning-artifact reuse", () => {
         status: "running",
         branch: targetRunId,
         worktree: targetWorktree,
-        slices: [{ id: "slice", status: "running", attempts: 1 }],
+        slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1 }],
       }));
       const before = readFileSync(join(targetRunDir, "run.json"));
       for (const [label, invoke] of [
@@ -3124,12 +3126,14 @@ function configureNonconvergentRoute(fixture) {
   writeJson(join(fixture.runDir, priorReviewRef), {
     subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
     remaining_fix_count: 1, required_fixes: ["first correction"],
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
   });
   writeJson(join(fixture.runDir, evidenceRef), { subject: "B", attempt: 2, status: "pass", review_ready: true, head_sha: head });
   const currentReview = {
     subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
     remaining_fix_count: 1, required_fixes: ["replace the missed category"],
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "nonconvergent", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
   };
   writeJson(join(fixture.runDir, reviewRef), currentReview);
@@ -3140,6 +3144,8 @@ function configureNonconvergentRoute(fixture) {
     review_ref: priorReviewRef,
     review_hash: hashFile(join(fixture.runDir, priorReviewRef)),
     reviewed_commit: head,
+    diff_base_commit: head,
+    ratified_paths: [],
     verdict: "REJECT",
     convergence: "converging",
     remaining_fix_count: 1,
@@ -3151,6 +3157,8 @@ function configureNonconvergentRoute(fixture) {
     review_ref: reviewRef,
     review_hash: hashFile(join(fixture.runDir, reviewRef)),
     reviewed_commit: head,
+    diff_base_commit: head,
+    ratified_paths: [],
     verdict: "REJECT",
     convergence: "nonconvergent",
     remaining_fix_count: 1,
@@ -3179,6 +3187,7 @@ function configureConvergingSliceRoute(fixture) {
   writeJson(join(fixture.runDir, reviewRef), {
     subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
     remaining_fix_count: 1, required_fixes: ["apply the selected correction"],
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
   });
   const source = {
@@ -3188,6 +3197,8 @@ function configureConvergingSliceRoute(fixture) {
     review_ref: reviewRef,
     review_hash: hashFile(join(fixture.runDir, reviewRef)),
     reviewed_commit: head,
+    diff_base_commit: head,
+    ratified_paths: [],
     verdict: "REJECT",
     convergence: "converging",
     remaining_fix_count: 1,
@@ -3269,22 +3280,22 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   writeJson(join(runDir, "reviews", "work-decomposer.json"), createReviewRecord({ subject: "work-decomposer", verdict: "APPROVE", required_fixes: [], summary: "accepted decomposition" }));
 
   const slices = plan.slices.map((planned) => {
-    if (!accepted.includes(planned.id)) return { id: planned.id, stack: planned.stack, depends_on: planned.depends_on, status: "pending", attempts: 0 };
+    if (!accepted.includes(planned.id)) return { id: planned.id, stack: planned.stack, depends_on: planned.depends_on, declared_paths: [...planned.paths], effective_paths: [...planned.paths], status: "pending", attempts: 0 };
     const evidenceRef = `evidence/${planned.id}.json`;
     const reviewRef = `reviews/${planned.id}.json`;
     writeJson(join(runDir, evidenceRef), { subject: planned.id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommits[planned.id] });
     writeJson(join(runDir, reviewRef), {
       subject: planned.id, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
-      required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommits[planned.id],
+      required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommits[planned.id],
     });
     const evidenceHash = hashFile(join(runDir, evidenceRef));
     const reviewHash = hashFile(join(runDir, reviewRef));
     const attemptReview = {
       attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
-      reviewed_commit: reviewedCommits[planned.id], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+      reviewed_commit: reviewedCommits[planned.id], diff_base_commit: baseCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
     };
     return {
-      id: planned.id, stack: planned.stack, depends_on: planned.depends_on, status: "merged", attempts: 1,
+      id: planned.id, stack: planned.stack, depends_on: planned.depends_on, declared_paths: [...planned.paths], effective_paths: [...planned.paths], status: "merged", attempts: 1,
       evidence_ref: evidenceRef, evidence_hash: evidenceHash,
       review_ref: reviewRef, review_hash: reviewHash,
       reviewed_commit: reviewedCommits[planned.id], merge_commit: mergeCommits[planned.id],
@@ -3338,7 +3349,7 @@ function acceptedManifestRow(fixture, id) {
   const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
   const slice = run.slices.find((candidate) => candidate.id === id);
   return {
-    id, attempts: slice.attempts,
+    id, declared_paths: structuredClone(slice.declared_paths), effective_paths: structuredClone(slice.effective_paths), attempts: slice.attempts,
     evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
     review_ref: slice.review_ref, review_hash: slice.review_hash,
     reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit, attempt_reviews: structuredClone(slice.attempt_reviews),
@@ -3362,24 +3373,25 @@ function configureMultiAttemptAcceptedSlice(fixture, id) {
   writeJson(join(fixture.runDir, attemptOne.reviewRef), {
     subject: id, attempt: 1, verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
     required_fixes: ["complete the first correction"],
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: [`${id}.txt`], fix_owner: id }] },
     reviewed_commit: reviewedCommit,
   });
   writeJson(join(fixture.runDir, attemptTwo.evidenceRef), { subject: id, attempt: 2, status: "pass", review_ready: true, head_sha: reviewedCommit });
   writeJson(join(fixture.runDir, attemptTwo.reviewRef), {
     subject: id, attempt: 2, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
-    required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
+    required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
   });
   const history = [
     {
       attempt: 1, evidence_ref: attemptOne.evidenceRef, evidence_hash: hashFile(join(fixture.runDir, attemptOne.evidenceRef)),
       review_ref: attemptOne.reviewRef, review_hash: hashFile(join(fixture.runDir, attemptOne.reviewRef)), reviewed_commit: reviewedCommit,
-      verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+      diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
     },
     {
       attempt: 2, evidence_ref: attemptTwo.evidenceRef, evidence_hash: hashFile(join(fixture.runDir, attemptTwo.evidenceRef)),
       review_ref: attemptTwo.reviewRef, review_hash: hashFile(join(fixture.runDir, attemptTwo.reviewRef)), reviewed_commit: reviewedCommit,
-      verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+      diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
     },
   ];
   Object.assign(slice, {
@@ -3403,14 +3415,14 @@ function writeMergedSliceFixture(runDir, id, reviewedCommit) {
   writeJson(join(runDir, evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
   writeJson(join(runDir, reviewRef), {
     subject: id, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
-    required_fixes: [], remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
+    required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
   });
   const evidenceHash = hashFile(join(runDir, evidenceRef));
   const reviewHash = hashFile(join(runDir, reviewRef));
   return {
     status: "merged", attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
     reviewed_commit: reviewedCommit, merge_commit: reviewedCommit,
-    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
   };
 }
 

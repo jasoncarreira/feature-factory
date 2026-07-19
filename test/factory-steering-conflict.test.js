@@ -247,8 +247,8 @@ function writeDurableFilesAndRun(runDir, runId) {
       { agent: "test-verifier", status: "accepted", evidence_ref: "evidence/test.json", review_ref: "reviews/test.json", attempts: 2 },
     ],
     slices: [
-      { id: "be-api", status: "merged", branch: "be-api", worktree: "/tmp/be-api", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, merge_commit: "abc123" },
-      { id: "be-docs", status: "blocked", branch: "be-docs", worktree: "/tmp/be-docs", attempts: 1, evidence_ref: "evidence/be-docs.json", review_ref: "reviews/be-docs.json", blocked_reason: "blocked by upstream" },
+      { id: "be-api", declared_paths: ["be-api.txt"], effective_paths: ["be-api.txt"], status: "merged", branch: "be-api", worktree: "/tmp/be-api", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, merge_commit: "abc123" },
+      { id: "be-docs", declared_paths: ["be-docs.txt"], effective_paths: ["be-docs.txt"], status: "blocked", branch: "be-docs", worktree: "/tmp/be-docs", attempts: 1, evidence_ref: "evidence/be-docs.json", review_ref: "reviews/be-docs.json", blocked_reason: "blocked by upstream" },
     ],
     validator: { verdict: "GO-WITH-NITS", report: "artifacts/validator.md", review_ref: "reviews/validator.json" },
     security_review: { verdict: "PASS", review_ref: "reviews/security.json" },

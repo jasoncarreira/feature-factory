@@ -934,7 +934,7 @@ function createFixture(runId) {
     status: "running",
     gates: {},
     steps: [],
-    slices: [{ id: "slice", status: "running", attempts: 1 }],
+    slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1 }],
   });
   return fixturePaths({ repo, runDir, runId });
 }
@@ -975,7 +975,7 @@ function readyRun(runId, fixture, head) {
     pr_url: null,
     gates: { pre_pr: { status: "approved", artifact: "artifacts/validation-report.md", question_ref: "gates/pre_pr.question.md", answer: "approve", answered_at: NOW } },
     steps: [{ agent: "implementation", status: "running", attempts: 1 }],
-    slices: [{ id: "slice", status: "merged", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head }],
+    slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "merged", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head }],
     validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFile(join(fixture.runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFile(join(fixture.runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
     security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFile(join(fixture.runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head },
     terminal_result: null,

@@ -205,8 +205,8 @@ describe("factory disrupted run recovery", () => {
           pre_pr: { status: "pending", artifact: "artifacts/pre-pr.md", question_ref: "gates/pre_pr.question.md", pending_snapshot: { question_ref: "gates/pre_pr.question.md", question_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", artifact_ref: "artifacts/pre-pr.md", artifact_hash: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", created_at: "2026-07-08T11:50:00.000Z" } },
         },
         slices: [
-          { id: "research", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
-          { id: "backend", stack: "backend", depends_on: ["research"], status: "running", attempts: 2, evidence_ref: "evidence/backend.md" },
+          { id: "research", stack: "backend", depends_on: [], declared_paths: ["research.txt"], effective_paths: ["research.txt"], status: "pending", attempts: 0 },
+          { id: "backend", stack: "backend", depends_on: ["research"], declared_paths: ["backend.txt"], effective_paths: ["backend.txt"], status: "running", attempts: 2, evidence_ref: "evidence/backend.md" },
         ],
         steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md", evidence_ref: "evidence/story.md", review_ref: "reviews/story.json" }],
         validator: { verdict: "GO-WITH-NITS", report: "artifacts/validation.md", loops: 1 },
@@ -398,6 +398,7 @@ describe("factory disrupted run recovery", () => {
       writeJson(join(fixture.runDir, reviewRef), {
         subject: "backend", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
         remaining_fix_count: 1, required_fixes: ["missed category"],
+        ownership_ratification: { schema_version: 1, paths: [] },
         remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "nonconvergent", scope_effect: "in-lane", likely_paths: ["README.md"], fix_owner: "backend" }] },
       });
       const source = {
@@ -407,13 +408,15 @@ describe("factory disrupted run recovery", () => {
         review_ref: reviewRef,
         review_hash: fileHash(join(fixture.runDir, reviewRef)),
         reviewed_commit: head,
+        diff_base_commit: head,
+        ratified_paths: [],
         verdict: "REJECT",
         convergence: "nonconvergent",
         remaining_fix_count: 1,
       };
       const run = readJson(join(fixture.runDir, "run.json"));
       run.slices = [{
-        id: "backend", stack: "backend", depends_on: [], status: "review", branch: fixture.runId,
+        id: "backend", stack: "backend", depends_on: [], declared_paths: ["backend.txt"], effective_paths: ["backend.txt"], status: "review", branch: fixture.runId,
         worktree: fixture.worktree, attempts: 1, attempt_reviews: [source], evidence_ref: evidenceRef,
         evidence_hash: source.evidence_hash, review_ref: reviewRef, review_hash: source.review_hash, reviewed_commit: head,
       }];
@@ -481,7 +484,7 @@ function createRecoveryFixture(runId, { baseMismatch = false, worktree } = {}) {
     branch: runId,
     worktree: resolvedWorktree,
     gates: { story: { status: "approved", artifact: "artifacts/story.md", question_ref: "gates/story.question.md", answer: "approve", answered_at: "2026-07-08T12:00:00.000Z" } },
-    slices: [{ id: "backend", stack: "backend", depends_on: [], status: "pending", attempts: 0 }],
+    slices: [{ id: "backend", stack: "backend", depends_on: [], declared_paths: ["backend.txt"], effective_paths: ["backend.txt"], status: "pending", attempts: 0 }],
     terminal_result: null,
   });
   return { repo, runDir, runId, worktree: resolvedWorktree };
@@ -539,13 +542,13 @@ function modernReviewedSlice(runDir, id, reviewedCommit, { status = "review", me
   writeJson(join(runDir, evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
   writeJson(join(runDir, reviewRef), {
     subject: id, attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging",
-    remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] },
+    remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] },
   });
   const evidenceHash = fileHash(join(runDir, evidenceRef));
   const reviewHash = fileHash(join(runDir, reviewRef));
-  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
+  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
   return {
-    id, stack: "backend", depends_on: [], status, attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash,
+    id, stack: "backend", depends_on: [], declared_paths: [`${id}.txt`], effective_paths: [`${id}.txt`], status, attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash,
     review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, attempt_reviews: [history],
     ...(status === "merged" ? { merge_commit: mergeCommit ?? reviewedCommit } : {}),
   };

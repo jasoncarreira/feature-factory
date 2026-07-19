@@ -52,7 +52,7 @@ describe("foreground factory output hardening", () => {
       branch: runId,
       worktree,
       gates: {},
-      slices: [{ id: "slice", status: "running", attempts: 1, branch: runId, worktree }],
+      slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1, branch: runId, worktree }],
     }) + "\n");
     const previousPath = process.env.PATH;
     try {

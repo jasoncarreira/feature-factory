@@ -872,11 +872,11 @@ function createFixture() {
     worktree: repo,
     steps: [],
     slices: [
-      { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 2, merge_commit: "1111111", ...authorityFor("owner") },
-      { id: "consumer", stack: "backend", depends_on: ["owner"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
-      { id: "merged-consumer", stack: "backend", depends_on: ["owner"], status: "merged", attempts: 1, merge_commit: "2222222", ...authorityFor("merged-consumer") },
-      { id: "unrelated", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
-      { id: "other", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
+      { id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/owner/**", "test/owner.test.js"], effective_paths: ["src/owner/**", "test/owner.test.js"], status: "merged", attempts: 2, merge_commit: "1111111", ...authorityFor("owner") },
+      { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
+      { id: "merged-consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/merged-consumer/**"], effective_paths: ["src/merged-consumer/**"], status: "merged", attempts: 1, merge_commit: "2222222", ...authorityFor("merged-consumer") },
+      { id: "unrelated", stack: "backend", depends_on: [], declared_paths: ["src/unrelated/**"], effective_paths: ["src/unrelated/**"], status: "pending", attempts: 0 },
+      { id: "other", stack: "backend", depends_on: [], declared_paths: ["src/other-lane/**"], effective_paths: ["src/other-lane/**"], status: "pending", attempts: 0 },
     ],
   }));
   writeJson(join(runDir, "plan", "slices.json"), {

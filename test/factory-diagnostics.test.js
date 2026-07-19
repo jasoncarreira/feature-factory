@@ -255,7 +255,7 @@ function runningRun(overrides = {}) {
     status: "running",
     heartbeat_at: "2026-07-08T11:59:00.000Z",
     gates: {},
-    slices: [{ id: "diag-core", stack: "backend", depends_on: [], status: "running", attempts: 1 }],
+    slices: [{ id: "diag-core", stack: "backend", depends_on: [], declared_paths: ["diag-core.txt"], effective_paths: ["diag-core.txt"], status: "running", attempts: 1 }],
     ...overrides,
   };
 }

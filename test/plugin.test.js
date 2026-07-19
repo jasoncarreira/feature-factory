@@ -534,13 +534,13 @@ describe("feature command payload parsing", () => {
       plan_hash: `sha256:${"1".repeat(64)}`,
       start_commit: continuation.parent.commit,
       accepted_slices: [{
-        id: "A", attempts: 2,
+        id: "A", declared_paths: ["A.txt"], effective_paths: ["A.txt"], attempts: 2,
         evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`,
         review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`,
         reviewed_commit: "4".repeat(40), merge_commit: "5".repeat(40),
         attempt_reviews: [
-          { attempt: 1, evidence_ref: "evidence/A.attempt-1.json", evidence_hash: `sha256:${"8".repeat(64)}`, review_ref: "reviews/A.attempt-1.json", review_hash: `sha256:${"9".repeat(64)}`, reviewed_commit: "a".repeat(40), verdict: "REJECT", convergence: "converging", remaining_fix_count: 1 },
-          { attempt: 2, evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`, review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`, reviewed_commit: "4".repeat(40), verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 },
+          { attempt: 1, evidence_ref: "evidence/A.attempt-1.json", evidence_hash: `sha256:${"8".repeat(64)}`, review_ref: "reviews/A.attempt-1.json", review_hash: `sha256:${"9".repeat(64)}`, reviewed_commit: "a".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "REJECT", convergence: "converging", remaining_fix_count: 1 },
+          { attempt: 2, evidence_ref: "evidence/A.json", evidence_hash: `sha256:${"2".repeat(64)}`, review_ref: "reviews/A.json", review_hash: `sha256:${"3".repeat(64)}`, reviewed_commit: "4".repeat(40), diff_base_commit: "e".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 },
         ],
       }],
       remaining_slice_ids: ["B"],
@@ -798,7 +798,7 @@ function createBuilderDispatchFixture() {
         review_ref: "reviews/work-decomposer.json", review_hash: fileHash(join(runDir, "reviews", "work-decomposer.json")),
       },
     }],
-    slices: [{ id: "slice", stack: "backend", depends_on: [], status: "running", branch: "main", worktree: repo, attempts: 1 }],
+    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "running", branch: "main", worktree: repo, attempts: 1 }],
   });
   return { repo, runDir, head: gitOutput(repo, ["rev-parse", "HEAD"]) };
 }
@@ -823,15 +823,15 @@ function createSpecialPanelDispatchFixture() {
   writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: fixture.head });
   writeJson(join(fixture.runDir, reviewRef), {
     subject: "slice", attempt: 1, reviewed_commit: fixture.head, verdict: "APPROVE", convergence: "converging",
-    remaining_fix_count: 0, required_fixes: [], remediation_context: { schema_version: 2, fixes: [] },
+    remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] },
   });
   const evidenceHash = fileHash(join(fixture.runDir, evidenceRef));
   const reviewHash = fileHash(join(fixture.runDir, reviewRef));
   run.slices = [{
-    id: "slice", stack: "backend", depends_on: [], status: "merged", attempts: 1,
+    id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1,
     evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
     reviewed_commit: fixture.head, merge_commit: fixture.head,
-    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: fixture.head, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: fixture.head, diff_base_commit: fixture.head, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
   }];
   run.validator = {
     verdict: "NO-GO", report: reportRef, review_ref: validatorRef,
@@ -854,6 +854,7 @@ function writeBuilderRemediation(fixture, classification) {
     convergence: "converging",
     remaining_fix_count: 1,
     required_fixes: ["repair"],
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification, scope_effect: "in-lane", likely_paths: ["src/fix.js"], fix_owner: "slice" }] },
   });
   const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
@@ -869,6 +870,8 @@ function writeBuilderRemediation(fixture, classification) {
     review_ref: reviewRef,
     review_hash: fileHash(join(fixture.runDir, reviewRef)),
     reviewed_commit: fixture.head,
+    diff_base_commit: fixture.head,
+    ratified_paths: [],
     verdict: "REJECT",
     convergence: "converging",
     remaining_fix_count: 1,

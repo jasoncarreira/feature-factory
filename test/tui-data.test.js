@@ -279,8 +279,8 @@ describe("TUI factory scanner", () => {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
       slices: [
-        { id: "done", status: "pending", attempts: 0 },
-        { id: "docs-authority-contract", status: "running", attempts: 2 },
+        { id: "done", declared_paths: ["done.txt"], effective_paths: ["done.txt"], status: "pending", attempts: 0 },
+        { id: "docs-authority-contract", declared_paths: ["docs/**"], effective_paths: ["docs/**"], status: "running", attempts: 2 },
       ],
       steps: [{ agent: "work-decomposer", status: "running", attempts: 1 }],
     });
@@ -323,7 +323,7 @@ describe("TUI factory scanner", () => {
     writeRun(repo, "cross-tier-run", {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
-      slices: [{ id: "docs-authority-contract", status: "blocked", attempts: 1 }],
+      slices: [{ id: "docs-authority-contract", declared_paths: ["docs/**"], effective_paths: ["docs/**"], status: "blocked", attempts: 1 }],
       steps: [{ agent: "spec-writer", status: "running", attempts: 2 }],
     });
 
@@ -370,7 +370,7 @@ describe("TUI factory scanner", () => {
     writeRun(repo, "blocked-run", {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
-      slices: [{ id: "docs-authority-contract", status: "blocked", attempts: 1 }],
+      slices: [{ id: "docs-authority-contract", declared_paths: ["docs/**"], effective_paths: ["docs/**"], status: "blocked", attempts: 1 }],
       steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }],
     });
 
@@ -385,7 +385,7 @@ describe("TUI factory scanner", () => {
     writeRun(repo, "review-run", {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
-      slices: [{ id: "docs-authority-contract", status: "review", attempts: 2 }],
+      slices: [{ id: "docs-authority-contract", declared_paths: ["docs/**"], effective_paths: ["docs/**"], status: "review", attempts: 2 }],
       steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }],
     });
 
@@ -434,7 +434,10 @@ describe("TUI factory scanner", () => {
       updated_at: "2026-07-05T00:00:00Z",
       gates: {},
       steps: [{ agent: "test-verifier", status: "accepted", attempts: 3 }],
-      slices: [{ id: "backend", status: "merged", attempts: 1 }],
+      slices: [{ id: "backend", declared_paths: ["backend.txt"], effective_paths: ["backend.txt"], status: "merged", attempts: 1,
+        evidence_ref: "evidence/backend.json", evidence_hash: `sha256:${"1".repeat(64)}`,
+        review_ref: "reviews/backend.json", review_hash: `sha256:${"2".repeat(64)}`, reviewed_commit: "3".repeat(40), merge_commit: "4".repeat(40),
+        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/backend.json", evidence_hash: `sha256:${"1".repeat(64)}`, review_ref: "reviews/backend.json", review_hash: `sha256:${"2".repeat(64)}`, reviewed_commit: "3".repeat(40), diff_base_commit: "3".repeat(40), ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }] }],
     });
     writeRun(repo, "security-run", {
       status: "running",
@@ -684,7 +687,7 @@ describe("TUI factory scanner", () => {
       status: "running",
       updated_at: "2026-07-05T00:00:00Z",
       gates: {},
-      slices: [{ id: "slice", status: "running", attempts: 1 }],
+      slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1 }],
     });
     writeHeartbeat(repo, "heartbeat-run");
 
@@ -776,7 +779,7 @@ function tuiSliceAuthority(id, status, attempt) {
   const reviewHash = `sha256:${"b".repeat(64)}`;
   const reviewedCommit = "c".repeat(40);
   return {
-    attempt_reviews: [{ attempt, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+    attempt_reviews: [{ attempt, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
     evidence_ref: evidenceRef,
     evidence_hash: evidenceHash,
     review_ref: reviewRef,

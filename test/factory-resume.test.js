@@ -449,7 +449,7 @@ function createFixture(runId, { prMode, mode, postPrPolicy } = {}) {
     branch: runId,
     worktree,
     gates: {},
-    slices: [{ id: "slice", status: "running", attempts: 1, branch: runId, worktree }],
+    slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1, branch: runId, worktree }],
   };
   if (prMode !== undefined) run.pr_mode = prMode;
   if (mode !== undefined) run.mode = mode;

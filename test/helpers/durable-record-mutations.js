@@ -203,7 +203,7 @@ const CONTINUATION_EXTERNAL = Object.freeze({
 });
 const SLICE_EXTERNAL = Object.freeze({
   evidence: { ref: "evidence/backend.json", bytes: `{"subject":"backend","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_B}"}\n` },
-  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"APPROVE","convergence":"converging","remaining_fix_count":0,"required_fixes":[],"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_B}"}\n` },
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"APPROVE","convergence":"converging","remaining_fix_count":0,"required_fixes":[],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_B}"}\n` },
 });
 const SLICE_DISPATCH_CLAIM_REF = `dispatch/${createHash("sha256").update(`catalog-run\0backend\0${1}`, "utf8").digest("hex")}.json`;
 const SLICE_DISPATCH_CLOSURE_REF = `${SLICE_DISPATCH_CLAIM_REF.slice(0, -5)}.closed.json`;
@@ -225,12 +225,12 @@ const SLICE_DISPATCH_EXTERNAL = Object.freeze({
 });
 const SLICE_NONCONVERGENCE_EXTERNAL = Object.freeze({
   evidence: SLICE_EXTERNAL.evidence,
-  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"nonconvergent","remaining_fix_count":1,"required_fixes":["replace missed category"],"remediation_context":{"schema_version":2,"fixes":[{"required_fix_index":0,"classification":"nonconvergent","scope_effect":"in-lane","likely_paths":["src/backend.js"],"fix_owner":"backend"}]},"reviewed_commit":"${SHA_B}"}\n` },
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"nonconvergent","remaining_fix_count":1,"required_fixes":["replace missed category"],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[{"required_fix_index":0,"classification":"nonconvergent","scope_effect":"in-lane","likely_paths":["src/backend.js"],"fix_owner":"backend"}]},"reviewed_commit":"${SHA_B}"}\n` },
   ...SLICE_DISPATCH_EXTERNAL,
 });
 const SLICE_BLOCKED_EXTERNAL = Object.freeze({
   evidence: SLICE_EXTERNAL.evidence,
-  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"converging","remaining_fix_count":1,"required_fixes":["apply narrow correction"],"remediation_context":{"schema_version":2,"fixes":[{"required_fix_index":0,"classification":"narrow-correction","scope_effect":"in-lane","likely_paths":["src/backend.js"],"fix_owner":"backend"}]},"reviewed_commit":"${SHA_B}"}\n` },
+  review: { ref: "reviews/backend.json", bytes: `{"subject":"backend","attempt":1,"verdict":"REJECT","convergence":"converging","remaining_fix_count":1,"required_fixes":["apply narrow correction"],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[{"required_fix_index":0,"classification":"narrow-correction","scope_effect":"in-lane","likely_paths":["src/backend.js"],"fix_owner":"backend"}]},"reviewed_commit":"${SHA_B}"}\n` },
   ...SLICE_DISPATCH_EXTERNAL,
 });
 const PANEL_EXTERNAL = Object.freeze({
@@ -541,7 +541,7 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["run-envelope-terminal", "d0199700f70c4f08427631780dae93cf197fd46ab3e0ed78d001020b7c7ee1f4"],
   ["terminal-result-completed", "624dd6c0050e64037c95aca7904c9841656bd09684c3d8548b05e15601ba094c"],
   ["terminal-result-blocked", "681845bd946f1cb11d6f2d0a528946365756a79f2ce284179856360e3d9b631e"],
-  ["terminal-result-blocked-nonconvergence", "e6a9286a1c4fcdd541621649bfd49378d36ed51d45c84400098e1511c5767687"],
+  ["terminal-result-blocked-nonconvergence", "d97091392350f02165c01705c4aa4ba2f92e5727325622c9eade4d5cdc0021f6"],
   ["terminal-result-partial", "6726223fbe9f4850a9d6815d78ccf5b5fbbdfdebcd6bf5c7611ace16569b9705"],
   ["terminal-result-needs-human", "8b7d4e6f6533c6072da2e83300c1f2503055905c0bcf5d69a54a91196f6c2eef"],
   ["gate-pending", "fed011780d644435b702f54dec1207d1b9d1a9990ce61c617c1a716c76ada680"],
@@ -567,12 +567,12 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-launch-error", "11fe1658bc1b0c4c29758109d41f7289ea50ab137ade91fba13a04e7c4760418"],
   ["test-execution-receipt-failed-timeout", "aba412c7a4df3bcc573775c40a8bed3da7c94cf794f656e935da0d197d35d409"],
   ["test-execution-receipt-failed-output-limit", "d0f033038f69b998693a6511b192ee39530c36d94a6854646d13f0180e3a664d"],
-  ["slice-pending", "27d978f06a5d77e19f3293902f5ef98a674bd920b35b39a0a56519f48b40b586"],
-  ["slice-running", "4643d7feda2aec0a65367792c879fd11ac8ff385317356990e866967595b5aee"],
-  ["slice-review", "9d4974e8bf94101a2b8a5befced5b9ba57c8a6e0a7026be2986d303e66ef0210"],
-  ["slice-merged", "dcbc32b1065038e3d0dfae63efc9958f449bfb3058b45956e9c812ddc6925fe7"],
-  ["slice-blocked-ordinary", "c4c20b33229cbee9c092ed6222b769ff57562cebc79bff0868b5eff8fafa71a0"],
-  ["slice-blocked", "92c67de66396ab30c7e8a71bdb3a3a278fcef954a7b37182ffd7c19525bd1335"],
+  ["slice-pending", "8d4bbec759c17fb00ead204f403603e1185b430f21f0306f9bb240f7f79d4ec1"],
+  ["slice-running", "af31fa943d166746d48207286fbc9dea216127b8120f77378949b166de73ea40"],
+  ["slice-review", "cd4b857d8325ae2b3df6ca965b17efb3af46dec393f0de2fdf939c79c0e9a5a4"],
+  ["slice-merged", "a0d8d809d6ef828beabe7a72cea680e665718ab60d6ba01ccd2aea21ab3e78f5"],
+  ["slice-blocked-ordinary", "078fbc6eada3adc4a22f4a55b1667a003d84172ba772035c6746cb256dd9e0d5"],
+  ["slice-blocked", "3ed8237beaad32f43ae5cad5a787fd5d148df9931a1baf42f95944516d2e7b00"],
   ["validator-verdict-binding", "ce1205fb84feece303f45e9841916d68fe26431d3117636aecc4b0cdccc79e14"],
   ["security-verdict-binding", "81cbb46158b44646aabf50e0152b80d5ed6dc423826337bf45fe6be7c24e5995"],
   ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
@@ -809,7 +809,7 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["run-envelope-terminal", "0e8365b1d3e99b2db1038cf9a2939fc6f4c421f199236307a1e1f4c300260e04"],
   ["terminal-result-completed", "67cc3ac4f4bc522a7e48be30ea4b1cdfcba2016a309ba99224197641cfcb059e"],
   ["terminal-result-blocked", "2e50300aa3e14e8fd6c935f3dae3fa44dd388c6ff386091ecbc28109f82ad855"],
-  ["terminal-result-blocked-nonconvergence", "14f393a215fcdd7410b6030e6fc3a2448e9e4c6635b5bf830ae6a4f9d843cbfb"],
+  ["terminal-result-blocked-nonconvergence", "55003f673d92a1b474b02aafdc90b72853ce9f376934878d49307509fe122233"],
   ["terminal-result-partial", "b5808744bc1ae0146a9a59e9814be3d58712a04c0cfbaf6f5d1858ab698c7746"],
   ["terminal-result-needs-human", "4c5aee988d94853ac78432435d4b65f7ebe8720dfa0652b6c9eeb8ee30bd0581"],
   ["gate-pending", "802c580efe10eaa5728775d05bb1f088c4831455b3763763b9daf3885c6442f4"],
@@ -835,12 +835,12 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-launch-error", "1320ebcb723f155eb795d8f91caf528d7fed2fb3e93f02d91a815c89f6f63008"],
   ["test-execution-receipt-failed-timeout", "5d77cdf0868afcf860e9fd1ec0cd985d0b4d4c2a9603e1efeb55c94e37f24bf4"],
   ["test-execution-receipt-failed-output-limit", "9f258d14925eb587cbe96ddfb9c0a1c7f6144c9bca3d7f8a73a07fa638fa328c"],
-  ["slice-pending", "ae8061ad556cf202f28c06dad1d8dfaf84168512be57e8dae034984926ad766b"],
-  ["slice-running", "ab8b06098386b7d5ca8ffb67fea577d4174fa961a945fa9f7179cbd448171a0a"],
-  ["slice-review", "5bf07b76dffccf27da6e1cc3b92e40d79b7a2134a6ffe83d5c13a63f0bed78c6"],
-  ["slice-merged", "55cc1727a80c4ab964a896ef20a6b6bf34985f8ec4779bc816b41c453f0c2167"],
-  ["slice-blocked-ordinary", "9b89f67cdd763124470cbe20931dbe4cbeec61f1159d54387bb19c190af3da8a"],
-  ["slice-blocked", "7a5f4c71dab812dd69e3c810ca632e55274770e020afd1ba8e221d5dace36d83"],
+  ["slice-pending", "0f66b96672a90c960a5cff760325c7e63a9a69dd95f19207406de97959afa113"],
+  ["slice-running", "5c91f74e38cddbf6278e3ad48aa2e74392e3120b7680e747299cf315126ffc26"],
+  ["slice-review", "c7128941b5660901d7c20c9f79a2f8676dc8bf22632fb32bf8e466b4215d5495"],
+  ["slice-merged", "bd160bb8e7d790ece4a840382ab5de8457b84962097642fdb9ff9b073d82d1b5"],
+  ["slice-blocked-ordinary", "4d26b4b40fbd88131264c5dcf4186f8cc75aab6ef3344948ee5c97b681119756"],
+  ["slice-blocked", "a43f8ee90d231336f11e9b72353c662d64dbd5ea2cba5bd9af828980f50628bc"],
   ["validator-verdict-binding", "22c22e8e118609a58e29101a6f6a89dacc8ddfddcc92974c810fe4b51cc5fdc9"],
   ["security-verdict-binding", "56e34d4427dc76cb46caee5a002856e4e97ef2dc870543fc489a750e384e6d99"],
   ["steering-boundary", "b3477a6967254d04f869b97b8d15d00ddb952673f00807ebec41f05afdbdacfc"],
@@ -1331,6 +1331,8 @@ function nonconvergenceTerminalResultEntry() {
     review_ref: SLICE_NONCONVERGENCE_EXTERNAL.review.ref,
     review_hash: hashBytes(SLICE_NONCONVERGENCE_EXTERNAL.review.bytes),
     reviewed_commit: SHA_B,
+    diff_base_commit: SHA_B,
+    ratified_paths: [],
     verdict: "REJECT",
     convergence: "nonconvergent",
     remaining_fix_count: 1,
@@ -1677,7 +1679,7 @@ function workDecomposerAcceptedEntry() {
 function sliceEntry(id, variant) {
   const status = variant === "blocked-ordinary" ? "blocked" : variant;
   const blocked = status === "blocked";
-  const source = { id: "backend", stack: "backend", depends_on: [], status, attempts: variant === "pending" ? 0 : 1 };
+  const source = { id: "backend", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status, attempts: variant === "pending" ? 0 : 1 };
   const targets = [stale(["attempts"], variant === "pending" ? 1 : 0), cross(["id"], "frontend")];
   let externalSources = {};
   const sidecars = [];
@@ -1707,6 +1709,8 @@ function sliceEntry(id, variant) {
       review_ref: reviewSources.review.ref,
       review_hash: hashBytes(reviewSources.review.bytes),
       reviewed_commit: SHA_B,
+      diff_base_commit: SHA_B,
+      ratified_paths: [],
       verdict: blocked ? "REJECT" : "APPROVE",
       convergence: variant === "blocked" ? "nonconvergent" : "converging",
       remaining_fix_count: blocked ? 1 : 0,
@@ -2283,10 +2287,10 @@ export function createRepairCatalogBaseline(record) {
   if (record?.authorityClassId !== "pr79-merged-slice-repair") throw new TypeError("repair fixture requires a registered PR79 repair record");
   if (canonicalJson(record.canonicalPath) !== canonicalJson(["merged_slice_repair"])) throw new TypeError(`${record.id} must bind run.json.merged_slice_repair`);
   const ownerEvidence = { ref: "evidence/owner.json", bytes: `{"subject":"owner","attempt":1,"status":"pass","review_ready":true,"head_sha":"${SHA_A}"}\n` };
-  const ownerReview = { ref: "reviews/owner.json", bytes: `{"subject":"owner","attempt":1,"verdict":"APPROVE","convergence":"converging","remaining_fix_count":0,"required_fixes":[],"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_A}"}\n` };
+  const ownerReview = { ref: "reviews/owner.json", bytes: `{"subject":"owner","attempt":1,"verdict":"APPROVE","convergence":"converging","remaining_fix_count":0,"required_fixes":[],"ownership_ratification":{"schema_version":1,"paths":[]},"remediation_context":{"schema_version":2,"fixes":[]},"reviewed_commit":"${SHA_A}"}\n` };
   const ownerEvidenceHash = hashBytes(ownerEvidence.bytes);
   const ownerReviewHash = hashBytes(ownerReview.bytes);
-  const ownerAttemptReview = { attempt: 1, evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
+  const ownerAttemptReview = { attempt: 1, evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, diff_base_commit: SHA_A, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
   const run = {
     schema_version: 1,
     run_id: "repair-catalog-run",
@@ -2295,8 +2299,8 @@ export function createRepairCatalogBaseline(record) {
     gates: {},
     steps: [],
     slices: [
-      { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 1, branch: "repair-feature--owner", worktree: "/tmp/repair-feature--owner", evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, attempt_reviews: [ownerAttemptReview], merge_commit: SHA_A, updated_at: NOW },
-      { id: "consumer", stack: "backend", depends_on: ["owner"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
+      { id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/owner/**"], effective_paths: ["src/owner/**"], status: "merged", attempts: 1, branch: "repair-feature--owner", worktree: "/tmp/repair-feature--owner", evidence_ref: ownerEvidence.ref, evidence_hash: ownerEvidenceHash, review_ref: ownerReview.ref, review_hash: ownerReviewHash, reviewed_commit: SHA_A, attempt_reviews: [ownerAttemptReview], merge_commit: SHA_A, updated_at: NOW },
+      { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
     ],
     merged_slice_repair: structuredClone(record.source),
   };

@@ -2378,6 +2378,9 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
             assertReviewedSliceRetryRoute(priorReviewAuthority.review, priorSlice.id);
           }
         }
+        if (!sameJson(priorSlice.effective_paths, slices[sliceIndex].effective_paths)) {
+          throw new Error(`slice '${priorSlice.id}' effective_paths is managed by checked review publication`);
+        }
         normalizeSliceTransition(priorSlice, slices[sliceIndex]);
         const priorAttempts = Number.isInteger(priorSlice.attempts) ? priorSlice.attempts : 0;
         if (slices[sliceIndex].status === "running" && slices[sliceIndex].attempts === priorAttempts + 1) slices[sliceIndex].dispatch_required = true;
@@ -4345,6 +4348,7 @@ function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, git
     for (const path of ratifiedPaths) {
       if (isRatificationContractPath(path)) throw new Error(`slice '${sliceId}' cannot ratify unsafe contract path '${path}'`);
       const owners = planLanes.filter((candidate) => candidate.lanes.some((lane) => ownershipLaneContains(lane, path))).map((candidate) => candidate.id);
+      if (owners.length > 1) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has ambiguous plan ownership: ${owners.join(", ")}`);
       if (owners.length !== 0) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has declared plan ownership`);
     }
   }
@@ -5502,7 +5506,10 @@ function assertSliceTransition(runDir, prior, next) {
   for (const key of ["id", "stack", "depends_on", "declared_paths"]) {
     if (!sameJson(prior?.[key], next?.[key])) throw new Error(`slice ${key} is immutable`);
   }
-  if (!sameJson(prior.effective_paths, next.effective_paths)) throw new Error(`slice '${prior.id}' effective_paths is managed by checked review publication`);
+  const checkedOwnershipReset = ["running", "blocked"].includes(next.status) && sameJson(next.effective_paths, next.declared_paths);
+  if (!sameJson(prior.effective_paths, next.effective_paths) && !checkedOwnershipReset) {
+    throw new Error(`slice '${prior.id}' effective_paths is managed by checked review publication`);
+  }
   const transitions = {
     pending: new Set(["running", "blocked"]),
     running: new Set(["running", "review", "blocked"]),

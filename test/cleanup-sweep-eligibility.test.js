@@ -491,7 +491,7 @@ test("R36-R41 verify recorded worktree containment, registration, branch/head id
     try {
       fixture.createBranch("slice");
       const worktree = fixture.addRegisteredWorktree("slice", "slice");
-      fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree, status: "running", attempts: 1 }] });
+      fixture.addRun("run", { branch: null, slices: [{ id: "slice", branch: "slice", worktree, declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1 }] });
       assert.equal(inspect(fixture).candidates[0].classification, "eligible");
     } finally { fixture.cleanup(); }
   });
@@ -502,7 +502,7 @@ test("R36-R41 verify recorded worktree containment, registration, branch/head id
       const worktree = fixture.addRecordedWorktree("run");
       fixture.createBranch("slice");
       const run = fixture.readRun("run");
-      run.slices = [{ id: "slice", branch: "slice", worktree, status: "running", attempts: 1 }];
+      run.slices = [{ id: "slice", branch: "slice", worktree, declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1 }];
       fixture.writeRun("run", run);
       const candidate = inspect(fixture).candidates[0];
       assert.deepEqual(candidate.reason_codes, ["SKIPPED_WORKTREE_IDENTITY"]);

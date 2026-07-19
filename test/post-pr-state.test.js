@@ -665,7 +665,7 @@ function createPrFixture(runId, enabled) {
   const attemptReview = createSliceAttemptReview({ evidenceRef, evidenceHash, reviewRef, reviewHash, reviewedCommit: head });
   writeJson(join(runDir, "run.json"), {
     schema_version: 1, run_id: runId, status: "running", branch: "feature", base_ref: "main", base_commit: head, worktree: repo, github_account: "acme", pr_mode: "ready", max_retries: 3, gates: { pre_pr: { status: "approved" } }, pr_url: null,
-    slices: [{ id: "api", stack: "backend", status: "merged", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head }],
+    slices: [{ id: "api", stack: "backend", declared_paths: ["api.txt"], effective_paths: ["api.txt"], status: "merged", attempts: 1, attempt_reviews: [attemptReview], evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: head, merge_commit: head }],
     validator: { verdict: "GO", report: "artifacts/validation-report.md", report_hash: hashFile(join(runDir, "artifacts", "validation-report.md")), review_ref: "reviews/implementation-validator.json", review_hash: hashFile(join(runDir, "reviews", "implementation-validator.json")), reviewed_head_sha: head },
     security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json", review_hash: hashFile(join(runDir, "reviews", "security-reviewer.json")), reviewed_head_sha: head }, steering: { schema_version: 1, generation: 0, pending: null, uncheckpointed: null, boundary: null, action_claim: null, last_action: null, pr_fence: null, history: [] },
     post_pr: createPostPrState(policy(enabled)), terminal_result: null,
