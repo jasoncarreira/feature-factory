@@ -68,6 +68,73 @@ describe("checked checkpoint child start", () => {
     }
   });
 
+  it("starts the reviewed first checkpoint through the public factory command at the fetched remote base", async () => {
+    const fixture = createFixture("checkpoint-parent-cli-authority-chain");
+    const output = [];
+    const originalLog = console.log;
+    let launches = 0;
+    try {
+      const remoteMain = advanceRemoteMain(fixture, "cli-authority-chain-base.txt");
+      console.log = (...values) => output.push(values.join(" "));
+      await runCliCommand([
+        "factory", "checkpoint-start", fixture.parentRunId, "checkpoint-001",
+        "--run-id", "checkpoint-cli-authority-child", "--json",
+      ], {
+        factoryOptions: {
+          cwd: fixture.repo,
+          checkpointLaunchFn: ({ binding, reservation, child_worktree }) => {
+            launches += 1;
+            assert.equal(binding.base_commit, remoteMain);
+            assert.equal(git(child_worktree, ["rev-parse", "HEAD"]), remoteMain);
+            assert.equal(reservation.claim.state, "launching");
+            return { binding, reservation, child_worktree };
+          },
+        },
+      });
+
+      const result = JSON.parse(output.at(-1));
+      const run = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", "checkpoint-cli-authority-child", "run.json"), "utf8"));
+      assert.equal(launches, 1);
+      assert.equal(result.binding.base_commit, remoteMain);
+      assert.equal(result.binding.child_run_id, "checkpoint-cli-authority-child");
+      assert.equal(run.checkpoint.child_run_id, "checkpoint-cli-authority-child");
+      assert.equal(run.base_commit, remoteMain);
+      assert.equal(checkpointReservationClaim(fixture, run.checkpoint).state, "launched");
+    } finally {
+      console.log = originalLog;
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects shape-valid forged launch payloads and launched reservations with no verified child manifest", async () => {
+    const fixture = createFixture("checkpoint-parent-payload-authority");
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-payload-authority-child", checkpointLaunchFn: (value) => value,
+      });
+      const runPath = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id, "run.json");
+      const claimBefore = checkpointReservationClaim(fixture, started.binding);
+      const forged = structuredClone(started.payload);
+      forged.checkpoint_reservation.worktree = join(fixture.repo, ".opencode", "worktrees", "other-registered-worktree");
+
+      assert.deepEqual(decodeFeatureCommandPayload(encodeFeatureCommandPayload(forged), { repo: fixture.repo }), {
+        ok: false,
+        reason: "invalid-checkpoint-authority",
+      });
+      assert.deepEqual(checkpointReservationClaim(fixture, started.binding), claimBefore);
+
+      rmSync(runPath, { force: true });
+      assert.deepEqual(decodeFeatureCommandPayload(started.commandArgs.at(-1), { repo: fixture.repo }), {
+        ok: false,
+        reason: "invalid-checkpoint-authority",
+      });
+      assert.equal(checkpointReservationClaim(fixture, started.binding).state, "launched");
+      assert.equal(existsSync(runPath), false);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes a normal Step 0 parent base_ref of main to canonical remote refs/heads/main", async () => {
     const fixture = createFixture("checkpoint-parent-short-main");
     try {
