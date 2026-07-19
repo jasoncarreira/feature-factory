@@ -197,13 +197,8 @@ function assertCheckpointPayloadAuthority(repoInput, binding, reservation, reque
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   const checkpoint = manifest.checkpoints?.find((candidate) => candidate?.id === binding.checkpoint_id);
   if (!checkpoint || checkpoint.ordinal !== binding.checkpoint_ordinal || !isDeepStrictEqual(checkpoint.request, request)) throw new Error("checkpoint request mismatch");
-  assertCheckpointReservationAuthority(repo, binding, reservation);
-  if (resume) {
-    const childPath = resolve(repo, ".opencode", "factory", binding.child_run_id, "run.json");
-    assertRegularFile(childPath);
-    const child = validateRun(JSON.parse(readFileSync(childPath, "utf8")));
-    if (!isDeepStrictEqual(child.checkpoint, binding)) throw new Error("checkpoint child binding mismatch");
-  }
+  const publishedReservation = assertCheckpointReservationAuthority(repo, binding, reservation);
+  if (publishedReservation.state === "launched" || resume) assertCheckpointChildManifestAuthority(repo, binding, publishedReservation);
 }
 
 function assertCheckpointReservationAuthority(repo, binding, expected) {
@@ -221,6 +216,21 @@ function assertCheckpointReservationAuthority(repo, binding, expected) {
     && value.worktree === expected.worktree && value.reserved_at === expected.reserved_at
     && isDeepStrictEqual(value.binding, expected.binding);
   if (!["reserved", "launching", "launched"].includes(value.state) || (!exact && !launchedFromPayload)) throw new Error("checkpoint reservation claim is stale");
+  return value;
+}
+
+function assertCheckpointChildManifestAuthority(repo, binding, reservation) {
+  const childPath = resolve(repo, ".opencode", "factory", binding.child_run_id, "run.json");
+  assertRegularFile(childPath);
+  const child = validateRun(JSON.parse(readFileSync(childPath, "utf8")));
+  if (!isDeepStrictEqual(child.checkpoint, binding)) throw new Error("checkpoint child binding mismatch");
+  if (child.run_id !== binding.child_run_id
+    || child.base_ref !== binding.base_ref
+    || child.base_commit !== binding.base_commit
+    || child.branch !== binding.child_run_id
+    || child.worktree !== reservation.worktree) {
+    throw new Error("checkpoint child top-level identity mismatch");
+  }
 }
 
 function assertRegularFile(path) {
