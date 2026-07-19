@@ -65,7 +65,7 @@ export const POST_PR_TERMINAL_REASONS = Object.freeze({
 const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
-const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "special_builder_dispatch", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
+const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "special_builder_dispatch", "integration_conflict", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
 const PLAN_KEYS = new Set(["slices", "integration_gate"]);
 const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
 const INTEGRATION_GATE_KEYS = new Set(["required_commands"]);
@@ -350,6 +350,7 @@ export function validateRun(run) {
   validateProvenance(errors, run.provenance, "run.provenance");
   validateMergedSliceRepair(errors, run, "run.merged_slice_repair");
   validateSpecialBuilderDispatch(errors, run.special_builder_dispatch, "run.special_builder_dispatch");
+  validateIntegrationConflict(errors, run.integration_conflict, "run.integration_conflict", run);
   validateContinuation(errors, run, "run.continuation");
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
@@ -1137,7 +1138,7 @@ function validateSpecialBuilderDispatch(errors, dispatch, path) {
   allowedKeys(errors, dispatch, keys, path);
   requiredInteger(errors, dispatch, "schema_version", `${path}.schema_version`);
   if (dispatch.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
-  requiredEnum(errors, dispatch, "route", new Set(["merged-slice-repair", "panel-remediation", "post-pr-remediation"]), `${path}.route`);
+  requiredEnum(errors, dispatch, "route", new Set(["merged-slice-repair", "panel-remediation", "post-pr-remediation", "integration-conflict"]), `${path}.route`);
   requiredString(errors, dispatch, "instance", `${path}.instance`);
   requiredEnum(errors, dispatch, "agent", new Set(["backend-builder", "frontend-builder"]), `${path}.agent`);
   requiredString(errors, dispatch, "claim_ref", `${path}.claim_ref`);
@@ -1149,10 +1150,69 @@ function validateSpecialBuilderDispatch(errors, dispatch, path) {
     requiredHash(errors, dispatch, "closure_hash", `${path}.closure_hash`);
     requiredFullGitSha(errors, dispatch, "completion_head", `${path}.completion_head`);
   }
-  if (dispatch.route === "panel-remediation" && closureCount === 3) requiredString(errors, dispatch, "owner_slice_id", `${path}.owner_slice_id`);
-  if (dispatch.route !== "panel-remediation" && dispatch.owner_slice_id !== undefined) errors.push({ path: `${path}.owner_slice_id`, message: "is allowed only for panel-remediation" });
+  if (["panel-remediation", "integration-conflict"].includes(dispatch.route) && (closureCount === 3 || dispatch.route === "integration-conflict")) requiredString(errors, dispatch, "owner_slice_id", `${path}.owner_slice_id`);
+  if (!["panel-remediation", "integration-conflict"].includes(dispatch.route) && dispatch.owner_slice_id !== undefined) errors.push({ path: `${path}.owner_slice_id`, message: "is allowed only for panel-remediation or integration-conflict" });
   if (stringValue(dispatch.claim_ref) && !/^dispatch\/[0-9a-f]{64}\.special\.json$/u.test(dispatch.claim_ref)) errors.push({ path: `${path}.claim_ref`, message: "must be a safe special dispatch claim ref" });
   if (stringValue(dispatch.closure_ref) && !/^dispatch\/[0-9a-f]{64}\.special\.closed\.json$/u.test(dispatch.closure_ref)) errors.push({ path: `${path}.closure_ref`, message: "must be a safe special dispatch closure ref" });
+}
+
+function validateIntegrationConflict(errors, conflict, path, run) {
+  if (conflict === undefined || conflict === null) return;
+  if (!isRecord(conflict)) { errors.push({ path, message: "must be an object" }); return; }
+  const keys = new Set(["schema_version", "status", "slice_id", "owner_slice_id", "agent", "integration_baseline", "resolution_commit", "conflict_paths", "claim_ref", "claim_hash", "closure_ref", "closure_hash", "integration_proof", "test_acceptance"]);
+  allowedKeys(errors, conflict, keys, path);
+  requiredInteger(errors, conflict, "schema_version", `${path}.schema_version`);
+  if (conflict.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredEnum(errors, conflict, "status", new Set(["pending-integrated-review", "accepted"]), `${path}.status`);
+  requiredString(errors, conflict, "slice_id", `${path}.slice_id`);
+  requiredString(errors, conflict, "owner_slice_id", `${path}.owner_slice_id`);
+  requiredEnum(errors, conflict, "agent", new Set(["backend-builder", "frontend-builder"]), `${path}.agent`);
+  requiredFullGitSha(errors, conflict, "integration_baseline", `${path}.integration_baseline`);
+  requiredFullGitSha(errors, conflict, "resolution_commit", `${path}.resolution_commit`);
+  validateCanonicalConcretePathSet(errors, conflict.conflict_paths, `${path}.conflict_paths`, { allowEmpty: false, sorted: true });
+  for (const key of ["claim_ref", "closure_ref"]) requiredString(errors, conflict, key, `${path}.${key}`);
+  for (const key of ["claim_hash", "closure_hash"]) requiredHash(errors, conflict, key, `${path}.${key}`);
+  if (stringValue(conflict.claim_ref) && !/^dispatch\/[0-9a-f]{64}\.special\.json$/u.test(conflict.claim_ref)) errors.push({ path: `${path}.claim_ref`, message: "must be a safe special dispatch claim ref" });
+  if (stringValue(conflict.closure_ref) && !/^dispatch\/[0-9a-f]{64}\.special\.closed\.json$/u.test(conflict.closure_ref)) errors.push({ path: `${path}.closure_ref`, message: "must be a safe special dispatch closure ref" });
+  validateIntegrationConflictProof(errors, conflict.integration_proof, `${path}.integration_proof`, conflict);
+  const slice = Array.isArray(run.slices) ? run.slices.find((candidate) => candidate?.id === conflict.slice_id) : null;
+  const owner = Array.isArray(run.slices) ? run.slices.find((candidate) => candidate?.id === conflict.owner_slice_id) : null;
+  if (!slice || slice.status !== "merged" || slice.merge_commit !== conflict.resolution_commit) errors.push({ path: `${path}.slice_id`, message: "must reference the merged conflict slice at resolution_commit" });
+  if (!owner || `${owner.stack}-builder` !== conflict.agent) errors.push({ path: `${path}.owner_slice_id`, message: "must reference the effective owner matching agent" });
+  if (run.special_builder_dispatch !== undefined) errors.push({ path, message: "cannot coexist with special_builder_dispatch" });
+  if (conflict.status === "accepted") validateIntegrationConflictTestAcceptance(errors, conflict.test_acceptance, `${path}.test_acceptance`, run);
+  else if (conflict.test_acceptance !== undefined) errors.push({ path: `${path}.test_acceptance`, message: "is allowed only after integrated acceptance" });
+}
+
+function validateIntegrationConflictProof(errors, proof, path, conflict) {
+  if (!isRecord(proof)) { errors.push({ path, message: "must be an object" }); return; }
+  const keys = new Set(["schema_version", "integration_baseline", "merge_head", "resolution_commit", "merge_base", "conflict_paths", "integrated_entries", "integrated_tree"]);
+  allowedKeys(errors, proof, keys, path);
+  requiredInteger(errors, proof, "schema_version", `${path}.schema_version`);
+  for (const key of ["integration_baseline", "merge_head", "resolution_commit", "merge_base", "integrated_tree"]) requiredFullGitSha(errors, proof, key, `${path}.${key}`);
+  validateCanonicalConcretePathSet(errors, proof.conflict_paths, `${path}.conflict_paths`, { allowEmpty: false, sorted: true });
+  if (proof.integration_baseline !== conflict.integration_baseline || proof.resolution_commit !== conflict.resolution_commit || JSON.stringify(proof.conflict_paths) !== JSON.stringify(conflict.conflict_paths)) {
+    errors.push({ path, message: "must exactly bind the integration conflict identity" });
+  }
+  if (!Array.isArray(proof.integrated_entries) || proof.integrated_entries.length !== conflict.conflict_paths?.length) errors.push({ path: `${path}.integrated_entries`, message: "must bind every conflict path exactly once" });
+  else for (const [index, entry] of proof.integrated_entries.entries()) {
+    const entryPath = `${path}.integrated_entries[${index}]`;
+    if (!isRecord(entry)) { errors.push({ path: entryPath, message: "must be an object" }); continue; }
+    allowedKeys(errors, entry, new Set(["path", "entry_hash"]), entryPath);
+    requiredString(errors, entry, "path", `${entryPath}.path`);
+    requiredHash(errors, entry, "entry_hash", `${entryPath}.entry_hash`);
+    if (entry.path !== conflict.conflict_paths[index]) errors.push({ path: `${entryPath}.path`, message: "must equal the corresponding conflict path" });
+  }
+}
+
+function validateIntegrationConflictTestAcceptance(errors, acceptance, path, run) {
+  if (!isRecord(acceptance)) { errors.push({ path, message: "is required and must be an object" }); return; }
+  allowedKeys(errors, acceptance, STEP_ACCEPTANCE_KEYS, path);
+  for (const key of ["artifact_ref", "evidence_ref", "review_ref"]) requiredString(errors, acceptance, key, `${path}.${key}`);
+  for (const key of ["artifact_hash", "evidence_hash", "review_hash"]) requiredHash(errors, acceptance, key, `${path}.${key}`);
+  requiredFullGitSha(errors, acceptance, "reviewed_head_sha", `${path}.reviewed_head_sha`);
+  const step = Array.isArray(run.steps) ? run.steps.find((candidate) => candidate?.agent === "test-verifier") : null;
+  if (!step || step.status !== "accepted" || JSON.stringify(step.acceptance) !== JSON.stringify(acceptance)) errors.push({ path, message: "must equal the exact accepted test-verifier authority" });
 }
 
 function validateProvenance(errors, provenance, path) {

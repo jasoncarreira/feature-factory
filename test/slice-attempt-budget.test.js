@@ -176,7 +176,7 @@ describe("uniform slice attempt evidence", () => {
     }
   });
 
-  it("rejects an attempt-two unowned extension before attempt three mutation or forced dispatch claim", async () => {
+  it("permits an attempt-two unowned extension with checked disclosure context", async () => {
     const fixture = createFixture("unowned-third");
     try {
       await startAttempt(fixture, 1);
@@ -189,24 +189,42 @@ describe("uniform slice attempt evidence", () => {
         likelyPaths: ["docs/adjacent.md"],
       });
 
+      const advanced = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 3 });
+      assert.equal(advanced.slice.attempts, 3);
+      const dispatchFilesBefore = readdirSync(join(fixture.runDir, "dispatch")).sort();
+      const context = await prepareSliceBuilderTaskDispatch(fixture.repo, { run_id: "run", slice_id: "slice", attempt: 3, agent: "backend-builder" });
+      assert.deepEqual(context.slice.ownership.forecast_unowned_extension_paths, ["docs/adjacent.md"]);
+      assert.equal(context.slice.ownership.disclosure_required_for_actual_unexpected_paths, true);
+      assert.deepEqual(readdirSync(join(fixture.runDir, "dispatch")).sort(), dispatchFilesBefore);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("routes contract changes before next-attempt mutation or dispatch", async () => {
+    const fixture = createFixture("contract-route");
+    try {
+      await startAttempt(fixture, 1);
+      await publishReview(fixture, 1, {
+        verdict: "REJECT", fixes: ["change the public package contract"], scopeEffect: "contract-change", likelyPaths: ["package.json"],
+      });
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       await assert.rejects(
-        transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 3 }),
-        /cannot consume another attempt[\s\S]*0:unowned-extension:slice/u,
+        transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 }),
+        /contract-change requires plan\/brief amendment/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
-      assert.equal(readRun(fixture).slices[0].attempts, 2);
 
       const forced = readRun(fixture);
       const forcedSlice = forced.slices[0];
       forcedSlice.status = "running";
-      forcedSlice.attempts = 3;
+      forcedSlice.attempts = 2;
       for (const key of ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]) delete forcedSlice[key];
       writeJson(join(fixture.runDir, "run.json"), forced);
       const dispatchFilesBefore = readdirSync(join(fixture.runDir, "dispatch")).sort();
       await assert.rejects(
-        prepareSliceBuilderTaskDispatch(fixture.repo, { run_id: "run", slice_id: "slice", attempt: 3, agent: "backend-builder" }, { claimDispatch: true, completionToken: "must-not-publish" }),
-        /cannot consume another attempt[\s\S]*0:unowned-extension:slice/u,
+        prepareSliceBuilderTaskDispatch(fixture.repo, { run_id: "run", slice_id: "slice", attempt: 2, agent: "backend-builder" }, { claimDispatch: true, completionToken: "must-not-publish" }),
+        /contract-change requires plan\/brief amendment/u,
       );
       assert.deepEqual(readdirSync(join(fixture.runDir, "dispatch")).sort(), dispatchFilesBefore);
     } finally {

@@ -1243,12 +1243,12 @@ describe("producer self-check contract", () => {
       assert.match(prompt, /Imports resolve to real exports[\s\S]*do not invent a similar name or a guessed path/i, `${name}-builder must self-check import resolution`);
       assert.match(prompt, /No vaporware[\s\S]*TODO[\s\S]*STUB[\s\S]*stub bodies/i, `${name}-builder must self-check vaporware`);
       assert.match(prompt, /Mechanically complete[\s\S]*unused imports[\s\S]*unreachable\/dead code/i, `${name}-builder must self-check mechanical completeness`);
-      assert.match(prompt, /In lane[\s\S]*within the slice `paths`/i, `${name}-builder must self-check lane discipline`);
+      assert.match(prompt, /Ownership disclosure[\s\S]*outside `slice\.ownership\.declared_paths`[\s\S]*nonempty, trimmed, NFC-normalized/i, `${name}-builder must self-check soft-lane disclosure`);
       assert.match(prompt, /Every AC is implemented and tested[\s\S]*exact-value assertion/i, `${name}-builder must self-check AC test coverage`);
       assert.match(prompt, /Verified, not masked[\s\S]*never worked around by weakening an assertion/i, `${name}-builder must self-check honest verification`);
     }
     // Reviewer still owns the enforcing bar these self-checks mirror.
-    assert.match(WORK_REVIEWER_PROMPT, /out-of-lane edits outside slice `paths`/i, "work-reviewer must enforce lane discipline");
+    assert.match(WORK_REVIEWER_PROMPT, /out-of-lane edits outside slice `paths`/i, "work-reviewer must classify lane feasibility");
   });
 
   it("gives test-verifier a self-review with an exact-value assertion floor", () => {
@@ -2036,7 +2036,7 @@ describe("remediation context reuse docs contract", () => {
   });
 
   it("requires checked context for ordinary and special builder routes", () => {
-    assert.match(SKILL, /FEATURE_FACTORY_SPECIAL_BUILDER_DISPATCH[\s\S]*merged-slice-repair\|panel-remediation\|post-pr-remediation/i);
+    assert.match(SKILL, /FEATURE_FACTORY_SPECIAL_BUILDER_DISPATCH[\s\S]*merged-slice-repair\|panel-remediation\|post-pr-remediation\|integration-conflict/i);
     assert.match(SCHEMA, /rejects every unmarked builder[\s\S]*PLUGIN_CHECKED_SPECIAL_BUILDER_CONTEXT_START/i);
     assert.match(SCHEMA, /post-Task `completion_head`[\s\S]*evidence head, reviewed commit, and current slice branch\/worktree HEAD/i);
     assert.match(SCHEMA, /base64url-encoded UTF-8 JSON[\s\S]*`@file`, `@agent`/i);
@@ -2046,8 +2046,22 @@ describe("remediation context reuse docs contract", () => {
     assert.match(README, /every unmarked builder Task is rejected/i);
     for (const [name, prompt] of [["backend", BACKEND_BUILDER_PROMPT], ["frontend", FRONTEND_BUILDER_PROMPT]]) {
       assert.match(prompt, /exactly one plugin-owned `PLUGIN_CHECKED_SLICE_CONTEXT_START` or `PLUGIN_CHECKED_SPECIAL_BUILDER_CONTEXT_START`/i, `${name} builder must require one checked route context`);
-      assert.match(prompt, /merged-slice-repair, panel-remediation, or post-pr-remediation route/i, `${name} builder must accept checked special remediation`);
+      assert.match(prompt, /merged-slice-repair, panel-remediation, post-pr-remediation, or integration-conflict route/i, `${name} builder must accept checked special remediation and conflict delegation`);
     }
+  });
+
+  it("documents soft-lane disclosure, hard routing, and delegated integrated acceptance", () => {
+    for (const text of [SKILL, SCHEMA]) {
+      assert.match(text, /ownership_disclosure[\s\S]*path[\s\S]*rationale/i);
+      assert.match(text, /APPROVE[\s\S]*ratification[\s\S]*exactly equal/i);
+      assert.match(text, /REJECT[\s\S]*ratification is empty/i);
+      assert.match(text, /pending\/running\/review sibling|pending\/running\/review siblings/i);
+      assert.match(text, /contract-change[\s\S]*plan\/brief amendment/i);
+      assert.match(text, /orchestrator[\s\S]*never edit|orchestrator[\s\S]*never edits/i);
+      assert.match(text, /fresh checked test-verifier[\s\S]*independent (?:approving )?review[\s\S]*holistic panels/i);
+    }
+    assert.match(SCHEMA, /exact integration baseline[\s\S]*current feature HEAD[\s\S]*MERGE_HEAD[\s\S]*effective owner/i);
+    assert.match(SKILL, /Contract, ambiguous, unsafe, generated, symlink, delete, rename, and non-textual conflicts never dispatch/i);
   });
 
 });

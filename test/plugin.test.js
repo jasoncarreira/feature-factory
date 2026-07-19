@@ -83,6 +83,8 @@ describe("checked slice builder Task dispatch", () => {
         marker: { run_id: "run", route: "panel-remediation", agent },
         body: "Repair the checked panel findings.",
       });
+      const conflictPrompt = `FEATURE_FACTORY_SPECIAL_BUILDER_DISPATCH ${JSON.stringify({ run_id: "run", route: "integration-conflict", agent })}\nResolve only the checked textual integration conflict.`;
+      assert.deepEqual(parseSpecialBuilderDispatchMarker(conflictPrompt, agent).marker, { run_id: "run", route: "integration-conflict", agent });
     }
   });
 
@@ -202,7 +204,12 @@ describe("checked slice builder Task dispatch", () => {
       const task = { args: { subagent_type: "backend-builder", prompt: builderPrompt(1) } };
       await instance["tool.execute.before"]({ tool: "task", sessionID: "session", callID: "hostile-context" }, task);
       assert.doesNotMatch(task.args.prompt, /@~\/|@\/etc/u);
-      assert.deepEqual(checkedPromptContext(task.args.prompt).slice.contract.acceptance, plan.slices[0].acceptance);
+      const checked = checkedPromptContext(task.args.prompt);
+      assert.deepEqual(checked.slice.contract.acceptance, plan.slices[0].acceptance);
+      assert.deepEqual(checked.slice.ownership, {
+        declared_paths: ["src/**"], effective_paths: ["src/**"], forecast_unowned_extension_paths: [], disclosure_required_for_actual_unexpected_paths: true,
+      });
+      assert.match(task.args.prompt, /Record every actual changed concrete path outside declared ownership/u);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
     }
