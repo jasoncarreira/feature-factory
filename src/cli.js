@@ -5,13 +5,13 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { readSlicesSeedPlan, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSlicesSeed, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { validateRun } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
@@ -768,17 +768,8 @@ async function slicesSeed(args) {
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory slices-seed requires exactly one <run-id>");
   const from = requiredOption(opts.from, "--from", "factory slices-seed");
-  const runDir = resolveRunDir(runId, opts);
   if (from !== "plan/slices.json") throw new Error("factory slices-seed --from must be exactly plan/slices.json");
-  const plan = readSlicesSeedPlan(runDir, from, opts);
-  const slices = plan.slices.map((slice) => ({
-    id: slice.id,
-    stack: slice.stack,
-    depends_on: Array.isArray(slice.depends_on) ? slice.depends_on : [],
-    status: "pending",
-    attempts: 0,
-  }));
-  return print(await transitionSlicesSeed(runDir, slices, opts), opts);
+  return print(await seedFactorySlices(runId, { ...opts, from }), opts);
 }
 
 async function sliceStatus(args) {

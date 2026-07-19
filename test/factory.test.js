@@ -17,6 +17,7 @@ import {
   persistFactoryRunCreatedEnv,
   persistFactoryRunResumeEnv,
   recordCostUsage,
+  seedFactorySlices,
   seedRepoSkill,
   status,
   validateState,
@@ -41,6 +42,35 @@ describe("factory public state operations", { concurrency: false }, () => {
       assert.equal(current.run_id, fixture.runId);
       assert.equal(current.status, "running");
       assert.equal(current.cost_summary, null);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("routes oversized slices-seed through the public factory orchestration path", async () => {
+    const fixture = createFixture("public-checkpoint-route");
+    try {
+      mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
+      writeJson(join(fixture.runDir, "plan", "slices.json"), oversizedFactoryPlan());
+      const runFile = join(fixture.runDir, "run.json");
+      const run = readJson(runFile);
+      run.slices = [];
+      run.steps = [{ agent: "work-decomposer", status: "running", attempts: 1 }];
+      run.terminal_result = null;
+      writeJson(runFile, run);
+
+      const result = await seedFactorySlices(fixture.runId, {
+        cwd: fixture.repo,
+        from: "plan/slices.json",
+        now: "2026-07-19T13:00:00.000Z",
+      });
+
+      assert.equal(result.route, "checkpoint");
+      assert.equal(result.checkpoint_routing.checkpoint_count, 2);
+      assert.equal(result.run.status, "blocked");
+      assert.deepEqual(result.run.slices, []);
+      assert.equal(result.run.steps[0].status, "running");
+      assert.equal(result.run.terminal_result.reason, "oversized-plan-checkpoint-routing-required");
     } finally {
       cleanup(fixture.repo);
     }
@@ -993,6 +1023,43 @@ describe("factory public state operations", { concurrency: false }, () => {
     }
   });
 });
+
+function oversizedFactoryPlan() {
+  const testPlan = Array.from({ length: 6 }, (_, index) => `test api ${index + 1}`);
+  return {
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    slices: [{
+      id: "api",
+      stack: "backend",
+      paths: ["src/api.js"],
+      depends_on: [],
+      acceptance: ["accept api"],
+      test_plan: testPlan,
+    }],
+    delivery_envelope: {
+      schema_version: 1,
+      delivery_units: [{
+        id: "api-unit",
+        slice_id: "api",
+        invariant_families: [
+          { id: "api-family-1", description: "API family 1" },
+          { id: "api-family-2", description: "API family 2" },
+        ],
+        obligations: testPlan.map((_, index) => ({
+          id: `api-obligation-${index + 1}`,
+          description: `API obligation ${index + 1}`,
+          invariant_family_id: `api-family-${(index % 2) + 1}`,
+          verification_artifact_id: `api-artifact-${index + 1}`,
+        })),
+        verification_artifacts: testPlan.map((entry, index) => ({
+          id: `api-artifact-${index + 1}`,
+          test_plan_index: index,
+          test_plan_entry: entry,
+        })),
+      }],
+    },
+  };
+}
 
 function createFixture(runId, { gate = false, terminal = false, git = false, repo = mkdtempSync(join(tmpdir(), "factory-simplified-")), updatedAt = undefined } = {}) {
   if (git) initGitRepo(repo, runId);

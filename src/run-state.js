@@ -19,6 +19,7 @@ import { isPrivilegedControlPlanePath, privilegedControlPlanePathReason } from "
 import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
 import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
 import { validateAdmissionExtensionResult, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
+import { buildCheckpointRoutingManifest, checkpointRoutingArtifact, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -2513,7 +2514,10 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
 
 export async function transitionSlicesSeed(runDir, slices, options = {}) {
   const requestedProjection = normalizePendingSliceProjection(slices);
-  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, requestedProjection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
+  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, requestedProjection, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true, requirePendingProjection: true });
+  if (seedPlanAuthority.admission_extension.decision === "checkpoint") {
+    return transitionCheckpointRouting(runDir, seedPlanAuthority, options);
+  }
   const projection = requestedProjection.map((slice, index) => ({
     ...slice,
     declared_paths: cloneJson(seedPlanAuthority.plan.slices[index].paths),
@@ -2534,7 +2538,122 @@ export async function transitionSlicesSeed(runDir, slices, options = {}) {
 }
 
 export function readSlicesSeedPlan(runDir, from, options = {}) {
-  return observePlanSourceAuthority(runDir, from, null, { ...options, requireIntegrationGate: true }).plan;
+  return observePlanSourceAuthority(runDir, from, null, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true }).plan;
+}
+
+async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = {}) {
+  const manifest = buildCheckpointRoutingManifest({
+    plan: seedPlanAuthority.plan,
+    planHash: seedPlanAuthority.plan_hash,
+    admissionResult: seedPlanAuthority.admission_extension,
+  });
+  const artifact = checkpointRoutingArtifact(manifest);
+
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const replay = current.status === "blocked" && current.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON;
+    if (replay) {
+      assertCheckpointRoutingReplay(runDir, current, seedPlanAuthority, manifest, artifact, options);
+      return checkpointRoutingResult(current, manifest, artifact, false);
+    }
+
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    assertRunJsonWriterAllowed(current, "checkpoint routing");
+    if (current.status !== "running") throw new Error(`checkpoint routing requires a running run, found '${current.status}'`);
+    assertNoPendingSpecialBuilderDispatches(runDir, current);
+    assertNoUnresolvedSliceDispatches(runDir, current);
+    assertCheckpointRoutingPreImplementation(current);
+    assertCheckpointRoutingAuthorityCurrent(runDir, seedPlanAuthority, manifest, artifact, options);
+    await publishCheckpointRoutingArtifact(runDir, manifest, artifact, seedPlanAuthority, options);
+
+    const next = validateRun({
+      ...cloneJson(current),
+      status: "blocked",
+      updated_at: timestamp(options.now),
+      terminal_result: {
+        status: "blocked",
+        run_id: current.run_id,
+        pr_url: null,
+        reason: CHECKPOINT_ROUTING_TERMINAL_REASON,
+        summary: `Oversized plan routed to ${manifest.checkpoints.length} sequential independently shippable checkpoints.`,
+        artifacts: { checkpoint_routing: artifact.ref },
+      },
+    });
+    await writeSemanticRunJson(runDir, next, options, null, () => {
+      assertCheckpointRoutingAuthorityCurrent(runDir, seedPlanAuthority, manifest, artifact, options);
+      assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+    });
+    return checkpointRoutingResult(next, manifest, artifact, true);
+  }, options);
+}
+
+function assertCheckpointRoutingPreImplementation(run) {
+  if (Array.isArray(run.slices) && run.slices.length > 0) throw new Error("checkpoint routing must occur before slice seeding");
+  if ((run.steps || []).some((step) => step?.agent === "work-decomposer" && step.status === "accepted")) {
+    throw new Error("checkpoint routing must occur before accepted work-decomposer state");
+  }
+  if (run.validator != null || run.security_review != null || run.gates?.pre_pr != null || run.merged_slice_repair != null || run.special_builder_dispatch != null) {
+    throw new Error("checkpoint routing must occur before implementation, panel, or pre-PR state");
+  }
+}
+
+async function publishCheckpointRoutingArtifact(runDir, manifest, artifact, authority, options) {
+  const path = join(runDir, artifact.ref);
+  if (existsSync(path)) {
+    assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+    return;
+  }
+  await writeProtectedJsonAtomic(runDir, artifact.ref, manifest, {
+    commit: "create-only",
+    hooks: {
+      beforeCommit: async () => {
+        await options.checkpointRoutingHooks?.beforeArtifactCommit?.();
+        assertCheckpointRoutingAuthorityCurrent(runDir, authority, manifest, artifact, options);
+      },
+    },
+  });
+  assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+}
+
+function assertCheckpointRoutingReplay(runDir, run, authority, manifest, artifact, options) {
+  if (run.terminal_result?.status !== "blocked" || run.terminal_result?.pr_url !== null
+    || !sameJson(run.terminal_result?.artifacts, { checkpoint_routing: artifact.ref })) {
+    throw new Error("checkpoint routing terminal result does not match exact routing artifact");
+  }
+  assertCheckpointRoutingAuthorityCurrent(runDir, authority, manifest, artifact, options);
+  assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+}
+
+function assertCheckpointRoutingAuthorityCurrent(runDir, expected, manifest, artifact, options) {
+  const current = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, null, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true });
+  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash
+    || !sameJson(current.admission_extension, expected.admission_extension)) {
+    throw new Error("checkpoint routing plan authority changed before publication");
+  }
+  const rebuilt = buildCheckpointRoutingManifest({ plan: current.plan, planHash: current.plan_hash, admissionResult: current.admission_extension });
+  const rebuiltArtifact = checkpointRoutingArtifact(rebuilt);
+  if (!sameJson(rebuilt, manifest) || !sameJson(rebuiltArtifact, artifact)) {
+    throw new Error("checkpoint routing manifest changed before publication");
+  }
+}
+
+function assertCheckpointRoutingArtifactCurrent(runDir, artifact) {
+  const path = join(runDir, artifact.ref);
+  if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile() || hashFile(path, { mode: "raw" }) !== artifact.hash) {
+    throw new Error("checkpoint routing artifact bytes do not match their content-addressed ref");
+  }
+}
+
+function checkpointRoutingResult(run, manifest, artifact, updated) {
+  return {
+    updated,
+    route: "checkpoint",
+    status: run.status,
+    run,
+    admission_extension: cloneJson(manifest.source.admission_result),
+    checkpoint_routing: { ref: artifact.ref, hash: artifact.hash, checkpoint_count: manifest.checkpoints.length },
+    terminal_result: run.terminal_result,
+  };
 }
 
 function observePlanSourceAuthority(runDir, from, slices, options = {}) {
@@ -2554,7 +2673,7 @@ function observePlanSourceAuthority(runDir, from, slices, options = {}) {
 }
 
 function assertSeedPlanAuthorityCurrent(runDir, projection, options, expected) {
-  const current = observePlanSourceAuthority(runDir, options.from, projection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
+  const current = observePlanSourceAuthority(runDir, options.from, projection, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true, requirePendingProjection: true });
   if (current.path !== expected.path || current.plan_hash !== expected.plan_hash || !sameJson(current.admission_extension, expected.admission_extension)) throw new Error("slice seed plan authority changed before run.json publication");
 }
 
