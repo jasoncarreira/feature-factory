@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { adoptContinuation, assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, seedContinuationPlanningArtifacts, startFactory } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
-import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice } from "../src/run-state.js";
+import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
 import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, createDurableCatalogBaseline, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
@@ -1299,6 +1299,49 @@ describe("continuation planning-artifact reuse", () => {
         post_pr_policy: continuationEligibilityPostPr("disabled", 0).policy,
       });
       assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", "carry-interleaved-cli")), false);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("carries a conflict-merged slice with exact proof sidecars and rejects every tamper", async () => {
+    const fixture = await createConflictCarryForwardFixture("carry-conflict-proof");
+    const childRunId = "carry-conflict-proof-next";
+    try {
+      const candidate = buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true });
+      const accepted = candidate.carry_forward.accepted_slices[0];
+      assert.deepEqual(accepted.integration_conflict, fixture.conflict);
+
+      for (const [label, mutate, expected] of [
+        ["claim bytes", () => writeFileSync(join(fixture.runDir, fixture.conflict.claim_ref), "{}\n"), /special builder|conflict.*claim|dispatch.*claim|hash.*stale/u],
+        ["closure bytes", () => writeFileSync(join(fixture.runDir, fixture.conflict.closure_ref), "{}\n"), /special builder|conflict.*closure|dispatch.*closure|hash.*stale/u],
+        ["proof bytes", () => updateRun(fixture, (run) => { run.slices[0].integration_conflict.integration_proof.integrated_tree = "f".repeat(40); }), /integrated bytes changed|conflict.*proof/u],
+      ]) {
+        const claimBytes = readFileSync(join(fixture.runDir, fixture.conflict.claim_ref));
+        const closureBytes = readFileSync(join(fixture.runDir, fixture.conflict.closure_ref));
+        const runBytes = readFileSync(join(fixture.runDir, "run.json"));
+        mutate();
+        assert.throws(
+          () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${childRunId}-${label.replaceAll(" ", "-")}`, carryForward: true }),
+          expected,
+          label,
+        );
+        writeFileSync(join(fixture.runDir, fixture.conflict.claim_ref), claimBytes);
+        writeFileSync(join(fixture.runDir, fixture.conflict.closure_ref), closureBytes);
+        writeFileSync(join(fixture.runDir, "run.json"), runBytes);
+      }
+
+      const result = await continueFactory(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+      });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+      assert.deepEqual(child.slices[0].integration_conflict, fixture.conflict);
+      for (const ref of [fixture.conflict.claim_ref, fixture.conflict.closure_ref]) {
+        assert.deepEqual(readFileSync(join(childRunDir, ref)), readFileSync(join(fixture.runDir, ref)), ref);
+      }
+      assert.equal(result.payload.continuation.carry_forward.accepted_slices[0].integration_conflict.resolution_commit, fixture.conflict.resolution_commit);
     } finally {
       cleanup(fixture.repo);
     }
@@ -3343,6 +3386,95 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   writeJson(join(runDir, "run.json"), run);
   const actualMergeOrder = gitStdout(repo, ["rev-list", "--first-parent", "--reverse", `${baseCommit}..${runId}`]).split("\n").filter(Boolean);
   return { repo, runDir, runId, baseCommit, reviewedCommits, mergeCommits, actualMergeOrder };
+}
+
+async function createConflictCarryForwardFixture(runId) {
+  const fixture = createV2Fixture(runId, { accepted: [], mergeOrder: [] });
+  const sliceId = "A";
+  const branch = `${runId}--${sliceId}`;
+  const sliceWorktree = join(fixture.repo, ".opencode", "worktrees", `${runId}-${sliceId}`);
+  runGit(fixture.repo, ["branch", branch, fixture.baseCommit]);
+  mkdirSync(dirname(sliceWorktree), { recursive: true });
+  runGit(fixture.repo, ["worktree", "add", sliceWorktree, branch]);
+  writeFileSync(join(sliceWorktree, "A.txt"), "reviewed A bytes\n");
+  runGit(sliceWorktree, ["add", "A.txt"]);
+  runGit(sliceWorktree, ["commit", "-m", "reviewed conflict A"]);
+  const reviewedCommit = gitStdout(sliceWorktree, ["rev-parse", "HEAD"]);
+
+  writeFileSync(join(fixture.repo, "A.txt"), "competing integration A bytes\n");
+  runGit(fixture.repo, ["add", "A.txt"]);
+  runGit(fixture.repo, ["commit", "-m", "integration baseline for A"]);
+  const integrationBaseline = gitStdout(fixture.repo, ["rev-parse", "HEAD"]);
+  runGit(fixture.repo, ["branch", "-f", "main", integrationBaseline]);
+  runGit(fixture.repo, ["push", "--force", "origin", `${integrationBaseline}:main`]);
+
+  const evidenceRef = "evidence/A.json";
+  const reviewRef = "reviews/A.json";
+  writeJson(join(fixture.runDir, evidenceRef), { subject: sliceId, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, reviewRef), {
+    subject: sliceId, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [],
+    ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
+  });
+  const evidenceHash = hashFile(join(fixture.runDir, evidenceRef));
+  const reviewHash = hashFile(join(fixture.runDir, reviewRef));
+  const claimStem = createHash("sha256").update(`${runId}\0${sliceId}\0${1}`, "utf8").digest("hex");
+  const claimRef = `dispatch/${claimStem}.json`;
+  const closureRef = `dispatch/${claimStem}.closed.json`;
+  const completionToken = "carry-forward-conflict-slice";
+  mkdirSync(join(fixture.runDir, "dispatch"), { recursive: true });
+  writeJson(join(fixture.runDir, claimRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: runId, slice_id: sliceId, attempt: 1,
+    agent: "backend-builder", branch, worktree: sliceWorktree, head: fixture.baseCommit,
+    context_hash: `sha256:${"a".repeat(64)}`, completion_token_hash: `sha256:${createHash("sha256").update(completionToken).digest("hex")}`,
+    claimed_at: "2026-07-18T12:00:00.000Z", closure_ref: closureRef,
+  });
+  const claimHash = hashFile(join(fixture.runDir, claimRef));
+  writeJson(join(fixture.runDir, closureRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: claimRef, claim_hash: claimHash,
+    run_id: runId, slice_id: sliceId, attempt: 1, agent: "backend-builder", branch, worktree: sliceWorktree,
+    head: fixture.baseCommit, completion_head: reviewedCommit, context_hash: `sha256:${"a".repeat(64)}`,
+    completion_token: completionToken, returned_at: "2026-07-18T12:00:00.000Z",
+  });
+  const closureHash = hashFile(join(fixture.runDir, closureRef));
+  updateRun(fixture, (run) => {
+    run.status = "running";
+    run.base_commit = integrationBaseline;
+    run.terminal_result = null;
+    run.validator = null;
+    run.security_review = null;
+    run.slices[0] = {
+      id: sliceId, stack: "backend", depends_on: [], declared_paths: ["A.txt"], effective_paths: ["A.txt"], status: "review", attempts: 1,
+      branch, worktree: sliceWorktree, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+      reviewed_commit: reviewedCommit, dispatch_required: true, dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash,
+      dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
+      attempt_reviews: [{
+        attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+        reviewed_commit: reviewedCommit, diff_base_commit: fixture.baseCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+        dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
+      }],
+    };
+  });
+
+  const merge = spawnSync("git", ["merge", "--no-ff", branch, "-m", "merge conflict A"], { cwd: fixture.repo, encoding: "utf8" });
+  assert.notEqual(merge.status, 0, "carry-forward fixture merge must conflict");
+  const specialToken = "carry-forward-special-conflict";
+  const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, { run_id: runId, route: "integration-conflict", agent: "backend-builder" }, { claimDispatch: true, completionToken: specialToken });
+  writeFileSync(join(fixture.repo, "A.txt"), "delegated integrated A bytes\n");
+  runGit(fixture.repo, ["add", "A.txt"]);
+  runGit(fixture.repo, ["commit", "-m", "delegated conflict A"]);
+  const resolutionCommit = gitStdout(fixture.repo, ["rev-parse", "HEAD"]);
+  await completeSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: runId, route: "integration-conflict", agent: "backend-builder", claim_ref: context.dispatch_claim.ref,
+    claim_hash: context.dispatch_claim.hash, completion_token: specialToken,
+  });
+  const merged = await transitionSliceMerged(fixture.runDir, sliceId, { merge_commit: resolutionCommit });
+  const conflict = merged.slice.integration_conflict || merged.run.integration_conflict;
+  updateRun(fixture, (run) => {
+    run.status = "blocked";
+    run.validator = { verdict: "NO-GO", review_ref: "reviews/reviewer.json" };
+    run.terminal_result = { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} };
+  });
+  return { ...fixture, baseCommit: integrationBaseline, resolutionCommit, conflict };
 }
 
 function acceptedManifestRow(fixture, id) {

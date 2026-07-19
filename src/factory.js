@@ -39,6 +39,7 @@ const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const SAFE_BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
 const CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "declared_paths", "effective_paths", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+const CARRY_FORWARD_ACCEPTED_OPTIONAL_KEYS = new Set(["integration_conflict"]);
 const CARRY_FORWARD_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy"]);
 const CARRY_FORWARD_MODES = new Set(["interactive", "headless", "autonomous"]);
 const CARRY_FORWARD_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -3136,6 +3137,7 @@ function initialCarryForwardRun(continuation, configuration, plan, decomposition
       reviewed_commit: adopted.reviewed_commit,
       merge_commit: adopted.merge_commit,
       attempt_reviews: cloneJson(adopted.attempt_reviews),
+      ...(adopted.integration_conflict ? { integration_conflict: cloneJson(adopted.integration_conflict) } : {}),
     } : { id: planned.id, stack: planned.stack, depends_on: cloneJson(planned.depends_on), declared_paths: cloneJson(planned.paths), effective_paths: cloneJson(planned.paths), status: "pending", attempts: 0 };
   });
   const reuse = continuation.planning_reuse;
@@ -3191,10 +3193,13 @@ function initialCarryForwardRun(continuation, configuration, plan, decomposition
 
 function collectCarryForwardPublicationInputs(parentRunDir, continuation) {
   const files = [];
-  const destinations = new Set();
+  const destinations = new Map();
   const add = (ref, bytes) => {
-    if (destinations.has(ref)) throw new Error(`carry-forward publication destination is duplicated: ${ref}`);
-    destinations.add(ref);
+    if (destinations.has(ref)) {
+      if (!destinations.get(ref).equals(bytes)) throw new Error(`carry-forward publication destination has conflicting bytes: ${ref}`);
+      return;
+    }
+    destinations.set(ref, bytes);
     files.push({ ref, bytes });
   };
   const planPath = join(parentRunDir, continuation.carry_forward.plan_ref);
@@ -3215,6 +3220,16 @@ function collectCarryForwardPublicationInputs(parentRunDir, continuation) {
     for (const attempt of slice.attempt_reviews) {
       add(attempt.evidence_ref, readExactCarryForwardFile(parentRunDir, attempt.evidence_ref, attempt.evidence_hash));
       add(attempt.review_ref, readExactCarryForwardFile(parentRunDir, attempt.review_ref, attempt.review_hash));
+    }
+    if (slice.integration_conflict) {
+      add(slice.integration_conflict.claim_ref, readExactCarryForwardFile(parentRunDir, slice.integration_conflict.claim_ref, slice.integration_conflict.claim_hash));
+      add(slice.integration_conflict.closure_ref, readExactCarryForwardFile(parentRunDir, slice.integration_conflict.closure_ref, slice.integration_conflict.closure_hash));
+      if (slice.integration_conflict.status === "accepted") {
+        const acceptance = slice.integration_conflict.test_acceptance;
+        add(slice.integration_conflict.test_artifact_snapshot.ref, readExactCarryForwardFile(parentRunDir, slice.integration_conflict.test_artifact_snapshot.ref, slice.integration_conflict.test_artifact_snapshot.hash));
+        add(acceptance.evidence_ref, readExactCarryForwardFile(parentRunDir, acceptance.evidence_ref, acceptance.evidence_hash));
+        add(acceptance.review_ref, readExactCarryForwardFile(parentRunDir, acceptance.review_ref, acceptance.review_hash));
+      }
     }
   }
   return { plan: { bytes: planBytes }, decomposition, files };
@@ -3443,13 +3458,15 @@ function validateCarryForwardCandidate(run) {
   const acceptedIds = new Set();
   for (const [index, accepted] of carry.accepted_slices.entries()) {
     const label = `carry_forward.accepted_slices[${index}]`;
-    assertExactCandidateKeys(accepted, CARRY_FORWARD_ACCEPTED_KEYS, label);
+    assertExactCandidateKeysWithOptional(accepted, CARRY_FORWARD_ACCEPTED_KEYS, CARRY_FORWARD_ACCEPTED_OPTIONAL_KEYS, label);
     if (!stringValue(accepted.id) || acceptedIds.has(accepted.id)) throw new Error(`${label}.id must be a unique slice id`);
     if (!Number.isInteger(accepted.attempts) || accepted.attempts < 1) throw new Error(`${label}.attempts must be positive`);
     if (!canonicalCarryForwardRef(accepted.evidence_ref, "evidence") || !canonicalCarryForwardRef(accepted.review_ref, "reviews")) throw new Error(`${label} refs must be canonical JSON sidecars`);
     if (!CARRY_FORWARD_HASH_PATTERN.test(String(accepted.evidence_hash || "")) || !CARRY_FORWARD_HASH_PATTERN.test(String(accepted.review_hash || ""))) throw new Error(`${label} hashes must be sha256 hashes`);
     if (!FULL_COMMIT_PATTERN.test(String(accepted.reviewed_commit || "")) || !FULL_COMMIT_PATTERN.test(String(accepted.merge_commit || ""))) throw new Error(`${label} commits must be full Git SHAs`);
-    validateRun({ schema_version: 1, run_id: "carry-forward-accepted-slice", status: "running", gates: {}, slices: [{ ...cloneJson(accepted), status: "merged" }] });
+    const structuralSlice = { ...cloneJson(accepted), status: "merged" };
+    delete structuralSlice.integration_conflict;
+    validateRun({ schema_version: 1, run_id: "carry-forward-accepted-slice", status: "running", gates: {}, slices: [structuralSlice] });
     acceptedIds.add(accepted.id);
   }
   const remainingIds = new Set();
@@ -3464,6 +3481,14 @@ function assertExactCandidateKeys(value, expected, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
   const keys = Object.keys(value);
   if (keys.length !== expected.size || keys.some((key) => !expected.has(key))) throw new Error(`${label} must have its exact closed shape`);
+}
+
+function assertExactCandidateKeysWithOptional(value, required, optional, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const keys = Object.keys(value);
+  if ([...required].some((key) => !Object.hasOwn(value, key)) || keys.some((key) => !required.has(key) && !optional.has(key))) {
+    throw new Error(`${label} must have its exact closed shape`);
+  }
 }
 
 function canonicalCarryForwardRef(value, rootName) {

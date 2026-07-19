@@ -2059,9 +2059,14 @@ describe("remediation context reuse docs contract", () => {
       assert.match(text, /contract-change[\s\S]*plan\/brief amendment/i);
       assert.match(text, /orchestrator[\s\S]*never edit|orchestrator[\s\S]*never edits/i);
       assert.match(text, /fresh checked test-verifier[\s\S]*independent (?:approving )?review[\s\S]*holistic panels/i);
+      assert.match(text, /newly added private regular[\s\S]*privileged\/control-plane/i);
+      assert.match(text, /workflow[\s\S]*CI[\s\S]*(?:agent\/skill\/command|assets\/agent[\s\S]*assets\/skills[\s\S]*assets\/command)[\s\S]*dependency[\s\S]*migration[\s\S]*generated/i);
+      assert.match(text, /unique merge base[\s\S]*both parent diffs[\s\S]*rename\/copy/i);
+      assert.match(text, /merged slice(?:'s)?[\s\S]*(?:append-only|own|integration_conflict)[\s\S]*(?:conflict|authority)/i);
+      assert.match(text, /carry-forward[\s\S]*copies[\s\S]*proof[\s\S]*sidecars/i);
     }
     assert.match(SCHEMA, /exact integration baseline[\s\S]*current feature HEAD[\s\S]*MERGE_HEAD[\s\S]*effective owner/i);
-    assert.match(SKILL, /Contract, ambiguous, unsafe, generated, symlink, delete, rename, and non-textual conflicts never dispatch/i);
+    assert.match(SKILL, /privileged\/control-plane policy rejects undeclared[\s\S]*Symlink, delete, ambiguous, and non-textual conflicts never dispatch/i);
   });
 
 });

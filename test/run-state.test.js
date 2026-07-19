@@ -712,8 +712,8 @@ describe("simplified run-state transitions", () => {
       const integrated = await transitionSliceMerged(fixture.runDir, "slice", { merge_commit: resolutionHead });
       assert.equal(integrated.slice.status, "merged");
       assert.equal(integrated.run.special_builder_dispatch, undefined);
-      assert.equal(integrated.run.integration_conflict.status, "pending-integrated-review");
-      assert.equal(integrated.run.integration_conflict.resolution_commit, resolutionHead);
+      assert.equal(integrated.slice.integration_conflict.status, "pending-integrated-review");
+      assert.equal(integrated.slice.integration_conflict.resolution_commit, resolutionHead);
       await assert.rejects(
         transitionPanelVerdicts(fixture.runDir, { validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" }, security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" } }),
         /require fresh integrated conflict tests and review/u,
@@ -734,8 +734,8 @@ describe("simplified run-state transitions", () => {
       const accepted = await transitionRunStep(fixture.runDir, "test-verifier", {
         status: "accepted", attempts: 1, artifact_ref: "artifacts/test-report.md", evidence_ref: claimed.claim.receipt_ref, review_ref: "reviews/test-verifier.attempt-1.json",
       }, { mustExist: true });
-      assert.equal(accepted.run.integration_conflict.status, "accepted");
-      assert.equal(accepted.run.integration_conflict.test_acceptance.reviewed_head_sha, resolutionHead);
+      assert.equal(accepted.run.slices[0].integration_conflict.status, "accepted");
+      assert.equal(accepted.run.slices[0].integration_conflict.test_acceptance.reviewed_head_sha, resolutionHead);
 
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n");
       writeJson(join(fixture.runDir, "reviews", "implementation-validator.json"), createPanelReviewRecord({ subject: "main", attempt: 1, reviewedHeadSha: resolutionHead, verdict: "GO" }));
@@ -746,6 +746,75 @@ describe("simplified run-state transitions", () => {
       });
       assert.equal(panels.run.validator.reviewed_head_sha, resolutionHead);
       assert.equal(panels.run.security_review.reviewed_head_sha, resolutionHead);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("retains two sequential delegated conflict proofs without a singular run-level fence", async () => {
+    const fixture = createFixture("two-delegated-integration-conflicts");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      prepareSliceMergeState(fixture, { reviewedPath: "first.txt", integrationConflict: true });
+      seedPendingSlice(fixture, { sliceId: "slice-two", reviewedPath: "second.txt" });
+      const first = await resolveDelegatedConflict(fixture, "slice", "first.txt", "first conflict resolution", 1);
+
+      prepareAdditionalSliceConflict(fixture, { sliceId: "slice-two", branch: "slice-two-branch", reviewedPath: "second.txt" });
+      const second = await resolveDelegatedConflict(fixture, "slice-two", "second.txt", "second conflict resolution", 2);
+      await acceptIntegratedConflict(fixture, second, 1);
+
+      const run = readJson(join(fixture.runDir, "run.json"));
+      assert.equal(Object.hasOwn(run, "integration_conflict"), false);
+      assert.deepEqual(run.slices.map((slice) => ({ id: slice.id, status: slice.integration_conflict?.status, resolution: slice.integration_conflict?.resolution_commit })), [
+        { id: "slice", status: "accepted", resolution: first },
+        { id: "slice-two", status: "accepted", resolution: second },
+      ]);
+      assert.notEqual(run.slices[0].integration_conflict.claim_ref, run.slices[1].integration_conflict.claim_ref);
+      assert.equal(run.special_builder_dispatch, undefined);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects rename/modify and rename/rename conflicts from checked delegation authority", async () => {
+    for (const topology of ["rename-modify", "rename-rename"]) {
+      const fixture = createFixture(`integration-conflict-${topology}`);
+      try {
+        initGitRepo(fixture.repo, ["slice-branch"]);
+        prepareSliceMergeState(fixture, { reviewedPath: "renamed-by-slice.txt", integrationConflict: true, conflictTopology: topology });
+        await assert.rejects(
+          prepareSpecialBuilderTaskDispatch(fixture.repo, { run_id: fixture.runId, route: "integration-conflict", agent: "backend-builder" }),
+          /rename or copy endpoint on a merge parent diff/u,
+          topology,
+        );
+      } finally {
+        cleanup(fixture.repo);
+      }
+    }
+  });
+
+  it("rejects privileged integration conflicts unless the path has explicit declared plan ownership", async () => {
+    const declared = createFixture("integration-conflict-declared-workflow");
+    try {
+      initGitRepo(declared.repo, ["slice-branch"]);
+      const privilegedPath = ".github/workflows/release.yml";
+      prepareSliceMergeState(declared, { reviewedPath: privilegedPath, integrationConflict: true });
+      const context = await prepareSpecialBuilderTaskDispatch(declared.repo, { run_id: declared.runId, route: "integration-conflict", agent: "backend-builder" });
+      assert.deepEqual(context.authority.conflict.conflict_paths, [privilegedPath]);
+    } finally {
+      cleanup(declared.repo);
+    }
+
+    const fixture = createFixture("integration-conflict-undeclared-workflow");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      const privilegedPath = ".github/workflows/release.yml";
+      prepareSliceMergeState(fixture, { reviewedPath: privilegedPath, integrationConflict: true });
+      makeConflictPathUndeclared(fixture, privilegedPath);
+      await assert.rejects(
+        prepareSpecialBuilderTaskDispatch(fixture.repo, { run_id: fixture.runId, route: "integration-conflict", agent: "backend-builder" }),
+        /privileged control-plane conflict path requires explicit declared plan ownership/u,
+      );
     } finally {
       cleanup(fixture.repo);
     }
@@ -2239,20 +2308,32 @@ describe("simplified run-state transitions", () => {
     }
   });
 
-  it("rejects APPROVE ratification for sibling-owned, contract, generated, symlink, delete, and rename paths", async () => {
+  it("rejects APPROVE ratification outside newly added private regular files and for centralized privileged paths", async () => {
     for (const [name, changedPath, addSibling, expected, kind = "file", disclosedPaths = [changedPath]] of [
       ["sibling", "test/sibling.test.js", true, /has declared plan ownership/u],
-      ["contract", "package.json", false, /cannot ratify unsafe contract path 'package\.json'/u],
-      ["generated", "dist/output.js", false, /cannot ratify generated path 'dist\/output\.js'/u],
+      ["dependency-manifest", "package.json", false, /privileged control-plane path 'package\.json'/u],
+      ["workflow", ".github/workflows/release.yml", false, /privileged control-plane path/u],
+      ["action", ".github/actions/setup/action.yml", false, /privileged control-plane path/u],
+      ["ci-config", ".circleci/config.yml", false, /privileged control-plane path/u],
+      ["agent-control", "assets/agent/new-agent.md", false, /privileged control-plane path/u],
+      ["skill-control", "assets/skills/new-skill/SKILL.md", false, /privileged control-plane path/u],
+      ["command-control", "assets/command/deploy.md", false, /privileged control-plane path/u],
+      ["opencode-workflow", ".opencode/config/workflow.json", false, /privileged control-plane path/u],
+      ["build-manifest", "Makefile", false, /privileged control-plane path/u],
+      ["deployment", "deploy/app.yaml", false, /privileged control-plane path/u],
+      ["migration", "migrations/001.sql", false, /privileged control-plane path/u],
+      ["generated", "dist/output.js", false, /privileged control-plane path/u],
+      ["modified", "docs/modified.md", false, /must be a newly added private regular file/u, "modify"],
+      ["mode", "docs/mode.md", false, /must be a newly added private regular file/u, "mode"],
       ["symlink", "docs/link.md", false, /cannot ratify symlink or submodule path 'docs\/link\.md'/u, "symlink"],
-      ["deleted", "docs/deleted.md", false, /cannot ratify deleted path 'docs\/deleted\.md'/u, "delete"],
-      ["renamed", "docs/new.md", false, /cannot ratify renamed path 'docs\/new\.md'/u, "rename", ["docs/new.md", "docs/old.md"]],
+      ["deleted", "docs/deleted.md", false, /must be a newly added private regular file/u, "delete"],
+      ["renamed", "docs/new.md", false, /must be a newly added private regular file/u, "rename", ["docs/new.md", "docs/old.md"]],
     ]) {
       const fixture = createFixture(`ownership-ratification-${name}`);
       try {
         initGitRepo(fixture.repo, ["slice-branch"]);
         runGit(fixture.repo, ["checkout", "slice-branch"]);
-        if (["delete", "rename"].includes(kind)) {
+        if (["delete", "rename", "modify", "mode"].includes(kind)) {
           const originalPath = kind === "rename" ? "docs/old.md" : changedPath;
           mkdirSync(join(fixture.repo, "docs"), { recursive: true });
           writeFileSync(join(fixture.repo, originalPath), "baseline path\n");
@@ -2281,6 +2362,7 @@ describe("simplified run-state transitions", () => {
           if (kind === "symlink") symlinkSync("../README.md", join(fixture.repo, changedPath));
           else if (kind === "delete") rmSync(join(fixture.repo, changedPath));
           else if (kind === "rename") runGit(fixture.repo, ["mv", "docs/old.md", changedPath]);
+          else if (kind === "mode") chmodSync(join(fixture.repo, changedPath), 0o755);
           else writeFileSync(join(fixture.repo, changedPath), `${name}\n`);
           if (kind !== "rename") runGit(fixture.repo, ["add", "-A", "--", ...disclosedPaths]);
           runGit(fixture.repo, ["commit", "-m", `change ${name} path`]);
@@ -3569,14 +3651,27 @@ async function closeBuilderDispatch(fixture, attempt, taskWork = () => {}) {
   return context;
 }
 
-function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice", writeReview = true, priorIntegration = false, reviewedPath = "slice.txt", integrationConflict = false } = {}) {
+function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice", writeReview = true, priorIntegration = false, reviewedPath = "slice.txt", integrationConflict = false, conflictTopology = null } = {}) {
   mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
   mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+  if (conflictTopology) {
+    writeFileSync(join(fixture.repo, "rename-source.txt"), `shared line\n${Array.from({ length: 20 }, (_, index) => `stable ${index}`).join("\n")}\n`);
+    runGit(fixture.repo, ["add", "rename-source.txt"]);
+    runGit(fixture.repo, ["commit", "-m", "seed rename conflict source"]);
+    runGit(fixture.repo, ["branch", "-f", "slice-branch", "HEAD"]);
+  }
   const sliceWorktree = join(fixture.repo, ".opencode", "worktrees", "slice");
   mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
   runGit(fixture.repo, ["worktree", "add", sliceWorktree, "slice-branch"]);
   const diffBaseCommit = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
-  writeFileSync(join(sliceWorktree, reviewedPath), "reviewed slice bytes\n");
+  if (conflictTopology) {
+    runGit(sliceWorktree, ["mv", "rename-source.txt", reviewedPath]);
+    writeFileSync(join(sliceWorktree, reviewedPath), `slice changes shared line\n${Array.from({ length: 20 }, (_, index) => `stable ${index}`).join("\n")}\n`);
+  }
+  else {
+    mkdirSync(join(sliceWorktree, ...reviewedPath.split("/").slice(0, -1)), { recursive: true });
+    writeFileSync(join(sliceWorktree, reviewedPath), "reviewed slice bytes\n");
+  }
   runGit(sliceWorktree, ["add", "-A"]);
   runGit(sliceWorktree, ["commit", "-m", "reviewed slice"]);
   const reviewedCommit = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
@@ -3599,8 +3694,9 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
     convergence: review.convergence,
     remaining_fix_count: review.remaining_fix_count,
   };
+  const declaredPaths = conflictTopology ? ["rename-source.txt", reviewedPath] : [reviewedPath];
   const slices = [{
-    id: "slice", stack: "backend", depends_on: [], declared_paths: [reviewedPath], effective_paths: [reviewedPath], status: "review", attempts: 1, branch: "slice-branch", worktree: sliceWorktree,
+    id: "slice", stack: "backend", depends_on: [], declared_paths: declaredPaths, effective_paths: declaredPaths, status: "review", attempts: 1, branch: "slice-branch", worktree: sliceWorktree,
     evidence_ref: "evidence/slice.json", evidence_hash: evidenceHash,
     review_ref: "reviews/slice.json", review_hash: reviewHash, reviewed_commit: reviewedCommit,
     attempt_reviews: [attemptReview],
@@ -3624,7 +3720,7 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [
       ...(priorIntegration ? [{ id: "prior", stack: "backend", paths: ["prior.txt"], depends_on: [], acceptance: ["prior"], test_plan: ["prior"] }] : []),
-      { id: "slice", stack: "backend", paths: [reviewedPath], depends_on: [], acceptance: ["slice"], test_plan: ["slice"] },
+      { id: "slice", stack: "backend", paths: declaredPaths, depends_on: [], acceptance: ["slice"], test_plan: ["slice"] },
     ],
   });
   const claimStem = createHash("sha256").update(`${fixture.runId}\0slice\0${1}`, "utf8").digest("hex");
@@ -3667,8 +3763,16 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
   });
   if (!writeReview) rmSync(join(fixture.runDir, "reviews", "slice.json"));
   if (integrationConflict) {
-    writeFileSync(join(fixture.repo, reviewedPath), "competing integration bytes\n");
-    runGit(fixture.repo, ["add", reviewedPath]);
+    if (conflictTopology === "rename-modify") {
+      writeFileSync(join(fixture.repo, "rename-source.txt"), `integration changes shared line\n${Array.from({ length: 20 }, (_, index) => `stable ${index}`).join("\n")}\n`);
+      runGit(fixture.repo, ["add", "rename-source.txt"]);
+    } else if (conflictTopology === "rename-rename") {
+      runGit(fixture.repo, ["mv", "rename-source.txt", "renamed-by-integration.txt"]);
+    } else {
+      mkdirSync(join(fixture.repo, ...reviewedPath.split("/").slice(0, -1)), { recursive: true });
+      writeFileSync(join(fixture.repo, reviewedPath), "competing integration bytes\n");
+      runGit(fixture.repo, ["add", reviewedPath]);
+    }
     runGit(fixture.repo, ["commit", "-m", "competing integration change"]);
     const integrationBaseline = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
     const merge = spawnSync("git", ["merge", "--no-ff", "slice-branch", "-m", "merge reviewed slice"], { cwd: fixture.repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
@@ -3677,6 +3781,130 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
   }
   runGit(fixture.repo, ["merge", "--no-ff", "slice-branch", "-m", "merge reviewed slice"]);
   return { reviewedCommit, mergeCommit: gitOutput(fixture.repo, ["rev-parse", "HEAD"]), sliceWorktree, priorCommit };
+}
+
+async function resolveDelegatedConflict(fixture, sliceId, path, contents, sequence) {
+  const token = `delegated-conflict-${sequence}`;
+  const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: fixture.runId, route: "integration-conflict", agent: "backend-builder",
+  }, { claimDispatch: true, completionToken: token });
+  writeFileSync(join(fixture.repo, path), `${contents}\n`);
+  runGit(fixture.repo, ["add", path]);
+  runGit(fixture.repo, ["commit", "-m", contents]);
+  const resolutionHead = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  await completeSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: fixture.runId, route: "integration-conflict", agent: "backend-builder",
+    claim_ref: context.dispatch_claim.ref, claim_hash: context.dispatch_claim.hash, completion_token: token,
+  });
+  await transitionSliceMerged(fixture.runDir, sliceId, { merge_commit: resolutionHead });
+  return resolutionHead;
+}
+
+async function acceptIntegratedConflict(fixture, head, attempt) {
+  await transitionRunStep(fixture.runDir, "test-verifier", { status: "running", attempts: attempt });
+  const claimed = await claimCheckedTestExecution(fixture.runDir, { now: NOW, nonce: `123e4567-e89b-42d3-a456-${String(attempt).padStart(12, "0")}` });
+  const emptyStream = { captured_bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}`, truncated: false };
+  const receipt = {
+    schema_version: 1, kind: "checked-test-execution-receipt", subject: "test-verifier", run_id: fixture.runId, attempt,
+    claim_nonce: claimed.claim.nonce, plan_ref: claimed.claim.plan_ref, plan_hash: claimed.claim.plan_hash, head_sha: head,
+    started_at: NOW, completed_at: NOW, duration_ms: 0, status: "pass", review_ready: true,
+    commands: claimed.authority.commands.map((command, index) => ({ index, ...command, outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null, duration_ms: 0, stdout: emptyStream, stderr: emptyStream })),
+  };
+  await completeCheckedTestExecution(fixture.runDir, claimed.claim, claimed.authority, receipt, { now: NOW });
+  writeFileSync(join(fixture.runDir, "artifacts", "test-report.md"), `integrated conflict tests ${attempt} pass\n`);
+  const reviewRef = `reviews/test-verifier.attempt-${attempt}.json`;
+  writeJson(join(fixture.runDir, reviewRef), { subject: "test-verifier", attempt, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
+  return transitionRunStep(fixture.runDir, "test-verifier", {
+    status: "accepted", attempts: attempt, artifact_ref: "artifacts/test-report.md", evidence_ref: claimed.claim.receipt_ref, review_ref: reviewRef,
+  }, { mustExist: true });
+}
+
+function prepareAdditionalSliceConflict(fixture, { sliceId, branch, reviewedPath }) {
+  const baseline = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  runGit(fixture.repo, ["branch", branch, baseline]);
+  const worktree = join(fixture.repo, ".opencode", "worktrees", sliceId);
+  runGit(fixture.repo, ["worktree", "add", worktree, branch]);
+  writeFileSync(join(worktree, reviewedPath), `reviewed ${sliceId} bytes\n`);
+  runGit(worktree, ["add", reviewedPath]);
+  runGit(worktree, ["commit", "-m", `reviewed ${sliceId}`]);
+  const reviewedCommit = gitOutput(worktree, ["rev-parse", "HEAD"]);
+  const evidenceRef = `evidence/${sliceId}.json`;
+  const reviewRef = `reviews/${sliceId}.json`;
+  writeJson(join(fixture.runDir, evidenceRef), { subject: sliceId, status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, reviewRef), createV2SliceReviewRecord({ subject: sliceId, attempt: 1, reviewedCommit }));
+  const evidenceHash = hashFile(join(fixture.runDir, evidenceRef));
+  const reviewHash = hashFile(join(fixture.runDir, reviewRef));
+  const claimStem = createHash("sha256").update(`${fixture.runId}\0${sliceId}\0${1}`, "utf8").digest("hex");
+  const claimRef = `dispatch/${claimStem}.json`;
+  const closureRef = `dispatch/${claimStem}.closed.json`;
+  const completionToken = `prepare-${sliceId}`;
+  writeJson(join(fixture.runDir, claimRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: fixture.runId, slice_id: sliceId, attempt: 1,
+    agent: "backend-builder", branch, worktree, head: baseline, context_hash: HASH,
+    completion_token_hash: `sha256:${createHash("sha256").update(completionToken).digest("hex")}`, claimed_at: NOW, closure_ref: closureRef,
+  });
+  const claimHash = hashFile(join(fixture.runDir, claimRef));
+  writeJson(join(fixture.runDir, closureRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: claimRef, claim_hash: claimHash,
+    run_id: fixture.runId, slice_id: sliceId, attempt: 1, agent: "backend-builder", branch, worktree, head: baseline,
+    completion_head: reviewedCommit, context_hash: HASH, completion_token: completionToken, returned_at: NOW,
+  });
+  const closureHash = hashFile(join(fixture.runDir, closureRef));
+  const attemptReview = {
+    attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+    reviewed_commit: reviewedCommit, diff_base_commit: baseline, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
+  };
+  const planPath = join(fixture.runDir, "plan", "slices.json");
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const sliceIndex = run.slices.findIndex((slice) => slice.id === sliceId);
+  assert.notEqual(sliceIndex, -1, "additional slice must be planned before the first integrated acceptance");
+  run.slices[sliceIndex] = {
+    id: sliceId, stack: "backend", depends_on: ["slice"], declared_paths: [reviewedPath], effective_paths: [reviewedPath], status: "review", attempts: 1,
+    branch, worktree, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit,
+    attempt_reviews: [attemptReview], dispatch_required: true, dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
+  };
+  writeJson(join(fixture.runDir, "run.json"), run);
+  writeFileSync(join(fixture.repo, reviewedPath), `competing ${sliceId} bytes\n`);
+  runGit(fixture.repo, ["add", reviewedPath]);
+  runGit(fixture.repo, ["commit", "-m", `competing ${sliceId} change`]);
+  const merge = spawnSync("git", ["merge", "--no-ff", branch, "-m", `merge ${sliceId}`], { cwd: fixture.repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.notEqual(merge.status, 0, "additional slice merge must conflict");
+}
+
+function seedPendingSlice(fixture, { sliceId, reviewedPath }) {
+  const planPath = join(fixture.runDir, "plan", "slices.json");
+  const plan = readJson(planPath);
+  plan.slices.push({ id: sliceId, stack: "backend", paths: [reviewedPath], depends_on: ["slice"], acceptance: [sliceId], test_plan: [sliceId] });
+  writeJson(planPath, plan);
+  const run = readJson(join(fixture.runDir, "run.json"));
+  run.slices.push({ id: sliceId, stack: "backend", depends_on: ["slice"], declared_paths: [reviewedPath], effective_paths: [reviewedPath], status: "pending", attempts: 0 });
+  run.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+  writeJson(join(fixture.runDir, "run.json"), run);
+}
+
+function makeConflictPathUndeclared(fixture, path) {
+  const planPath = join(fixture.runDir, "plan", "slices.json");
+  const plan = readJson(planPath);
+  plan.slices[0].paths = ["src/**"];
+  writeJson(planPath, plan);
+  const evidencePath = join(fixture.runDir, "evidence", "slice.json");
+  const reviewPath = join(fixture.runDir, "reviews", "slice.json");
+  const evidence = readJson(evidencePath);
+  evidence.ownership_disclosure = [{ path, rationale: "The adversarial fixture models a formerly ratified control-plane excursion." }];
+  writeJson(evidencePath, evidence);
+  const review = readJson(reviewPath);
+  review.ownership_ratification.paths = [path];
+  writeJson(reviewPath, review);
+  const run = readJson(join(fixture.runDir, "run.json"));
+  const slice = run.slices[0];
+  slice.declared_paths = ["src/**"];
+  slice.effective_paths = ["src/**", path];
+  slice.evidence_hash = hashFile(evidencePath);
+  slice.review_hash = hashFile(reviewPath);
+  Object.assign(slice.attempt_reviews[0], { ratified_paths: [path], evidence_hash: slice.evidence_hash, review_hash: slice.review_hash });
+  run.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
+  writeJson(join(fixture.runDir, "run.json"), run);
 }
 
 function prepareLegacyPanelState(fixture) {

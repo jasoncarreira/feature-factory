@@ -15,6 +15,7 @@ import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
+import { isPrivilegedControlPlanePath, privilegedControlPlanePathReason } from "./privileged-path-policy.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -46,10 +47,6 @@ const SECURITY_BINDING_KEYS = Object.freeze(["review_hash", "reviewed_head_sha"]
 const PR_FENCE_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "head_ref", "head_sha", "base_ref", "base_sha", "draft"]);
 const CARRY_FORWARD_PLANNING_KINDS = new Set(["story", "research_map", "design_brief", "technical_brief"]);
 const SLICE_BUILDER_AGENTS = new Set(["backend-builder", "frontend-builder"]);
-const RATIFICATION_CONTRACT_PATHS = new Set([
-  "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
-  ".nvmrc", ".node-version", ".npmrc", ".yarnrc", ".yarnrc.yml", "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
-]);
 const SAFE_TASK_DISPATCH_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const CONTINUATION_PARENT_ARTIFACTS = Object.freeze([
   ["story", "artifacts/story.md"],
@@ -1584,11 +1581,13 @@ export function observeCarryForwardAuthority(repoInput, parentRunDirInput, paren
     if (!Number.isInteger(slice.attempts) || slice.attempts < 1) throw new Error(`accepted slice '${planned.id}' attempts must be positive`);
     const observed = assertSliceReviewBindingCurrent(parentRunDir, planned.id, slice);
     if (observed.review.verdict !== "APPROVE") throw new Error(`accepted slice '${planned.id}' requires APPROVE review`);
+    if (slice.integration_conflict) assertSliceIntegrationConflictCurrent(parentRunDir, parentRun, slice, { ...options, repoRoot: repo });
     acceptedSlices.push({
       id: planned.id, declared_paths: cloneJson(slice.declared_paths), effective_paths: cloneJson(slice.effective_paths),
       attempts: slice.attempts, evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
       review_ref: slice.review_ref, review_hash: slice.review_hash, reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit,
       attempt_reviews: cloneJson(slice.attempt_reviews),
+      ...(slice.integration_conflict ? { integration_conflict: cloneJson(slice.integration_conflict) } : {}),
     });
   }
   if (remainingSliceIds.length === 0) throw new Error("v2 carry-forward requires at least one nonmerged slice");
@@ -1596,7 +1595,7 @@ export function observeCarryForwardAuthority(repoInput, parentRunDirInput, paren
   const branch = git(repo, ["rev-parse", "--verify", `refs/heads/${parentRun.branch}^{commit}`]);
   if (!branch.ok || !/^[0-9a-f]{40}$/u.test(branch.stdout.trim())) throw new Error("v2 carry-forward parent branch HEAD cannot be observed");
   const startCommit = branch.stdout.trim();
-  assertObservedCarryForwardIntegration(repo, targetBaseCommit, startCommit, acceptedSlices);
+  assertObservedCarryForwardIntegration(repo, parentRunDir, parentRun, targetBaseCommit, startCommit, acceptedSlices, options);
   assertObservedCarryForwardPanels(parentRunDir, parentRun, startCommit);
   assertObservedOriginBase(repo, targetBaseRef, targetBaseCommit, startCommit, options);
   return {
@@ -1605,7 +1604,7 @@ export function observeCarryForwardAuthority(repoInput, parentRunDirInput, paren
   };
 }
 
-function assertObservedCarryForwardIntegration(repo, baseCommit, startCommit, acceptedSlices) {
+function assertObservedCarryForwardIntegration(repo, parentRunDir, parentRun, baseCommit, startCommit, acceptedSlices, options = {}) {
   if (!git(repo, ["merge-base", "--is-ancestor", baseCommit, startCommit]).ok) throw new Error("v2 carry-forward start_commit must descend from target.base_commit");
   if (acceptedSlices.length === 0) {
     if (startCommit !== baseCommit) throw new Error("v2 carry-forward with zero accepted slices requires start_commit equal target.base_commit");
@@ -1620,9 +1619,13 @@ function assertObservedCarryForwardIntegration(repo, baseCommit, startCommit, ac
   }
   for (const [index, mergeCommit] of chain.entries()) {
     const accepted = acceptedByMerge.get(mergeCommit);
-    const proof = observeReviewedMergeProof(repo, accepted.id, mergeCommit, accepted.reviewed_commit);
+    let firstParent;
+    if (accepted.integration_conflict) {
+      assertSliceIntegrationConflictCurrent(parentRunDir, parentRun, parentRun.slices.find((slice) => slice.id === accepted.id), { ...options, repoRoot: repo });
+      firstParent = accepted.integration_conflict.integration_baseline;
+    } else firstParent = observeReviewedMergeProof(repo, accepted.id, mergeCommit, accepted.reviewed_commit).first_parent;
     const expectedFirstParent = index === 0 ? baseCommit : chain[index - 1];
-    if (proof.first_parent !== expectedFirstParent) throw new Error(`accepted slice '${accepted.id}' merge first parent does not match the actual first-parent chain`);
+    if (firstParent !== expectedFirstParent) throw new Error(`accepted slice '${accepted.id}' merge first parent does not match the actual first-parent chain`);
   }
 }
 
@@ -1848,6 +1851,7 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
       status: "merged", attempts: adopted.attempts,
       evidence_ref: adopted.evidence_ref, evidence_hash: adopted.evidence_hash, review_ref: adopted.review_ref, review_hash: adopted.review_hash,
       reviewed_commit: adopted.reviewed_commit, merge_commit: adopted.merge_commit, attempt_reviews: adopted.attempt_reviews,
+      ...(adopted.integration_conflict ? { integration_conflict: adopted.integration_conflict } : {}),
     };
     if (!sameJson(row, expected)) throw new Error(`adopted carry-forward slice '${row.id}' is immutable`);
     for (const [ref, hash, label] of [[row.evidence_ref, row.evidence_hash, "evidence"], [row.review_ref, row.review_hash, "review"]]) {
@@ -1855,6 +1859,7 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
       assertNoSymlinkPath(runDir, path, `adopted slice ${label}`);
       if (!existsSync(path) || !lstatSync(path).isFile() || hashFile(path) !== hash) throw new Error(`adopted carry-forward slice '${row.id}' ${label} sidecar changed`);
     }
+    if (row.integration_conflict) assertSliceIntegrationConflictCurrent(runDir, run, row, { runDir });
   }
 }
 
@@ -2176,19 +2181,26 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
       }
       assertDraftSpecReuseAttempt(draft, steps[stepIndex], priorStep);
       decompositionAuthority = bindStepAcceptance(runDir, steps[stepIndex], draft, options) || decompositionAuthority;
-      if (steps[stepIndex]?.agent === "test-verifier" && steps[stepIndex].status === "accepted" && draft.integration_conflict?.status === "pending-integrated-review") {
-        assertIntegrationConflictRecordCurrent(runDir, draft, options);
-        draft.integration_conflict.status = "accepted";
-        draft.integration_conflict.test_acceptance = cloneJson(steps[stepIndex].acceptance);
+      if (steps[stepIndex]?.agent === "test-verifier" && steps[stepIndex].status === "accepted") {
+        const pending = integrationConflictSlices(draft).filter(({ conflict }) => conflict.status === "pending-integrated-review");
+        for (const { slice, conflict } of pending) {
+          assertSliceIntegrationConflictCurrent(runDir, draft, slice, options);
+          const snapshot = await snapshotIntegrationConflictTestArtifact(runDir, slice, conflict, steps[stepIndex].acceptance);
+          conflict.status = "accepted";
+          conflict.test_acceptance = cloneJson(steps[stepIndex].acceptance);
+          conflict.test_artifact_snapshot = snapshot;
+          conflict.test_execution_claim = cloneJson(steps[stepIndex].execution_claim);
+          conflict.test_execution_claim_hash = steps[stepIndex].execution_claim_hash;
+        }
       }
     }
   }, options, {
     authorizedStep: stepIdentityForSelector(stepSelector),
     allowInheritedAcceptance: authority.allowInheritedAcceptance,
-    integrationConflict: "test-acceptance",
+    integrationConflicts: "test-acceptance",
     beforeReplace: (next) => {
       if (decompositionAuthority) assertAcceptedDecompositionAuthorityCurrent(runDir, next, decompositionAuthority);
-      if (next.integration_conflict) assertIntegrationConflictRecordCurrent(runDir, next, options);
+      assertSliceIntegrationConflictsCurrent(runDir, next, options);
     },
   }), options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
@@ -2255,7 +2267,7 @@ function assertDraftSpecReuseAttempt(run, step, priorStep) {
 
 function assertTestVerifierIntegrationGate(run, step, priorStep) {
   if (step?.agent !== "test-verifier") return;
-  if ((run.continuation?.schema_version === 2 || run.integration_conflict) && step.status === "accepted") {
+  if ((run.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.status === "accepted") {
     if (priorStep?.status !== "running" || !Number.isInteger(step.attempts) || step.attempts < 1 || step.attempts !== priorStep.attempts) {
       throw new Error("schema-v2 test-verifier acceptance must transition from running at the same positive attempt");
     }
@@ -2296,7 +2308,7 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
   if (!step) return null;
   delete step.acceptance;
   if (step.status !== "accepted") return null;
-  if ((run?.continuation?.schema_version === 2 || run?.integration_conflict) && step.agent === "test-verifier") {
+  if ((run?.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.agent === "test-verifier") {
     step.acceptance = observeV2TestVerifierAuthority(runDir, run, step, options).acceptance;
     return null;
   }
@@ -2461,7 +2473,8 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
     draft.slices = slices;
     if (mergeAuthority.integration_conflict) {
       const conflict = mergeAuthority.integration_conflict;
-      draft.integration_conflict = {
+      if (currentSlice.integration_conflict !== undefined) throw new Error(`slice '${sliceId}' already carries immutable integration-conflict authority`);
+      slices[sliceIndex].integration_conflict = {
         schema_version: 1,
         status: "pending-integrated-review",
         slice_id: sliceId,
@@ -2482,7 +2495,6 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
   }, options, {
     sliceTransition: true,
     consumeSpecialDispatch: true,
-    integrationConflict: "transfer",
     beforeReplace: (next, current) => {
       if (mergeAuthority.integration_conflict) {
         const observed = observeSliceMergeAuthority(runDir, current, sliceId, current.slices[sliceIndex], mergeAuthority.merge_commit, options);
@@ -2599,9 +2611,9 @@ export async function transitionPanelVerdicts(runDir, input, options = {}) {
   let v2Authority = null;
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
     if (mergedSliceRepairFence(current)) throw new Error("panel verdicts are fenced while a merged-slice repair is unresolved");
-    if (current.integration_conflict) {
-      if (current.integration_conflict.status !== "accepted") throw new Error("panel verdicts require fresh integrated conflict tests and review");
-      assertIntegrationConflictRecordCurrent(runDir, current, options);
+    if (integrationConflictSlices(current).length > 0) {
+      if (integrationConflictSlices(current).some(({ conflict }) => conflict.status !== "accepted")) throw new Error("panel verdicts require fresh integrated conflict tests and review");
+      assertSliceIntegrationConflictsCurrent(runDir, current, options);
     }
     v2Authority = assertV2FreshDownstreamAuthority(runDir, current, "panel publication");
     const exactReplay = panelBaseEquals(current.validator, request.validator) && panelBaseEquals(current.security_review, request.security_review);
@@ -2641,7 +2653,7 @@ export async function transitionPanelVerdicts(runDir, input, options = {}) {
     consumeSpecialDispatch: true,
     beforeReplace: (_next, current) => {
       assertV2FreshDownstreamAuthority(runDir, current, "panel publication", v2Authority);
-      if (current.integration_conflict) assertIntegrationConflictRecordCurrent(runDir, current, options);
+      assertSliceIntegrationConflictsCurrent(runDir, current, options);
       assertPanelVerdictAuthorityCurrent(runDir, current, request, authority, options);
     },
   }), options);
@@ -2863,16 +2875,8 @@ function assertScopedAuthorityTransitions(current, next, hooks = {}) {
       throw new Error("run special_builder_dispatch can only be changed by checked special Task dispatch transitions");
     }
   }
-  if (!sameJson(current.integration_conflict, next.integration_conflict)) {
-    const transferred = hooks.integrationConflict === "transfer" && current.integration_conflict === undefined
-      && current.special_builder_dispatch?.route === "integration-conflict" && next.special_builder_dispatch === undefined
-      && next.integration_conflict?.status === "pending-integrated-review";
-    const accepted = hooks.integrationConflict === "test-acceptance" && current.integration_conflict?.status === "pending-integrated-review"
-      && next.integration_conflict?.status === "accepted"
-      && sameJson({ ...current.integration_conflict, status: "accepted", test_acceptance: next.integration_conflict.test_acceptance }, next.integration_conflict);
-    if (!transferred && !accepted) throw new Error("run integration_conflict can change only through checked conflict transfer and integrated test review acceptance");
-  }
-  if (hooks.slicesSeed !== true && hooks.sliceTransition !== true && !sameJson(current.slices, next.slices)) {
+  const acceptedIntegrationConflicts = hooks.integrationConflicts === "test-acceptance" && isExactIntegrationConflictAcceptanceTransition(current.slices, next.slices);
+  if (hooks.slicesSeed !== true && hooks.sliceTransition !== true && !acceptedIntegrationConflicts && !sameJson(current.slices, next.slices)) {
     throw new Error("run slices can only be changed by checked slice transitions");
   }
   if (hooks.panelVerdicts !== true) {
@@ -3933,7 +3937,8 @@ function assertPrCreatedSliceState(runDir, run) {
 
 export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, policy = {}) {
   const continuationEligible = run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation";
-  const conflictEligible = isRecord(run?.integration_conflict);
+  const conflicts = integrationConflictSlices(run);
+  const conflictEligible = conflicts.length > 0;
   if (!continuationEligible && !conflictEligible) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2 child or delegated integration conflict");
   const repository = resolve(runDir, "../../..");
   const target = run.continuation?.target;
@@ -3944,7 +3949,7 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
   if (run.status !== "running") throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
   if (policy.skipLocalAuthority !== true) {
     if (continuationEligible) assertV2LocalPublishedAuthority(runDir, run, options);
-    if (conflictEligible && run.integration_conflict.status === "pending-integrated-review") assertIntegrationConflictRecordCurrent(runDir, run, options);
+    if (conflictEligible) assertSliceIntegrationConflictsCurrent(runDir, run, options);
   }
   const step = uniqueTestVerifierStep(run);
   if (!step || !Number.isInteger(step.attempts) || step.attempts < 1) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires exactly one positive-attempt test-verifier step");
@@ -4130,9 +4135,9 @@ export function assertPanelReviewBindingsCurrent(runDir, run) {
   if (!hasCompleteBinding(run.validator, VALIDATOR_BINDING_KEYS) || !hasCompleteBinding(run.security_review, SECURITY_BINDING_KEYS)) {
     throw new Error("pr-created requires successor validator and security reviewed-head bindings");
   }
-  if (run.integration_conflict) {
-    if (run.integration_conflict.status !== "accepted") throw new Error("panel bindings require accepted integrated conflict authority");
-    assertIntegrationConflictRecordCurrent(runDir, run, {});
+  if (integrationConflictSlices(run).length > 0) {
+    if (integrationConflictSlices(run).some(({ conflict }) => conflict.status !== "accepted")) throw new Error("panel bindings require accepted integrated conflict authority");
+    assertSliceIntegrationConflictsCurrent(runDir, run, {});
   }
   const request = {
     validator: panelBaseRecord(run.validator, true),
@@ -4409,17 +4414,19 @@ function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, evi
     const planLanes = decomposition.plan.slices.map((candidate) => ({ id: candidate.id, lanes: candidate.paths.map(ownershipLane) }));
     const changeKinds = observeChangedPathKinds(gitAuthority.repository, diffBaseCommit, gitAuthority.head, options);
     for (const path of ratifiedPaths) {
-      if (isRatificationContractPath(path)) throw new Error(`slice '${sliceId}' cannot ratify unsafe contract path '${path}'`);
-      if (isGeneratedConflictPath(path)) throw new Error(`slice '${sliceId}' cannot ratify generated path '${path}'`);
-      if (["deleted", "renamed"].includes(changeKinds.get(path))) throw new Error(`slice '${sliceId}' cannot ratify ${changeKinds.get(path)} path '${path}'`);
-      for (const commit of [diffBaseCommit, gitAuthority.head]) {
-        const entry = authorityGit(options, gitAuthority.repository, ["ls-tree", "-z", commit, "--", `:(literal)${path}`]);
-        if (!entry.ok) throw new Error(`slice '${sliceId}' cannot observe ratification tree entry '${path}'`);
-        if (/^(120000|160000) /u.test(entry.stdout)) throw new Error(`slice '${sliceId}' cannot ratify symlink or submodule path '${path}'`);
-      }
       const owners = planLanes.filter((candidate) => candidate.lanes.some((lane) => ownershipLaneContains(lane, path))).map((candidate) => candidate.id);
       if (owners.length > 1) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has ambiguous plan ownership: ${owners.join(", ")}`);
       if (owners.length !== 0) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has declared plan ownership`);
+      const privilegedReason = privilegedControlPlanePathReason(path);
+      if (privilegedReason) throw new Error(`slice '${sliceId}' cannot ratify privileged control-plane path '${path}' (${privilegedReason}); it requires explicit declared plan ownership`);
+      if (changeKinds.get(path) !== "added") throw new Error(`slice '${sliceId}' unowned extension '${path}' must be a newly added private regular file`);
+      const baselineEntry = authorityGit(options, gitAuthority.repository, ["ls-tree", "-z", diffBaseCommit, "--", `:(literal)${path}`]);
+      const reviewedEntry = authorityGit(options, gitAuthority.repository, ["ls-tree", "-z", gitAuthority.head, "--", `:(literal)${path}`]);
+      if (!baselineEntry.ok || !reviewedEntry.ok) throw new Error(`slice '${sliceId}' cannot observe ratification tree entry '${path}'`);
+      if (baselineEntry.stdout !== "") throw new Error(`slice '${sliceId}' unowned extension '${path}' must be absent at the first checked dispatch baseline`);
+      if (!/^(100644|100755) blob [0-9a-f]{40}\t/u.test(reviewedEntry.stdout)) {
+        throw new Error(`slice '${sliceId}' cannot ratify symlink or submodule path '${path}'; unowned extensions must be private regular files`);
+      }
     }
   }
   return {
@@ -4491,11 +4498,6 @@ function ownershipLane(path) {
 
 function ownershipLaneContains(lane, path) {
   return lane.recursive ? path.startsWith(`${lane.base}/`) : path === lane.base;
-}
-
-function isRatificationContractPath(path) {
-  return RATIFICATION_CONTRACT_PATHS.has(path) || path.startsWith(".yarn/") || path.startsWith("node_modules/")
-    || (!path.includes("/") && (/^(?:tsconfig(?:\.[^.]+)?\.json|(?:eslint|prettier|babel|webpack|vite|vitest|jest)\.config\.[A-Za-z0-9]+)$/u.test(path) || /^\.env(?:\.|$)/u.test(path)));
 }
 
 export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
@@ -5097,18 +5099,26 @@ function observeIntegrationConflictAuthority(repository, runDir, run, options = 
   const currentSlice = candidates[0];
   const currentReview = assertSliceReviewBindingCurrent(runDir, currentSlice.id, currentSlice);
   if (currentReview.review.verdict !== "APPROVE") throw new Error("integration-conflict dispatch requires an APPROVE current-slice review");
+  const mergeBases = authorityGit(options, repository, ["merge-base", "--all", integrationBaseline, reviewedCommit]);
+  const bases = mergeBases.ok ? mergeBases.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean) : [];
+  if (bases.length !== 1 || !/^[0-9a-f]{40}$/u.test(bases[0])) throw new Error("integration-conflict dispatch requires one unique merge base");
+  const renameCopyEndpoints = new Set([
+    ...observeRenameCopyEndpoints(repository, bases[0], integrationBaseline, options, "integration-conflict integration parent diff"),
+    ...observeRenameCopyEndpoints(repository, bases[0], reviewedCommit, options, "integration-conflict reviewed parent diff"),
+  ]);
 
   const status = git(worktree, gitCleanlinessArgs());
   const unmerged = git(worktree, ["ls-files", "-u", "-z"]);
   if (!status.ok || !unmerged.ok || status.stdout === "" || unmerged.stdout === "") throw new Error("integration-conflict paths cannot be observed");
   const statusRecords = parseNulRecords(status.stdout, "integration-conflict status");
   const conflictPaths = [];
+  let unsupportedConflictCode = false;
   for (const record of statusRecords) {
     if (record.length < 4 || record[2] !== " ") throw new Error("integration-conflict status contains an invalid path record");
     const code = record.slice(0, 2);
     const path = record.slice(3);
     if (code.includes("U") || code === "AA" || code === "DD") {
-      if (!new Set(["UU", "AA"]).has(code)) throw new Error("integration-conflict delete or non-textual conflict cannot dispatch");
+      if (!new Set(["UU", "AA"]).has(code)) unsupportedConflictCode = true;
       const canonical = normalizeRepositoryPath(path);
       if (canonical !== path || path.normalize("NFC") !== path || !isCanonicalConcreteRepositoryPath(path)) throw new Error("integration-conflict path is invalid");
       conflictPaths.push(path);
@@ -5118,6 +5128,10 @@ function observeIntegrationConflictAuthority(repository, runDir, run, options = 
   }
   conflictPaths.sort();
   if (conflictPaths.length === 0 || new Set(conflictPaths).size !== conflictPaths.length) throw new Error("integration-conflict paths must be nonempty and unique");
+  if (conflictPaths.some((path) => renameCopyEndpoints.has(path))) {
+    throw new Error("integration-conflict path is a rename or copy endpoint on a merge parent diff and cannot dispatch");
+  }
+  if (unsupportedConflictCode) throw new Error("integration-conflict delete or non-textual conflict cannot dispatch");
   const unmergedEntries = parseNulRecords(unmerged.stdout, "integration-conflict index");
   const indexedPaths = new Set();
   for (const record of unmergedEntries) {
@@ -5134,11 +5148,11 @@ function observeIntegrationConflictAuthority(repository, runDir, run, options = 
       if (!blob.ok || blob.stdout.includes("\0")) throw new Error("integration-conflict binary or unreadable conflict cannot dispatch");
     }
   }
-  if (conflictPaths.some((path) => isRatificationContractPath(path) || isGeneratedConflictPath(path))) {
-    throw new Error("integration-conflict contract or generated path cannot dispatch");
-  }
-
   const ownership = createOwnershipIndex((run.slices || []).map((slice) => ({ id: slice.id, stack: slice.stack, effective_paths: slice.effective_paths })));
+  const declaredOwnership = createOwnershipIndex((run.slices || []).map((slice) => ({ id: slice.id, stack: slice.stack, effective_paths: slice.declared_paths })));
+  if (conflictPaths.some((path) => isPrivilegedControlPlanePath(path) && declaredOwnership.owners(path).length !== 1)) {
+    throw new Error("integration-conflict privileged control-plane conflict path requires explicit declared plan ownership");
+  }
   const owners = conflictPaths.map((path) => ownership.owners(path));
   if (owners.some((matches) => matches.length > 1)) throw new Error("integration-conflict ambiguous effective ownership cannot dispatch");
   const soleOwnerIds = new Set(owners.filter((matches) => matches.length === 1).map(([owner]) => owner.id));
@@ -5178,9 +5192,24 @@ function parseNulRecords(value, label) {
   return records;
 }
 
-function isGeneratedConflictPath(path) {
-  return path.startsWith("dist/") || path.startsWith("build/") || path.startsWith("coverage/") || path.startsWith("generated/")
-    || path.split("/").includes("generated") || /(?:^|\.)generated\.[^/]+$/u.test(path);
+function observeRenameCopyEndpoints(repository, from, to, options, label) {
+  const result = authorityGit(options, repository, ["diff", "--name-status", "-z", "--find-renames", "--find-copies-harder", from, to]);
+  if (!result.ok) throw new Error(`${label} cannot be observed`);
+  if (result.stdout === "") return new Set();
+  const records = parseNulRecords(result.stdout, label);
+  const endpoints = new Set();
+  for (let index = 0; index < records.length;) {
+    const status = records[index++];
+    const first = records[index++];
+    if (!/^(?:[AMDTUXB]|[RC][0-9]{1,3})$/u.test(status) || !first) throw new Error(`${label} contains an invalid change record`);
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const second = records[index++];
+      if (!second) throw new Error(`${label} contains an invalid rename or copy record`);
+      endpoints.add(first);
+      endpoints.add(second);
+    }
+  }
+  return endpoints;
 }
 
 function observeIntegrationConflictCompletionProof(repository, run, claim, completionHead, options = {}) {
@@ -5231,8 +5260,18 @@ function observeIntegrationConflictCompletionProof(repository, run, claim, compl
   };
 }
 
-function assertIntegrationConflictRecordCurrent(runDir, run, options = {}) {
-  const conflict = run.integration_conflict;
+function integrationConflictSlices(run) {
+  return (Array.isArray(run?.slices) ? run.slices : [])
+    .filter((slice) => isRecord(slice?.integration_conflict))
+    .map((slice) => ({ slice, conflict: slice.integration_conflict }));
+}
+
+function assertSliceIntegrationConflictsCurrent(runDir, run, options = {}) {
+  return integrationConflictSlices(run).map(({ slice }) => assertSliceIntegrationConflictCurrent(runDir, run, slice, options));
+}
+
+function assertSliceIntegrationConflictCurrent(runDir, run, slice, options = {}) {
+  const conflict = slice?.integration_conflict;
   if (!conflict) return null;
   const repository = resolveAuthorityRepository(runDir, run, options);
   if (!stringValue(repository)) throw new Error("integration-conflict review binding requires a local repository");
@@ -5254,14 +5293,90 @@ function assertIntegrationConflictRecordCurrent(runDir, run, options = {}) {
     throw new Error("integration-conflict resolution commit must be an ancestor of the exact integrated review head");
   }
   if (conflict.status === "accepted") {
-    const step = uniqueTestVerifierStep(run);
-    if (!step || step.status !== "accepted" || !sameJson(step.acceptance, conflict.test_acceptance)) {
-      throw new Error("integration-conflict accepted authority must equal exact test-verifier acceptance");
-    }
-    const authority = observeV2TestVerifierAuthority(runDir, run, step, { ...options, runDir });
-    if (!sameJson(authority.acceptance, conflict.test_acceptance)) throw new Error("integration-conflict test acceptance bytes or head are stale");
+    assertHistoricalIntegrationConflictTestAcceptance(runDir, run, conflict, integration, options);
   }
   return { observed, closed, proof, integration };
+}
+
+async function snapshotIntegrationConflictTestArtifact(runDir, slice, conflict, acceptance) {
+  const source = resolveArtifactRef(runDir, acceptance.artifact_ref);
+  const bytes = readRegularNonEmptyFile(source.path, "integration-conflict test artifact");
+  if (sha256Bytes(bytes) !== acceptance.artifact_hash) throw new Error("integration-conflict test artifact hash is stale before snapshot");
+  const digest = createHash("sha256").update(`${slice.id}\0${conflict.resolution_commit}`, "utf8").digest("hex");
+  const ref = `artifacts/integration-conflicts/${digest}.test-report.md`;
+  const path = resolve(runDir, ref);
+  await mkdir(dirname(path), { recursive: true });
+  assertNoSymlinkPath(runDir, dirname(path), "integration-conflict test artifact snapshot directory");
+  try {
+    await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    assertNoSymlinkPath(runDir, path, "integration-conflict test artifact snapshot");
+    if (!readFileSync(path).equals(bytes)) throw new Error("integration-conflict test artifact snapshot conflicts with existing bytes");
+  }
+  return { ref, hash: acceptance.artifact_hash };
+}
+
+function assertHistoricalIntegrationConflictTestAcceptance(runDir, run, conflict, integration, options = {}) {
+  const acceptance = conflict.test_acceptance;
+  const executionClaim = conflict.test_execution_claim;
+  if (!isRecord(acceptance) || !isRecord(executionClaim) || conflict.test_execution_claim_hash !== hashValue(executionClaim)) {
+    throw new Error("integration-conflict accepted test execution claim is stale");
+  }
+  const artifact = resolveArtifactRef(runDir, conflict.test_artifact_snapshot?.ref);
+  const evidence = resolveEvidenceRef(runDir, acceptance.evidence_ref);
+  const review = resolveReviewRef(runDir, acceptance.review_ref);
+  if (hashFile(artifact.path) !== conflict.test_artifact_snapshot.hash || conflict.test_artifact_snapshot.hash !== acceptance.artifact_hash
+    || hashFile(evidence.path) !== acceptance.evidence_hash || hashFile(review.path) !== acceptance.review_hash) {
+    throw new Error("integration-conflict accepted test sidecar bytes are stale");
+  }
+  const receipt = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, "integration-conflict checked test receipt"));
+  const reviewValue = parseJsonObjectFile(review.path, "integration-conflict test review");
+  if (executionClaim.state !== "completed" || executionClaim.status !== "pass" || executionClaim.receipt_ref !== acceptance.evidence_ref
+    || executionClaim.receipt_hash !== acceptance.evidence_hash || executionClaim.head_sha !== acceptance.reviewed_head_sha
+    || receipt.run_id !== executionClaim.run_id || receipt.attempt !== executionClaim.attempt || receipt.claim_nonce !== executionClaim.nonce
+    || receipt.plan_ref !== executionClaim.plan_ref || receipt.plan_hash !== executionClaim.plan_hash || receipt.head_sha !== executionClaim.head_sha
+    || receipt.status !== "pass" || receipt.review_ready !== true) {
+    throw new Error("integration-conflict accepted checked test receipt is stale or cross-bound");
+  }
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+  const commands = decomposition.plan.integration_gate.required_commands;
+  if (executionClaim.plan_ref !== PLAN_SLICES_REF || executionClaim.plan_hash !== decomposition.plan_hash || receipt.commands.length !== commands.length
+    || receipt.commands.some((result, index) => result.index !== index || result.program !== commands[index].program || !sameJson(result.args, commands[index].args) || result.status !== "pass")) {
+    throw new Error("integration-conflict accepted checked test commands differ from the exact plan");
+  }
+  if (reviewValue.subject !== "test-verifier" || reviewValue.attempt !== executionClaim.attempt || String(reviewValue.verdict || "").toUpperCase() !== "APPROVE"
+    || reviewValue.reviewed_head_sha !== acceptance.reviewed_head_sha) {
+    throw new Error("integration-conflict accepted test review is stale or cross-bound");
+  }
+  if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", conflict.resolution_commit, acceptance.reviewed_head_sha]).ok
+    || !authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", acceptance.reviewed_head_sha, integration.head]).ok) {
+    throw new Error("integration-conflict accepted test head is outside the exact integrated ancestry");
+  }
+}
+
+function isExactIntegrationConflictAcceptanceTransition(currentSlices, nextSlices) {
+  if (!Array.isArray(currentSlices) || !Array.isArray(nextSlices) || currentSlices.length !== nextSlices.length) return false;
+  let accepted = 0;
+  for (const [index, current] of currentSlices.entries()) {
+    const next = nextSlices[index];
+    if (current?.id !== next?.id) return false;
+    const priorConflict = current.integration_conflict;
+    const nextConflict = next.integration_conflict;
+    if (priorConflict?.status === "pending-integrated-review") {
+      if (nextConflict?.status !== "accepted") return false;
+      const stripped = cloneJson(nextConflict);
+      delete stripped.test_acceptance;
+      delete stripped.test_artifact_snapshot;
+      delete stripped.test_execution_claim;
+      delete stripped.test_execution_claim_hash;
+      stripped.status = "pending-integrated-review";
+      if (!sameJson(stripped, priorConflict)) return false;
+      accepted += 1;
+    } else if (!sameJson(priorConflict, nextConflict)) return false;
+    if (!sameJson({ ...current, integration_conflict: nextConflict }, next)) return false;
+  }
+  return accepted > 0;
 }
 
 function observeClosedIntegrationConflictForSlice(runDir, run, sliceId, mergeCommit, repository, options = {}) {
@@ -5968,6 +6083,7 @@ function assertSliceTransition(runDir, prior, next) {
   if (next.status === "review" && next.attempts !== priorAttempts) throw new Error(`slice '${prior.id}' review requires the current running attempt ${priorAttempts}`);
   if (next.status === "blocked" && next.attempts !== priorAttempts) throw new Error(`slice '${prior.id}' blocked transition cannot change attempts`);
   if (!sameJson(prior.attempt_reviews || [], next.attempt_reviews || [])) throw new Error(`slice '${prior.id}' attempt review history is managed by checked review publication`);
+  if (!sameJson(prior.integration_conflict, next.integration_conflict)) throw new Error(`slice '${prior.id}' integration_conflict is managed by checked delegated merge and test acceptance`);
   if (prior.dispatch_required === true && next.dispatch_required !== true) throw new Error(`slice '${prior.id}' dispatch_required is immutable once enabled`);
   const advancingAttempt = next.attempts === priorAttempts + 1;
   for (const key of SLICE_DISPATCH_BINDING_KEYS) {
