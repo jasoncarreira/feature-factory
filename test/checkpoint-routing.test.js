@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { buildCheckpointRoutingManifest, CHECKPOINT_ROUTING_TERMINAL_REASON } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
+import { listRuns, status, validateState } from "../src/factory.js";
 import { transitionRunStep, transitionSlicesSeed, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
 import { hashValue } from "../src/refs.js";
 
@@ -348,8 +349,65 @@ describe("B4.3 checkpoint routing", () => {
         null, "checkpoint-001", "checkpoint-002", "checkpoint-003", "checkpoint-004",
       ]);
       assert.equal(manifest.sequencing.next_checkpoint_rule, "Checkpoint N+1 may start only from main containing merged PR N.");
+      const publicStatus = status(fixture.runId, { cwd: fixture.repo });
+      const publicList = listRuns({ cwd: fixture.repo }).find((item) => item.run_id === fixture.runId);
+      const publicValidation = validateState(fixture.runId, { cwd: fixture.repo });
+      assert.equal(publicStatus.status, "blocked", JSON.stringify(publicStatus));
+      assert.deepEqual(publicStatus.diagnostics.items.map((item) => item.condition), ["terminal-run"]);
+      assert.equal(publicList.status, "blocked");
+      assert.deepEqual(publicList.diagnostics.items.map((item) => item.condition), ["terminal-run"]);
+      assert.equal(publicValidation.runs[0].checks.every((check) => check.ok), true, JSON.stringify(publicValidation.runs[0].checks));
+      assert.deepEqual(publicValidation.runs[0].diagnostics.items.map((item) => item.condition), ["terminal-run"]);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps malformed five-wave checkpoint-routing parent lookalikes invalid in public diagnostics", async () => {
+    for (const tamper of ["manifest-bytes", "content-addressed-manifest", "terminal-ref", "terminal-reason", "seeded-slices"]) {
+      const plan = planWithSpecs([
+        unitSpec("wave-5", 1, 1, ["wave-4"]), unitSpec("wave-1"), unitSpec("wave-3", 1, 1, ["wave-2"]),
+        unitSpec("wave-2", 1, 1, ["wave-1"]), unitSpec("wave-4", 1, 1, ["wave-3"]),
+      ]);
+      const fixture = createRoutingFixture(`checkpoint-five-wave-tamper-${tamper}`, plan);
+      try {
+        const boundary = await openTerminalBoundary(fixture);
+        const routed = await transitionSlicesSeed(fixture.runDir, pendingProjection(plan), { from: "plan/slices.json", boundaryToken: boundary.token });
+        const runPath = join(fixture.runDir, "run.json");
+        const manifestPath = join(fixture.runDir, routed.checkpoint_routing.ref);
+        const run = readJson(runPath);
+        if (tamper === "manifest-bytes") {
+          const manifest = readJson(manifestPath);
+          manifest.kind = "delivery-checkpoint-routing-lookalike";
+          writeJson(manifestPath, manifest);
+        } else if (tamper === "content-addressed-manifest") {
+          const manifest = readJson(manifestPath);
+          manifest.source.plan_hash = `sha256:${"f".repeat(64)}`;
+          const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
+          const ref = `artifacts/checkpoint-routing-${hashBytes(bytes).slice("sha256:".length)}.json`;
+          writeFileSync(join(fixture.runDir, ref), bytes);
+          run.terminal_result.artifacts.checkpoint_routing = ref;
+          writeJson(runPath, run);
+        } else if (tamper === "terminal-ref") {
+          run.terminal_result.artifacts.checkpoint_routing = `artifacts/checkpoint-routing-${"f".repeat(64)}.json`;
+          writeJson(runPath, run);
+        } else if (tamper === "terminal-reason") {
+          run.terminal_result.reason = "ordinary-blocked-lookalike";
+          writeJson(runPath, run);
+        } else {
+          run.slices = pendingProjection(plan);
+          writeJson(runPath, run);
+        }
+        const publicStatus = status(fixture.runId, { cwd: fixture.repo });
+        const publicList = listRuns({ cwd: fixture.repo }).find((item) => item.run_id === fixture.runId);
+        const publicValidation = validateState(fixture.runId, { cwd: fixture.repo });
+        assert.equal(publicStatus.status, "invalid", `${tamper} status`);
+        assert.equal(publicList.status, "invalid", `${tamper} list`);
+        assert.equal(publicValidation.ok, false, `${tamper} validation`);
+        assert.equal(publicValidation.runs[0].ok, false, `${tamper} run validation`);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
     }
   });
 

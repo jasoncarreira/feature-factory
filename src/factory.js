@@ -163,7 +163,8 @@ export async function startFactory(args, opts = {}) {
     if (!ownershipTarget.error) {
       const ownershipRead = readDurableRecoveryRun(repo, ownershipTarget.runDir, ownershipTarget.runFile);
       if (!ownershipRead.error) {
-        await assertRunClaimRoute(repo, ownershipRead.run, opts);
+        const checkpointRoute = await ordinaryCheckpointRunClaimRoute(repo, ownershipRead.run, opts);
+        if (checkpointRoute) return checkpointRoute;
         assertResumeConfiguration(ownershipRead.run, opts);
         const ownership = await existingRunOwnershipOutcome(ownershipTarget.runDir, ownershipRead.run, { ...opts, repo });
         if (ownership) return ownership;
@@ -178,7 +179,8 @@ export async function startFactory(args, opts = {}) {
     if (!eligibility.ok) return eligibility;
     resumedRunDir = preflight.run_dir;
     resumedRun = readRunFile(preflight.run_file || join(resumedRunDir, "run.json"));
-    await assertRunClaimRoute(repo, resumedRun, opts);
+    const checkpointRoute = await ordinaryCheckpointRunClaimRoute(repo, resumedRun, opts);
+    if (checkpointRoute) return checkpointRoute;
     assertResumeConfiguration(resumedRun, opts);
   }
   const launchEnv = factoryLaunchEnv(opts);
@@ -189,7 +191,7 @@ export async function startFactory(args, opts = {}) {
     ? encodeFeatureCommandPayload(buildResumePayload(resumedRun, { ...opts, repo }))
     : formatPrompt(args.join(" "), { ...opts, repo, requestedRunId: detachedRunId || requestedRunId }));
   if (resumedRun) {
-    return coordinateExistingRunLaunch(resumedRunDir, resumedRun, {
+    return coordinateOrdinaryExistingRunLaunch(resumedRunDir, resumedRun, {
       ...opts,
       repo,
       launchKind: opts.detached ? "start-resume-detached" : "start-resume-foreground",
@@ -895,7 +897,8 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   if (readResult.error) return syntheticDisruptedTerminal(target.runId, target.runDir, target.runFile, readResult.error, opts);
 
   const run = readResult.run;
-  await assertRunClaimRoute(repo, run, opts);
+  const checkpointRoute = await ordinaryCheckpointRunClaimRoute(repo, run, opts);
+  if (checkpointRoute) return checkpointRoute;
   assertNoPendingSpecialBuilderDispatches(target.runDir, run);
   if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, target.runDir, run, opts);
   await opts.recoveryHooks?.beforeLegacyFenceMutation?.({ runDir: target.runDir, run });
@@ -1423,7 +1426,8 @@ export async function resumeFactory(runId, opts = {}) {
   const repo = repoRoot(opts.cwd || process.cwd());
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const beforeRecovery = readRunFile(join(runDir, "run.json"));
-  await assertRunClaimRoute(repo, beforeRecovery, opts);
+  let checkpointRoute = await ordinaryCheckpointRunClaimRoute(repo, beforeRecovery, opts);
+  if (checkpointRoute) return checkpointRoute;
   if (hasClosedPostPrRecoveryDispatch(beforeRecovery)) assertNoUnresolvedSpecialBuilderDispatches(runDir, beforeRecovery);
   else assertNoPendingSpecialBuilderDispatches(runDir, beforeRecovery);
   assertResumeConfiguration(beforeRecovery, opts);
@@ -1433,7 +1437,8 @@ export async function resumeFactory(runId, opts = {}) {
   }
   const recovery = await reconcilePostPrCrash(runDir, opts);
   const run = readRunFile(join(runDir, "run.json"));
-  await assertRunClaimRoute(repo, run, opts);
+  checkpointRoute = await ordinaryCheckpointRunClaimRoute(repo, run, opts);
+  if (checkpointRoute) return checkpointRoute;
   assertResumeConfiguration(run, opts);
   if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, runDir, run, opts);
   if (recovery.action === "closed-dispatch-dirty-worktree") {
@@ -1454,7 +1459,7 @@ export async function resumeFactory(runId, opts = {}) {
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
   commandArgs.push(encodeFeatureCommandPayload(payload));
-  return coordinateExistingRunLaunch(runDir, run, {
+  return coordinateOrdinaryExistingRunLaunch(runDir, run, {
     ...opts,
     repo,
     launchKind: opts.detached ? "resume-detached" : "resume-foreground",
@@ -1569,6 +1574,16 @@ async function coordinateExistingRunLaunch(runDir, run, opts) {
         if (!claimFns.release(runDir, token, { ...opts, expectedPhase: "foreground-live", runId: run.run_id })) throw new Error("foreground launch claim cleanup failed");
       }
     }
+  }
+}
+
+async function coordinateOrdinaryExistingRunLaunch(runDir, run, opts) {
+  try {
+    return await coordinateExistingRunLaunch(runDir, run, opts);
+  } catch (error) {
+    const route = checkpointReservationRouteOutcome(run, error);
+    if (route) return route;
+    throw error;
   }
 }
 
@@ -5351,6 +5366,45 @@ async function assertRunClaimRoute(repo, run, opts = {}) {
   return run;
 }
 
+async function ordinaryCheckpointRunClaimRoute(repo, run, opts = {}) {
+  try {
+    await assertRunClaimRoute(repo, run, opts);
+    return null;
+  } catch (error) {
+    const route = checkpointReservationRouteOutcome(run, error);
+    if (route) return route;
+    throw error;
+  }
+}
+
+function checkpointReservationRouteOutcome(run, error) {
+  if (!run?.checkpoint || !["CHECKPOINT_START_REPLAY_REQUIRED", "CHECKPOINT_RESERVATION_RECONCILIATION_REQUIRED"].includes(error?.code)) return null;
+  const reserved = error.code === "CHECKPOINT_START_REPLAY_REQUIRED";
+  return {
+    ok: false,
+    durable: true,
+    updated: false,
+    recovered: false,
+    status: reserved ? "checkpoint-start-required" : "recovery-required",
+    run_id: run.run_id,
+    launched: false,
+    recovery_required: !reserved,
+    reason_code: reserved ? "checkpoint-reservation-reserved" : "checkpoint-reservation-reconciliation-required",
+    reservation_state: error.reservationState,
+    reason: error.message,
+  };
+}
+
+function checkpointReservationRouteError(state) {
+  const reserved = state === "reserved";
+  const error = new Error(reserved
+    ? "reserved checkpoint children may launch only through factory checkpoint-start exact replay"
+    : `checkpoint reservation state '${state}' requires operator reconciliation before ordinary resume or recovery`);
+  error.code = reserved ? "CHECKPOINT_START_REPLAY_REQUIRED" : "CHECKPOINT_RESERVATION_RECONCILIATION_REQUIRED";
+  error.reservationState = state;
+  return error;
+}
+
 async function assertCheckpointRunAuthority(repo, run, opts = {}) {
   const binding = validateCheckpointChildBinding(run.checkpoint, { runId: run.run_id });
   if (run.base_ref !== binding.base_ref || run.base_commit !== binding.base_commit) throw new Error("checkpoint child top-level base authority must exactly equal run.checkpoint");
@@ -5375,9 +5429,8 @@ async function assertCheckpointRunAuthority(repo, run, opts = {}) {
   const claim = git(repo, ["cat-file", "blob", childOid.stdout.trim()]);
   if (!claim.ok) throw new Error("checkpoint child reservation claim is unreadable");
   const value = validateCheckpointReservationClaim(JSON.parse(claim.stdout), { expectedBinding: binding });
-  if (!["reserved", "launching", "launched"].includes(value.state) || hashValue(value.binding) !== hashValue(binding)) {
-    throw new Error("checkpoint child reservation claim is stale");
-  }
+  if (hashValue(value.binding) !== hashValue(binding)) throw new Error("checkpoint child reservation claim is stale");
+  if (value.state !== "launched") throw checkpointReservationRouteError(value.state);
   const reservation = { childRef, routeRef, branchRef: `refs/heads/${binding.child_run_id}`, oid: childOid.stdout.trim(), claim: value };
   assertCheckpointChildBranch(repo, reservation.branchRef, binding.base_commit, value.state);
   assertCheckpointPublishedChild(repo, binding, reservation, opts);

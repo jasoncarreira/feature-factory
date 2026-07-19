@@ -3,12 +3,11 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   TERMINAL_RUN_STATUSES,
   pendingProtectedGate,
-  runSlicesMatchPlan,
   validateFactoryLock,
   validateHeartbeatState,
   validateProcessSidecar,
   validateRun,
-  validateSlicesPlan,
+  validateRunSlicesPlanAuthority,
 } from "./validate.js";
 import { PROCESS_EVIDENCE_FILE } from "./process-evidence.js";
 import { hasInFlightHeartbeatWork } from "./run-state.js";
@@ -235,7 +234,7 @@ function inspectSidecars(runDir, checkedAt, run) {
     { path: join(runDir, HEARTBEAT_FILE), source: HEARTBEAT_FILE, validator: validateHeartbeatState },
     { path: join(runDir, "factory.lock"), source: "factory.lock", validator: validateFactoryLock },
     { path: join(runDir, PROCESS_EVIDENCE_FILE), source: PROCESS_EVIDENCE_FILE, validator: (value) => validateProcessSidecar(value, { runDir, runId: run.run_id }), failClosed: true },
-    { path: join(runDir, "plan", "slices.json"), source: "plan/slices.json", validator: (value) => validateSlicesPlan(value, { enforceDependencyDepth: !runSlicesMatchPlan(run, value) }) },
+    { path: join(runDir, "plan", "slices.json"), source: "plan/slices.json", validator: (value) => validateRunSlicesPlanAuthority(runDir, run, value) },
   ];
   for (const check of checks) {
     if (!existsSync(check.path)) continue;

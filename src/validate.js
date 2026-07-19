@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency, sanitizePublicCostText } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
@@ -9,6 +9,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
 import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
 import { DeliveryContractValidationError, validateAdmissionExtensionResult, validateInvariantFamilyLedger, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
+import { CHECKPOINT_ROUTING_TERMINAL_REASON, validateCheckpointRoutingManifest } from "./delivery-envelope/checkpoint-routing.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -816,6 +817,64 @@ export function runSlicesMatchPlan(run, plan) {
   return true;
 }
 
+export function validateRunSlicesPlanAuthority(runDir, run, plan) {
+  const validated = validateSlicesPlan(plan, { enforceDependencyDepth: false });
+  if (claimsCheckpointRoutingParent(run)) {
+    assertExactCheckpointRoutingParent(runDir, run, validated);
+    return validated;
+  }
+  return validateSlicesPlan(validated, { enforceDependencyDepth: !runSlicesMatchPlan(run, validated) });
+}
+
+function claimsCheckpointRoutingParent(run) {
+  return run?.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON
+    || isRecord(run?.terminal_result?.artifacts) && Object.hasOwn(run.terminal_result.artifacts, "checkpoint_routing");
+}
+
+function assertExactCheckpointRoutingParent(runDir, run, plan) {
+  const terminal = run?.terminal_result;
+  const artifacts = terminal?.artifacts;
+  const artifactKeys = isRecord(artifacts) ? Object.keys(artifacts) : [];
+  const manifestRef = artifacts?.checkpoint_routing;
+  if (run?.status !== "blocked" || terminal?.status !== "blocked" || terminal?.run_id !== run.run_id
+    || terminal?.reason !== CHECKPOINT_ROUTING_TERMINAL_REASON || run.pr_url != null || terminal.pr_url !== null
+    || artifactKeys.length !== 1 || artifactKeys[0] !== "checkpoint_routing"
+    || !/^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u.test(manifestRef ?? "")
+    || !Array.isArray(run.slices) || run.slices.length !== 0) {
+    throw new Error("blocked checkpoint-routing parent terminal authority is not exact");
+  }
+  const planPath = join(resolve(runDir), PLAN_SLICES_REF);
+  if (!existsSync(planPath) || lstatSync(planPath).isSymbolicLink() || !lstatSync(planPath).isFile()) throw new Error("checkpoint-routing plan must be a regular file");
+  const planHash = hashFile(planPath);
+  const decompositionSteps = (Array.isArray(run.steps) ? run.steps : []).filter((step) => step?.agent === "work-decomposer");
+  const step = decompositionSteps.length === 1 ? decompositionSteps[0] : null;
+  if (!step || step.status !== "accepted" || step.artifact_ref !== PLAN_SLICES_REF || step.acceptance?.artifact_ref !== PLAN_SLICES_REF
+    || step.acceptance?.artifact_hash !== planHash || step.review_ref !== step.acceptance?.review_ref
+    || !stringValue(step.review_ref) || !stringValue(step.acceptance?.review_hash) || !Number.isInteger(step.attempts) || step.attempts < 1) {
+    throw new Error("checkpoint-routing decomposition authority is not exact");
+  }
+  const review = resolveReviewRef(runDir, step.review_ref);
+  if (hashFile(review.path) !== step.acceptance.review_hash) throw new Error("checkpoint-routing decomposition review hash is stale");
+  const reviewValue = JSON.parse(readFileSync(review.path, "utf8"));
+  const manifest = resolveArtifactRef(runDir, manifestRef);
+  const manifestHash = hashFile(manifest.path);
+  if (manifestRef !== `artifacts/checkpoint-routing-${manifestHash.slice("sha256:".length)}.json`) throw new Error("checkpoint-routing manifest content address is stale");
+  const admissionResult = evaluateDeliveryEnvelopeAdmission({ plan });
+  validateCheckpointRoutingManifest(JSON.parse(readFileSync(manifest.path, "utf8")), {
+    plan,
+    planHash,
+    admissionResult,
+    decompositionAuthority: {
+      plan_ref: PLAN_SLICES_REF,
+      plan_hash: planHash,
+      review_ref: step.review_ref,
+      review_hash: step.acceptance.review_hash,
+      attempt: step.attempts,
+      review: reviewValue,
+    },
+  });
+}
+
 function normalizeSliceGraph(slices) {
   if (!Array.isArray(slices)) return null;
   const graph = new Map();
@@ -1192,7 +1251,7 @@ function validateSlicesPlanFile(file, run) {
   try {
     const bytes = readFileSync(file);
     const compatibilityPlan = parseSlicesPlanBytes(bytes, { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
-    validateSlicesPlan(compatibilityPlan, { enforceDependencyDepth: !runSlicesMatchPlan(run, compatibilityPlan) });
+    validateRunSlicesPlanAuthority(dirname(dirname(file)), run, compatibilityPlan);
     return { path: file, ok: true, errors: [] };
   } catch (error) {
     return { path: file, ok: false, errors: error instanceof ValidationError ? error.errors : [{ path: file, message: error.message }] };

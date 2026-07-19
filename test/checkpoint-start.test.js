@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import { runCliCommand } from "../src/cli.js";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { buildContinuation, closeFactoryCheckpointRoute, continueFactory, resumeFactory, startFactoryCheckpoint } from "../src/factory.js";
+import { buildContinuation, closeFactoryCheckpointRoute, continueFactory, recoverDisruptedRun, resumeFactory, startFactoryCheckpoint } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
 import { transitionRunStep } from "../src/run-state.js";
@@ -383,7 +383,7 @@ describe("checked checkpoint child start", () => {
     }
   });
 
-  it("fails a stale checkpoint before implementation when canonical remote main advances", async () => {
+  it("routes a reserved checkpoint only through checkpoint-start replay before checking remote advancement", async () => {
     const fixture = createFixture("checkpoint-parent-resume-prelaunch-advance");
     try {
       const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
@@ -392,7 +392,11 @@ describe("checked checkpoint child start", () => {
       rewriteCheckpointReservation(fixture, started.binding, "reserved");
       publishRunningCheckpointChild(fixture, started);
       advanceRemoteMain(fixture, "prelaunch-advance.txt");
-      await assert.rejects(resumeFactory(started.binding.child_run_id, { cwd: fixture.repo, dryRun: true }), /checkpoint base is stale before implementation launch/u);
+      const resumed = await resumeFactory(started.binding.child_run_id, { cwd: fixture.repo, dryRun: true });
+      assert.equal(resumed.status, "checkpoint-start-required");
+      assert.equal(resumed.reason_code, "checkpoint-reservation-reserved");
+      assert.equal(resumed.reservation_state, "reserved");
+      assert.match(resumed.reason, /factory checkpoint-start exact replay/u);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
     }
@@ -412,6 +416,67 @@ describe("checked checkpoint child start", () => {
       assert.notEqual(remoteMain, originalBase);
       assert.equal(resumed.payload.checkpoint.base_commit, originalBase);
       assert.equal(git(fixture.repo, ["rev-parse", `refs/heads/${started.binding.child_run_id}`]), originalBase);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("routes concurrent reserved, launching, and unknown ordinary resume and recovery without launch", async () => {
+    for (const state of ["reserved", "launching", "unknown"]) {
+      const fixture = createFixture(`checkpoint-ordinary-resume-${state}`);
+      let launches = 0;
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-ordinary-resume-${state}-child`, checkpointLaunchFn: (value) => value,
+        });
+        rewriteCheckpointReservation(fixture, started.binding, state);
+        const runPath = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id, "run.json");
+        const beforeRun = readFileSync(runPath);
+        const beforeClaim = checkpointReservationClaim(fixture, started.binding);
+        const [resume, recovery] = await Promise.all([
+          resumeFactory(started.binding.child_run_id, {
+            cwd: fixture.repo,
+            foregroundLaunchFn: async () => { launches += 1; return { status: "launched" }; },
+          }),
+          recoverDisruptedRun(started.binding.child_run_id, { cwd: fixture.repo }),
+        ]);
+        const expectedStatus = state === "reserved" ? "checkpoint-start-required" : "recovery-required";
+        const expectedReason = state === "reserved" ? "checkpoint-reservation-reserved" : "checkpoint-reservation-reconciliation-required";
+        for (const result of [resume, recovery]) {
+          assert.equal(result.status, expectedStatus, `${state} status`);
+          assert.equal(result.reason_code, expectedReason, `${state} reason`);
+          assert.equal(result.reservation_state, state, `${state} reservation`);
+          assert.equal(result.launched, false, `${state} launch result`);
+        }
+        assert.equal(launches, 0, state);
+        assert.deepEqual(readFileSync(runPath), beforeRun, state);
+        assert.deepEqual(checkpointReservationClaim(fixture, started.binding), beforeClaim, state);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("allows concurrent ordinary resumes to launch an exactly launched checkpoint only once", async () => {
+    const fixture = createFixture("checkpoint-ordinary-resume-launched");
+    let launches = 0;
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-ordinary-resume-launched-child", checkpointLaunchFn: (value) => value,
+      });
+      const invoke = () => resumeFactory(started.binding.child_run_id, {
+        cwd: fixture.repo,
+        foregroundLaunchFn: async () => {
+          launches += 1;
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+          return { status: "launched", run_id: started.binding.child_run_id };
+        },
+      });
+      const results = await Promise.all([invoke(), invoke()]);
+      assert.equal(launches, 1);
+      assert.equal(results.filter((result) => result.status === "launched").length, 1);
+      assert.equal(results.filter((result) => result.status === "recovery-required" || result.status === "already-running").length, 1);
+      assert.equal(checkpointReservationClaim(fixture, started.binding).state, "launched");
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
     }
