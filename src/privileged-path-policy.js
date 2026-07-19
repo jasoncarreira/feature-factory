@@ -23,29 +23,20 @@ const PRIVILEGED_PREFIXES = [
 const PRIVILEGED_SEGMENTS = new Set(["migrations", "migration", "migrate", "generated", "dist", "build", "coverage", "node_modules", ".yarn"]);
 const DEPENDENCY_OR_BUILD_BASENAME = /^(?:requirements(?:[._-][A-Za-z0-9_-]+)?\.txt|tsconfig(?:\.[^.]+)?\.json|(?:eslint|prettier|babel|webpack|vite|vitest|jest|rollup|esbuild|postcss|tailwind)\.config\.[A-Za-z0-9]+|Dockerfile(?:\.[A-Za-z0-9_-]+)?|.*\.(?:csproj|fsproj|vbproj|sln|tf|tfvars))$/u;
 const GENERATED_BASENAME = /(?:^|\.)generated\.[^/]+$/u;
-const ROOT_AGENT_INSTRUCTION_FILE = /^(?:agents?|claude|codex|gemini|copilot)(?:\.local)?\.md$/u;
-const ROOT_CI_FILES = new Set([
-  ".travis.yml", ".travis.yaml", ".drone.yml", ".drone.yaml", ".woodpecker.yml", ".woodpecker.yaml",
-  "azure-pipelines.yml", "azure-pipelines.yaml", "jenkinsfile", "bitrise.yml", "bitrise.yaml",
-  "appveyor.yml", "appveyor.yaml", "buildkite.yml", "buildkite.yaml", "circle.yml",
-  "semaphore.yml", "semaphore.yaml", ".cirrus.yml", ".cirrus.yaml",
-]);
 
 export function privilegedControlPlanePathReason(value) {
   if (typeof value !== "string" || value === "" || value.startsWith("/") || value.includes("\\") || value.includes("\0")) return "invalid-path";
   const segments = value.split("/");
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) return "invalid-path";
   const basename = segments.at(-1);
-  const lowerValue = value.toLowerCase();
-  if (segments.length === 1 && (ROOT_AGENT_INSTRUCTION_FILE.test(lowerValue) || ROOT_CI_FILES.has(lowerValue) || lowerValue === ".cursorrules")) {
-    return "root-agent-or-ci-configuration";
-  }
   if (EXACT_PRIVILEGED_PATHS.has(value) || EXACT_PRIVILEGED_PATHS.has(basename)) return "dependency-build-deployment-manifest";
   if (PRIVILEGED_PREFIXES.some((prefix) => value.startsWith(prefix))) return "control-plane-directory";
   if (segments.some((segment) => PRIVILEGED_SEGMENTS.has(segment))) return "migration-or-generated-artifact";
   if (DEPENDENCY_OR_BUILD_BASENAME.test(basename)) return "dependency-build-deployment-manifest";
   if (GENERATED_BASENAME.test(basename)) return "generated-artifact";
   if (basename === ".env" || basename.startsWith(".env.")) return "runtime-configuration";
+  if (segments.length === 1) return "repository-root-file";
+  if (segments[0].startsWith(".")) return "root-dot-directory";
   return null;
 }
 

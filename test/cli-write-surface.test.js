@@ -165,8 +165,9 @@ describe("cli write surface", () => {
       const dispatch = await prepareSliceBuilderTaskDispatch(repo, {
         run_id: RUN_ID, slice_id: "slice", attempt: 1, agent: "backend-builder",
       }, { claimDispatch: true, completionToken });
-      writeFileSync(join(sliceWorktree, "slice.txt"), "slice bytes\n");
-      runGit(sliceWorktree, ["add", "slice.txt"]);
+      mkdirSync(join(sliceWorktree, "extension"), { recursive: true });
+      writeFileSync(join(sliceWorktree, "extension", "slice.txt"), "slice bytes\n");
+      runGit(sliceWorktree, ["add", "extension/slice.txt"]);
       runGit(sliceWorktree, ["commit", "-m", "slice bytes"]);
       reviewedHead = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]).trim();
       await completeSliceBuilderTaskDispatch(repo, {
@@ -182,10 +183,10 @@ describe("cli write surface", () => {
       assert.match(runFactoryFail(repo, ["slices-seed", RUN_ID, "--from", "plan/slices.json", "--json"]).stderr, /refuses to replace non-pending slice progress/u);
       assert.match(runFactoryFail(repo, ["slice-status", RUN_ID, "typo", "running", "--branch", "slice-branch", "--worktree", ".opencode/worktrees/typo", "--attempts", "1", "--json"]).stderr, /slice 'typo' not found/u);
       writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedHead,
-        ownership_disclosure: [{ path: "slice.txt", rationale: "The slice requires this adjacent executable fixture." }] });
-      writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: ["slice.txt"] }, remediation_context: { schema_version: 2, fixes: [] }, attempt: 1, reviewed_commit: reviewedHead });
+        ownership_disclosure: [{ path: "extension/slice.txt", rationale: "The slice requires this adjacent executable fixture." }] });
+      writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: ["extension/slice.txt"] }, remediation_context: { schema_version: 2, fixes: [] }, attempt: 1, reviewed_commit: reviewedHead });
       runFactory(repo, ["slice-status", RUN_ID, "slice", "review", "--evidence-ref", "evidence/slice.json", "--review-ref", "reviews/slice.json", "--json"]);
-      assert.deepEqual(readJson(join(runDir, "run.json")).slices[0].effective_paths, ["src/example.js", "slice.txt"]);
+      assert.deepEqual(readJson(join(runDir, "run.json")).slices[0].effective_paths, ["src/example.js", "extension/slice.txt"]);
       validateFactory(repo);
       runGit(repo, ["merge", "--no-ff", "slice-branch", "-m", "merge slice"]);
       const integrationHead = gitOutput(repo, ["rev-parse", "HEAD"]).trim();

@@ -52,6 +52,12 @@ const CONTROL_PLANE_PATH_CASES = Object.freeze([
   { name: "opencode-skills", path: ".opencode/skills/local/SKILL.md" },
   { name: "opencode-agents", path: ".opencode/agents/security.md" },
   { name: "opencode-other", path: ".opencode/runtime-policy.json" },
+  { name: "claude-dot-directory", path: ".claude/settings.json" },
+  { name: "cursor-dot-directory", path: ".cursor/rules/project.mdc" },
+  { name: "codex-dot-directory", path: ".codex/config.toml" },
+  { name: "gemini-dot-directory", path: ".gemini/settings.json" },
+  { name: "agents-dot-directory", path: ".agents/config.json" },
+  { name: "generic-root-dot-directory", path: ".future-control/policy.conf" },
   { name: "github-workflow", path: ".github/workflows/release.yml" },
   { name: "github-action", path: ".github/actions/setup/action.yml" },
   { name: "github-other", path: ".github/dependabot.yml" },
@@ -63,11 +69,13 @@ const CONTROL_PLANE_PATH_CASES = Object.freeze([
   { name: "drone-directory", path: ".drone/pipeline.yml" },
   { name: "woodpecker-directory", path: ".woodpecker/pipeline.yml" },
   { name: "agents-instructions", path: "AGENTS.md" },
+  { name: "agents-override-instructions", path: "AGENTS.override.md" },
   { name: "claude-instructions", path: "CLAUDE.md" },
   { name: "codex-instructions", path: "CODEX.md" },
   { name: "gemini-instructions", path: "GEMINI.md" },
   { name: "copilot-instructions", path: "COPILOT.md" },
   { name: "cursor-instructions", path: ".cursorrules" },
+  { name: "forgejo-root", path: ".forgejo/workflows/ci.yml" },
   { name: "travis-provider", path: ".travis.yml" },
   { name: "drone-provider", path: ".drone.yml" },
   { name: "woodpecker-provider", path: ".woodpecker.yml" },
@@ -75,6 +83,16 @@ const CONTROL_PLANE_PATH_CASES = Object.freeze([
   { name: "jenkins-provider", path: "Jenkinsfile" },
   { name: "bitrise-provider", path: "bitrise.yml" },
   { name: "appveyor-provider", path: "appveyor.yml" },
+  { name: "aws-build-provider", path: "buildspec.yml" },
+  { name: "google-build-provider", path: "cloudbuild.yaml" },
+  { name: "codefresh-provider", path: "codefresh.yml" },
+  { name: "wercker-provider", path: "wercker.yml" },
+  { name: "shippable-provider", path: "shippable.yml" },
+  { name: "container-build-file", path: "Containerfile" },
+  { name: "earthly-build-file", path: "Earthfile" },
+  { name: "deno-manifest", path: "deno.json" },
+  { name: "nix-flake", path: "flake.nix" },
+  { name: "generic-unknown-root-file", path: "future-provider.conf" },
   { name: "agent-assets", path: "assets/agent/new-agent.md" },
   { name: "skill-assets", path: "assets/skills/new-skill/SKILL.md" },
   { name: "command-assets", path: "assets/command/deploy.md" },
@@ -1794,8 +1812,9 @@ describe("simplified run-state transitions", () => {
 
       let attemptOneHead;
       await closeBuilderDispatch(fixture, 1, () => {
-        writeFileSync(join(sliceWorktree, "feature.txt"), "attempt 1\n");
-        runGit(sliceWorktree, ["add", "feature.txt"]);
+        mkdirSync(join(sliceWorktree, "extension"), { recursive: true });
+        writeFileSync(join(sliceWorktree, "extension", "feature.txt"), "attempt 1\n");
+        runGit(sliceWorktree, ["add", "extension/feature.txt"]);
         runGit(sliceWorktree, ["commit", "-m", "slice attempt 1"]);
         attemptOneHead = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
       });
@@ -1803,10 +1822,10 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: attemptOneHead,
-        ownership_disclosure: [{ path: "feature.txt", rationale: "The slice implementation requires the adjacent feature entry point." }] });
+        ownership_disclosure: [{ path: "extension/feature.txt", rationale: "The slice implementation requires the adjacent feature entry point." }] });
       writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), createV2SliceReviewRecord({
         subject: "slice", attempt: 1, reviewedCommit: attemptOneHead, verdict: "REJECT", requiredFixes: ["adjust implementation"],
-        scopeEffect: "unowned-extension", likelyPaths: ["feature.txt"],
+        scopeEffect: "unowned-extension", likelyPaths: ["extension/feature.txt"],
       }));
       await transitionRunSlice(fixture.runDir, "slice", {
         status: "review",
@@ -1826,19 +1845,19 @@ describe("simplified run-state transitions", () => {
       assert.deepEqual(readJson(join(fixture.runDir, "run.json")).slices[0].effective_paths, ["src/**"], "retry clears effective ownership to the exact declared lane");
       let attemptTwoHead;
       const attemptTwoContext = await closeBuilderDispatch(fixture, 2, () => {
-        writeFileSync(join(sliceWorktree, "feature.txt"), "attempt 2\n");
-        runGit(sliceWorktree, ["add", "feature.txt"]);
+        writeFileSync(join(sliceWorktree, "extension", "feature.txt"), "attempt 2\n");
+        runGit(sliceWorktree, ["add", "extension/feature.txt"]);
         runGit(sliceWorktree, ["commit", "-m", "slice attempt 2"]);
         attemptTwoHead = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
       });
       assert.deepEqual(attemptTwoContext.slice.ownership, {
-        declared_paths: ["src/**"], effective_paths: ["src/**"], forecast_unowned_extension_paths: ["feature.txt"], disclosure_required_for_actual_unexpected_paths: true,
+        declared_paths: ["src/**"], effective_paths: ["src/**"], forecast_unowned_extension_paths: ["extension/feature.txt"], disclosure_required_for_actual_unexpected_paths: true,
       });
       assert.notEqual(attemptTwoHead, attemptOneHead);
 
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-2.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 2, head_sha: attemptTwoHead, previous_head: attemptOneHead,
-        ownership_disclosure: [{ path: "feature.txt", rationale: "The slice implementation requires the adjacent feature entry point." }] });
-      writeJson(join(fixture.runDir, "reviews", "slice.attempt-2.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 2, reviewedCommit: attemptTwoHead, ratifiedPaths: ["feature.txt"] }));
+        ownership_disclosure: [{ path: "extension/feature.txt", rationale: "The slice implementation requires the adjacent feature entry point." }] });
+      writeJson(join(fixture.runDir, "reviews", "slice.attempt-2.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 2, reviewedCommit: attemptTwoHead, ratifiedPaths: ["extension/feature.txt"] }));
       const untampered = readJson(join(fixture.runDir, "run.json"));
       const tamperedBaseline = structuredClone(untampered);
       tamperedBaseline.slices[0].attempt_reviews[0].diff_base_commit = attemptOneHead;
@@ -1858,9 +1877,9 @@ describe("simplified run-state transitions", () => {
         review_ref: "reviews/slice.attempt-2.json",
       });
       ownership = readJson(join(fixture.runDir, "run.json")).slices[0];
-      assert.deepEqual(ownership.effective_paths, ["src/**", "feature.txt"]);
+      assert.deepEqual(ownership.effective_paths, ["src/**", "extension/feature.txt"]);
       assert.equal(ownership.attempt_reviews[1].diff_base_commit, run.base_commit, "remediation review keeps the first dispatch baseline");
-      assert.deepEqual(ownership.attempt_reviews[1].ratified_paths, ["feature.txt"]);
+      assert.deepEqual(ownership.attempt_reviews[1].ratified_paths, ["extension/feature.txt"]);
       assertConsistent(fixture);
 
       runGit(fixture.repo, ["merge", "--no-ff", "slice-branch", "-m", "merge remediated slice"]);
@@ -1870,7 +1889,7 @@ describe("simplified run-state transitions", () => {
         transitionRunJson(fixture.runDir, (draft) => { draft.slices[0].effective_paths = ["src/**"]; }),
         /slices can only be changed by checked slice transitions/u,
       );
-      assert.deepEqual(readJson(join(fixture.runDir, "run.json")).slices[0].effective_paths, ["src/**", "feature.txt"]);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")).slices[0].effective_paths, ["src/**", "extension/feature.txt"]);
       assertConsistent(fixture);
 
       writeFileSync(join(fixture.runDir, "artifacts", "validation-report.md"), "GO\n");
@@ -2509,27 +2528,28 @@ describe("simplified run-state transitions", () => {
       await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
       let reviewedCommit;
       await closeBuilderDispatch(fixture, 1, () => {
-        writeFileSync(join(fixture.repo, "adjacent.txt"), "ratified\n");
-        runGit(fixture.repo, ["add", "adjacent.txt"]);
+        mkdirSync(join(fixture.repo, "extension"), { recursive: true });
+        writeFileSync(join(fixture.repo, "extension", "adjacent.txt"), "ratified\n");
+        runGit(fixture.repo, ["add", "extension/adjacent.txt"]);
         runGit(fixture.repo, ["commit", "-m", "change ratified adjacent path"]);
         reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
       });
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
-        ownership_disclosure: [{ path: "adjacent.txt", rationale: "The adjacent file is required to expose this slice behavior." }] });
-      writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: ["adjacent.txt"] }));
+        ownership_disclosure: [{ path: "extension/adjacent.txt", rationale: "The adjacent file is required to expose this slice behavior." }] });
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: ["extension/adjacent.txt"] }));
       const beforeDisclosure = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
-        ownership_disclosure: [{ path: "adjacent.txt", rationale: " not normalized " }] });
+        ownership_disclosure: [{ path: "extension/adjacent.txt", rationale: " not normalized " }] });
       await assert.rejects(
         transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" }),
         /rationale must be nonempty normalized text/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeDisclosure);
       writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
-        ownership_disclosure: [{ path: "adjacent.txt", rationale: "The adjacent file is required to expose this slice behavior." }] });
+        ownership_disclosure: [{ path: "extension/adjacent.txt", rationale: "The adjacent file is required to expose this slice behavior." }] });
       await transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" });
-      assert.deepEqual(readJson(join(fixture.runDir, "run.json")).slices[0].effective_paths, ["src/**", "adjacent.txt"]);
+      assert.deepEqual(readJson(join(fixture.runDir, "run.json")).slices[0].effective_paths, ["src/**", "extension/adjacent.txt"]);
       const beforeMutation = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       await assert.rejects(
         transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "stopped", effective_paths: ["src/**", "caller.txt"] }),
@@ -2539,7 +2559,7 @@ describe("simplified run-state transitions", () => {
 
       const blocked = await transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "stopped" });
       assert.deepEqual(blocked.slice.effective_paths, ["src/**"]);
-      assert.deepEqual(blocked.slice.attempt_reviews[0].ratified_paths, ["adjacent.txt"]);
+      assert.deepEqual(blocked.slice.attempt_reviews[0].ratified_paths, ["extension/adjacent.txt"]);
     } finally {
       cleanup(fixture.repo);
     }
