@@ -8,10 +8,10 @@ import { describe, it } from "node:test";
 import { runCliCommand } from "../src/cli.js";
 import { buildCheckpointRoutingManifest, checkpointRoutingArtifact } from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { buildContinuation, cleanupRun, closeFactoryCheckpointRoute, continueFactory, persistFactoryRunCreatedEnv, recordCostUsage, recoverDisruptedRun, resumeFactory, startFactoryCheckpoint, startHeartbeat, stopHeartbeat } from "../src/factory.js";
+import { buildContinuation, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, continueFactory, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, recordCostUsage, recordReviewDispatchProvenance, recoverDisruptedRun, resumeFactory, startFactoryCheckpoint, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import { decodeFeatureCommandPayload, encodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { hashValue } from "../src/refs.js";
-import { heartbeatOnce, transitionRecoverOrphan, transitionRunJson, transitionRunStep, transitionTerminalResult } from "../src/run-state.js";
+import { heartbeatOnce, transitionGateDecision, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRecoverOrphan, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSteeringAcknowledged, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { validateRun } from "../src/validate.js";
 import { passingInvariantFamilyLedger, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
@@ -429,7 +429,7 @@ describe("checked checkpoint child start", () => {
         const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
           cwd: fixture.repo, runId: `checkpoint-ordinary-resume-${state}-child`, checkpointLaunchFn: (value) => value,
         });
-        rewriteCheckpointReservation(fixture, started.binding, state);
+        setCheckpointAuthorityVariant(fixture, started.binding, state);
         const runPath = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id, "run.json");
         const beforeRun = readFileSync(runPath);
         const beforeClaim = checkpointReservationClaim(fixture, started.binding);
@@ -451,6 +451,33 @@ describe("checked checkpoint child start", () => {
         assert.equal(launches, 0, state);
         assert.deepEqual(readFileSync(runPath), beforeRun, state);
         assert.deepEqual(checkpointReservationClaim(fixture, started.binding), beforeClaim, state);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("rejects missing and cross-bound checkpoint reservations before ordinary resume or recovery can mutate", async () => {
+    for (const state of ["missing", "cross-bound"]) {
+      const fixture = createFixture(`checkpoint-ordinary-${state}`);
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-ordinary-${state}-child`, checkpointLaunchFn: (value) => value,
+        });
+        setCheckpointAuthorityVariant(fixture, started.binding, state);
+        const runPath = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id, "run.json");
+        const before = readFileSync(runPath);
+        await assert.rejects(resumeFactory(started.binding.child_run_id, { cwd: fixture.repo }), /checkpoint child reservation authority is missing or cross-bound/u, `${state} resume`);
+        await assert.rejects(recoverDisruptedRun(started.binding.child_run_id, { cwd: fixture.repo }), /checkpoint child reservation authority is missing or cross-bound/u, `${state} recover`);
+        assert.deepEqual(readFileSync(runPath), before, `${state} run.json`);
+        if (state === "missing") {
+          const { childRef, routeRef } = checkpointReservationRefs(fixture, started.binding);
+          assert.equal(gitResult(fixture.repo, ["rev-parse", "--verify", childRef]).ok, false, state);
+          assert.equal(gitResult(fixture.repo, ["rev-parse", "--verify", routeRef]).ok, false, state);
+        } else {
+          const { childRef, routeRef } = checkpointReservationRefs(fixture, started.binding);
+          assert.notEqual(git(fixture.repo, ["rev-parse", childRef]), git(fixture.repo, ["rev-parse", routeRef]), state);
+        }
       } finally {
         rmSync(fixture.repo, { recursive: true, force: true });
       }
@@ -517,16 +544,31 @@ describe("checked checkpoint child start", () => {
         const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
         const runPath = join(runDir, "run.json");
         const before = readFileSync(runPath);
+        mkdirSync(join(runDir, "artifacts"), { recursive: true });
+        mkdirSync(join(runDir, "gates"), { recursive: true });
+        writeFileSync(join(runDir, "artifacts", "brief.md"), "# Brief\n");
+        writeFileSync(join(runDir, "gates", "brief.question.md"), "Approve?\n");
         const writers = [
           ["generic transition API", () => transitionRunJson(runDir, (draft) => { draft.review_tier = "blocked mutation"; }, { repoRoot: fixture.repo })],
           ["terminal API", () => transitionTerminalResult(runDir, { status: "blocked", pr_url: null, reason: "blocked mutation", summary: null, artifacts: {} }, { repoRoot: fixture.repo })],
           ["orphan recovery API", () => transitionRecoverOrphan(runDir, "blocked mutation", { repoRoot: fixture.repo })],
+          ["steer queue API", () => transitionSteeringQueued(runDir, "blocked steering", { id: `blocked-steer-${state}` })],
+          ["steer consume API", () => transitionSteeringConsumed(runDir, { ref: "steering/blocked.json", hash: `sha256:${"a".repeat(64)}` })],
+          ["steer acknowledgement API", () => transitionSteeringAcknowledged(runDir, { ref: "steering/blocked.json", hash: `sha256:${"a".repeat(64)}` })],
+          ["steer conflict API", () => transitionSteeringConflict(runDir, { ref: "steering/blocked.json", hash: `sha256:${"a".repeat(64)}`, reason: "blocked checkpoint mutation" })],
+          ["steering boundary API", () => transitionSteeringBoundaryOpened(runDir, "terminal", { token: `blocked-boundary-${state}` })],
+          ["gate API", () => transitionGateDecision(runDir, "brief", { status: "pending", artifact: "artifacts/brief.md", question_ref: "gates/brief.question.md" })],
+          ["pre-PR fence API", () => transitionPrePrFenceEstablished(runDir, { token: `blocked-fence-${state}` })],
+          ["pre-PR reconciliation API", () => transitionPrCreated(runDir, {}, { fenceToken: `blocked-fence-${state}` })],
+          ["pre-PR fence clear API", () => clearPrePrFence(started.binding.child_run_id, `blocked-fence-${state}`, { cwd: fixture.repo })],
           ["heartbeat tick API", () => heartbeatOnce(runDir, { now: "2026-07-19T10:00:00.000Z" }, { repoRoot: fixture.repo })],
           ["heartbeat start API", () => startHeartbeat(started.binding.child_run_id, { phase: "builder-wave", intervalMs: 30000 }, { cwd: fixture.repo })],
           ["step API", () => transitionRunStep(runDir, "spec-writer", { status: "running", attempts: 1 }, { repoRoot: fixture.repo })],
           ["cost API", () => recordCostUsage(started.binding.child_run_id, { agent: "backend-builder", input_tokens: 1 }, { cwd: fixture.repo, entryId: `cost-${state}` })],
           ["cost CLI", () => runCliCommand(["factory", "cost-record", started.binding.child_run_id, "--agent", "backend-builder", "--input-tokens", "1", "--entry-id", `cli-cost-${state}`, "--repo", fixture.repo, "--json"])],
           ["created env API", () => persistFactoryRunCreatedEnv(started.binding.child_run_id, { cwd: fixture.repo, checkpointLaunchWaitMs: 0 })],
+          ["resume env API", () => persistFactoryRunResumeEnv(started.binding.child_run_id, { cwd: fixture.repo })],
+          ["review provenance API", () => recordReviewDispatchProvenance(started.binding.child_run_id, { agent: "implementation-validator", subject: started.binding.child_run_id, attempt: 1, promptHash: `sha256:${"b".repeat(64)}`, promptBytes: 1 }, { cwd: fixture.repo })],
           ["cleanup API", () => cleanupRun(started.binding.child_run_id, { cwd: fixture.repo, force: true, dryRun: true })],
           ["cleanup CLI", () => runCliCommand(["factory", "cleanup", started.binding.child_run_id, "--force", "--dry-run", "--repo", fixture.repo, "--json"])],
         ];
@@ -631,6 +673,109 @@ describe("checked checkpoint child start", () => {
       assert.equal(checkpointReservationClaim(fixture, started.binding).state, "reserved");
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps cancel and heartbeat-stop sidecar-only for every non-launched checkpoint authority state", async () => {
+    for (const state of ["reserved", "launching", "unknown", "missing", "cross-bound"]) {
+      const fixture = createFixture(`checkpoint-sidecar-cancel-${state}`);
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-sidecar-cancel-${state}-child`, checkpointLaunchFn: (value) => value,
+        });
+        setCheckpointAuthorityVariant(fixture, started.binding, state);
+        const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+        const runPath = join(runDir, "run.json");
+        const before = readFileSync(runPath);
+        mkdirSync(join(runDir, "processes"), { recursive: true });
+        writeFileSync(join(runDir, "processes", "opencode.log"), "started\n");
+        writeJson(join(runDir, "process.json"), {
+          schema_version: 1, kind: "opencode-process", run_id: started.binding.child_run_id,
+          execution_id: "checkpoint-cancel", pid: 4242, started_at: "2026-07-19T10:00:00.000Z", updated_at: "2026-07-19T10:00:00.000Z",
+          state: "running", cwd: fixture.repo,
+          identity: { inspector: "checkpoint-test", start_marker: "start-1", command_name: "opencode" },
+          log_ref: "processes/opencode.log", cancel: null,
+        });
+        writeJson(join(runDir, "heartbeat.json"), {
+          schema_version: 1, run_id: started.binding.child_run_id, phase: "builder-wave", pid: null,
+          last_tick_at: "2026-07-19T10:00:00.000Z", interval_ms: 30000,
+        });
+        const signals = [];
+        const cancelled = await cancelFactoryRun(started.binding.child_run_id, {
+          cwd: fixture.repo, now: "2026-07-19T10:01:00.000Z", cancelWaitMs: 100,
+          inspectorFn: (pid) => signals.length > 0
+            ? { ok: false, inspector: "checkpoint-test", reason: "ESRCH: no such process" }
+            : { ok: pid === 4242, inspector: "checkpoint-test", pid, start_marker: "start-1", command_name: "opencode", cwd: fixture.repo, reason: null },
+          signalFn: (pid, signal) => signals.push({ pid, signal }),
+        });
+        assert.equal(cancelled.status, "cancelled", `${state} cancel status`);
+        assert.deepEqual(signals, [{ pid: 4242, signal: "SIGTERM" }], `${state} cancel signal`);
+        assert.equal(readJson(join(runDir, "process.json")).state, "cancelled", `${state} process sidecar`);
+        assert.equal(readJson(join(runDir, "heartbeat.json")).pid, null, `${state} heartbeat sidecar`);
+        assert.deepEqual(readFileSync(runPath), before, `${state} run.json`);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("blocks direct slice transitions across every non-launched checkpoint authority state", async () => {
+    for (const state of ["reserved", "launching", "unknown", "missing", "cross-bound"]) {
+      const fixture = createFixture(`checkpoint-slice-${state}`);
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-slice-${state}-child`, checkpointLaunchFn: (value) => value,
+        });
+        const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+        const runPath = join(runDir, "run.json");
+        const prepared = readJson(runPath);
+        prepared.slices = [{ id: "backend", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "pending", attempts: 0 }];
+        validateRun(prepared);
+        writeJson(runPath, prepared);
+        setCheckpointAuthorityVariant(fixture, started.binding, state);
+        const before = readFileSync(runPath);
+        await assert.rejects(
+          transitionRunSlice(runDir, "backend", { status: "blocked", blocked_reason: "checkpoint authority unavailable" }, { repoRoot: fixture.repo }),
+          /checkpoint child (?:mutation|reservation)/u,
+          state,
+        );
+        assert.deepEqual(readFileSync(runPath), before, `${state} run.json`);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("blocks direct panel publication across every non-launched checkpoint authority state", async () => {
+    for (const state of ["reserved", "launching", "unknown", "missing", "cross-bound"]) {
+      const fixture = createFixture(`checkpoint-panels-${state}`);
+      try {
+        const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+          cwd: fixture.repo, runId: `checkpoint-panels-${state}-child`, checkpointLaunchFn: (value) => value,
+        });
+        publishCompletedChild(fixture, started.binding, started.binding.base_commit);
+        const runDir = join(fixture.repo, ".opencode", "factory", started.binding.child_run_id);
+        const runPath = join(runDir, "run.json");
+        const prepared = readJson(runPath);
+        prepared.status = "running";
+        prepared.pr_url = null;
+        prepared.terminal_result = null;
+        validateRun(prepared);
+        writeJson(runPath, prepared);
+        setCheckpointAuthorityVariant(fixture, started.binding, state);
+        const before = readFileSync(runPath);
+        await assert.rejects(
+          transitionPanelVerdicts(runDir, {
+            validator: { verdict: "GO", report: "artifacts/validation-report.md", review_ref: "reviews/implementation-validator.json" },
+            security_review: { verdict: "PASS", review_ref: "reviews/security-reviewer.json" },
+          }, { repoRoot: fixture.repo }),
+          /checkpoint child (?:mutation|reservation)/u,
+          state,
+        );
+        assert.deepEqual(readFileSync(runPath), before, `${state} run.json`);
+      } finally {
+        rmSync(fixture.repo, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1581,6 +1726,10 @@ function assertNoCheckpointBaseRefs(fixture) {
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function readJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
 }
 
 function hashFile(path) {
