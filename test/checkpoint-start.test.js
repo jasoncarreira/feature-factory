@@ -482,6 +482,30 @@ describe("checked checkpoint child start", () => {
     }
   });
 
+  it("allows recovery to coordinate an exactly launched checkpoint without recreating its worktree", async () => {
+    const fixture = createFixture("checkpoint-ordinary-recovery-launched");
+    try {
+      const started = await startFactoryCheckpoint(fixture.parentRunId, "checkpoint-001", {
+        cwd: fixture.repo, runId: "checkpoint-ordinary-recovery-launched-child", checkpointLaunchFn: (value) => value,
+      });
+      const beforeRun = readFileSync(join(fixture.repo, ".opencode", "factory", started.binding.child_run_id, "run.json"));
+      const recovered = await recoverDisruptedRun(started.binding.child_run_id, {
+        cwd: fixture.repo,
+        recoveryHooks: { beforeWorktreeAdd: () => assert.fail("launched checkpoint must retain its factory-owned worktree") },
+      });
+
+      assert.equal(recovered.status, "running", JSON.stringify(recovered));
+      assert.equal(recovered.ok, true, JSON.stringify(recovered));
+      assert.equal(recovered.recovered, false, "healthy launched checkpoint recovery is a non-mutating coordination pass");
+      assert.equal(recovered.updated, false);
+      assert.equal(recovered.branch_head, started.binding.base_commit);
+      assert.equal(checkpointReservationClaim(fixture, started.binding).state, "launched");
+      assert.deepEqual(readFileSync(join(fixture.repo, ".opencode", "factory", started.binding.child_run_id, "run.json")), beforeRun);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
   it("routes divergent remote main safely without changing launched checkpoint identity", async () => {
     const fixture = createFixture("checkpoint-parent-resume-divergent-main");
     try {
