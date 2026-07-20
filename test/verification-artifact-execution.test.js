@@ -75,16 +75,31 @@ describe("checked verification artifact execution", () => {
   it("publishes a durable claim before spawn and rejects concurrent duplicate execution", async () => {
     const fixture = createArtifactFixture("artifact-concurrent");
     let spawns = 0;
+    let releaseFirst;
+    let firstExecution;
+    const holdFirst = new Promise((resolve) => { releaseFirst = resolve; });
     try {
       const options = { env: process.env, spawnFn(...args) { spawns += 1; return spawn(...args); } };
-      const results = await Promise.allSettled([
-        executeCheckedVerificationArtifact(fixture.runDir, "slice", "slice-tests", options),
+      let markFirstClaimed;
+      const claimPublished = new Promise((resolve) => { markFirstClaimed = resolve; });
+      firstExecution = executeCheckedVerificationArtifact(fixture.runDir, "slice", "slice-tests", {
+        ...options,
+        afterArtifactClaim: async () => {
+          markFirstClaimed();
+          await holdFirst;
+        },
+      });
+      await claimPublished;
+      const duplicate = await Promise.allSettled([
         executeCheckedVerificationArtifact(fixture.runDir, "slice", "slice-tests", options),
       ]);
+      assert.equal(duplicate[0].status, "rejected");
+      releaseFirst();
+      await firstExecution;
       assert.equal(spawns, 1);
-      assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-      assert.equal(results.filter((result) => result.status === "rejected").length, 1);
     } finally {
+      releaseFirst?.();
+      await firstExecution?.catch(() => undefined);
       rmSync(fixture.repo, { recursive: true, force: true });
     }
   });
