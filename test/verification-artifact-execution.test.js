@@ -9,6 +9,7 @@ import { claimCheckedVerificationArtifactExecution, completeCheckedVerificationA
 import { executeCheckedVerificationArtifact } from "../src/test-execution.js";
 import { evaluateInvariantFamilyReview } from "../src/delivery-envelope/review-extension.js";
 import { verificationArtifactExecutionClaimRef, verificationArtifactExecutionReceiptRef } from "../src/verification-artifact-refs.js";
+import { validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
 
 describe("checked verification artifact execution", () => {
   it("executes the exact current artifact command and publishes a current closed receipt", async () => {
@@ -147,6 +148,65 @@ describe("checked verification artifact execution", () => {
       );
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("binds command results to the exact probe during validation, completion, and replay", async () => {
+    for (const [name, mutate] of [
+      ["program", (command) => { command.program = "npm"; }],
+      ["args", (command) => { command.args = ["--test"]; }],
+    ]) {
+      const completionFixture = createArtifactFixture(`artifact-command-completion-${name}`);
+      try {
+        const claimed = await claimCheckedVerificationArtifactExecution(completionFixture.runDir, "slice", "slice-tests");
+        const receipt = artifactReceipt(claimed.authority, claimed.claim.nonce);
+        mutate(receipt.commands[0]);
+        assert.throws(() => validateVerificationArtifactExecutionReceipt(receipt), /must equal receipt\.probe/u, name);
+        await assert.rejects(
+          completeCheckedVerificationArtifactExecution(completionFixture.runDir, claimed.claim, claimed.authority, receipt),
+          /must equal receipt\.probe|authoritative probe/u,
+          name,
+        );
+        const claimRef = verificationArtifactExecutionClaimRef(claimed.authority.receipt_ref);
+        assert.equal(JSON.parse(readFileSync(join(completionFixture.runDir, claimRef), "utf8")).state, "active", name);
+      } finally {
+        rmSync(completionFixture.repo, { recursive: true, force: true });
+      }
+
+      const replayFixture = createArtifactFixture(`artifact-command-replay-${name}`);
+      try {
+        const authority = artifactAuthority(replayFixture);
+        const nonce = "123e4567-e89b-42d3-a456-426614174000";
+        const receipt = artifactReceipt(authority, nonce);
+        mutate(receipt.commands[0]);
+        writeJson(join(replayFixture.runDir, authority.receipt_ref), receipt);
+        writeJson(join(replayFixture.runDir, verificationArtifactExecutionClaimRef(authority.receipt_ref)), {
+          schema_version: 1,
+          kind: "checked-verification-artifact-execution-claim",
+          state: "completed",
+          nonce,
+          run_id: authority.run_id,
+          slice_id: authority.slice_id,
+          attempt: authority.attempt,
+          plan_ref: authority.plan_ref,
+          plan_hash: authority.plan_hash,
+          head_sha: authority.head_sha,
+          verification_artifact_id: authority.verification_artifact_id,
+          probe: authority.probe,
+          receipt_ref: authority.receipt_ref,
+          claimed_at: "2026-07-19T11:59:59.000Z",
+          completed_at: receipt.completed_at,
+          status: receipt.status,
+          receipt_hash: hashFile(join(replayFixture.runDir, authority.receipt_ref)),
+        });
+        await assert.rejects(
+          executeCheckedVerificationArtifact(replayFixture.runDir, "slice", "slice-tests", { env: process.env }),
+          /must equal receipt\.probe|authoritative probe/u,
+          name,
+        );
+      } finally {
+        rmSync(replayFixture.repo, { recursive: true, force: true });
+      }
     }
   });
 

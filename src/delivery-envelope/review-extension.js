@@ -77,6 +77,11 @@ function assertCheckedDispositionReceipt({ deliveryEnvelope, sliceId, review, di
     || receipt.probe.program !== command.program || JSON.stringify(receipt.probe.args) !== JSON.stringify(command.args)) {
     throw new Error("invariant family ledger checked receipt probe does not match the exact current verification artifact command");
   }
+  const observedCommand = receipt.commands[0];
+  if (receipt.status !== "skipped" && (!observedCommand || observedCommand.index !== 0 || observedCommand.program !== receipt.probe.program
+    || JSON.stringify(observedCommand.args) !== JSON.stringify(receipt.probe.args))) {
+    throw new Error("invariant family ledger checked receipt command does not match its exact authoritative probe");
+  }
   if (receipt.status !== disposition.result.outcome || JSON.stringify(receipt.result) !== JSON.stringify(disposition.result)) {
     throw new Error("invariant family ledger claimed result does not match the observed checked execution result");
   }

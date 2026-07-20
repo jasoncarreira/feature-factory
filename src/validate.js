@@ -840,7 +840,15 @@ export function validateVerificationArtifactExecutionReceipt(receipt) {
     if (receipt.commands.length !== 0 || receipt.review_ready !== false) errors.push({ path: "receipt.commands", message: "skipped requires zero commands and review_ready false" });
   } else {
     if (receipt.commands.length !== 1) errors.push({ path: "receipt.commands", message: "pass or fail requires exactly one command result" });
-    else validateTestExecutionCommandResult(errors, receipt.commands[0], 0);
+    else {
+      validateTestExecutionCommandResult(errors, receipt.commands[0], 0);
+      if (receipt.commands[0]?.program !== receipt.probe?.program) {
+        errors.push({ path: "receipt.commands[0].program", message: "must equal receipt.probe.program" });
+      }
+      if (JSON.stringify(receipt.commands[0]?.args) !== JSON.stringify(receipt.probe?.args)) {
+        errors.push({ path: "receipt.commands[0].args", message: "must equal receipt.probe.args" });
+      }
+    }
     const passing = receipt.commands.length === 1 && receipt.commands[0]?.outcome === "exited" && receipt.commands[0]?.exit_code === 0 && receipt.commands[0]?.signal === null && receipt.commands[0]?.status === "pass";
     if (receipt.status !== (passing ? "pass" : "fail")) errors.push({ path: "receipt.status", message: "must equal the observed command result status" });
     if (receipt.review_ready !== passing) errors.push({ path: "receipt.review_ready", message: "must equal true exactly for an observed passing command" });

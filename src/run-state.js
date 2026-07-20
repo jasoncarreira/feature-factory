@@ -1598,6 +1598,10 @@ function assertVerificationArtifactReceiptMatches(receipt, authority, claim) {
   if (receipt.subject !== authority.slice_id || !sameJson(receipt.probe, authority.probe)) {
     throw new Error("checked verification artifact receipt probe is stale");
   }
+  const command = receipt.commands?.[0];
+  if (receipt.status !== "skipped" && (!command || command.index !== 0 || command.program !== authority.probe.program || !sameJson(command.args, authority.probe.args))) {
+    throw new Error("checked verification artifact receipt command does not match the exact authoritative probe");
+  }
   if (!isRecord(claim) || receipt.claim_nonce !== claim.nonce) throw new Error("checked verification artifact receipt nonce does not match the exact active claim");
   if (receipt.status !== receipt.result.outcome) throw new Error("checked verification artifact receipt result is stale");
 }

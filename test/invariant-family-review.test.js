@@ -211,7 +211,11 @@ describe("B4.4 invariant-family review authority", () => {
       ["wrong attempt", (observed) => { observed.receipt.attempt = 2; }, /attempt is stale/u],
       ["wrong head", (observed) => { observed.receipt.head_sha = "d".repeat(40); }, /reviewed HEAD is stale/u],
       ["wrong artifact", (observed) => { observed.receipt.verification_artifact_id = observed.receipt.probe.verification_artifact_id = "api-security-tests"; }, /artifact id is stale|completed checked execution claim/u],
-      ["wrong argv", (observed) => { observed.receipt.probe.args = ["--test", "test/other.test.js"]; }, /exact current verification artifact command/u],
+      ["wrong argv", (observed) => {
+        observed.receipt.probe.args = observed.receipt.commands[0].args = ["--test", "test/other.test.js"];
+      }, /exact current verification artifact command/u],
+      ["command program differs from probe", (observed) => { observed.receipt.commands[0].program = "npm"; }, /command.*probe|completed checked execution claim/u],
+      ["command args differ from probe", (observed) => { observed.receipt.commands[0].args = ["--test"]; }, /command.*probe|completed checked execution claim/u],
       ["claimed pass", (observed) => {
         observed.receipt.status = "fail";
         observed.receipt.review_ready = false;
