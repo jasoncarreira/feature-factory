@@ -2409,13 +2409,14 @@ describe("simplified run-state transitions", () => {
       ["symlink", "docs/link.md", false, /cannot ratify symlink or submodule path 'docs\/link\.md'/u, "symlink"],
       ["deleted", "docs/deleted.md", false, /must be a newly added private regular file/u, "delete"],
       ["renamed", "docs/new.md", false, /must be a newly added private regular file/u, "rename", ["docs/new.md", "docs/old.md"]],
+      ["copied", "docs/copied.md", false, /must be a newly added private regular file/u, "copy"],
     ]) {
       const fixture = createFixture(`ownership-ratification-${name}`);
       try {
         initGitRepo(fixture.repo, ["slice-branch"]);
         runGit(fixture.repo, ["checkout", "slice-branch"]);
-        if (["delete", "rename", "modify", "mode"].includes(kind)) {
-          const originalPath = kind === "rename" ? "docs/old.md" : changedPath;
+        if (["delete", "rename", "copy", "modify", "mode"].includes(kind)) {
+          const originalPath = kind === "rename" ? "docs/old.md" : kind === "copy" ? "docs/original.md" : changedPath;
           mkdirSync(join(fixture.repo, "docs"), { recursive: true });
           writeFileSync(join(fixture.repo, originalPath), "baseline path\n");
           runGit(fixture.repo, ["add", originalPath]);
@@ -2443,6 +2444,7 @@ describe("simplified run-state transitions", () => {
           if (kind === "symlink") symlinkSync("../README.md", join(fixture.repo, changedPath));
           else if (kind === "delete") rmSync(join(fixture.repo, changedPath));
           else if (kind === "rename") runGit(fixture.repo, ["mv", "docs/old.md", changedPath]);
+          else if (kind === "copy") cpSync(join(fixture.repo, "docs", "original.md"), join(fixture.repo, changedPath));
           else if (kind === "mode") chmodSync(join(fixture.repo, changedPath), 0o755);
           else writeFileSync(join(fixture.repo, changedPath), `${name}\n`);
           if (kind !== "rename") runGit(fixture.repo, ["add", "-A", "--", ...disclosedPaths]);

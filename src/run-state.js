@@ -4440,7 +4440,7 @@ function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, evi
 }
 
 function observeChangedPathKinds(repository, from, to, options = {}) {
-  const result = authorityGit(options, repository, ["diff", "--name-status", "-z", "--find-renames", from, to]);
+  const result = authorityGit(options, repository, ["diff", "--name-status", "-z", "--find-renames", "--find-copies-harder", from, to]);
   if (!result.ok) throw new Error("slice ownership change kinds cannot be observed");
   if (result.stdout === "") return new Map();
   const records = parseNulRecords(result.stdout, "slice ownership change kinds");
