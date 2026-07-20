@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
 import {
@@ -265,7 +266,7 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE" });
   writeJson(join(runDir, "reviews", "validator.json"), { subject: "parent", attempt: 1, verdict: "NO-GO" });
   writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass" });
-  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", reviewed_commit: head });
+  writeJson(join(runDir, "reviews", "slice.json"), createSliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head }));
   const plan = {
     slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["checked"] }],
     integration_gate: { required_commands: commands },
@@ -276,6 +277,9 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
   const planHash = hashFile(join(runDir, "plan", "slices.json"));
   const decompositionReviewHash = hashFile(join(runDir, "reviews", "work-decomposer.json"));
   const validatorReviewHash = hashFile(join(runDir, "reviews", "validator.json"));
+  const sliceEvidenceRef = "evidence/slice.json"; const sliceReviewRef = "reviews/slice.json";
+  const sliceEvidenceHash = hashFile(join(runDir, sliceEvidenceRef)); const sliceReviewHash = hashFile(join(runDir, sliceReviewRef));
+  const sliceAttemptReview = createSliceAttemptReview({ evidenceRef: sliceEvidenceRef, evidenceHash: sliceEvidenceHash, reviewRef: sliceReviewRef, reviewHash: sliceReviewHash, reviewedCommit: head });
   const policy = { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } };
   const continuation = {
     schema_version: 2, kind: "blocked-run-continuation", created_at: NOW, operator_summary: "checked execution fixture",
@@ -292,7 +296,7 @@ function createExecutionFixture(runId, commands = [{ program: "node", args: ["--
     schema_version: 1, run_id: runId, mode: "headless", status: "running", base_ref: "main", base_commit: head, branch: runId, worktree: repo,
     github_account: null, pr_mode: "ready", max_parallel_slices: 3, max_retries: 3, gates: {}, continuation,
     post_pr: { schema_version: 1, policy, phase: "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
-    slices: [{ id: "slice", stack: "backend", depends_on: [], status: "merged", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json", merge_commit: head }],
+    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["README.md"], effective_paths: ["README.md"], status: "merged", attempts: 1, attempt_reviews: [sliceAttemptReview], evidence_ref: sliceEvidenceRef, evidence_hash: sliceEvidenceHash, review_ref: sliceReviewRef, review_hash: sliceReviewHash, reviewed_commit: head, merge_commit: head }],
     steps: [
       { agent: "spec-writer", status: "accepted", attempts: 0, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json", acceptance: { artifact_ref: "artifacts/technical-brief.md", artifact_hash: briefHash, review_ref: "reviews/spec-writer.json", review_hash: specReviewHash }, inherited_acceptance: { from_run_id: "parent", parent_spec_review_ref: "reviews/spec-writer.json", artifact_hash: briefHash, review_hash: specReviewHash } },
       { agent: "work-decomposer", status: "accepted", attempts: 1, artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json", acceptance: { artifact_ref: "plan/slices.json", artifact_hash: planHash, review_ref: "reviews/work-decomposer.json", review_hash: decompositionReviewHash } },

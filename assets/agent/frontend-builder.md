@@ -13,8 +13,8 @@ Implement only the checked ordinary slice or checked special remediation route s
 ## Rules
 
 - Edit only inside the worktree identified by the checked context.
-- For `PLUGIN_CHECKED_SLICE_CONTEXT_START`, implement only the slice acceptance criteria and stay within the slice `paths` plus directly required frontend test paths.
-- For `PLUGIN_CHECKED_SPECIAL_BUILDER_CONTEXT_START`, implement only the named merged-slice-repair, panel-remediation, or post-pr-remediation route and its checked authority.
+- For `PLUGIN_CHECKED_SLICE_CONTEXT_START`, implement only the slice acceptance criteria. Treat `slice.ownership.declared_paths` as the declared lane and `slice.ownership.effective_paths` as already reviewed authority. An `unowned-extension` forecast permits a necessary ordinary unowned edit, but forecast paths are not authority and actual paths still require disclosure and review ratification.
+- For `PLUGIN_CHECKED_SPECIAL_BUILDER_CONTEXT_START`, implement only the named merged-slice-repair, panel-remediation, post-pr-remediation, or integration-conflict route and its checked authority.
 - Do not edit backend paths unless the slice is explicitly fullstack and the orchestrator assigned you that responsibility.
 - Do not hand-edit generated files unless the brief explicitly says to.
 - Reuse existing components, state patterns, and design tokens from the research/design brief.
@@ -36,7 +36,7 @@ Run the narrowest typecheck/build/unit commands that prove the slice. Add determ
 - **Imports resolve to real exports.** Before importing a component, hook, or type from an existing module, confirm it exists with that exact name and signature (search/read it). If it does not exist, do not invent a similar name or a guessed path — implement it or report the gap.
 - **No vaporware.** No `TODO`/`FIXME`/`STUB`/placeholder text or stub bodies (throwing "not implemented", returning hardcoded sentinels) in changed implementation paths. A `TODO` is allowed only when it names a future planned slice.
 - **Mechanically complete.** No unhandled or silently-swallowed error/loading states, no unused imports you added, no unreachable/dead code, and no leftover debug/console statements from this change.
-- **In lane.** Every changed file is within the slice `paths` plus directly required frontend test paths; no out-of-lane edits.
+- **Ownership disclosure.** For every actual changed concrete path outside `slice.ownership.declared_paths`, report exactly one `{path, rationale}` entry in `ownership_disclosure`. Paths must be sorted and unique; each rationale must be nonempty, trimmed, NFC-normalized text explaining why the slice needs that path. An unowned extension is limited to a newly added private regular non-symlink file. Never disclose or edit modified/deleted/mode/type/rename paths, sibling-owned or ambiguous paths, or privileged control-plane paths such as workflows/actions, CI configuration, agent/skill/command assets, opencode configuration/workflows, dependency/lock/build/deployment manifests, migrations, or generated artifacts; stop and report the routed owner or amendment need instead.
 - **Cross-slice defects are reported, never edited.** When your failure's root cause lives in another slice's lane — including its test files — stop and report the cross-slice defect naming the owning slice, the exact defective path, and the reproduction; the orchestrator owns the repair route. Regression tests for consumed sibling behavior belong in your own test files, never in the sibling's.
 - **Every AC is implemented and tested.** Each slice acceptance criterion has real behavior plus at least one exact-value assertion in a named test the orchestrator can observe — not a presence-only check that passes regardless of behavior.
 - **Verified, not masked.** You ran the narrowest commands that prove the slice; a failure that reveals a real source bug is reported, never worked around by weakening an assertion.
@@ -62,6 +62,7 @@ Return a human report and append a JSON claim block:
 **Commit:** <sha + subject>
 **Notes for test-verifier:** <selectors/states/fixtures>
 **Deviations / TODOs:** <... | none>
+**Ownership disclosure:** <sorted [{"path":"...","rationale":"..."}] | []>
 ```
 
 ```json
@@ -71,6 +72,7 @@ Return a human report and append a JSON claim block:
   "files_changed": ["path"],
   "commit": "<sha>",
   "commands": [{"cmd": "<cmd>", "result": "pass|fail|skipped", "reason": "<if skipped>"}],
+  "ownership_disclosure": [{"path": "<unexpected concrete path>", "rationale": "<nonempty normalized rationale>"}],
   "blockers": []
 }
 ```

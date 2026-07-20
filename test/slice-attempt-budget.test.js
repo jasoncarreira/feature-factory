@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -103,7 +103,12 @@ describe("uniform slice attempt evidence", () => {
         writeJson(join(fixture.runDir, "evidence", "slice.attempt-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
         writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), {
           subject: "slice", attempt: 1, reviewed_commit: head,
-          remediation_context: { schema_version: 1, fixes: (review.required_fixes || []).map((_, required_fix_index) => ({ required_fix_index, classification: "narrow-correction" })) },
+          remediation_context: {
+            schema_version: 2,
+            fixes: (review.required_fixes || []).map((_, required_fix_index) => ({
+              required_fix_index, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["slice.txt"], fix_owner: "slice",
+            })),
+          },
           ...review,
         });
         await assert.rejects(transitionRunSlice(fixture.runDir, "slice", {
@@ -119,7 +124,7 @@ describe("uniform slice attempt evidence", () => {
   it("keeps the plan and durable schema closed to a fixed limit of three", () => {
     const plan = {
       integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
-      slices: [{ id: "slice", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
+      slices: [{ id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
     };
     assert.equal(validateSlicesPlan(plan, { requireIntegrationGate: true }).slices.length, 1);
     assert.throws(() => validateSlicesPlan({ ...plan, slices: [{ ...plan.slices[0], max_attempts: 4 }] }), /max_attempts: is not allowed/u);
@@ -168,6 +173,89 @@ describe("uniform slice attempt evidence", () => {
       assert.equal(result.slice.attempts, 3);
     } finally {
       cleanup(fixture);
+    }
+  });
+
+  it("permits an attempt-two unowned extension with checked disclosure context", async () => {
+    const fixture = createFixture("unowned-third");
+    try {
+      await startAttempt(fixture, 1);
+      await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["first"] });
+      await startAttempt(fixture, 2);
+      await publishReview(fixture, 2, {
+        verdict: "REJECT",
+        fixes: ["edit adjacent documentation"],
+        scopeEffect: "unowned-extension",
+        likelyPaths: ["docs/adjacent.md"],
+      });
+
+      const advanced = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 3 });
+      assert.equal(advanced.slice.attempts, 3);
+      const dispatchFilesBefore = readdirSync(join(fixture.runDir, "dispatch")).sort();
+      const context = await prepareSliceBuilderTaskDispatch(fixture.repo, { run_id: "run", slice_id: "slice", attempt: 3, agent: "backend-builder" });
+      assert.deepEqual(context.slice.ownership.forecast_unowned_extension_paths, ["docs/adjacent.md"]);
+      assert.equal(context.slice.ownership.disclosure_required_for_actual_unexpected_paths, true);
+      assert.deepEqual(readdirSync(join(fixture.runDir, "dispatch")).sort(), dispatchFilesBefore);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("routes contract changes before next-attempt mutation or dispatch", async () => {
+    const fixture = createFixture("contract-route");
+    try {
+      await startAttempt(fixture, 1);
+      await publishReview(fixture, 1, {
+        verdict: "REJECT", fixes: ["change the public package contract"], scopeEffect: "contract-change", likelyPaths: ["package.json"],
+      });
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 }),
+        /contract-change requires plan\/brief amendment/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+
+      const forced = readRun(fixture);
+      const forcedSlice = forced.slices[0];
+      forcedSlice.status = "running";
+      forcedSlice.attempts = 2;
+      for (const key of ["evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]) delete forcedSlice[key];
+      writeJson(join(fixture.runDir, "run.json"), forced);
+      const dispatchFilesBefore = readdirSync(join(fixture.runDir, "dispatch")).sort();
+      await assert.rejects(
+        prepareSliceBuilderTaskDispatch(fixture.repo, { run_id: "run", slice_id: "slice", attempt: 2, agent: "backend-builder" }, { claimDispatch: true, completionToken: "must-not-publish" }),
+        /contract-change requires plan\/brief amendment/u,
+      );
+      assert.deepEqual(readdirSync(join(fixture.runDir, "dispatch")).sort(), dispatchFilesBefore);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
+  it("rejects schema-v1 and unstructured slice-review publication without mutation", async () => {
+    for (const shape of ["schema-v1", "unstructured"]) {
+      const fixture = createFixture(`rejected-${shape}`);
+      try {
+        await startAttempt(fixture, 1);
+        commitSliceAttempt(fixture, 1);
+        const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+        const evidenceRef = "evidence/slice.attempt-1.json";
+        const reviewRef = "reviews/slice.attempt-1.json";
+        writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
+        const review = reviewRecord(fixture, 1, { verdict: "REJECT", fixes: ["invalid review shape"] });
+        if (shape === "schema-v1") review.remediation_context.schema_version = 1;
+        else delete review.remediation_context;
+        writeJson(join(fixture.runDir, reviewRef), review);
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(
+          transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: evidenceRef, review_ref: reviewRef }),
+          shape === "schema-v1" ? /schema_version.*must equal 2/u : /remediation_context.*required/u,
+          shape,
+        );
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, shape);
+      } finally {
+        cleanup(fixture);
+      }
     }
   });
 
@@ -581,7 +669,7 @@ function commitSliceAttempt(fixture, attempt) {
   git(fixture.repo, ["commit", "-m", `slice attempt ${attempt}`]);
 }
 
-function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "converging", classifications }) {
+function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "converging", classifications, scopeEffect = "in-lane", likelyPaths = ["slice.txt"], fixOwner = "slice" }) {
   return {
     subject: "slice",
     attempt,
@@ -590,11 +678,15 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
     convergence,
     remaining_fix_count: fixes.length,
     required_fixes: fixes,
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: {
-      schema_version: 1,
+      schema_version: 2,
       fixes: fixes.map((_, required_fix_index) => ({
         required_fix_index,
         classification: classifications?.[required_fix_index] || (convergence === "nonconvergent" ? "nonconvergent" : "narrow-correction"),
+        scope_effect: scopeEffect,
+        likely_paths: [...likelyPaths],
+        fix_owner: fixOwner,
       })),
     },
   };
@@ -631,7 +723,7 @@ function createFixture(name) {
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   writeJson(join(runDir, "plan", "slices.json"), {
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
-    slices: [{ id: "slice", stack: "backend", paths: ["src/"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
+    slices: [{ id: "slice", stack: "backend", paths: ["slice.txt"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
   });
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
   writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
@@ -656,7 +748,7 @@ function createFixture(name) {
       acceptance: { artifact_ref: "plan/slices.json", artifact_hash: planHash, review_ref: "reviews/work-decomposer.json", review_hash: decompositionReviewHash },
     }],
     gates: {},
-    slices: [{ id: "slice", stack: "backend", depends_on: [], status: "pending", attempts: 0 }],
+    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "pending", attempts: 0 }],
   });
   return { repo, runDir };
 }

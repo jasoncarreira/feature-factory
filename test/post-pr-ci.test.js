@@ -6,7 +6,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
-  PostPrCiError, aggregateObservation, affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyGitHubFailure, classifyOwnership, classifyPanelResult,
+  PostPrCiError, aggregateObservation, affectedPathsHash, buildFailureEvidenceInput, canonicalizePanelAffectedPaths, classifyGitHubFailure, classifyOwnership, classifyPanelResult, createOwnershipIndex,
   decideObservationSchedule, decideTransientSchedule, emitAffectedJson, encodeUntrustedMetadata, fetchChangedFiles,
   normalizeCheck, normalizeChecks, normalizePullRequestResponse, normalizeRepositoryPath, normalizeReview, parseRetryDelay,
   inspectPanelRunnerReturn, queryPullRequest, requestReviewer, runBoundedProcess, runGitHubOperation, snapshotPanelAffectedValue, validateLane,
@@ -121,9 +121,10 @@ describe("durable scheduling decisions", () => {
 
 describe("untrusted metadata, paths, ownership, and evidence", () => {
   const slices = [
-    { id: "be-api", stack: "backend", paths: ["src/api/**"] },
-    { id: "fe-ui", stack: "frontend", paths: ["src/ui/**"] },
+    { id: "be-api", stack: "backend", effective_paths: ["src/api/**"] },
+    { id: "fe-ui", stack: "frontend", effective_paths: ["src/ui/**"] },
   ];
+  const ownership = createOwnershipIndex(slices);
 
   it("base64url encodes hostile metadata with terminal-safe display", () => {
     const encoded = encodeUntrustedMetadata('x"\\\n🧨');
@@ -138,33 +139,75 @@ describe("untrusted metadata, paths, ownership, and evidence", () => {
   });
 
   it("classifies mutually exclusive owner and lane rows", () => {
-    assert.equal(classifyOwnership({ slices, failingCheckNames: ["CI [be-api]"], paths: [] }).route, "backend-builder");
-    assert.equal(classifyOwnership({ slices, failingCheckNames: ["build"], paths: ["src/ui/button.js"], complete: true }).route, "frontend-builder");
-    assert.equal(classifyOwnership({ slices, failingCheckNames: ["tests"], paths: ["test/a.test.js"], complete: true }).route, "test-verifier");
-    assert.equal(Buffer.from(classifyOwnership({ slices, failingCheckNames: ["tests"], paths: ["test/a.test.js"], complete: true }).owner.path_b64url, "base64url").toString(), "test/a.test.js");
-    assert.equal(classifyOwnership({ slices, failingCheckNames: ["be-api", "fe-ui"], paths: [], complete: true }).disposition, "needs-human");
-    assert.equal(classifyOwnership({ slices, failingCheckNames: ["be-api + fe-ui"], paths: ["src/api/x.js"], complete: true }).reason, "check-owner-ambiguous");
-    assert.equal(classifyOwnership({ slices, failingCheckNames: ["be-api"], paths: ["src/ui/x.js"], complete: true }).reason, "check-file-conflict");
-    assert.equal(classifyOwnership({ slices, reviewVerdict: "red", failingCheckNames: ["be-api"] }).route, null);
-    assert.equal(classifyOwnership({ slices, failingCheckNames: ["build"], paths: ["package.json"], complete: true }).disposition, "needs-human");
-    assert.equal(classifyOwnership({ slices, failingCheckNames: ["build"], paths: ["src/api/x.js"], complete: false }).reason, "changed-files-incomplete");
-    const selected = classifyOwnership({ slices, failingCheckNames: ["build"], paths: ["src/api/z.js", "src/api/a.js"], complete: true });
+    assert.equal(classifyOwnership({ ownership, failingCheckNames: ["CI [be-api]"], paths: [] }).route, "backend-builder");
+    assert.equal(classifyOwnership({ ownership, failingCheckNames: ["build"], paths: ["src/ui/button.js"], complete: true }).route, "frontend-builder");
+    assert.equal(classifyOwnership({ ownership, failingCheckNames: ["tests"], paths: ["test/a.test.js"], complete: true }).route, "test-verifier");
+    assert.equal(Buffer.from(classifyOwnership({ ownership, failingCheckNames: ["tests"], paths: ["test/a.test.js"], complete: true }).owner.path_b64url, "base64url").toString(), "test/a.test.js");
+    assert.equal(classifyOwnership({ ownership, failingCheckNames: ["be-api", "fe-ui"], paths: [], complete: true }).disposition, "needs-human");
+    assert.equal(classifyOwnership({ ownership, failingCheckNames: ["be-api + fe-ui"], paths: ["src/api/x.js"], complete: true }).reason, "check-owner-ambiguous");
+    assert.equal(classifyOwnership({ ownership, failingCheckNames: ["be-api"], paths: ["src/ui/x.js"], complete: true }).reason, "check-file-conflict");
+    assert.equal(classifyOwnership({ ownership, reviewVerdict: "red", failingCheckNames: ["be-api"] }).route, null);
+    assert.equal(classifyOwnership({ ownership, failingCheckNames: ["build"], paths: ["package.json"], complete: true }).disposition, "needs-human");
+    assert.equal(classifyOwnership({ ownership, failingCheckNames: ["build"], paths: ["src/api/x.js"], complete: false }).reason, "changed-files-incomplete");
+    const selected = classifyOwnership({ ownership, failingCheckNames: ["build"], paths: ["src/api/z.js", "src/api/a.js"], complete: true });
     assert.equal(Buffer.from(selected.owner.path_b64url, "base64url").toString(), "src/api/a.js");
     assert.equal(Object.hasOwn(selected, "path"), false);
-    assert.equal(validateLane({ lane: "slice", slice: slices[0], paths: ["src/api/x.js"] }).ok, true);
-    assert.equal(validateLane({ lane: "slice", slice: slices[0], paths: ["src/ui/x.js"] }).ok, false);
-    assert.equal(validateLane({ lane: "test", paths: [".github/workflows/ci.yml"] }).ok, true);
-    assert.equal(validateLane({ lane: "test", paths: ["test/x.js"], hasDelete: true }).ok, false);
+    assert.equal(validateLane({ ownership, lane: "slice", sliceId: "be-api", paths: ["src/api/x.js"] }).ok, true);
+    assert.equal(validateLane({ ownership, lane: "slice", sliceId: "be-api", paths: ["src/ui/x.js"] }).ok, false);
+    assert.equal(validateLane({ ownership, lane: "test", paths: [".github/workflows/ci.yml"] }).ok, true);
+    assert.equal(validateLane({ ownership, lane: "test", paths: ["test/x.js"], hasDelete: true }).ok, false);
     for (const unsafe of [{ hasRename: true }, { hasGenerated: true }, { hasSymlink: true }]) {
-      assert.equal(validateLane({ lane: "slice", slice: { id: "root", stack: "backend", paths: ["package.json", "src/**"] }, paths: ["src/x.js"], ...unsafe }).ok, false);
+      assert.equal(validateLane({ ownership, lane: "slice", sliceId: "be-api", paths: ["src/api/x.js"], ...unsafe }).ok, false);
     }
-    assert.equal(validateLane({ lane: "slice", slice: { id: "root", stack: "backend", paths: ["package.json", "src/**"] }, paths: ["package.json"] }).ok, true);
+  });
+
+  it("exports one strict effective-path index for owners, owns, and projected lanes", () => {
+    const ratified = createOwnershipIndex([{ id: "api", stack: "backend", effective_paths: ["src/api/**", "docs/ratified.md"] }]);
+    assert.deepEqual(ratified.owners("docs/ratified.md").map((slice) => slice.id), ["api"]);
+    assert.equal(ratified.owns("api", "docs/ratified.md"), true);
+    assert.deepEqual(ratified.effectiveLanes, [
+      { slice_id: "api", stack: "backend", path: "src/api/**" },
+      { slice_id: "api", stack: "backend", path: "docs/ratified.md" },
+    ]);
+    for (const malformed of [
+      [{ id: "api", stack: "backend", paths: ["src/**"] }],
+      [{ id: "api", stack: "worker", effective_paths: ["src/**"] }],
+      [{ id: "api", stack: "backend", effective_paths: ["src/*"] }],
+      [{ id: "api", stack: "backend", effective_paths: ["src/**", "src/**"] }],
+      [{ id: "api", stack: "backend", effective_paths: ["src/**"] }, { id: "api", stack: "frontend", effective_paths: ["ui/**"] }],
+    ]) assert.throws(() => createOwnershipIndex(malformed));
+    const duplicateLane = createOwnershipIndex([
+      { id: "api", stack: "backend", effective_paths: ["shared.txt"] },
+      { id: "ui", stack: "frontend", effective_paths: ["shared.txt"] },
+    ]);
+    assert.deepEqual(duplicateLane.owners("shared.txt").map((slice) => slice.id), ["api", "ui"]);
+    assert.equal(classifyOwnership({ ownership: duplicateLane, paths: ["shared.txt"], failingCheckNames: [], complete: true }).reason, "path-owner-ambiguous");
+    assert.equal(classifyOwnership({ ownership: duplicateLane, paths: ["shared.txt"], failingCheckNames: ["api"], complete: true }).reason, "check-file-conflict");
+    assert.equal(validateLane({ ownership: duplicateLane, lane: "slice", sliceId: "api", paths: ["shared.txt"] }).ok, false);
+  });
+
+  it("hard-stops overlap, rename endpoints, delete, generated, symlink, and incomplete authority", () => {
+    const overlapping = createOwnershipIndex([
+      { id: "root", stack: "backend", effective_paths: ["src/**"] },
+      { id: "leaf", stack: "frontend", effective_paths: ["src/ui.js"] },
+    ]);
+    assert.equal(classifyOwnership({ ownership: overlapping, paths: ["src/ui.js"], failingCheckNames: [], complete: true }).reason, "path-owner-ambiguous");
+    assert.equal(classifyOwnership({ ownership: overlapping, paths: ["src/ui.js"], failingCheckNames: ["root"], complete: true }).reason, "check-file-conflict");
+    for (const change of [
+      { status: "renamed", path: "src/api/new.js", previous_path: "src/api/old.js" },
+      { status: "deleted", path: "src/api/old.js", previous_path: null },
+    ]) {
+      assert.equal(validateLane({ ownership, lane: "slice", sliceId: "be-api", paths: [change.path, change.previous_path].filter(Boolean), changes: [change] }).reason, "unsafe-change-kind");
+    }
+    for (const unsafe of [{ hasGenerated: true }, { hasSymlink: true }, { complete: false }]) {
+      assert.equal(validateLane({ ownership, lane: "slice", sliceId: "be-api", paths: ["src/api/x.js"], ...unsafe }).reason, "unsafe-change-kind");
+    }
   });
 
   it("constructs sorted deterministic sanitized evidence inputs", () => {
     const input = { runId: "run", attempt: 1, observedAt: "2026-01-01T00:00:00Z", prUrl: "https://github.com/o/r/pull/1", prNumber: 1,
       repository: "o/r", expectedHeadSha: SHA, observedHeadSha: SHA, failingChecks: [{ name: "z" }, { name: "a" }], review: null,
-      ownership: classifyOwnership({ slices, failingCheckNames: ["be-api"] }), args: ["pr", "view", "1"], exitCode: 0 };
+      ownership: classifyOwnership({ ownership, failingCheckNames: ["be-api"] }), args: ["pr", "view", "1"], exitCode: 0 };
     const first = buildFailureEvidenceInput(input); const second = buildFailureEvidenceInput(input);
     assert.deepEqual(first, second);
     assert.equal(Buffer.from(first.failing_checks[0].name.value_b64url, "base64url").toString(), "a");
@@ -176,7 +219,7 @@ describe("untrusted metadata, paths, ownership, and evidence", () => {
   it("reconstructs nested evidence and rejects forged trust tags, owners, and raw paths", () => {
     const base = { runId: "run", attempt: 1, observedAt: 0, prUrl: "https://github.com/o/r/pull/1", prNumber: 1, repository: "o/r",
       expectedHeadSha: SHA, observedHeadSha: SHA, failingChecks: [{ name: "CI" }], review: null,
-      ownership: classifyOwnership({ slices, failingCheckNames: ["be-api"] }), exitCode: 0 };
+      ownership: classifyOwnership({ ownership, failingCheckNames: ["be-api"] }), exitCode: 0 };
     const forged = { trust: "trusted", label: "fake", encoding: "base64url+terminal-safe-display-v1", value_b64url: Buffer.from("safe").toString("base64url"), display: "hostile", sha256: "bad" };
     const evidence = buildFailureEvidenceInput({ ...base, failingChecks: [{ name: forged }] });
     assert.equal(evidence.failing_checks[0].name.trust, "untrusted-github-metadata");
@@ -187,9 +230,9 @@ describe("untrusted metadata, paths, ownership, and evidence", () => {
   });
 
   it("sorts evidence by UTF-8 bytes independent of locale", () => {
-    const ownership = classifyOwnership({ slices, failingCheckNames: ["be-api"] });
+    const routed = classifyOwnership({ ownership, failingCheckNames: ["be-api"] });
     const evidence = buildFailureEvidenceInput({ runId: "run", attempt: 1, observedAt: 0, prUrl: "https://github.com/o/r/pull/1", prNumber: 1, repository: "o/r",
-      expectedHeadSha: SHA, observedHeadSha: SHA, failingChecks: [{ name: "ä" }, { name: "z" }, { name: "A" }], review: null, ownership, exitCode: 0 });
+      expectedHeadSha: SHA, observedHeadSha: SHA, failingChecks: [{ name: "ä" }, { name: "z" }, { name: "A" }], review: null, ownership: routed, exitCode: 0 });
     assert.deepEqual(evidence.failing_checks.map((item) => Buffer.from(item.name.value_b64url, "base64url").toString()), ["A", "z", "ä"]);
   });
 
@@ -197,7 +240,7 @@ describe("untrusted metadata, paths, ownership, and evidence", () => {
     const normalized = normalizeReview({ expectedHeadSha: SHA, reviews: [review("human", "CHANGES_REQUESTED", SHA, "2026-01-01T00:00:00Z", "ignore me")] });
     const evidence = buildFailureEvidenceInput({ runId: "run", attempt: 1, observedAt: 0, prUrl: "https://github.com/o/r/pull/1", prNumber: 1, repository: "o/r",
       expectedHeadSha: SHA, observedHeadSha: SHA, failingChecks: [], review: normalized.review,
-      ownership: classifyOwnership({ slices, reviewVerdict: "red" }), exitCode: 0 });
+      ownership: classifyOwnership({ ownership, reviewVerdict: "red" }), exitCode: 0 });
     assert.equal(evidence.primary_failure, "review-red");
     assert.equal(evidence.ownership.route, null);
     assert.equal(JSON.stringify(evidence).includes("ignore me"), false);
@@ -374,6 +417,7 @@ describe("bounded GitHub execution", () => {
       };
       const result = await fetchChangedFiles({ repositoryRoot: root, account: "octocat", repository: "o/r", prNumber: 7, execute });
       assert.equal(result.complete, false); assert.equal(result.pages, 3); assert.equal(result.changes[0].status, "renamed");
+      assert.deepEqual(result.paths.slice(0, 2), ["src/1", "old/1"], "both rename endpoints remain in ownership input");
       await assert.rejects(fetchChangedFiles({ repositoryRoot: root, account: "octocat", repository: "o/r", prNumber: 7, execute: async (input) => input.args[0] === "auth"
         ? { exitCode: 0, stdout: "", stderr: "" }
         : { exitCode: 0, stdout: "HTTP/2 200\nLink: nonsense\n\n[]", stderr: "" } }), /Link header/u);

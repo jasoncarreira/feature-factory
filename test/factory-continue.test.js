@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { adoptContinuation, assertContinuationBindingsCurrent, buildContinuation, continueFactory, persistFactoryRunResumeEnv, recoverDisruptedRun, resumeFactory, seedContinuationPlanningArtifacts, startFactory } from "../src/factory.js";
 import { validateRun } from "../src/validate.js";
-import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice } from "../src/run-state.js";
+import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, completeSliceBuilderTaskDispatch, completeSpecialBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, prepareSpecialBuilderTaskDispatch, transitionContinuationAdoption, transitionPanelVerdicts, transitionPrePrFenceEstablished, transitionPrCreated, transitionRunSlice, transitionSliceMerged } from "../src/run-state.js";
 import { DURABLE_AUTHORITY_CATALOG, DURABLE_MUTATION_FAMILIES, createDurableCatalogBaseline, emitDurableRecordMutations } from "./helpers/durable-record-mutations.js";
 import { decodeFeatureCommandPayload } from "../src/feature-command-payload.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
@@ -26,7 +26,7 @@ describe("factory continue", () => {
       const head = gitStdout(fixture.repo, ["rev-parse", `${fixture.runId}^{commit}`]);
       const worktree = join(fixture.repo, ".opencode", "worktrees", fixture.runId);
       updateRun(fixture, (run) => {
-        run.slices = [{ id: "slice", stack: "backend", depends_on: [], status: "running", attempts: 1, branch: fixture.runId, worktree, dispatch_required: true }];
+        run.slices = [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1, branch: fixture.runId, worktree, dispatch_required: true }];
       });
       const claimStem = createHash("sha256").update(`${fixture.runId}\0slice\0${1}`, "utf8").digest("hex");
       mkdirSync(join(fixture.runDir, "dispatch"), { recursive: true });
@@ -190,7 +190,7 @@ describe("factory continue", () => {
         reviewRef: "reviews/api-slice-review.json",
         review: createReviewRecord({ subject: "api-slice", verdict: undefined, required_fixes: undefined, summary: "slice review blocks continuation" }),
         patchRun(run) {
-          run.slices = [{ id: "api-slice", status: "blocked", review_ref: "reviews/api-slice-review.json", blocked_reason: "slice review blocks continuation" }];
+          run.slices = [{ id: "api-slice", declared_paths: ["api-slice.txt"], effective_paths: ["api-slice.txt"], status: "blocked", attempts: 0, review_ref: "reviews/api-slice-review.json", blocked_reason: "slice review blocks continuation" }];
         },
         expected: { kind: "slice", source: "run.slices.api-slice.review_ref", subject: "api-slice" },
         expectedReviews: ["reviews/api-slice-review.json", "reviews/reviewer.json"],
@@ -224,7 +224,7 @@ describe("factory continue", () => {
       writeJson(join(fixture.runDir, "evidence", "a-slice.json"), { ok: false, source: "slice" });
       updateRun(fixture, (run) => {
         run.steps = [{ agent: "spec-writer", status: "blocked", evidence_ref: "evidence/z-step.json" }];
-        run.slices = [{ id: "api-slice", status: "blocked", evidence_ref: "evidence/a-slice.json", blocked_reason: "slice evidence blocks continuation" }];
+        run.slices = [{ id: "api-slice", declared_paths: ["api-slice.txt"], effective_paths: ["api-slice.txt"], status: "blocked", attempts: 0, evidence_ref: "evidence/a-slice.json", blocked_reason: "slice evidence blocks continuation" }];
       });
 
       const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "parent-evidence-next", dryRun: true });
@@ -1304,6 +1304,49 @@ describe("continuation planning-artifact reuse", () => {
     }
   });
 
+  it("carries a conflict-merged slice with exact proof sidecars and rejects every tamper", async () => {
+    const fixture = await createConflictCarryForwardFixture("carry-conflict-proof");
+    const childRunId = "carry-conflict-proof-next";
+    try {
+      const candidate = buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true });
+      const accepted = candidate.carry_forward.accepted_slices[0];
+      assert.deepEqual(accepted.integration_conflict, fixture.conflict);
+
+      for (const [label, mutate, expected] of [
+        ["claim bytes", () => writeFileSync(join(fixture.runDir, fixture.conflict.claim_ref), "{}\n"), /special builder|conflict.*claim|dispatch.*claim|hash.*stale/u],
+        ["closure bytes", () => writeFileSync(join(fixture.runDir, fixture.conflict.closure_ref), "{}\n"), /special builder|conflict.*closure|dispatch.*closure|hash.*stale/u],
+        ["proof bytes", () => updateRun(fixture, (run) => { run.slices[0].integration_conflict.integration_proof.integrated_tree = "f".repeat(40); }), /integrated bytes changed|conflict.*proof/u],
+      ]) {
+        const claimBytes = readFileSync(join(fixture.runDir, fixture.conflict.claim_ref));
+        const closureBytes = readFileSync(join(fixture.runDir, fixture.conflict.closure_ref));
+        const runBytes = readFileSync(join(fixture.runDir, "run.json"));
+        mutate();
+        assert.throws(
+          () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: `${childRunId}-${label.replaceAll(" ", "-")}`, carryForward: true }),
+          expected,
+          label,
+        );
+        writeFileSync(join(fixture.runDir, fixture.conflict.claim_ref), claimBytes);
+        writeFileSync(join(fixture.runDir, fixture.conflict.closure_ref), closureBytes);
+        writeFileSync(join(fixture.runDir, "run.json"), runBytes);
+      }
+
+      const result = await continueFactory(fixture.runId, {
+        cwd: fixture.repo, review: "reviewer.json", runId: childRunId, carryForward: true,
+        foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+      });
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+      assert.deepEqual(child.slices[0].integration_conflict, fixture.conflict);
+      for (const ref of [fixture.conflict.claim_ref, fixture.conflict.closure_ref]) {
+        assert.deepEqual(readFileSync(join(childRunDir, ref)), readFileSync(join(fixture.runDir, ref)), ref);
+      }
+      assert.equal(result.payload.continuation.carry_forward.accepted_slices[0].integration_conflict.resolution_commit, fixture.conflict.resolution_commit);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects a legacy plan without integration_gate at v2 carry-forward construction", () => {
     const fixture = createV2Fixture("carry-legacy-plan", { accepted: ["A"], mergeOrder: ["A"] });
     try {
@@ -1419,15 +1462,24 @@ describe("continuation planning-artifact reuse", () => {
 
   it("fails closed on missing/mutable sidecars, partial successor tuples, non-APPROVE, and plan drift", () => {
     const cases = [
-      ["missing evidence", (fixture) => rmSync(join(fixture.runDir, "evidence", "A.json")), /missing parent evidence ref/u],
+      ["missing evidence", (fixture) => rmSync(join(fixture.runDir, "evidence", "A.json")), /missing (?:parent )?evidence ref/u],
       ["mutable review", (fixture) => writeFileSync(join(fixture.runDir, "reviews", "A.json"), "{}\n"), /hashes are stale|subject must match/u],
-      ["partial successor", (fixture) => updateRun(fixture, (run) => { delete run.slices[0].review_hash; }), /all present or all absent/u],
+      ["partial successor", (fixture) => updateRun(fixture, (run) => { delete run.slices[0].review_hash; }), /require complete evidence_hash, review_hash, and reviewed_commit bindings/u],
       ["non approve", (fixture) => {
         const reviewPath = join(fixture.runDir, "reviews", "A.json");
         const review = JSON.parse(readFileSync(reviewPath, "utf8"));
         review.verdict = "REJECT";
+        review.convergence = "converging";
+        review.remaining_fix_count = 1;
+        review.required_fixes = ["reject accepted slice"];
+        review.remediation_context = { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["A.txt"], fix_owner: "A" }] };
         writeJson(reviewPath, review);
-        updateRun(fixture, (run) => { run.slices[0].review_hash = hashFile(reviewPath); });
+        updateRun(fixture, (run) => {
+          run.slices[0].review_hash = hashFile(reviewPath);
+          run.slices[0].attempt_reviews[0].review_hash = run.slices[0].review_hash;
+          run.slices[0].attempt_reviews[0].verdict = "REJECT";
+          run.slices[0].attempt_reviews[0].remaining_fix_count = 1;
+        });
       }, /requires APPROVE review/u],
       ["plan drift", (fixture) => {
         const planPath = join(fixture.runDir, "plan", "slices.json");
@@ -1461,7 +1513,16 @@ describe("continuation planning-artifact reuse", () => {
       }, /not an ancestor|must descend from target\.base_commit/u],
       ["extra", (fixture) => { runGit(fixture.repo, ["commit", "--allow-empty", "-m", "extra"]); }, /all and only accepted merge commits/u],
       ["missing", (fixture) => updateRun(fixture, (run) => { run.slices[0].merge_commit = fixture.baseCommit; }), /all and only accepted merge commits|unique full commits/u],
-      ["malformed", (fixture) => updateRun(fixture, (run) => { run.slices[0].reviewed_commit = fixture.baseCommit; }), /sidecar heads must equal reviewed_commit|second parent/u],
+      ["malformed", (fixture) => updateRun(fixture, (run) => {
+        const reviewPath = join(fixture.runDir, "reviews", "A.json");
+        const review = JSON.parse(readFileSync(reviewPath, "utf8"));
+        review.reviewed_commit = fixture.baseCommit;
+        writeJson(reviewPath, review);
+        run.slices[0].reviewed_commit = fixture.baseCommit;
+        run.slices[0].attempt_reviews[0].reviewed_commit = fixture.baseCommit;
+        run.slices[0].review_hash = hashFile(reviewPath);
+        run.slices[0].attempt_reviews[0].review_hash = run.slices[0].review_hash;
+      }), /review history is stale|sidecar heads must equal reviewed_commit|second parent/u],
     ];
     for (const [label, mutate, expected] of cases) {
       const fixture = createV2Fixture(`chain-${label.replaceAll(" ", "-")}`, { accepted: ["A"], mergeOrder: ["A"] });
@@ -1670,7 +1731,8 @@ describe("continuation planning-artifact reuse", () => {
       writeJson(join(fixture.runDir, reviewRef), {
         subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
         remaining_fix_count: 1, required_fixes: ["rewritten after terminalization"],
-        remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "nonconvergent" }] },
+        ownership_ratification: { schema_version: 1, paths: [] },
+        remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "nonconvergent", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
       });
       assert.throws(
         () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: reviewRef, runId: "nonconvergent-route-rewritten", carryForward: true }),
@@ -1680,7 +1742,8 @@ describe("continuation planning-artifact reuse", () => {
       writeJson(join(fixture.runDir, priorReviewRef), {
         subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
         remaining_fix_count: 1, required_fixes: ["rewritten earlier history"],
-        remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "narrow-correction" }] },
+        ownership_ratification: { schema_version: 1, paths: [] },
+        remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
       });
       assert.throws(
         () => buildContinuation(fixture.runId, { cwd: fixture.repo, review: reviewRef, runId: "nonconvergent-route-history-rewritten", carryForward: true }),
@@ -1940,6 +2003,72 @@ describe("continuation planning-artifact reuse", () => {
       ].join("\n"));
       await assert.rejects(adoptContinuation(childRunId, { cwd: fixture.repo }), /before B1\.4 publication|not available/u);
     } finally { cleanup(fixture.repo); }
+  });
+
+  it("publishes and replays complete multi-attempt carry-forward history", async () => {
+    const fixture = createV2Fixture("multi-attempt-publication", { accepted: ["A"], mergeOrder: ["A"] });
+    const childRunId = "multi-attempt-publication-next";
+    const launches = [];
+    try {
+      const history = configureMultiAttemptAcceptedSlice(fixture, "A");
+      const parentBytes = new Map(history.flatMap((entry) => [entry.evidence_ref, entry.review_ref])
+        .map((ref) => [ref, readFileSync(join(fixture.runDir, ref))]));
+      const launch = async (repo, args) => {
+        launches.push({ repo, payload: args.at(-1) });
+        return { status: "started", run_id: childRunId };
+      };
+      const options = {
+        cwd: fixture.repo,
+        review: "reviewer.json",
+        runId: childRunId,
+        carryForward: true,
+        now: "2026-07-18T12:00:00.000Z",
+        foregroundLaunchFn: launch,
+      };
+
+      const result = await continueFactory(fixture.runId, options);
+      const accepted = result.payload.continuation.carry_forward.accepted_slices[0];
+      const childRunDir = join(fixture.repo, ".opencode", "factory", childRunId);
+      const child = JSON.parse(readFileSync(join(childRunDir, "run.json"), "utf8"));
+      const childSlice = child.slices.find((slice) => slice.id === "A");
+
+      assert.deepEqual(accepted.attempt_reviews, history);
+      assert.deepEqual(childSlice.attempt_reviews, history);
+      assert.equal(accepted.attempt_reviews[0].review_ref, "reviews/A.attempt-1.json");
+      assert.equal(accepted.attempt_reviews[1].review_ref, "reviews/A.attempt-2.json");
+      assert.notEqual(accepted.attempt_reviews[0].review_hash, accepted.attempt_reviews[1].review_hash);
+      assert.notEqual(accepted.attempt_reviews[0].evidence_hash, accepted.attempt_reviews[1].evidence_hash);
+      for (const [ref, bytes] of parentBytes) assert.deepEqual(readFileSync(join(childRunDir, ref)), bytes, ref);
+
+      const decoded = decodeFeatureCommandPayload(launches[0].payload, { repo: launches[0].repo });
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
+      assert.deepEqual(decoded.payload.continuation.carry_forward.accepted_slices[0].attempt_reviews, history);
+      const replay = await continueFactory(fixture.runId, options);
+      assert.deepEqual(replay.publication, { published: true, replayed: true });
+      const replayDecoded = decodeFeatureCommandPayload(launches[1].payload, { repo: launches[1].repo });
+      assert.equal(replayDecoded.ok, true, JSON.stringify(replayDecoded));
+      assert.deepEqual(replayDecoded.payload.continuation.carry_forward.accepted_slices[0].attempt_reviews, history);
+    } finally { cleanup(fixture.repo); }
+
+    for (const [label, mutate, expected] of [
+      ["historical deletion", (candidate) => rmSync(join(candidate.runDir, "reviews", "A.attempt-1.json")), /missing.*review|review.*missing/u],
+      ["historical byte drift", (candidate) => {
+        const path = join(candidate.runDir, "evidence", "A.attempt-1.json");
+        writeFileSync(path, `${readFileSync(path, "utf8")} `);
+      }, /history is stale|hashes are stale/u],
+      ["historical hash drift", (candidate) => updateRun(candidate, (run) => { run.slices[0].attempt_reviews[0].review_hash = `sha256:${"0".repeat(64)}`; }), /history is stale|hashes are stale/u],
+    ]) {
+      const candidate = createV2Fixture(`multi-attempt-${label.replaceAll(" ", "-")}`, { accepted: ["A"], mergeOrder: ["A"] });
+      try {
+        configureMultiAttemptAcceptedSlice(candidate, "A");
+        mutate(candidate);
+        assert.throws(
+          () => buildContinuation(candidate.runId, { cwd: candidate.repo, review: "reviewer.json", runId: `${candidate.runId}-next`, carryForward: true }),
+          expected,
+          label,
+        );
+      } finally { cleanup(candidate.repo); }
+    }
   });
 
   it("runs the full final recheck after candidate build and rejects every authority mutation without resources", () => {
@@ -2480,9 +2609,7 @@ describe("continuation planning-artifact reuse", () => {
 
       const childFile = join(fixture.repo, ".opencode", "factory", childRunId, "run.json");
       const child = JSON.parse(readFileSync(childFile, "utf8"));
-      Object.assign(child.slices.find((slice) => slice.id === "B"), {
-        status: "merged", attempts: 1, evidence_ref: "evidence/A.json", review_ref: "reviews/A.json", merge_commit: child.continuation.carry_forward.start_commit,
-      });
+      Object.assign(child.slices.find((slice) => slice.id === "B"), writeMergedSliceFixture(dirname(childFile), "B", child.continuation.carry_forward.start_commit));
       writeJson(childFile, child);
       const afterMerged = runCli(fixture.repo, ["factory", "step", childRunId, "test-verifier", "running", "--attempts", "1", "--json"]);
       assert.equal(afterMerged.status, 0, afterMerged.stderr);
@@ -2608,7 +2735,7 @@ describe("continuation planning-artifact reuse", () => {
         status: "running",
         branch: targetRunId,
         worktree: targetWorktree,
-        slices: [{ id: "slice", status: "running", attempts: 1 }],
+        slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1 }],
       }));
       const before = readFileSync(join(targetRunDir, "run.json"));
       for (const [label, invoke] of [
@@ -2757,13 +2884,7 @@ describe("continuation planning-artifact reuse", () => {
       const worktree = child.worktree;
       runGit(worktree, ["commit", "--allow-empty", "-m", "merge remaining B"]);
       const mergedCommit = gitStdout(worktree, ["rev-parse", "HEAD"]);
-      Object.assign(child.slices.find((slice) => slice.id === "B"), {
-        status: "merged",
-        attempts: 1,
-        evidence_ref: "evidence/A.json",
-        review_ref: "reviews/A.json",
-        merge_commit: mergedCommit,
-      });
+      Object.assign(child.slices.find((slice) => slice.id === "B"), writeMergedSliceFixture(childDir, "B", mergedCommit));
       writeJson(childFile, child);
       runGit(worktree, ["reset", "--hard", child.continuation.carry_forward.start_commit]);
       const before = readFileSync(childFile);
@@ -3048,13 +3169,15 @@ function configureNonconvergentRoute(fixture) {
   writeJson(join(fixture.runDir, priorReviewRef), {
     subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
     remaining_fix_count: 1, required_fixes: ["first correction"],
-    remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "narrow-correction" }] },
+    ownership_ratification: { schema_version: 1, paths: [] },
+    remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
   });
   writeJson(join(fixture.runDir, evidenceRef), { subject: "B", attempt: 2, status: "pass", review_ready: true, head_sha: head });
   const currentReview = {
     subject: "B", attempt: 2, reviewed_commit: head, verdict: "REJECT", convergence: "nonconvergent",
     remaining_fix_count: 1, required_fixes: ["replace the missed category"],
-    remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "nonconvergent" }] },
+    ownership_ratification: { schema_version: 1, paths: [] },
+    remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "nonconvergent", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
   };
   writeJson(join(fixture.runDir, reviewRef), currentReview);
   const priorReview = {
@@ -3064,6 +3187,8 @@ function configureNonconvergentRoute(fixture) {
     review_ref: priorReviewRef,
     review_hash: hashFile(join(fixture.runDir, priorReviewRef)),
     reviewed_commit: head,
+    diff_base_commit: head,
+    ratified_paths: [],
     verdict: "REJECT",
     convergence: "converging",
     remaining_fix_count: 1,
@@ -3075,6 +3200,8 @@ function configureNonconvergentRoute(fixture) {
     review_ref: reviewRef,
     review_hash: hashFile(join(fixture.runDir, reviewRef)),
     reviewed_commit: head,
+    diff_base_commit: head,
+    ratified_paths: [],
     verdict: "REJECT",
     convergence: "nonconvergent",
     remaining_fix_count: 1,
@@ -3103,7 +3230,8 @@ function configureConvergingSliceRoute(fixture) {
   writeJson(join(fixture.runDir, reviewRef), {
     subject: "B", attempt: 1, reviewed_commit: head, verdict: "REJECT", convergence: "converging",
     remaining_fix_count: 1, required_fixes: ["apply the selected correction"],
-    remediation_context: { schema_version: 1, fixes: [{ required_fix_index: 0, classification: "narrow-correction" }] },
+    ownership_ratification: { schema_version: 1, paths: [] },
+    remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: ["B.txt"], fix_owner: "B" }] },
   });
   const source = {
     attempt: 1,
@@ -3112,6 +3240,8 @@ function configureConvergingSliceRoute(fixture) {
     review_ref: reviewRef,
     review_hash: hashFile(join(fixture.runDir, reviewRef)),
     reviewed_commit: head,
+    diff_base_commit: head,
+    ratified_paths: [],
     verdict: "REJECT",
     convergence: "converging",
     remaining_fix_count: 1,
@@ -3193,16 +3323,26 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   writeJson(join(runDir, "reviews", "work-decomposer.json"), createReviewRecord({ subject: "work-decomposer", verdict: "APPROVE", required_fixes: [], summary: "accepted decomposition" }));
 
   const slices = plan.slices.map((planned) => {
-    if (!accepted.includes(planned.id)) return { id: planned.id, stack: planned.stack, depends_on: planned.depends_on, status: "pending", attempts: 0 };
+    if (!accepted.includes(planned.id)) return { id: planned.id, stack: planned.stack, depends_on: planned.depends_on, declared_paths: [...planned.paths], effective_paths: [...planned.paths], status: "pending", attempts: 0 };
     const evidenceRef = `evidence/${planned.id}.json`;
     const reviewRef = `reviews/${planned.id}.json`;
     writeJson(join(runDir, evidenceRef), { subject: planned.id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommits[planned.id] });
-    writeJson(join(runDir, reviewRef), { subject: planned.id, attempt: 1, verdict: "APPROVE", reviewed_commit: reviewedCommits[planned.id] });
+    writeJson(join(runDir, reviewRef), {
+      subject: planned.id, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+      required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommits[planned.id],
+    });
+    const evidenceHash = hashFile(join(runDir, evidenceRef));
+    const reviewHash = hashFile(join(runDir, reviewRef));
+    const attemptReview = {
+      attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+      reviewed_commit: reviewedCommits[planned.id], diff_base_commit: baseCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    };
     return {
-      id: planned.id, stack: planned.stack, depends_on: planned.depends_on, status: "merged", attempts: 1,
-      evidence_ref: evidenceRef, evidence_hash: hashFile(join(runDir, evidenceRef)),
-      review_ref: reviewRef, review_hash: hashFile(join(runDir, reviewRef)),
+      id: planned.id, stack: planned.stack, depends_on: planned.depends_on, declared_paths: [...planned.paths], effective_paths: [...planned.paths], status: "merged", attempts: 1,
+      evidence_ref: evidenceRef, evidence_hash: evidenceHash,
+      review_ref: reviewRef, review_hash: reviewHash,
       reviewed_commit: reviewedCommits[planned.id], merge_commit: mergeCommits[planned.id],
+      attempt_reviews: [attemptReview],
     };
   });
   const run = createRunRecord({
@@ -3248,14 +3388,173 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   return { repo, runDir, runId, baseCommit, reviewedCommits, mergeCommits, actualMergeOrder };
 }
 
+async function createConflictCarryForwardFixture(runId) {
+  const fixture = createV2Fixture(runId, { accepted: [], mergeOrder: [] });
+  const sliceId = "A";
+  const branch = `${runId}--${sliceId}`;
+  const sliceWorktree = join(fixture.repo, ".opencode", "worktrees", `${runId}-${sliceId}`);
+  runGit(fixture.repo, ["branch", branch, fixture.baseCommit]);
+  mkdirSync(dirname(sliceWorktree), { recursive: true });
+  runGit(fixture.repo, ["worktree", "add", sliceWorktree, branch]);
+  writeFileSync(join(sliceWorktree, "A.txt"), "reviewed A bytes\n");
+  runGit(sliceWorktree, ["add", "A.txt"]);
+  runGit(sliceWorktree, ["commit", "-m", "reviewed conflict A"]);
+  const reviewedCommit = gitStdout(sliceWorktree, ["rev-parse", "HEAD"]);
+
+  writeFileSync(join(fixture.repo, "A.txt"), "competing integration A bytes\n");
+  runGit(fixture.repo, ["add", "A.txt"]);
+  runGit(fixture.repo, ["commit", "-m", "integration baseline for A"]);
+  const integrationBaseline = gitStdout(fixture.repo, ["rev-parse", "HEAD"]);
+  runGit(fixture.repo, ["branch", "-f", "main", integrationBaseline]);
+  runGit(fixture.repo, ["push", "--force", "origin", `${integrationBaseline}:main`]);
+
+  const evidenceRef = "evidence/A.json";
+  const reviewRef = "reviews/A.json";
+  writeJson(join(fixture.runDir, evidenceRef), { subject: sliceId, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, reviewRef), {
+    subject: sliceId, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [],
+    ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
+  });
+  const evidenceHash = hashFile(join(fixture.runDir, evidenceRef));
+  const reviewHash = hashFile(join(fixture.runDir, reviewRef));
+  const claimStem = createHash("sha256").update(`${runId}\0${sliceId}\0${1}`, "utf8").digest("hex");
+  const claimRef = `dispatch/${claimStem}.json`;
+  const closureRef = `dispatch/${claimStem}.closed.json`;
+  const completionToken = "carry-forward-conflict-slice";
+  mkdirSync(join(fixture.runDir, "dispatch"), { recursive: true });
+  writeJson(join(fixture.runDir, claimRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-claim", run_id: runId, slice_id: sliceId, attempt: 1,
+    agent: "backend-builder", branch, worktree: sliceWorktree, head: fixture.baseCommit,
+    context_hash: `sha256:${"a".repeat(64)}`, completion_token_hash: `sha256:${createHash("sha256").update(completionToken).digest("hex")}`,
+    claimed_at: "2026-07-18T12:00:00.000Z", closure_ref: closureRef,
+  });
+  const claimHash = hashFile(join(fixture.runDir, claimRef));
+  writeJson(join(fixture.runDir, closureRef), {
+    schema_version: 1, kind: "checked-slice-builder-dispatch-closure", claim_ref: claimRef, claim_hash: claimHash,
+    run_id: runId, slice_id: sliceId, attempt: 1, agent: "backend-builder", branch, worktree: sliceWorktree,
+    head: fixture.baseCommit, completion_head: reviewedCommit, context_hash: `sha256:${"a".repeat(64)}`,
+    completion_token: completionToken, returned_at: "2026-07-18T12:00:00.000Z",
+  });
+  const closureHash = hashFile(join(fixture.runDir, closureRef));
+  updateRun(fixture, (run) => {
+    run.status = "running";
+    run.base_commit = integrationBaseline;
+    run.terminal_result = null;
+    run.validator = null;
+    run.security_review = null;
+    run.slices[0] = {
+      id: sliceId, stack: "backend", depends_on: [], declared_paths: ["A.txt"], effective_paths: ["A.txt"], status: "review", attempts: 1,
+      branch, worktree: sliceWorktree, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+      reviewed_commit: reviewedCommit, dispatch_required: true, dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash,
+      dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
+      attempt_reviews: [{
+        attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+        reviewed_commit: reviewedCommit, diff_base_commit: fixture.baseCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+        dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
+      }],
+    };
+  });
+
+  const merge = spawnSync("git", ["merge", "--no-ff", branch, "-m", "merge conflict A"], { cwd: fixture.repo, encoding: "utf8" });
+  assert.notEqual(merge.status, 0, "carry-forward fixture merge must conflict");
+  const specialToken = "carry-forward-special-conflict";
+  const context = await prepareSpecialBuilderTaskDispatch(fixture.repo, { run_id: runId, route: "integration-conflict", agent: "backend-builder" }, { claimDispatch: true, completionToken: specialToken });
+  writeFileSync(join(fixture.repo, "A.txt"), "delegated integrated A bytes\n");
+  runGit(fixture.repo, ["add", "A.txt"]);
+  runGit(fixture.repo, ["commit", "-m", "delegated conflict A"]);
+  const resolutionCommit = gitStdout(fixture.repo, ["rev-parse", "HEAD"]);
+  await completeSpecialBuilderTaskDispatch(fixture.repo, {
+    run_id: runId, route: "integration-conflict", agent: "backend-builder", claim_ref: context.dispatch_claim.ref,
+    claim_hash: context.dispatch_claim.hash, completion_token: specialToken,
+  });
+  const merged = await transitionSliceMerged(fixture.runDir, sliceId, { merge_commit: resolutionCommit });
+  const conflict = merged.slice.integration_conflict || merged.run.integration_conflict;
+  updateRun(fixture, (run) => {
+    run.status = "blocked";
+    run.validator = { verdict: "NO-GO", review_ref: "reviews/reviewer.json" };
+    run.terminal_result = { status: "blocked", run_id: runId, reason: "review blocked", summary: "blocked", artifacts: {} };
+  });
+  return { ...fixture, baseCommit: integrationBaseline, resolutionCommit, conflict };
+}
+
 function acceptedManifestRow(fixture, id) {
   const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
   const slice = run.slices.find((candidate) => candidate.id === id);
   return {
-    id, attempts: slice.attempts,
+    id, declared_paths: structuredClone(slice.declared_paths), effective_paths: structuredClone(slice.effective_paths), attempts: slice.attempts,
     evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
     review_ref: slice.review_ref, review_hash: slice.review_hash,
-    reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit,
+    reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit, attempt_reviews: structuredClone(slice.attempt_reviews),
+  };
+}
+
+function configureMultiAttemptAcceptedSlice(fixture, id) {
+  const runPath = join(fixture.runDir, "run.json");
+  const run = JSON.parse(readFileSync(runPath, "utf8"));
+  const slice = run.slices.find((candidate) => candidate.id === id);
+  const reviewedCommit = slice.reviewed_commit;
+  const attemptOne = {
+    evidenceRef: `evidence/${id}.attempt-1.json`,
+    reviewRef: `reviews/${id}.attempt-1.json`,
+  };
+  const attemptTwo = {
+    evidenceRef: `evidence/${id}.attempt-2.json`,
+    reviewRef: `reviews/${id}.attempt-2.json`,
+  };
+  writeJson(join(fixture.runDir, attemptOne.evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, attemptOne.reviewRef), {
+    subject: id, attempt: 1, verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+    required_fixes: ["complete the first correction"],
+    ownership_ratification: { schema_version: 1, paths: [] },
+    remediation_context: { schema_version: 2, fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: "in-lane", likely_paths: [`${id}.txt`], fix_owner: id }] },
+    reviewed_commit: reviewedCommit,
+  });
+  writeJson(join(fixture.runDir, attemptTwo.evidenceRef), { subject: id, attempt: 2, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(fixture.runDir, attemptTwo.reviewRef), {
+    subject: id, attempt: 2, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
+  });
+  const history = [
+    {
+      attempt: 1, evidence_ref: attemptOne.evidenceRef, evidence_hash: hashFile(join(fixture.runDir, attemptOne.evidenceRef)),
+      review_ref: attemptOne.reviewRef, review_hash: hashFile(join(fixture.runDir, attemptOne.reviewRef)), reviewed_commit: reviewedCommit,
+      diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "REJECT", convergence: "converging", remaining_fix_count: 1,
+    },
+    {
+      attempt: 2, evidence_ref: attemptTwo.evidenceRef, evidence_hash: hashFile(join(fixture.runDir, attemptTwo.evidenceRef)),
+      review_ref: attemptTwo.reviewRef, review_hash: hashFile(join(fixture.runDir, attemptTwo.reviewRef)), reviewed_commit: reviewedCommit,
+      diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    },
+  ];
+  Object.assign(slice, {
+    attempts: 2,
+    attempt_reviews: history,
+    evidence_ref: history[1].evidence_ref,
+    evidence_hash: history[1].evidence_hash,
+    review_ref: history[1].review_ref,
+    review_hash: history[1].review_hash,
+    reviewed_commit: reviewedCommit,
+  });
+  rmSync(join(fixture.runDir, `evidence/${id}.json`));
+  rmSync(join(fixture.runDir, `reviews/${id}.json`));
+  writeJson(runPath, run);
+  return history;
+}
+
+function writeMergedSliceFixture(runDir, id, reviewedCommit) {
+  const evidenceRef = `evidence/${id}.fixture.json`;
+  const reviewRef = `reviews/${id}.fixture.json`;
+  writeJson(join(runDir, evidenceRef), { subject: id, attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit });
+  writeJson(join(runDir, reviewRef), {
+    subject: id, attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: reviewedCommit,
+  });
+  const evidenceHash = hashFile(join(runDir, evidenceRef));
+  const reviewHash = hashFile(join(runDir, reviewRef));
+  return {
+    status: "merged", attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
+    reviewed_commit: reviewedCommit, merge_commit: reviewedCommit,
+    attempt_reviews: [{ attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
   };
 }
 

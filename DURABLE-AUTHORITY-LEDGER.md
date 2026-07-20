@@ -185,11 +185,12 @@ authority class.
 - Persisted legacy records keep their original schema. Readers validate and consume
   them under the schema/version that wrote them; there is no eager rewrite, field
   stripping, synthetic backfill, or reinterpretation of missing successor fields.
-- The reviewed-code successor is a narrow checked-replay exception: exact same-status
-  legacy slice review, exact same-merge legacy merged, and exact dual-panel verdict
-  replays may atomically add only their complete hash/head tuples after current bytes,
-  Git identities, attempts, subjects, refs, and cleanliness prove the binding. Partial
-  tuples, mismatched replays, and all legacy completed mutations fail closed.
+- Slice review and merged rows have no compatibility upgrade: legacy or incomplete
+  current bindings/history reject without mutation. Exact dual-panel verdict replays
+  remain the narrow reviewed-code successor exception and may atomically add only their
+  complete hash/head tuples after current bytes, Git identities, attempts, subjects,
+  refs, and cleanliness prove the binding. Partial tuples, mismatched replays, and all
+  legacy completed mutations fail closed.
 - A successor may consolidate a legacy duplicate only at a checked transition that
   writes the named canonical replacement and preserves every unique retained fact.
 - No two repair authorities may be active for one run. Admission and resume must

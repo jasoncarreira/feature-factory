@@ -196,7 +196,7 @@ function createFixture(runId, options = {}) {
     run.mode = options.mode || "interactive";
     run.worktree = join(repo, ".opencode", "worktrees", runId);
     run.branch = runId;
-    run.slices = [{ id: "slice", status: "pending", attempts: 0 }];
+    run.slices = [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "pending", attempts: 0 }];
     mkdirSync(run.worktree, { recursive: true });
   }
   writeJson(join(runDir, "run.json"), run);

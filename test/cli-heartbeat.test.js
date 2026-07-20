@@ -528,7 +528,7 @@ function runningRun(overrides = {}) {
     worktree: null,
     gates: {},
     steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md" }],
-    slices: [{ id: "cli-heartbeat-routing", stack: "backend", depends_on: [], status: "running", branch: "heartbeat-liveness--cli-heartbeat-routing", worktree: ".opencode/worktrees/heartbeat-liveness--cli-heartbeat-routing", attempts: 1 }],
+    slices: [{ id: "cli-heartbeat-routing", stack: "backend", depends_on: [], declared_paths: ["cli-heartbeat-routing.txt"], effective_paths: ["cli-heartbeat-routing.txt"], status: "running", branch: "heartbeat-liveness--cli-heartbeat-routing", worktree: ".opencode/worktrees/heartbeat-liveness--cli-heartbeat-routing", attempts: 1 }],
     validator: null,
     security_review: null,
     pr_url: null,

@@ -4,8 +4,9 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "./helpers/git-fixture.js";
-import { createReviewRecord } from "./helpers/review-record-fixture.js";
+import { createReviewRecord, createSliceAttemptReview, createSliceReviewRecord } from "./helpers/review-record-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
+import { hashFile } from "../src/refs.js";
 import { completeSpecialBuilderTaskDispatch, createPostPrState, hasInFlightHeartbeatWork, heartbeatOnce, prepareSpecialBuilderTaskDispatch, transitionGateDecision, transitionMergedSliceRepair, transitionPrCreated, transitionRunJson, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionSteeringBoundaryOpened, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { resumeFactory, runActiveHeartbeatTickForTest, startHeartbeat, stopHeartbeat } from "../src/factory.js";
 import { checkRunConsistency, validateRun } from "../src/validate.js";
@@ -46,6 +47,43 @@ describe("merged-sibling repair", () => {
     } finally {
       cleanup(fixture);
     }
+  });
+
+  it("uses merged durable effective ownership for ratified repair paths and blocks sibling overlap", async () => {
+    const fixture = createFixture();
+    const ratifiedPath = "docs/ratified-owner.md";
+    try {
+      ratifyOwnerPath(fixture, ratifiedPath);
+      const stalePlan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+      stalePlan.slices.find((slice) => slice.id === "owner").paths = ["src/stale-owner/**"];
+      writeJson(join(fixture.runDir, "plan", "slices.json"), stalePlan);
+      assert.doesNotThrow(() => validateRun(readRun(fixture)));
+
+      const reported = await report(fixture, { defect_path: ratifiedPath });
+      assert.equal(reported.merged_slice_repair.owner_slice_id, "owner");
+      assert.equal(reported.merged_slice_repair.defect_path, ratifiedPath);
+      await transitionMergedSliceRepair(fixture.runDir, { status: "repairing", attempts: 1 }, { repoRoot: fixture.repo });
+      const repairHead = await commitRepairFix(fixture, [ratifiedPath]);
+      writeJson(join(fixture.runDir, "evidence", "repair-attempt.json"), { subject: "repair:owner", changed_paths: [ratifiedPath] });
+      recordReview(fixture, "repair-ratified", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: repairHead });
+      const reviewed = await review(fixture, "repair-ratified", repairHead);
+      assert.equal(reviewed.merged_slice_repair.status, "review");
+      writeJson(join(fixture.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
+      const merged = await merge(fixture, { merge_commit: repairHead });
+      assert.equal(merged.merged_slice_repair.status, "merged");
+      assert.equal(merged.merged_slice_repair.merge_commit, repairHead);
+
+      const overlapping = createFixture();
+      try {
+        ratifyOwnerPath(overlapping, ratifiedPath);
+        const run = readRun(overlapping);
+        const sibling = run.slices.find((slice) => slice.id === "other");
+        sibling.declared_paths = [ratifiedPath];
+        sibling.effective_paths = [ratifiedPath];
+        writeJson(join(overlapping.runDir, "run.json"), run);
+        await assert.rejects(report(overlapping, { defect_path: ratifiedPath }), /outside owner slice/u);
+      } finally { cleanup(overlapping); }
+    } finally { cleanup(fixture); }
   });
 
   it("enforces quiescence, monotonic attempts, and the two-attempt ceiling", async () => {
@@ -546,16 +584,16 @@ describe("merged-sibling repair", () => {
       writeJson(planPath, plan);
       await assert.rejects(
         report(fixture),
-        /outside owner slice/u,
-        "padded lane text must not expand repair ownership beyond the canonical grammar",
+        /invalid or ambiguous ownership lane/u,
+        "padded lane text must reject at plan admission",
       );
 
       owner.paths = ["src\\owner\\records.js"];
       writeJson(planPath, plan);
       await assert.rejects(
         report(fixture),
-        /plan lanes are not valid repository paths/u,
-        "malformed lane text fails the whole check closed",
+        /invalid or ambiguous ownership lane/u,
+        "malformed lane text rejects at plan admission",
       );
 
       owner.paths = ["src/owner/**"];
@@ -579,8 +617,8 @@ describe("merged-sibling repair", () => {
       writeJson(planPath, plan);
       await assert.rejects(
         report(fixture),
-        /outside owner slice/u,
-        "a glob shape the slice-lane grammar does not define must match nothing",
+        /invalid or ambiguous ownership lane/u,
+        "an unsupported glob rejects at plan admission",
       );
     } finally {
       cleanup(fixture);
@@ -845,17 +883,37 @@ function createFixture() {
   const runDir = join(repo, ".opencode", "factory", RUN_ID);
   for (const dir of ["evidence", "reviews", "plan"]) mkdirSync(join(runDir, dir), { recursive: true });
 
+  const acceptedSlices = [
+    { id: "owner", attempt: 2 },
+    { id: "merged-consumer", attempt: 1 },
+  ].map(({ id, attempt }) => {
+    const evidenceRef = `evidence/${id}.json`;
+    const reviewRef = `reviews/${id}.json`;
+    writeJson(join(runDir, evidenceRef), { subject: id, attempt, status: "pass", review_ready: true, head_sha: featureCommit });
+    writeJson(join(runDir, reviewRef), createSliceReviewRecord({ subject: id, attempt, reviewedCommit: featureCommit }));
+    const evidenceHash = hashFile(join(runDir, evidenceRef));
+    const reviewHash = hashFile(join(runDir, reviewRef));
+    return {
+      id,
+      attemptReview: createSliceAttemptReview({ attempt, evidenceRef, evidenceHash, reviewRef, reviewHash, reviewedCommit: featureCommit }),
+    };
+  });
+  const authorityFor = (id) => {
+    const authority = acceptedSlices.find((slice) => slice.id === id).attemptReview;
+    return { attempt_reviews: [authority], evidence_ref: authority.evidence_ref, evidence_hash: authority.evidence_hash, review_ref: authority.review_ref, review_hash: authority.review_hash, reviewed_commit: authority.reviewed_commit };
+  };
+
   writeJson(join(runDir, "run.json"), createRunRecord({
     run_id: RUN_ID,
     branch: FEATURE_BRANCH,
     worktree: repo,
     steps: [],
     slices: [
-      { id: "owner", stack: "backend", depends_on: [], status: "merged", attempts: 2, merge_commit: "1111111", review_ref: "reviews/owner.json" },
-      { id: "consumer", stack: "backend", depends_on: ["owner"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
-      { id: "merged-consumer", stack: "backend", depends_on: ["owner"], status: "merged", attempts: 1, merge_commit: "2222222", review_ref: "reviews/owner.json" },
-      { id: "unrelated", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
-      { id: "other", stack: "backend", depends_on: [], status: "pending", attempts: 0 },
+      { id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/owner/**", "test/owner.test.js"], effective_paths: ["src/owner/**", "test/owner.test.js"], status: "merged", attempts: 2, merge_commit: "1111111", ...authorityFor("owner") },
+      { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "blocked", attempts: 1, blocked_reason: "owner defect" },
+      { id: "merged-consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/merged-consumer/**"], effective_paths: ["src/merged-consumer/**"], status: "merged", attempts: 1, merge_commit: "2222222", ...authorityFor("merged-consumer") },
+      { id: "unrelated", stack: "backend", depends_on: [], declared_paths: ["src/unrelated/**"], effective_paths: ["src/unrelated/**"], status: "pending", attempts: 0 },
+      { id: "other", stack: "backend", depends_on: [], declared_paths: ["src/other-lane/**"], effective_paths: ["src/other-lane/**"], status: "pending", attempts: 0 },
     ],
   }));
   writeJson(join(runDir, "plan", "slices.json"), {
@@ -870,8 +928,21 @@ function createFixture() {
   writeJson(join(runDir, "evidence", "no-subject.json"), { status: "fail" });
   writeJson(join(runDir, "evidence", "passing.json"), { subject: "consumer", status: "pass" });
   writeJson(join(runDir, "evidence", "repair-attempt.json"), { subject: "repair:owner", changed_paths: ["src/owner/records.js", "test/owner.test.js"] });
-  writeJson(join(runDir, "reviews", "owner.json"), createReviewRecord({ subject: "owner", verdict: "APPROVE", required_fixes: [] }));
   return { repo, runDir, featureCommit, mainOnlyCommit };
+}
+
+function ratifyOwnerPath(fixture, ratifiedPath) {
+  const runPath = join(fixture.runDir, "run.json");
+  const run = readRun(fixture);
+  const owner = run.slices.find((slice) => slice.id === "owner");
+  const reviewPath = join(fixture.runDir, owner.review_ref);
+  writeJson(reviewPath, createSliceReviewRecord({ subject: "owner", attempt: owner.attempts, reviewedCommit: owner.reviewed_commit, ratifiedPaths: [ratifiedPath] }));
+  const reviewHash = hashFile(reviewPath);
+  owner.review_hash = reviewHash;
+  owner.effective_paths = [...owner.declared_paths, ratifiedPath];
+  owner.attempt_reviews.at(-1).review_hash = reviewHash;
+  owner.attempt_reviews.at(-1).ratified_paths = [ratifiedPath];
+  writeJson(runPath, run);
 }
 
 function git(repo, args) {

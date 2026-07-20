@@ -8,13 +8,14 @@ import { git, repoRoot } from "./git.js";
 import { probeLegacyBooleanLiveness } from "./hardening/process-verification.js";
 import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
-import { normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
+import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
+import { isPrivilegedControlPlanePath, privilegedControlPlanePathReason } from "./privileged-path-policy.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -47,7 +48,6 @@ const PR_FENCE_IDENTITY_KEYS = Object.freeze(["operation_id", "repository", "hea
 const CARRY_FORWARD_PLANNING_KINDS = new Set(["story", "research_map", "design_brief", "technical_brief"]);
 const SLICE_BUILDER_AGENTS = new Set(["backend-builder", "frontend-builder"]);
 const SAFE_TASK_DISPATCH_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const LEGACY_MERGED_UPGRADE_ERROR = "legacy merged slice authority upgrade failed";
 const CONTINUATION_PARENT_ARTIFACTS = Object.freeze([
   ["story", "artifacts/story.md"],
   ["research_map", "artifacts/research-map.md"],
@@ -1576,13 +1576,18 @@ export function observeCarryForwardAuthority(repoInput, parentRunDirInput, paren
   for (const planned of plan.slices) {
     const slice = runById.get(planned.id);
     if (!slice || slice.stack !== planned.stack || !sameJson(slice.depends_on, planned.depends_on)) throw new Error(`parent slice '${planned.id}' identity/dependencies do not match the bound plan`);
+    if (!sameJson(slice.declared_paths, planned.paths)) throw new Error(`parent slice '${planned.id}' declared_paths do not match the bound plan`);
     if (slice.status !== "merged") { remainingSliceIds.push(planned.id); continue; }
     if (!Number.isInteger(slice.attempts) || slice.attempts < 1) throw new Error(`accepted slice '${planned.id}' attempts must be positive`);
     const observed = assertSliceReviewBindingCurrent(parentRunDir, planned.id, slice);
     if (observed.review.verdict !== "APPROVE") throw new Error(`accepted slice '${planned.id}' requires APPROVE review`);
+    if (slice.integration_conflict) assertSliceIntegrationConflictCurrent(parentRunDir, parentRun, slice, { ...options, repoRoot: repo });
     acceptedSlices.push({
-      id: planned.id, attempts: slice.attempts, evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
+      id: planned.id, declared_paths: cloneJson(slice.declared_paths), effective_paths: cloneJson(slice.effective_paths),
+      attempts: slice.attempts, evidence_ref: slice.evidence_ref, evidence_hash: slice.evidence_hash,
       review_ref: slice.review_ref, review_hash: slice.review_hash, reviewed_commit: slice.reviewed_commit, merge_commit: slice.merge_commit,
+      attempt_reviews: cloneJson(slice.attempt_reviews),
+      ...(slice.integration_conflict ? { integration_conflict: cloneJson(slice.integration_conflict) } : {}),
     });
   }
   if (remainingSliceIds.length === 0) throw new Error("v2 carry-forward requires at least one nonmerged slice");
@@ -1590,7 +1595,7 @@ export function observeCarryForwardAuthority(repoInput, parentRunDirInput, paren
   const branch = git(repo, ["rev-parse", "--verify", `refs/heads/${parentRun.branch}^{commit}`]);
   if (!branch.ok || !/^[0-9a-f]{40}$/u.test(branch.stdout.trim())) throw new Error("v2 carry-forward parent branch HEAD cannot be observed");
   const startCommit = branch.stdout.trim();
-  assertObservedCarryForwardIntegration(repo, targetBaseCommit, startCommit, acceptedSlices);
+  assertObservedCarryForwardIntegration(repo, parentRunDir, parentRun, targetBaseCommit, startCommit, acceptedSlices, options);
   assertObservedCarryForwardPanels(parentRunDir, parentRun, startCommit);
   assertObservedOriginBase(repo, targetBaseRef, targetBaseCommit, startCommit, options);
   return {
@@ -1599,7 +1604,7 @@ export function observeCarryForwardAuthority(repoInput, parentRunDirInput, paren
   };
 }
 
-function assertObservedCarryForwardIntegration(repo, baseCommit, startCommit, acceptedSlices) {
+function assertObservedCarryForwardIntegration(repo, parentRunDir, parentRun, baseCommit, startCommit, acceptedSlices, options = {}) {
   if (!git(repo, ["merge-base", "--is-ancestor", baseCommit, startCommit]).ok) throw new Error("v2 carry-forward start_commit must descend from target.base_commit");
   if (acceptedSlices.length === 0) {
     if (startCommit !== baseCommit) throw new Error("v2 carry-forward with zero accepted slices requires start_commit equal target.base_commit");
@@ -1614,9 +1619,13 @@ function assertObservedCarryForwardIntegration(repo, baseCommit, startCommit, ac
   }
   for (const [index, mergeCommit] of chain.entries()) {
     const accepted = acceptedByMerge.get(mergeCommit);
-    const proof = observeReviewedMergeProof(repo, accepted.id, mergeCommit, accepted.reviewed_commit);
+    let firstParent;
+    if (accepted.integration_conflict) {
+      assertSliceIntegrationConflictCurrent(parentRunDir, parentRun, parentRun.slices.find((slice) => slice.id === accepted.id), { ...options, repoRoot: repo });
+      firstParent = accepted.integration_conflict.integration_baseline;
+    } else firstParent = observeReviewedMergeProof(repo, accepted.id, mergeCommit, accepted.reviewed_commit).first_parent;
     const expectedFirstParent = index === 0 ? baseCommit : chain[index - 1];
-    if (proof.first_parent !== expectedFirstParent) throw new Error(`accepted slice '${accepted.id}' merge first parent does not match the actual first-parent chain`);
+    if (firstParent !== expectedFirstParent) throw new Error(`accepted slice '${accepted.id}' merge first parent does not match the actual first-parent chain`);
   }
 }
 
@@ -1838,9 +1847,11 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
     const adopted = accepted.get(row.id);
     if (!adopted) continue;
     const expected = {
-      id: row.id, stack: row.stack, depends_on: row.depends_on, status: "merged", attempts: adopted.attempts,
+      id: row.id, stack: row.stack, depends_on: row.depends_on, declared_paths: adopted.declared_paths, effective_paths: adopted.effective_paths,
+      status: "merged", attempts: adopted.attempts,
       evidence_ref: adopted.evidence_ref, evidence_hash: adopted.evidence_hash, review_ref: adopted.review_ref, review_hash: adopted.review_hash,
-      reviewed_commit: adopted.reviewed_commit, merge_commit: adopted.merge_commit,
+      reviewed_commit: adopted.reviewed_commit, merge_commit: adopted.merge_commit, attempt_reviews: adopted.attempt_reviews,
+      ...(adopted.integration_conflict ? { integration_conflict: adopted.integration_conflict } : {}),
     };
     if (!sameJson(row, expected)) throw new Error(`adopted carry-forward slice '${row.id}' is immutable`);
     for (const [ref, hash, label] of [[row.evidence_ref, row.evidence_hash, "evidence"], [row.review_ref, row.review_hash, "review"]]) {
@@ -1848,6 +1859,7 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
       assertNoSymlinkPath(runDir, path, `adopted slice ${label}`);
       if (!existsSync(path) || !lstatSync(path).isFile() || hashFile(path) !== hash) throw new Error(`adopted carry-forward slice '${row.id}' ${label} sidecar changed`);
     }
+    if (row.integration_conflict) assertSliceIntegrationConflictCurrent(runDir, run, row, { runDir });
   }
 }
 
@@ -2169,12 +2181,26 @@ async function transitionRunStepChecked(runDir, stepSelector, updater, options, 
       }
       assertDraftSpecReuseAttempt(draft, steps[stepIndex], priorStep);
       decompositionAuthority = bindStepAcceptance(runDir, steps[stepIndex], draft, options) || decompositionAuthority;
+      if (steps[stepIndex]?.agent === "test-verifier" && steps[stepIndex].status === "accepted") {
+        const pending = integrationConflictSlices(draft).filter(({ conflict }) => conflict.status === "pending-integrated-review");
+        for (const { slice, conflict } of pending) {
+          assertSliceIntegrationConflictCurrent(runDir, draft, slice, options);
+          const snapshot = await snapshotIntegrationConflictTestArtifact(runDir, slice, conflict, steps[stepIndex].acceptance);
+          conflict.status = "accepted";
+          conflict.test_acceptance = cloneJson(steps[stepIndex].acceptance);
+          conflict.test_artifact_snapshot = snapshot;
+          conflict.test_execution_claim = cloneJson(steps[stepIndex].execution_claim);
+          conflict.test_execution_claim_hash = steps[stepIndex].execution_claim_hash;
+        }
+      }
     }
   }, options, {
     authorizedStep: stepIdentityForSelector(stepSelector),
     allowInheritedAcceptance: authority.allowInheritedAcceptance,
+    integrationConflicts: "test-acceptance",
     beforeReplace: (next) => {
       if (decompositionAuthority) assertAcceptedDecompositionAuthorityCurrent(runDir, next, decompositionAuthority);
+      assertSliceIntegrationConflictsCurrent(runDir, next, options);
     },
   }), options);
   return { ...result, step_index: stepIndex, step: stepIndex >= 0 ? result.run.steps?.[stepIndex] ?? null : null };
@@ -2241,7 +2267,7 @@ function assertDraftSpecReuseAttempt(run, step, priorStep) {
 
 function assertTestVerifierIntegrationGate(run, step, priorStep) {
   if (step?.agent !== "test-verifier") return;
-  if (run.continuation?.schema_version === 2 && step.status === "accepted") {
+  if ((run.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.status === "accepted") {
     if (priorStep?.status !== "running" || !Number.isInteger(step.attempts) || step.attempts < 1 || step.attempts !== priorStep.attempts) {
       throw new Error("schema-v2 test-verifier acceptance must transition from running at the same positive attempt");
     }
@@ -2282,7 +2308,7 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
   if (!step) return null;
   delete step.acceptance;
   if (step.status !== "accepted") return null;
-  if (run?.continuation?.schema_version === 2 && step.agent === "test-verifier") {
+  if ((run?.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.agent === "test-verifier") {
     step.acceptance = observeV2TestVerifierAuthority(runDir, run, step, options).acceptance;
     return null;
   }
@@ -2333,6 +2359,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
   let priorReviewAuthority = null;
   let nextReviewAuthority = null;
   let priorDispatchAuthority = null;
+  let reviewPlanAuthority = null;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft, { current }) => {
     const slices = Array.isArray(draft.slices) ? draft.slices : [];
     if (!collectionHasItem(slices, sliceId, "id")) throw new Error(`slice '${formatSelector(sliceId)}' not found`);
@@ -2342,22 +2369,9 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
     sliceIndex = update.index;
     if (!update.changed) {
       if (priorSlice.status !== "review") return;
-      if (hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)) {
-        observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
-        assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
-        if (TERMINAL_RUN_STATUSES.has(current.status)) return;
-        const currentHistory = priorSlice.attempt_reviews?.find((entry) => entry?.attempt === priorSlice.attempts);
-        if (currentHistory) return;
-        nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, { ...options, allowLegacyReview: true });
-        appendSliceAttemptReview(slices[priorIndex], nextReviewAuthority);
-        sliceIndex = priorIndex;
-        return;
-      }
-      if (TERMINAL_RUN_STATUSES.has(current.status)) return;
-      nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, priorSlice.id, priorSlice, { ...options, allowLegacyReview: true });
-      Object.assign(slices[priorIndex], nextReviewAuthority.binding);
-      if (nextReviewAuthority.history_entry) appendSliceAttemptReview(slices[priorIndex], nextReviewAuthority);
-      sliceIndex = priorIndex;
+      priorDispatchAuthority = observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
+      assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
+      return;
     }
     if (sliceIndex >= 0 && slices[sliceIndex].status === "merged") {
       throw new Error(`slice '${slices[sliceIndex].id || formatSelector(sliceId)}' merges must use transitionSliceMerged`);
@@ -2371,14 +2385,20 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
           priorDispatchAuthority = observeClosedSliceDispatchIfClaimed(runDir, current.run_id, priorSlice, { required: priorSlice.dispatch_required === true });
         }
         if (priorSlice.status === "review" && slices[sliceIndex].status !== "review") {
-          priorReviewAuthority = hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)
-            ? assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice)
-            : observeSliceReviewSidecars(runDir, priorSlice.id, priorSlice);
+          priorReviewAuthority = assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
           if (priorReviewAuthority.review.verdict === "REJECT" && priorReviewAuthority.review.convergence === "nonconvergent") {
             if (slices[sliceIndex].status !== "running") throw new Error(`slice '${priorSlice.id}' current nonconvergent review cannot transition to ordinary blocked state`);
             terminalizeSliceNonconvergence(draft, priorSlice, sliceIndex, options);
             return;
           }
+          if (slices[sliceIndex].status === "running") {
+            reviewPlanAuthority = observeAcceptedDecompositionAuthority(runDir, current, { ...options, requireIntegrationGate: true });
+            validateSliceReviewFeasibility(priorReviewAuthority.review, reviewPlanAuthority.plan, { sliceId: priorSlice.id });
+            assertReviewedSliceRetryRoute(priorReviewAuthority.review, priorSlice.id, current);
+          }
+        }
+        if (!sameJson(priorSlice.effective_paths, slices[sliceIndex].effective_paths)) {
+          throw new Error(`slice '${priorSlice.id}' effective_paths is managed by checked review publication`);
         }
         normalizeSliceTransition(priorSlice, slices[sliceIndex]);
         const priorAttempts = Number.isInteger(priorSlice.attempts) ? priorSlice.attempts : 0;
@@ -2389,17 +2409,15 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
           if (unmet.length) throw new Error(`slice '${priorSlice.id}' is not dependency-ready: ${unmet.join(", ")}`);
         }
         assertSliceTransition(runDir, priorSlice, slices[sliceIndex]);
-        if (priorSlice.status === "review") priorReviewAuthority = hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)
-          ? assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice)
-          : observeSliceReviewSidecars(runDir, priorSlice.id, priorSlice);
+        if (priorSlice.status === "review") priorReviewAuthority = assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
         if (slices[sliceIndex].status === "review") {
-          if (priorSlice.status === "review" && !hasCompleteBinding(priorSlice, SLICE_REVIEW_BINDING_KEYS)) {
-            throw new Error(`legacy slice '${priorSlice.id}' review upgrade requires an exact same-status replay`);
-          }
           if (priorSlice.status === "review") throw new Error(`slice '${priorSlice.id}' review binding is write-once; return to running before publishing another review`);
           assertNoBindingFields(slices[sliceIndex], SLICE_REVIEW_BINDING_KEYS, `slice '${priorSlice.id}' review binding`);
-          nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], options);
+          reviewPlanAuthority = observeAcceptedDecompositionAuthority(runDir, draft, { ...options, requireIntegrationGate: true });
+          nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], reviewPlanAuthority, options);
+          validateSliceReviewFeasibility(nextReviewAuthority.review, reviewPlanAuthority.plan, { sliceId: slices[sliceIndex].id });
           Object.assign(slices[sliceIndex], nextReviewAuthority.binding);
+          slices[sliceIndex].effective_paths = cloneJson(nextReviewAuthority.ownership.effective_paths);
           if (nextReviewAuthority.history_entry) appendSliceAttemptReview(slices[sliceIndex], nextReviewAuthority);
         }
       }
@@ -2417,7 +2435,8 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
         if (!sameJson(currentDispatch, priorDispatchAuthority)) throw new Error(`slice '${prior.id}' dispatch authority changed before publication`);
       }
       if (priorReviewAuthority) assertSliceReviewAuthorityCurrent(runDir, prior.id, prior, priorReviewAuthority);
-      if (nextReviewAuthority) assertSliceReviewPublicationAuthorityCurrent(runDir, next, slice.id, slice, nextReviewAuthority, options);
+      if (nextReviewAuthority) assertSliceReviewPublicationAuthorityCurrent(runDir, next, slice.id, slice, nextReviewAuthority, reviewPlanAuthority, options);
+      if (reviewPlanAuthority) assertAcceptedDecompositionAuthorityCurrent(runDir, next, reviewPlanAuthority);
     },
   }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
@@ -2428,40 +2447,18 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
   const request = normalizeSliceMergedInput(input);
   let sliceIndex = -1;
   let mergeAuthority = null;
-  let legacyUpgrade = false;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft) => {
     const slices = Array.isArray(draft.slices) ? draft.slices : [];
     sliceIndex = slices.findIndex((slice) => slice?.id === sliceId);
     if (sliceIndex < 0) throw new Error(`slice '${sliceId}' not found`);
     const currentSlice = slices[sliceIndex];
+    if (draft.special_builder_dispatch && draft.special_builder_dispatch.route !== "integration-conflict") {
+      throw new Error(`slice '${sliceId}' merge cannot consume special route '${draft.special_builder_dispatch.route}'`);
+    }
     if (mergedSliceRepairFence(draft)) throw new Error(`slice '${sliceId}' cannot merge while a merged-slice repair is unresolved`);
     if (currentSlice.status === "merged") {
-      if (hasCompleteBinding(currentSlice, SLICE_REVIEW_BINDING_KEYS)) {
-        if (TERMINAL_RUN_STATUSES.has(draft.status)) throw new Error("legacy completed run is read-only");
-        if (request.merge_commit === currentSlice.merge_commit) {
-          const currentHistory = currentSlice.attempt_reviews?.find((entry) => entry?.attempt === currentSlice.attempts);
-          if (!currentHistory) {
-            legacyUpgrade = true;
-            const reviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, sliceId, currentSlice, { ...options, allowLegacyMergedUpgrade: true });
-            appendSliceAttemptReview(currentSlice, reviewAuthority);
-            mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, allowLegacyMergedUpgrade: true });
-            return;
-          }
-          observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, options);
-        }
-        throw new Error(`slice '${sliceId}' is already merged`);
-      }
-      if (TERMINAL_RUN_STATUSES.has(draft.status)) throw new Error("legacy completed run is read-only");
-      if (request.merge_commit !== currentSlice.merge_commit) throw new Error(LEGACY_MERGED_UPGRADE_ERROR);
-      legacyUpgrade = true;
-      try {
-        mergeAuthority = observeSliceMergeAuthority(runDir, draft, sliceId, currentSlice, request.merge_commit, { ...options, allowLegacyMergedUpgrade: true });
-      } catch (error) {
-        throw new Error(LEGACY_MERGED_UPGRADE_ERROR, { cause: error });
-      }
-      Object.assign(currentSlice, mergeAuthority.review_authority.binding);
-      appendSliceAttemptReview(currentSlice, mergeAuthority.review_authority);
-      return;
+      assertSliceReviewBindingCurrent(runDir, sliceId, currentSlice);
+      throw new Error(`slice '${sliceId}' is already merged`);
     }
     if (currentSlice.status !== "review") throw new Error(`slice '${sliceId}' can merge only from review`);
     const updatedAt = timestamp(options.now);
@@ -2474,26 +2471,52 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
       updated_at: updatedAt,
     };
     draft.slices = slices;
+    if (mergeAuthority.integration_conflict) {
+      const conflict = mergeAuthority.integration_conflict;
+      if (currentSlice.integration_conflict !== undefined) throw new Error(`slice '${sliceId}' already carries immutable integration-conflict authority`);
+      slices[sliceIndex].integration_conflict = {
+        schema_version: 1,
+        status: "pending-integrated-review",
+        slice_id: sliceId,
+        owner_slice_id: conflict.owner_slice_id,
+        agent: conflict.agent,
+        integration_baseline: conflict.integration_baseline,
+        resolution_commit: conflict.completion_head,
+        conflict_paths: cloneJson(conflict.conflict_paths),
+        claim_ref: conflict.claim_ref,
+        claim_hash: conflict.claim_hash,
+        closure_ref: conflict.closure_ref,
+        closure_hash: conflict.closure_hash,
+        integration_proof: cloneJson(conflict.integration_proof),
+      };
+      delete draft.special_builder_dispatch;
+    }
     draft.updated_at = updatedAt;
   }, options, {
     sliceTransition: true,
-    beforeReplace: (next) => {
-      try {
-        return assertSliceMergeAuthorityCurrent(runDir, next, sliceId, next.slices[sliceIndex], mergeAuthority, { ...options, allowLegacyMergedUpgrade: legacyUpgrade });
-      } catch (error) {
-        if (legacyUpgrade) throw new Error(LEGACY_MERGED_UPGRADE_ERROR, { cause: error });
-        throw error;
+    consumeSpecialDispatch: true,
+    beforeReplace: (next, current) => {
+      if (mergeAuthority.integration_conflict) {
+        const observed = observeSliceMergeAuthority(runDir, current, sliceId, current.slices[sliceIndex], mergeAuthority.merge_commit, options);
+        if (!sameJson(observed, mergeAuthority)) throw new Error(`slice '${sliceId}' integration-conflict merge authority changed before publication`);
+        return;
       }
+      return assertSliceMergeAuthorityCurrent(runDir, next, sliceId, next.slices[sliceIndex], mergeAuthority, options);
     },
   }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
 }
 
 export async function transitionSlicesSeed(runDir, slices, options = {}) {
-  const projection = normalizePendingSliceProjection(slices);
-  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, projection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
+  const requestedProjection = normalizePendingSliceProjection(slices);
+  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, requestedProjection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
+  const projection = requestedProjection.map((slice, index) => ({
+    ...slice,
+    declared_paths: cloneJson(seedPlanAuthority.plan.slices[index].paths),
+    effective_paths: cloneJson(seedPlanAuthority.plan.slices[index].paths),
+  }));
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
-    assertSeedPlanAuthorityCurrent(runDir, projection, options, seedPlanAuthority);
+    assertSeedPlanAuthorityCurrent(runDir, requestedProjection, options, seedPlanAuthority);
     const existing = Array.isArray(current.slices) ? current.slices : [];
     if (sameJson(existing, projection)) return;
     if (existing.some(hasSliceProgress)) {
@@ -2502,7 +2525,7 @@ export async function transitionSlicesSeed(runDir, slices, options = {}) {
     draft.slices = cloneJson(projection);
   }, options, {
     slicesSeed: true,
-    beforeReplace: () => assertSeedPlanAuthorityCurrent(runDir, projection, options, seedPlanAuthority),
+    beforeReplace: () => assertSeedPlanAuthorityCurrent(runDir, requestedProjection, options, seedPlanAuthority),
   }), options);
 }
 
@@ -2566,7 +2589,8 @@ function assertPlanSlicesMatch(plan, slices, { requirePendingProjection = false 
   if (!Array.isArray(slices) || slices.length !== plan.slices.length) throw new Error("parent run slices must exactly classify the bound plan");
   for (const [index, planned] of plan.slices.entries()) {
     const slice = slices[index];
-    if (!slice || slice.id !== planned.id || slice.stack !== planned.stack || !sameJson(slice.depends_on, planned.depends_on)) {
+    if (!slice || slice.id !== planned.id || slice.stack !== planned.stack || !sameJson(slice.depends_on, planned.depends_on)
+      || (slice.declared_paths !== undefined && !sameJson(slice.declared_paths, planned.paths))) {
       throw new Error("parent run slices must exactly classify the bound plan");
     }
     if (requirePendingProjection && (slice.status !== "pending" || slice.attempts !== 0 || hasSliceProgress(slice))) {
@@ -2587,6 +2611,10 @@ export async function transitionPanelVerdicts(runDir, input, options = {}) {
   let v2Authority = null;
   return withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
     if (mergedSliceRepairFence(current)) throw new Error("panel verdicts are fenced while a merged-slice repair is unresolved");
+    if (integrationConflictSlices(current).length > 0) {
+      if (integrationConflictSlices(current).some(({ conflict }) => conflict.status !== "accepted")) throw new Error("panel verdicts require fresh integrated conflict tests and review");
+      assertSliceIntegrationConflictsCurrent(runDir, current, options);
+    }
     v2Authority = assertV2FreshDownstreamAuthority(runDir, current, "panel publication");
     const exactReplay = panelBaseEquals(current.validator, request.validator) && panelBaseEquals(current.security_review, request.security_review);
     const legacyValidator = isRecord(current.validator) && !hasCompleteBinding(current.validator, VALIDATOR_BINDING_KEYS);
@@ -2625,6 +2653,7 @@ export async function transitionPanelVerdicts(runDir, input, options = {}) {
     consumeSpecialDispatch: true,
     beforeReplace: (_next, current) => {
       assertV2FreshDownstreamAuthority(runDir, current, "panel publication", v2Authority);
+      assertSliceIntegrationConflictsCurrent(runDir, current, options);
       assertPanelVerdictAuthorityCurrent(runDir, current, request, authority, options);
     },
   }), options);
@@ -2846,7 +2875,8 @@ function assertScopedAuthorityTransitions(current, next, hooks = {}) {
       throw new Error("run special_builder_dispatch can only be changed by checked special Task dispatch transitions");
     }
   }
-  if (hooks.slicesSeed !== true && hooks.sliceTransition !== true && !sameJson(current.slices, next.slices)) {
+  const acceptedIntegrationConflicts = hooks.integrationConflicts === "test-acceptance" && isExactIntegrationConflictAcceptanceTransition(current.slices, next.slices);
+  if (hooks.slicesSeed !== true && hooks.sliceTransition !== true && !acceptedIntegrationConflicts && !sameJson(current.slices, next.slices)) {
     throw new Error("run slices can only be changed by checked slice transitions");
   }
   if (hooks.panelVerdicts !== true) {
@@ -3906,17 +3936,21 @@ function assertPrCreatedSliceState(runDir, run) {
 }
 
 export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, policy = {}) {
-  if (run?.continuation?.schema_version !== 2 || run.continuation.kind !== "blocked-run-continuation") {
-    throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2 child");
-  }
+  const continuationEligible = run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation";
+  const conflicts = integrationConflictSlices(run);
+  const conflictEligible = conflicts.length > 0;
+  if (!continuationEligible && !conflictEligible) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2 child or delegated integration conflict");
   const repository = resolve(runDir, "../../..");
-  const target = run.continuation.target;
+  const target = run.continuation?.target;
   if (resolve(runDir) !== resolve(directFactoryRoot(repository), run.run_id)
-    || target?.run_id !== run.run_id || target?.branch !== run.branch || resolve(target?.worktree || "") !== resolve(run.worktree || "")) {
+    || (continuationEligible && (target?.run_id !== run.run_id || target?.branch !== run.branch || resolve(target?.worktree || "") !== resolve(run.worktree || "")))) {
     throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution run identity does not match the published schema-v2 target");
   }
   if (run.status !== "running") throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
-  if (policy.skipLocalAuthority !== true) assertV2LocalPublishedAuthority(runDir, run, options);
+  if (policy.skipLocalAuthority !== true) {
+    if (continuationEligible) assertV2LocalPublishedAuthority(runDir, run, options);
+    if (conflictEligible) assertSliceIntegrationConflictsCurrent(runDir, run, options);
+  }
   const step = uniqueTestVerifierStep(run);
   if (!step || !Number.isInteger(step.attempts) || step.attempts < 1) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires exactly one positive-attempt test-verifier step");
   if (policy.allowCompleted !== true && step.status !== "running") throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires test-verifier running at its current attempt");
@@ -4101,6 +4135,10 @@ export function assertPanelReviewBindingsCurrent(runDir, run) {
   if (!hasCompleteBinding(run.validator, VALIDATOR_BINDING_KEYS) || !hasCompleteBinding(run.security_review, SECURITY_BINDING_KEYS)) {
     throw new Error("pr-created requires successor validator and security reviewed-head bindings");
   }
+  if (integrationConflictSlices(run).length > 0) {
+    if (integrationConflictSlices(run).some(({ conflict }) => conflict.status !== "accepted")) throw new Error("panel bindings require accepted integrated conflict authority");
+    assertSliceIntegrationConflictsCurrent(runDir, run, {});
+  }
   const request = {
     validator: panelBaseRecord(run.validator, true),
     security_review: panelBaseRecord(run.security_review, false),
@@ -4204,16 +4242,11 @@ function normalizeSliceMergedInput(input) {
 }
 
 function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, options = {}) {
-  const legacyUpgrade = options.allowLegacyMergedUpgrade === true;
-  if (!legacyUpgrade && !hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) {
-    throw new Error(`slice '${sliceId}' merge requires a successor review binding; replay the legacy review first`);
-  }
-  const observed = legacyUpgrade
-    ? observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options)
-    : assertSliceReviewBindingCurrent(runDir, sliceId, slice);
+  if (!hasCompleteBinding(slice, SLICE_REVIEW_BINDING_KEYS)) throw new Error(`slice '${sliceId}' merge requires a complete successor review binding`);
+  const observed = assertSliceReviewBindingCurrent(runDir, sliceId, slice);
   const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: slice.dispatch_required === true });
   if (observed.review.verdict !== "APPROVE") throw new Error(`slice '${sliceId}' merge requires APPROVE review`);
-  const sliceGit = legacyUpgrade ? observed.git : observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
+  const sliceGit = observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
   if (sliceGit.head !== observed.binding.reviewed_commit) throw new Error(`slice '${sliceId}' current branch/worktree head differs from reviewed_commit`);
   const repository = resolveAuthorityRepository(runDir, run, options);
   if (!stringValue(repository)) throw new Error(`slice '${sliceId}' merge requires a local git repository`);
@@ -4233,7 +4266,13 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
   const cleanliness = authorityGit(options, worktree, gitCleanlinessArgs());
   if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error(`slice '${sliceId}' merge requires a clean integration worktree`);
   const reviewedCommit = observed.binding.reviewed_commit;
-  const proof = observeExactSliceMergeProof(repository, run, sliceId, canonicalCommit, reviewedCommit, options);
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+  const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, sliceGit, decomposition, options);
+  if (!sameJson(slice.effective_paths, ownership.effective_paths)) throw new Error(`slice '${sliceId}' effective ownership changed after review`);
+  const integrationConflict = run.special_builder_dispatch?.route === "integration-conflict"
+    ? observeClosedIntegrationConflictForSlice(runDir, run, sliceId, canonicalCommit, repository, options)
+    : null;
+  const proof = integrationConflict?.integration_proof || observeExactSliceMergeProof(repository, run, sliceId, canonicalCommit, reviewedCommit, options);
   return {
     merge_commit: canonicalCommit,
     integration_branch: integrationBranch,
@@ -4243,6 +4282,8 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
     slice_branch: slice.branch,
     slice_branch_head: reviewedCommit,
     proof,
+    integration_conflict: integrationConflict,
+    ownership,
     dispatch,
     review_authority: { ...observed, git: sliceGit },
   };
@@ -4293,15 +4334,10 @@ function assertSliceReviewAuthorityCurrent(runDir, sliceId, slice, expected) {
   return current;
 }
 
-function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, options = {}) {
+function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, decomposition, options = {}) {
   const observed = observeSliceReviewSidecars(runDir, sliceId, slice);
-  const legacyReview = (options.allowLegacyReview === true || options.allowLegacyMergedUpgrade === true)
-    && ["convergence", "remaining_fix_count", "remediation_context"].every((key) => observed.review[key] === undefined);
-  const compatibilityReplay = options.allowLegacyReview === true || options.allowLegacyMergedUpgrade === true;
-  const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: slice.dispatch_required === true || !compatibilityReplay });
-  const result = legacyReview
-    ? { verdict: observed.review.verdict, legacy_unclassified: true }
-    : observeAttemptReviewResult(sliceId, observed.review);
+  const dispatch = observeClosedSliceDispatchIfClaimed(runDir, run.run_id, slice, { required: true });
+  const result = observeAttemptReviewResult(sliceId, observed.review);
   const attempt = slice.attempts;
   if (!Number.isInteger(attempt) || attempt < 1 || observed.evidence.attempt !== attempt || observed.review.attempt !== attempt) {
     throw new Error(`slice '${sliceId}' successor evidence and review attempts must equal the positive slice attempt`);
@@ -4310,6 +4346,7 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
   if (observed.evidence.head_sha !== gitAuthority.head) throw new Error(`slice '${sliceId}' evidence head_sha must equal the current slice head`);
   if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
   if (dispatch && dispatch.completion_head !== gitAuthority.head) throw new Error(`slice '${sliceId}' reviewed head must equal the checked Task completion head`);
+  const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, gitAuthority, decomposition, options);
   return {
     ...observed,
     binding: { ...observed.binding, reviewed_commit: gitAuthority.head },
@@ -4320,6 +4357,8 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
       review_ref: slice.review_ref,
       review_hash: observed.binding.review_hash,
       reviewed_commit: gitAuthority.head,
+      diff_base_commit: ownership.diff_base_commit,
+      ratified_paths: ownership.ratified_paths,
       ...result,
       ...(dispatch ? {
         dispatch_claim_ref: dispatch.claim_ref,
@@ -4330,13 +4369,135 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, opt
     },
     git: gitAuthority,
     dispatch,
+    ownership,
   };
 }
 
-function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, options = {}) {
-  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, { ...options, allowLegacyReview: expected?.history_entry?.legacy_unclassified === true });
+function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, decomposition, options = {}) {
+  const current = observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, decomposition, options);
   if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' review authority changed before publication`);
   return current;
+}
+
+function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, evidence, gitAuthority, decomposition, options = {}) {
+  const planned = decomposition?.plan?.slices?.find((candidate) => candidate?.id === sliceId);
+  if (!planned || !sameJson(slice.declared_paths, planned.paths)) throw new Error(`slice '${sliceId}' declared_paths must equal the exact accepted plan paths`);
+  const claim = observeSliceDispatchClaim(runDir, run.run_id, slice, slice.attempts, { requireRunBinding: true });
+  if (!claim) throw new Error(`slice '${sliceId}' ownership review requires the exact checked dispatch baseline`);
+  const history = Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : [];
+  const diffBaseCommit = history[0]?.diff_base_commit || claim.claim.head;
+  if (!/^[0-9a-f]{40}$/u.test(diffBaseCommit)) throw new Error(`slice '${sliceId}' first checked dispatch baseline is invalid`);
+  if (history.length > 0) {
+    const first = history[0];
+    const boundFirst = { ...slice, attempts: first.attempt, dispatch_required: true, ...pickBinding(first, SLICE_DISPATCH_BINDING_KEYS) };
+    const firstClaim = observeSliceDispatchClaim(runDir, run.run_id, boundFirst, first.attempt, { requireRunBinding: true });
+    if (!firstClaim || firstClaim.claim.head !== diffBaseCommit) throw new Error(`slice '${sliceId}' stored diff baseline must equal the first checked dispatch commit`);
+  }
+  if (!authorityGit(options, gitAuthority.repository, ["merge-base", "--is-ancestor", diffBaseCommit, gitAuthority.head]).ok) {
+    throw new Error(`slice '${sliceId}' reviewed commit must descend from the first checked dispatch baseline`);
+  }
+  const changedPaths = [...observeNoRenamePathSet(gitAuthority.repository, diffBaseCommit, gitAuthority.head, options, `slice '${sliceId}' full reviewed diff`)].sort();
+  for (const path of changedPaths) {
+    if (normalizeRepositoryPath(path) !== path || path.normalize("NFC") !== path || !isCanonicalConcreteRepositoryPath(path)) {
+      throw new Error(`slice '${sliceId}' full reviewed diff contains an invalid ownership path`);
+    }
+  }
+  const declaredLanes = planned.paths.map(ownershipLane);
+  const unexpected = changedPaths.filter((path) => !declaredLanes.some((lane) => ownershipLaneContains(lane, path)));
+  const ownershipDisclosure = normalizeOwnershipDisclosure(evidence?.ownership_disclosure, sliceId, unexpected);
+  const { ratified_paths: ratifiedPaths, verdict } = validateSliceReviewResult(review, { sliceId });
+  const expectedRatified = verdict === "APPROVE" ? unexpected : [];
+  if (!sameJson(ratifiedPaths, expectedRatified)) {
+    throw new Error(`slice '${sliceId}' ownership ratification must exactly equal every changed path outside declared ownership`);
+  }
+  if (verdict === "APPROVE") {
+    const planLanes = decomposition.plan.slices.map((candidate) => ({ id: candidate.id, lanes: candidate.paths.map(ownershipLane) }));
+    const changeKinds = observeChangedPathKinds(gitAuthority.repository, diffBaseCommit, gitAuthority.head, options);
+    for (const path of ratifiedPaths) {
+      const owners = planLanes.filter((candidate) => candidate.lanes.some((lane) => ownershipLaneContains(lane, path))).map((candidate) => candidate.id);
+      if (owners.length > 1) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has ambiguous plan ownership: ${owners.join(", ")}`);
+      if (owners.length !== 0) throw new Error(`slice '${sliceId}' cannot ratify path '${path}' because it has declared plan ownership`);
+      const privilegedReason = privilegedControlPlanePathReason(path);
+      if (privilegedReason) throw new Error(`slice '${sliceId}' cannot ratify privileged control-plane path '${path}' (${privilegedReason}); it requires explicit declared plan ownership`);
+      if (changeKinds.get(path) !== "added") throw new Error(`slice '${sliceId}' unowned extension '${path}' must be a newly added private regular file`);
+      const baselineEntry = authorityGit(options, gitAuthority.repository, ["ls-tree", "-z", diffBaseCommit, "--", `:(literal)${path}`]);
+      const reviewedEntry = authorityGit(options, gitAuthority.repository, ["ls-tree", "-z", gitAuthority.head, "--", `:(literal)${path}`]);
+      if (!baselineEntry.ok || !reviewedEntry.ok) throw new Error(`slice '${sliceId}' cannot observe ratification tree entry '${path}'`);
+      if (baselineEntry.stdout !== "") throw new Error(`slice '${sliceId}' unowned extension '${path}' must be absent at the first checked dispatch baseline`);
+      if (!/^(100644|100755) blob [0-9a-f]{40}\t/u.test(reviewedEntry.stdout)) {
+        throw new Error(`slice '${sliceId}' cannot ratify symlink or submodule path '${path}'; unowned extensions must be private regular files`);
+      }
+    }
+  }
+  return {
+    diff_base_commit: diffBaseCommit,
+    ratified_paths: [...ratifiedPaths],
+    effective_paths: [...slice.declared_paths, ...ratifiedPaths],
+    changed_paths: changedPaths,
+    ownership_disclosure: ownershipDisclosure,
+    plan_hash: decomposition.plan_hash,
+  };
+}
+
+function observeChangedPathKinds(repository, from, to, options = {}) {
+  const result = authorityGit(options, repository, ["diff", "--name-status", "-z", "--find-renames", "--find-copies-harder", from, to]);
+  if (!result.ok) throw new Error("slice ownership change kinds cannot be observed");
+  if (result.stdout === "") return new Map();
+  const records = parseNulRecords(result.stdout, "slice ownership change kinds");
+  const kinds = new Map();
+  for (let index = 0; index < records.length;) {
+    const status = records[index++];
+    if (!/^(?:[AMDTUXB]|[RC][0-9]{1,3})$/u.test(status)) throw new Error("slice ownership change kinds contain an invalid status");
+    const first = records[index++];
+    if (!first) throw new Error("slice ownership change kinds contain an invalid path");
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const second = records[index++];
+      if (!second) throw new Error("slice ownership change kinds contain an invalid paired path");
+      kinds.set(first, status.startsWith("R") ? "renamed" : "copied");
+      kinds.set(second, status.startsWith("R") ? "renamed" : "copied");
+    } else kinds.set(first, status === "D" ? "deleted" : status === "T" ? "type-changed" : status === "A" ? "added" : "modified");
+  }
+  return kinds;
+}
+
+function normalizeOwnershipDisclosure(value, sliceId, unexpectedPaths) {
+  if (unexpectedPaths.length === 0) {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.length !== 0) throw new Error(`slice '${sliceId}' ownership_disclosure must be empty when every changed path is declared`);
+    return [];
+  }
+  if (!Array.isArray(value)) throw new Error(`slice '${sliceId}' evidence must include ownership_disclosure for every changed path outside declared ownership`);
+  const normalized = value.map((entry, index) => {
+    if (!isRecord(entry) || Object.keys(entry).length !== 2 || !Object.hasOwn(entry, "path") || !Object.hasOwn(entry, "rationale")) {
+      throw new Error(`slice '${sliceId}' ownership_disclosure[${index}] must contain exactly path and rationale`);
+    }
+    if (!isCanonicalConcreteRepositoryPath(entry.path) || normalizeRepositoryPath(entry.path) !== entry.path || entry.path.normalize("NFC") !== entry.path) {
+      throw new Error(`slice '${sliceId}' ownership_disclosure[${index}].path must be a canonical concrete repository path`);
+    }
+    const rationale = typeof entry.rationale === "string" ? entry.rationale : "";
+    if (!rationale || rationale !== rationale.trim() || rationale !== rationale.normalize("NFC") || /[\0-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(rationale)) {
+      throw new Error(`slice '${sliceId}' ownership_disclosure[${index}].rationale must be nonempty normalized text`);
+    }
+    return { path: entry.path, rationale };
+  });
+  const disclosedPaths = normalized.map((entry) => entry.path);
+  if (!sameJson(disclosedPaths, [...disclosedPaths].sort()) || new Set(disclosedPaths).size !== disclosedPaths.length) {
+    throw new Error(`slice '${sliceId}' ownership_disclosure paths must be sorted and unique`);
+  }
+  if (!sameJson(disclosedPaths, unexpectedPaths)) {
+    throw new Error(`slice '${sliceId}' ownership_disclosure paths must exactly equal every changed path outside declared ownership`);
+  }
+  return normalized;
+}
+
+function ownershipLane(path) {
+  const canonical = validatePlanPath(path);
+  if (canonical !== path) throw new Error("accepted plan contains an invalid ownership lane");
+  return canonical.endsWith("/**") ? { base: canonical.slice(0, -3), recursive: true } : { base: canonical, recursive: false };
+}
+
+function ownershipLaneContains(lane, path) {
+  return lane.recursive ? path.startsWith(`${lane.base}/`) : path === lane.base;
 }
 
 export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
@@ -4352,26 +4513,25 @@ export function assertSliceReviewBindingCurrent(runDir, sliceId, slice) {
     throw new Error(`slice '${sliceId}' successor review hashes are stale`);
   }
   const history = Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : [];
-  if (history.length > 0) {
-    assertSliceAttemptHistoryCurrent(runDir, sliceId, slice);
-    const current = history.find((entry) => entry?.attempt === slice.attempts);
-    if (!current) throw new Error(`slice '${sliceId}' current review is missing from append-only attempt history`);
-    const result = current.legacy_unclassified === true
-      ? legacyAttemptReviewResult(sliceId, observed.review)
-      : observeAttemptReviewResult(sliceId, observed.review);
-    const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, current);
-    const expected = {
-      attempt: slice.attempts,
-      evidence_ref: slice.evidence_ref,
-      evidence_hash: slice.evidence_hash,
-      review_ref: slice.review_ref,
-      review_hash: slice.review_hash,
-      reviewed_commit: slice.reviewed_commit,
-      ...result,
-      ...dispatch,
-    };
-    if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' current review differs from append-only attempt history`);
-  }
+  if (history.length === 0) throw new Error(`slice '${sliceId}' current review is missing append-only attempt history`);
+  assertSliceAttemptHistoryCurrent(runDir, sliceId, slice);
+  const current = history.find((entry) => entry?.attempt === slice.attempts);
+  if (!current) throw new Error(`slice '${sliceId}' current review is missing from append-only attempt history`);
+  const result = observeAttemptReviewResult(sliceId, observed.review);
+  const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, current);
+  const expected = {
+    attempt: slice.attempts,
+    evidence_ref: slice.evidence_ref,
+    evidence_hash: slice.evidence_hash,
+    review_ref: slice.review_ref,
+    review_hash: slice.review_hash,
+    reviewed_commit: slice.reviewed_commit,
+    diff_base_commit: current.diff_base_commit,
+    ratified_paths: result.ratified_paths,
+    ...result,
+    ...dispatch,
+  };
+  if (!sameJson(current, expected)) throw new Error(`slice '${sliceId}' current review differs from append-only attempt history`);
   return { ...observed, binding: pickBinding(slice, SLICE_REVIEW_BINDING_KEYS) };
 }
 
@@ -4419,6 +4579,7 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
     const previous = history.at(-1) || null;
     let prior = null;
     let taskContext = "fresh";
+    let forecastUnownedExtensionPaths = [];
     if (previous) {
       if (previous.attempt !== slice.attempts - 1 || previous.verdict !== "REJECT") throw new Error("slice builder Task dispatch requires the immediately prior rejected review");
       const observed = assertSliceReviewBindingCurrent(runDir, slice.id, {
@@ -4431,9 +4592,12 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
         reviewed_commit: previous.reviewed_commit,
       });
       if (head !== previous.reviewed_commit) throw new Error("slice builder remediation head must equal the immediately prior reviewed_commit");
-      taskContext = previous.legacy_unclassified === true
-        ? "fresh"
-        : validateSliceReviewResult(observed.review, { sliceId: slice.id }).task_context;
+      taskContext = validateSliceReviewResult(observed.review, { sliceId: slice.id }).task_context;
+      validateSliceReviewFeasibility(observed.review, plan, { sliceId: slice.id });
+      assertReviewedSliceRetryRoute(observed.review, slice.id, run);
+      forecastUnownedExtensionPaths = observed.review.remediation_context.fixes
+        .filter((fix) => fix.scope_effect === "unowned-extension")
+        .flatMap((fix) => cloneJson(fix.likely_paths));
       prior = {
         binding: cloneJson(previous),
         evidence: { encoding: "base64", bytes: observed.evidence_bytes },
@@ -4468,7 +4632,21 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
       kind: "checked-slice-builder-task-dispatch",
       task_context: taskContext,
       run: { id: run.run_id, branch: run.branch, worktree: run.worktree },
-      slice: { id: slice.id, stack: slice.stack, attempt: slice.attempts, branch: slice.branch, worktree: slice.worktree, head, contract: cloneJson(planned) },
+      slice: {
+        id: slice.id,
+        stack: slice.stack,
+        attempt: slice.attempts,
+        branch: slice.branch,
+        worktree: slice.worktree,
+        head,
+        contract: cloneJson(planned),
+        ownership: {
+          declared_paths: cloneJson(slice.declared_paths),
+          effective_paths: cloneJson(slice.effective_paths),
+          forecast_unowned_extension_paths: forecastUnownedExtensionPaths,
+          disclosure_required_for_actual_unexpected_paths: true,
+        },
+      },
       plan: { ref: PLAN_SLICES_REF, hash: decomposition.plan_hash, bytes: { encoding: "base64", bytes: planBytes.toString("base64") }, review_ref: decomposition.review_ref, review_hash: decomposition.review_hash },
       prior,
       authorized_inputs: authorizedInputs,
@@ -4531,7 +4709,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
   if (!isRecord(request)) throw new Error("special builder Task dispatch marker must be an object");
   const allowed = new Set(["run_id", "route", "agent"]);
   const extra = Object.keys(request).filter((key) => !allowed.has(key));
-  const routes = new Set(["merged-slice-repair", "panel-remediation", "post-pr-remediation"]);
+  const routes = new Set(["merged-slice-repair", "panel-remediation", "post-pr-remediation", "integration-conflict"]);
   if (extra.length || !stringValue(request.run_id) || !SAFE_TASK_DISPATCH_ID_PATTERN.test(request.run_id) || request.run_id.includes("..")
     || !routes.has(request.route) || !SLICE_BUILDER_AGENTS.has(request.agent)) {
     throw new Error("special builder Task dispatch marker requires safe run_id, recognized route, and backend-builder|frontend-builder agent");
@@ -4545,7 +4723,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     if (run.run_id !== request.run_id || run.status !== "running") throw new Error("special builder Task dispatch requires the exact current running run");
-    if ((run.slices || []).some((slice) => ["running", "review"].includes(slice?.status))) {
+    if (request.route !== "integration-conflict" && (run.slices || []).some((slice) => ["running", "review"].includes(slice?.status))) {
       throw new Error("special builder Task dispatch cannot overlap ordinary slice work");
     }
     let authority;
@@ -4580,7 +4758,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
         panels,
         ownership: observePanelRemediationOwnership(runDir, run, request.agent),
       };
-    } else {
+    } else if (request.route === "post-pr-remediation") {
       const remediation = run.post_pr?.remediation;
       if (run.post_pr?.phase !== "remediation-running" || remediation?.route !== request.agent || remediation?.dispatch?.status !== "running") {
         throw new Error("special post-PR remediation dispatch authority is not current");
@@ -4592,6 +4770,15 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
         remediation: cloneJson(remediation),
         publication: observePostPrPublicationAuthority(runDir, run, { ...options, repoRoot: repository }),
       };
+    } else {
+      const conflict = observeIntegrationConflictAuthority(repository, runDir, run, options);
+      if (`${conflict.effective_owner.stack}-builder` !== request.agent) {
+        throw new Error("integration-conflict agent must match the effective conflict owner stack");
+      }
+      branch = run.branch;
+      worktreeRef = run.worktree;
+      instance = `${conflict.current_slice.id}-${conflict.integration_baseline}-${hashValue(conflict.conflict_paths)}`;
+      authority = { conflict };
     }
     if (!stringValue(branch) || !stringValue(worktreeRef)) throw new Error("special builder Task dispatch requires exact branch and worktree authority");
     const branchResult = git(repository, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
@@ -4599,7 +4786,8 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
     const worktree = resolve(repository, worktreeRef);
     const identity = checkWorktreeIdentity(repository, worktree, { branch, head });
     const cleanliness = git(worktree, gitCleanlinessArgs());
-    if (!/^[0-9a-f]{40}$/u.test(head) || !identity.ok || !cleanliness.ok || cleanliness.stdout !== "") {
+    const expectedConflict = request.route === "integration-conflict";
+    if (!/^[0-9a-f]{40}$/u.test(head) || !identity.ok || !cleanliness.ok || (!expectedConflict && cleanliness.stdout !== "")) {
       throw new Error("special builder Task dispatch requires the exact clean current branch/worktree HEAD");
     }
     const context = {
@@ -4609,7 +4797,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
       agent: request.agent,
       run: { id: run.run_id, branch: run.branch, worktree: run.worktree },
       authority,
-      target: { branch, worktree: worktreeRef, head, clean: true },
+      target: { branch, worktree: worktreeRef, head, clean: !expectedConflict, ...(expectedConflict ? { integration_conflict: true } : {}) },
     };
     assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
     if (options.claimDispatch === true) {
@@ -4636,6 +4824,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
         completion_token_hash: sha256Bytes(Buffer.from(completionToken, "utf8")),
         claimed_at: timestamp(options.now),
         closure_ref: closureRef,
+        ...(request.route === "integration-conflict" ? integrationConflictClaimFields(authority.conflict) : {}),
       };
       try {
         await writeFile(claimPath, `${JSON.stringify(claim, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
@@ -4649,6 +4838,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
       const next = cloneJson(run);
       next.special_builder_dispatch = {
         schema_version: 1, route: request.route, instance, agent: request.agent, claim_ref: claimRef, claim_hash: claimHash,
+        ...(request.route === "integration-conflict" ? { owner_slice_id: authority.conflict.effective_owner.slice_id } : {}),
       };
       next.updated_at = timestamp(options.now);
       const assertClaimAuthority = () => {
@@ -4698,6 +4888,9 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
     const panelOwnerSliceId = observed.claim.route === "panel-remediation"
       ? derivePanelRemediationOwner(repository, observed.claim, completionHead, currentContext.authority.ownership)
       : null;
+    const conflictProof = observed.claim.route === "integration-conflict"
+      ? observeIntegrationConflictCompletionProof(repository, run, observed.claim, completionHead, options)
+      : null;
     const closurePath = resolve(runDir, observed.claim.closure_ref);
     const closure = {
       schema_version: 1,
@@ -4717,6 +4910,7 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
       completion_token: request.completion_token,
       returned_at: timestamp(options.now),
       ...(panelOwnerSliceId ? { owner_slice_id: panelOwnerSliceId } : {}),
+      ...(conflictProof ? { owner_slice_id: observed.claim.effective_owner.slice_id, integration_proof: conflictProof } : {}),
     };
     try {
       await writeFile(closurePath, `${JSON.stringify(closure, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
@@ -4764,7 +4958,7 @@ function assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, expe
   const worktree = resolve(repository, context.target.worktree);
   const identity = checkWorktreeIdentity(repository, worktree, { branch: context.target.branch, head: context.target.head });
   const cleanliness = git(worktree, gitCleanlinessArgs());
-  if (head !== context.target.head || !identity.ok || !cleanliness.ok || cleanliness.stdout !== "") {
+  if (head !== context.target.head || !identity.ok || !cleanliness.ok || (!context.target.integration_conflict && cleanliness.stdout !== "")) {
     throw new Error("special builder Task dispatch Git authority changed before claim publication");
   }
   let authority;
@@ -4779,8 +4973,10 @@ function assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, expe
       panels: assertPanelReviewBindingsCurrent(runDir, currentRun),
       ownership: observePanelRemediationOwnership(runDir, currentRun, context.agent),
     };
-  } else {
+  } else if (context.route === "post-pr-remediation") {
     authority = { remediation: cloneJson(currentRun.post_pr?.remediation), publication: observePostPrPublicationAuthority(runDir, currentRun, { ...options, repoRoot: repository }) };
+  } else {
+    authority = { conflict: observeIntegrationConflictAuthority(repository, runDir, currentRun, options) };
   }
   if (!sameJson(authority, context.authority)) throw new Error("special builder Task dispatch route authority changed before claim publication");
 }
@@ -4801,8 +4997,26 @@ function specialBuilderContextFromClaim(repository, runDir, run, claim, options 
       panels: observePriorPanelDispatchAuthority(repository, runDir, run, claim.head),
       ownership: observePanelRemediationOwnership(runDir, run, claim.agent),
     };
-  } else {
+  } else if (claim.route === "post-pr-remediation") {
     authority = { remediation: cloneJson(run.post_pr?.remediation), publication: observePostPrPublicationAuthority(runDir, run, { ...options, repoRoot: repository }) };
+  } else {
+    const slice = (run.slices || []).find((candidate) => candidate?.id === claim.current_slice_id);
+    const owner = (run.slices || []).find((candidate) => candidate?.id === claim.effective_owner?.slice_id);
+    if (!slice || slice.status !== "review" || slice.reviewed_commit !== claim.merge_head || !owner || owner.stack !== claim.effective_owner.stack) {
+      throw new Error("integration-conflict claim slice authority is stale");
+    }
+    authority = {
+      conflict: {
+        schema_version: 1,
+        integration_baseline: claim.integration_baseline,
+        feature_head: claim.feature_head,
+        merge_head: claim.merge_head,
+        conflict_paths: cloneJson(claim.conflict_paths),
+        conflict_index_hash: claim.conflict_index_hash,
+        current_slice: { id: slice.id, stack: slice.stack, reviewed_commit: slice.reviewed_commit, effective_paths: cloneJson(slice.effective_paths) },
+        effective_owner: cloneJson(claim.effective_owner),
+      },
+    };
   }
   return {
     schema_version: 1,
@@ -4811,7 +5025,7 @@ function specialBuilderContextFromClaim(repository, runDir, run, claim, options 
     agent: claim.agent,
     run: { id: run.run_id, branch: run.branch, worktree: run.worktree },
     authority,
-    target: { branch: claim.branch, worktree: claim.worktree, head: claim.head, clean: true },
+    target: { branch: claim.branch, worktree: claim.worktree, head: claim.head, clean: claim.route !== "integration-conflict", ...(claim.route === "integration-conflict" ? { integration_conflict: true } : {}) },
   };
 }
 
@@ -4839,11 +5053,15 @@ function observePriorPanelDispatchAuthority(repository, runDir, run, priorHead) 
 function observePanelRemediationOwnership(runDir, run, agent) {
   const planPath = join(runDir, PLAN_SLICES_REF);
   const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
-  const merged = new Set((run.slices || []).filter((slice) => slice?.status === "merged").map((slice) => slice.id));
-  const slices = plan.slices.map((slice) => ({ id: slice.id, stack: slice.stack, paths: cloneJson(slice.paths || []) }));
-  if (slices.some((slice) => !merged.has(slice.id))) throw new Error("panel remediation ownership requires every planned slice to be merged");
-  if (!slices.some((slice) => `${slice.stack}-builder` === agent)) throw new Error("panel remediation agent has no eligible merged slice owner");
-  return { plan: exactAuthorityFile(planPath), slices };
+  const durableById = new Map((run.slices || []).map((slice) => [slice?.id, slice]));
+  for (const planned of plan.slices) {
+    const slice = durableById.get(planned.id);
+    if (!slice || slice.status !== "merged") throw new Error("panel remediation ownership requires every planned slice to be merged");
+  }
+  const slices = (run.slices || []).map((slice) => ({ id: slice?.id, stack: slice?.stack, effective_paths: cloneJson(slice?.effective_paths) }));
+  const ownership = createOwnershipIndex(slices);
+  if (!ownership.slices.some((slice) => `${slice.stack}-builder` === agent)) throw new Error("panel remediation agent has no eligible merged slice owner");
+  return { plan: exactAuthorityFile(planPath), slices: cloneJson(ownership.slices), effective_lanes: cloneJson(ownership.effectiveLanes) };
 }
 
 function derivePanelRemediationOwner(repository, claim, completionHead, ownership) {
@@ -4851,13 +5069,344 @@ function derivePanelRemediationOwner(repository, claim, completionHead, ownershi
   if (!result.ok) throw new Error("panel remediation changed paths are not observable");
   const paths = result.stdout.split("\0").filter(Boolean).map((path) => normalizeRepositoryPath(path));
   if (paths.length === 0) throw new Error("panel remediation must commit an observable change");
-  const owners = ownership.slices.filter((slice) => {
-    const lanes = (slice.paths || []).map((lane) => validatePlanPath(lane)).filter(Boolean);
-    return paths.every((path) => lanes.some((lane) => repairPathWithinLane(path, lane)));
-  });
-  if (owners.length !== 1) throw new Error("panel remediation changes must derive exactly one unambiguous slice owner");
-  if (`${owners[0].stack}-builder` !== claim.agent) throw new Error("panel remediation agent must match the derived slice owner stack");
-  return owners[0].id;
+  const index = createOwnershipIndex(ownership.slices);
+  const pathOwners = paths.map((path) => index.owners(path));
+  if (pathOwners.some((owners) => owners.length !== 1)) throw new Error("panel remediation changes must derive exactly one unambiguous slice owner");
+  const ownerIds = new Set(pathOwners.map(([owner]) => owner.id));
+  if (ownerIds.size !== 1) throw new Error("panel remediation changes must derive exactly one unambiguous slice owner");
+  const owner = index.slices.find((slice) => slice.id === [...ownerIds][0]);
+  if (`${owner.stack}-builder` !== claim.agent) throw new Error("panel remediation agent must match the derived slice owner stack");
+  return owner.id;
+}
+
+function observeIntegrationConflictAuthority(repository, runDir, run, options = {}) {
+  const branch = requireNonEmptyString(run.branch, "run.branch");
+  const worktreeRef = requireNonEmptyString(run.worktree, "run.worktree");
+  const worktree = resolve(repository, worktreeRef);
+  const branchHead = git(repository, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  const worktreeHead = git(worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const mergeHead = git(worktree, ["rev-parse", "--verify", "MERGE_HEAD^{commit}"]);
+  const checkedOut = git(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const integrationBaseline = branchHead.ok ? branchHead.stdout.trim() : "";
+  const featureHead = worktreeHead.ok ? worktreeHead.stdout.trim() : "";
+  const reviewedCommit = mergeHead.ok ? mergeHead.stdout.trim() : "";
+  if (!/^[0-9a-f]{40}$/u.test(integrationBaseline) || featureHead !== integrationBaseline || !/^[0-9a-f]{40}$/u.test(reviewedCommit)
+    || !checkedOut.ok || checkedOut.stdout.trim() !== branch) {
+    throw new Error("integration-conflict dispatch requires an exact in-progress merge on the feature branch HEAD");
+  }
+  const candidates = (run.slices || []).filter((slice) => slice?.status === "review" && slice.reviewed_commit === reviewedCommit);
+  if (candidates.length !== 1) throw new Error("integration-conflict dispatch requires exactly one reviewed current slice matching MERGE_HEAD");
+  const currentSlice = candidates[0];
+  const currentReview = assertSliceReviewBindingCurrent(runDir, currentSlice.id, currentSlice);
+  if (currentReview.review.verdict !== "APPROVE") throw new Error("integration-conflict dispatch requires an APPROVE current-slice review");
+  const mergeBases = authorityGit(options, repository, ["merge-base", "--all", integrationBaseline, reviewedCommit]);
+  const bases = mergeBases.ok ? mergeBases.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean) : [];
+  if (bases.length !== 1 || !/^[0-9a-f]{40}$/u.test(bases[0])) throw new Error("integration-conflict dispatch requires one unique merge base");
+  const renameCopyEndpoints = new Set([
+    ...observeRenameCopyEndpoints(repository, bases[0], integrationBaseline, options, "integration-conflict integration parent diff"),
+    ...observeRenameCopyEndpoints(repository, bases[0], reviewedCommit, options, "integration-conflict reviewed parent diff"),
+  ]);
+
+  const status = git(worktree, gitIntegrationConflictStatusArgs());
+  const unmerged = git(worktree, ["ls-files", "-u", "-z"]);
+  const untracked = git(worktree, gitIntegrationConflictUntrackedArgs());
+  if (!status.ok || !unmerged.ok || !untracked.ok || status.stdout === "" || unmerged.stdout === "") throw new Error("integration-conflict paths cannot be observed");
+  if (untracked.stdout !== "") throw new Error("integration-conflict dispatch rejects unrelated unstaged or untracked edits");
+  const statusRecords = parseNulRecords(status.stdout, "integration-conflict status");
+  const conflictPaths = [];
+  let unsupportedConflictCode = false;
+  for (const record of statusRecords) {
+    if (record.length < 4 || record[2] !== " ") throw new Error("integration-conflict status contains an invalid path record");
+    const code = record.slice(0, 2);
+    const path = record.slice(3);
+    if (code.includes("U") || code === "AA" || code === "DD") {
+      if (!new Set(["UU", "AA"]).has(code)) unsupportedConflictCode = true;
+      const canonical = normalizeRepositoryPath(path);
+      if (canonical !== path || path.normalize("NFC") !== path || !isCanonicalConcreteRepositoryPath(path)) throw new Error("integration-conflict path is invalid");
+      conflictPaths.push(path);
+    } else if (code[1] !== " ") {
+      throw new Error("integration-conflict dispatch rejects unrelated unstaged or untracked edits");
+    }
+  }
+  conflictPaths.sort();
+  if (conflictPaths.length === 0 || new Set(conflictPaths).size !== conflictPaths.length) throw new Error("integration-conflict paths must be nonempty and unique");
+  if (conflictPaths.some((path) => renameCopyEndpoints.has(path))) {
+    throw new Error("integration-conflict path is a rename or copy endpoint on a merge parent diff and cannot dispatch");
+  }
+  if (unsupportedConflictCode) throw new Error("integration-conflict delete or non-textual conflict cannot dispatch");
+  const unmergedEntries = parseNulRecords(unmerged.stdout, "integration-conflict index");
+  const indexedPaths = new Set();
+  for (const record of unmergedEntries) {
+    const match = /^(\d{6}) [0-9a-f]{40} [123]\t(.+)$/u.exec(record);
+    if (!match) throw new Error("integration-conflict index contains an invalid entry");
+    const [, mode, path] = match;
+    if (mode === "120000" || mode === "160000") throw new Error("integration-conflict symlink or submodule conflict cannot dispatch");
+    indexedPaths.add(path);
+  }
+  if (!sameJson([...indexedPaths].sort(), conflictPaths)) throw new Error("integration-conflict status and index path sets differ");
+  for (const path of conflictPaths) {
+    for (const stage of [2, 3]) {
+      const blob = git(worktree, ["show", `:${stage}:${path}`]);
+      if (!blob.ok || blob.stdout.includes("\0")) throw new Error("integration-conflict binary or unreadable conflict cannot dispatch");
+    }
+  }
+  const ownership = createOwnershipIndex((run.slices || []).map((slice) => ({ id: slice.id, stack: slice.stack, effective_paths: slice.effective_paths })));
+  const declaredOwnership = createOwnershipIndex((run.slices || []).map((slice) => ({ id: slice.id, stack: slice.stack, effective_paths: slice.declared_paths })));
+  if (conflictPaths.some((path) => isPrivilegedControlPlanePath(path) && declaredOwnership.owners(path).length !== 1)) {
+    throw new Error("integration-conflict privileged control-plane conflict path requires explicit declared plan ownership");
+  }
+  const owners = conflictPaths.map((path) => ownership.owners(path));
+  if (owners.some((matches) => matches.length > 1)) throw new Error("integration-conflict ambiguous effective ownership cannot dispatch");
+  const soleOwnerIds = new Set(owners.filter((matches) => matches.length === 1).map(([owner]) => owner.id));
+  const oneOwner = owners.every((matches) => matches.length === 1) && soleOwnerIds.size === 1;
+  const assignedOwner = oneOwner
+    ? ownership.slices.find((slice) => slice.id === [...soleOwnerIds][0])
+    : ownership.slices.find((slice) => slice.id === currentSlice.id);
+  if (!assignedOwner) throw new Error("integration-conflict effective owner is unavailable");
+  return {
+    schema_version: 1,
+    integration_baseline: integrationBaseline,
+    feature_head: featureHead,
+    merge_head: reviewedCommit,
+    conflict_paths: conflictPaths,
+    conflict_index_hash: sha256Bytes(Buffer.from(unmerged.stdout, "utf8")),
+    current_slice: { id: currentSlice.id, stack: currentSlice.stack, reviewed_commit: currentSlice.reviewed_commit, effective_paths: cloneJson(currentSlice.effective_paths) },
+    effective_owner: { slice_id: assignedOwner.id, stack: assignedOwner.stack, kind: oneOwner ? "sole-owner" : "current-slice-integration" },
+  };
+}
+
+function integrationConflictClaimFields(conflict) {
+  return {
+    integration_baseline: conflict.integration_baseline,
+    feature_head: conflict.feature_head,
+    merge_head: conflict.merge_head,
+    conflict_paths: cloneJson(conflict.conflict_paths),
+    conflict_index_hash: conflict.conflict_index_hash,
+    current_slice_id: conflict.current_slice.id,
+    effective_owner: cloneJson(conflict.effective_owner),
+  };
+}
+
+function parseNulRecords(value, label) {
+  if (typeof value !== "string" || !value.endsWith("\0")) throw new Error(`${label} must be NUL-delimited`);
+  const records = value.slice(0, -1).split("\0");
+  if (records.some((record) => record === "")) throw new Error(`${label} contains an empty record`);
+  return records;
+}
+
+function observeRenameCopyEndpoints(repository, from, to, options, label) {
+  const result = authorityGit(options, repository, ["diff", "--name-status", "-z", "--find-renames", "--find-copies-harder", from, to]);
+  if (!result.ok) throw new Error(`${label} cannot be observed`);
+  if (result.stdout === "") return new Set();
+  const records = parseNulRecords(result.stdout, label);
+  const endpoints = new Set();
+  for (let index = 0; index < records.length;) {
+    const status = records[index++];
+    const first = records[index++];
+    if (!/^(?:[AMDTUXB]|[RC][0-9]{1,3})$/u.test(status) || !first) throw new Error(`${label} contains an invalid change record`);
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const second = records[index++];
+      if (!second) throw new Error(`${label} contains an invalid rename or copy record`);
+      endpoints.add(first);
+      endpoints.add(second);
+    }
+  }
+  return endpoints;
+}
+
+function observeIntegrationConflictCompletionProof(repository, run, claim, completionHead, options = {}) {
+  const currentSlice = (run.slices || []).find((slice) => slice?.id === claim.current_slice_id);
+  const owner = (run.slices || []).find((slice) => slice?.id === claim.effective_owner?.slice_id);
+  if (!currentSlice || !["review", "merged"].includes(currentSlice.status) || currentSlice.reviewed_commit !== claim.merge_head
+    || !owner || owner.stack !== claim.effective_owner.stack || `${owner.stack}-builder` !== claim.agent) {
+    throw new Error("integration-conflict completion effective owner or current slice is stale");
+  }
+  const parentsResult = authorityGit(options, repository, ["rev-list", "--parents", "-n", "1", completionHead]);
+  if (!parentsResult.ok) throw new Error("integration-conflict completion parents cannot be observed");
+  const parents = parentsResult.stdout.trim().split(/\s+/u);
+  if (parents.length !== 3 || parents[0] !== completionHead || parents[1] !== claim.integration_baseline || parents[2] !== claim.merge_head) {
+    throw new Error("integration-conflict completion must be a new merge commit with exact baseline and reviewed-slice parents");
+  }
+  const mergeBases = authorityGit(options, repository, ["merge-base", "--all", claim.integration_baseline, claim.merge_head]);
+  const bases = mergeBases.ok ? mergeBases.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean) : [];
+  if (bases.length !== 1 || !/^[0-9a-f]{40}$/u.test(bases[0])) throw new Error("integration-conflict completion requires one exact merge base");
+  const reviewedPaths = observeNoRenamePathSet(repository, bases[0], claim.merge_head, options, "integration-conflict reviewed diff");
+  const integratedPaths = observeNoRenamePathSet(repository, claim.integration_baseline, completionHead, options, "integration-conflict integrated diff");
+  if (!sameStringSet(reviewedPaths, integratedPaths)) throw new Error("integration-conflict integrated path set must exactly equal the reviewed slice path set");
+  const conflicts = new Set(claim.conflict_paths);
+  if ([...conflicts].some((path) => !reviewedPaths.has(path))) throw new Error("integration-conflict path must belong to the exact reviewed slice diff");
+  const integratedEntries = [];
+  for (const path of reviewedPaths) {
+    const literal = `:(literal)${path}`;
+    const reviewed = authorityGit(options, repository, ["ls-tree", "-z", claim.merge_head, "--", literal]);
+    const integrated = authorityGit(options, repository, ["ls-tree", "-z", completionHead, "--", literal]);
+    if (!reviewed.ok || !integrated.ok) throw new Error("integration-conflict tree entries cannot be observed");
+    if (!conflicts.has(path) && reviewed.stdout !== integrated.stdout) throw new Error(`integration-conflict non-conflict path '${path}' differs from reviewed bytes`);
+    if (conflicts.has(path)) {
+      if (!/^(100644|100755) blob [0-9a-f]{40}\t/u.test(integrated.stdout)) throw new Error(`integration-conflict path '${path}' must resolve to a regular integrated file`);
+      integratedEntries.push({ path, entry_hash: sha256Bytes(Buffer.from(integrated.stdout, "utf8")) });
+    }
+  }
+  integratedEntries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const tree = authorityGit(options, repository, ["rev-parse", "--verify", `${completionHead}^{tree}`]);
+  if (!tree.ok || !/^[0-9a-f]{40}$/u.test(tree.stdout.trim())) throw new Error("integration-conflict integrated tree cannot be observed");
+  return {
+    schema_version: 1,
+    integration_baseline: claim.integration_baseline,
+    merge_head: claim.merge_head,
+    resolution_commit: completionHead,
+    merge_base: bases[0],
+    conflict_paths: cloneJson(claim.conflict_paths),
+    integrated_entries: integratedEntries,
+    integrated_tree: tree.stdout.trim(),
+  };
+}
+
+function integrationConflictSlices(run) {
+  return (Array.isArray(run?.slices) ? run.slices : [])
+    .filter((slice) => isRecord(slice?.integration_conflict))
+    .map((slice) => ({ slice, conflict: slice.integration_conflict }));
+}
+
+function assertSliceIntegrationConflictsCurrent(runDir, run, options = {}) {
+  return integrationConflictSlices(run).map(({ slice }) => assertSliceIntegrationConflictCurrent(runDir, run, slice, options));
+}
+
+function assertSliceIntegrationConflictCurrent(runDir, run, slice, options = {}) {
+  const conflict = slice?.integration_conflict;
+  if (!conflict) return null;
+  const repository = resolveAuthorityRepository(runDir, run, options);
+  if (!stringValue(repository)) throw new Error("integration-conflict review binding requires a local repository");
+  const observed = observeSpecialDispatchClaim(runDir, conflict.claim_ref);
+  const closed = observeClosedSpecialDispatch(runDir, observed);
+  if (observed.hash !== conflict.claim_hash || observed.claim.route !== "integration-conflict" || closed.closure_ref !== conflict.closure_ref
+    || closed.closure_hash !== conflict.closure_hash || closed.completion_head !== conflict.resolution_commit
+    || observed.claim.current_slice_id !== conflict.slice_id || observed.claim.effective_owner.slice_id !== conflict.owner_slice_id
+    || observed.claim.agent !== conflict.agent || observed.claim.integration_baseline !== conflict.integration_baseline
+    || !sameJson(observed.claim.conflict_paths, conflict.conflict_paths)) {
+    throw new Error("integration-conflict durable dispatch binding is stale");
+  }
+  const proof = observeIntegrationConflictCompletionProof(repository, run, observed.claim, conflict.resolution_commit, options);
+  if (!sameJson(proof, conflict.integration_proof) || !sameJson(proof, closed.integration_proof)) {
+    throw new Error("integration-conflict integrated bytes changed after resolution");
+  }
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "integration-conflict integrated review");
+  if (!authorityGit(options, repository, ["merge-base", "--is-ancestor", conflict.resolution_commit, integration.head]).ok) {
+    throw new Error("integration-conflict resolution commit must be an ancestor of the exact integrated review head");
+  }
+  if (conflict.status === "accepted") {
+    assertHistoricalIntegrationConflictTestAcceptance(runDir, run, conflict, integration, options);
+  }
+  return { observed, closed, proof, integration };
+}
+
+async function snapshotIntegrationConflictTestArtifact(runDir, slice, conflict, acceptance) {
+  const source = resolveArtifactRef(runDir, acceptance.artifact_ref);
+  const bytes = readRegularNonEmptyFile(source.path, "integration-conflict test artifact");
+  if (sha256Bytes(bytes) !== acceptance.artifact_hash) throw new Error("integration-conflict test artifact hash is stale before snapshot");
+  const digest = createHash("sha256").update(`${slice.id}\0${conflict.resolution_commit}`, "utf8").digest("hex");
+  const ref = `artifacts/integration-conflicts/${digest}.test-report.md`;
+  const path = resolve(runDir, ref);
+  await mkdir(dirname(path), { recursive: true });
+  assertNoSymlinkPath(runDir, dirname(path), "integration-conflict test artifact snapshot directory");
+  try {
+    await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    assertNoSymlinkPath(runDir, path, "integration-conflict test artifact snapshot");
+    if (!readFileSync(path).equals(bytes)) throw new Error("integration-conflict test artifact snapshot conflicts with existing bytes");
+  }
+  return { ref, hash: acceptance.artifact_hash };
+}
+
+function assertHistoricalIntegrationConflictTestAcceptance(runDir, run, conflict, integration, options = {}) {
+  const acceptance = conflict.test_acceptance;
+  const executionClaim = conflict.test_execution_claim;
+  if (!isRecord(acceptance) || !isRecord(executionClaim) || conflict.test_execution_claim_hash !== hashValue(executionClaim)) {
+    throw new Error("integration-conflict accepted test execution claim is stale");
+  }
+  const artifact = resolveArtifactRef(runDir, conflict.test_artifact_snapshot?.ref);
+  const evidence = resolveEvidenceRef(runDir, acceptance.evidence_ref);
+  const review = resolveReviewRef(runDir, acceptance.review_ref);
+  if (hashFile(artifact.path) !== conflict.test_artifact_snapshot.hash || conflict.test_artifact_snapshot.hash !== acceptance.artifact_hash
+    || hashFile(evidence.path) !== acceptance.evidence_hash || hashFile(review.path) !== acceptance.review_hash) {
+    throw new Error("integration-conflict accepted test sidecar bytes are stale");
+  }
+  const receipt = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, "integration-conflict checked test receipt"));
+  const reviewValue = parseJsonObjectFile(review.path, "integration-conflict test review");
+  if (executionClaim.state !== "completed" || executionClaim.status !== "pass" || executionClaim.receipt_ref !== acceptance.evidence_ref
+    || executionClaim.receipt_hash !== acceptance.evidence_hash || executionClaim.head_sha !== acceptance.reviewed_head_sha
+    || receipt.run_id !== executionClaim.run_id || receipt.attempt !== executionClaim.attempt || receipt.claim_nonce !== executionClaim.nonce
+    || receipt.plan_ref !== executionClaim.plan_ref || receipt.plan_hash !== executionClaim.plan_hash || receipt.head_sha !== executionClaim.head_sha
+    || receipt.status !== "pass" || receipt.review_ready !== true) {
+    throw new Error("integration-conflict accepted checked test receipt is stale or cross-bound");
+  }
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
+  const commands = decomposition.plan.integration_gate.required_commands;
+  if (executionClaim.plan_ref !== PLAN_SLICES_REF || executionClaim.plan_hash !== decomposition.plan_hash || receipt.commands.length !== commands.length
+    || receipt.commands.some((result, index) => result.index !== index || result.program !== commands[index].program || !sameJson(result.args, commands[index].args) || result.status !== "pass")) {
+    throw new Error("integration-conflict accepted checked test commands differ from the exact plan");
+  }
+  if (reviewValue.subject !== "test-verifier" || reviewValue.attempt !== executionClaim.attempt || String(reviewValue.verdict || "").toUpperCase() !== "APPROVE"
+    || reviewValue.reviewed_head_sha !== acceptance.reviewed_head_sha) {
+    throw new Error("integration-conflict accepted test review is stale or cross-bound");
+  }
+  if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", conflict.resolution_commit, acceptance.reviewed_head_sha]).ok
+    || !authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", acceptance.reviewed_head_sha, integration.head]).ok) {
+    throw new Error("integration-conflict accepted test head is outside the exact integrated ancestry");
+  }
+}
+
+function isExactIntegrationConflictAcceptanceTransition(currentSlices, nextSlices) {
+  if (!Array.isArray(currentSlices) || !Array.isArray(nextSlices) || currentSlices.length !== nextSlices.length) return false;
+  let accepted = 0;
+  for (const [index, current] of currentSlices.entries()) {
+    const next = nextSlices[index];
+    if (current?.id !== next?.id) return false;
+    const priorConflict = current.integration_conflict;
+    const nextConflict = next.integration_conflict;
+    if (priorConflict?.status === "pending-integrated-review") {
+      if (nextConflict?.status !== "accepted") return false;
+      const stripped = cloneJson(nextConflict);
+      delete stripped.test_acceptance;
+      delete stripped.test_artifact_snapshot;
+      delete stripped.test_execution_claim;
+      delete stripped.test_execution_claim_hash;
+      stripped.status = "pending-integrated-review";
+      if (!sameJson(stripped, priorConflict)) return false;
+      accepted += 1;
+    } else if (!sameJson(priorConflict, nextConflict)) return false;
+    if (!sameJson({ ...current, integration_conflict: nextConflict }, next)) return false;
+  }
+  return accepted > 0;
+}
+
+function observeClosedIntegrationConflictForSlice(runDir, run, sliceId, mergeCommit, repository, options = {}) {
+  const binding = run.special_builder_dispatch;
+  if (!binding || binding.route !== "integration-conflict" || binding.owner_slice_id === undefined) {
+    throw new Error("integration-conflict slice merge requires the exact closed delegated conflict dispatch");
+  }
+  const observed = observeSpecialDispatchClaim(runDir, binding.claim_ref);
+  const closed = observeClosedSpecialDispatch(runDir, observed);
+  if (observed.hash !== binding.claim_hash || binding.closure_ref !== closed.closure_ref || binding.closure_hash !== closed.closure_hash
+    || binding.completion_head !== closed.completion_head || closed.completion_head !== mergeCommit || observed.claim.current_slice_id !== sliceId
+    || binding.owner_slice_id !== observed.claim.effective_owner.slice_id || specialDispatchAuthorityHash(run) !== observed.claim.run_hash) {
+    throw new Error("integration-conflict checked dispatch binding is stale or targets another merge");
+  }
+  const integrationProof = observeIntegrationConflictCompletionProof(repository, run, observed.claim, mergeCommit, options);
+  if (!sameJson(integrationProof, closed.integration_proof)) throw new Error("integration-conflict integrated bytes changed after delegated completion");
+  return {
+    claim_ref: observed.ref,
+    claim_hash: observed.hash,
+    closure_ref: closed.closure_ref,
+    closure_hash: closed.closure_hash,
+    completion_head: closed.completion_head,
+    owner_slice_id: closed.owner_slice_id,
+    agent: observed.claim.agent,
+    integration_baseline: observed.claim.integration_baseline,
+    conflict_paths: cloneJson(observed.claim.conflict_paths),
+    integration_proof: integrationProof,
+  };
 }
 
 function observeCarryForwardNonconvergencePrior(repository, runDir, run, slice) {
@@ -5059,6 +5608,8 @@ function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expect
       review_hash: previous.review_hash,
       reviewed_commit: previous.reviewed_commit,
     });
+    validateSliceReviewFeasibility(observed.review, decomposition.plan, { sliceId: slice.id });
+    assertReviewedSliceRetryRoute(observed.review, slice.id, currentRun);
     prior = {
       binding: cloneJson(previous),
       evidence: { encoding: "base64", bytes: observed.evidence_bytes },
@@ -5079,6 +5630,25 @@ function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expect
 
 function sliceDispatchClaimName(runId, sliceId, attempt) {
   return `${createHash("sha256").update(`${runId}\0${sliceId}\0${attempt}`, "utf8").digest("hex")}.json`;
+}
+
+function assertReviewedSliceRetryRoute(review, sliceId, run) {
+  const rerouted = review.remediation_context.fixes.filter((fix) => ["sibling-owned", "contract-change"].includes(fix.scope_effect));
+  if (rerouted.length === 0) return;
+  const routes = rerouted.map((fix) => `${fix.required_fix_index}:${fix.scope_effect}:${fix.fix_owner}`).join(", ");
+  const first = rerouted[0];
+  if (first.scope_effect === "contract-change") {
+    throw new Error(`slice '${sliceId}' retry cannot consume another attempt; contract-change requires plan/brief amendment (${routes})`);
+  }
+  const owner = (run?.slices || []).find((slice) => slice?.id === first.fix_owner);
+  const consumer = (run?.slices || []).find((slice) => slice?.id === sliceId);
+  if (owner && ["pending", "running", "review"].includes(owner.status)) {
+    throw new Error(`slice '${sliceId}' retry cannot consume another attempt; sibling-owned work is assigned to active owner '${first.fix_owner}' before current-slice dispatch (${routes})`);
+  }
+  if (owner?.status === "merged" && consumer?.status !== "merged" && consumer?.depends_on?.includes(owner.id) && !run?.merged_slice_repair) {
+    throw new Error(`slice '${sliceId}' retry cannot consume another attempt; sibling-owned work must use existing merged-slice-repair for owner '${first.fix_owner}' (${routes})`);
+  }
+  throw new Error(`slice '${sliceId}' retry cannot consume another attempt; sibling-owned route is ineligible and requires plan/brief amendment (${routes})`);
 }
 
 function assertPriorSliceDispatchesClosed(runDir, runId, slice, attempt, includeCurrent) {
@@ -5181,7 +5751,8 @@ export function assertNoUnresolvedSpecialBuilderDispatches(runDir, run) {
     try { observed = observeSpecialDispatchClaim(runDir, binding.claim_ref); }
     catch (error) { throw new Error("unresolved checked special builder Task dispatch: bound claim is missing or invalid", { cause: error }); }
     if (observed.hash !== binding.claim_hash || observed.claim.run_id !== run.run_id || observed.claim.route !== binding.route
-      || observed.claim.instance !== binding.instance || observed.claim.agent !== binding.agent) {
+      || observed.claim.instance !== binding.instance || observed.claim.agent !== binding.agent
+      || (binding.route === "integration-conflict" && binding.owner_slice_id !== observed.claim.effective_owner?.slice_id)) {
       throw new Error("unresolved checked special builder Task dispatch: bound claim identity is stale");
     }
     if (!binding.closure_ref) throw new Error(`unresolved checked special builder Task dispatch: route '${binding.route}' instance '${binding.instance}' remains active or has an unknown outcome`);
@@ -5286,14 +5857,18 @@ function observeSpecialDispatchClaim(runDir, ref) {
   assertNoSymlinkPath(runDir, path, "special builder dispatch claim");
   const bytes = readRegularNonEmptyFile(path, "special builder dispatch claim");
   const claim = parseJsonObjectBytes(bytes, "special builder dispatch claim");
-  const expectedKeys = ["schema_version", "kind", "run_id", "route", "instance", "agent", "branch", "worktree", "head", "run_hash", "context_hash", "completion_token_hash", "claimed_at", "closure_ref"];
+  const conflictKeys = claim.route === "integration-conflict"
+    ? ["integration_baseline", "feature_head", "merge_head", "conflict_paths", "conflict_index_hash", "current_slice_id", "effective_owner"]
+    : [];
+  const expectedKeys = ["schema_version", "kind", "run_id", "route", "instance", "agent", "branch", "worktree", "head", "run_hash", "context_hash", "completion_token_hash", "claimed_at", "closure_ref", ...conflictKeys];
   if (!sameStringSet(new Set(Object.keys(claim)), new Set(expectedKeys))
     || claim.schema_version !== 1 || claim.kind !== "checked-special-builder-dispatch-claim"
-    || !stringValue(claim.run_id) || !["merged-slice-repair", "panel-remediation", "post-pr-remediation"].includes(claim.route)
+    || !stringValue(claim.run_id) || !["merged-slice-repair", "panel-remediation", "post-pr-remediation", "integration-conflict"].includes(claim.route)
     || !stringValue(claim.instance) || !SLICE_BUILDER_AGENTS.has(claim.agent) || !stringValue(claim.branch) || !stringValue(claim.worktree)
     || !/^[0-9a-f]{40}$/u.test(claim.head || "") || !/^sha256:[0-9a-f]{64}$/u.test(claim.run_hash || "")
     || !/^sha256:[0-9a-f]{64}$/u.test(claim.context_hash || "") || !/^sha256:[0-9a-f]{64}$/u.test(claim.completion_token_hash || "")
-    || !Number.isFinite(Date.parse(claim.claimed_at || "")) || claim.closure_ref !== `${ref.slice(0, -5)}.closed.json`) {
+    || !Number.isFinite(Date.parse(claim.claimed_at || "")) || claim.closure_ref !== `${ref.slice(0, -5)}.closed.json`
+    || (claim.route === "integration-conflict" && !validIntegrationConflictClaim(claim))) {
     throw new Error("special builder dispatch claim identity is invalid");
   }
   return { ref, path, hash: sha256Bytes(bytes), claim };
@@ -5305,7 +5880,7 @@ function observeClosedSpecialDispatch(runDir, observed) {
   assertNoSymlinkPath(runDir, path, "special builder dispatch closure");
   const bytes = readRegularNonEmptyFile(path, "special builder dispatch closure");
   const closure = parseJsonObjectBytes(bytes, "special builder dispatch closure");
-  const expectedKeys = ["schema_version", "kind", "claim_ref", "claim_hash", "run_id", "route", "instance", "agent", "branch", "worktree", "head", "completion_head", "run_hash", "context_hash", "completion_token", "returned_at", ...(observed.claim.route === "panel-remediation" ? ["owner_slice_id"] : [])];
+  const expectedKeys = ["schema_version", "kind", "claim_ref", "claim_hash", "run_id", "route", "instance", "agent", "branch", "worktree", "head", "completion_head", "run_hash", "context_hash", "completion_token", "returned_at", ...(["panel-remediation", "integration-conflict"].includes(observed.claim.route) ? ["owner_slice_id"] : []), ...(observed.claim.route === "integration-conflict" ? ["integration_proof"] : [])];
   for (const key of ["run_id", "route", "instance", "agent", "branch", "worktree", "head", "run_hash", "context_hash"]) {
     if (closure[key] !== observed.claim[key]) throw new Error("special builder dispatch closure identity is invalid");
   }
@@ -5313,9 +5888,29 @@ function observeClosedSpecialDispatch(runDir, observed) {
     || closure.schema_version !== 1 || closure.kind !== "checked-special-builder-dispatch-closure"
     || closure.claim_ref !== observed.ref || closure.claim_hash !== observed.hash || !/^[0-9a-f]{40}$/u.test(closure.completion_head || "")
     || !stringValue(closure.completion_token) || sha256Bytes(Buffer.from(closure.completion_token, "utf8")) !== observed.claim.completion_token_hash
-    || (observed.claim.route === "panel-remediation" && !stringValue(closure.owner_slice_id))
+    || (["panel-remediation", "integration-conflict"].includes(observed.claim.route) && !stringValue(closure.owner_slice_id))
+    || (observed.claim.route === "integration-conflict" && (closure.owner_slice_id !== observed.claim.effective_owner.slice_id || !validIntegrationConflictProof(closure.integration_proof, observed.claim, closure.completion_head)))
     || !Number.isFinite(Date.parse(closure.returned_at || ""))) throw new Error("special builder dispatch closure binding is invalid");
-  return { claim_ref: observed.ref, claim_hash: observed.hash, closure_ref: observed.claim.closure_ref, closure_hash: sha256Bytes(bytes), completion_head: closure.completion_head, ...(closure.owner_slice_id ? { owner_slice_id: closure.owner_slice_id } : {}) };
+  return { claim_ref: observed.ref, claim_hash: observed.hash, closure_ref: observed.claim.closure_ref, closure_hash: sha256Bytes(bytes), completion_head: closure.completion_head, ...(closure.owner_slice_id ? { owner_slice_id: closure.owner_slice_id } : {}), ...(closure.integration_proof ? { integration_proof: cloneJson(closure.integration_proof) } : {}) };
+}
+
+function validIntegrationConflictClaim(claim) {
+  if (claim.integration_baseline !== claim.head || claim.feature_head !== claim.head || !/^[0-9a-f]{40}$/u.test(claim.merge_head || "")
+    || !/^sha256:[0-9a-f]{64}$/u.test(claim.conflict_index_hash || "") || !stringValue(claim.current_slice_id)
+    || !Array.isArray(claim.conflict_paths) || claim.conflict_paths.length < 1 || !sameJson(claim.conflict_paths, [...claim.conflict_paths].sort())
+    || new Set(claim.conflict_paths).size !== claim.conflict_paths.length || claim.conflict_paths.some((path) => !isCanonicalConcreteRepositoryPath(path))) return false;
+  const owner = claim.effective_owner;
+  return isRecord(owner) && sameStringSet(new Set(Object.keys(owner)), new Set(["slice_id", "stack", "kind"])) && stringValue(owner.slice_id)
+    && ["backend", "frontend"].includes(owner.stack) && ["sole-owner", "current-slice-integration"].includes(owner.kind);
+}
+
+function validIntegrationConflictProof(proof, claim, completionHead) {
+  if (!isRecord(proof) || !sameStringSet(new Set(Object.keys(proof)), new Set(["schema_version", "integration_baseline", "merge_head", "resolution_commit", "merge_base", "conflict_paths", "integrated_entries", "integrated_tree"]))) return false;
+  if (proof.schema_version !== 1 || proof.integration_baseline !== claim.integration_baseline || proof.merge_head !== claim.merge_head
+    || proof.resolution_commit !== completionHead || !/^[0-9a-f]{40}$/u.test(proof.merge_base || "") || !/^[0-9a-f]{40}$/u.test(proof.integrated_tree || "")
+    || !sameJson(proof.conflict_paths, claim.conflict_paths) || !Array.isArray(proof.integrated_entries) || proof.integrated_entries.length !== claim.conflict_paths.length) return false;
+  return proof.integrated_entries.every((entry, index) => isRecord(entry) && sameStringSet(new Set(Object.keys(entry)), new Set(["path", "entry_hash"]))
+    && entry.path === claim.conflict_paths[index] && /^sha256:[0-9a-f]{64}$/u.test(entry.entry_hash || ""));
 }
 
 export function assertNoCurrentSliceNonconvergence(runDir, run) {
@@ -5335,9 +5930,7 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
       evidence_ref: entry.evidence_ref,
       review_ref: entry.review_ref,
     });
-    const result = entry.legacy_unclassified === true
-      ? legacyAttemptReviewResult(sliceId, observed.review)
-      : observeAttemptReviewResult(sliceId, observed.review);
+    const result = observeAttemptReviewResult(sliceId, observed.review);
     const dispatch = observeAttemptReviewDispatch(runDir, sliceId, slice, entry);
     const current = {
       attempt: entry.attempt,
@@ -5346,6 +5939,8 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
       review_ref: entry.review_ref,
       review_hash: observed.binding.review_hash,
       reviewed_commit: observed.review.reviewed_commit,
+      diff_base_commit: entry.diff_base_commit,
+      ratified_paths: result.ratified_paths,
       ...result,
       ...dispatch,
     };
@@ -5353,14 +5948,6 @@ export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
       throw new Error(`slice '${sliceId}' attempt ${entry.attempt} review history is stale`);
     }
   }
-}
-
-function legacyAttemptReviewResult(sliceId, review) {
-  if (!review || review.subject !== sliceId || !["APPROVE", "REJECT"].includes(review.verdict)
-    || ["convergence", "remaining_fix_count", "remediation_context"].some((key) => review[key] !== undefined)) {
-    throw new Error(`slice '${sliceId}' legacy review history is not exact unclassified authority`);
-  }
-  return { verdict: review.verdict, legacy_unclassified: true };
 }
 
 function observeAttemptReviewDispatch(runDir, sliceId, slice, entry) {
@@ -5466,8 +6053,12 @@ function sameStringSet(left, right) {
 
 function assertSliceTransition(runDir, prior, next) {
   assertSliceAttemptHistoryCurrent(runDir, prior.id, prior);
-  for (const key of ["id", "stack", "depends_on"]) {
+  for (const key of ["id", "stack", "depends_on", "declared_paths"]) {
     if (!sameJson(prior?.[key], next?.[key])) throw new Error(`slice ${key} is immutable`);
+  }
+  const checkedOwnershipReset = ["running", "blocked"].includes(next.status) && sameJson(next.effective_paths, next.declared_paths);
+  if (!sameJson(prior.effective_paths, next.effective_paths) && !checkedOwnershipReset) {
+    throw new Error(`slice '${prior.id}' effective_paths is managed by checked review publication`);
   }
   const transitions = {
     pending: new Set(["running", "blocked"]),
@@ -5494,6 +6085,7 @@ function assertSliceTransition(runDir, prior, next) {
   if (next.status === "review" && next.attempts !== priorAttempts) throw new Error(`slice '${prior.id}' review requires the current running attempt ${priorAttempts}`);
   if (next.status === "blocked" && next.attempts !== priorAttempts) throw new Error(`slice '${prior.id}' blocked transition cannot change attempts`);
   if (!sameJson(prior.attempt_reviews || [], next.attempt_reviews || [])) throw new Error(`slice '${prior.id}' attempt review history is managed by checked review publication`);
+  if (!sameJson(prior.integration_conflict, next.integration_conflict)) throw new Error(`slice '${prior.id}' integration_conflict is managed by checked delegated merge and test acceptance`);
   if (prior.dispatch_required === true && next.dispatch_required !== true) throw new Error(`slice '${prior.id}' dispatch_required is immutable once enabled`);
   const advancingAttempt = next.attempts === priorAttempts + 1;
   for (const key of SLICE_DISPATCH_BINDING_KEYS) {
@@ -5570,6 +6162,7 @@ function terminalizeSliceNonconvergence(run, slice, sliceIndex, options = {}) {
 
 function normalizeSliceTransition(prior, next) {
   if (next.status === "running") {
+    next.effective_paths = cloneJson(next.declared_paths);
     delete next.evidence_ref;
     delete next.evidence_hash;
     delete next.review_ref;
@@ -5584,6 +6177,7 @@ function normalizeSliceTransition(prior, next) {
     delete next.blocked_reason;
     delete next.updated_at;
   } else if (next.status === "blocked") {
+    next.effective_paths = cloneJson(next.declared_paths);
     delete next.merge_commit;
     delete next.evidence_hash;
     delete next.review_hash;
@@ -5741,7 +6335,7 @@ function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
   if (request.status === "reported") return reportedMergedSliceRepair(runDir, run, current, request, stampedAt);
   if (!current) throw new Error("merged-slice repair must be reported before any other transition");
   if (request.status === "repairing") return repairingMergedSliceRepair(runDir, run, current, request, stampedAt, options);
-  if (request.status === "review") return reviewMergedSliceRepair(runDir, current, request, stampedAt, options);
+  if (request.status === "review") return reviewMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   if (request.status === "merged") return mergedMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   return { ...current, status: "blocked", reason: request.reason, updated_at: stampedAt };
 }
@@ -5763,11 +6357,10 @@ function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
   if (!consumerDeps.includes(owner.id)) {
     throw new Error(`repair consumer '${consumer.id}' must directly depend on owner '${owner.id}'`);
   }
-  // Owner-lane authority is bound at report time: every later transition
-  // re-verifies plan/slices.json against this hash, so the lane can never be
-  // widened, narrowed, or replaced mid-incident.
+  // The accepted plan remains freshness-bound at report time while lane
+  // authority comes only from the owner's durable effective paths.
   const planHash = hashFile(join(runDir, "plan", "slices.json"));
-  assertRepairPathInOwnerLane(runDir, owner.id, request.defect_path, planHash);
+  assertRepairPathInOwnerLane(runDir, run, owner.id, request.defect_path, planHash);
   const evidence = resolveEvidenceRef(runDir, request.evidence_ref);
   const evidenceJson = parseJsonObjectFile(evidence.path, "repair evidence_ref");
   if (evidenceJson.subject !== consumer.id) {
@@ -5837,7 +6430,7 @@ function assertRepairOriginalEvidenceIntact(runDir, current) {
   }
 }
 
-function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = {}) {
+function reviewMergedSliceRepair(runDir, run, current, request, stampedAt, options = {}) {
   // Recording a review from `review` again is allowed ONLY as a byte-identical
   // idempotent re-record (crash recovery). The binding is write-once per
   // attempt: a bound REJECT can never be replaced by a different review — a
@@ -5865,7 +6458,7 @@ function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = 
   if (!baselineContained.ok) throw new Error("repair reviewed commit must contain the observed attempt baseline");
   const observedPaths = observeRepairChangedPaths(repoRoot, baseline, reviewedSha);
   for (const observedPath of observedPaths) {
-    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(observedPath), current.plan_hash);
+    assertRepairPathInOwnerLane(runDir, run, current.owner_slice_id, normalizeRepairDefectPath(observedPath), current.plan_hash);
   }
   const reviewJson = parseJsonObjectFile(review.path, "repair review_ref");
   if (reviewJson.subject !== `repair:${current.owner_slice_id}`) {
@@ -5880,7 +6473,7 @@ function reviewMergedSliceRepair(runDir, current, request, stampedAt, options = 
   // stale verdict written for another attempt or commit can never be
   // re-paired with code the reviewer did not see.
   assertRepairReviewBinding(reviewJson, current.attempts, reviewedSha);
-  const repairEvidence = assertRepairChangedPathsInOwnerLane(runDir, current, request.repair_evidence_ref, observedPaths);
+  const repairEvidence = assertRepairChangedPathsInOwnerLane(runDir, run, current, request.repair_evidence_ref, observedPaths);
   return {
     ...current,
     status: "review",
@@ -5915,9 +6508,9 @@ function observeRepairChangedPaths(repoRoot, fromCommit, toCommit) {
 
 // Lane confinement is observed, not declared: the orchestrator records the
 // repair diff's actual changed paths as evidence, every one of them must fall
-// inside the owner's bound plan lane, and the recorded list must equal the
+// inside the owner's bound durable lane, and the recorded list must equal the
 // git-observed diff — a claim that diverges from git is rejected outright.
-function assertRepairChangedPathsInOwnerLane(runDir, current, evidenceRef, observedPaths) {
+function assertRepairChangedPathsInOwnerLane(runDir, run, current, evidenceRef, observedPaths) {
   const evidence = resolveEvidenceRef(runDir, evidenceRef);
   const evidenceJson = parseJsonObjectFile(evidence.path, "repair evidence_ref");
   if (evidenceJson.subject !== `repair:${current.owner_slice_id}`) {
@@ -5928,7 +6521,7 @@ function assertRepairChangedPathsInOwnerLane(runDir, current, evidenceRef, obser
     throw new Error("repair attempt evidence must record the observed non-empty changed_paths list");
   }
   for (const changedPath of changedPaths) {
-    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(changedPath), current.plan_hash);
+    assertRepairPathInOwnerLane(runDir, run, current.owner_slice_id, normalizeRepairDefectPath(changedPath), current.plan_hash);
   }
   const recorded = [...new Set(changedPaths.map((path) => normalizeRepairDefectPath(path)))].sort();
   const observed = [...new Set(observedPaths)].sort();
@@ -5984,7 +6577,7 @@ function mergedMergedSliceRepair(runDir, run, current, request, stampedAt, optio
   }
   const mergedPaths = observeRepairChangedPaths(repoRoot, baseline, mergeSha);
   for (const mergedPath of mergedPaths) {
-    assertRepairPathInOwnerLane(runDir, current.owner_slice_id, normalizeRepairDefectPath(mergedPath), current.plan_hash);
+    assertRepairPathInOwnerLane(runDir, run, current.owner_slice_id, normalizeRepairDefectPath(mergedPath), current.plan_hash);
   }
   // The original consumer reproduction must now pass, on observed evidence.
   const verification = resolveEvidenceRef(runDir, request.verification_ref);
@@ -6044,7 +6637,7 @@ function assertRepairQuiescence(run, action) {
   if (busy) throw new Error(`cannot ${action} while slice '${busy.id}' is ${busy.status}; quiesce slice work first`);
 }
 
-function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath, expectedPlanHash) {
+function assertRepairPathInOwnerLane(runDir, run, ownerSliceId, defectPath, expectedPlanHash) {
   const planPath = join(runDir, "plan", "slices.json");
   if (requireNonEmptyString(expectedPlanHash, "repair plan_hash") !== hashFile(planPath)) {
     throw new Error("plan/slices.json no longer matches the lane authority bound when the repair was reported");
@@ -6052,23 +6645,13 @@ function assertRepairPathInOwnerLane(runDir, ownerSliceId, defectPath, expectedP
   const plan = parseSlicesPlanBytes(readFileSync(planPath), { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
   const planned = (Array.isArray(plan.slices) ? plan.slices : []).find((slice) => slice?.id === ownerSliceId);
   if (!planned) throw new Error(`repair owner slice '${ownerSliceId}' is missing from plan/slices.json`);
-  let lanes;
-  try {
-    lanes = (Array.isArray(planned.paths) ? planned.paths : []).map((lane) => validatePlanPath(lane));
-  } catch {
-    throw new Error(`repair owner slice '${ownerSliceId}' plan lanes are not valid repository paths`);
-  }
-  if (!lanes.filter(Boolean).some((lane) => repairPathWithinLane(defectPath, lane))) {
+  const durable = (Array.isArray(run.slices) ? run.slices : []).map((slice) => ({ id: slice?.id, stack: slice?.stack, effective_paths: slice?.effective_paths }));
+  const owner = (run.slices || []).find((slice) => slice?.id === ownerSliceId);
+  if (!owner || owner.status !== "merged") throw new Error(`repair owner slice '${ownerSliceId}' must retain merged ownership authority`);
+  const owners = createOwnershipIndex(durable).owners(defectPath);
+  if (owners.length !== 1 || owners[0].id !== ownerSliceId) {
     throw new Error(`repair defect path '${defectPath}' is outside owner slice '${ownerSliceId}' lanes`);
   }
-}
-
-// Lane matching reuses the canonical plan-path grammar (post-pr-ci
-// validatePlanPath/sliceOwnsPath): a lane is either `<dir>/**` or an exact
-// file path, lane text is never locally normalized, and any other shape
-// matches nothing.
-function repairPathWithinLane(path, lane) {
-  return lane.endsWith("/**") ? path.startsWith(lane.slice(0, -2)) : path === lane;
 }
 
 function normalizePrCreatedTerminalResult(run, request, operation, overrides = {}) {
@@ -6428,6 +7011,18 @@ function observeGitPublicationAuthority(repoRoot, commands) {
 
 function gitCleanlinessArgs() {
   return ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", ":(exclude,top,glob).opencode/**"];
+}
+
+function gitIntegrationConflictStatusArgs() {
+  return ["status", "--porcelain=v1", "-z", "--untracked-files=no"];
+}
+
+function gitIntegrationConflictUntrackedArgs() {
+  return [
+    "ls-files", "--others", "--exclude-standard", "-z", "--", ".",
+    ":(exclude,top,glob).opencode/factory/**",
+    ":(exclude,top,glob).opencode/worktrees/**",
+  ];
 }
 
 function normalizePositiveInteger(value, fallback) {

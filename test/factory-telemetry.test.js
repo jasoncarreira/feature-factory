@@ -172,7 +172,7 @@ function createResumeLaunchFixture(runId) {
     branch: runId,
     worktree,
     gates: {},
-    slices: [{ id: "slice", status: "running", attempts: 1, branch: runId, worktree }],
+    slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", attempts: 1, branch: runId, worktree }],
   });
   return { ...fixture, runId, runDir, worktree };
 }

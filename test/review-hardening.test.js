@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "./helpers/git-fixture.js";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readFileSync } from "node:fs";
@@ -10,19 +11,24 @@ import { normalizeCostAttribution } from "../src/cost-attribution.js";
 import { runAttributes, sanitizeOtlpEnv, validateTracestate } from "../src/telemetry.js";
 import { collectProtectedSteeringState } from "../src/steering-conflicts.js";
 import { cancelFactoryRun, cleanupRun, continueFactory, recordCostUsage, startFactory } from "../src/factory.js";
-import { SLICE_FIX_CLASSIFICATIONS, sliceReviewTaskContext, validateSliceReviewResult } from "../src/validate.js";
+import { SLICE_FIX_CLASSIFICATIONS, SLICE_FIX_SCOPE_EFFECTS, sliceReviewTaskContext, validateSliceReviewFeasibility, validateSliceReviewResult } from "../src/validate.js";
 
 const NOW = "2026-07-09T15:00:00.000Z";
 
-function classifiedReview(classifications, { convergence = "converging" } = {}) {
+function classifiedReview(classifications, { convergence = "converging", schemaVersion = 2, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice" } = {}) {
   return {
     verdict: "REJECT",
     convergence,
     required_fixes: classifications.map((_, index) => `fix-${index + 1}`),
     remaining_fix_count: classifications.length,
+    ownership_ratification: { schema_version: 1, paths: [] },
     remediation_context: {
-      schema_version: 1,
-      fixes: classifications.map((classification, required_fix_index) => ({ required_fix_index, classification })),
+      schema_version: schemaVersion,
+      fixes: classifications.map((classification, required_fix_index) => ({
+        required_fix_index,
+        classification,
+        ...(schemaVersion === 2 ? { scope_effect: scopeEffect, likely_paths: likelyPaths, fix_owner: fixOwner } : {}),
+      })),
     },
   };
 }
@@ -58,7 +64,7 @@ describe("steering consume crash recovery", () => {
 describe("slice merge transition guard", () => {
   it("rejects direct status merged writes through transitionRunSlice", async () => {
     const runDir = createRunDir("slice-merged-guard", {
-      slices: [{ id: "s1", status: "running", attempts: 1 }],
+      slices: [{ id: "s1", declared_paths: ["s1.txt"], effective_paths: ["s1.txt"], status: "running", attempts: 1 }],
     });
     try {
       await assert.rejects(
@@ -72,10 +78,23 @@ describe("slice merge transition guard", () => {
   });
 
   it("refuses to roll a merged slice back to running/review/blocked via transitionRunSlice", async () => {
+    const reviewedCommit = "c".repeat(40);
+    const evidence = { subject: "s1", attempt: 1, status: "pass", review_ready: true, head_sha: reviewedCommit };
+    const review = { subject: "s1", attempt: 1, reviewed_commit: reviewedCommit, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] } };
+    const evidenceHash = jsonHash(evidence);
+    const reviewHash = jsonHash(review);
     const runDir = createRunDir("slice-merged-immutable", {
-      slices: [{ id: "s1", status: "merged", merge_commit: "abc1234", review_ref: "reviews/s1.json", evidence_ref: "evidence/s1.json", attempts: 1 }],
+      slices: [{
+        id: "s1", declared_paths: ["s1.txt"], effective_paths: ["s1.txt"], status: "merged", merge_commit: "abc1234", review_ref: "reviews/s1.json", review_hash: reviewHash,
+        evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, reviewed_commit: reviewedCommit, attempts: 1,
+        attempt_reviews: [{ attempt: 1, evidence_ref: "evidence/s1.json", evidence_hash: evidenceHash, review_ref: "reviews/s1.json", review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 }],
+      }],
     });
     try {
+      mkdirSync(join(runDir, "evidence"), { recursive: true });
+      mkdirSync(join(runDir, "reviews"), { recursive: true });
+      writeJson(join(runDir, "evidence", "s1.json"), evidence);
+      writeJson(join(runDir, "reviews", "s1.json"), review);
       for (const status of ["running", "review", "blocked"]) {
         await assert.rejects(
           transitionRunSlice(runDir, "s1", { status }, { mustExist: true }),
@@ -120,7 +139,113 @@ describe("slice remediation task context", () => {
     assert.throws(() => validateSliceReviewResult(classifiedReview(["nonconvergent"])), /classify nonconvergent exactly when review convergence is nonconvergent/u);
     assert.throws(() => validateSliceReviewResult(classifiedReview(["narrow-correction"], { convergence: "nonconvergent" })), /classify nonconvergent exactly when review convergence is nonconvergent/u);
   });
+
+  it("rejects schema-v1 and unstructured slice reviews for validation, task context, and feasibility", () => {
+    const schemaV1 = classifiedReview(["narrow-correction"], { schemaVersion: 1 });
+    const unstructured = classifiedReview(["narrow-correction"]);
+    delete unstructured.remediation_context;
+    for (const [name, review, expected] of [
+      ["schema-v1", schemaV1, /schema_version.*must equal 2/u],
+      ["unstructured", unstructured, /remediation_context.*required/u],
+    ]) {
+      assert.throws(() => validateSliceReviewResult(review), expected, name);
+      assert.throws(() => sliceReviewTaskContext(review), expected, name);
+      assert.throws(() => validateSliceReviewFeasibility(review, feasibilityPlan(), { sliceId: "slice" }), expected, name);
+    }
+  });
+
+  it("requires every v2 positional fix to carry closed canonical feasibility fields", () => {
+    for (const field of ["scope_effect", "likely_paths", "fix_owner"]) {
+      const review = classifiedReview(["narrow-correction"]);
+      delete review.remediation_context.fixes[0][field];
+      assert.throws(() => validateSliceReviewResult(review), new RegExp(field, "u"), field);
+    }
+    for (const scopeEffect of SLICE_FIX_SCOPE_EFFECTS) {
+      const review = classifiedReview(["narrow-correction"], { scopeEffect });
+      assert.equal(validateSliceReviewResult(review).task_context, "reuse", scopeEffect);
+    }
+    for (const likelyPaths of [[], ["src/*.js"], ["/src/fix.js"], ["src/../fix.js"], ["src/fix.js", "src/fix.js"]]) {
+      const review = classifiedReview(["narrow-correction"], { likelyPaths });
+      assert.throws(() => validateSliceReviewResult(review), /likely_paths|canonical concrete|unique paths/u, JSON.stringify(likelyPaths));
+    }
+  });
+
+  it("rejects each closed-schema and canonical-path violation at its exact field", () => {
+    const cases = [
+      ["extra remediation context key", (review) => { review.remediation_context.extra = true; }, "review.remediation_context.extra", /is not allowed/u],
+      ["extra v2 fix key", (review) => { review.remediation_context.fixes[0].extra = true; }, "review.remediation_context.fixes[0].extra", /is not allowed/u],
+      ["unknown scope_effect", (review) => { review.remediation_context.fixes[0].scope_effect = "adjacent"; }, "review.remediation_context.fixes[0].scope_effect", /must be one of/u],
+      ["non-NFC likely path", (review) => { review.remediation_context.fixes[0].likely_paths = ["src/cafe\u0301.js"]; }, "review.remediation_context.fixes[0].likely_paths[0]", /canonical concrete repository path/u],
+      ["backslash likely path", (review) => { review.remediation_context.fixes[0].likely_paths = ["src\\fix.js"]; }, "review.remediation_context.fixes[0].likely_paths[0]", /canonical concrete repository path/u],
+    ];
+    for (const [name, mutate, expectedPath, expectedMessage] of cases) {
+      const review = classifiedReview(["narrow-correction"]);
+      mutate(review);
+      assert.throws(() => validateSliceReviewResult(review), (error) => {
+        assert.equal(error.errors.some((item) => item.path === expectedPath && expectedMessage.test(item.message)), true, name);
+        return true;
+      });
+    }
+  });
+
+  it("mechanically accepts each unambiguous plan-aware scope forecast", () => {
+    const plan = feasibilityPlan();
+    for (const [scopeEffect, likelyPaths, fixOwner] of [
+      ["in-lane", ["src/fix.js"], "slice"],
+      ["unowned-extension", ["docs/fix.md"], "slice"],
+      ["sibling-owned", ["test/fix.test.js"], "sibling"],
+      ["contract-change", ["src/public-contract.js"], "sibling"],
+    ]) {
+      const review = classifiedReview(["narrow-correction"], { scopeEffect, likelyPaths, fixOwner });
+      assert.deepEqual(validateSliceReviewFeasibility(review, plan, { sliceId: "slice" }), {
+        schema_version: 2,
+        slice_id: "slice",
+        fixes: [{ required_fix_index: 0, classification: "narrow-correction", scope_effect: scopeEffect, likely_paths: likelyPaths, fix_owner: fixOwner }],
+      }, scopeEffect);
+    }
+  });
+
+  it("uses the admitted exact-file and recursive-directory lane grammar for feasibility", () => {
+    for (const [lane, likelyPath] of [["src/fix.js", "src/fix.js"], ["src/**", "src/nested/fix.js"]]) {
+      const plan = feasibilityPlan();
+      plan.slices[0].paths = [lane];
+      const review = classifiedReview(["narrow-correction"], { likelyPaths: [likelyPath] });
+      assert.equal(validateSliceReviewFeasibility(review, plan, { sliceId: "slice" }).fixes[0].likely_paths[0], likelyPath, lane);
+    }
+    for (const lane of ["src/", "src/*.js", "src/**/fix.js"]) {
+      const plan = feasibilityPlan();
+      plan.slices[0].paths = [lane];
+      assert.throws(
+        () => validateSliceReviewFeasibility(classifiedReview(["narrow-correction"]), plan, { sliceId: "slice" }),
+        /invalid or ambiguous ownership lane/u,
+        lane,
+      );
+    }
+  });
+
+  it("fails closed for ambiguous, overlapping, mixed, missing-owner, and mismatched forecasts", () => {
+    const cases = [
+      ["overlap", classifiedReview(["narrow-correction"]), feasibilityPlan({ overlap: true }), /sole plan owner/u],
+      ["mixed sibling ownership", classifiedReview(["narrow-correction"], { scopeEffect: "sibling-owned", likelyPaths: ["test/a.js", "src/a.js"], fixOwner: "sibling" }), feasibilityPlan(), /sole plan owner/u],
+      ["owned extension", classifiedReview(["narrow-correction"], { scopeEffect: "unowned-extension", likelyPaths: ["src/a.js"] }), feasibilityPlan(), /zero plan owners/u],
+      ["missing owner", classifiedReview(["narrow-correction"], { fixOwner: "missing" }), feasibilityPlan(), /existing current-plan slice id/u],
+      ["same-slice sibling", classifiedReview(["narrow-correction"], { scopeEffect: "sibling-owned" }), feasibilityPlan(), /must differ from the reviewed slice/u],
+      ["invalid plan lane", classifiedReview(["narrow-correction"]), { ...feasibilityPlan(), slices: [{ ...feasibilityPlan().slices[0], paths: ["src/*"] }, feasibilityPlan().slices[1]] }, /invalid or ambiguous ownership lane/u],
+    ];
+    for (const [name, review, plan, expected] of cases) {
+      assert.throws(() => validateSliceReviewFeasibility(review, plan, { sliceId: "slice" }), expected, name);
+    }
+  });
 });
+
+function feasibilityPlan({ overlap = false } = {}) {
+  return {
+    slices: [
+      { id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["slice works"], test_plan: ["test slice"] },
+      { id: "sibling", stack: "backend", paths: ["test/**", ...(overlap ? ["src/**"] : [])], depends_on: [], acceptance: ["sibling works"], test_plan: ["test sibling"] },
+    ],
+  };
+}
 
 describe("cost attribution hardening", () => {
   const base = { run_id: "run-1", agent: "backend-builder" };
@@ -456,6 +581,10 @@ function readJson(file) {
 function writeJson(file, value) {
   mkdirSync(join(file, ".."), { recursive: true });
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function jsonHash(value) {
+  return `sha256:${createHash("sha256").update(`${JSON.stringify(value, null, 2)}\n`).digest("hex")}`;
 }
 
 function cleanupDir(runDir) {

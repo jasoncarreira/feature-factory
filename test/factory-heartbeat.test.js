@@ -255,7 +255,7 @@ describe("factory heartbeat lifecycle", () => {
     for (const [name, nextRun] of [
       ["terminal", terminalRun("completed")],
       ["protected-gate", runningRun({ gates: protectedGates("pre_pr") })],
-      ["no-in-flight-work", runningRun({ steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md" }], slices: [{ id: "slice", status: "merged", attempts: 1 }] })],
+      ["no-in-flight-work", runningRun({ steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md" }], slices: [{ id: "slice", declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "merged", attempts: 1 }] })],
     ]) {
       const repo = tempRepo();
       const runDir = createRunDir(repo);
@@ -311,7 +311,7 @@ function runningRun(overrides = {}) {
     worktree: null,
     gates: {},
     steps: [{ agent: "story-reader", status: "accepted", attempts: 1, artifact_ref: "artifacts/story.md" }],
-    slices: [{ id: "slice", stack: "backend", depends_on: [], status: "running", branch: "heartbeat-liveness--slice", worktree: ".opencode/worktrees/heartbeat-liveness--slice", attempts: 1 }],
+    slices: [{ id: "slice", stack: "backend", depends_on: [], declared_paths: ["slice.txt"], effective_paths: ["slice.txt"], status: "running", branch: "heartbeat-liveness--slice", worktree: ".opencode/worktrees/heartbeat-liveness--slice", attempts: 1 }],
     validator: null,
     security_review: null,
     pr_url: null,
