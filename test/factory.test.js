@@ -52,9 +52,13 @@ describe("factory public state operations", { concurrency: false }, () => {
     const fixture = createFixture("public-checkpoint-route");
     try {
       mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
-      writeJson(join(fixture.runDir, "plan", "slices.json"), oversizedFactoryPlan());
+      const plan = oversizedFactoryPlan();
+      writeJson(join(fixture.runDir, "plan", "slices.json"), plan);
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
-      writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] });
+      writeJson(
+        join(fixture.runDir, "reviews", "work-decomposer.json"),
+        oversizedFactoryReview(plan, hashFile(join(fixture.runDir, "plan", "slices.json"))),
+      );
       const runFile = join(fixture.runDir, "run.json");
       const run = readJson(runFile);
       run.slices = [];
@@ -1042,7 +1046,7 @@ describe("factory public state operations", { concurrency: false }, () => {
 
 function oversizedFactoryPlan() {
   const testPlan = Array.from({ length: 6 }, (_, index) => `test api ${index + 1}`);
-  return {
+  const plan = {
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [{
       id: "api",
@@ -1075,6 +1079,146 @@ function oversizedFactoryPlan() {
       }],
     },
   };
+  const unit = plan.delivery_envelope.delivery_units[0];
+  const acceptanceRow = { id: "acceptance-000001", source_slice_id: "api", source_index: 0, text: "accept api" };
+  const checkpoints = unit.invariant_families.map((family, index) => {
+    const obligations = unit.obligations.filter((obligation) => obligation.invariant_family_id === family.id);
+    const artifactIds = new Set(obligations.map((obligation) => obligation.verification_artifact_id));
+    const artifacts = unit.verification_artifacts.filter((artifact) => artifactIds.has(artifact.id));
+    return {
+      id: `checkpoint-${String(index + 1).padStart(3, "0")}`,
+      ordinal: index + 1,
+      prerequisite_checkpoint_id: index === 0 ? null : `checkpoint-${String(index).padStart(3, "0")}`,
+      acceptance_ids: [acceptanceRow.id],
+      brief_scope: {
+        title: `Deliver ${family.description}`,
+        source_delivery_unit_id: unit.id,
+        source_slice_id: "api",
+        source_slice_dependencies: [],
+        stack: "backend",
+        paths: ["src/api.js"],
+        acceptance: [acceptanceRow.text],
+        invariant_family: structuredClone(family),
+        obligations: structuredClone(obligations),
+        verification_artifacts: structuredClone(artifacts),
+      },
+      child_plan: {
+        integration_gate: structuredClone(plan.integration_gate),
+        slices: [{
+          id: "api",
+          stack: "backend",
+          paths: ["src/api.js"],
+          depends_on: [],
+          acceptance: [acceptanceRow.text],
+          test_plan: artifacts.map((artifact) => artifact.test_plan_entry),
+        }],
+        delivery_envelope: {
+          schema_version: 1,
+          delivery_units: [{
+            id: unit.id,
+            slice_id: "api",
+            invariant_families: [structuredClone(family)],
+            obligations: structuredClone(obligations),
+            verification_artifacts: artifacts.map((artifact, artifactIndex) => ({ ...structuredClone(artifact), test_plan_index: artifactIndex })),
+          }],
+        },
+      },
+    };
+  });
+  const assignment = (checkpoint) => ({
+    checkpoint_id: checkpoint.id,
+    invariant_family_id: checkpoint.brief_scope.invariant_family.id,
+    obligation_ids: checkpoint.brief_scope.obligations.map((obligation) => obligation.id),
+    verification_artifact_ids: checkpoint.brief_scope.verification_artifacts.map((artifact) => artifact.id),
+    test_plan_entries: checkpoint.brief_scope.verification_artifacts.map((artifact) => artifact.test_plan_entry),
+  });
+  plan.delivery_envelope.checkpoint_plan = {
+    schema_version: 1,
+    kind: "delivery-checkpoint-plan",
+    acceptance_inventory: [acceptanceRow],
+    acceptance_mappings: [{
+      acceptance_id: acceptanceRow.id,
+      policy: "shared-repeat",
+      checkpoint_ids: checkpoints.map((checkpoint) => checkpoint.id),
+      assignments: checkpoints.map(assignment),
+    }],
+    checkpoints,
+  };
+  return plan;
+}
+
+function oversizedFactoryReview(plan, planHash) {
+  const checkpointPlan = plan.delivery_envelope.checkpoint_plan;
+  const identityFields = {
+    schema_version: 1,
+    subject: "work-decomposer",
+    attempt: 1,
+    plan_ref: "plan/slices.json",
+    plan_hash: planHash,
+    review_ref: "reviews/work-decomposer.json",
+  };
+  const reviewIdentity = { ...identityFields, identity_hash: checkpointCanonicalHash(identityFields) };
+  const acceptanceById = new Map(checkpointPlan.acceptance_inventory.map((row) => [row.id, row]));
+  const mappingById = new Map(checkpointPlan.acceptance_mappings.map((row) => [row.acceptance_id, row]));
+  const summaries = checkpointPlan.checkpoints.map((checkpoint) => {
+    const projection = {
+      acceptance_ids: checkpoint.acceptance_ids,
+      acceptance_inventory: checkpoint.acceptance_ids.map((id) => acceptanceById.get(id)),
+      acceptance_mappings: checkpoint.acceptance_ids.map((id) => mappingById.get(id)),
+    };
+    return {
+      checkpoint_id: checkpoint.id,
+      ordinal: checkpoint.ordinal,
+      brief_scope_hash: checkpointCanonicalHash(checkpoint.brief_scope),
+      child_plan_hash: checkpointCanonicalHash(checkpoint.child_plan),
+      acceptance_mapping_hash: checkpointCanonicalHash(projection),
+    };
+  });
+  const admissionProbe = {
+    schema_version: 1,
+    kind: "delivery-plan-admission-probe",
+    status: "valid",
+    decision: "checkpoint",
+    plan_ref: "plan/slices.json",
+    plan_hash: planHash,
+    reasons: ["checkpoint:mixed-invariant-families:unit=api-unit:families=2:obligations=6"],
+    checkpoint_plan_hash: checkpointCanonicalHash(checkpointPlan),
+    checkpoints: summaries,
+  };
+  return {
+    schema_version: 1,
+    subject: "work-decomposer",
+    attempt: 1,
+    verdict: "APPROVE-CHECKPOINT",
+    required_fixes: [],
+    admission_probe: admissionProbe,
+    review_identity: reviewIdentity,
+    checkpoint_dispositions: summaries.map((summary) => ({
+      schema_version: 1,
+      kind: "checkpoint-child-decomposition-review",
+      subject: "work-decomposer",
+      attempt: 1,
+      verdict: "APPROVE",
+      required_fixes: [],
+      checkpoint_id: summary.checkpoint_id,
+      checkpoint_ordinal: summary.ordinal,
+      reviewed_plan_ref: "plan/slices.json",
+      reviewed_plan_hash: summary.child_plan_hash,
+      child_plan_hash: summary.child_plan_hash,
+      brief_scope_hash: summary.brief_scope_hash,
+      acceptance_mapping_hash: summary.acceptance_mapping_hash,
+      parent_review_identity: reviewIdentity,
+    })),
+  };
+}
+
+function checkpointCanonicalHash(value) {
+  const canonical = (input) => Array.isArray(input)
+    ? input.map(canonical)
+    : input !== null && typeof input === "object"
+      ? Object.fromEntries(Object.keys(input).sort().map((key) => [key, canonical(input[key])]))
+      : input;
+  return `sha256:${createHash("sha256").update(`${JSON.stringify(canonical(value), null, 2)}\n`).digest("hex")}`;
 }
 
 function createFixture(runId, { gate = false, terminal = false, git = false, repo = mkdtempSync(join(tmpdir(), "factory-simplified-")), updatedAt = undefined } = {}) {

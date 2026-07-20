@@ -124,6 +124,39 @@ describe("cli write surface", () => {
     }
   });
 
+  it("rejects the removed checkpoint predecessor merge flag", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-checkpoint-predecessor-"));
+    try {
+      initGitRepo(repo);
+      const rejected = runFactoryFail(repo, [
+        "checkpoint-start", "parent", "checkpoint-002", "--run-id", "child",
+        "--predecessor-merge-commit", "a".repeat(40), "--json",
+      ]);
+      assert.match(rejected.stderr, /unknown option: --predecessor-merge-commit/u);
+      assert.equal(existsSync(join(repo, ".opencode", "factory")), false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps checkpoint-record-merged as an observation-only command surface", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-checkpoint-record-merged-"));
+    try {
+      initGitRepo(repo);
+      for (const args of [
+        ["checkpoint-record-merged", "parent", "checkpoint-001", "--run-id", "child"],
+        ["checkpoint-record-merged", "parent", "checkpoint-001", "--force"],
+        ["checkpoint-record-merged", "parent", "checkpoint-001", "--merge-commit", "a".repeat(40)],
+      ]) {
+        const rejected = runFactoryFail(repo, args);
+        assert.match(rejected.stderr, /factory checkpoint-record-merged does not support/u);
+      }
+      assert.equal(existsSync(join(repo, ".opencode", "factory")), false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("drives a run through local state transitions without direct run.json edits", async () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-write-"));
     const runDir = join(repo, ".opencode", "factory", RUN_ID);

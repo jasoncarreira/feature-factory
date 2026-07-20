@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
@@ -28,7 +28,7 @@ const root = dirname(dirname(cliPath));
 const HEARTBEAT_START_TIMEOUT_MS = 5000;
 const HEARTBEAT_START_POLL_MS = 25;
 const BOOLEAN_FLAGS = new Set(["--json", "--local", "--profiles", "--provider-smoke", "--telemetry", "--autonomous", "--detached", "--all", "--headless", "--ready", "--force", "--dry-run", "--start", "--stop", "--status", "--foreground", "--draft", "--no-draft", "--clear", "--post-pr-ci", "--no-post-pr-ci", "--new-pr", "--carry-forward"]);
-const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--predecessor-merge-commit", "--commit", "--owner-slice", "--consumer-slice", "--defect-path", "--verification-ref", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--subject", "--prompt-bytes", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
+const VALUE_FLAGS = new Set(["--repo", "--gh-account", "--model", "--interval", "--phase", "--reviewer", "--review", "--run-id", "--from", "--artifact", "--question-ref", "--answer-ref", "--answer", "--approval-source", "--decision-note", "--answered-at", "--reason", "--merge-commit", "--commit", "--owner-slice", "--consumer-slice", "--defect-path", "--verification-ref", "--pr-url", "--pr-number", "--repository", "--head-sha", "--branch", "--worktree", "--attempts", "--evidence-ref", "--review-ref", "--artifact-ref", "--validator", "--security", "--report", "--message", "--ref", "--hash", "--boundary-token", "--action-token", "--fence-token", "--agent", "--subject", "--prompt-bytes", "--step", "--slice-id", "--provider", "--source", "--operation", "--request-id", "--input-tokens", "--output-tokens", "--total-tokens", "--cache-creation-input-tokens", "--cache-read-input-tokens", "--reasoning-tokens", "--cost-total", "--cost-input", "--cost-output", "--cost-cache-creation", "--cost-cache-read", "--currency", "--recorded-at", "--entry-id", "--parent-span-id", "--traceparent", "--tracestate", "--post-pr-wait-minutes", "--post-pr-poll-seconds", "--post-pr-max-poll-seconds", "--post-pr-check-start-grace-seconds", "--post-pr-max-transient-errors", "--remediation-evidence-ref", "--failure-evidence-ref", "--test-evidence-ref", "--validator-report-ref", "--validator-review-ref", "--security-review-ref"]);
 const COST_REPORT_BOOLEAN_FLAGS = new Set(["--json", "--telemetry"]);
 const COST_REPORT_VALUE_FLAGS = new Set(["--repo"]);
 const COST_NUMERIC_FLAGS = new Map([
@@ -53,7 +53,8 @@ Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] [--telemetry] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
-  factory checkpoint-start <parent-run-id> <checkpoint-id> --run-id <child-run-id> [--predecessor-merge-commit SHA] [start options]
+  factory checkpoint-start <parent-run-id> <checkpoint-id> --run-id <child-run-id> [start options]
+  factory checkpoint-record-merged <parent-run-id> <checkpoint-id> [--json]
   factory checkpoint-close <parent-run-id> [--json]  Close the final checkpoint route after its canonical PR merge
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--carry-forward|--new-pr] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
@@ -210,6 +211,11 @@ async function factory(args, dependencies = {}) {
     print(result, opts);
     if (result && typeof result === "object" && result.ok === false) process.exitCode = 1;
     return;
+  }
+  if (sub === "checkpoint-record-merged") {
+    assertOnlyCommandOptions(rest, new Set(["--json", "--repo"]), "factory checkpoint-record-merged");
+    if (positional.length !== 2) throw new Error("factory checkpoint-record-merged requires exactly <parent-run-id> <checkpoint-id>");
+    return print(await recordFactoryCheckpointMerged(positional[0], positional[1], opts), opts);
   }
   if (sub === "checkpoint-close") {
     if (positional.length !== 1) throw new Error("factory checkpoint-close requires exactly <parent-run-id>");
@@ -601,7 +607,6 @@ function options(args) {
     if (args[index] === "--answered-at") opts.answeredAt = args[++index];
     if (args[index] === "--reason") opts.reason = args[++index];
     if (args[index] === "--merge-commit") opts.mergeCommit = args[++index];
-    if (args[index] === "--predecessor-merge-commit") opts.predecessorMergeCommit = args[++index];
     if (args[index] === "--owner-slice") opts.ownerSlice = args[++index];
     if (args[index] === "--consumer-slice") opts.consumerSlice = args[++index];
     if (args[index] === "--defect-path") opts.defectPath = args[++index];
@@ -825,7 +830,10 @@ async function slicesProbe(args) {
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory slices-probe requires exactly one <run-id>");
   const from = requiredOption(opts.from, "--from", "factory slices-probe");
   if (from !== "plan/slices.json") throw new Error("factory slices-probe --from must be exactly plan/slices.json");
-  return print(probeFactorySlices(runId, { ...opts, from }), opts);
+  const result = probeFactorySlices(runId, { ...opts, from });
+  print(result, opts);
+  if (result.status === "invalid") process.exitCode = 1;
+  return result;
 }
 
 async function sliceStatus(args) {
@@ -933,8 +941,9 @@ async function prCreated(args) {
   }
   opts.fenceToken = requiredOption(opts.fenceToken, "--fence-token", "factory pr-created");
   const result = await transitionPrCreated(resolveRunDir(runId, opts), {}, opts);
-  print(result, opts);
-  if (result?.ok === false) process.exitCode = 1;
+  const completed = await attachCheckpointCompletionRecovery(result, result?.run, opts);
+  print(completed, opts);
+  if (completed?.ok === false) process.exitCode = 1;
 }
 
 async function sliceMerged(args) {

@@ -1883,7 +1883,7 @@ describe("continuation planning-artifact reuse", () => {
       const childBefore = readFileSync(join(childRunDir, "run.json"));
 
       await assert.rejects(adoptContinuation(childRunId, { cwd: fixture.repo }), /closed mode\/pr configuration|publication/u);
-      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /closed mode\/pr configuration|published carry-forward/u);
+      await assert.rejects(resumeFactory(childRunId, { cwd: fixture.repo, dryRun: true }), /closed mode\/pr configuration|published carry-forward|exact closed immutable configuration/u);
 
       assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), parentBefore);
       assert.deepEqual(readFileSync(join(childRunDir, "run.json")), childBefore);
@@ -1914,6 +1914,80 @@ describe("continuation planning-artifact reuse", () => {
         }), expected, label);
       } finally { cleanup(fixture.repo); }
     }
+  });
+
+  it("binds same-checkpoint B1 source and stored configuration through continuation, claim, and child root", async () => {
+    for (const reviewTier of [null, "strict"]) {
+      const suffix = reviewTier ?? "null";
+      const fixture = createV2Fixture(`checkpoint-b1-${suffix}`, { accepted: ["A"], mergeOrder: ["A"] });
+      const childRunId = `checkpoint-b1-${suffix}-next`;
+      try {
+        const bound = bindCheckpointContinuationFixture(fixture, reviewTier);
+        const result = await continueFactory(fixture.runId, {
+          cwd: fixture.repo,
+          review: "reviewer.json",
+          runId: childRunId,
+          carryForward: true,
+          foregroundLaunchFn: async () => ({ status: "started", run_id: childRunId }),
+        });
+        const continuation = result.payload.continuation;
+        const child = JSON.parse(readFileSync(join(fixture.repo, ".opencode", "factory", childRunId, "run.json"), "utf8"));
+        const claim = JSON.parse(gitStdoutPreserve(fixture.repo, ["cat-file", "blob", expectedClaim(continuation).claimRef]));
+
+        assert.deepEqual(continuation.configuration, bound.configuration);
+        assert.equal(continuation.checkpoint_source_hash, canonicalHash(bound.source));
+        assert.equal(continuation.configuration_hash, canonicalHash(bound.configuration));
+        assert.equal(claim.checkpoint_source_hash, continuation.checkpoint_source_hash);
+        assert.equal(claim.configuration_hash, continuation.configuration_hash);
+        assert.deepEqual(child.checkpoint_source, bound.source);
+        assert.equal(reviewTier === null ? !Object.hasOwn(child, "review_tier") : child.review_tier === reviewTier, true);
+        assert.deepEqual(continuation.planning_reuse, {
+          eligible: true,
+          plan_ref: "plan/slices.json",
+          plan_hash: bound.source.child_plan_hash,
+          review_ref: "reviews/work-decomposer.json",
+          review_hash: bound.source.child_disposition_hash,
+        });
+        assert.equal(child.steps.some((step) => step.agent === "spec-writer"), false);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId, "artifacts", "technical-brief.md")), false);
+        assert.equal(existsSync(join(fixture.repo, ".opencode", "factory", childRunId, "reviews", "spec-writer.json")), false);
+      } finally { cleanup(fixture.repo); }
+    }
+  });
+
+  it("rejects checkpoint B1 configuration conflicts and cross-checkpoint source before allocation", () => {
+    const conflict = createV2Fixture("checkpoint-b1-conflict", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      bindCheckpointContinuationFixture(conflict, "strict");
+      assert.throws(() => continueFactory(conflict.runId, {
+        cwd: conflict.repo, review: "reviewer.json", runId: "checkpoint-b1-v1-next",
+      }), /same-checkpoint --carry-forward/u);
+      assert.throws(() => continueFactory(conflict.runId, {
+        cwd: conflict.repo, review: "reviewer.json", runId: "checkpoint-b1-conflict-next", carryForward: true, autonomous: true,
+      }), /mode conflicts with published immutable configuration/u);
+      assert.equal(refOid(conflict.repo, continuationReservationRef("checkpoint-b1-conflict-next")), null);
+      assert.notEqual(spawnSync("git", ["show-ref", "--verify", "refs/heads/checkpoint-b1-conflict-next"], { cwd: conflict.repo, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }).status, 0);
+      assert.equal(gitStdout(conflict.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "");
+      assert.equal(existsSync(join(conflict.repo, ".opencode", "worktrees", "checkpoint-b1-conflict-next")), false);
+      assert.equal(existsSync(join(conflict.repo, ".opencode", "factory", "checkpoint-b1-conflict-next")), false);
+    } finally { cleanup(conflict.repo); }
+
+    const crossed = createV2Fixture("checkpoint-b1-crossed", { accepted: ["A"], mergeOrder: ["A"] });
+    try {
+      bindCheckpointContinuationFixture(crossed, null);
+      updateRun(crossed, (run) => {
+        run.checkpoint_source.checkpoint_id = "checkpoint-002";
+        run.checkpoint_source.checkpoint_ordinal = 2;
+      });
+      assert.throws(() => continueFactory(crossed.runId, {
+        cwd: crossed.repo, review: "reviewer.json", runId: "checkpoint-b1-crossed-next", carryForward: true,
+      }), /cross-checkpoint/u);
+      assert.equal(refOid(crossed.repo, continuationReservationRef("checkpoint-b1-crossed-next")), null);
+      assert.notEqual(spawnSync("git", ["show-ref", "--verify", "refs/heads/checkpoint-b1-crossed-next"], { cwd: crossed.repo, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }).status, 0);
+      assert.equal(gitStdout(crossed.repo, ["for-each-ref", "--format=%(refname)", "refs/opencode/continuations"]), "");
+      assert.equal(existsSync(join(crossed.repo, ".opencode", "worktrees", "checkpoint-b1-crossed-next")), false);
+      assert.equal(existsSync(join(crossed.repo, ".opencode", "factory", "checkpoint-b1-crossed-next")), false);
+    } finally { cleanup(crossed.repo); }
   });
 
   it("atomically publishes and launches the complete canonical child after exact allocation", async () => {
@@ -3394,6 +3468,108 @@ function createV2Fixture(runId, { accepted = ["A"], mergeOrder = accepted, panel
   return { repo, runDir, runId, baseCommit, reviewedCommits, mergeCommits, actualMergeOrder };
 }
 
+function bindCheckpointContinuationFixture(fixture, reviewTier) {
+  const routingRunId = `${fixture.runId}-routing-parent`;
+  const manifestHash = `sha256:${"a".repeat(64)}`;
+  const manifestRef = `artifacts/checkpoint-routing-${manifestHash.slice("sha256:".length)}.json`;
+  const decompositionReviewPath = join(fixture.runDir, "reviews", "work-decomposer.json");
+  const decompositionReview = JSON.parse(readFileSync(decompositionReviewPath, "utf8"));
+  decompositionReview.attempt = 1;
+  writeJson(decompositionReviewPath, decompositionReview);
+  const source = {
+    schema_version: 1,
+    kind: "delivery-checkpoint-source",
+    parent_run_id: routingRunId,
+    manifest_ref: manifestRef,
+    manifest_hash: manifestHash,
+    checkpoint_id: "checkpoint-001",
+    checkpoint_ordinal: 1,
+    root_child_run_id: fixture.runId,
+    source_plan_ref: "plan/slices.json",
+    source_plan_hash: `sha256:${"b".repeat(64)}`,
+    source_review_ref: "reviews/work-decomposer.json",
+    source_review_hash: `sha256:${"b".repeat(64)}`,
+    source_review_attempt: 1,
+    parent_review_identity_hash: `sha256:${"b".repeat(64)}`,
+    child_disposition_hash: hashFile(join(fixture.runDir, "reviews", "work-decomposer.json")),
+    admission_probe_hash: `sha256:${"b".repeat(64)}`,
+    brief_scope_hash: `sha256:${"b".repeat(64)}`,
+    child_plan_hash: hashFile(join(fixture.runDir, "plan", "slices.json")),
+    acceptance_mapping_hash: `sha256:${"b".repeat(64)}`,
+    initial_base_ref: "refs/remotes/origin/main",
+    initial_base_commit: fixture.baseCommit,
+  };
+  const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+  run.steps.find((step) => step.agent === "work-decomposer").acceptance.review_hash = hashFile(decompositionReviewPath);
+  run.mode = "interactive";
+  run.github_account = null;
+  run.pr_mode = "ready";
+  run.max_parallel_slices = 3;
+  run.max_retries = 3;
+  run.post_pr = continuationEligibilityPostPr("disabled", 0);
+  const configuration = {
+    mode: run.mode,
+    github_account: run.github_account ?? null,
+    pr_mode: run.pr_mode,
+    max_parallel_slices: run.max_parallel_slices,
+    max_retries: run.max_retries,
+    post_pr_policy: structuredClone(run.post_pr.policy),
+    review_tier: reviewTier,
+  };
+  run.checkpoint_source = structuredClone(source);
+  if (reviewTier === null) delete run.review_tier;
+  else run.review_tier = reviewTier;
+  writeJson(join(fixture.runDir, "run.json"), run);
+
+  const routingRunDir = join(fixture.repo, ".opencode", "factory", routingRunId);
+  mkdirSync(routingRunDir, { recursive: true });
+  writeJson(join(routingRunDir, "run.json"), {
+    schema_version: 1,
+    run_id: routingRunId,
+    status: "blocked",
+    gates: {},
+    checkpoint_progress: {
+      schema_version: 1,
+      kind: "delivery-checkpoint-progress",
+      manifest_ref: manifestRef,
+      manifest_hash: manifestHash,
+      status: "active",
+      entries: [{
+        state: "launched",
+        checkpoint_id: source.checkpoint_id,
+        ordinal: source.checkpoint_ordinal,
+        root_child_run_id: source.root_child_run_id,
+        branch: source.root_child_run_id,
+        worktree: run.worktree,
+        base_ref: "refs/remotes/origin/main",
+        base_commit: fixture.baseCommit,
+        predecessor_checkpoint_id: null,
+        predecessor_completed_run_id: null,
+        predecessor_merge_commit: null,
+        configuration: structuredClone(configuration),
+        publication_claim_ref: `refs/opencode/checkpoint-publications/${createHash("sha256").update(source.root_child_run_id).digest("hex")}`,
+        publication_claim_oid: "a".repeat(40),
+        reserved_at: "2026-07-19T12:00:00.000Z",
+        child_run_hash: `sha256:${"b".repeat(64)}`,
+        child_plan_hash: source.child_plan_hash,
+        brief_scope_hash: source.brief_scope_hash,
+        published_at: "2026-07-19T12:01:00.000Z",
+        launched_at: "2026-07-19T12:02:00.000Z",
+      }],
+      final_closure: null,
+    },
+    terminal_result: {
+      status: "blocked",
+      run_id: routingRunId,
+      pr_url: null,
+      reason: "oversized-plan-checkpoint-routing-required",
+      summary: "Routed to checkpoints.",
+      artifacts: { checkpoint_routing: manifestRef },
+    },
+  });
+  return { source, configuration };
+}
+
 async function createConflictCarryForwardFixture(runId) {
   const fixture = createV2Fixture(runId, { accepted: [], mergeOrder: [] });
   const sliceId = "A";
@@ -3709,8 +3885,13 @@ function expectedClaim(candidate) {
       child_run_id: candidate.target.run_id,
       child_branch_ref: `refs/heads/${candidate.target.branch}`,
       start_commit: candidate.carry_forward.start_commit,
+      ...(Object.hasOwn(candidate, "checkpoint_source_hash") ? { checkpoint_source_hash: candidate.checkpoint_source_hash, configuration_hash: candidate.configuration_hash } : {}),
     },
   };
+}
+
+function continuationReservationRef(runId) {
+  return `refs/opencode/continuation-targets/${createHash("sha256").update(runId).digest("hex")}`;
 }
 
 function canonicalJson(value) {
@@ -3719,6 +3900,10 @@ function canonicalJson(value) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function canonicalHash(value) {
+  return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 }
 
 function writeBlob(repo, bytes) {

@@ -1,19 +1,16 @@
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
-import { isDeepStrictEqual } from "node:util";
-import { validateCheckpointChildBinding, validateCheckpointReservationClaim, validateRun } from "./validate.js";
+import { basename, resolve } from "node:path";
+import { validateRun } from "./validate.js";
 import { normalizePostPrCiDriverOverride } from "./config.js";
 import { assertContinuationReservationAuthority, assertPublishedCarryForwardRun, assertPublishedCarryForwardRunById, inspectContinuationRouteSchema } from "./run-state.js";
-import { git } from "./git.js";
 
 const PREFIX = "ffpayload-v1:";
 const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
 const DRIVER_KEYS = new Set(["mode", "ready", "pr_mode", "reviewer", "github_account", "run_id", "post_pr_ci"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward"]);
+const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_hash", "review_ref", "review_hash"]);
 const CONTINUATION_DRAFT_SPEC_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
@@ -87,13 +84,11 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   const hasResume = payload.resume !== undefined && payload.resume !== null;
   const hasSteering = payload.steering !== undefined && payload.steering !== null;
   const hasContinuation = payload.continuation !== undefined && payload.continuation !== null;
-  const hasCheckpoint = payload.checkpoint !== undefined && payload.checkpoint !== null;
-  const hasCheckpointRequest = payload.checkpoint_request !== undefined && payload.checkpoint_request !== null;
-  const hasCheckpointReservation = payload.checkpoint_reservation !== undefined && payload.checkpoint_reservation !== null;
+  if (["checkpoint", "checkpoint_reservation", "checkpoint_request"].some((key) => Object.hasOwn(payload, key))) {
+    return { ok: false, reason: "unsupported-checkpoint-route" };
+  }
   if (hasResume !== hasSteering) return { ok: false, reason: "incomplete-resume-route" };
   if (hasResume && hasContinuation) return { ok: false, reason: "ambiguous-route" };
-  if (hasCheckpoint !== hasCheckpointRequest || hasCheckpoint !== hasCheckpointReservation) return { ok: false, reason: "incomplete-checkpoint-route" };
-  if (hasCheckpoint && hasContinuation) return { ok: false, reason: "ambiguous-route" };
   if (driver.run_id !== undefined && driver.run_id !== null && (hasResume || hasContinuation)) return { ok: false, reason: "invalid-driver-run-id-route" };
   if (hasContinuation && plainObject(payload.continuation?.target) && safeRunId(payload.continuation.target.run_id) && Number.isInteger(payload.continuation.schema_version)) {
     const mismatch = inspectRouteSchema(options.repo, payload.continuation.target.run_id, payload.continuation.schema_version, { route: "continuation" });
@@ -127,19 +122,6 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
     steering: null,
     continuation,
   };
-
-  if (hasCheckpoint) {
-    try {
-      const expectedRunId = hasResume ? payload.resume?.run_id : driver.run_id;
-      normalized.checkpoint = cloneJson(validateCheckpointChildBinding(payload.checkpoint, { runId: expectedRunId }));
-      normalized.checkpoint_reservation = cloneJson(validateCheckpointReservationClaim(payload.checkpoint_reservation, { expectedBinding: normalized.checkpoint }));
-      if (!plainObject(payload.checkpoint_request)) return { ok: false, reason: "invalid-checkpoint-request" };
-      normalized.checkpoint_request = cloneJson(payload.checkpoint_request);
-      assertCheckpointPayloadAuthority(options.repo, normalized.checkpoint, normalized.checkpoint_reservation, normalized.checkpoint_request, { resume: hasResume });
-    } catch {
-      return { ok: false, reason: "invalid-checkpoint-authority" };
-    }
-  }
 
   if (hasResume) {
     if (!plainObject(payload.resume) || !hasOnlyKeys(payload.resume, new Set(["schema_version", "kind", "run_id", "post_pr_policy"])) || ![1, 2].includes(payload.resume.schema_version) || payload.resume.kind !== "existing-run-resume" || !nonEmptyString(payload.resume.run_id)) {
@@ -180,65 +162,6 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   }
 
   return { ok: true, payload: normalized };
-}
-
-function assertCheckpointPayloadAuthority(repoInput, binding, reservation, request, { resume }) {
-  const repo = resolve(repoInput || process.cwd());
-  const parentPath = resolve(repo, binding.parent_run_ref);
-  if (parentPath !== resolve(repo, ".opencode", "factory", binding.parent_run_id, "run.json")) throw new Error("checkpoint parent path mismatch");
-  assertRegularFile(parentPath);
-  if (sha256File(parentPath) !== binding.parent_run_hash) throw new Error("checkpoint parent hash mismatch");
-  const parent = validateRun(JSON.parse(readFileSync(parentPath, "utf8")));
-  if (parent.status !== "blocked" || parent.terminal_result?.reason !== "oversized-plan-checkpoint-routing-required"
-    || parent.terminal_result?.artifacts?.checkpoint_routing !== binding.manifest_ref) throw new Error("checkpoint parent terminal mismatch");
-  const manifestPath = resolve(dirname(parentPath), binding.manifest_ref);
-  assertRegularFile(manifestPath);
-  if (sha256File(manifestPath) !== binding.manifest_hash) throw new Error("checkpoint manifest hash mismatch");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  const checkpoint = manifest.checkpoints?.find((candidate) => candidate?.id === binding.checkpoint_id);
-  if (!checkpoint || checkpoint.ordinal !== binding.checkpoint_ordinal || !isDeepStrictEqual(checkpoint.request, request)) throw new Error("checkpoint request mismatch");
-  const publishedReservation = assertCheckpointReservationAuthority(repo, binding, reservation);
-  if (publishedReservation.state === "launched" || resume) assertCheckpointChildManifestAuthority(repo, binding, publishedReservation);
-}
-
-function assertCheckpointReservationAuthority(repo, binding, expected) {
-  const childRef = `refs/opencode/checkpoint-targets/${createHash("sha256").update(binding.child_run_id, "utf8").digest("hex")}`;
-  const routeRef = `refs/opencode/checkpoint-routes/${createHash("sha256").update(`${binding.parent_run_id}\0${binding.checkpoint_id}`, "utf8").digest("hex")}`;
-  const child = git(repo, ["rev-parse", "--verify", childRef]);
-  const route = git(repo, ["rev-parse", "--verify", routeRef]);
-  if (!child.ok || !route.ok || child.stdout.trim() !== route.stdout.trim()) throw new Error("checkpoint reservation authority is missing or cross-bound");
-  const claim = git(repo, ["cat-file", "blob", child.stdout.trim()]);
-  if (!claim.ok) throw new Error("checkpoint reservation claim is unreadable");
-  const value = validateCheckpointReservationClaim(JSON.parse(claim.stdout), { expectedBinding: binding });
-  const exact = isDeepStrictEqual(value, expected);
-  const launchedFromPayload = expected.state === "launching" && value.state === "launched"
-    && value.schema_version === expected.schema_version && value.kind === expected.kind && value.nonce === expected.nonce
-    && value.worktree === expected.worktree && value.reserved_at === expected.reserved_at
-    && isDeepStrictEqual(value.binding, expected.binding);
-  if (!["reserved", "launching", "launched"].includes(value.state) || (!exact && !launchedFromPayload)) throw new Error("checkpoint reservation claim is stale");
-  return value;
-}
-
-function assertCheckpointChildManifestAuthority(repo, binding, reservation) {
-  const childPath = resolve(repo, ".opencode", "factory", binding.child_run_id, "run.json");
-  assertRegularFile(childPath);
-  const child = validateRun(JSON.parse(readFileSync(childPath, "utf8")));
-  if (!isDeepStrictEqual(child.checkpoint, binding)) throw new Error("checkpoint child binding mismatch");
-  if (child.run_id !== binding.child_run_id
-    || child.base_ref !== binding.base_ref
-    || child.base_commit !== binding.base_commit
-    || child.branch !== binding.child_run_id
-    || child.worktree !== reservation.worktree) {
-    throw new Error("checkpoint child top-level identity mismatch");
-  }
-}
-
-function assertRegularFile(path) {
-  if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) throw new Error("checkpoint authority file is not regular");
-}
-
-function sha256File(path) {
-  return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
 }
 
 function inspectRouteSchema(repo, runId, schemaVersion, options) {
@@ -319,10 +242,20 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
 
   const planningReuse = continuation.planning_reuse;
   if (planningReuse !== undefined) {
-    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, CONTINUATION_PLANNING_REUSE_KEYS) || typeof planningReuse.eligible !== "boolean") {
+    const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash") && planningReuse?.eligible === true;
+    const allowedPlanningKeys = checkpointVariant ? CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS : CONTINUATION_PLANNING_REUSE_KEYS;
+    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, allowedPlanningKeys) || typeof planningReuse.eligible !== "boolean") {
       return { ok: false, reason: "invalid-continuation-planning-reuse" };
     }
-    if (planningReuse.eligible
+    if (checkpointVariant
+      && (planningReuse.plan_ref !== "plan/slices.json"
+        || planningReuse.plan_hash !== continuation.carry_forward?.plan_hash
+        || planningReuse.review_ref !== "reviews/work-decomposer.json"
+        || !SHA256_PATTERN.test(planningReuse.plan_hash || "")
+        || !SHA256_PATTERN.test(planningReuse.review_hash || ""))) {
+      return { ok: false, reason: "invalid-continuation-planning-reuse" };
+    }
+    if (!checkpointVariant && planningReuse.eligible
       && (!canonicalJsonRef(planningReuse.spec_review_ref, "reviews/")
         || planningReuse.child_spec_review_ref !== CONTINUATION_CHILD_SPEC_REVIEW_REF
         || planningReuse.spec_artifact_ref !== "artifacts/technical-brief.md"
@@ -364,7 +297,11 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
       branch: target.branch,
       worktree: target.worktree,
       status: "running",
-      ...(v2 ? { mode: driver.mode, github_account: driver.github_account ?? null, pr_mode: driver.pr_mode, max_parallel_slices: 3, max_retries: 3, post_pr: { schema_version: 1, policy, phase: policy.enabled ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null } } : {}),
+      ...(v2 ? {
+        mode: driver.mode, github_account: driver.github_account ?? null, pr_mode: driver.pr_mode, max_parallel_slices: 3, max_retries: 3,
+        ...(continuation.configuration?.review_tier === null || continuation.configuration?.review_tier === undefined ? {} : { review_tier: continuation.configuration.review_tier }),
+        post_pr: { schema_version: 1, policy, phase: policy.enabled ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
+      } : {}),
       ...(draftSpecReuse === undefined ? {} : { max_retries: draftSpecReuse.max_retries }),
       gates: {},
       continuation,
@@ -447,6 +384,8 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
       ...(draftSpecReuse === undefined ? {} : { draft_spec_reuse: cloneJson(draftSpecReuse) }),
       ...(continuation.post_pr === undefined ? {} : { post_pr: cloneJson(continuation.post_pr) }),
       ...(continuation.configuration === undefined ? {} : { configuration: cloneJson(continuation.configuration) }),
+      ...(continuation.checkpoint_source_hash === undefined ? {} : { checkpoint_source_hash: continuation.checkpoint_source_hash }),
+      ...(continuation.configuration_hash === undefined ? {} : { configuration_hash: continuation.configuration_hash }),
       ...(carryForward.value === null ? {} : { carry_forward: carryForward.value }),
     },
   };
@@ -502,6 +441,15 @@ function validAcceptedAttemptHistory(row) {
 function normalizedPlanningReuse(planningReuse) {
   if (!planningReuse.eligible) {
     return { eligible: false, ...(nonEmptyString(planningReuse.reason) ? { reason: planningReuse.reason } : {}) };
+  }
+  if (Object.hasOwn(planningReuse, "plan_ref")) {
+    return {
+      eligible: true,
+      plan_ref: planningReuse.plan_ref,
+      plan_hash: planningReuse.plan_hash,
+      review_ref: planningReuse.review_ref,
+      review_hash: planningReuse.review_hash,
+    };
   }
   return {
     eligible: true,

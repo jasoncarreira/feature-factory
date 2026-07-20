@@ -138,6 +138,25 @@ describe("B4 delivery-contract extension seams", () => {
       /delivery_envelope\.active: is not allowed/u,
     );
   });
+
+  it("allows and fully validates the optional reviewed checkpoint plan", () => {
+    const plan = reviewedCheckpointPlan();
+    assert.equal(validateDeliveryEnvelope(plan.delivery_envelope, plan.slices, { plan }), plan.delivery_envelope);
+
+    const unknownKey = structuredClone(plan);
+    unknownKey.delivery_envelope.checkpoint_plan.checkpoints[0].runtime_request = {};
+    assert.throws(
+      () => validateDeliveryEnvelope(unknownKey.delivery_envelope, unknownKey.slices, { plan: unknownKey }),
+      /checkpoint.*must be a closed object/u,
+    );
+
+    const driftedChild = structuredClone(plan);
+    driftedChild.delivery_envelope.checkpoint_plan.checkpoints[0].child_plan.slices[0].acceptance = ["other acceptance"];
+    assert.throws(
+      () => validateDeliveryEnvelope(driftedChild.delivery_envelope, driftedChild.slices, { plan: driftedChild }),
+      /must be the exact reviewed one-slice plan/u,
+    );
+  });
 });
 
 function deliveryPlan() {
@@ -182,6 +201,64 @@ function invariantFamilyLedger() {
       reviewed_commit: COMMIT,
       unresolved_findings: ["Known failure remains"],
     }],
+  };
+}
+
+function reviewedCheckpointPlan() {
+  const slice = { id: "api", stack: "backend", paths: ["src/api/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test test/api.test.js"] };
+  const family = { id: "api-behavior", description: "API behavior remains stable" };
+  const obligation = { id: "api-response-obligation", description: "Return the specified API response", invariant_family_id: family.id, verification_artifact_id: "api-tests" };
+  const artifact = { id: "api-tests", test_plan_index: 0, test_plan_entry: slice.test_plan[0] };
+  const integrationGate = { required_commands: [{ program: "npm", args: ["run", "check"] }] };
+  const checkpointId = "checkpoint-001";
+  return {
+    integration_gate: integrationGate,
+    slices: [slice],
+    delivery_envelope: {
+      schema_version: 1,
+      delivery_units: [{
+        id: "api-unit", slice_id: slice.id, invariant_families: [family], obligations: [obligation], verification_artifacts: [artifact],
+      }],
+      checkpoint_plan: {
+        schema_version: 1,
+        kind: "delivery-checkpoint-plan",
+        acceptance_inventory: [{ id: "acceptance-000001", source_slice_id: slice.id, source_index: 0, text: "AC1" }],
+        acceptance_mappings: [{
+          acceptance_id: "acceptance-000001",
+          policy: "single-owner",
+          checkpoint_ids: [checkpointId],
+          assignments: [{ checkpoint_id: checkpointId, invariant_family_id: family.id, obligation_ids: [obligation.id], verification_artifact_ids: [artifact.id], test_plan_entries: [artifact.test_plan_entry] }],
+        }],
+        checkpoints: [{
+          id: checkpointId,
+          ordinal: 1,
+          prerequisite_checkpoint_id: null,
+          acceptance_ids: ["acceptance-000001"],
+          brief_scope: {
+            title: "Deliver API behavior",
+            source_delivery_unit_id: "api-unit",
+            source_slice_id: slice.id,
+            source_slice_dependencies: [],
+            stack: slice.stack,
+            paths: slice.paths,
+            acceptance: slice.acceptance,
+            invariant_family: family,
+            obligations: [obligation],
+            verification_artifacts: [artifact],
+          },
+          child_plan: {
+            integration_gate: integrationGate,
+            slices: [{ ...slice, depends_on: [] }],
+            delivery_envelope: {
+              schema_version: 1,
+              delivery_units: [{
+                id: "api-unit", slice_id: slice.id, invariant_families: [family], obligations: [obligation], verification_artifacts: [artifact],
+              }],
+            },
+          },
+        }],
+      },
+    },
   };
 }
 

@@ -319,7 +319,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(writerMatrix, /authority class, id, record, variant, canonical (?:persisted )?source path and exact shape/i);
     assert.match(writerMatrix, /path-plus-expected-value authority facts/i);
     assert.match(writerMatrix, /source deletion\/substitution[\s\S]*record(?: or |\/)variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /current canonical-source manifest has 142 variants[\s\S]*141 production-covered rows[\s\S]*`final-plan-descriptor`/i);
+    assert.match(schemaCatalog, /current canonical-source manifest has 148 variants[\s\S]*147 production-covered rows[\s\S]*`final-plan-descriptor`/i);
     for (const id of [
       "test-execution-claim-active", "test-execution-claim-completed-pass", "test-execution-claim-completed-fail",
       "test-execution-claim-unknown-process-outcome-indeterminate", "test-execution-claim-unknown-authority-changed",
@@ -514,7 +514,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(schemaCatalog, /No other catalog row gains production-integrity coverage from B0M\.1/i);
 
     const runSchema = markdownSection(SCHEMA, "run.json");
-    assert.match(runSchema, /root is closed to exactly `schema_version`, `run_id`, `mode`, `status`, `created_at`, `updated_at`, `heartbeat_at`, `base_ref`, `base_commit`, `branch`, `worktree`, `github_account`, `pr_mode`, `pr_url`, `max_parallel_slices`, `max_retries`, `review_tier`, `debug_snapshot`, `provenance`, `merged_slice_repair`, `continuation`, `steering`, `post_pr`, `gates`, `slices`, `cost_attribution`, `steps`, `validator`, `security_review`, and `terminal_result`/i);
+    assert.match(runSchema, /root is closed to exactly `schema_version`, `run_id`, `mode`, `status`, `created_at`, `updated_at`, `heartbeat_at`, `base_ref`, `base_commit`, `branch`, `worktree`, `github_account`, `pr_mode`, `pr_url`, `max_parallel_slices`, `max_retries`, `review_tier`, `debug_snapshot`, `provenance`, `merged_slice_repair`, `special_builder_dispatch`, `continuation`, `checkpoint_source`, `checkpoint_progress`, `steering`, `post_pr`, `gates`, `slices`, `cost_attribution`, `steps`, `validator`, `security_review`, and `terminal_result`/i);
     assert.match(runSchema, /Unknown root keys have no legacy fallback[\s\S]*`schema_version` is required and equals `1`/i);
     assert.match(runSchema, /Ordinary checked `run\.json` transitions keep `run_id`, `base_commit`, `branch`, and `worktree` immutable/i);
     assert.match(runSchema, /`recoverDisruptedRun` is the sole worktree-rebinding exception[\s\S]*may change only top-level `worktree`/i);
@@ -536,7 +536,7 @@ describe("class-wide planning prompt contract", () => {
     const integrate = markdownSection(SKILL, "Step 5 - Integrate And Validate");
 
     assert.match(schemaCatalog, /B0MR\.1 additionally gives production-consumer coverage to exactly `slice-review`, `slice-merged`, `validator-verdict-binding`, and `security-verdict-binding`/i);
-    assert.match(schemaCatalog, /current canonical-source manifest has 142 variants/i);
+    assert.match(schemaCatalog, /current canonical-source manifest has 148 variants/i);
 
     for (const text of [README, SPEC, SCHEMA]) {
       assert.match(text, /`?evidence_hash`?.*`?review_hash`?.*`?reviewed_commit`?/is);
@@ -587,7 +587,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(contract, /only complete checked absence.*clear/i);
     assert.match(contract, /legacy-pr-fence-operation-identity-missing.*retain/is);
     assert.match(contract, /\{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft\}/i);
-    assert.match(SCHEMA, /current canonical-source manifest has 142 variants[\s\S]*141 production-covered rows[\s\S]*`final-plan-descriptor`/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 148 variants[\s\S]*147 production-covered rows[\s\S]*`final-plan-descriptor`/i);
     assert.match(SCHEMA, /`steering-pr-fence`/i);
     assert.match(WORK_REVIEWER_PROMPT, /deterministic marker identity.*account-switched GitHub observer/is);
     assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /deterministic operation identity.*account-switched observer/is);
@@ -957,7 +957,7 @@ describe("consolidated reviewer decision procedure contract", () => {
     const workOutput = firstFencedBlockAfter(WORK_REVIEWER_PROMPT, /## Output/i);
     for (const field of [
       "## Review: <subject>",
-      "**Verdict:** APPROVE | REJECT",
+      "**Verdict:** APPROVE | APPROVE-CHECKPOINT | REJECT",
       "**Checked against:** output-contract, technical-brief, observed-evidence, repo-guidelines",
       "**Claim vs observed:** consistent | MISMATCH - <details>",
       "**Findings:**",
@@ -1147,13 +1147,13 @@ describe("bounded agent depth contract", () => {
 });
 
 describe("decomposition depth contract", () => {
-  it("requires the decomposer and reviewer to enforce a four-wave maximum with depth secondary to width", () => {
-    assert.match(WORK_DECOMPOSER_PROMPT, /longest dependency path(?: admitted as one run)? may span at most four waves; a root slice is wave 1/i);
+  it("requires ordinary child runs to enforce a four-wave maximum with depth secondary to width", () => {
+    assert.match(WORK_DECOMPOSER_PROMPT, /longest dependency path admitted as one ordinary child run may span at most four waves; a root slice is wave 1/i);
     // The old "combine into one coherent slice rather than a fourth wave" collapse rule that
     // produced god-slices must be gone; a fourth wave is now allowed to keep width bounded.
     assert.doesNotMatch(WORK_DECOMPOSER_PROMPT, /combine tightly serialized work into one coherent slice instead of creating a fourth wave/i);
     assert.match(WORK_DECOMPOSER_PROMPT, /use a fourth wave when it is needed to keep each slice within the width budget/i);
-    assert.match(WORK_REVIEWER_PROMPT, /dependency path deeper than four waves \(root is wave 1\)/i);
+    assert.match(WORK_REVIEWER_PROMPT, /valid probe decision of `checkpoint` due to a dependency path deeper than four waves \(root is wave 1\)[\s\S]*valid checkpoint routing, not a rejection/i);
   });
 
   it("makes per-slice width the primary decomposition limit", () => {
@@ -1208,8 +1208,11 @@ describe("decomposition depth contract", () => {
   it("branches checked admission while binding reviewed checkpoint authority before routing", () => {
     for (const [name, text] of [["SKILL", SKILL], ["command", COMMAND]]) {
       assert.match(text, /slices-probe[\s\S]*typed[^\n]*decision[^\n]*reasons[^\n]*plan_hash/i, `${name} must use the typed non-mutating probe`);
-      assert.match(text, /`admit`[\s\S]*slices-seed[\s\S]*accepted `work-decomposer`[^\n]*after/i, `${name} must seed admit before acceptance`);
-      assert.match(text, /`checkpoint`[\s\S]*same-attempt[^\n]*APPROVE[\s\S]*slices remain empty[\s\S]*terminal[- ]boundary[\s\S]*slices-seed/i, `${name} must accept checkpoint before token-bound routing`);
+      assert.match(text, /work-decomposer[^\n]*explicit checkpoint plan[\s\S]*slices-probe[\s\S]*(?:dispatch )?`?work-reviewer`?/i, `${name} must probe explicit plan bytes before review`);
+      assert.match(text, /(?:`admit`|For `admit`)[^\n]*seed[^\n]*(?:before|first)[^\n]*accept/i, `${name} must seed admit before acceptance`);
+      assert.match(text, /APPROVE-CHECKPOINT[^\n]*dispositions/i, `${name} must require checkpoint dispositions`);
+      assert.match(text, /(?:For `checkpoint`|A `checkpoint` decision)[^\n]*bind[^\n]*slices remain empty[^\n]*terminal[- ]boundary/i, `${name} must accept checkpoint before terminal routing`);
+      assert.match(text, /terminal[- ]boundary[\s\S]*slices-seed[^\n]*(?:boundary-token|token-bound)|terminal[- ]boundary[^\n]*token-bound[^\n]*slices-seed/i, `${name} must route checkpoint through token-bound slices-seed`);
     }
   });
 
@@ -1289,7 +1292,7 @@ describe("test-verifier integration gate contract", () => {
     assert.match(contract, /exact run-relative[\s\S]*plan\/slices\.json[\s\S]*(?:regular non-symlink|non-symlink)[\s\S]*(?:fatal UTF-8|fatally decodes UTF-8)/i);
     assert.match(contract, /work-decomposer[\s\S]*accepted[\s\S]*artifact_ref(?::|.*)\s*[`"]?plan\/slices\.json[\s\S]*review_ref[\s\S]*(?:artifact_hash|exact plan)[\s\S]*(?:review_hash|review bytes)/i);
     assert.match(contract, /after (?:observing|target).*target.*(?:absence|observation)[\s\S]*immediately before[\s\S]*(?:no-replace|no-overwrite|atomic).*move/i);
-    assert.match(SCHEMA, /current canonical-source manifest has 142 variants[\s\S]*141 production-covered rows/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 148 variants[\s\S]*147 production-covered rows/i);
     assert.match(SCHEMA, /`plan-v2-integration-gate`/i);
     assert.match(SCHEMA, /`step-work-decomposer-accepted-plan`/i);
     assert.match(SCHEMA, /sole future row `final-plan-descriptor`/i);
@@ -1321,13 +1324,19 @@ describe("test-verifier integration gate contract", () => {
     assert.match(contract, /factory artifact-execute <run-id> <slice-id> <artifact-id> --json/i);
     assert.match(contract, /run, slice, attempt[\s\S]*plan hash[\s\S]*HEAD[\s\S]*artifact ID[\s\S]*program\/argv[\s\S]*observed/i);
     assert.match(SCHEMA, /Admission decisions are `admit\|checkpoint`[\s\S]*review decisions are `approve\|reject`/i);
-    assert.match(SCHEMA, /checkpoint refs[\s\S]*reserved[\s\S]*launching[\s\S]*launched[\s\S]*unknown/i);
+    assert.match(SCHEMA, /entries are contiguous and follow `reserved -> child-published -> launched -> merged`/i);
     assert.match(SCHEMA, /artifact-execute[\s\S]*before spawn[\s\S]*claim[\s\S]*receipt[_ ]hash/i);
-    assert.match(SCHEMA, /run\.checkpoint[\s\S]*predecessor_checkpoint_id[\s\S]*predecessor_merge_commit/i);
+    assert.match(SCHEMA, /ordinary normal run[\s\S]*immutable `checkpoint_source`/i);
     assert.match(contract, /do not (?:create|invent)[\s\S]*(?:second|another) run root|do not (?:create|invent)[\s\S]*(?:second|another) plan\/review hash chain/i);
     assert.equal(planAuthorityRow.entryIds.includes("plan-delivery-envelope-v1"), true, "Plan and slices graph row must register plan-delivery-envelope-v1");
     assert.equal(planAuthorityRow.entryIds.includes("review-invariant-family-ledger-v1"), false, "Plan and slices graph row must not absorb the review ledger");
-    assert.match(planAuthorityRow.decisionSurface, /delivery-unit\/family\/obligation\/artifact identity[\s\S]*typed admission-extension decision/i);
+    for (const id of [
+      "checkpoint-reviewed-plan-v1", "checkpoint-admission-probe-valid", "checkpoint-child-disposition-v1",
+      "checkpoint-child-publication-v1", "checkpoint-source-v1", "checkpoint-progress-reserved",
+      "checkpoint-progress-child-published", "checkpoint-progress-launched", "checkpoint-progress-merged",
+      "checkpoint-progress-closed", "checkpoint-merged-completion-v1", "checkpoint-final-closure-v1",
+    ]) assert.equal(planAuthorityRow.entryIds.includes(id), true, `Plan and slices graph row must register ${id}`);
+    assert.match(planAuthorityRow.decisionSurface, /reviewed checkpoint-plan identity[\s\S]*typed probe[\s\S]*creation-only publication[\s\S]*monotonic parent progress[\s\S]*content-addressed closure/i);
     assert.equal(reviewAuthorityRow.entryIds.includes("review-invariant-family-ledger-v1"), true, "Slices and review/evidence bindings row must register review-invariant-family-ledger-v1");
     assert.equal(reviewAuthorityRow.entryIds.includes("plan-delivery-envelope-v1"), false, "Slices and review/evidence bindings row must not absorb the plan envelope");
     assert.match(reviewAuthorityRow.decisionSurface, /delivery-unit\/family\/artifact mapping[\s\S]*evidence ref\/hash[\s\S]*typed probe\/result[\s\S]*reviewed commit[\s\S]*unresolved findings[\s\S]*typed review-extension decision/i);
@@ -1374,7 +1383,7 @@ describe("test-verifier integration gate contract", () => {
     assert.match(contract, /clear[\s\S]*replace[\s\S]*terminaliz[\s\S]*retry[\s\S]*advance/i);
     assert.doesNotMatch(contract, /only `?factory recover[^\n]*test-execution-reconciliation/i);
     assert.match(contract, /completed passing[\s\S]*artifacts\/test-report\.md[\s\S]*independent[\s\S]*APPROVE[\s\S]*(?:same attempt|same-attempt)[\s\S]*(?:same HEAD|same-HEAD)/i);
-    assert.match(SCHEMA, /current canonical-source manifest has 142 variants[\s\S]*terminal-result-blocked-nonconvergence[\s\S]*checked-dispatch authority/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 148 variants[\s\S]*terminal-result-blocked-nonconvergence[\s\S]*checked-dispatch authority/i);
   });
 });
 

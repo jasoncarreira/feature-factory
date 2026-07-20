@@ -18,6 +18,11 @@ import {
   inspectApprovalHandoffReceipt,
   mutateRunJsonLocked,
   transitionCostUsage,
+  transitionCheckpointProgressChildPublished,
+  transitionCheckpointProgressClosed,
+  transitionCheckpointProgressLaunched,
+  transitionCheckpointProgressMerged,
+  transitionCheckpointProgressReserved,
   transitionGateDecision,
   transitionPanelVerdicts,
   transitionPrePrFenceEstablished,
@@ -1334,6 +1339,26 @@ describe("simplified run-state transitions", () => {
       });
       assert.equal(progressed.slice.status, "running");
     } finally { cleanup(fixture.repo); }
+  });
+
+  it("treats checkpoint_source runs as ordinary lifecycle records without consulting parent claims or refs", async () => {
+    const fixture = createFixture("checkpoint-source-ordinary-writer");
+    try {
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.checkpoint_source = checkpointSource("missing-routing-parent", fixture.runId);
+      writeJson(join(fixture.runDir, "run.json"), run);
+
+      const transitioned = await transitionRunJson(fixture.runDir, (draft) => {
+        draft.review_tier = "strict";
+      }, {
+        gitFn() { throw new Error("ordinary writer consulted checkpoint Git authority"); },
+      });
+
+      assert.equal(transitioned.run.review_tier, "strict");
+      assert.deepEqual(transitioned.run.checkpoint_source, run.checkpoint_source);
+    } finally {
+      cleanup(fixture.repo);
+    }
   });
 
   it("rejects every later schema-v2 mutation after the parent branch moves", async () => {
@@ -3824,6 +3849,133 @@ describe("simplified run-state transitions", () => {
       cleanup(fixture.repo);
     }
   });
+
+  describe("checkpoint routing parent progress", () => {
+    it("advances every exact state, replays idempotently, and keeps terminal authority immutable", async () => {
+      const fixture = createCheckpointProgressFixture("checkpoint-parent-progress");
+      try {
+        const terminal = structuredClone(readJson(join(fixture.runDir, "run.json")).terminal_result);
+        const planning = structuredClone(readJson(join(fixture.runDir, "run.json")).steps);
+        const transitions = [
+          [transitionCheckpointProgressReserved, checkpointProgressEntry("reserved", 1)],
+          [transitionCheckpointProgressChildPublished, checkpointProgressEntry("child-published", 1)],
+          [transitionCheckpointProgressLaunched, checkpointProgressEntry("launched", 1)],
+          [transitionCheckpointProgressMerged, checkpointProgressEntry("merged", 1)],
+          [transitionCheckpointProgressReserved, checkpointProgressEntry("reserved", 2)],
+          [transitionCheckpointProgressChildPublished, checkpointProgressEntry("child-published", 2)],
+          [transitionCheckpointProgressLaunched, checkpointProgressEntry("launched", 2)],
+          [transitionCheckpointProgressMerged, checkpointProgressEntry("merged", 2)],
+        ];
+
+        for (const [transition, entry] of transitions) {
+          const changed = await transition(fixture.runDir, entry, { now: "2026-07-19T12:10:00.000Z" });
+          assert.equal(changed.updated, true, entry.state);
+          const beforeReplay = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+          const replay = await transition(fixture.runDir, entry, { now: "2026-07-19T12:11:00.000Z" });
+          assert.equal(replay.updated, false, `${entry.state} replay`);
+          assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeReplay, `${entry.state} replay bytes`);
+          assert.deepEqual(replay.run.terminal_result, terminal);
+          assert.deepEqual(replay.run.steps, planning);
+        }
+
+        const closure = checkpointFinalClosureBinding();
+        const closed = await transitionCheckpointProgressClosed(fixture.runDir, closure, { now: "2026-07-19T12:12:00.000Z" });
+        assert.equal(closed.updated, true);
+        assert.equal(closed.checkpoint_progress.status, "closed");
+        assert.deepEqual(closed.checkpoint_progress.final_closure, closure);
+        assert.deepEqual(closed.run.terminal_result, terminal);
+        assert.deepEqual(closed.run.steps, planning);
+        const beforeReplay = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        const replay = await transitionCheckpointProgressClosed(fixture.runDir, closure);
+        assert.equal(replay.updated, false);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeReplay);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+
+    it("rejects skipped, reversed, conflicting, and noncontiguous progress", async () => {
+      const fixture = createCheckpointProgressFixture("checkpoint-parent-conflicts");
+      try {
+        await assert.rejects(
+          transitionCheckpointProgressChildPublished(fixture.runDir, checkpointProgressEntry("child-published", 1)),
+          /skip directly/u,
+        );
+        await assert.rejects(
+          transitionCheckpointProgressReserved(fixture.runDir, checkpointProgressEntry("reserved", 2)),
+          /contiguous after merged predecessors/u,
+        );
+        const reserved = checkpointProgressEntry("reserved", 1);
+        await transitionCheckpointProgressReserved(fixture.runDir, reserved);
+        const conflict = checkpointProgressEntry("child-published", 1);
+        conflict.base_commit = "f".repeat(40);
+        await assert.rejects(
+          transitionCheckpointProgressChildPublished(fixture.runDir, conflict),
+          /field 'base_commit' is immutable/u,
+        );
+        await transitionCheckpointProgressChildPublished(fixture.runDir, checkpointProgressEntry("child-published", 1));
+        await transitionCheckpointProgressLaunched(fixture.runDir, checkpointProgressEntry("launched", 1));
+        await assert.rejects(
+          transitionCheckpointProgressChildPublished(fixture.runDir, checkpointProgressEntry("child-published", 1)),
+          /cannot transition 'launched' -> 'child-published'/u,
+        );
+        const conflictingReplay = checkpointProgressEntry("launched", 1);
+        conflictingReplay.launched_at = "2026-07-19T12:02:01.000Z";
+        await assert.rejects(
+          transitionCheckpointProgressLaunched(fixture.runDir, conflictingReplay),
+          /replay conflicts/u,
+        );
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+
+    it("closes only after every manifest checkpoint is merged", async () => {
+      const fixture = createCheckpointProgressFixture("checkpoint-parent-close-eligibility");
+      try {
+        for (const state of ["reserved", "child-published", "launched", "merged"]) {
+          const transition = {
+            reserved: transitionCheckpointProgressReserved,
+            "child-published": transitionCheckpointProgressChildPublished,
+            launched: transitionCheckpointProgressLaunched,
+            merged: transitionCheckpointProgressMerged,
+          }[state];
+          await transition(fixture.runDir, checkpointProgressEntry(state, 1));
+        }
+        await assert.rejects(
+          transitionCheckpointProgressClosed(fixture.runDir, checkpointFinalClosureBinding()),
+          /every manifest checkpoint to be merged/u,
+        );
+        assert.equal(readJson(join(fixture.runDir, "run.json")).checkpoint_progress.status, "active");
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+
+    it("runs the race hook immediately before replacement and refuses stale parent authority", async () => {
+      const fixture = createCheckpointProgressFixture("checkpoint-parent-race");
+      try {
+        await assert.rejects(
+          transitionCheckpointProgressReserved(fixture.runDir, checkpointProgressEntry("reserved", 1), {
+            checkpointProgressHooks: {
+              beforeReplace() {
+                const run = readJson(join(fixture.runDir, "run.json"));
+                run.terminal_result.summary = "raced terminal authority";
+                writeJson(join(fixture.runDir, "run.json"), run);
+              },
+            },
+          }),
+          (error) => error?.message === "protected file commit failed"
+            && /parent authority changed before progress publication/u.test(error.cause?.message),
+        );
+        const raced = readJson(join(fixture.runDir, "run.json"));
+        assert.equal(raced.terminal_result.summary, "raced terminal authority");
+        assert.deepEqual(raced.checkpoint_progress.entries, []);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  });
 });
 
 function deferredPromise() {
@@ -3857,6 +4009,154 @@ function createFixture(runId) {
   writeFileSync(join(runDir, "gates", "story.question.md"), "approve?\n");
   writeJson(join(runDir, "run.json"), baseRun(runId));
   return { repo, runDir, runId };
+}
+
+function createCheckpointProgressFixture(runId) {
+  const fixture = createFixture(runId);
+  const manifest = {
+    schema_version: 1,
+    kind: "delivery-checkpoint-routing-manifest",
+    checkpoints: [1, 2].map((ordinal) => ({
+      id: `checkpoint-${String(ordinal).padStart(3, "0")}`,
+      ordinal,
+      child_plan_hash: HASH,
+      brief_scope_hash: HASH,
+    })),
+  };
+  const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
+  const manifestHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  const manifestRef = `artifacts/checkpoint-routing-${manifestHash.slice("sha256:".length)}.json`;
+  writeFileSync(join(fixture.runDir, manifestRef), bytes);
+  writeJson(join(fixture.runDir, "run.json"), {
+    schema_version: 1,
+    run_id: runId,
+    status: "blocked",
+    updated_at: "2026-07-19T12:00:00.000Z",
+    gates: {},
+    slices: [],
+    steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }],
+    checkpoint_progress: {
+      schema_version: 1,
+      kind: "delivery-checkpoint-progress",
+      manifest_ref: manifestRef,
+      manifest_hash: manifestHash,
+      status: "active",
+      entries: [],
+      final_closure: null,
+    },
+    terminal_result: {
+      status: "blocked",
+      run_id: runId,
+      pr_url: null,
+      reason: "oversized-plan-checkpoint-routing-required",
+      summary: "Oversized plan routed to two checkpoints.",
+      artifacts: { checkpoint_routing: manifestRef },
+    },
+  });
+  return { ...fixture, manifestRef, manifestHash };
+}
+
+function checkpointProgressEntry(state, ordinal) {
+  const childRunId = `checkpoint-child-${ordinal}`;
+  const entry = {
+    state,
+    checkpoint_id: `checkpoint-${String(ordinal).padStart(3, "0")}`,
+    ordinal,
+    root_child_run_id: childRunId,
+    branch: childRunId,
+    worktree: `/tmp/${childRunId}`,
+    base_ref: "refs/remotes/origin/main",
+    base_commit: ordinal === 1 ? "a".repeat(40) : "c".repeat(40),
+    predecessor_checkpoint_id: ordinal === 1 ? null : `checkpoint-${String(ordinal - 1).padStart(3, "0")}`,
+    predecessor_completed_run_id: ordinal === 1 ? null : `checkpoint-child-${ordinal - 1}`,
+    predecessor_merge_commit: ordinal === 1 ? null : "c".repeat(40),
+    configuration: checkpointProgressConfiguration(),
+    publication_claim_ref: `refs/opencode/checkpoint-publications/${createHash("sha256").update(childRunId).digest("hex")}`,
+    publication_claim_oid: "a".repeat(40),
+    reserved_at: "2026-07-19T12:00:00.000Z",
+  };
+  if (state === "reserved") return entry;
+  Object.assign(entry, {
+    child_run_hash: HASH,
+    child_plan_hash: HASH,
+    brief_scope_hash: HASH,
+    published_at: "2026-07-19T12:01:00.000Z",
+  });
+  if (state === "child-published") return entry;
+  entry.launched_at = "2026-07-19T12:02:00.000Z";
+  if (state === "launched") return entry;
+  return Object.assign(entry, {
+    completed_child_run_id: childRunId,
+    completed_child_run_hash: HASH,
+    checkpoint_source_hash: HASH,
+    configuration_hash: HASH,
+    lineage: [{ run_id: childRunId, run_hash: HASH, parent_run_id: null, continuation_claim_ref: null, continuation_claim_oid: null }],
+    pull_request: {
+      pr_url: `https://github.com/acme/repo/pull/${ordinal}`,
+      pr_number: ordinal,
+      pr_node_id: `PR_checkpoint_${ordinal}`,
+      repository: "acme/repo",
+      operation_id: `ffpr-v1-${"d".repeat(64)}`,
+      head_ref: childRunId,
+      head_sha: "b".repeat(40),
+      base_ref: "main",
+      base_sha: "a".repeat(40),
+      draft: false,
+      merge_commit: "c".repeat(40),
+    },
+    remote_main: { ref: "refs/heads/main", commit: "c".repeat(40), observed_at: "2026-07-19T12:03:00.000Z" },
+    merged_at: "2026-07-19T12:04:00.000Z",
+  });
+}
+
+function checkpointProgressConfiguration() {
+  return {
+    mode: "interactive",
+    github_account: null,
+    pr_mode: "ready",
+    max_parallel_slices: 3,
+    max_retries: 3,
+    post_pr_policy: {
+      enabled: false,
+      wait_ms: 3_600_000,
+      initial_poll_ms: 30_000,
+      max_poll_ms: 120_000,
+      check_start_grace_ms: 300_000,
+      max_transient_errors: 12,
+      review: { required: false, reviewer_login: null, source: "none" },
+    },
+    review_tier: null,
+  };
+}
+
+function checkpointSource(parentRunId, rootChildRunId) {
+  return {
+    schema_version: 1,
+    kind: "delivery-checkpoint-source",
+    parent_run_id: parentRunId,
+    manifest_ref: `artifacts/checkpoint-routing-${"a".repeat(64)}.json`,
+    manifest_hash: HASH,
+    checkpoint_id: "checkpoint-001",
+    checkpoint_ordinal: 1,
+    root_child_run_id: rootChildRunId,
+    source_plan_ref: "plan/slices.json",
+    source_plan_hash: HASH,
+    source_review_ref: "reviews/work-decomposer.json",
+    source_review_hash: HASH,
+    source_review_attempt: 1,
+    parent_review_identity_hash: HASH,
+    child_disposition_hash: HASH,
+    admission_probe_hash: HASH,
+    brief_scope_hash: HASH,
+    child_plan_hash: HASH,
+    acceptance_mapping_hash: HASH,
+    initial_base_ref: "refs/remotes/origin/main",
+    initial_base_commit: "a".repeat(40),
+  };
+}
+
+function checkpointFinalClosureBinding() {
+  return { ref: "artifacts/checkpoint-final-closure.json", hash: HASH, closed_at: "2026-07-19T12:05:00.000Z" };
 }
 
 function seedBuilderDispatchAuthority(fixture) {

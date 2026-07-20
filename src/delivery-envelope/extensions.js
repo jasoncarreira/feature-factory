@@ -3,7 +3,7 @@ const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/u;
 
-const DELIVERY_ENVELOPE_KEYS = new Set(["schema_version", "delivery_units"]);
+const DELIVERY_ENVELOPE_KEYS = new Set(["schema_version", "delivery_units", "checkpoint_plan"]);
 const DELIVERY_UNIT_KEYS = new Set(["id", "slice_id", "invariant_families", "obligations", "verification_artifacts"]);
 const INVARIANT_FAMILY_KEYS = new Set(["id", "description"]);
 const OBLIGATION_KEYS = new Set(["id", "description", "invariant_family_id", "verification_artifact_id"]);
@@ -26,7 +26,7 @@ export class DeliveryContractValidationError extends Error {
   }
 }
 
-export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "plan.delivery_envelope", required = false } = {}) {
+export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "plan.delivery_envelope", required = false, plan } = {}) {
   if (deliveryEnvelope === undefined || deliveryEnvelope === null) {
     if (required) throwValidation([{ path, message: "is required" }]);
     return null;
@@ -51,6 +51,10 @@ export function validateDeliveryEnvelope(deliveryEnvelope, slices, { path = "pla
       const unitPath = `${path}.delivery_units[${index}]`;
       validateDeliveryUnit(errors, unit, unitPath, plannedSlices[index], { unitIds, familyIds, obligationIds, artifactIds });
     }
+  }
+  if (deliveryEnvelope.checkpoint_plan !== undefined && plan !== undefined) {
+    try { validateReviewedCheckpointPlan(plan); }
+    catch (error) { errors.push({ path: `${path}.checkpoint_plan`, message: error.message }); }
   }
   if (errors.length) throwValidation(errors);
   return deliveryEnvelope;
@@ -334,3 +338,4 @@ function safeText(value) {
 function throwValidation(errors) {
   throw new DeliveryContractValidationError(errors);
 }
+import { validateReviewedCheckpointPlan } from "./checkpoint-routing.js";

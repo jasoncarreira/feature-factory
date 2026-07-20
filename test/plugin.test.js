@@ -414,6 +414,7 @@ describe("feature command payload parsing", () => {
     assert.match(text, /parse_status: valid/u);
     assert.match(text, /driver\.mode: autonomous/u);
     assert.match(text, /resume: \{"schema_version":1,"kind":"existing-run-resume","run_id":"steering-drain-boundaries"\}/u);
+    assert.doesNotMatch(text.slice(parsedStart, rawStart), /checkpoint(?:_reservation|_request)?:/u);
     assert.match(text.slice(rawStart), /ffpayload-v1:[A-Za-z0-9_-]+/u);
     assert.doesNotMatch(text.slice(rawStart), /resume steering-drain-boundaries/u);
   });
@@ -469,6 +470,9 @@ describe("feature command payload parsing", () => {
       [encodeFeatureCommandPayload({ operator_request: `resume ${runId}`, driver: { mode: "autonomous" }, resume, steering: { ...steering, pending: { garbage: true }, consume: { command: "other", args: [] } } }), "invalid-steering-pointer"],
       [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless" }, continuation: {} }), "invalid-continuation"],
       [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless", run_id: "new-run" }, continuation: {} }), "invalid-driver-run-id-route"],
+      [encodeFeatureCommandPayload({ operator_request: "start", driver: {}, checkpoint: {} }), "unsupported-checkpoint-route"],
+      [encodeFeatureCommandPayload({ operator_request: "start", driver: {}, checkpoint_reservation: {} }), "unsupported-checkpoint-route"],
+      [encodeFeatureCommandPayload({ operator_request: "start", driver: {}, checkpoint_request: {} }), "unsupported-checkpoint-route"],
     ];
 
     for (const [token, reason] of cases) assert.deepEqual(decodeFeatureCommandPayload(token), { ok: false, reason });

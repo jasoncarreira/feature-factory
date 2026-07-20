@@ -1,728 +1,425 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { buildCheckpointRoutingManifest, CHECKPOINT_ROUTING_TERMINAL_REASON } from "../src/delivery-envelope/checkpoint-routing.js";
+import {
+  buildCheckpointRoutingManifest,
+  checkpointRoutingArtifact,
+  validateCheckpointRoutingManifest,
+} from "../src/delivery-envelope/checkpoint-routing.js";
 import { evaluateDeliveryEnvelopeAdmission } from "../src/delivery-envelope/admission-extension.js";
-import { runCliCommand } from "../src/cli.js";
-import { listRuns, status, validateState } from "../src/factory.js";
-import { transitionRunStep, transitionSlicesSeed, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConsumed, transitionSteeringQueued } from "../src/run-state.js";
-import { hashValue } from "../src/refs.js";
+import { transitionSlicesSeed, transitionSteeringBoundaryOpened } from "../src/run-state.js";
 
-describe("B4.3 checkpoint routing", () => {
-  it("builds a deterministic strict sequence in dependency then family order with whole-story gates", () => {
-    const plan = planWithSpecs([
-      unitSpec("final", 1, 1, ["middle"]),
-      unitSpec("root", 2, 6),
-      unitSpec("middle", 1, 1, ["root"]),
-    ]);
-    const admission = evaluateDeliveryEnvelopeAdmission({ plan });
-    const planHash = hashBytes(`${JSON.stringify(plan)}\n`);
-    const first = buildCheckpointRoutingManifest({ plan, planHash, admissionResult: admission, decompositionAuthority: decompositionAuthority(planHash) });
-    const second = buildCheckpointRoutingManifest({ plan: structuredClone(plan), planHash, admissionResult: structuredClone(admission), decompositionAuthority: decompositionAuthority(planHash) });
-
-    assert.deepEqual(second, first);
-    assert.deepEqual(first.checkpoints.map((checkpoint) => checkpoint.request.acceptance_boundary.invariant_family.id), [
-      "root-family-1", "root-family-2", "middle-family-1", "final-family-1",
-    ]);
-    assert.deepEqual(first.checkpoints.map((checkpoint) => checkpoint.prerequisite_checkpoint_id), [
-      null, "checkpoint-001", "checkpoint-002", "checkpoint-003",
-    ]);
-    assert.equal(first.sequencing.mode, "strictly-sequential");
-    assert.equal(first.sequencing.base_branch, "main");
-    assert.equal(first.sequencing.next_checkpoint_rule, "Checkpoint N+1 may start only from main containing merged PR N.");
-
-    for (const [index, checkpoint] of first.checkpoints.entries()) {
-      assert.equal(checkpoint.ordinal, index + 1);
-      assert.equal(checkpoint.request.run_kind, "fresh-normal-feature-run");
-      assert.equal(checkpoint.request.execution_boundary.base_branch, "main");
-      assert.equal(checkpoint.request.integration_test_verifier.required, true);
-      assert.deepEqual(checkpoint.request.integration_test_verifier.required_commands, plan.integration_gate.required_commands);
-      assert.deepEqual(checkpoint.request.whole_story_panels.map((panel) => [panel.agent, panel.required]), [
-        ["implementation-validator", true], ["security-reviewer", true],
-      ]);
-      assert.deepEqual(checkpoint.request.gate_3, { name: "pre_pr", required: true, scope: "this-checkpoint-whole-story" });
-      assert.deepEqual(checkpoint.request.pull_request, { required: true, count: 1, scope: "this-checkpoint-whole-story" });
-      assert.ok(checkpoint.request.acceptance_boundary.slice_acceptance.length > 0);
-      assert.ok(checkpoint.request.acceptance_boundary.obligations.length > 0);
-      assert.ok(checkpoint.request.acceptance_boundary.verification_artifacts.length > 0);
-    }
-
-    const serialized = JSON.stringify(first);
-    for (const forbidden of ["carry_forward", "carry-forward", "retained_merged_rows", "partial_pr", "merge_train", "join", "shared_final_panel"]) {
-      assert.equal(serialized.includes(forbidden), false, forbidden);
-    }
-  });
-
-  it("accepts the exact reviewed checkpoint plan before seeding without inventing slice authority", async () => {
-    const fixture = createRoutingFixture("checkpoint-acceptance", planWithSpecs([unitSpec("api", 2, 6)]));
+describe("B4.3 reviewed checkpoint routing contract", () => {
+  it("initializes manifest-bound active parent progress when routing terminalizes", async () => {
+    const fixture = routingRunFixture("checkpoint-progress-initialization");
     try {
-      const run = readJson(join(fixture.runDir, "run.json"));
-      run.steps[0] = { agent: "work-decomposer", status: "running", attempts: 1 };
-      writeJson(join(fixture.runDir, "run.json"), run);
-
-      const accepted = await transitionRunStep(fixture.runDir, "work-decomposer", {
-        status: "accepted",
-        attempts: 1,
-        artifact_ref: "plan/slices.json",
-        review_ref: "reviews/work-decomposer.json",
-      }, { mustExist: true });
-
-      assert.equal(accepted.step.status, "accepted");
-      assert.equal(accepted.step.acceptance.artifact_hash, hashBytes(readFileSync(join(fixture.runDir, "plan", "slices.json"))));
-      assert.equal(accepted.step.acceptance.review_hash, hashBytes(readFileSync(join(fixture.runDir, "reviews", "work-decomposer.json"))));
-      assert.deepEqual(accepted.run.slices, []);
-    } finally {
-      rmSync(fixture.repo, { recursive: true, force: true });
-    }
-  });
-
-  it("terminalizes an oversized parent after accepted reviewed decomposition and before runnable slices, then replays idempotently", async () => {
-    const fixture = createRoutingFixture("checkpoint-replay", planWithSpecs([unitSpec("api", 2, 6)]));
-    try {
-      const projection = pendingProjection(fixture.plan);
-      const boundary = await openTerminalBoundary(fixture);
-      const first = await transitionSlicesSeed(fixture.runDir, projection, {
+      const boundary = await transitionSteeringBoundaryOpened(fixture.runDir, "terminal", {
+        token: "checkpoint-progress-terminal-boundary",
+        now: "2026-07-19T11:59:00.000Z",
+      });
+      const routed = await transitionSlicesSeed(fixture.runDir, pendingProjection(fixture.plan), {
         from: "plan/slices.json",
-        boundaryToken: boundary.token,
+        boundaryToken: boundary.boundary.token,
         now: "2026-07-19T12:00:00.000Z",
       });
       const persisted = readJson(join(fixture.runDir, "run.json"));
-      const manifest = readJson(join(fixture.runDir, first.checkpoint_routing.ref));
-
-      assert.equal(first.updated, true);
-      assert.equal(first.route, "checkpoint");
-      assert.equal(first.status, "blocked");
-      assert.equal(first.checkpoint_routing.checkpoint_count, 2);
-      assert.match(first.checkpoint_routing.ref, /^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u);
-      assert.equal(hashBytes(readFileSync(join(fixture.runDir, first.checkpoint_routing.ref))), first.checkpoint_routing.hash);
-      assert.deepEqual(persisted.slices, []);
-      assert.equal(persisted.steps[0].status, "accepted");
-      assert.equal(persisted.steps[0].acceptance.artifact_hash, manifest.source.plan_hash);
-      assert.equal(persisted.steps[0].acceptance.review_hash, manifest.source.decomposition_review_hash);
-      assert.equal(persisted.steering.boundary, null);
-      assert.equal(persisted.steering.pending, null);
-      assert.equal(persisted.steering.uncheckpointed, null);
-      assert.equal(persisted.status, "blocked");
-      assert.equal(persisted.terminal_result.reason, CHECKPOINT_ROUTING_TERMINAL_REASON);
-      assert.deepEqual(persisted.terminal_result.artifacts, { checkpoint_routing: first.checkpoint_routing.ref });
-      assert.equal(manifest.source.plan_hash, hashBytes(readFileSync(join(fixture.runDir, "plan", "slices.json"))));
-
-      const before = readFileSync(join(fixture.runDir, "run.json"));
-      const replay = await transitionSlicesSeed(fixture.runDir, projection, { from: "plan/slices.json" });
-      assert.equal(replay.updated, false);
-      assert.equal(replay.route, "checkpoint");
-      assert.deepEqual(replay.checkpoint_routing, first.checkpoint_routing);
-      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before);
-      assert.deepEqual(readdirSync(join(fixture.runDir, "artifacts")), [first.checkpoint_routing.ref.split("/").at(-1)]);
-    } finally {
-      rmSync(fixture.repo, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects missing and stale terminal boundary observations without publishing route state", async () => {
-    for (const state of ["missing", "stale"]) {
-      const fixture = createRoutingFixture(`checkpoint-boundary-${state}`, planWithSpecs([unitSpec("api", 2, 6)]));
-      try {
-        let boundaryToken;
-        if (state === "stale") {
-          const boundary = await openTerminalBoundary(fixture);
-          boundaryToken = boundary.token;
-          const run = readJson(join(fixture.runDir, "run.json"));
-          run.updated_at = "2026-07-19T12:00:01.000Z";
-          writeJson(join(fixture.runDir, "run.json"), run);
-        }
-        const before = snapshotRouteState(fixture);
-        await assert.rejects(
-          transitionSlicesSeed(fixture.runDir, pendingProjection(fixture.plan), { from: "plan/slices.json", boundaryToken }),
-          state === "missing" ? /lock-protected boundary observation/u : /boundary observation is stale/u,
-        );
-        assertRouteStateUnchanged(fixture, before);
-      } finally {
-        rmSync(fixture.repo, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it("rejects pending and uncheckpointed steering without preserving it in a blocked parent", async () => {
-    for (const state of ["pending", "uncheckpointed"]) {
-      const fixture = createRoutingFixture(`checkpoint-steering-${state}`, planWithSpecs([unitSpec("api", 2, 6)]));
-      try {
-        const queued = await transitionSteeringQueued(fixture.runDir, "change routing", { now: "2026-07-19T11:00:00.000Z", id: `${state}-steering` });
-        if (state === "uncheckpointed") {
-          await transitionSteeringConsumed(fixture.runDir, queued.steering, { now: "2026-07-19T11:00:01.000Z" });
-        }
-        const before = snapshotRouteState(fixture);
-        await assert.rejects(
-          transitionSlicesSeed(fixture.runDir, pendingProjection(fixture.plan), { from: "plan/slices.json" }),
-          state === "pending" ? /pending steering/u : /acknowledgement is pending/u,
-        );
-        assertRouteStateUnchanged(fixture, before);
-        assert.equal(readJson(join(fixture.runDir, "run.json")).status, "running");
-      } finally {
-        rmSync(fixture.repo, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it("rejects a fresh heartbeat after terminal observation without publishing route state", async () => {
-    const fixture = createRoutingFixture("checkpoint-heartbeat", planWithSpecs([unitSpec("api", 2, 6)]));
-    try {
-      const boundary = await openTerminalBoundary(fixture);
-      writeJson(join(fixture.runDir, "heartbeat.json"), heartbeat(fixture.runId));
-      const before = snapshotRouteState(fixture);
-      await assert.rejects(
-        transitionSlicesSeed(fixture.runDir, pendingProjection(fixture.plan), {
-          from: "plan/slices.json",
-          boundaryToken: boundary.token,
-          now: "2026-07-19T12:00:00.000Z",
-          processAliveFn: () => true,
-        }),
-        /active-heartbeat/u,
-      );
-      assertRouteStateUnchanged(fixture, before);
-    } finally {
-      rmSync(fixture.repo, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects incompatible open boundary, action claim, and pre-PR fence authority", async () => {
-    const cases = [
-      ["boundary", async (fixture) => (await transitionSteeringBoundaryOpened(fixture.runDir, "gate", { token: "checkpoint-gate" })).boundary.token, /terminal boundary token mismatch/u],
-      ["action", async (fixture) => {
-        const opened = await transitionSteeringBoundaryOpened(fixture.runDir, "dispatch", { token: "checkpoint-dispatch" });
-        await transitionSteeringBoundaryCrossed(fixture.runDir, "dispatch", opened.boundary.token, { token: "checkpoint-action" });
-        return undefined;
-      }, /action start acknowledgement is pending/u],
-      ["fence", async (fixture) => {
-        const run = readJson(join(fixture.runDir, "run.json"));
-        run.steering = {
-          schema_version: 1,
-          generation: 0,
-          pending: null,
-          uncheckpointed: null,
-          boundary: null,
-          action_claim: null,
-          last_action: null,
-          pr_fence: { token: "checkpoint-fence", generation: 0, state_hash: `sha256:${"a".repeat(64)}`, created_at: "2026-07-19T11:00:00.000Z" },
-          history: [],
-        };
-        writeJson(join(fixture.runDir, "run.json"), run);
-        return undefined;
-      }, /active pre-PR fence/u],
-    ];
-    for (const [name, arrange, expected] of cases) {
-      const fixture = createRoutingFixture(`checkpoint-incompatible-${name}`, planWithSpecs([unitSpec("api", 2, 6)]));
-      try {
-        const boundaryToken = await arrange(fixture);
-        const before = snapshotRouteState(fixture);
-        await assert.rejects(
-          transitionSlicesSeed(fixture.runDir, pendingProjection(fixture.plan), { from: "plan/slices.json", boundaryToken }),
-          expected,
-        );
-        assertRouteStateUnchanged(fixture, before);
-      } finally {
-        rmSync(fixture.repo, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it("rejects Gate 2 and non-placeholder test-verifier state before artifact publication", async () => {
-    const cases = [
-      ["brief", (run) => { run.gates.brief = { status: "pending" }; }, /before Gate 2 brief state/u],
-      ["test-running", (run) => { run.steps[1] = { agent: "test-verifier", status: "running", attempts: 1 }; }, /zero-attempt blocked test-verifier placeholder/u],
-      ["test-positive-blocked", (run) => { run.steps[1] = { agent: "test-verifier", status: "blocked", attempts: 1 }; }, /zero-attempt blocked test-verifier placeholder/u],
-      ["test-accepted", (run) => { run.steps[1] = { agent: "test-verifier", status: "accepted", attempts: 0 }; }, /zero-attempt blocked test-verifier placeholder/u],
-      ["test-rejected", (run) => { run.steps[1] = { agent: "test-verifier", status: "rejected", attempts: 0 }; }, /zero-attempt blocked test-verifier placeholder/u],
-      ["test-claim", (run, fixture) => {
-        const claim = activeExecutionClaim(run.run_id, hashBytes(readFileSync(join(fixture.runDir, "plan", "slices.json"))));
-        run.steps[1] = { agent: "test-verifier", status: "running", attempts: 1, execution_claim: claim, execution_claim_hash: hashValue(claim) };
-      }, /zero-attempt blocked test-verifier placeholder/u],
-    ];
-    for (const [name, mutate, expected] of cases) {
-      const fixture = createRoutingFixture(`checkpoint-preimplementation-${name}`, planWithSpecs([unitSpec("api", 2, 6)]));
-      try {
-        const run = readJson(join(fixture.runDir, "run.json"));
-        mutate(run, fixture);
-        writeJson(join(fixture.runDir, "run.json"), run);
-        const boundary = await openTerminalBoundary(fixture);
-        const before = snapshotRouteState(fixture);
-        await assert.rejects(
-          transitionSlicesSeed(fixture.runDir, pendingProjection(fixture.plan), { from: "plan/slices.json", boundaryToken: boundary.token }),
-          expected,
-        );
-        assertRouteStateUnchanged(fixture, before);
-      } finally {
-        rmSync(fixture.repo, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it("rejects exact-plan drift inside the observation/publication interval without routing or seeding", async () => {
-    const original = planWithSpecs([unitSpec("api", 2, 6)]);
-    const fixture = createRoutingFixture("checkpoint-race", original);
-    try {
-      const raced = structuredClone(original);
-      raced.delivery_envelope.delivery_units[0].invariant_families[0].description = "Raced family description";
-      const boundary = await openTerminalBoundary(fixture);
-      await assert.rejects(
-        transitionSlicesSeed(fixture.runDir, pendingProjection(original), {
-          from: "plan/slices.json",
-          boundaryToken: boundary.token,
-          checkpointRoutingHooks: { beforeArtifactCommit: () => writeJson(join(fixture.runDir, "plan", "slices.json"), raced) },
-        }),
-        (error) => error?.message === "protected file commit failed"
-          && /accepted work-decomposer plan ref\/hash does not match exact plan bytes|checkpoint routing plan authority changed before publication/u.test(error.cause?.message),
-      );
-
-      const run = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(run.status, "running");
-      assert.equal(run.terminal_result, null);
-      assert.deepEqual(run.slices, []);
-      assert.deepEqual(readdirSync(join(fixture.runDir, "artifacts")), []);
-    } finally {
-      rmSync(fixture.repo, { recursive: true, force: true });
-    }
-  });
-
-  it("retains a deterministic artifact on plan drift before run replacement and recovers idempotently", async () => {
-    const original = planWithSpecs([unitSpec("api", 2, 6)]);
-    const fixture = createRoutingFixture("checkpoint-run-publication-race", original);
-    try {
-      const boundary = await openTerminalBoundary(fixture);
-      const raced = structuredClone(original);
-      raced.delivery_envelope.delivery_units[0].invariant_families[0].description = "Post-artifact raced description";
-      await assert.rejects(
-        transitionSlicesSeed(fixture.runDir, pendingProjection(original), {
-          from: "plan/slices.json",
-          boundaryToken: boundary.token,
-          atomicWriteHooks: { beforeCommit: () => writeJson(join(fixture.runDir, "plan", "slices.json"), raced) },
-        }),
-        (error) => error?.message === "protected file commit failed"
-          && /accepted work-decomposer plan ref\/hash does not match exact plan bytes|checkpoint routing plan authority changed before publication/u.test(error.cause?.message),
-      );
-      const artifactNames = readdirSync(join(fixture.runDir, "artifacts"));
-      assert.equal(artifactNames.length, 1);
-      const runAfterRace = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(runAfterRace.status, "running");
-      assert.deepEqual(runAfterRace.slices, []);
-      assert.equal(runAfterRace.terminal_result, null);
-
-      writeJson(join(fixture.runDir, "plan", "slices.json"), original);
-      const recovered = await transitionSlicesSeed(fixture.runDir, pendingProjection(original), {
-        from: "plan/slices.json",
-        boundaryToken: boundary.token,
+      assert.equal(routed.route, "checkpoint");
+      assert.deepEqual(persisted.checkpoint_progress, {
+        schema_version: 1,
+        kind: "delivery-checkpoint-progress",
+        manifest_ref: routed.checkpoint_routing.ref,
+        manifest_hash: routed.checkpoint_routing.hash,
+        status: "active",
+        entries: [],
+        final_closure: null,
       });
-      assert.equal(recovered.route, "checkpoint");
-      assert.equal(recovered.updated, true);
-      assert.deepEqual(readdirSync(join(fixture.runDir, "artifacts")), artifactNames);
-      const replay = await transitionSlicesSeed(fixture.runDir, pendingProjection(original), { from: "plan/slices.json" });
+      assert.deepEqual(Object.keys(persisted.checkpoint_progress), [
+        "schema_version", "kind", "manifest_ref", "manifest_hash", "status", "entries", "final_closure",
+      ]);
+
+      const beforeReplay = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      const replay = await transitionSlicesSeed(fixture.runDir, pendingProjection(fixture.plan), { from: "plan/slices.json" });
       assert.equal(replay.updated, false);
-      assert.deepEqual(replay.checkpoint_routing, recovered.checkpoint_routing);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeReplay);
     } finally {
       rmSync(fixture.repo, { recursive: true, force: true });
     }
   });
 
-  it("routes an integrated five-wave slices plan into topological merged-main checkpoints", async () => {
-    const plan = planWithSpecs([
-      unitSpec("wave-5", 1, 1, ["wave-4"]),
-      unitSpec("wave-1"),
-      unitSpec("wave-3", 1, 1, ["wave-2"]),
-      unitSpec("wave-2", 1, 1, ["wave-1"]),
-      unitSpec("wave-4", 1, 1, ["wave-3"]),
-    ]);
-    const fixture = createRoutingFixture("checkpoint-five-wave", plan);
-    try {
-      const boundary = await openTerminalBoundary(fixture);
-      const result = await transitionSlicesSeed(fixture.runDir, pendingProjection(plan), { from: "plan/slices.json", boundaryToken: boundary.token });
-      const run = readJson(join(fixture.runDir, "run.json"));
-      const manifest = readJson(join(fixture.runDir, result.checkpoint_routing.ref));
-      assert.equal(result.route, "checkpoint");
-      assert.equal(run.status, "blocked");
-      assert.deepEqual(run.slices, []);
-      assert.deepEqual(manifest.checkpoints.map((checkpoint) => checkpoint.request.acceptance_boundary.slice_id), [
-        "wave-1", "wave-2", "wave-3", "wave-4", "wave-5",
-      ]);
-      assert.deepEqual(manifest.checkpoints.map((checkpoint) => checkpoint.prerequisite_checkpoint_id), [
-        null, "checkpoint-001", "checkpoint-002", "checkpoint-003", "checkpoint-004",
-      ]);
-      assert.equal(manifest.sequencing.next_checkpoint_rule, "Checkpoint N+1 may start only from main containing merged PR N.");
-      const publicStatus = status(fixture.runId, { cwd: fixture.repo });
-      const publicList = listRuns({ cwd: fixture.repo }).find((item) => item.run_id === fixture.runId);
-      const publicValidation = validateState(fixture.runId, { cwd: fixture.repo });
-      assert.equal(publicStatus.status, "blocked", JSON.stringify(publicStatus));
-      assert.deepEqual(publicStatus.diagnostics.items.map((item) => item.condition), ["terminal-run"]);
-      assert.equal(publicList.status, "blocked");
-      assert.deepEqual(publicList.diagnostics.items.map((item) => item.condition), ["terminal-run"]);
-      assert.equal(publicValidation.runs[0].checks.every((check) => check.ok), true, JSON.stringify(publicValidation.runs[0].checks));
-      assert.deepEqual(publicValidation.runs[0].diagnostics.items.map((item) => item.condition), ["terminal-run"]);
-    } finally {
-      rmSync(fixture.repo, { recursive: true, force: true });
+  it("copies exact reviewed scope, child plans, acceptance projections, hashes, and child dispositions", () => {
+    const fixture = routingFixture();
+    const manifest = buildCheckpointRoutingManifest(fixture);
+
+    assert.equal(manifest.source.checkpoint_plan_hash, canonicalHash(fixture.plan.delivery_envelope.checkpoint_plan));
+    assert.deepEqual(manifest.source.review_identity, fixture.decompositionAuthority.review.review_identity);
+    assert.deepEqual(manifest.source.admission_probe, fixture.decompositionAuthority.review.admission_probe);
+    assert.deepEqual(manifest.checkpoints.map((checkpoint) => checkpoint.id), ["checkpoint-001", "checkpoint-002"]);
+    assert.deepEqual(manifest.checkpoints.map((checkpoint) => checkpoint.prerequisite_checkpoint_id), [null, "checkpoint-001"]);
+
+    for (const [index, checkpoint] of manifest.checkpoints.entries()) {
+      const reviewed = fixture.plan.delivery_envelope.checkpoint_plan.checkpoints[index];
+      const disposition = fixture.decompositionAuthority.review.checkpoint_dispositions[index];
+      const projection = acceptanceProjection(fixture.plan.delivery_envelope.checkpoint_plan, reviewed);
+      assert.deepEqual(checkpoint.brief_scope, reviewed.brief_scope);
+      assert.deepEqual(checkpoint.child_plan, reviewed.child_plan);
+      assert.deepEqual(checkpoint.acceptance_projection, projection);
+      assert.equal(checkpoint.brief_scope_hash, canonicalHash(reviewed.brief_scope));
+      assert.equal(checkpoint.child_plan_hash, canonicalHash(reviewed.child_plan));
+      assert.equal(checkpoint.acceptance_mapping_hash, canonicalHash(projection));
+      assert.deepEqual(checkpoint.child_disposition, disposition);
+      assert.equal(checkpoint.request.run_kind, "normal-feature-run");
+      assert.deepEqual(checkpoint.request.integration_test_verifier.required_commands, reviewed.child_plan.integration_gate.required_commands);
+      assert.deepEqual(checkpoint.request.whole_story_panels.map(({ agent }) => agent), ["implementation-validator", "security-reviewer"]);
+      assert.deepEqual(checkpoint.request.gate_3, { name: "pre_pr", required: true, scope: "this-checkpoint-whole-story" });
+      assert.deepEqual(checkpoint.request.pull_request, { required: true, count: 1, scope: "this-checkpoint-whole-story" });
     }
+
+    fixture.plan.delivery_envelope.checkpoint_plan.checkpoints[0].brief_scope.title = "mutated after routing";
+    fixture.decompositionAuthority.review.checkpoint_dispositions[0].checkpoint_id = "mutated-after-routing";
+    assert.equal(manifest.checkpoints[0].brief_scope.title, "Deliver API family 1");
+    assert.equal(manifest.checkpoints[0].child_disposition.checkpoint_id, "checkpoint-001");
   });
 
-  it("keeps malformed five-wave checkpoint-routing parent lookalikes invalid in public diagnostics", async () => {
-    for (const tamper of ["manifest-bytes", "content-addressed-manifest", "terminal-ref", "terminal-reason", "seeded-slices"]) {
-      const plan = planWithSpecs([
-        unitSpec("wave-5", 1, 1, ["wave-4"]), unitSpec("wave-1"), unitSpec("wave-3", 1, 1, ["wave-2"]),
-        unitSpec("wave-2", 1, 1, ["wave-1"]), unitSpec("wave-4", 1, 1, ["wave-3"]),
-      ]);
-      const fixture = createRoutingFixture(`checkpoint-five-wave-tamper-${tamper}`, plan);
-      try {
-        const boundary = await openTerminalBoundary(fixture);
-        const routed = await transitionSlicesSeed(fixture.runDir, pendingProjection(plan), { from: "plan/slices.json", boundaryToken: boundary.token });
-        const runPath = join(fixture.runDir, "run.json");
-        const manifestPath = join(fixture.runDir, routed.checkpoint_routing.ref);
-        const run = readJson(runPath);
-        if (tamper === "manifest-bytes") {
-          const manifest = readJson(manifestPath);
-          manifest.kind = "delivery-checkpoint-routing-lookalike";
-          writeJson(manifestPath, manifest);
-        } else if (tamper === "content-addressed-manifest") {
-          const manifest = readJson(manifestPath);
-          manifest.source.plan_hash = `sha256:${"f".repeat(64)}`;
-          const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
-          const ref = `artifacts/checkpoint-routing-${hashBytes(bytes).slice("sha256:".length)}.json`;
-          writeFileSync(join(fixture.runDir, ref), bytes);
-          run.terminal_result.artifacts.checkpoint_routing = ref;
-          writeJson(runPath, run);
-        } else if (tamper === "terminal-ref") {
-          run.terminal_result.artifacts.checkpoint_routing = `artifacts/checkpoint-routing-${"f".repeat(64)}.json`;
-          writeJson(runPath, run);
-        } else if (tamper === "terminal-reason") {
-          run.terminal_result.reason = "ordinary-blocked-lookalike";
-          writeJson(runPath, run);
-        } else {
-          run.slices = pendingProjection(plan);
-          writeJson(runPath, run);
-        }
-        const publicStatus = status(fixture.runId, { cwd: fixture.repo });
-        const publicList = listRuns({ cwd: fixture.repo }).find((item) => item.run_id === fixture.runId);
-        const publicValidation = validateState(fixture.runId, { cwd: fixture.repo });
-        assert.equal(publicStatus.status, "invalid", `${tamper} status`);
-        assert.equal(publicList.status, "invalid", `${tamper} list`);
-        assert.equal(publicValidation.ok, false, `${tamper} validation`);
-        assert.equal(publicValidation.runs[0].ok, false, `${tamper} run validation`);
-      } finally {
-        rmSync(fixture.repo, { recursive: true, force: true });
-      }
-    }
+  it("produces stable canonical manifest bytes and validates only the exact projection", () => {
+    const fixture = routingFixture();
+    const first = buildCheckpointRoutingManifest(fixture);
+    const second = buildCheckpointRoutingManifest(structuredClone(fixture));
+    const artifact = checkpointRoutingArtifact(first);
+
+    assert.deepEqual(second, first);
+    assert.equal(artifact.bytes, canonicalBytes(first));
+    assert.equal(artifact.hash, hashBytes(artifact.bytes));
+    assert.match(artifact.ref, /^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u);
+    assert.deepEqual(validateCheckpointRoutingManifest(structuredClone(first), fixture), first);
+
+    const changed = structuredClone(first);
+    changed.checkpoints[0].brief_scope.title = "runtime reinterpretation";
+    assert.throws(() => validateCheckpointRoutingManifest(changed, fixture), /does not match exact reviewed plan authority/u);
   });
 
-  for (const [name, tamper] of checkpointTerminalAuthorityCases()) {
-    it(`fails closed through status, list, API validation, and validate command for terminal authority ${name}`, async () => {
-      const fixture = await createFiveWaveTerminalFixture(`checkpoint-terminal-matrix-${name}`);
-      try {
-        await assertExactCheckpointTerminalDiagnostics(fixture, name);
-        tamper(fixture);
-        await assertInvalidCheckpointTerminalDiagnostics(fixture, name);
-      } finally {
-        rmSync(fixture.repo, { recursive: true, force: true });
-      }
+  for (const [name, mutate] of [
+    ["missing", (review) => { review.checkpoint_dispositions.pop(); }],
+    ["duplicate", (review) => { review.checkpoint_dispositions[1] = structuredClone(review.checkpoint_dispositions[0]); }],
+    ["reordered", (review) => { review.checkpoint_dispositions.reverse(); }],
+    ["cross-bound", (review) => { review.checkpoint_dispositions[1].checkpoint_id = "checkpoint-001"; }],
+    ["stale child-plan hash", (review) => { review.checkpoint_dispositions[0].child_plan_hash = `sha256:${"f".repeat(64)}`; }],
+    ["stale scope hash", (review) => { review.checkpoint_dispositions[0].brief_scope_hash = `sha256:${"e".repeat(64)}`; }],
+    ["stale acceptance hash", (review) => { review.checkpoint_dispositions[0].acceptance_mapping_hash = `sha256:${"d".repeat(64)}`; }],
+    ["rejecting", (review) => {
+      review.checkpoint_dispositions[0].verdict = "REJECT";
+      review.checkpoint_dispositions[0].required_fixes = ["not approved"];
+    }],
+  ]) {
+    it(`rejects ${name} reviewer-produced child dispositions`, () => {
+      const fixture = routingFixture();
+      mutate(fixture.decompositionAuthority.review);
+      assert.throws(
+        () => buildCheckpointRoutingManifest(fixture),
+        /exactly one ordered child disposition|missing, stale, reordered, or cross-bound/u,
+      );
     });
   }
 
-  it("fails closed for a missing envelope instead of manufacturing a checkpoint route", async () => {
-    const invalid = planWithSpecs([unitSpec("api")]);
-    delete invalid.delivery_envelope;
-    const fixture = createRoutingFixture("checkpoint-missing-envelope", invalid);
-    try {
-      await assert.rejects(
-        transitionSlicesSeed(fixture.runDir, pendingProjection(invalid), { from: "plan/slices.json" }),
-        /plan\.delivery_envelope: is required/u,
-      );
-      const run = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(run.status, "running");
-      assert.equal(run.terminal_result, null);
-      assert.deepEqual(run.slices, []);
-    } finally {
-      rmSync(fixture.repo, { recursive: true, force: true });
-    }
+  it("rejects plain APPROVE and plans without the new closed checkpoint contract", () => {
+    const fixture = routingFixture();
+    fixture.decompositionAuthority.review.verdict = "APPROVE";
+    assert.throws(() => buildCheckpointRoutingManifest(fixture), /APPROVE-CHECKPOINT/u);
+
+    const oldSchema = routingFixture();
+    delete oldSchema.plan.delivery_envelope.checkpoint_plan;
+    assert.throws(() => buildCheckpointRoutingManifest(oldSchema), /delivery checkpoint plan must be a closed object/u);
   });
 
-  it("keeps the admit path on ordinary slices-seed behavior", async () => {
-    const plan = planWithSpecs([unitSpec("api")]);
-    const fixture = createRoutingFixture("checkpoint-admit", plan);
-    try {
-      const result = await transitionSlicesSeed(fixture.runDir, pendingProjection(plan), { from: "plan/slices.json" });
-      const run = readJson(join(fixture.runDir, "run.json"));
-      assert.equal(result.route, undefined);
-      assert.equal(run.status, "running");
-      assert.equal(run.terminal_result, null);
-      assert.deepEqual(run.slices, [{
-        id: "api", stack: "backend", depends_on: [], status: "pending", attempts: 0,
-        declared_paths: ["src/api.js"], effective_paths: ["src/api.js"],
-      }]);
-    } finally {
-      rmSync(fixture.repo, { recursive: true, force: true });
-    }
+  it("rejects acceptance projection drift instead of rebuilding reviewed scope", () => {
+    const fixture = routingFixture();
+    fixture.plan.delivery_envelope.checkpoint_plan.acceptance_mappings[0].assignments[0].test_plan_entries = ["test api 3"];
+    assert.throws(() => buildCheckpointRoutingManifest(fixture), /unbound artifact|exactly cover reviewed scope/u);
+  });
+
+  it("rejects single-owner acceptance mapped to multiple checkpoints", () => {
+    const fixture = routingFixture();
+    const mapping = fixture.plan.delivery_envelope.checkpoint_plan.acceptance_mappings[0];
+    mapping.checkpoint_ids = ["checkpoint-001", "checkpoint-002"];
+    mapping.assignments.push({
+      ...structuredClone(mapping.assignments[0]),
+      checkpoint_id: "checkpoint-002",
+    });
+    assert.throws(
+      () => buildCheckpointRoutingManifest(fixture),
+      /invalid ownership policy or checkpoint order/u,
+    );
   });
 });
 
-function createRoutingFixture(runId, plan) {
-  const repo = mkdtempSync(join(tmpdir(), "checkpoint-routing-"));
+function routingFixture() {
+  const plan = parentPlan();
+  plan.delivery_envelope.checkpoint_plan = checkpointPlan(plan);
+  const planHash = hashBytes(`${JSON.stringify(plan, null, 2)}\n`);
+  const admissionResult = evaluateDeliveryEnvelopeAdmission({ plan });
+  const reviewRef = "reviews/work-decomposer.json";
+  const identityFields = {
+    schema_version: 1,
+    subject: "work-decomposer",
+    attempt: 1,
+    plan_ref: "plan/slices.json",
+    plan_hash: planHash,
+    review_ref: reviewRef,
+  };
+  const reviewIdentity = { ...identityFields, identity_hash: canonicalHash(identityFields) };
+  const checkpointPlanHash = canonicalHash(plan.delivery_envelope.checkpoint_plan);
+  const summaries = plan.delivery_envelope.checkpoint_plan.checkpoints.map((checkpoint) => {
+    const projection = acceptanceProjection(plan.delivery_envelope.checkpoint_plan, checkpoint);
+    return {
+      checkpoint_id: checkpoint.id,
+      ordinal: checkpoint.ordinal,
+      brief_scope_hash: canonicalHash(checkpoint.brief_scope),
+      child_plan_hash: canonicalHash(checkpoint.child_plan),
+      acceptance_mapping_hash: canonicalHash(projection),
+    };
+  });
+  const admissionProbe = {
+    schema_version: 1,
+    kind: "delivery-plan-admission-probe",
+    status: "valid",
+    decision: "checkpoint",
+    plan_ref: "plan/slices.json",
+    plan_hash: planHash,
+    reasons: [...admissionResult.reasons],
+    checkpoint_plan_hash: checkpointPlanHash,
+    checkpoints: summaries,
+  };
+  const checkpointDispositions = summaries.map((summary) => ({
+    schema_version: 1,
+    kind: "checkpoint-child-decomposition-review",
+    subject: "work-decomposer",
+    attempt: 1,
+    verdict: "APPROVE",
+    required_fixes: [],
+    checkpoint_id: summary.checkpoint_id,
+    checkpoint_ordinal: summary.ordinal,
+    reviewed_plan_ref: "plan/slices.json",
+    reviewed_plan_hash: summary.child_plan_hash,
+    child_plan_hash: summary.child_plan_hash,
+    brief_scope_hash: summary.brief_scope_hash,
+    acceptance_mapping_hash: summary.acceptance_mapping_hash,
+    parent_review_identity: structuredClone(reviewIdentity),
+  }));
+  const review = {
+    schema_version: 1,
+    subject: "work-decomposer",
+    attempt: 1,
+    verdict: "APPROVE-CHECKPOINT",
+    required_fixes: [],
+    admission_probe: admissionProbe,
+    review_identity: reviewIdentity,
+    checkpoint_dispositions: checkpointDispositions,
+  };
+  return {
+    plan,
+    planHash,
+    admissionResult,
+    decompositionAuthority: {
+      plan_ref: "plan/slices.json",
+      plan_hash: planHash,
+      review_ref: reviewRef,
+      review_hash: hashBytes(`${JSON.stringify(review, null, 2)}\n`),
+      attempt: 1,
+      review,
+    },
+  };
+}
+
+function routingRunFixture(runId) {
+  const authority = routingFixture();
+  const repo = mkdtempSync(join(tmpdir(), "checkpoint-routing-progress-"));
   const runDir = join(repo, ".opencode", "factory", runId);
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
   mkdirSync(join(runDir, "plan"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
-  mkdirSync(join(runDir, "steering"), { recursive: true });
-  writeJson(join(runDir, "plan", "slices.json"), plan);
-  const planHash = hashBytes(readFileSync(join(runDir, "plan", "slices.json")));
-  const review = { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] };
-  writeJson(join(runDir, "reviews", "work-decomposer.json"), review);
-  const reviewHash = hashBytes(readFileSync(join(runDir, "reviews", "work-decomposer.json")));
+  writeJson(join(runDir, "plan", "slices.json"), authority.plan);
+  writeJson(join(runDir, "reviews", "work-decomposer.json"), authority.decompositionAuthority.review);
   writeJson(join(runDir, "run.json"), {
     schema_version: 1,
     run_id: runId,
     status: "running",
     gates: {},
     slices: [],
-    steps: [
-      {
-        agent: "work-decomposer", status: "accepted", attempts: 1,
-        artifact_ref: "plan/slices.json", review_ref: "reviews/work-decomposer.json",
-        acceptance: {
-          artifact_ref: "plan/slices.json", artifact_hash: planHash,
-          review_ref: "reviews/work-decomposer.json", review_hash: reviewHash,
-        },
+    steps: [{
+      agent: "work-decomposer",
+      status: "accepted",
+      attempts: 1,
+      artifact_ref: "plan/slices.json",
+      review_ref: "reviews/work-decomposer.json",
+      acceptance: {
+        artifact_ref: "plan/slices.json",
+        artifact_hash: authority.planHash,
+        review_ref: "reviews/work-decomposer.json",
+        review_hash: authority.decompositionAuthority.review_hash,
       },
-      { agent: "test-verifier", status: "blocked", attempts: 0 },
-    ],
+    }, { agent: "test-verifier", status: "blocked", attempts: 0 }],
     terminal_result: null,
   });
-  return { repo, runDir, runId, plan };
+  return { ...authority, repo, runDir, runId };
 }
 
-function checkpointTerminalAuthorityCases() {
-  return [
-    ["plan-absent", (fixture) => rmSync(join(fixture.runDir, "plan", "slices.json"))],
-    ["plan-symlink", (fixture) => replaceWithSymlink(join(fixture.runDir, "plan", "slices.json"))],
-    ["plan-invalid-bytes", (fixture) => writeFileSync(join(fixture.runDir, "plan", "slices.json"), "{not json\n")],
-    ["plan-valid-byte-drift", (fixture) => {
-      const plan = readJson(join(fixture.runDir, "plan", "slices.json"));
-      plan.delivery_envelope.delivery_units[0].invariant_families[0].description = "drifted plan bytes";
-      writeJson(join(fixture.runDir, "plan", "slices.json"), plan);
-    }],
-    ["review-absent", (fixture) => rmSync(join(fixture.runDir, "reviews", "work-decomposer.json"))],
-    ["review-drift", (fixture) => {
-      const review = readJson(join(fixture.runDir, "reviews", "work-decomposer.json"));
-      review.required_fixes = ["drifted review bytes"];
-      writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), review);
-    }],
-    ["manifest-absent", (fixture) => rmSync(fixture.manifestPath)],
-    ["manifest-symlink", (fixture) => replaceWithSymlink(fixture.manifestPath)],
-    ["manifest-invalid-bytes", (fixture) => writeFileSync(fixture.manifestPath, "{not json\n")],
-    ["manifest-valid-byte-drift", (fixture) => {
-      const manifest = readJson(fixture.manifestPath);
-      manifest.source.plan_hash = `sha256:${"f".repeat(64)}`;
-      writeJson(fixture.manifestPath, manifest);
-    }],
-    ["terminal-artifact-ref-mismatch", (fixture) => mutateTerminal(fixture, (terminal) => {
-      terminal.artifacts.checkpoint_routing = "artifacts/not-a-checkpoint-routing-manifest.json";
-    })],
-    ["terminal-artifact-hash-mismatch", (fixture) => {
-      const manifest = readJson(fixture.manifestPath);
-      manifest.source.plan_hash = `sha256:${"e".repeat(64)}`;
-      writeJson(fixture.manifestPath, manifest);
-    }],
-    ["terminal-reason-mismatch", (fixture) => mutateTerminal(fixture, (terminal) => { terminal.reason = "ordinary-blocked-lookalike"; })],
-    ["accepted-step-plan-hash-mismatch", (fixture) => mutateAcceptedStep(fixture, (step) => {
-      step.acceptance.artifact_hash = `sha256:${"d".repeat(64)}`;
-    })],
-    ["accepted-step-review-hash-mismatch", (fixture) => mutateAcceptedStep(fixture, (step) => {
-      step.acceptance.review_hash = `sha256:${"c".repeat(64)}`;
-    })],
-    ["deterministic-admission-manifest-mismatch", (fixture) => rewriteManifestWithCurrentAddress(fixture, (manifest) => {
-      manifest.sequencing.next_checkpoint_rule = "checkpoint ordering is caller-defined";
-    })],
-  ];
-}
-
-async function createFiveWaveTerminalFixture(runId) {
-  const plan = planWithSpecs([
-    unitSpec("wave-5", 1, 1, ["wave-4"]), unitSpec("wave-1"), unitSpec("wave-3", 1, 1, ["wave-2"]),
-    unitSpec("wave-2", 1, 1, ["wave-1"]), unitSpec("wave-4", 1, 1, ["wave-3"]),
-  ]);
-  const fixture = createRoutingFixture(runId, plan);
-  const boundary = await openTerminalBoundary(fixture);
-  const routed = await transitionSlicesSeed(fixture.runDir, pendingProjection(plan), { from: "plan/slices.json", boundaryToken: boundary.token });
-  return { ...fixture, manifestRef: routed.checkpoint_routing.ref, manifestPath: join(fixture.runDir, routed.checkpoint_routing.ref) };
-}
-
-async function assertExactCheckpointTerminalDiagnostics(fixture, label) {
-  const publicStatus = status(fixture.runId, { cwd: fixture.repo });
-  const publicList = listRuns({ cwd: fixture.repo }).find((item) => item.run_id === fixture.runId);
-  const publicValidation = validateState(fixture.runId, { cwd: fixture.repo });
-  const commandValidation = await validateCommand(fixture);
-  assert.equal(publicStatus.status, "blocked", `${label} status control`);
-  assert.equal(publicList.status, "blocked", `${label} list control`);
-  assert.equal(publicValidation.runs[0].checks.every((check) => check.ok), true, `${label} API checks control: ${JSON.stringify(publicValidation)}`);
-  assert.equal(commandValidation.runs[0].checks.every((check) => check.ok), true, `${label} validate command checks control: ${JSON.stringify(commandValidation)}`);
-}
-
-async function assertInvalidCheckpointTerminalDiagnostics(fixture, label) {
-  const publicStatus = status(fixture.runId, { cwd: fixture.repo });
-  const publicList = listRuns({ cwd: fixture.repo }).find((item) => item.run_id === fixture.runId);
-  const publicValidation = validateState(fixture.runId, { cwd: fixture.repo });
-  const commandValidation = await validateCommand(fixture);
-  assert.equal(publicStatus.status, "invalid", `${label} status`);
-  assert.equal(publicList.status, "invalid", `${label} list`);
-  assert.equal(publicValidation.ok, false, `${label} API validation`);
-  assert.equal(publicValidation.runs[0].ok, false, `${label} API run validation`);
-  assert.equal(publicValidation.runs[0].checks.some((check) => !check.ok), true, `${label} API failed authority check`);
-  assert.equal(commandValidation.ok, false, `${label} validate command`);
-  assert.equal(commandValidation.runs[0].ok, false, `${label} validate command run`);
-  assert.equal(commandValidation.runs[0].checks.some((check) => !check.ok), true, `${label} validate command failed authority check`);
-}
-
-async function validateCommand(fixture) {
-  const output = [];
-  const originalLog = console.log;
-  const originalExitCode = process.exitCode;
-  try {
-    console.log = (...values) => output.push(values.join(" "));
-    process.exitCode = undefined;
-    await runCliCommand(["factory", "validate", fixture.runId, "--json"], { factoryOptions: { cwd: fixture.repo } });
-    return JSON.parse(output.at(-1));
-  } finally {
-    console.log = originalLog;
-    process.exitCode = originalExitCode;
-  }
-}
-
-function mutateTerminal(fixture, mutate) {
-  const path = join(fixture.runDir, "run.json");
-  const run = readJson(path);
-  mutate(run.terminal_result);
-  writeJson(path, run);
-}
-
-function mutateAcceptedStep(fixture, mutate) {
-  const path = join(fixture.runDir, "run.json");
-  const run = readJson(path);
-  mutate(run.steps.find((step) => step.agent === "work-decomposer"));
-  writeJson(path, run);
-}
-
-function rewriteManifestWithCurrentAddress(fixture, mutate) {
-  const manifest = readJson(fixture.manifestPath);
-  mutate(manifest);
-  const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
-  const ref = `artifacts/checkpoint-routing-${hashBytes(bytes).slice("sha256:".length)}.json`;
-  writeFileSync(join(fixture.runDir, ref), bytes);
-  mutateTerminal(fixture, (terminal) => { terminal.artifacts.checkpoint_routing = ref; });
-}
-
-function replaceWithSymlink(path) {
-  const target = `${path}.target`;
-  writeFileSync(target, readFileSync(path));
-  rmSync(path);
-  symlinkSync(target, path);
-}
-
-function decompositionAuthority(planHash) {
-  const review = { subject: "work-decomposer", attempt: 1, verdict: "APPROVE", required_fixes: [] };
-  return {
-    plan_ref: "plan/slices.json",
-    plan_hash: planHash,
-    review_ref: "reviews/work-decomposer.json",
-    review_hash: hashBytes(`${JSON.stringify(review)}\n`),
-    attempt: 1,
-    review,
-  };
-}
-
-async function openTerminalBoundary(fixture) {
-  const result = await transitionSteeringBoundaryOpened(fixture.runDir, "terminal", {
-    now: "2026-07-19T11:30:00.000Z",
-    token: `terminal-${fixture.runId}`.slice(0, 128),
-  });
-  return result.boundary;
-}
-
-function snapshotRouteState(fixture) {
-  return {
-    run: readFileSync(join(fixture.runDir, "run.json")),
-    artifacts: readdirSync(join(fixture.runDir, "artifacts")),
-  };
-}
-
-function assertRouteStateUnchanged(fixture, before) {
-  assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), before.run);
-  assert.deepEqual(readdirSync(join(fixture.runDir, "artifacts")), before.artifacts);
-}
-
-function heartbeat(runId) {
-  return {
-    schema_version: 1,
-    run_id: runId,
-    phase: "decomposition-review",
-    pid: process.pid,
-    last_tick_at: "2026-07-19T11:59:30.000Z",
-    interval_ms: 30000,
-  };
-}
-
-function activeExecutionClaim(runId, planHash) {
-  return {
-    schema_version: 1,
-    kind: "checked-test-execution-claim",
-    state: "active",
-    nonce: "123e4567-e89b-42d3-a456-426614174000",
-    run_id: runId,
-    attempt: 1,
-    plan_ref: "plan/slices.json",
-    plan_hash: planHash,
-    head_sha: "a".repeat(40),
-    receipt_ref: "evidence/test-verifier.attempt-1.json",
-    claimed_at: "2026-07-19T11:00:00.000Z",
-  };
-}
-
-function planWithSpecs(specs) {
-  const slices = specs.map((spec) => ({
-    id: spec.id,
-    stack: "backend",
-    paths: [`src/${spec.id}.js`],
-    depends_on: [...spec.dependsOn],
-    acceptance: [`accept ${spec.id}`],
-    test_plan: Array.from({ length: spec.obligations }, (_, index) => `test ${spec.id} ${index + 1}`),
-  }));
+function parentPlan() {
+  const testPlan = Array.from({ length: 6 }, (_, index) => `test api ${index + 1}`);
   return {
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
-    slices,
-    delivery_envelope: { schema_version: 1, delivery_units: specs.map((spec, index) => deliveryUnit(spec, slices[index])) },
+    slices: [{
+      id: "api",
+      stack: "backend",
+      paths: ["src/api.js"],
+      depends_on: [],
+      acceptance: ["AC1", "AC2"],
+      test_plan: testPlan,
+    }],
+    delivery_envelope: {
+      schema_version: 1,
+      delivery_units: [{
+        id: "api-unit",
+        slice_id: "api",
+        invariant_families: [
+          { id: "api-family-1", description: "API family 1" },
+          { id: "api-family-2", description: "API family 2" },
+        ],
+        obligations: testPlan.map((entry, index) => ({
+          id: `api-obligation-${index + 1}`,
+          description: `API obligation ${index + 1}`,
+          invariant_family_id: `api-family-${(index % 2) + 1}`,
+          verification_artifact_id: `api-artifact-${index + 1}`,
+        })),
+        verification_artifacts: testPlan.map((entry, index) => ({
+          id: `api-artifact-${index + 1}`,
+          test_plan_index: index,
+          test_plan_entry: entry,
+        })),
+      }],
+    },
   };
 }
 
-function unitSpec(id, families = 1, obligations = 1, dependsOn = []) {
-  return { id, families, obligations, dependsOn };
-}
-
-function deliveryUnit(spec, slice) {
+function checkpointPlan(plan) {
+  const slice = plan.slices[0];
+  const unit = plan.delivery_envelope.delivery_units[0];
+  const acceptanceInventory = slice.acceptance.map((text, index) => ({
+    id: `acceptance-${String(index + 1).padStart(6, "0")}`,
+    source_slice_id: slice.id,
+    source_index: index,
+    text,
+  }));
+  const checkpoints = unit.invariant_families.map((family, index) => {
+    const id = `checkpoint-${String(index + 1).padStart(3, "0")}`;
+    const obligations = unit.obligations.filter((obligation) => obligation.invariant_family_id === family.id);
+    const artifactIds = new Set(obligations.map((obligation) => obligation.verification_artifact_id));
+    const artifacts = unit.verification_artifacts.filter((artifact) => artifactIds.has(artifact.id));
+    const acceptance = [acceptanceInventory[index].text];
+    return {
+      id,
+      ordinal: index + 1,
+      prerequisite_checkpoint_id: index === 0 ? null : `checkpoint-${String(index).padStart(3, "0")}`,
+      acceptance_ids: [acceptanceInventory[index].id],
+      brief_scope: {
+        title: `Deliver API family ${index + 1}`,
+        source_delivery_unit_id: unit.id,
+        source_slice_id: slice.id,
+        source_slice_dependencies: [...slice.depends_on],
+        stack: slice.stack,
+        paths: [...slice.paths],
+        acceptance,
+        invariant_family: structuredClone(family),
+        obligations: structuredClone(obligations),
+        verification_artifacts: structuredClone(artifacts),
+      },
+      child_plan: {
+        integration_gate: structuredClone(plan.integration_gate),
+        slices: [{
+          id: slice.id,
+          stack: slice.stack,
+          paths: [...slice.paths],
+          depends_on: [],
+          acceptance,
+          test_plan: artifacts.map((artifact) => artifact.test_plan_entry),
+        }],
+        delivery_envelope: {
+          schema_version: 1,
+          delivery_units: [{
+            id: unit.id,
+            slice_id: slice.id,
+            invariant_families: [structuredClone(family)],
+            obligations: structuredClone(obligations),
+            verification_artifacts: artifacts.map((artifact, artifactIndex) => ({ ...structuredClone(artifact), test_plan_index: artifactIndex })),
+          }],
+        },
+      },
+    };
+  });
+  const acceptanceMappings = acceptanceInventory.map((row, index) => {
+    const checkpoint = checkpoints[index];
+    const family = checkpoint.brief_scope.invariant_family;
+    const obligations = checkpoint.brief_scope.obligations;
+    const artifacts = checkpoint.brief_scope.verification_artifacts;
+    return {
+      acceptance_id: row.id,
+      policy: "single-owner",
+      checkpoint_ids: [checkpoint.id],
+      assignments: [{
+        checkpoint_id: checkpoint.id,
+        invariant_family_id: family.id,
+        obligation_ids: obligations.map((obligation) => obligation.id),
+        verification_artifact_ids: artifacts.map((artifact) => artifact.id),
+        test_plan_entries: artifacts.map((artifact) => artifact.test_plan_entry),
+      }],
+    };
+  });
   return {
-    id: `${spec.id}-unit`,
-    slice_id: spec.id,
-    invariant_families: Array.from({ length: spec.families }, (_, index) => ({ id: `${spec.id}-family-${index + 1}`, description: `${spec.id} family ${index + 1}` })),
-    obligations: Array.from({ length: spec.obligations }, (_, index) => ({
-      id: `${spec.id}-obligation-${index + 1}`,
-      description: `${spec.id} obligation ${index + 1}`,
-      invariant_family_id: `${spec.id}-family-${(index % spec.families) + 1}`,
-      verification_artifact_id: `${spec.id}-artifact-${index + 1}`,
-    })),
-    verification_artifacts: slice.test_plan.map((entry, index) => ({ id: `${spec.id}-artifact-${index + 1}`, test_plan_index: index, test_plan_entry: entry })),
+    schema_version: 1,
+    kind: "delivery-checkpoint-plan",
+    acceptance_inventory: acceptanceInventory,
+    acceptance_mappings: acceptanceMappings,
+    checkpoints,
   };
 }
 
-function pendingProjection(plan) {
-  return plan.slices.map((slice) => ({ id: slice.id, stack: slice.stack, depends_on: [...slice.depends_on], status: "pending", attempts: 0 }));
+function acceptanceProjection(checkpointPlanValue, checkpoint) {
+  const inventoryById = new Map(checkpointPlanValue.acceptance_inventory.map((row) => [row.id, row]));
+  const mappingById = new Map(checkpointPlanValue.acceptance_mappings.map((mapping) => [mapping.acceptance_id, mapping]));
+  return {
+    acceptance_ids: structuredClone(checkpoint.acceptance_ids),
+    acceptance_inventory: checkpoint.acceptance_ids.map((id) => structuredClone(inventoryById.get(id))),
+    acceptance_mappings: checkpoint.acceptance_ids.map((id) => structuredClone(mappingById.get(id))),
+  };
+}
+
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+}
+
+function canonicalBytes(value) {
+  return `${JSON.stringify(canonicalValue(value), null, 2)}\n`;
+}
+
+function canonicalHash(value) {
+  return hashBytes(canonicalBytes(value));
 }
 
 function hashBytes(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function pendingProjection(plan) {
+  return plan.slices.map((slice) => ({
+    id: slice.id,
+    stack: slice.stack,
+    depends_on: [...slice.depends_on],
+    status: "pending",
+    attempts: 0,
+  }));
 }
 
 function writeJson(path, value) {

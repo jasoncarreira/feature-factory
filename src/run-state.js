@@ -11,7 +11,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateCheckpointChildBinding, validateCheckpointReservationClaim, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
@@ -19,7 +19,7 @@ import { isPrivilegedControlPlanePath, privilegedControlPlanePathReason } from "
 import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
 import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
 import { validateAdmissionExtensionResult, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
-import { buildCheckpointRoutingManifest, checkpointRoutingArtifact, CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
+import { buildCheckpointRoutingManifest, buildDeliveryPlanAdmissionProbe, buildInvalidDeliveryPlanAdmissionProbe, checkpointRoutingArtifact, CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
 import { parseVerificationCommand } from "./delivery-envelope/verification-command.js";
 import { verificationArtifactExecutionClaimRef, verificationArtifactExecutionReceiptRef } from "./verification-artifact-refs.js";
 
@@ -41,7 +41,6 @@ const LOCK_DIR = "run-json.lock";
 const LOCK_OWNER_FILE = "owner.json";
 const RUN_FILE = "run.json";
 const HEARTBEAT_FILE = "heartbeat.json";
-const CHECKPOINT_GENERIC_MUTATION_STATES = Object.freeze(["launched"]);
 const STEERING_BOUNDARY_KINDS = new Set(["gate", "dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
 const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "terminal", "post-pr-observe", "post-pr-push"]);
 const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
@@ -570,7 +569,6 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
   const text = requireNonEmptyString(message, "steering message");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
@@ -602,7 +600,6 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
     const assertPublicationAuthority = () => {
       const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
       if (!sameJson(observed, current)) throw new Error("steering queue run authority changed before publication");
-      if (checkpointAuthority) assertCheckpointLocalPublishedAuthority(runDir, observed, options, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
       if (v2Authority) assertV2LocalPublishedAuthority(runDir, observed, options, v2Authority);
     };
     let publication = null;
@@ -648,7 +645,7 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
         });
       }
       await removeOwnedEmptyDirectory(createdDirectory);
-      throwCheckpointPublicationCause(error);
+      throw error;
     }
   }, options);
 }
@@ -658,7 +655,6 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
@@ -725,19 +721,19 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
       if (!source.consumedRef) {
         const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
         await options.steeringConsumeRenameHooks?.beforeRename?.();
-        assertSteeringMutationAuthority(runDir, current, options, checkpointAuthority, v2Authority);
+        assertSteeringMutationAuthority(runDir, current, options, v2Authority);
         moved = await renameOwnedSteeringSidecar(source.path, consumedResolved.path, pending.hash);
         assertOwnedSteeringSidecarMove(moved);
         await options.steeringConsumeRenameHooks?.afterRename?.();
-        assertSteeringMutationAuthority(runDir, current, options, checkpointAuthority, v2Authority);
+        assertSteeringMutationAuthority(runDir, current, options, v2Authority);
       }
       await writeSemanticRunJson(runDir, next, options, v2Authority, () => {
-        assertSteeringMutationAuthority(runDir, current, options, checkpointAuthority, v2Authority);
+        assertSteeringMutationAuthority(runDir, current, options, v2Authority);
         if (moved) assertOwnedSteeringSidecarMove(moved);
       });
     } catch (error) {
       if (moved) await restoreOwnedSteeringSidecarMove(moved);
-      throwCheckpointPublicationCause(error);
+      throw error;
     }
     const steering = {
       kind: "operator-steering-consumed",
@@ -756,7 +752,6 @@ export async function transitionSteeringAcknowledged(runDir, input, options = {}
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot acknowledge steering`);
@@ -805,7 +800,6 @@ export async function transitionSteeringConflict(runDir, input, options = {}) {
   const requestedHash = requireNonEmptyString(input?.hash, "steering hash");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (TERMINAL_RUN_STATUSES.has(current.status)) throw new Error(`terminal run '${current.status}' cannot record steering conflict`);
@@ -856,7 +850,6 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
   const boundaryKind = normalizeSteeringBoundaryKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-open ${boundaryKind}`);
@@ -887,7 +880,6 @@ export async function transitionSteeringBoundaryCrossed(runDir, kind, token, opt
   if (!STEERING_ACTION_KINDS.has(boundaryKind)) throw new Error("boundary-cross supports dispatch, remediation, terminal, post-pr-observe, or post-pr-push");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-cross ${boundaryKind}`);
@@ -922,7 +914,6 @@ export async function transitionSteeringActionClosed(runDir, kind, token, option
   const actionKind = normalizeSteeringActionKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertSteeringBoundaryClear(current, "action-close");
@@ -942,7 +933,6 @@ async function transitionSteeringActionResolved(runDir, kind, token, outcome, op
   const actionKind = normalizeSteeringActionKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     const claim = assertSteeringActionClaim(current, actionKind, token);
@@ -976,7 +966,6 @@ async function transitionSteeringActionResolved(runDir, kind, token, outcome, op
 export async function transitionPrePrFenceEstablished(runDir, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
@@ -1038,7 +1027,6 @@ export async function transitionPrCreated(runDir, input = {}, options = {}) {
 async function reconcilePrOperation(runDir, token, mode, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.continuation?.schema_version === 2) assertV2LocalPublishedAuthority(runDir, current, options);
@@ -1336,7 +1324,6 @@ export async function transitionCostUsage(runDir, input, options = {}) {
 export async function transitionRecoverOrphan(runDir, reason = "orphaned factory run", options = {}) {
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     if (current.status !== "running") throw new Error(`recover requires a running run, found '${current.status}'`);
@@ -1573,7 +1560,6 @@ export async function markCheckedVerificationArtifactExecutionUnknown(runDir, ex
 
 function observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options) {
   if (run.status !== "running") throw new Error("checked verification artifact execution requires a running run");
-  assertCheckpointLocalPublishedAuthority(runDir, run, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
   const slice = (run.slices || []).find((candidate) => candidate?.id === sliceId);
   if (!slice || slice.status !== "running" || !Number.isInteger(slice.attempts) || slice.attempts < 1) {
     throw new Error(`checked verification artifact execution requires running slice '${sliceId}' at a positive attempt`);
@@ -1745,6 +1731,17 @@ export function assertContinuationAuthorityCurrent(runDir, run, options = {}) {
   const parentRun = validateRun(parseJsonObjectFile(parentFile, "continuation parent run.json"));
   for (const key of ["run_id", "status", "branch", "worktree"]) {
     if (continuation.parent[key] !== parentRun[key]) throw new Error(`continuation parent ${key} binding is stale`);
+  }
+  const checkpointBound = Object.hasOwn(continuation, "checkpoint_source_hash");
+  if (checkpointBound !== Object.hasOwn(continuation, "configuration_hash")) throw new Error("continuation checkpoint bindings are incomplete");
+  if (checkpointBound) {
+    if (!isRecord(parentRun.checkpoint_source) || hashValue(parentRun.checkpoint_source) !== continuation.checkpoint_source_hash) {
+      throw new Error("continuation checkpoint_source binding is stale or cross-checkpoint");
+    }
+    if (hashValue(continuation.configuration) !== continuation.configuration_hash) throw new Error("continuation configuration hash is stale");
+    assertRunMatchesContinuationConfiguration(parentRun, continuation.configuration, "continuation parent");
+  } else if (parentRun.checkpoint_source !== undefined) {
+    throw new Error("checkpoint-source parent requires checkpoint-bound continuation authority");
   }
   const branch = git(repo, ["rev-parse", "--verify", `refs/heads/${continuation.parent.branch}^{commit}`]);
   if (!branch.ok || branch.stdout.trim() !== continuation.parent.commit) throw new Error("continuation parent branch/commit binding is stale");
@@ -2022,9 +2019,14 @@ export function observePermanentContinuationClaims(repoInput, runId) {
     } catch {
       throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
     }
+    const checkpointBound = Object.hasOwn(claim, "checkpoint_source_hash");
     if (!isRecord(claim) || claim.schema_version !== 2 || claim.kind !== "blocked-run-continuation-claim"
       || !isRecord(claim.parent_identity) || !stringValue(claim.child_run_id) || !stringValue(claim.child_branch_ref)
       || !/^[0-9a-f]{40}$/u.test(String(claim.start_commit || "")) || !content.stdout || !Buffer.from(content.stdout).equals(canonicalJsonBytes(claim))) {
+      throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
+    }
+    if (checkpointBound !== Object.hasOwn(claim, "configuration_hash")
+      || checkpointBound && (!/^sha256:[a-f0-9]{64}$/u.test(claim.checkpoint_source_hash) || !/^sha256:[a-f0-9]{64}$/u.test(claim.configuration_hash))) {
       throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
     }
     if (claim.child_run_id === runId) matches.push({ ref, oid, claim, bytes: content.stdout });
@@ -2040,6 +2042,7 @@ function routeSchemaError(code) {
 }
 
 function assertPublishedCarryForwardConfiguration(run, expected) {
+  const checkpointBound = Object.hasOwn(run.continuation, "checkpoint_source_hash");
   const actual = {
     mode: run.mode,
     github_account: run.github_account ?? null,
@@ -2048,7 +2051,6 @@ function assertPublishedCarryForwardConfiguration(run, expected) {
     max_retries: run.max_retries,
     policy: run.post_pr?.policy,
   };
-  if (run.review_tier !== undefined) throw new Error("schema-v2 carry-forward child cannot contain review_tier");
   if (actual.max_parallel_slices !== 3 || actual.max_retries !== 3 || !actual.mode || !actual.pr_mode || !isRecord(actual.policy)) throw new Error("published carry-forward child configuration is incomplete");
   const persisted = run.continuation?.configuration;
   const bound = isRecord(persisted) ? {
@@ -2059,10 +2061,31 @@ function assertPublishedCarryForwardConfiguration(run, expected) {
     max_retries: persisted.max_retries,
     policy: persisted.post_pr_policy,
   } : null;
-  if (!bound || !sameJson(actual, bound)) throw new Error("published carry-forward child configuration differs from immutable continuation configuration");
+  if (!bound || (checkpointBound ? hashValue(actual) !== hashValue(bound) : !sameJson(actual, bound))) throw new Error("published carry-forward child configuration differs from immutable continuation configuration");
+  assertRunMatchesContinuationConfiguration(run, persisted, "published carry-forward child");
+  if (checkpointBound) {
+    if (!isRecord(run.checkpoint_source) || hashValue(run.checkpoint_source) !== run.continuation.checkpoint_source_hash) throw new Error("published carry-forward child checkpoint_source is stale or cross-checkpoint");
+    if (hashValue(persisted) !== run.continuation.configuration_hash) throw new Error("published carry-forward child configuration hash is stale");
+  } else if (run.checkpoint_source !== undefined) throw new Error("non-checkpoint carry-forward child cannot introduce checkpoint_source");
   if (!expected) return;
   const wanted = { mode: expected.mode, github_account: expected.github_account ?? null, pr_mode: expected.pr_mode, max_parallel_slices: 3, max_retries: 3, policy: expected.post_pr?.policy };
-  if (!sameJson(actual, wanted)) throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+  if (checkpointBound ? hashValue(actual) !== hashValue(wanted) : !sameJson(actual, wanted)) throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+  const expectedTier = Object.hasOwn(expected, "review_tier") ? expected.review_tier : undefined;
+  const actualTier = Object.hasOwn(run, "review_tier") ? run.review_tier : null;
+  if (expectedTier !== undefined && actualTier !== expectedTier) throw new Error("current carry-forward invocation conflicts with published immutable review_tier");
+}
+
+function assertRunMatchesContinuationConfiguration(run, configuration, label) {
+  if (!isRecord(configuration)) throw new Error(`${label} configuration is missing`);
+  const expectedTier = Object.hasOwn(configuration, "review_tier") ? configuration.review_tier : undefined;
+  const tierMatches = expectedTier === null ? !Object.hasOwn(run, "review_tier") : run.review_tier === expectedTier;
+  if (run.mode !== configuration.mode || (run.github_account ?? null) !== configuration.github_account || run.pr_mode !== configuration.pr_mode
+    || run.max_parallel_slices !== configuration.max_parallel_slices || run.max_retries !== configuration.max_retries
+    || (Object.hasOwn(run.continuation || {}, "checkpoint_source_hash") || run.checkpoint_source?.kind === "delivery-checkpoint-source"
+      ? hashValue(run.post_pr?.policy) !== hashValue(configuration.post_pr_policy)
+      : !sameJson(run.post_pr?.policy, configuration.post_pr_policy)) || !tierMatches) {
+    throw new Error(`${label} differs from immutable continuation configuration`);
+  }
 }
 
 function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
@@ -2092,6 +2115,21 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
 }
 
 function assertPublishedCarryForwardSpec(runDir, run, continuation) {
+  if (isCheckpointPlanningReuse(continuation)) {
+    if ((run.steps || []).some((item) => item?.agent === "spec-writer")) {
+      throw new Error("checkpoint carry-forward must not synthesize a spec-writer step");
+    }
+    for (const ref of ["artifacts/technical-brief.md", "reviews/spec-writer.json"]) {
+      if (existsSync(resolve(runDir, ref))) throw new Error(`checkpoint carry-forward must not synthesize ${ref}`);
+    }
+    const reuse = continuation.planning_reuse;
+    const authority = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true, requireApprovingReview: true });
+    if (authority.plan_ref !== reuse.plan_ref || authority.plan_hash !== reuse.plan_hash
+      || authority.review_ref !== reuse.review_ref || authority.review_hash !== reuse.review_hash) {
+      throw new Error("published checkpoint carry-forward work-decomposer authority is not exact");
+    }
+    return;
+  }
   const step = (run.steps || []).find((item) => item?.agent === "spec-writer");
   const reuse = continuation.planning_reuse;
   const expected = canonicalCarryForwardSpecStep(continuation);
@@ -2118,7 +2156,11 @@ function assertPublishedCarryForwardClaim(repo, continuation) {
     target_base_commit: continuation.target.base_commit, plan_ref: continuation.carry_forward.plan_ref,
     plan_hash: continuation.carry_forward.plan_hash, start_commit: continuation.carry_forward.start_commit,
   };
-  const claim = { schema_version: 2, kind: "blocked-run-continuation-claim", parent_identity: parentIdentity, child_run_id: continuation.target.run_id, child_branch_ref: `refs/heads/${continuation.target.branch}`, start_commit: continuation.carry_forward.start_commit };
+  const claim = {
+    schema_version: 2, kind: "blocked-run-continuation-claim", parent_identity: parentIdentity, child_run_id: continuation.target.run_id,
+    child_branch_ref: `refs/heads/${continuation.target.branch}`, start_commit: continuation.carry_forward.start_commit,
+    ...(Object.hasOwn(continuation, "checkpoint_source_hash") ? { checkpoint_source_hash: continuation.checkpoint_source_hash, configuration_hash: continuation.configuration_hash } : {}),
+  };
   const parentBytes = canonicalJsonBytes(parentIdentity);
   const claimBytes = canonicalJsonBytes(claim);
   const claimRef = `refs/opencode/continuations/${createHash("sha256").update(parentBytes).digest("hex")}`;
@@ -2316,8 +2358,24 @@ function normalizeContinuationRef(ref, rootName) {
 
 function assertContinuationPlanningReuse(parentFile, parentRun, continuation) {
   const parentDir = parentRunDir(parentFile);
-  const step = (parentRun.steps || []).find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
   const reuse = continuation.planning_reuse;
+  if (isCheckpointPlanningReuse(continuation)) {
+    const source = parentRun.checkpoint_source;
+    let authority;
+    try {
+      authority = observeAcceptedDecompositionAuthority(parentDir, parentRun, { requireIntegrationGate: true, requireApprovingReview: true });
+    } catch (error) {
+      throw new Error(`checkpoint continuation planning_reuse authority is stale: ${error.message}`);
+    }
+    if (reuse.eligible !== true || reuse.plan_ref !== authority.plan_ref || reuse.plan_hash !== authority.plan_hash
+      || reuse.review_ref !== authority.review_ref || reuse.review_hash !== authority.review_hash
+      || source?.child_plan_hash !== reuse.plan_hash || source?.child_disposition_hash !== reuse.review_hash) {
+      throw new Error("checkpoint continuation planning_reuse binding is stale or cross-checkpoint");
+    }
+    if (continuation.draft_spec_reuse !== undefined) throw new Error("checkpoint continuation cannot carry draft_spec_reuse");
+    return;
+  }
+  const step = (parentRun.steps || []).find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
   if (reuse?.eligible === true) {
     if (step?.status !== "accepted" || !isRecord(step.acceptance)) throw new Error("continuation planning_reuse parent acceptance is stale");
     if (reuse.spec_artifact_ref !== "artifacts/technical-brief.md" || (reuse.child_spec_review_ref && reuse.child_spec_review_ref !== "reviews/spec-writer.json")) throw new Error("continuation planning_reuse target refs are stale");
@@ -2502,7 +2560,7 @@ function assertDraftSpecReuseAttempt(run, step, priorStep) {
 
 function assertTestVerifierIntegrationGate(run, step, priorStep) {
   if (step?.agent !== "test-verifier") return;
-  if ((run.continuation?.schema_version === 2 || run.checkpoint?.kind === "delivery-checkpoint-child" || integrationConflictSlices(run).length > 0) && step.status === "accepted") {
+  if ((run.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.status === "accepted") {
     if (priorStep?.status !== "running" || !Number.isInteger(step.attempts) || step.attempts < 1 || step.attempts !== priorStep.attempts) {
       throw new Error("schema-v2 test-verifier acceptance must transition from running at the same positive attempt");
     }
@@ -2543,7 +2601,7 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
   if (!step) return null;
   delete step.acceptance;
   if (step.status !== "accepted") return null;
-  if ((run?.continuation?.schema_version === 2 || run?.checkpoint?.kind === "delivery-checkpoint-child" || integrationConflictSlices(run).length > 0) && step.agent === "test-verifier") {
+  if ((run?.continuation?.schema_version === 2 || integrationConflictSlices(run).length > 0) && step.agent === "test-verifier") {
     step.acceptance = observeV2TestVerifierAuthority(runDir, run, step, options).acceptance;
     return null;
   }
@@ -2561,8 +2619,8 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
     const review = resolveReviewRef(runDir, step.review_ref, { mustExist: true });
     const reviewHash = hashFile(review.path);
     const reviewValue = parseJsonObjectFile(review.path, "accepted work-decomposer review");
-    if (checkpoint && (reviewValue.subject !== "work-decomposer" || reviewValue.attempt !== step.attempts || reviewValue.verdict !== "APPROVE")) {
-      throw new Error("checkpoint work-decomposer acceptance requires an exact same-attempt APPROVE decomposition review");
+    if (checkpoint && (reviewValue.subject !== "work-decomposer" || reviewValue.attempt !== step.attempts || reviewValue.verdict !== "APPROVE-CHECKPOINT")) {
+      throw new Error("checkpoint work-decomposer acceptance requires an exact same-attempt APPROVE-CHECKPOINT decomposition review");
     }
     step.acceptance = {
       artifact_ref: PLAN_SLICES_REF,
@@ -2577,6 +2635,7 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
       attempt: step.attempts,
       review: reviewValue,
       admission_extension: planAuthority.admission_extension,
+      admission_probe: planAuthority.admission_probe,
       allow_unseeded_checkpoint: checkpoint,
     };
   }
@@ -2792,20 +2851,19 @@ export function readSlicesSeedPlan(runDir, from, options = {}) {
 }
 
 export function probeSlicesPlanAdmission(runDir, options = {}) {
-  const source = observePlanSourceAuthority(runDir, options.from, null, {
-    ...options,
-    enforceDependencyDepth: false,
-    requireIntegrationGate: true,
-  });
-  const admission = source.admission_extension;
-  if (admission.status !== "active" || !["admit", "checkpoint"].includes(admission.decision)) {
-    throw new Error("factory slices-probe requires an active delivery-envelope admission decision");
+  const observed = observePlanSourceBytes(runDir, options.from, options, "slice probe plan source");
+  try {
+    return validateObservedPlanSource(observed, null, {
+      ...options,
+      enforceDependencyDepth: false,
+      requireIntegrationGate: true,
+    }).admission_probe;
+  } catch (error) {
+    return buildInvalidDeliveryPlanAdmissionProbe({
+      planHash: observed.plan_hash,
+      errors: normalizeSlicesProbeErrors(error),
+    });
   }
-  return Object.freeze({
-    decision: admission.decision,
-    reasons: Object.freeze([...admission.reasons]),
-    plan_hash: source.plan_hash,
-  });
 }
 
 async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = {}) {
@@ -2819,6 +2877,7 @@ async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = 
       plan: seedPlanAuthority.plan,
       planHash: seedPlanAuthority.plan_hash,
       admissionResult: seedPlanAuthority.admission_extension,
+      admissionProbe: seedPlanAuthority.admission_probe,
       decompositionAuthority,
     });
     const artifact = checkpointRoutingArtifact(manifest);
@@ -2844,6 +2903,7 @@ async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = 
       ...terminalDraft,
       status: "blocked",
       updated_at: timestamp(options.now),
+      checkpoint_progress: initialCheckpointProgress(artifact),
       terminal_result: {
         status: "blocked",
         run_id: current.run_id,
@@ -2929,16 +2989,24 @@ function assertCheckpointRoutingReplay(runDir, run, authority, manifest, artifac
   }
   assertCheckpointRoutingAuthorityCurrent(runDir, run, authority, manifest, artifact, options);
   assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+  assertCheckpointProgressManifestBinding(run, artifact);
 }
 
 function assertCheckpointRoutingAuthorityCurrent(runDir, run, expected, manifest, artifact, options) {
   const current = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true, allowUnseededCheckpoint: true, requireApprovingReview: true });
   if (current.path !== expected.path || current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref
     || current.review_hash !== expected.review_hash || current.attempt !== expected.attempt
-    || !sameJson(current.review, expected.review) || !sameJson(current.admission_extension, expected.admission_extension)) {
+    || !sameJson(current.review, expected.review) || !sameJson(current.admission_extension, expected.admission_extension)
+    || !sameJson(current.admission_probe, expected.admission_probe)) {
     throw new Error("checkpoint routing plan authority changed before publication");
   }
-  const rebuilt = buildCheckpointRoutingManifest({ plan: current.plan, planHash: current.plan_hash, admissionResult: current.admission_extension, decompositionAuthority: current });
+  const rebuilt = buildCheckpointRoutingManifest({
+    plan: current.plan,
+    planHash: current.plan_hash,
+    admissionResult: current.admission_extension,
+    admissionProbe: current.admission_probe,
+    decompositionAuthority: current,
+  });
   const rebuiltArtifact = checkpointRoutingArtifact(rebuilt);
   if (!sameJson(rebuilt, manifest) || !sameJson(rebuiltArtifact, artifact)) {
     throw new Error("checkpoint routing manifest changed before publication");
@@ -2964,25 +3032,237 @@ function checkpointRoutingResult(run, manifest, artifact, updated) {
   };
 }
 
+function initialCheckpointProgress(artifact) {
+  return {
+    schema_version: 1,
+    kind: "delivery-checkpoint-progress",
+    manifest_ref: artifact.ref,
+    manifest_hash: artifact.hash,
+    status: "active",
+    entries: [],
+    final_closure: null,
+  };
+}
+
+export function transitionCheckpointProgressReserved(runDir, entry, options = {}) {
+  return transitionCheckpointProgressEntry(runDir, entry, "reserved", null, options);
+}
+
+export function transitionCheckpointProgressChildPublished(runDir, entry, options = {}) {
+  return transitionCheckpointProgressEntry(runDir, entry, "child-published", "reserved", options);
+}
+
+export function transitionCheckpointProgressLaunched(runDir, entry, options = {}) {
+  return transitionCheckpointProgressEntry(runDir, entry, "launched", "child-published", options);
+}
+
+export function transitionCheckpointProgressMerged(runDir, entry, options = {}) {
+  return transitionCheckpointProgressEntry(runDir, entry, "merged", "launched", options);
+}
+
+export async function transitionCheckpointProgressClosed(runDir, finalClosure, options = {}) {
+  const requested = cloneJson(finalClosure);
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const authority = observeCheckpointProgressParentAuthority(runDir, current);
+    const progress = current.checkpoint_progress;
+    if (progress.status === "closed") {
+      if (!sameJson(progress.final_closure, requested)) throw new Error("checkpoint progress closure conflicts with the already closed parent");
+      return checkpointProgressTransitionResult(current, false, "closed");
+    }
+    if (progress.status !== "active" || progress.final_closure !== null) throw new Error("checkpoint progress can close only from active state");
+    if (progress.entries.length !== authority.manifest.checkpoints.length
+      || progress.entries.some((entry) => entry.state !== "merged")) {
+      throw new Error("checkpoint progress closure requires every manifest checkpoint to be merged");
+    }
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: timestamp(options.now),
+      checkpoint_progress: { ...cloneJson(progress), status: "closed", final_closure: requested },
+    });
+    await writeCheckpointProgressRun(runDir, current, next, authority, options);
+    return checkpointProgressTransitionResult(next, true, "closed");
+  }, options);
+}
+
+async function transitionCheckpointProgressEntry(runDir, input, targetState, priorState, options) {
+  const requested = cloneJson(input);
+  if (!isRecord(requested) || requested.state !== targetState) {
+    throw new Error(`checkpoint progress ${targetState} transition requires a complete '${targetState}' entry`);
+  }
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const authority = observeCheckpointProgressParentAuthority(runDir, current);
+    const progress = current.checkpoint_progress;
+    if (progress.status !== "active" || progress.final_closure !== null) throw new Error("closed checkpoint progress cannot be mutated");
+    const ordinal = requested.ordinal;
+    if (!Number.isInteger(ordinal) || ordinal < 1) throw new Error("checkpoint progress entry ordinal must be a positive integer");
+    const manifestCheckpoint = authority.manifest.checkpoints[ordinal - 1];
+    if (!manifestCheckpoint || manifestCheckpoint.id !== requested.checkpoint_id || manifestCheckpoint.ordinal !== ordinal) {
+      throw new Error("checkpoint progress entry does not match its manifest checkpoint");
+    }
+    if (["child-published", "launched", "merged"].includes(targetState)
+      && (requested.child_plan_hash !== manifestCheckpoint.child_plan_hash || requested.brief_scope_hash !== manifestCheckpoint.brief_scope_hash)) {
+      throw new Error("checkpoint progress entry plan facts do not match the manifest checkpoint");
+    }
+
+    const existing = progress.entries[ordinal - 1];
+    if (targetState === "reserved") {
+      if (existing) {
+        if (existing.state === targetState && sameJson(existing, requested)) return checkpointProgressTransitionResult(current, false, targetState, ordinal);
+        throw new Error(`checkpoint progress '${requested.checkpoint_id}' reservation conflicts with existing state '${existing.state}'`);
+      }
+      if (ordinal !== progress.entries.length + 1 || progress.entries.some((entry) => entry.state !== "merged")) {
+        throw new Error("checkpoint progress reservations must be contiguous after merged predecessors");
+      }
+    } else {
+      if (!existing) throw new Error(`checkpoint progress cannot skip directly to '${targetState}'`);
+      if (existing.state === targetState) {
+        if (sameJson(existing, requested)) return checkpointProgressTransitionResult(current, false, targetState, ordinal);
+        throw new Error(`checkpoint progress '${requested.checkpoint_id}' ${targetState} replay conflicts with persisted facts`);
+      }
+      if (existing.state !== priorState) {
+        throw new Error(`checkpoint progress cannot transition '${existing.state}' -> '${targetState}'`);
+      }
+      assertCheckpointProgressFactsRetained(existing, requested);
+    }
+
+    const entries = cloneJson(progress.entries);
+    if (targetState === "reserved") entries.push(requested);
+    else entries[ordinal - 1] = requested;
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: timestamp(options.now),
+      checkpoint_progress: { ...cloneJson(progress), entries },
+    });
+    await writeCheckpointProgressRun(runDir, current, next, authority, options);
+    return checkpointProgressTransitionResult(next, true, targetState, ordinal);
+  }, options);
+}
+
+function assertCheckpointProgressFactsRetained(current, requested) {
+  for (const [key, value] of Object.entries(current)) {
+    if (key !== "state" && !sameJson(value, requested[key])) {
+      throw new Error(`checkpoint progress field '${key}' is immutable once recorded`);
+    }
+  }
+}
+
+function observeCheckpointProgressParentAuthority(runDir, run) {
+  const terminal = run.terminal_result;
+  const artifactKeys = isRecord(terminal?.artifacts) ? Object.keys(terminal.artifacts) : [];
+  if (run.status !== "blocked" || terminal?.status !== "blocked" || terminal?.run_id !== run.run_id
+    || terminal?.reason !== CHECKPOINT_ROUTING_TERMINAL_REASON || run.pr_url != null || terminal.pr_url !== null
+    || artifactKeys.length !== 1 || artifactKeys[0] !== "checkpoint_routing") {
+    throw new Error("checkpoint progress requires the exact blocked routing parent terminal authority");
+  }
+  const progress = run.checkpoint_progress;
+  const manifestRef = terminal.artifacts.checkpoint_routing;
+  if (!isRecord(progress) || progress.manifest_ref !== manifestRef) throw new Error("checkpoint progress manifest binding is stale");
+  const resolved = resolveArtifactRef(runDir, manifestRef);
+  const identity = lstatSync(resolved.path);
+  if (identity.isSymbolicLink() || !identity.isFile()) throw new Error("checkpoint progress manifest must be a regular file");
+  const manifestHash = hashFile(resolved.path, { mode: "raw" });
+  const artifact = { ref: manifestRef, hash: manifestHash };
+  assertCheckpointProgressManifestBinding(run, artifact);
+  const manifest = parseJsonObjectFile(resolved.path, "checkpoint progress manifest");
+  if (manifest.kind !== CHECKPOINT_ROUTING_KIND || !Array.isArray(manifest.checkpoints) || manifest.checkpoints.length === 0) {
+    throw new Error("checkpoint progress manifest is not a checkpoint routing manifest");
+  }
+  return { run: cloneJson(run), artifact, manifest: cloneJson(manifest) };
+}
+
+function assertCheckpointProgressManifestBinding(run, artifact) {
+  const progress = run.checkpoint_progress;
+  if (!isRecord(progress) || progress.manifest_ref !== artifact.ref || progress.manifest_hash !== artifact.hash) {
+    throw new Error("checkpoint progress does not bind the exact routing manifest");
+  }
+}
+
+async function writeCheckpointProgressRun(runDir, current, next, authority, options) {
+  await writeProtectedRunJson(runDir, next, options, async () => {
+    await options.checkpointProgressHooks?.beforeReplace?.({ current: cloneJson(current), next: cloneJson(next) });
+    const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+    if (!sameJson(observed, current)) throw new Error("checkpoint parent authority changed before progress publication");
+    const observedAuthority = observeCheckpointProgressParentAuthority(runDir, observed);
+    if (!sameJson(observedAuthority.artifact, authority.artifact) || !sameJson(observedAuthority.manifest, authority.manifest)) {
+      throw new Error("checkpoint parent manifest authority changed before progress publication");
+    }
+  });
+}
+
+function checkpointProgressTransitionResult(run, updated, state, ordinal = null) {
+  return {
+    updated,
+    status: run.status,
+    progress_status: run.checkpoint_progress.status,
+    state,
+    ordinal,
+    run,
+    checkpoint_progress: cloneJson(run.checkpoint_progress),
+  };
+}
+
 function observePlanSourceAuthority(runDir, from, slices, options = {}) {
+  return validateObservedPlanSource(observePlanSourceBytes(runDir, from, options, "slice seed plan source"), slices, options);
+}
+
+function observePlanSourceBytes(runDir, from, options, label) {
   if (from !== PLAN_SLICES_REF) throw new Error(`exact run-relative plan source '${PLAN_SLICES_REF}' is required`);
   const expectedRepo = resolve(runDir, "../../..");
   if (stringValue(options.repoRoot) && resolve(options.repoRoot) !== expectedRepo) throw new Error("slice seed repoRoot does not own the target run directory");
-  const planPath = resolveExactPlanSlicesFile(runDir, from, "slice seed plan source");
+  const planPath = resolveExactPlanSlicesFile(runDir, from, label);
   const bytes = readFileSync(planPath);
+  return { path: planPath, plan_bytes: bytes, plan_hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+}
+
+function validateObservedPlanSource(source, slices, options = {}) {
+  const bytes = source.plan_bytes;
   const plan = parseSlicesPlanBytes(bytes, {
     label: PLAN_SLICES_REF,
     enforceDependencyDepth: options.enforceDependencyDepth !== false,
     requireIntegrationGate: options.requireIntegrationGate === true,
   });
   const admissionExtension = validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan }));
+  const admissionProbe = buildDeliveryPlanAdmissionProbe({ plan, planHash: source.plan_hash, admissionResult: admissionExtension });
   if (slices) assertPlanSlicesMatch(plan, slices, { requirePendingProjection: options.requirePendingProjection === true });
-  return { path: planPath, plan, plan_bytes: bytes, plan_hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`, admission_extension: admissionExtension };
+  return { ...source, plan, admission_extension: admissionExtension, admission_probe: admissionProbe };
+}
+
+function normalizeSlicesProbeErrors(error) {
+  const source = Array.isArray(error?.errors) && error.errors.length > 0
+    ? error.errors
+    : [slicesProbeError(error)];
+  const normalized = source.map((item) => ({ path: String(item.path), message: String(item.message) }));
+  normalized.sort((left, right) => compareProbeErrorText(left.path, right.path) || compareProbeErrorText(left.message, right.message));
+  return normalized.filter((item, index) => index === 0
+    || item.path !== normalized[index - 1].path || item.message !== normalized[index - 1].message);
+}
+
+function compareProbeErrorText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function slicesProbeError(error) {
+  const message = typeof error?.message === "string" && error.message.length > 0 ? error.message : "plan validation failed";
+  if (message.startsWith(`${PLAN_SLICES_REF} must be valid JSON:`)) {
+    return { path: PLAN_SLICES_REF, message: "must be valid JSON" };
+  }
+  if (message === `${PLAN_SLICES_REF} must contain valid UTF-8`) {
+    return { path: PLAN_SLICES_REF, message: "must contain valid UTF-8" };
+  }
+  return {
+    path: /checkpoint/iu.test(message) ? "plan.delivery_envelope.checkpoint_plan" : "plan",
+    message,
+  };
 }
 
 function assertSeedPlanAuthorityCurrent(runDir, projection, options, expected) {
   const current = observePlanSourceAuthority(runDir, options.from, projection, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true, requirePendingProjection: true });
-  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash || !sameJson(current.admission_extension, expected.admission_extension)) throw new Error("slice seed plan authority changed before run.json publication");
+  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash
+    || !sameJson(current.admission_extension, expected.admission_extension) || !sameJson(current.admission_probe, expected.admission_probe)) {
+    throw new Error("slice seed plan authority changed before run.json publication");
+  }
 }
 
 export function observeAcceptedDecompositionAuthority(runDir, run, options = {}) {
@@ -3008,8 +3288,11 @@ export function observeAcceptedDecompositionAuthority(runDir, run, options = {})
   const reviewHash = hashFile(review.path);
   if (reviewHash !== step.acceptance.review_hash) throw new Error("accepted work-decomposer review bytes changed after acceptance");
   const reviewValue = parseJsonObjectFile(review.path, "accepted work-decomposer review");
+  const approvingVerdicts = source.admission_extension.decision === "checkpoint"
+    ? new Set(["APPROVE", "APPROVE-CHECKPOINT"])
+    : new Set(["APPROVE"]);
   if (options.requireApprovingReview === true
-    && (reviewValue.subject !== "work-decomposer" || reviewValue.attempt !== step.attempts || reviewValue.verdict !== "APPROVE")) {
+    && (reviewValue.subject !== "work-decomposer" || reviewValue.attempt !== step.attempts || !approvingVerdicts.has(reviewValue.verdict))) {
     throw new Error("accepted work-decomposer review must be an exact same-attempt APPROVE decomposition review");
   }
   return { ...source, plan_ref: PLAN_SLICES_REF, attempt: step.attempts, attempts: step.attempts, review_ref: step.review_ref, review_hash: reviewHash, review: reviewValue };
@@ -3022,7 +3305,7 @@ function assertAcceptedDecompositionAuthorityCurrent(runDir, run, expected) {
   });
   if (current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref || current.review_hash !== expected.review_hash
     || current.attempt !== expected.attempt || !sameJson(current.review, expected.review)
-    || !sameJson(current.admission_extension, expected.admission_extension)) {
+    || !sameJson(current.admission_extension, expected.admission_extension) || !sameJson(current.admission_probe, expected.admission_probe)) {
     throw new Error("accepted work-decomposer plan authority changed before run.json publication");
   }
 }
@@ -3115,7 +3398,6 @@ export async function heartbeatOnce(runDir, { now } = {}, options = {}) {
 
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
-    assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     if (isRecord(current.steering?.pr_fence)) throw new Error("heartbeat tick rejected: active pre-PR fence");
     if (TERMINAL_RUN_STATUSES.has(current.status)) return { updated: false, reason: "terminal-status", status: current.status, run: current };
@@ -3140,7 +3422,6 @@ export function hasInFlightHeartbeatWork(run) {
 
 async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}) {
   const current = await readRunJson(runDir);
-  assertCheckpointLocalPublishedAuthority(runDir, current, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
   assertExpectedCurrentHash(current, options.expectedCurrentHash);
   assertRunJsonWriterAllowed(current, "run.json transition", { allowPrePrFence: hooks.prCreated === true });
   const v2AdmissionAuthority = assertV2LocalPublishedAuthority(runDir, current, options);
@@ -3281,6 +3562,7 @@ function observeV2ParentAuthority(runDir, run, options = {}) {
 }
 
 function canonicalCarryForwardSpecStep(continuation) {
+  if (isCheckpointPlanningReuse(continuation)) return null;
   const reuse = continuation.planning_reuse;
   return {
     agent: "spec-writer", status: "accepted", attempts: 0, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
@@ -3291,17 +3573,23 @@ function canonicalCarryForwardSpecStep(continuation) {
 
 function assertV2ImmutablePublicationTransition(current, next) {
   if (current.continuation?.schema_version !== 2) return;
-  for (const key of ["continuation", "mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries"]) {
+  for (const key of ["continuation", "mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "review_tier", "checkpoint_source"]) {
     if (!sameJson(current[key], next[key])) throw new Error(`schema-v2 publication field '${key}' is immutable`);
   }
   if (!sameJson(current.post_pr?.policy, next.post_pr?.policy)) throw new Error("schema-v2 publication field 'post_pr.policy' is immutable");
   const canonical = canonicalCarryForwardSpecStep(current.continuation);
   const currentSpec = (current.steps || []).find((step) => step?.agent === "spec-writer");
   const nextSpec = (next.steps || []).find((step) => step?.agent === "spec-writer");
-  if (!sameJson(currentSpec, canonical) || !sameJson(nextSpec, canonical)) throw new Error("schema-v2 carry-forward spec-writer projection is immutable");
+  if (canonical === null) {
+    if (currentSpec !== undefined || nextSpec !== undefined) throw new Error("checkpoint schema-v2 carry-forward cannot fabricate a spec-writer projection");
+  } else if (!sameJson(currentSpec, canonical) || !sameJson(nextSpec, canonical)) throw new Error("schema-v2 carry-forward spec-writer projection is immutable");
   const currentDecomposition = (current.steps || []).find((step) => step?.agent === "work-decomposer");
   const nextDecomposition = (next.steps || []).find((step) => step?.agent === "work-decomposer");
   if (!isRecord(currentDecomposition) || !sameJson(currentDecomposition, nextDecomposition)) throw new Error("schema-v2 accepted work-decomposer projection is immutable");
+}
+
+function isCheckpointPlanningReuse(continuation) {
+  return Object.hasOwn(continuation || {}, "checkpoint_source_hash") && Object.hasOwn(continuation?.planning_reuse || {}, "plan_ref");
 }
 
 function assertRunIdentityTransition(current, next) {
@@ -3348,34 +3636,20 @@ function assertScopedAuthorityTransitions(current, next, hooks = {}) {
 }
 
 async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace = null) {
-  const checkpointCurrent = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
-  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(
-    runDir,
-    checkpointCurrent,
-    options,
-    null,
-    CHECKPOINT_GENERIC_MUTATION_STATES,
-  );
   const assertSpecialDispatches = options.allowUnresolvedSpecialDispatch === true ? null : () => {
     const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
     if (options.allowPendingSpecialDispatch === true) assertNoUnresolvedSpecialBuilderDispatches(runDir, current);
     else assertNoPendingSpecialBuilderDispatches(runDir, current);
   };
   if (assertSpecialDispatches) assertSpecialDispatches();
-  const assertCheckpointAuthority = checkpointAuthority ? () => {
-    const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
-    assertCheckpointLocalPublishedAuthority(runDir, observed, options, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
-  } : null;
-  const protectedBeforeReplace = beforeReplace || assertSpecialDispatches || assertCheckpointAuthority ? () => {
+  const protectedBeforeReplace = beforeReplace || assertSpecialDispatches ? () => {
     if (beforeReplace) {
       const observed = beforeReplace();
       if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => {
         assertSpecialDispatches?.();
-        assertCheckpointAuthority?.();
       });
     }
     if (assertSpecialDispatches) assertSpecialDispatches();
-    if (assertCheckpointAuthority) assertCheckpointAuthority();
   } : null;
   const fsOps = typeof protectedBeforeReplace === "function"
     ? {
@@ -3390,14 +3664,6 @@ async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace =
 }
 
 async function writeSemanticRunJson(runDir, next, options = {}, expected = null, beforeReplace = null) {
-  const checkpointCurrent = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
-  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(
-    runDir,
-    checkpointCurrent,
-    options,
-    null,
-    CHECKPOINT_GENERIC_MUTATION_STATES,
-  );
   const authority = assertV2LocalPublishedAuthority(runDir, next, options, expected);
   const assertTerminalDispatches = TERMINAL_RUN_STATUSES.has(next.status) ? () => {
     const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
@@ -3408,13 +3674,9 @@ async function writeSemanticRunJson(runDir, next, options = {}, expected = null,
     runDir,
     next,
     options,
-    authority || checkpointAuthority || beforeReplace || assertTerminalDispatches ? () => {
+    authority || beforeReplace || assertTerminalDispatches ? () => {
       if (beforeReplace) beforeReplace();
       if (authority) assertV2LocalPublishedAuthority(runDir, next, options, authority);
-      if (checkpointAuthority) {
-        const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
-        assertCheckpointLocalPublishedAuthority(runDir, observed, options, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
-      }
       if (assertTerminalDispatches) assertTerminalDispatches();
     } : null,
   );
@@ -4407,71 +4669,11 @@ function assertPrCreatedSliceState(runDir, run) {
   });
 }
 
-export function assertCheckpointLocalPublishedAuthority(runDir, run, options = {}, expected = null, allowedStates = CHECKPOINT_GENERIC_MUTATION_STATES) {
-  if (run?.checkpoint?.kind !== "delivery-checkpoint-child") return null;
-  if (!Array.isArray(allowedStates) || allowedStates.length === 0
-    || allowedStates.some((state) => !["reserved", "launching", "launched", "unknown"].includes(state))) {
-    throw new Error("checkpoint child authority requires explicit recognized allowed states");
-  }
-  const binding = validateCheckpointChildBinding(run.checkpoint, { runId: run.run_id });
-  const repository = resolve(runDir, "../../..");
-  if (resolve(runDir) !== resolve(directFactoryRoot(repository), binding.child_run_id)) throw new Error("checkpoint child run directory differs from its reserved identity");
-  if (run.base_ref !== binding.base_ref || run.base_commit !== binding.base_commit || run.branch !== binding.child_run_id || run.continuation != null) {
-    throw new Error("checkpoint child base/branch/continuation identity is stale");
-  }
-  const childRef = `refs/opencode/checkpoint-targets/${createHash("sha256").update(binding.child_run_id, "utf8").digest("hex")}`;
-  const routeRef = `refs/opencode/checkpoint-routes/${createHash("sha256").update(`${binding.parent_run_id}\0${binding.checkpoint_id}`, "utf8").digest("hex")}`;
-  const child = authorityGit(options, repository, ["rev-parse", "--verify", childRef]);
-  const route = authorityGit(options, repository, ["rev-parse", "--verify", routeRef]);
-  if (!child.ok || !route.ok || child.stdout.trim() !== route.stdout.trim()) throw new Error("checkpoint child reservation refs are missing or cross-bound");
-  const claimBlob = authorityGit(options, repository, ["cat-file", "blob", child.stdout.trim()]);
-  if (!claimBlob.ok) throw new Error("checkpoint child reservation claim is unreadable");
-  const claim = validateCheckpointReservationClaim(JSON.parse(claimBlob.stdout), { expectedBinding: binding });
-  if (!allowedStates.includes(claim.state)) {
-    throw new Error(`checkpoint child mutation requires reservation state ${allowedStates.join(" or ")}, found ${claim.state}`);
-  }
-  if (resolve(run.worktree || "") !== resolve(claim.worktree)) throw new Error(`checkpoint child run.worktree differs from its exact reservation worktree: ${resolve(run.worktree || "")} != ${resolve(claim.worktree)}`);
-  const branch = authorityGit(options, repository, ["rev-parse", "--verify", `refs/heads/${binding.child_run_id}^{commit}`]);
-  const head = branch.ok ? branch.stdout.trim() : "";
-  if (!/^[0-9a-f]{40}$/u.test(head) || !authorityGit(options, repository, ["merge-base", "--is-ancestor", binding.base_commit, head]).ok) {
-    throw new Error("checkpoint child branch no longer descends from its exact reserved base");
-  }
-  const worktree = checkWorktreeIdentity(repository, claim.worktree, { branch: binding.child_run_id, head }, options.gitOptions || {});
-  if (!worktree.ok) throw new Error(`checkpoint child registered reservation worktree is stale: ${worktree.reason}`);
-  const worktreeHead = authorityGit(options, claim.worktree, ["rev-parse", "--verify", "HEAD^{commit}"]);
-  if (!worktreeHead.ok || worktreeHead.stdout.trim() !== head) throw new Error("checkpoint child worktree HEAD differs from its exact branch");
-  const parentPath = resolve(repository, binding.parent_run_ref);
-  const manifestPath = resolve(dirname(parentPath), binding.manifest_ref);
-  assertNoSymlinkPath(repository, parentPath, "checkpoint parent run");
-  assertNoSymlinkPath(repository, manifestPath, "checkpoint routing manifest");
-  if (hashFile(parentPath) !== binding.parent_run_hash || hashFile(manifestPath) !== binding.manifest_hash) throw new Error("checkpoint child parent/manifest binding is stale");
-  const manifest = parseJsonObjectFile(manifestPath, "checkpoint routing manifest");
-  if (manifest.kind !== CHECKPOINT_ROUTING_KIND) throw new Error("checkpoint routing manifest discriminator is stale");
-  const selected = manifest.checkpoints?.find((candidate) => candidate?.id === binding.checkpoint_id && candidate.ordinal === binding.checkpoint_ordinal);
-  const commands = selected?.request?.integration_test_verifier?.required_commands;
-  if (!selected || !Array.isArray(commands) || commands.length === 0) throw new Error("checkpoint selected manifest request has no integration test authority");
-  const observed = {
-    binding_hash: hashValue(binding),
-    reservation_oid: child.stdout.trim(),
-    reservation: cloneJson(claim),
-    parent_hash: binding.parent_run_hash,
-    manifest_hash: binding.manifest_hash,
-    request: cloneJson(selected.request),
-    commands: cloneJson(commands),
-    branch: binding.child_run_id,
-    worktree: worktree.worktree,
-    head,
-  };
-  if (expected && !sameJson(observed, expected)) throw new Error("checkpoint child local authority changed before publication");
-  return observed;
-}
-
 export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, policy = {}) {
   const continuationEligible = run?.continuation?.schema_version === 2 && run.continuation.kind === "blocked-run-continuation";
-  const checkpointEligible = run?.checkpoint?.schema_version === 1 && run.checkpoint.kind === "delivery-checkpoint-child";
   const conflicts = integrationConflictSlices(run);
   const conflictEligible = conflicts.length > 0;
-  if (!continuationEligible && !checkpointEligible && !conflictEligible) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2/checkpoint child or delegated integration conflict");
+  if (!continuationEligible && !conflictEligible) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires an exact published schema-v2 child or delegated integration conflict");
   const repository = resolve(runDir, "../../..");
   const target = run.continuation?.target;
   if (resolve(runDir) !== resolve(directFactoryRoot(repository), run.run_id)
@@ -4481,7 +4683,6 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
   if (run.status !== "running" && !(policy.allowTerminalCompleted === true && run.status === "completed")) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
   if (policy.skipLocalAuthority !== true) {
     if (continuationEligible) assertV2LocalPublishedAuthority(runDir, run, options);
-    if (checkpointEligible) assertCheckpointLocalPublishedAuthority(runDir, run, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     if (conflictEligible) assertSliceIntegrationConflictsCurrent(runDir, run, options);
   }
   const step = uniqueTestVerifierStep(run);
@@ -4510,9 +4711,7 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
     plan_ref: PLAN_SLICES_REF,
     plan_hash: decomposition.plan_hash,
     plan_bytes: decomposition.plan_bytes.toString("base64"),
-    commands: checkpointEligible
-      ? assertCheckpointLocalPublishedAuthority(runDir, run, options, null, CHECKPOINT_GENERIC_MUTATION_STATES).commands
-      : cloneJson(decomposition.plan.integration_gate.required_commands),
+    commands: cloneJson(decomposition.plan.integration_gate.required_commands),
     decomposition_review_ref: decomposition.review_ref,
     decomposition_review_hash: decomposition.review_hash,
     branch: integration.branch,
@@ -4602,8 +4801,8 @@ function testExecutionError(code, message) {
 }
 
 function assertV2FreshDownstreamAuthority(runDir, run, sink, expected = null) {
-  if (run.continuation?.schema_version !== 2 && run.checkpoint?.kind !== "delivery-checkpoint-child") return null;
-  const route = run.checkpoint?.kind === "delivery-checkpoint-child" ? "checkpoint" : "schema-v2";
+  if (run.continuation?.schema_version !== 2) return null;
+  const route = "schema-v2";
   const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
   if (incomplete.length) throw new Error(`${route} downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
   const step = (run.steps || []).find((candidate) => candidate?.agent === "test-verifier");
@@ -4632,8 +4831,7 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
   if (step.evidence_ref !== checked.claim.receipt_ref || hashFile(evidence.path, { mode: "raw" }) !== checked.receipt_hash || !sameJson(evidenceValue, checked.receipt)) throw new Error("schema-v2 test-verifier evidence must be the exact completed checked receipt");
   if (checked.claim.status !== "pass" || evidenceValue.status !== "pass" || evidenceValue.review_ready !== true) throw new Error("schema-v2 test-verifier acceptance requires a completed passing checked receipt");
   const planAuthority = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
-  const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, options, null, CHECKPOINT_GENERIC_MUTATION_STATES);
-  const expectedCommands = checkpointAuthority?.commands ?? planAuthority.plan.integration_gate.required_commands;
+  const expectedCommands = planAuthority.plan.integration_gate.required_commands;
   if (evidenceValue.commands.length !== expectedCommands.length || evidenceValue.commands.some((result, index) => result.program !== expectedCommands[index].program || !sameJson(result.args, expectedCommands[index].args) || result.status !== "pass")) throw new Error("schema-v2 test-verifier receipt commands must exactly pass every accepted plan command in order");
   if (evidenceValue.head_sha !== integration.head) throw new Error("schema-v2 test-verifier evidence head_sha must equal the current clean child branch/worktree HEAD");
   if (reviewValue.subject !== "test-verifier" || reviewValue.attempt !== step.attempts || String(reviewValue.verdict || "").toUpperCase() !== "APPROVE") {
@@ -4653,30 +4851,8 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
   };
 }
 
-export function assertCompletedCheckpointChildAuthority(runDir, run, options = {}) {
-  if (run?.status !== "completed" || run.terminal_result?.status !== "completed" || run.checkpoint?.kind !== "delivery-checkpoint-child") {
-    throw new Error("checkpoint predecessor requires a completed checkpoint child terminal result");
-  }
-  const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
-  if ((run.slices || []).length === 0 || incomplete.length > 0) throw new Error(`checkpoint predecessor requires all slices merged through the full normal pipeline${incomplete.length ? `: ${incomplete.join(", ")}` : ""}`);
-  const step = uniqueTestVerifierStep(run);
-  if (!step || step.status !== "accepted" || !Number.isInteger(step.attempts) || step.attempts < 1 || !isRecord(step.acceptance)) {
-    throw new Error("checkpoint predecessor requires fresh accepted test-verifier authority");
-  }
-  const testAuthority = observeV2TestVerifierAuthority(runDir, run, step, { ...options, allowTerminalCompleted: true });
-  if (!sameJson(step.acceptance, testAuthority.acceptance)) throw new Error("checkpoint predecessor test-verifier acceptance bytes or head are stale");
-  if (run.gates?.pre_pr?.status !== "approved") throw new Error("checkpoint predecessor requires Gate 3 pre_pr approval");
-  if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
-    throw new Error("checkpoint predecessor requires exact-head validator and security approval");
-  }
-  const panels = assertPanelReviewBindingsCurrent(runDir, run);
-  const slices = assertPrCreatedSliceState(runDir, run);
-  if (run.terminal_result.head_sha !== testAuthority.integration.head) throw new Error("checkpoint predecessor terminal PR head is stale");
-  return { test: testAuthority, panels, slices, head_sha: testAuthority.integration.head };
-}
-
 function assertV2PrePrGateAuthority(runDir, run, sink, expected = null) {
-  if (run.continuation?.schema_version !== 2 && run.checkpoint?.kind !== "delivery-checkpoint-child") return null;
+  if (run.continuation?.schema_version !== 2) return null;
   const freshTestAuthority = assertV2FreshDownstreamAuthority(runDir, run, sink);
   if (!PASSING_VALIDATOR_VERDICTS.has(run.validator?.verdict) || !PASSING_SECURITY_VERDICTS.has(run.security_review?.verdict)) {
     throw new Error(`schema-v2 pre-PR gate requires fresh passing child panels before ${sink}`);
@@ -5184,7 +5360,6 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
   if (dirname(runDir) !== factoryRoot) throw new Error("slice builder Task dispatch run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
-    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     if (run.run_id !== request.run_id || run.status !== "running") throw new Error("slice builder Task dispatch requires the exact current running run");
     const slice = (run.slices || []).find((candidate) => candidate?.id === request.slice_id);
@@ -5313,10 +5488,6 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
       const publication = await publishDispatchRecord(runDir, claimRef, claim, {
         hooks: options.sliceDispatchClaimAtomicWriteHooks,
         beforeCommit: () => {
-          if (checkpointAuthority) {
-            const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
-            assertCheckpointLocalPublishedAuthority(runDir, currentRun, { ...options, repoRoot: repository }, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
-          }
           assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
         },
         existsMessage: "slice builder Task dispatch is already claimed for this exact run/slice/attempt",
@@ -5366,7 +5537,6 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
   if (dirname(runDir) !== factoryRoot) throw new Error("special builder Task dispatch run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
-    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     if (run.run_id !== request.run_id || run.status !== "running") throw new Error("special builder Task dispatch requires the exact current running run");
@@ -5475,10 +5645,6 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
         ...(request.route === "integration-conflict" ? integrationConflictClaimFields(authority.conflict) : {}),
       };
       const assertPublicationAuthority = () => {
-        if (checkpointAuthority) {
-          const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
-          assertCheckpointLocalPublishedAuthority(runDir, currentRun, { ...options, repoRoot: repository }, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
-        }
         assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
       };
       const publication = await publishDispatchRecord(runDir, claimRef, claim, {
@@ -5509,7 +5675,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
           const binding = current?.special_builder_dispatch;
           return binding?.claim_ref === claimRef && binding?.claim_hash === claimHash;
         });
-        throwCheckpointPublicationCause(error);
+        throw error;
       }
     }
     return context;
@@ -5525,7 +5691,6 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
   const runDir = resolve(directFactoryRoot(repository), request.run_id);
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
-    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     const observed = observeSpecialDispatchClaim(runDir, request.claim_ref);
     if (observed.hash !== request.claim_hash || observed.claim.run_id !== run.run_id || observed.claim.route !== request.route || observed.claim.agent !== request.agent) {
@@ -5578,12 +5743,6 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
     const publication = await publishDispatchRecord(runDir, observed.claim.closure_ref, closure, {
       hooks: options.specialDispatchClosureAtomicWriteHooks,
       allowExisting: true,
-      beforeCommit: () => {
-        if (checkpointAuthority) {
-          const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
-          assertCheckpointLocalPublishedAuthority(runDir, currentRun, { ...options, repoRoot: repository }, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
-        }
-      },
     });
     const closed = observeClosedSpecialDispatch(runDir, observed);
     if (closed.completion_head !== completionHead) throw new Error("special builder Task completion conflicts with a closure for another HEAD");
@@ -6175,7 +6334,6 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
   if (dirname(runDir) !== factoryRoot) throw new Error("slice builder Task completion run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
-    const checkpointAuthority = assertCheckpointLocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository }, null, CHECKPOINT_GENERIC_MUTATION_STATES);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     if (run.status !== "running" || run.run_id !== request.run_id) throw new Error("slice builder Task completion requires the exact running run");
     const slice = (run.slices || []).find((candidate) => candidate?.id === request.slice_id);
@@ -6216,12 +6374,6 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
     const publication = await publishDispatchRecord(runDir, observed.claim.closure_ref, closure, {
       hooks: options.sliceDispatchClosureAtomicWriteHooks,
       allowExisting: true,
-      beforeCommit: () => {
-        if (checkpointAuthority) {
-          const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
-          assertCheckpointLocalPublishedAuthority(runDir, currentRun, { ...options, repoRoot: repository }, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
-        }
-      },
     });
     if (!publication.created) {
       const existing = observeClosedSliceDispatch(runDir, observed);
@@ -6340,10 +6492,9 @@ function publicationBeforeCommitHooks(value) {
   return hooks;
 }
 
-function assertSteeringMutationAuthority(runDir, expectedRun, options, checkpointAuthority, v2Authority) {
+function assertSteeringMutationAuthority(runDir, expectedRun, options, v2Authority) {
   const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
   if (!sameJson(current, expectedRun)) throw new Error("steering run authority changed during sidecar mutation");
-  if (checkpointAuthority) assertCheckpointLocalPublishedAuthority(runDir, current, options, checkpointAuthority, CHECKPOINT_GENERIC_MUTATION_STATES);
   if (v2Authority) assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
 }
 
@@ -6384,11 +6535,6 @@ async function restoreOwnedSteeringSidecarMove(moved) {
   if (restored.dev !== moved.dev || restored.ino !== moved.ino || hashFile(moved.sourcePath, { mode: "raw" }) !== moved.hash) {
     throw new Error("steering rollback could not verify the restored pending sidecar");
   }
-}
-
-function throwCheckpointPublicationCause(error) {
-  if (/checkpoint child (?:mutation|reservation|local authority)/u.test(error?.cause?.message || "")) throw error.cause;
-  throw error;
 }
 
 function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expectedRun, expectedContext, options = {}) {
@@ -7705,13 +7851,7 @@ function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR o
 }
 
 function localPrBaseRef(run) {
-  const configured = requireNonEmptyString(run.base_ref, "run.base_ref");
-  if (run.checkpoint?.kind !== "delivery-checkpoint-child") return configured;
-  const prefix = "refs/heads/";
-  if (!configured.startsWith(prefix) || configured.length === prefix.length || configured.slice(prefix.length).includes("/")) {
-    throw new Error("checkpoint PR operation requires canonical refs/heads/<branch> base authority");
-  }
-  return configured.slice(prefix.length);
+  return requireNonEmptyString(run.base_ref, "run.base_ref");
 }
 
 function observeExactRemoteHead(options, repository, ref, label) {

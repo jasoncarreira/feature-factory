@@ -36,8 +36,20 @@ describe("B4.4 work-reviewer prompt", () => {
 
   it("emits a closed machine-readable slice review with the complete ledger schema", () => {
     const blocks = [...PROMPT.matchAll(/```json\n([\s\S]*?)\n```/gu)];
-    assert.equal(blocks.length, 1);
-    const output = JSON.parse(blocks[0][1]);
+    assert.equal(blocks.length, 2);
+    const checkpointOutput = JSON.parse(blocks[0][1]);
+    assert.equal(checkpointOutput.verdict, "APPROVE-CHECKPOINT");
+    assert.deepEqual(Object.keys(checkpointOutput), [
+      "schema_version",
+      "subject",
+      "attempt",
+      "verdict",
+      "required_fixes",
+      "admission_probe",
+      "review_identity",
+      "checkpoint_dispositions",
+    ]);
+    const output = JSON.parse(blocks[1][1]);
     assert.deepEqual(Object.keys(output), [
       "subject",
       "attempt",
@@ -67,5 +79,7 @@ describe("B4.4 work-reviewer prompt", () => {
     assert.deepEqual(output.invariant_family_ledger.dispositions[0].unresolved_findings, []);
     assert.match(PROMPT, /object is closed to the keys shown below/iu);
     assert.match(PROMPT, /Every nested ledger object is also closed to the displayed keys/iu);
+    assert.match(PROMPT, /separate output contract from the slice-review JSON/iu);
+    assert.match(PROMPT, /never add checkpoint keys to a slice review or omit any slice-review key/iu);
   });
 });
