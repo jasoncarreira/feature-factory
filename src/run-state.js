@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
-import { lstat, open, readFile, rename, rm, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { appendCostAttributionEntry } from "./cost-attribution.js";
@@ -11,11 +11,17 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
 import { isPrivilegedControlPlanePath, privilegedControlPlanePathReason } from "./privileged-path-policy.js";
+import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
+import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
+import { validateAdmissionExtensionResult, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
+import { buildCheckpointRoutingManifest, buildDeliveryPlanAdmissionProbe, buildInvalidDeliveryPlanAdmissionProbe, checkpointRoutingArtifact, CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON } from "./delivery-envelope/checkpoint-routing.js";
+import { parseVerificationCommand } from "./delivery-envelope/verification-command.js";
+import { verificationArtifactExecutionClaimRef, verificationArtifactExecutionReceiptRef } from "./verification-artifact-refs.js";
 
 export const TERMINAL_RUN_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
 
@@ -577,8 +583,10 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
     const id = safeSteeringId(options.id || randomUUID());
     const ref = `steering/pending-${safeTimestamp(createdAt)}-${id}.json`;
     const resolved = resolveSteeringRef(runDir, ref, { mustExist: false });
-    await mkdir(dirname(resolved.path), { recursive: true });
-    if (existsSync(resolved.path)) throw new Error(`steering ref already exists: ${ref}`);
+    const steeringDir = dirname(resolved.path);
+    const steeringDirExisted = existsSync(steeringDir);
+    await mkdir(steeringDir, { recursive: true });
+    const createdDirectory = steeringDirExisted ? null : await observeCreatedDirectory(steeringDir);
     const steeringFile = {
       schema_version: 1,
       kind: "operator-steering",
@@ -589,29 +597,56 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
       created_at: createdAt,
       source: "factory steer",
     };
-    assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
-    await writeJsonAtomically(resolved.path, steeringFile);
-    const fileHash = hashFile(resolved.path, { mode: "raw" });
-    const metadata = { id, ref, hash: fileHash, message_chars: text.length, created_at: createdAt };
-    const history = Array.isArray(current.steering?.history) ? cloneJson(current.steering.history) : [];
-    history.push({ event: "queued", ...metadata });
-    const next = validateRun({
-      ...cloneJson(current),
-      updated_at: createdAt,
-      steering: {
-        schema_version: 1,
-        generation: steeringGeneration(current) + 1,
-        pending: metadata,
-        uncheckpointed: null,
-        boundary: null,
-        action_claim: null,
-        last_action: cloneJson(current.steering?.last_action ?? null),
-        pr_fence: null,
-        history,
-      },
-    });
-    await writeSemanticRunJson(runDir, next, options, v2Authority);
-    return { updated: true, status: next.status, run: next, steering: metadata };
+    const assertPublicationAuthority = () => {
+      const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+      if (!sameJson(observed, current)) throw new Error("steering queue run authority changed before publication");
+      if (v2Authority) assertV2LocalPublishedAuthority(runDir, observed, options, v2Authority);
+    };
+    let publication = null;
+    let fileHash = null;
+    try {
+      if (existsSync(resolved.path)) throw new Error(`steering ref already exists: ${ref}`);
+      publication = await publishDispatchRecord(runDir, ref, steeringFile, {
+        hooks: publicationBeforeCommitHooks(options.steeringQueueAtomicWriteHooks),
+        beforeCommit: assertPublicationAuthority,
+        existsMessage: `steering ref already exists: ${ref}`,
+      });
+      fileHash = hashFile(resolved.path, { mode: "raw" });
+      const metadata = { id, ref, hash: fileHash, message_chars: text.length, created_at: createdAt };
+      const history = Array.isArray(current.steering?.history) ? cloneJson(current.steering.history) : [];
+      history.push({ event: "queued", ...metadata });
+      const next = validateRun({
+        ...cloneJson(current),
+        updated_at: createdAt,
+        steering: {
+          schema_version: 1,
+          generation: steeringGeneration(current) + 1,
+          pending: metadata,
+          uncheckpointed: null,
+          boundary: null,
+          action_claim: null,
+          last_action: cloneJson(current.steering?.last_action ?? null),
+          pr_fence: null,
+          history,
+        },
+      });
+      await options.steeringQueueAtomicWriteHooks?.afterCommit?.();
+      assertPublicationAuthority();
+      await writeSemanticRunJson(runDir, next, options, v2Authority, () => {
+        assertPublicationAuthority();
+        if (hashFile(resolved.path, { mode: "raw" }) !== fileHash) throw new Error("steering queue sidecar changed before run binding");
+      });
+      return { updated: true, status: next.status, run: next, steering: metadata };
+    } catch (error) {
+      if (publication) {
+        await removeOwnedFailedDispatchPublication(runDir, ref, publication, (observed) => {
+          const pending = observed?.steering?.pending;
+          return pending?.ref === ref && pending?.hash === fileHash;
+        });
+      }
+      await removeOwnedEmptyDirectory(createdDirectory);
+      throw error;
+    }
   }, options);
 }
 
@@ -681,12 +716,25 @@ export async function transitionSteeringConsumed(runDir, input, options = {}) {
         history,
       },
     });
-    if (!source.consumedRef) {
-      const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
-      assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
-      await rename(source.path, consumedResolved.path);
+    let moved = null;
+    try {
+      if (!source.consumedRef) {
+        const consumedResolved = resolveSteeringRef(runDir, consumedRef, { mustExist: false });
+        await options.steeringConsumeRenameHooks?.beforeRename?.();
+        assertSteeringMutationAuthority(runDir, current, options, v2Authority);
+        moved = await renameOwnedSteeringSidecar(source.path, consumedResolved.path, pending.hash);
+        assertOwnedSteeringSidecarMove(moved);
+        await options.steeringConsumeRenameHooks?.afterRename?.();
+        assertSteeringMutationAuthority(runDir, current, options, v2Authority);
+      }
+      await writeSemanticRunJson(runDir, next, options, v2Authority, () => {
+        assertSteeringMutationAuthority(runDir, current, options, v2Authority);
+        if (moved) assertOwnedSteeringSidecarMove(moved);
+      });
+    } catch (error) {
+      if (moved) await restoreOwnedSteeringSidecarMove(moved);
+      throw error;
     }
-    await writeSemanticRunJson(runDir, next, options, v2Authority);
     const steering = {
       kind: "operator-steering-consumed",
       trust: "untrusted-operator-data",
@@ -1403,6 +1451,176 @@ export async function completeCheckedTestExecution(runDir, expectedClaim, expect
   }, options);
 }
 
+export async function claimCheckedVerificationArtifactExecution(runDir, sliceId, artifactId, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const run = await readRunJson(runDir);
+    const authority = observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options);
+    const claimRef = verificationArtifactExecutionClaimRef(authority.receipt_ref);
+    const claimResolved = resolveEvidenceRef(runDir, claimRef, { mustExist: false });
+    const receiptResolved = resolveEvidenceRef(runDir, authority.receipt_ref, { mustExist: false });
+    if (existsSync(claimResolved.path)) {
+      const claim = validateVerificationArtifactExecutionClaim(parseJsonObjectFile(claimResolved.path, "checked verification artifact claim"));
+      assertVerificationArtifactClaimMatches(claim, authority);
+      if (claim.state === "active") throw operatorReconciliationRequired("checked verification artifact execution claim is active");
+      if (claim.state === "unknown") throw operatorReconciliationRequired("checked verification artifact execution outcome is unknown");
+      const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectFile(receiptResolved.path, "checked verification artifact receipt"));
+      assertVerificationArtifactReceiptMatches(receipt, authority, claim);
+      const receiptHash = hashFile(receiptResolved.path, { mode: "raw" });
+      if (claim.receipt_hash !== receiptHash || claim.status !== receipt.status) throw new Error("completed checked verification artifact claim is stale");
+      return { replayed: true, authority, claim, claim_ref: claimRef, receipt, receipt_hash: receiptHash };
+    }
+    if (existsSync(receiptResolved.path)) throw new Error("checked verification artifact unclaimed receipt already exists without a claim");
+    const claim = validateVerificationArtifactExecutionClaim({
+      schema_version: 1,
+      kind: "checked-verification-artifact-execution-claim",
+      state: "active",
+      nonce: options.nonce || randomUUID(),
+      run_id: authority.run_id,
+      slice_id: authority.slice_id,
+      attempt: authority.attempt,
+      plan_ref: authority.plan_ref,
+      plan_hash: authority.plan_hash,
+      head_sha: authority.head_sha,
+      verification_artifact_id: authority.verification_artifact_id,
+      probe: authority.probe,
+      receipt_ref: authority.receipt_ref,
+      claimed_at: timestamp(options.now),
+    });
+    await writeProtectedJsonAtomic(runDir, claimRef, claim, {
+      commit: "create-only",
+      hooks: {
+        beforeCommit: () => {
+          if (existsSync(receiptResolved.path)) throw new Error("checked verification artifact receipt appeared before claim publication");
+          const observedRun = validateRun(parseJsonObjectFile(join(runDir, RUN_FILE), "verification artifact claim run.json"));
+          const observed = observeVerificationArtifactExecutionAuthority(runDir, observedRun, sliceId, artifactId, options);
+          if (!sameJson(observed, authority)) throw new Error("checked verification artifact authority changed before claim publication");
+        },
+      },
+    });
+    return { replayed: false, authority, claim, claim_ref: claimRef };
+  }, options);
+}
+
+export async function completeCheckedVerificationArtifactExecution(runDir, expectedClaim, expectedAuthority, receiptInput, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const run = await readRunJson(runDir);
+    const current = observeVerificationArtifactExecutionAuthority(runDir, run, expectedAuthority.slice_id, expectedAuthority.verification_artifact_id, options);
+    if (!sameJson(current, expectedAuthority)) throw new Error("checked verification artifact authority changed before receipt publication");
+    const claimRef = verificationArtifactExecutionClaimRef(current.receipt_ref);
+    assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, current);
+    const receipt = validateVerificationArtifactExecutionReceipt(cloneJson(receiptInput));
+    assertVerificationArtifactReceiptMatches(receipt, current, expectedClaim);
+    const resolved = resolveEvidenceRef(runDir, current.receipt_ref, { mustExist: false });
+    await writeProtectedJsonAtomic(runDir, current.receipt_ref, receipt, {
+      commit: "create-only",
+      hooks: {
+        beforeCommit: () => {
+          const observedRun = validateRun(parseJsonObjectFile(join(runDir, RUN_FILE), "verification artifact run.json"));
+          const observed = observeVerificationArtifactExecutionAuthority(runDir, observedRun, current.slice_id, current.verification_artifact_id, options);
+          if (!sameJson(observed, current)) throw new Error("checked verification artifact authority changed before receipt commit");
+          assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, current);
+        },
+      },
+    });
+    const receiptHash = hashFile(resolved.path, { mode: "raw" });
+    if (typeof options.afterArtifactReceiptPublication === "function") await options.afterArtifactReceiptPublication({ claim: cloneJson(expectedClaim), authority: current, receipt, receipt_hash: receiptHash });
+    const completed = validateVerificationArtifactExecutionClaim({
+      ...cloneJson(expectedClaim), state: "completed", completed_at: receipt.completed_at, status: receipt.status, receipt_hash: receiptHash,
+    });
+    await writeProtectedJsonAtomic(runDir, claimRef, completed, { hooks: { beforeCommit: () => {
+      assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, current);
+      const exactReceipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectFile(resolved.path, "checked verification artifact receipt"));
+      if (!sameJson(exactReceipt, receipt) || hashFile(resolved.path, { mode: "raw" }) !== receiptHash) throw new Error("checked verification artifact receipt changed before claim completion");
+    } } });
+    return { replayed: false, authority: current, claim: completed, claim_ref: claimRef, receipt, receipt_hash: receiptHash };
+  }, options);
+}
+
+export async function markCheckedVerificationArtifactExecutionUnknown(runDir, expectedClaim, expectedAuthority, reason, options = {}) {
+  if (!["process-outcome-indeterminate", "receipt-publication-indeterminate"].includes(reason)) throw new Error("checked verification artifact unknown reason is invalid");
+  return withRunJsonLock(runDir, async () => {
+    const claimRef = verificationArtifactExecutionClaimRef(expectedAuthority.receipt_ref);
+    assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, expectedAuthority);
+    const receiptResolved = resolveEvidenceRef(runDir, expectedAuthority.receipt_ref, { mustExist: false });
+    let receiptBinding = {};
+    if (existsSync(receiptResolved.path)) {
+      const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectFile(receiptResolved.path, "checked verification artifact receipt"));
+      assertVerificationArtifactReceiptMatches(receipt, expectedAuthority, expectedClaim);
+      receiptBinding = { status: receipt.status, receipt_hash: hashFile(receiptResolved.path, { mode: "raw" }) };
+    }
+    const unknown = validateVerificationArtifactExecutionClaim({
+      ...cloneJson(expectedClaim), state: "unknown", failed_at: timestamp(options.now), reason, ...receiptBinding,
+    });
+    await writeProtectedJsonAtomic(runDir, claimRef, unknown, { hooks: { beforeCommit: () => {
+      assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, expectedAuthority);
+    } } });
+    return { claim: unknown, claim_ref: claimRef };
+  }, options);
+}
+
+function observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options) {
+  if (run.status !== "running") throw new Error("checked verification artifact execution requires a running run");
+  const slice = (run.slices || []).find((candidate) => candidate?.id === sliceId);
+  if (!slice || slice.status !== "running" || !Number.isInteger(slice.attempts) || slice.attempts < 1) {
+    throw new Error(`checked verification artifact execution requires running slice '${sliceId}' at a positive attempt`);
+  }
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+  const unit = decomposition.plan.delivery_envelope?.delivery_units.find((candidate) => candidate.slice_id === sliceId);
+  const artifact = unit?.verification_artifacts.find((candidate) => candidate.id === artifactId);
+  if (!artifact) throw new Error(`verification artifact '${artifactId}' is not current for slice '${sliceId}'`);
+  const gitAuthority = observeSliceHeadAuthority(runDir, run, sliceId, slice, options);
+  const command = parseVerificationCommand(artifact.test_plan_entry);
+  return {
+    run_id: run.run_id,
+    slice_id: sliceId,
+    attempt: slice.attempts,
+    plan_ref: PLAN_SLICES_REF,
+    plan_hash: decomposition.plan_hash,
+    head_sha: gitAuthority.head,
+    verification_artifact_id: artifact.id,
+    probe: {
+      type: "verification-artifact",
+      verification_artifact_id: artifact.id,
+      test_plan_index: artifact.test_plan_index,
+      test_plan_entry: artifact.test_plan_entry,
+      program: command.program,
+      args: command.args,
+    },
+    worktree: gitAuthority.worktree,
+    receipt_ref: verificationArtifactExecutionReceiptRef(sliceId, artifact.id, slice.attempts),
+  };
+}
+
+function assertVerificationArtifactReceiptMatches(receipt, authority, claim) {
+  for (const key of ["run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id"]) {
+    if (receipt[key] !== authority[key]) throw new Error(`checked verification artifact receipt ${key} is stale`);
+  }
+  if (receipt.subject !== authority.slice_id || !sameJson(receipt.probe, authority.probe)) {
+    throw new Error("checked verification artifact receipt probe is stale");
+  }
+  const command = receipt.commands?.[0];
+  if (receipt.status !== "skipped" && (!command || command.index !== 0 || command.program !== authority.probe.program || !sameJson(command.args, authority.probe.args))) {
+    throw new Error("checked verification artifact receipt command does not match the exact authoritative probe");
+  }
+  if (!isRecord(claim) || receipt.claim_nonce !== claim.nonce) throw new Error("checked verification artifact receipt nonce does not match the exact active claim");
+  if (receipt.status !== receipt.result.outcome) throw new Error("checked verification artifact receipt result is stale");
+}
+
+function assertVerificationArtifactClaimMatches(claim, authority) {
+  for (const key of ["run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "receipt_ref"]) {
+    if (claim[key] !== authority[key]) throw new Error(`checked verification artifact claim ${key} is stale`);
+  }
+  if (!sameJson(claim.probe, authority.probe)) throw new Error("checked verification artifact claim probe is stale");
+}
+
+function assertExactActiveVerificationArtifactClaim(runDir, claimRef, expectedClaim, authority) {
+  const resolved = resolveEvidenceRef(runDir, claimRef);
+  const observed = validateVerificationArtifactExecutionClaim(parseJsonObjectFile(resolved.path, "checked verification artifact claim"));
+  assertVerificationArtifactClaimMatches(observed, authority);
+  if (observed.state !== "active" || !sameJson(observed, expectedClaim)) throw operatorReconciliationRequired("active checked verification artifact execution claim changed or is missing");
+  return observed;
+}
+
 export async function markCheckedTestExecutionUnknown(runDir, expectedClaim, reason, options = {}) {
   if (!TEST_EXECUTION_UNKNOWN_REASONS.has(reason)) throw new Error("unknown checked execution reason is invalid");
   return withRunJsonLock(runDir, async () => {
@@ -1517,6 +1735,17 @@ export function assertContinuationAuthorityCurrent(runDir, run, options = {}) {
   const parentRun = validateRun(parseJsonObjectFile(parentFile, "continuation parent run.json"));
   for (const key of ["run_id", "status", "branch", "worktree"]) {
     if (continuation.parent[key] !== parentRun[key]) throw new Error(`continuation parent ${key} binding is stale`);
+  }
+  const checkpointBound = Object.hasOwn(continuation, "checkpoint_source_hash");
+  if (checkpointBound !== Object.hasOwn(continuation, "configuration_hash")) throw new Error("continuation checkpoint bindings are incomplete");
+  if (checkpointBound) {
+    if (!isRecord(parentRun.checkpoint_source) || hashValue(parentRun.checkpoint_source) !== continuation.checkpoint_source_hash) {
+      throw new Error("continuation checkpoint_source binding is stale or cross-checkpoint");
+    }
+    if (hashValue(continuation.configuration) !== continuation.configuration_hash) throw new Error("continuation configuration hash is stale");
+    assertRunMatchesContinuationConfiguration(parentRun, continuation.configuration, "continuation parent");
+  } else if (parentRun.checkpoint_source !== undefined) {
+    throw new Error("checkpoint-source parent requires checkpoint-bound continuation authority");
   }
   const branch = git(repo, ["rev-parse", "--verify", `refs/heads/${continuation.parent.branch}^{commit}`]);
   if (!branch.ok || branch.stdout.trim() !== continuation.parent.commit) throw new Error("continuation parent branch/commit binding is stale");
@@ -1794,9 +2023,14 @@ export function observePermanentContinuationClaims(repoInput, runId) {
     } catch {
       throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
     }
+    const checkpointBound = Object.hasOwn(claim, "checkpoint_source_hash");
     if (!isRecord(claim) || claim.schema_version !== 2 || claim.kind !== "blocked-run-continuation-claim"
       || !isRecord(claim.parent_identity) || !stringValue(claim.child_run_id) || !stringValue(claim.child_branch_ref)
       || !/^[0-9a-f]{40}$/u.test(String(claim.start_commit || "")) || !content.stdout || !Buffer.from(content.stdout).equals(canonicalJsonBytes(claim))) {
+      throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
+    }
+    if (checkpointBound !== Object.hasOwn(claim, "configuration_hash")
+      || checkpointBound && (!/^sha256:[a-f0-9]{64}$/u.test(claim.checkpoint_source_hash) || !/^sha256:[a-f0-9]{64}$/u.test(claim.configuration_hash))) {
       throw new Error(`continuation claim conflict: malformed permanent claim '${ref}' blocks routing`);
     }
     if (claim.child_run_id === runId) matches.push({ ref, oid, claim, bytes: content.stdout });
@@ -1812,6 +2046,7 @@ function routeSchemaError(code) {
 }
 
 function assertPublishedCarryForwardConfiguration(run, expected) {
+  const checkpointBound = Object.hasOwn(run.continuation, "checkpoint_source_hash");
   const actual = {
     mode: run.mode,
     github_account: run.github_account ?? null,
@@ -1820,7 +2055,6 @@ function assertPublishedCarryForwardConfiguration(run, expected) {
     max_retries: run.max_retries,
     policy: run.post_pr?.policy,
   };
-  if (run.review_tier !== undefined) throw new Error("schema-v2 carry-forward child cannot contain review_tier");
   if (actual.max_parallel_slices !== 3 || actual.max_retries !== 3 || !actual.mode || !actual.pr_mode || !isRecord(actual.policy)) throw new Error("published carry-forward child configuration is incomplete");
   const persisted = run.continuation?.configuration;
   const bound = isRecord(persisted) ? {
@@ -1831,10 +2065,31 @@ function assertPublishedCarryForwardConfiguration(run, expected) {
     max_retries: persisted.max_retries,
     policy: persisted.post_pr_policy,
   } : null;
-  if (!bound || !sameJson(actual, bound)) throw new Error("published carry-forward child configuration differs from immutable continuation configuration");
+  if (!bound || (checkpointBound ? hashValue(actual) !== hashValue(bound) : !sameJson(actual, bound))) throw new Error("published carry-forward child configuration differs from immutable continuation configuration");
+  assertRunMatchesContinuationConfiguration(run, persisted, "published carry-forward child");
+  if (checkpointBound) {
+    if (!isRecord(run.checkpoint_source) || hashValue(run.checkpoint_source) !== run.continuation.checkpoint_source_hash) throw new Error("published carry-forward child checkpoint_source is stale or cross-checkpoint");
+    if (hashValue(persisted) !== run.continuation.configuration_hash) throw new Error("published carry-forward child configuration hash is stale");
+  } else if (run.checkpoint_source !== undefined) throw new Error("non-checkpoint carry-forward child cannot introduce checkpoint_source");
   if (!expected) return;
   const wanted = { mode: expected.mode, github_account: expected.github_account ?? null, pr_mode: expected.pr_mode, max_parallel_slices: 3, max_retries: 3, policy: expected.post_pr?.policy };
-  if (!sameJson(actual, wanted)) throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+  if (checkpointBound ? hashValue(actual) !== hashValue(wanted) : !sameJson(actual, wanted)) throw new Error("current carry-forward invocation conflicts with published immutable configuration");
+  const expectedTier = Object.hasOwn(expected, "review_tier") ? expected.review_tier : undefined;
+  const actualTier = Object.hasOwn(run, "review_tier") ? run.review_tier : null;
+  if (expectedTier !== undefined && actualTier !== expectedTier) throw new Error("current carry-forward invocation conflicts with published immutable review_tier");
+}
+
+function assertRunMatchesContinuationConfiguration(run, configuration, label) {
+  if (!isRecord(configuration)) throw new Error(`${label} configuration is missing`);
+  const expectedTier = Object.hasOwn(configuration, "review_tier") ? configuration.review_tier : undefined;
+  const tierMatches = expectedTier === null ? !Object.hasOwn(run, "review_tier") : run.review_tier === expectedTier;
+  if (run.mode !== configuration.mode || (run.github_account ?? null) !== configuration.github_account || run.pr_mode !== configuration.pr_mode
+    || run.max_parallel_slices !== configuration.max_parallel_slices || run.max_retries !== configuration.max_retries
+    || (Object.hasOwn(run.continuation || {}, "checkpoint_source_hash") || run.checkpoint_source?.kind === "delivery-checkpoint-source"
+      ? hashValue(run.post_pr?.policy) !== hashValue(configuration.post_pr_policy)
+      : !sameJson(run.post_pr?.policy, configuration.post_pr_policy)) || !tierMatches) {
+    throw new Error(`${label} differs from immutable continuation configuration`);
+  }
 }
 
 function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
@@ -1864,6 +2119,21 @@ function assertPublishedCarryForwardSlices(runDir, run, plan, carry) {
 }
 
 function assertPublishedCarryForwardSpec(runDir, run, continuation) {
+  if (isCheckpointPlanningReuse(continuation)) {
+    if ((run.steps || []).some((item) => item?.agent === "spec-writer")) {
+      throw new Error("checkpoint carry-forward must not synthesize a spec-writer step");
+    }
+    for (const ref of ["artifacts/technical-brief.md", "reviews/spec-writer.json"]) {
+      if (existsSync(resolve(runDir, ref))) throw new Error(`checkpoint carry-forward must not synthesize ${ref}`);
+    }
+    const reuse = continuation.planning_reuse;
+    const authority = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true, requireApprovingReview: true });
+    if (authority.plan_ref !== reuse.plan_ref || authority.plan_hash !== reuse.plan_hash
+      || authority.review_ref !== reuse.review_ref || authority.review_hash !== reuse.review_hash) {
+      throw new Error("published checkpoint carry-forward work-decomposer authority is not exact");
+    }
+    return;
+  }
   const step = (run.steps || []).find((item) => item?.agent === "spec-writer");
   const reuse = continuation.planning_reuse;
   const expected = canonicalCarryForwardSpecStep(continuation);
@@ -1890,7 +2160,11 @@ function assertPublishedCarryForwardClaim(repo, continuation) {
     target_base_commit: continuation.target.base_commit, plan_ref: continuation.carry_forward.plan_ref,
     plan_hash: continuation.carry_forward.plan_hash, start_commit: continuation.carry_forward.start_commit,
   };
-  const claim = { schema_version: 2, kind: "blocked-run-continuation-claim", parent_identity: parentIdentity, child_run_id: continuation.target.run_id, child_branch_ref: `refs/heads/${continuation.target.branch}`, start_commit: continuation.carry_forward.start_commit };
+  const claim = {
+    schema_version: 2, kind: "blocked-run-continuation-claim", parent_identity: parentIdentity, child_run_id: continuation.target.run_id,
+    child_branch_ref: `refs/heads/${continuation.target.branch}`, start_commit: continuation.carry_forward.start_commit,
+    ...(Object.hasOwn(continuation, "checkpoint_source_hash") ? { checkpoint_source_hash: continuation.checkpoint_source_hash, configuration_hash: continuation.configuration_hash } : {}),
+  };
   const parentBytes = canonicalJsonBytes(parentIdentity);
   const claimBytes = canonicalJsonBytes(claim);
   const claimRef = `refs/opencode/continuations/${createHash("sha256").update(parentBytes).digest("hex")}`;
@@ -2051,6 +2325,13 @@ function assertContinuationContext(parentFile, parentRun, continuation) {
   for (const step of parentRun.steps || []) if (stringValue(step?.evidence_ref)) evidenceRefs.push(step.evidence_ref);
   for (const slice of parentRun.slices || []) if (stringValue(slice?.evidence_ref)) evidenceRefs.push(slice.evidence_ref);
   for (const slice of parentRun.slices || []) for (const review of slice?.attempt_reviews || []) if (stringValue(review?.evidence_ref)) evidenceRefs.push(review.evidence_ref);
+  const sliceReviewRefs = (parentRun.slices || []).flatMap((slice) => [slice?.review_ref, ...(slice?.attempt_reviews || []).map((review) => review?.review_ref)]);
+  for (const reviewRef of new Set(sliceReviewRefs.filter(stringValue))) {
+    const review = parseJsonObjectFile(resolveReviewRef(parentDir, reviewRef).path, "continuation slice review");
+    for (const disposition of review.invariant_family_ledger?.dispositions || []) {
+      if (stringValue(disposition?.evidence_ref)) evidenceRefs.push(disposition.evidence_ref, verificationArtifactExecutionClaimRef(disposition.evidence_ref));
+    }
+  }
   if (stringValue(parentRun.post_pr?.remediation?.failure_evidence_ref)) evidenceRefs.push(parentRun.post_pr.remediation.failure_evidence_ref);
   for (const binding of parentRun.post_pr?.evidence_refs || []) if (stringValue(binding?.ref)) evidenceRefs.push(binding.ref);
   const expectedEvidence = bindUniqueContinuationRefs(parentDir, evidenceRefs, "evidence", "evidence", resolveEvidenceRef);
@@ -2081,8 +2362,24 @@ function normalizeContinuationRef(ref, rootName) {
 
 function assertContinuationPlanningReuse(parentFile, parentRun, continuation) {
   const parentDir = parentRunDir(parentFile);
-  const step = (parentRun.steps || []).find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
   const reuse = continuation.planning_reuse;
+  if (isCheckpointPlanningReuse(continuation)) {
+    const source = parentRun.checkpoint_source;
+    let authority;
+    try {
+      authority = observeAcceptedDecompositionAuthority(parentDir, parentRun, { requireIntegrationGate: true, requireApprovingReview: true });
+    } catch (error) {
+      throw new Error(`checkpoint continuation planning_reuse authority is stale: ${error.message}`);
+    }
+    if (reuse.eligible !== true || reuse.plan_ref !== authority.plan_ref || reuse.plan_hash !== authority.plan_hash
+      || reuse.review_ref !== authority.review_ref || reuse.review_hash !== authority.review_hash
+      || source?.child_plan_hash !== reuse.plan_hash || source?.child_disposition_hash !== reuse.review_hash) {
+      throw new Error("checkpoint continuation planning_reuse binding is stale or cross-checkpoint");
+    }
+    if (continuation.draft_spec_reuse !== undefined) throw new Error("checkpoint continuation cannot carry draft_spec_reuse");
+    return;
+  }
+  const step = (parentRun.steps || []).find((entry) => stringValue(entry?.agent) && String(entry.agent).trim() === "spec-writer");
   if (reuse?.eligible === true) {
     if (step?.status !== "accepted" || !isRecord(step.acceptance)) throw new Error("continuation planning_reuse parent acceptance is stale");
     if (reuse.spec_artifact_ref !== "artifacts/technical-brief.md" || (reuse.child_spec_review_ref && reuse.child_spec_review_ref !== "reviews/spec-writer.json")) throw new Error("continuation planning_reuse target refs are stale");
@@ -2315,16 +2612,36 @@ function bindStepAcceptance(runDir, step, run = null, options = {}) {
   if (step.agent === "work-decomposer") {
     if (step.artifact_ref !== PLAN_SLICES_REF) throw new Error(`accepted work-decomposer step requires artifact_ref exactly '${PLAN_SLICES_REF}'`);
     if (!stringValue(step.review_ref)) throw new Error("accepted work-decomposer step requires review_ref");
-    const planAuthority = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, run?.slices, { ...options, requireIntegrationGate: true, enforceDependencyDepth: false });
+    const unprojectedAuthority = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, null, { ...options, requireIntegrationGate: true, enforceDependencyDepth: false });
+    const checkpoint = unprojectedAuthority.admission_extension.decision === "checkpoint";
+    if (checkpoint && Array.isArray(run?.slices) && run.slices.length > 0) {
+      throw new Error("checkpoint work-decomposer acceptance requires an unseeded slice projection");
+    }
+    const planAuthority = checkpoint
+      ? unprojectedAuthority
+      : observePlanSourceAuthority(runDir, PLAN_SLICES_REF, run?.slices, { ...options, requireIntegrationGate: true, enforceDependencyDepth: false });
     const review = resolveReviewRef(runDir, step.review_ref, { mustExist: true });
     const reviewHash = hashFile(review.path);
+    const reviewValue = parseJsonObjectFile(review.path, "accepted work-decomposer review");
+    if (checkpoint && (reviewValue.subject !== "work-decomposer" || reviewValue.attempt !== step.attempts || reviewValue.verdict !== "APPROVE-CHECKPOINT")) {
+      throw new Error("checkpoint work-decomposer acceptance requires an exact same-attempt APPROVE-CHECKPOINT decomposition review");
+    }
     step.acceptance = {
       artifact_ref: PLAN_SLICES_REF,
       artifact_hash: planAuthority.plan_hash,
       review_ref: step.review_ref,
       review_hash: reviewHash,
     };
-    return { plan_hash: planAuthority.plan_hash, review_ref: step.review_ref, review_hash: reviewHash };
+    return {
+      plan_hash: planAuthority.plan_hash,
+      review_ref: step.review_ref,
+      review_hash: reviewHash,
+      attempt: step.attempts,
+      review: reviewValue,
+      admission_extension: planAuthority.admission_extension,
+      admission_probe: planAuthority.admission_probe,
+      allow_unseeded_checkpoint: checkpoint,
+    };
   }
   const artifactRef = typeof step.artifact_ref === "string" ? step.artifact_ref.trim() : "";
   if (!artifactRef) {
@@ -2414,6 +2731,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
           if (priorSlice.status === "review") throw new Error(`slice '${priorSlice.id}' review binding is write-once; return to running before publishing another review`);
           assertNoBindingFields(slices[sliceIndex], SLICE_REVIEW_BINDING_KEYS, `slice '${priorSlice.id}' review binding`);
           reviewPlanAuthority = observeAcceptedDecompositionAuthority(runDir, draft, { ...options, requireIntegrationGate: true });
+          assertSliceAttemptHistoryCurrent(runDir, priorSlice.id, priorSlice);
           nextReviewAuthority = observeSliceReviewPublicationAuthority(runDir, draft, slices[sliceIndex].id, slices[sliceIndex], reviewPlanAuthority, options);
           validateSliceReviewFeasibility(nextReviewAuthority.review, reviewPlanAuthority.plan, { sliceId: slices[sliceIndex].id });
           Object.assign(slices[sliceIndex], nextReviewAuthority.binding);
@@ -2509,7 +2827,10 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
 
 export async function transitionSlicesSeed(runDir, slices, options = {}) {
   const requestedProjection = normalizePendingSliceProjection(slices);
-  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, requestedProjection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
+  const seedPlanAuthority = observePlanSourceAuthority(runDir, options.from, requestedProjection, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true, requirePendingProjection: true });
+  if (seedPlanAuthority.admission_extension.decision === "checkpoint") {
+    return transitionCheckpointRouting(runDir, seedPlanAuthority, options);
+  }
   const projection = requestedProjection.map((slice, index) => ({
     ...slice,
     declared_paths: cloneJson(seedPlanAuthority.plan.slices[index].paths),
@@ -2530,32 +2851,427 @@ export async function transitionSlicesSeed(runDir, slices, options = {}) {
 }
 
 export function readSlicesSeedPlan(runDir, from, options = {}) {
-  return observePlanSourceAuthority(runDir, from, null, { ...options, requireIntegrationGate: true }).plan;
+  return observePlanSourceAuthority(runDir, from, null, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true }).plan;
+}
+
+export function probeSlicesPlanAdmission(runDir, options = {}) {
+  const observed = observePlanSourceBytes(runDir, options.from, options, "slice probe plan source");
+  try {
+    return validateObservedPlanSource(observed, null, {
+      ...options,
+      enforceDependencyDepth: false,
+      requireIntegrationGate: true,
+    }).admission_probe;
+  } catch (error) {
+    return buildInvalidDeliveryPlanAdmissionProbe({
+      planHash: observed.plan_hash,
+      errors: normalizeSlicesProbeErrors(error),
+    });
+  }
+}
+
+async function transitionCheckpointRouting(runDir, seedPlanAuthority, options = {}) {
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const decompositionAuthority = observeAcceptedDecompositionAuthority(runDir, current, { ...options, requireIntegrationGate: true, allowUnseededCheckpoint: true, requireApprovingReview: true });
+    if (decompositionAuthority.plan_hash !== seedPlanAuthority.plan_hash) {
+      throw new Error("checkpoint routing accepted decomposition does not bind the exact requested plan bytes");
+    }
+    const manifest = buildCheckpointRoutingManifest({
+      plan: seedPlanAuthority.plan,
+      planHash: seedPlanAuthority.plan_hash,
+      admissionResult: seedPlanAuthority.admission_extension,
+      admissionProbe: seedPlanAuthority.admission_probe,
+      decompositionAuthority,
+    });
+    const artifact = checkpointRoutingArtifact(manifest);
+    const replay = current.status === "blocked" && current.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON;
+    if (replay) {
+      assertCheckpointRoutingReplay(runDir, current, decompositionAuthority, manifest, artifact, options);
+      return checkpointRoutingResult(current, manifest, artifact, false);
+    }
+
+    assertExpectedCurrentHash(current, options.expectedCurrentHash);
+    assertRunJsonWriterAllowed(current, "checkpoint routing");
+    if (current.status !== "running") throw new Error(`checkpoint routing requires a running run, found '${current.status}'`);
+    assertNoPendingSpecialBuilderDispatches(runDir, current);
+    assertNoUnresolvedSliceDispatches(runDir, current);
+    assertCheckpointRoutingPreImplementation(current);
+    assertCheckpointRoutingAuthorityCurrent(runDir, current, decompositionAuthority, manifest, artifact, options);
+    const terminalBoundaryAuthority = observeCheckpointTerminalBoundaryAuthority(runDir, current, options);
+    await publishCheckpointRoutingArtifact(runDir, current, manifest, artifact, decompositionAuthority, options);
+
+    const terminalDraft = cloneJson(current);
+    consumeSteeringBoundary(terminalDraft, "terminal", options.boundaryToken);
+    const next = validateRun({
+      ...terminalDraft,
+      status: "blocked",
+      updated_at: timestamp(options.now),
+      checkpoint_progress: initialCheckpointProgress(artifact),
+      terminal_result: {
+        status: "blocked",
+        run_id: current.run_id,
+        pr_url: null,
+        reason: CHECKPOINT_ROUTING_TERMINAL_REASON,
+        summary: `Oversized plan routed to ${manifest.checkpoints.length} sequential independently shippable checkpoints.`,
+        artifacts: { checkpoint_routing: artifact.ref },
+      },
+    });
+    await writeSemanticRunJson(runDir, next, options, null, () => {
+      const observedRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+      assertCheckpointTerminalBoundaryAuthorityCurrent(runDir, observedRun, terminalBoundaryAuthority, options);
+      assertCheckpointRoutingPreImplementation(observedRun);
+      assertCheckpointRoutingAuthorityCurrent(runDir, observedRun, decompositionAuthority, manifest, artifact, options);
+      assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+    });
+    return checkpointRoutingResult(next, manifest, artifact, true);
+  }, options);
+}
+
+function assertCheckpointRoutingPreImplementation(run) {
+  if (Array.isArray(run.slices) && run.slices.length > 0) throw new Error("checkpoint routing must occur before slice seeding");
+  const decompositionSteps = (run.steps || []).filter((step) => step?.agent === "work-decomposer");
+  if (decompositionSteps.length !== 1 || decompositionSteps[0].status !== "accepted") throw new Error("checkpoint routing requires accepted work-decomposer state");
+  if (run.gates?.brief !== undefined && run.gates?.brief !== null) {
+    throw new Error("checkpoint routing must occur before Gate 2 brief state is present");
+  }
+  const testVerifierSteps = (run.steps || []).filter((step) => step?.agent === "test-verifier");
+  const standardPlaceholder = { agent: "test-verifier", status: "blocked", attempts: 0 };
+  if (testVerifierSteps.length > 1 || (testVerifierSteps.length === 1 && !sameJson(testVerifierSteps[0], standardPlaceholder))) {
+    throw new Error("checkpoint routing permits only the repository-standard zero-attempt blocked test-verifier placeholder");
+  }
+  if (run.validator != null || run.security_review != null || run.gates?.pre_pr != null || run.merged_slice_repair != null || run.special_builder_dispatch != null) {
+    throw new Error("checkpoint routing must occur before implementation, panel, or pre-PR state");
+  }
+}
+
+function observeCheckpointTerminalBoundaryAuthority(runDir, run, options) {
+  assertNoFreshHeartbeat(runDir, options, "checkpoint routing requires inactive heartbeat");
+  const draft = cloneJson(run);
+  consumeSteeringBoundary(draft, "terminal", options.boundaryToken);
+  const boundary = run.steering?.boundary;
+  return {
+    kind: boundary.kind,
+    token: boundary.token,
+    generation: boundary.generation,
+    state_hash: boundary.state_hash,
+    created_at: boundary.created_at,
+  };
+}
+
+function assertCheckpointTerminalBoundaryAuthorityCurrent(runDir, run, expected, options) {
+  const current = observeCheckpointTerminalBoundaryAuthority(runDir, run, options);
+  if (!sameJson(current, expected)) throw new Error("checkpoint terminal boundary authority changed before publication");
+}
+
+async function publishCheckpointRoutingArtifact(runDir, run, manifest, artifact, authority, options) {
+  const path = join(runDir, artifact.ref);
+  if (existsSync(path)) {
+    assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+    return;
+  }
+  await writeProtectedJsonAtomic(runDir, artifact.ref, manifest, {
+    commit: "create-only",
+    hooks: {
+      beforeCommit: async () => {
+        await options.checkpointRoutingHooks?.beforeArtifactCommit?.();
+        assertCheckpointRoutingAuthorityCurrent(runDir, run, authority, manifest, artifact, options);
+      },
+    },
+  });
+  assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+}
+
+function assertCheckpointRoutingReplay(runDir, run, authority, manifest, artifact, options) {
+  if (run.terminal_result?.status !== "blocked" || run.terminal_result?.pr_url !== null
+    || !sameJson(run.terminal_result?.artifacts, { checkpoint_routing: artifact.ref })) {
+    throw new Error("checkpoint routing terminal result does not match exact routing artifact");
+  }
+  if (run.steering?.pending != null || run.steering?.uncheckpointed != null || run.steering?.boundary != null
+    || run.steering?.action_claim != null || run.steering?.pr_fence != null) {
+    throw new Error("checkpoint routing terminal result retained incompatible steering authority");
+  }
+  assertCheckpointRoutingAuthorityCurrent(runDir, run, authority, manifest, artifact, options);
+  assertCheckpointRoutingArtifactCurrent(runDir, artifact);
+  assertCheckpointProgressManifestBinding(run, artifact);
+}
+
+function assertCheckpointRoutingAuthorityCurrent(runDir, run, expected, manifest, artifact, options) {
+  const current = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true, allowUnseededCheckpoint: true, requireApprovingReview: true });
+  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref
+    || current.review_hash !== expected.review_hash || current.attempt !== expected.attempt
+    || !sameJson(current.review, expected.review) || !sameJson(current.admission_extension, expected.admission_extension)
+    || !sameJson(current.admission_probe, expected.admission_probe)) {
+    throw new Error("checkpoint routing plan authority changed before publication");
+  }
+  const rebuilt = buildCheckpointRoutingManifest({
+    plan: current.plan,
+    planHash: current.plan_hash,
+    admissionResult: current.admission_extension,
+    admissionProbe: current.admission_probe,
+    decompositionAuthority: current,
+  });
+  const rebuiltArtifact = checkpointRoutingArtifact(rebuilt);
+  if (!sameJson(rebuilt, manifest) || !sameJson(rebuiltArtifact, artifact)) {
+    throw new Error("checkpoint routing manifest changed before publication");
+  }
+}
+
+function assertCheckpointRoutingArtifactCurrent(runDir, artifact) {
+  const path = join(runDir, artifact.ref);
+  if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile() || hashFile(path, { mode: "raw" }) !== artifact.hash) {
+    throw new Error("checkpoint routing artifact bytes do not match their content-addressed ref");
+  }
+}
+
+function checkpointRoutingResult(run, manifest, artifact, updated) {
+  return {
+    updated,
+    route: "checkpoint",
+    status: run.status,
+    run,
+    admission_extension: cloneJson(manifest.source.admission_result),
+    checkpoint_routing: { ref: artifact.ref, hash: artifact.hash, checkpoint_count: manifest.checkpoints.length },
+    terminal_result: run.terminal_result,
+  };
+}
+
+function initialCheckpointProgress(artifact) {
+  return {
+    schema_version: 1,
+    kind: "delivery-checkpoint-progress",
+    manifest_ref: artifact.ref,
+    manifest_hash: artifact.hash,
+    status: "active",
+    entries: [],
+    final_closure: null,
+  };
+}
+
+export function transitionCheckpointProgressReserved(runDir, entry, options = {}) {
+  return transitionCheckpointProgressEntry(runDir, entry, "reserved", null, options);
+}
+
+export function transitionCheckpointProgressChildPublished(runDir, entry, options = {}) {
+  return transitionCheckpointProgressEntry(runDir, entry, "child-published", "reserved", options);
+}
+
+export function transitionCheckpointProgressLaunched(runDir, entry, options = {}) {
+  return transitionCheckpointProgressEntry(runDir, entry, "launched", "child-published", options);
+}
+
+export function transitionCheckpointProgressMerged(runDir, entry, options = {}) {
+  return transitionCheckpointProgressEntry(runDir, entry, "merged", "launched", options);
+}
+
+export async function transitionCheckpointProgressClosed(runDir, finalClosure, options = {}) {
+  const requested = cloneJson(finalClosure);
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const authority = observeCheckpointProgressParentAuthority(runDir, current);
+    const progress = current.checkpoint_progress;
+    if (progress.status === "closed") {
+      if (!sameJson(progress.final_closure, requested)) throw new Error("checkpoint progress closure conflicts with the already closed parent");
+      return checkpointProgressTransitionResult(current, false, "closed");
+    }
+    if (progress.status !== "active" || progress.final_closure !== null) throw new Error("checkpoint progress can close only from active state");
+    if (progress.entries.length !== authority.manifest.checkpoints.length
+      || progress.entries.some((entry) => entry.state !== "merged")) {
+      throw new Error("checkpoint progress closure requires every manifest checkpoint to be merged");
+    }
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: timestamp(options.now),
+      checkpoint_progress: { ...cloneJson(progress), status: "closed", final_closure: requested },
+    });
+    await writeCheckpointProgressRun(runDir, current, next, authority, options);
+    return checkpointProgressTransitionResult(next, true, "closed");
+  }, options);
+}
+
+async function transitionCheckpointProgressEntry(runDir, input, targetState, priorState, options) {
+  const requested = cloneJson(input);
+  if (!isRecord(requested) || requested.state !== targetState) {
+    throw new Error(`checkpoint progress ${targetState} transition requires a complete '${targetState}' entry`);
+  }
+  return withRunJsonLock(runDir, async () => {
+    const current = await readRunJson(runDir);
+    const authority = observeCheckpointProgressParentAuthority(runDir, current);
+    const progress = current.checkpoint_progress;
+    if (progress.status !== "active" || progress.final_closure !== null) throw new Error("closed checkpoint progress cannot be mutated");
+    const ordinal = requested.ordinal;
+    if (!Number.isInteger(ordinal) || ordinal < 1) throw new Error("checkpoint progress entry ordinal must be a positive integer");
+    const manifestCheckpoint = authority.manifest.checkpoints[ordinal - 1];
+    if (!manifestCheckpoint || manifestCheckpoint.id !== requested.checkpoint_id || manifestCheckpoint.ordinal !== ordinal) {
+      throw new Error("checkpoint progress entry does not match its manifest checkpoint");
+    }
+    if (["child-published", "launched", "merged"].includes(targetState)
+      && (requested.child_plan_hash !== manifestCheckpoint.child_plan_hash || requested.brief_scope_hash !== manifestCheckpoint.brief_scope_hash)) {
+      throw new Error("checkpoint progress entry plan facts do not match the manifest checkpoint");
+    }
+
+    const existing = progress.entries[ordinal - 1];
+    if (targetState === "reserved") {
+      if (existing) {
+        if (existing.state === targetState && sameJson(existing, requested)) return checkpointProgressTransitionResult(current, false, targetState, ordinal);
+        throw new Error(`checkpoint progress '${requested.checkpoint_id}' reservation conflicts with existing state '${existing.state}'`);
+      }
+      if (ordinal !== progress.entries.length + 1 || progress.entries.some((entry) => entry.state !== "merged")) {
+        throw new Error("checkpoint progress reservations must be contiguous after merged predecessors");
+      }
+    } else {
+      if (!existing) throw new Error(`checkpoint progress cannot skip directly to '${targetState}'`);
+      if (existing.state === targetState) {
+        if (sameJson(existing, requested)) return checkpointProgressTransitionResult(current, false, targetState, ordinal);
+        throw new Error(`checkpoint progress '${requested.checkpoint_id}' ${targetState} replay conflicts with persisted facts`);
+      }
+      if (existing.state !== priorState) {
+        throw new Error(`checkpoint progress cannot transition '${existing.state}' -> '${targetState}'`);
+      }
+      assertCheckpointProgressFactsRetained(existing, requested);
+    }
+
+    const entries = cloneJson(progress.entries);
+    if (targetState === "reserved") entries.push(requested);
+    else entries[ordinal - 1] = requested;
+    const next = validateRun({
+      ...cloneJson(current),
+      updated_at: timestamp(options.now),
+      checkpoint_progress: { ...cloneJson(progress), entries },
+    });
+    await writeCheckpointProgressRun(runDir, current, next, authority, options);
+    return checkpointProgressTransitionResult(next, true, targetState, ordinal);
+  }, options);
+}
+
+function assertCheckpointProgressFactsRetained(current, requested) {
+  for (const [key, value] of Object.entries(current)) {
+    if (key !== "state" && !sameJson(value, requested[key])) {
+      throw new Error(`checkpoint progress field '${key}' is immutable once recorded`);
+    }
+  }
+}
+
+function observeCheckpointProgressParentAuthority(runDir, run) {
+  const terminal = run.terminal_result;
+  const artifactKeys = isRecord(terminal?.artifacts) ? Object.keys(terminal.artifacts) : [];
+  if (run.status !== "blocked" || terminal?.status !== "blocked" || terminal?.run_id !== run.run_id
+    || terminal?.reason !== CHECKPOINT_ROUTING_TERMINAL_REASON || run.pr_url != null || terminal.pr_url !== null
+    || artifactKeys.length !== 1 || artifactKeys[0] !== "checkpoint_routing") {
+    throw new Error("checkpoint progress requires the exact blocked routing parent terminal authority");
+  }
+  const progress = run.checkpoint_progress;
+  const manifestRef = terminal.artifacts.checkpoint_routing;
+  if (!isRecord(progress) || progress.manifest_ref !== manifestRef) throw new Error("checkpoint progress manifest binding is stale");
+  const resolved = resolveArtifactRef(runDir, manifestRef);
+  const identity = lstatSync(resolved.path);
+  if (identity.isSymbolicLink() || !identity.isFile()) throw new Error("checkpoint progress manifest must be a regular file");
+  const manifestHash = hashFile(resolved.path, { mode: "raw" });
+  const artifact = { ref: manifestRef, hash: manifestHash };
+  assertCheckpointProgressManifestBinding(run, artifact);
+  const manifest = parseJsonObjectFile(resolved.path, "checkpoint progress manifest");
+  if (manifest.kind !== CHECKPOINT_ROUTING_KIND || !Array.isArray(manifest.checkpoints) || manifest.checkpoints.length === 0) {
+    throw new Error("checkpoint progress manifest is not a checkpoint routing manifest");
+  }
+  return { run: cloneJson(run), artifact, manifest: cloneJson(manifest) };
+}
+
+function assertCheckpointProgressManifestBinding(run, artifact) {
+  const progress = run.checkpoint_progress;
+  if (!isRecord(progress) || progress.manifest_ref !== artifact.ref || progress.manifest_hash !== artifact.hash) {
+    throw new Error("checkpoint progress does not bind the exact routing manifest");
+  }
+}
+
+async function writeCheckpointProgressRun(runDir, current, next, authority, options) {
+  await writeProtectedRunJson(runDir, next, options, async () => {
+    await options.checkpointProgressHooks?.beforeReplace?.({ current: cloneJson(current), next: cloneJson(next) });
+    const observed = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+    if (!sameJson(observed, current)) throw new Error("checkpoint parent authority changed before progress publication");
+    const observedAuthority = observeCheckpointProgressParentAuthority(runDir, observed);
+    if (!sameJson(observedAuthority.artifact, authority.artifact) || !sameJson(observedAuthority.manifest, authority.manifest)) {
+      throw new Error("checkpoint parent manifest authority changed before progress publication");
+    }
+  });
+}
+
+function checkpointProgressTransitionResult(run, updated, state, ordinal = null) {
+  return {
+    updated,
+    status: run.status,
+    progress_status: run.checkpoint_progress.status,
+    state,
+    ordinal,
+    run,
+    checkpoint_progress: cloneJson(run.checkpoint_progress),
+  };
 }
 
 function observePlanSourceAuthority(runDir, from, slices, options = {}) {
+  return validateObservedPlanSource(observePlanSourceBytes(runDir, from, options, "slice seed plan source"), slices, options);
+}
+
+function observePlanSourceBytes(runDir, from, options, label) {
   if (from !== PLAN_SLICES_REF) throw new Error(`exact run-relative plan source '${PLAN_SLICES_REF}' is required`);
   const expectedRepo = resolve(runDir, "../../..");
   if (stringValue(options.repoRoot) && resolve(options.repoRoot) !== expectedRepo) throw new Error("slice seed repoRoot does not own the target run directory");
-  const planPath = resolveExactPlanSlicesFile(runDir, from, "slice seed plan source");
+  const planPath = resolveExactPlanSlicesFile(runDir, from, label);
   const bytes = readFileSync(planPath);
+  return { path: planPath, plan_bytes: bytes, plan_hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+}
+
+function validateObservedPlanSource(source, slices, options = {}) {
+  const bytes = source.plan_bytes;
   const plan = parseSlicesPlanBytes(bytes, {
     label: PLAN_SLICES_REF,
     enforceDependencyDepth: options.enforceDependencyDepth !== false,
     requireIntegrationGate: options.requireIntegrationGate === true,
   });
+  const admissionExtension = validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan }));
+  const admissionProbe = buildDeliveryPlanAdmissionProbe({ plan, planHash: source.plan_hash, admissionResult: admissionExtension });
   if (slices) assertPlanSlicesMatch(plan, slices, { requirePendingProjection: options.requirePendingProjection === true });
-  return { path: planPath, plan, plan_bytes: bytes, plan_hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+  return { ...source, plan, admission_extension: admissionExtension, admission_probe: admissionProbe };
+}
+
+function normalizeSlicesProbeErrors(error) {
+  const source = Array.isArray(error?.errors) && error.errors.length > 0
+    ? error.errors
+    : [slicesProbeError(error)];
+  const normalized = source.map((item) => ({ path: String(item.path), message: String(item.message) }));
+  normalized.sort((left, right) => compareProbeErrorText(left.path, right.path) || compareProbeErrorText(left.message, right.message));
+  return normalized.filter((item, index) => index === 0
+    || item.path !== normalized[index - 1].path || item.message !== normalized[index - 1].message);
+}
+
+function compareProbeErrorText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function slicesProbeError(error) {
+  const message = typeof error?.message === "string" && error.message.length > 0 ? error.message : "plan validation failed";
+  if (message.startsWith(`${PLAN_SLICES_REF} must be valid JSON:`)) {
+    return { path: PLAN_SLICES_REF, message: "must be valid JSON" };
+  }
+  if (message === `${PLAN_SLICES_REF} must contain valid UTF-8`) {
+    return { path: PLAN_SLICES_REF, message: "must contain valid UTF-8" };
+  }
+  return {
+    path: /checkpoint/iu.test(message) ? "plan.delivery_envelope.checkpoint_plan" : "plan",
+    message,
+  };
 }
 
 function assertSeedPlanAuthorityCurrent(runDir, projection, options, expected) {
-  const current = observePlanSourceAuthority(runDir, options.from, projection, { ...options, requireIntegrationGate: true, requirePendingProjection: true });
-  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash) throw new Error("slice seed plan authority changed before run.json publication");
+  const current = observePlanSourceAuthority(runDir, options.from, projection, { ...options, enforceDependencyDepth: false, requireIntegrationGate: true, requirePendingProjection: true });
+  if (current.path !== expected.path || current.plan_hash !== expected.plan_hash
+    || !sameJson(current.admission_extension, expected.admission_extension) || !sameJson(current.admission_probe, expected.admission_probe)) {
+    throw new Error("slice seed plan authority changed before run.json publication");
+  }
 }
 
 export function observeAcceptedDecompositionAuthority(runDir, run, options = {}) {
   if (options.requireForIntegrationGatePlan === true && !existsSync(join(resolve(runDir), "plan", "slices.json"))) return null;
-  const source = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, run.slices, {
+  const source = observePlanSourceAuthority(runDir, PLAN_SLICES_REF, options.allowUnseededCheckpoint === true ? null : run.slices, {
     ...options,
     enforceDependencyDepth: false,
     requireIntegrationGate: options.requireIntegrationGate === true,
@@ -2575,12 +3291,25 @@ export function observeAcceptedDecompositionAuthority(runDir, run, options = {})
   const review = resolveReviewRef(runDir, step.review_ref, { mustExist: true });
   const reviewHash = hashFile(review.path);
   if (reviewHash !== step.acceptance.review_hash) throw new Error("accepted work-decomposer review bytes changed after acceptance");
-  return { ...source, attempts: step.attempts, review_ref: step.review_ref, review_hash: reviewHash };
+  const reviewValue = parseJsonObjectFile(review.path, "accepted work-decomposer review");
+  const approvingVerdicts = source.admission_extension.decision === "checkpoint"
+    ? new Set(["APPROVE", "APPROVE-CHECKPOINT"])
+    : new Set(["APPROVE"]);
+  if (options.requireApprovingReview === true
+    && (reviewValue.subject !== "work-decomposer" || reviewValue.attempt !== step.attempts || !approvingVerdicts.has(reviewValue.verdict))) {
+    throw new Error("accepted work-decomposer review must be an exact same-attempt APPROVE decomposition review");
+  }
+  return { ...source, plan_ref: PLAN_SLICES_REF, attempt: step.attempts, attempts: step.attempts, review_ref: step.review_ref, review_hash: reviewHash, review: reviewValue };
 }
 
 function assertAcceptedDecompositionAuthorityCurrent(runDir, run, expected) {
-  const current = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
-  if (current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref || current.review_hash !== expected.review_hash) {
+  const current = observeAcceptedDecompositionAuthority(runDir, run, {
+    requireIntegrationGate: true,
+    allowUnseededCheckpoint: expected.allow_unseeded_checkpoint === true,
+  });
+  if (current.plan_hash !== expected.plan_hash || current.review_ref !== expected.review_ref || current.review_hash !== expected.review_hash
+    || current.attempt !== expected.attempt || !sameJson(current.review, expected.review)
+    || !sameJson(current.admission_extension, expected.admission_extension) || !sameJson(current.admission_probe, expected.admission_probe)) {
     throw new Error("accepted work-decomposer plan authority changed before run.json publication");
   }
 }
@@ -2837,6 +3566,7 @@ function observeV2ParentAuthority(runDir, run, options = {}) {
 }
 
 function canonicalCarryForwardSpecStep(continuation) {
+  if (isCheckpointPlanningReuse(continuation)) return null;
   const reuse = continuation.planning_reuse;
   return {
     agent: "spec-writer", status: "accepted", attempts: 0, artifact_ref: "artifacts/technical-brief.md", review_ref: "reviews/spec-writer.json",
@@ -2847,17 +3577,23 @@ function canonicalCarryForwardSpecStep(continuation) {
 
 function assertV2ImmutablePublicationTransition(current, next) {
   if (current.continuation?.schema_version !== 2) return;
-  for (const key of ["continuation", "mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries"]) {
+  for (const key of ["continuation", "mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "review_tier", "checkpoint_source"]) {
     if (!sameJson(current[key], next[key])) throw new Error(`schema-v2 publication field '${key}' is immutable`);
   }
   if (!sameJson(current.post_pr?.policy, next.post_pr?.policy)) throw new Error("schema-v2 publication field 'post_pr.policy' is immutable");
   const canonical = canonicalCarryForwardSpecStep(current.continuation);
   const currentSpec = (current.steps || []).find((step) => step?.agent === "spec-writer");
   const nextSpec = (next.steps || []).find((step) => step?.agent === "spec-writer");
-  if (!sameJson(currentSpec, canonical) || !sameJson(nextSpec, canonical)) throw new Error("schema-v2 carry-forward spec-writer projection is immutable");
+  if (canonical === null) {
+    if (currentSpec !== undefined || nextSpec !== undefined) throw new Error("checkpoint schema-v2 carry-forward cannot fabricate a spec-writer projection");
+  } else if (!sameJson(currentSpec, canonical) || !sameJson(nextSpec, canonical)) throw new Error("schema-v2 carry-forward spec-writer projection is immutable");
   const currentDecomposition = (current.steps || []).find((step) => step?.agent === "work-decomposer");
   const nextDecomposition = (next.steps || []).find((step) => step?.agent === "work-decomposer");
   if (!isRecord(currentDecomposition) || !sameJson(currentDecomposition, nextDecomposition)) throw new Error("schema-v2 accepted work-decomposer projection is immutable");
+}
+
+function isCheckpointPlanningReuse(continuation) {
+  return Object.hasOwn(continuation || {}, "checkpoint_source_hash") && Object.hasOwn(continuation?.planning_reuse || {}, "plan_ref");
 }
 
 function assertRunIdentityTransition(current, next) {
@@ -2913,7 +3649,9 @@ async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace =
   const protectedBeforeReplace = beforeReplace || assertSpecialDispatches ? () => {
     if (beforeReplace) {
       const observed = beforeReplace();
-      if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => assertSpecialDispatches?.());
+      if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => {
+        assertSpecialDispatches?.();
+      });
     }
     if (assertSpecialDispatches) assertSpecialDispatches();
   } : null;
@@ -3946,7 +4684,7 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
     || (continuationEligible && (target?.run_id !== run.run_id || target?.branch !== run.branch || resolve(target?.worktree || "") !== resolve(run.worktree || "")))) {
     throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution run identity does not match the published schema-v2 target");
   }
-  if (run.status !== "running") throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
+  if (run.status !== "running" && !(policy.allowTerminalCompleted === true && run.status === "completed")) throw testExecutionError("TEST_EXECUTION_INELIGIBLE", "checked test execution requires a running run");
   if (policy.skipLocalAuthority !== true) {
     if (continuationEligible) assertV2LocalPublishedAuthority(runDir, run, options);
     if (conflictEligible) assertSliceIntegrationConflictsCurrent(runDir, run, options);
@@ -3987,11 +4725,11 @@ export function observeCheckedTestExecutionAuthority(runDir, run, options = {}, 
   };
 }
 
-export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step = uniqueTestVerifierStep(run), authority = null) {
+export function observeCompletedCheckedTestExecutionAuthority(runDir, run, step = uniqueTestVerifierStep(run), authority = null, options = {}) {
   const claim = step?.execution_claim;
   if (!isRecord(claim) || claim.state !== "completed") throw new Error("schema-v2 test authority requires a completed checked execution claim");
   if (step.execution_claim_hash !== hashValue(claim)) throw new Error("completed checked execution claim hash is stale");
-  const currentAuthority = authority || observeCheckedTestExecutionAuthority(runDir, run, { runDir }, { allowCompleted: true, skipLocalAuthority: true });
+  const currentAuthority = authority || observeCheckedTestExecutionAuthority(runDir, run, { ...options, runDir }, { allowCompleted: true, skipLocalAuthority: true, allowTerminalCompleted: options.allowTerminalCompleted === true });
   if (claim.run_id !== run.run_id || claim.attempt !== step.attempts || claim.plan_ref !== currentAuthority.plan_ref
     || claim.plan_hash !== currentAuthority.plan_hash || claim.head_sha !== currentAuthority.head_sha) throw new Error("completed checked execution claim no longer matches current authority");
   const receipt = resolveEvidenceRef(runDir, claim.receipt_ref);
@@ -4068,16 +4806,17 @@ function testExecutionError(code, message) {
 
 function assertV2FreshDownstreamAuthority(runDir, run, sink, expected = null) {
   if (run.continuation?.schema_version !== 2) return null;
+  const route = "schema-v2";
   const incomplete = (run.slices || []).filter((slice) => slice?.status !== "merged").map((slice) => slice?.id || "<unknown>");
-  if (incomplete.length) throw new Error(`schema-v2 downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
+  if (incomplete.length) throw new Error(`${route} downstream authority requires all child slices merged before ${sink}: ${incomplete.join(", ")}`);
   const step = (run.steps || []).find((candidate) => candidate?.agent === "test-verifier");
   if (!step || step.status !== "accepted" || !Number.isInteger(step.attempts) || step.attempts < 1 || !isRecord(step.acceptance)) {
-    throw new Error(`schema-v2 downstream authority requires fresh accepted test-verifier authority before ${sink}`);
+    throw new Error(`${route} downstream authority requires fresh accepted test-verifier authority before ${sink}`);
   }
   const authority = observeV2TestVerifierAuthority(runDir, run, step, { runDir });
-  if (!sameJson(step.acceptance, authority.acceptance)) throw new Error("schema-v2 test-verifier acceptance bytes or head are stale");
+  if (!sameJson(step.acceptance, authority.acceptance)) throw new Error(`${route} test-verifier acceptance bytes or head are stale`);
   const observed = { step: cloneJson(step), ...authority };
-  if (expected && !sameJson(observed, expected)) throw new Error(`schema-v2 downstream authority changed before ${sink} publication`);
+  if (expected && !sameJson(observed, expected)) throw new Error(`checked downstream authority changed before ${sink} publication`);
   return observed;
 }
 
@@ -4089,7 +4828,7 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
   const artifact = resolveArtifactRef(runDir, step.artifact_ref);
   const evidence = resolveEvidenceRef(runDir, step.evidence_ref);
   const review = resolveReviewRef(runDir, step.review_ref);
-  const checked = observeCompletedCheckedTestExecutionAuthority(runDir, run, step);
+  const checked = observeCompletedCheckedTestExecutionAuthority(runDir, run, step, null, options);
   const evidenceValue = validateTestExecutionReceipt(parseJsonObjectFile(evidence.path, "schema-v2 test-verifier receipt"));
   const reviewValue = parseJsonObjectFile(review.path, "schema-v2 test-verifier review");
   const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "schema-v2 test-verifier acceptance");
@@ -4110,7 +4849,7 @@ function observeV2TestVerifierAuthority(runDir, run, step, options = {}) {
       review_ref: step.review_ref, review_hash: hashFile(review.path), reviewed_head_sha: integration.head,
     },
     evidence: evidenceValue,
-    plan: { ref: PLAN_SLICES_REF, hash: planAuthority.plan_hash, commands: cloneJson(planAuthority.plan.integration_gate.required_commands) },
+    plan: { ref: PLAN_SLICES_REF, hash: planAuthority.plan_hash, commands: cloneJson(expectedCommands) },
     review: reviewValue,
     integration: { branch: integration.branch, worktree: integration.worktree, head: integration.head, clean: true },
   };
@@ -4267,6 +5006,8 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
   if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error(`slice '${sliceId}' merge requires a clean integration worktree`);
   const reviewedCommit = observed.binding.reviewed_commit;
   const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true });
+  const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, run, decomposition, sliceId, observed.review);
+  assertApprovingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension, "merge");
   const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, sliceGit, decomposition, options);
   if (!sameJson(slice.effective_paths, ownership.effective_paths)) throw new Error(`slice '${sliceId}' effective ownership changed after review`);
   const integrationConflict = run.special_builder_dispatch?.route === "integration-conflict"
@@ -4285,6 +5026,7 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
     integration_conflict: integrationConflict,
     ownership,
     dispatch,
+    review_extension: reviewExtension,
     review_authority: { ...observed, git: sliceGit },
   };
 }
@@ -4302,6 +5044,7 @@ function observeSliceReviewSidecars(runDir, sliceId, slice) {
   const review = resolveReviewRef(runDir, requireNonEmptyString(slice.review_ref, "review_ref"));
   const reviewBytes = readRegularNonEmptyFile(review.path, `slice '${sliceId}' review_ref`);
   const reviewJson = parseJsonObjectBytes(reviewBytes, `slice '${sliceId}' review_ref`);
+  observeInvariantFamilyLedgerEvidence(runDir, sliceId, reviewJson);
   if (evidenceJson.subject !== sliceId) throw new Error(`slice '${sliceId}' evidence subject must match slice id`);
   if (evidenceJson.status !== "pass" || evidenceJson.review_ready !== true) throw new Error(`slice '${sliceId}' evidence must be pass and review_ready`);
   if (reviewJson.subject !== sliceId) throw new Error(`slice '${sliceId}' review subject must match slice id`);
@@ -4346,6 +5089,8 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
   if (observed.evidence.head_sha !== gitAuthority.head) throw new Error(`slice '${sliceId}' evidence head_sha must equal the current slice head`);
   if (observed.review.reviewed_commit !== gitAuthority.head) throw new Error(`slice '${sliceId}' review reviewed_commit must equal the current slice head`);
   if (dispatch && dispatch.completion_head !== gitAuthority.head) throw new Error(`slice '${sliceId}' reviewed head must equal the checked Task completion head`);
+  const reviewExtension = observeInvariantFamilyReviewAuthority(runDir, run, decomposition, sliceId, observed.review);
+  assertPublishingInvariantFamilyReviewAuthority(decomposition.plan, sliceId, observed.review, reviewExtension);
   const ownership = observeSliceOwnershipAuthority(runDir, run, sliceId, slice, observed.review, observed.evidence, gitAuthority, decomposition, options);
   return {
     ...observed,
@@ -4370,7 +5115,74 @@ function observeSliceReviewPublicationAuthority(runDir, run, sliceId, slice, dec
     git: gitAuthority,
     dispatch,
     ownership,
+    review_extension: reviewExtension,
   };
+}
+
+function observeReviewExtensionEvidence(runDir, ref, expectedHash) {
+  const resolved = resolveEvidenceRef(runDir, ref, { mustExist: true });
+  const bytes = readRegularNonEmptyFile(resolved.path, `invariant family ledger evidence '${ref}'`);
+  const hash = sha256Bytes(bytes);
+  if (expectedHash !== undefined && hash !== expectedHash) throw new Error(`invariant family ledger evidence hash is stale for '${ref}'`);
+  const receipt = validateVerificationArtifactExecutionReceipt(parseJsonObjectBytes(bytes, `invariant family ledger evidence '${ref}'`));
+  const claimRef = verificationArtifactExecutionClaimRef(ref);
+  const claimResolved = resolveEvidenceRef(runDir, claimRef);
+  const claim = validateVerificationArtifactExecutionClaim(parseJsonObjectFile(claimResolved.path, `invariant family ledger claim '${claimRef}'`));
+  return { ref, hash, receipt, claim_ref: claimRef, claim };
+}
+
+function observeInvariantFamilyLedgerEvidence(runDir, sliceId, review) {
+  const dispositions = review?.invariant_family_ledger?.dispositions;
+  if (!Array.isArray(dispositions)) return;
+  for (const disposition of dispositions) {
+    const ref = requireNonEmptyString(disposition?.evidence_ref, `slice '${sliceId}' invariant family ledger evidence_ref`);
+    const observed = observeReviewExtensionEvidence(runDir, ref, disposition.evidence_hash);
+    if (observed.hash !== disposition.evidence_hash) {
+      throw new Error(`slice '${sliceId}' invariant family ledger evidence hash is stale for '${ref}'`);
+    }
+  }
+}
+
+function observeInvariantFamilyReviewAuthority(runDir, run, decomposition, sliceId, review) {
+  return validateReviewExtensionResult(evaluateInvariantFamilyReview({
+    plan: decomposition.plan,
+    sliceId,
+    review,
+    observeEvidence: (ref) => {
+      const observed = observeReviewExtensionEvidence(runDir, ref);
+      if (observed.receipt.run_id !== run.run_id) throw new Error("invariant family ledger checked receipt run id is stale");
+      if (observed.receipt.plan_hash !== decomposition.plan_hash) throw new Error("invariant family ledger checked receipt plan hash is stale");
+      return observed;
+    },
+  }));
+}
+
+function assertApprovingInvariantFamilyReviewAuthority(plan, sliceId, review, extension, boundary) {
+  if (plan?.delivery_envelope === undefined || review?.verdict !== "APPROVE") return;
+  if (extension.status !== "active" || extension.decision !== "approve" || extension.grants_b4_authority !== true) {
+    throw new Error(`slice '${sliceId}' ${boundary} requires active approving invariant-family review authority: ${extension.reasons?.join(", ") || "authority-not-granted"}`);
+  }
+}
+
+function assertPublishingInvariantFamilyReviewAuthority(plan, sliceId, review, extension) {
+  if (plan?.delivery_envelope === undefined) return;
+  if (review?.verdict === "APPROVE") {
+    assertApprovingInvariantFamilyReviewAuthority(plan, sliceId, review, extension, "publication");
+    return;
+  }
+  if (review?.verdict !== "REJECT") return;
+  const reasons = Array.isArray(extension.reasons) ? extension.reasons : [];
+  const incompleteReasons = reasons.filter((reason) => reason !== "review-verdict-reject"
+    && !reason.startsWith("invariant-family-result-not-pass:")
+    && !reason.startsWith("invariant-family-unresolved-findings:"));
+  const completeReject = extension.status === "active"
+    && extension.decision === "reject"
+    && extension.grants_b4_authority === false
+    && reasons.includes("review-verdict-reject")
+    && incompleteReasons.length === 0;
+  if (!completeReject) {
+    throw new Error(`slice '${sliceId}' publication requires complete current invariant-family review ledger: ${incompleteReasons.join(", ") || "reject-authority-invalid"}`);
+  }
 }
 
 function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slice, expected, decomposition, options = {}) {
@@ -4659,7 +5471,8 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
       await mkdir(dispatchDir, { recursive: true });
       assertNoSymlinkPath(runDir, dispatchDir, "slice builder dispatch claim directory");
       const claimName = sliceDispatchClaimName(run.run_id, slice.id, slice.attempts);
-      const claimPath = join(dispatchDir, claimName);
+      const claimRef = `dispatch/${claimName}`;
+      const claimPath = join(runDir, claimRef);
       const closureRef = `dispatch/${claimName.slice(0, -5)}.closed.json`;
       const claim = {
         schema_version: 1,
@@ -4676,13 +5489,13 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
         claimed_at: timestamp(options.now),
         closure_ref: closureRef,
       };
-      try {
-        await writeFile(claimPath, `${JSON.stringify(claim, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-      } catch (error) {
-        if (error?.code === "EEXIST") throw new Error("slice builder Task dispatch is already claimed for this exact run/slice/attempt");
-        throw error;
-      }
-      const claimRef = `dispatch/${claimName}`;
+      const publication = await publishDispatchRecord(runDir, claimRef, claim, {
+        hooks: options.sliceDispatchClaimAtomicWriteHooks,
+        beforeCommit: () => {
+          assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
+        },
+        existsMessage: "slice builder Task dispatch is already claimed for this exact run/slice/attempt",
+      });
       const claimHash = hashFile(claimPath);
       const next = cloneJson(run);
       const nextSlice = next.slices.find((candidate) => candidate?.id === slice.id);
@@ -4697,8 +5510,16 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
         const currentClaim = observeSliceDispatchClaim(runDir, run.run_id, nextSlice, nextSlice.attempts);
         if (!currentClaim || currentClaim.ref !== claimRef || currentClaim.hash !== claimHash) throw new Error("slice builder Task dispatch claim changed before run binding");
       };
-      assertPublicationAuthority();
-      await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertPublicationAuthority);
+      try {
+        assertPublicationAuthority();
+        await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertPublicationAuthority);
+      } catch (error) {
+        await removeOwnedFailedDispatchPublication(runDir, claimRef, publication, (current) => {
+          const currentSlice = current.slices?.find((candidate) => candidate?.id === slice.id);
+          return currentSlice?.dispatch_claim_ref === claimRef && currentSlice?.dispatch_claim_hash === claimHash;
+        });
+        throw error;
+      }
       context.dispatch_claim = { ref: claimRef, hash: claimHash, closure_ref: closureRef, head };
     }
     return context;
@@ -4807,7 +5628,8 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
       const dispatchDir = join(runDir, "dispatch");
       await mkdir(dispatchDir, { recursive: true });
       assertNoSymlinkPath(runDir, dispatchDir, "special builder dispatch claim directory");
-      const claimPath = join(dispatchDir, claimName);
+      const claimRef = `dispatch/${claimName}`;
+      const claimPath = join(runDir, claimRef);
       const closureRef = `dispatch/${claimName.slice(0, -5)}.closed.json`;
       const claim = {
         schema_version: 1,
@@ -4826,28 +5648,39 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
         closure_ref: closureRef,
         ...(request.route === "integration-conflict" ? integrationConflictClaimFields(authority.conflict) : {}),
       };
+      const assertPublicationAuthority = () => {
+        assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
+      };
+      const publication = await publishDispatchRecord(runDir, claimRef, claim, {
+        hooks: publicationBeforeCommitHooks(options.specialDispatchClaimAtomicWriteHooks),
+        beforeCommit: assertPublicationAuthority,
+        existsMessage: "special builder Task dispatch is already claimed for this exact route instance",
+      });
+      let claimHash = null;
       try {
-        await writeFile(claimPath, `${JSON.stringify(claim, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        claimHash = hashFile(claimPath);
+        const next = cloneJson(run);
+        next.special_builder_dispatch = {
+          schema_version: 1, route: request.route, instance, agent: request.agent, claim_ref: claimRef, claim_hash: claimHash,
+          ...(request.route === "integration-conflict" ? { owner_slice_id: authority.conflict.effective_owner.slice_id } : {}),
+        };
+        next.updated_at = timestamp(options.now);
+        const assertClaimAuthority = () => {
+          assertPublicationAuthority();
+          const currentClaim = observeSpecialDispatchClaim(runDir, claimRef);
+          if (currentClaim.hash !== claimHash) throw new Error("special builder Task dispatch claim changed before run binding");
+        };
+        await options.specialDispatchClaimAtomicWriteHooks?.afterCommit?.();
+        assertClaimAuthority();
+        await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClaimAuthority);
+        context.dispatch_claim = { ref: claimRef, hash: claimHash, closure_ref: closureRef };
       } catch (error) {
-        if (error?.code === "EEXIST") throw new Error("special builder Task dispatch is already claimed for this exact route instance");
+        await removeOwnedFailedDispatchPublication(runDir, claimRef, publication, (current) => {
+          const binding = current?.special_builder_dispatch;
+          return binding?.claim_ref === claimRef && binding?.claim_hash === claimHash;
+        });
         throw error;
       }
-      assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
-      const claimRef = `dispatch/${claimName}`;
-      const claimHash = hashFile(claimPath);
-      const next = cloneJson(run);
-      next.special_builder_dispatch = {
-        schema_version: 1, route: request.route, instance, agent: request.agent, claim_ref: claimRef, claim_hash: claimHash,
-        ...(request.route === "integration-conflict" ? { owner_slice_id: authority.conflict.effective_owner.slice_id } : {}),
-      };
-      next.updated_at = timestamp(options.now);
-      const assertClaimAuthority = () => {
-        assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, run, context, options);
-        const currentClaim = observeSpecialDispatchClaim(runDir, claimRef);
-        if (currentClaim.hash !== claimHash) throw new Error("special builder Task dispatch claim changed before run binding");
-      };
-      await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClaimAuthority);
-      context.dispatch_claim = { ref: claimRef, hash: claimHash, closure_ref: closureRef };
     }
     return context;
   }, options);
@@ -4891,7 +5724,6 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
     const conflictProof = observed.claim.route === "integration-conflict"
       ? observeIntegrationConflictCompletionProof(repository, run, observed.claim, completionHead, options)
       : null;
-    const closurePath = resolve(runDir, observed.claim.closure_ref);
     const closure = {
       schema_version: 1,
       kind: "checked-special-builder-dispatch-closure",
@@ -4912,11 +5744,10 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
       ...(panelOwnerSliceId ? { owner_slice_id: panelOwnerSliceId } : {}),
       ...(conflictProof ? { owner_slice_id: observed.claim.effective_owner.slice_id, integration_proof: conflictProof } : {}),
     };
-    try {
-      await writeFile(closurePath, `${JSON.stringify(closure, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-    }
+    const publication = await publishDispatchRecord(runDir, observed.claim.closure_ref, closure, {
+      hooks: options.specialDispatchClosureAtomicWriteHooks,
+      allowExisting: true,
+    });
     const closed = observeClosedSpecialDispatch(runDir, observed);
     if (closed.completion_head !== completionHead) throw new Error("special builder Task completion conflicts with a closure for another HEAD");
     const next = cloneJson(run);
@@ -4934,7 +5765,15 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
       const currentClosed = observeClosedSpecialDispatch(runDir, currentClaim);
       if (!sameJson(currentClosed, closed)) throw new Error("special builder Task completion closure changed before run binding");
     };
-    await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClosureAuthority);
+    try {
+      await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClosureAuthority);
+    } catch (error) {
+      await removeOwnedFailedDispatchPublication(runDir, observed.claim.closure_ref, publication, (current) => {
+        const binding = current.special_builder_dispatch;
+        return binding?.closure_ref === closed.closure_ref && binding?.closure_hash === closed.closure_hash;
+      });
+      throw error;
+    }
     return closed;
   }, options);
 }
@@ -5519,7 +6358,6 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
     if (!git(repository, ["merge-base", "--is-ancestor", observed.claim.head, completionHead]).ok) {
       throw new Error("slice builder Task completion HEAD must descend from the dispatch claim HEAD");
     }
-    const closurePath = resolve(runDir, observed.claim.closure_ref);
     const closure = {
       schema_version: 1,
       kind: "checked-slice-builder-dispatch-closure",
@@ -5537,10 +6375,11 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
       completion_token: request.completion_token,
       returned_at: timestamp(options.now),
     };
-    try {
-      await writeFile(closurePath, `${JSON.stringify(closure, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
+    const publication = await publishDispatchRecord(runDir, observed.claim.closure_ref, closure, {
+      hooks: options.sliceDispatchClosureAtomicWriteHooks,
+      allowExisting: true,
+    });
+    if (!publication.created) {
       const existing = observeClosedSliceDispatch(runDir, observed);
       if (!existing || existing.claim_ref !== observed.ref || existing.claim_hash !== observed.hash) throw new Error("slice builder Task completion conflicts with an existing closure");
     }
@@ -5566,10 +6405,140 @@ export async function completeSliceBuilderTaskDispatch(repoInput, request, optio
         throw new Error("slice builder Task completion Git authority changed before closure binding");
       }
     };
-    assertClosureAuthority();
-    await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertClosureAuthority);
+    try {
+      assertClosureAuthority();
+      await writeSemanticRunJson(runDir, validateRun(next), options, v2Authority, assertClosureAuthority);
+    } catch (error) {
+      await removeOwnedFailedDispatchPublication(runDir, observed.claim.closure_ref, publication, (current) => {
+        const currentSlice = current.slices?.find((candidate) => candidate?.id === slice.id);
+        return currentSlice?.dispatch_closure_ref === closed.closure_ref && currentSlice?.dispatch_closure_hash === closed.closure_hash;
+      });
+      throw error;
+    }
     return observeClosedSliceDispatchIfClaimed(runDir, run.run_id, nextSlice, { required: true });
   }, options);
+}
+
+async function publishDispatchRecord(runDir, ref, value, options = {}) {
+  const externalHooks = isRecord(options.hooks) ? options.hooks : {};
+  const externalBeforeCommit = externalHooks.beforeCommit;
+  try {
+    await writeProtectedJsonAtomic(runDir, ref, value, {
+      commit: "create-only",
+      hooks: {
+        ...externalHooks,
+        beforeCommit: async () => {
+          if (typeof externalBeforeCommit === "function") await externalBeforeCommit();
+          if (typeof options.beforeCommit === "function") await options.beforeCommit();
+        },
+      },
+    });
+  } catch (error) {
+    if (/checkpoint child (?:mutation|reservation|local authority)/u.test(error?.cause?.message || "")) throw error.cause;
+    if (error?.code !== "TARGET_EXISTS") throw error;
+    if (!options.allowExisting) throw new Error(options.existsMessage || "dispatch publication already exists");
+    return { created: false, ref };
+  }
+  const path = resolve(runDir, ref);
+  const identity = await lstat(path);
+  if (identity.isSymbolicLink() || !identity.isFile()) throw new Error("dispatch publication target is not a regular file");
+  return { created: true, ref, path, dev: identity.dev, ino: identity.ino, hash: hashFile(path) };
+}
+
+async function removeOwnedFailedDispatchPublication(runDir, ref, publication, isBound) {
+  if (!publication?.created) return;
+  let current = null;
+  try {
+    current = await readRunJson(runDir);
+  } catch {
+    // The run may be the failed authority source; filesystem ownership below
+    // remains sufficient to remove only this operation's unbound publication.
+  }
+  if (current && typeof isBound === "function" && isBound(current)) return;
+  const path = resolve(runDir, ref);
+  let identity;
+  try {
+    identity = await lstat(path);
+  } catch {
+    return;
+  }
+  if (identity.isSymbolicLink() || !identity.isFile() || identity.dev !== publication.dev || identity.ino !== publication.ino
+    || hashFile(path) !== publication.hash) return;
+  await rm(path, { force: true });
+}
+
+async function observeCreatedDirectory(path) {
+  const identity = await lstat(path);
+  if (identity.isSymbolicLink() || !identity.isDirectory()) throw new Error("created sidecar directory is not a regular directory");
+  return { path, dev: identity.dev, ino: identity.ino };
+}
+
+async function removeOwnedEmptyDirectory(owned) {
+  if (!owned) return;
+  let identity;
+  try {
+    identity = await lstat(owned.path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (identity.isSymbolicLink() || !identity.isDirectory() || identity.dev !== owned.dev || identity.ino !== owned.ino) return;
+  try {
+    await rmdir(owned.path);
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "ENOTEMPTY") throw error;
+  }
+}
+
+function publicationBeforeCommitHooks(value) {
+  if (!isRecord(value)) return undefined;
+  const { afterCommit: _afterCommit, ...hooks } = value;
+  return hooks;
+}
+
+function assertSteeringMutationAuthority(runDir, expectedRun, options, v2Authority) {
+  const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+  if (!sameJson(current, expectedRun)) throw new Error("steering run authority changed during sidecar mutation");
+  if (v2Authority) assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
+}
+
+async function renameOwnedSteeringSidecar(sourcePath, destinationPath, expectedHash) {
+  if (existsSync(destinationPath)) throw new Error("consumed steering destination already exists");
+  const source = await lstat(sourcePath);
+  if (source.isSymbolicLink() || !source.isFile() || hashFile(sourcePath, { mode: "raw" }) !== expectedHash) {
+    throw new Error("pending steering source changed before rename");
+  }
+  const moved = { sourcePath, destinationPath, dev: source.dev, ino: source.ino, hash: expectedHash };
+  await rename(sourcePath, destinationPath);
+  return moved;
+}
+
+function assertOwnedSteeringSidecarMove(moved) {
+  if (existsSync(moved.sourcePath)) throw new Error("pending steering source reappeared during rename");
+  const destination = lstatSync(moved.destinationPath);
+  if (destination.isSymbolicLink() || !destination.isFile() || destination.dev !== moved.dev || destination.ino !== moved.ino
+    || hashFile(moved.destinationPath, { mode: "raw" }) !== moved.hash) {
+    throw new Error("consumed steering destination changed during rename");
+  }
+}
+
+async function restoreOwnedSteeringSidecarMove(moved) {
+  if (existsSync(moved.sourcePath)) {
+    const source = lstatSync(moved.sourcePath);
+    if (!source.isSymbolicLink() && source.isFile() && source.dev === moved.dev && source.ino === moved.ino
+      && hashFile(moved.sourcePath, { mode: "raw" }) === moved.hash && !existsSync(moved.destinationPath)) return;
+    throw new Error("steering rollback refused to replace a successor pending sidecar");
+  }
+  const destination = lstatSync(moved.destinationPath);
+  if (destination.isSymbolicLink() || !destination.isFile() || destination.dev !== moved.dev || destination.ino !== moved.ino
+    || hashFile(moved.destinationPath, { mode: "raw" }) !== moved.hash) {
+    throw new Error("steering rollback refused to move a successor consumed sidecar");
+  }
+  await rename(moved.destinationPath, moved.sourcePath);
+  const restored = lstatSync(moved.sourcePath);
+  if (restored.dev !== moved.dev || restored.ino !== moved.ino || hashFile(moved.sourcePath, { mode: "raw" }) !== moved.hash) {
+    throw new Error("steering rollback could not verify the restored pending sidecar");
+  }
 }
 
 function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expectedRun, expectedContext, options = {}) {
@@ -6875,7 +7844,7 @@ function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR o
   if (!origin.ok || !stringValue(origin.stdout) || origin.stdout.trim().includes("\n")) throw new Error(`${label} requires exactly one canonical GitHub origin`);
   const repository = canonicalGithubRepositoryFromOrigin(origin.stdout.trim());
   const headRef = requireNonEmptyString(run.branch, "run.branch");
-  const baseRef = requireNonEmptyString(run.base_ref, "run.base_ref");
+  const baseRef = localPrBaseRef(run);
   if (!run.pr_mode || !["draft", "ready"].includes(run.pr_mode)) throw new Error(`${label} requires persisted run.pr_mode`);
   const headSha = observeExactRemoteHead(options, integration.repository, headRef, label);
   const baseSha = observeExactRemoteHead(options, integration.repository, baseRef, label);
@@ -6883,6 +7852,10 @@ function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR o
   if (requireNonEmptyString(run.base_commit, "run.base_commit") !== baseSha) throw new Error(`${label} requires run.base_commit equal to the exact origin base head`);
   if (!authorityGit(options, integration.repository, ["merge-base", "--is-ancestor", baseSha, headSha]).ok) throw new Error(`${label} requires the origin base to be an ancestor of the origin head`);
   return { repository, origin: origin.stdout.trim(), head_ref: headRef, head_sha: headSha, base_ref: baseRef, base_sha: baseSha, draft: run.pr_mode === "draft", integration };
+}
+
+function localPrBaseRef(run) {
+  return requireNonEmptyString(run.base_ref, "run.base_ref");
 }
 
 function observeExactRemoteHead(options, repository, ref, label) {

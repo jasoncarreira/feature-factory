@@ -7,6 +7,7 @@ import { after, describe, it } from "node:test";
 import { completeSliceBuilderTaskDispatch, prepareSliceBuilderTaskDispatch, transitionRecoverOrphan, transitionRunSlice, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, transitionTerminalResult } from "../src/run-state.js";
 import { validateRun, validateSlicesPlan } from "../src/validate.js";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 describe("uniform slice attempt evidence", () => {
   it("advances one attempt at a time and appends exact review history", async () => {
@@ -88,6 +89,38 @@ describe("uniform slice attempt evidence", () => {
     }
   });
 
+  it("rechecks historical invariant-family evidence before progress and final replacement", async () => {
+    const fixture = createFixture("historical-ledger-evidence-race");
+    try {
+      await startAttempt(fixture, 1);
+      await publishReview(fixture, 1, { verdict: "REJECT", fixes: ["repair"] });
+      await startAttempt(fixture, 2);
+      const familyEvidence = join(fixture.runDir, "evidence", "slice.family-attempt-1.json");
+      const currentFamilyEvidence = readFileSync(familyEvidence, "utf8");
+      writeJson(familyEvidence, { subject: "slice", attempt: 1, invariant_family: "fixture-family-1", status: "drifted" });
+
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        publishReview(fixture, 2, { verdict: "REJECT", fixes: ["repair again"] }),
+        /invariant family ledger evidence hash is stale/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      writeFileSync(familyEvidence, currentFamilyEvidence);
+      await publishReview(fixture, 2, { verdict: "REJECT", fixes: ["repair again"] });
+
+      const beforeRace = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 3 }, {
+          atomicWriteHooks: { beforeCommit: () => writeJson(familyEvidence, { subject: "slice", attempt: 1, invariant_family: "fixture-family-1", status: "raced" }) },
+        }),
+        /invariant family ledger evidence hash is stale|commit failed/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeRace);
+    } finally {
+      cleanup(fixture);
+    }
+  });
+
   it("rejects non-atomic, duplicate, and inconsistent review issue counts", async () => {
     for (const [name, review, error] of [
       ["missing-convergence", { verdict: "REJECT", required_fixes: ["fix"], remaining_fix_count: 1 }, /convergence.*must be/u],
@@ -122,10 +155,10 @@ describe("uniform slice attempt evidence", () => {
   });
 
   it("keeps the plan and durable schema closed to a fixed limit of three", () => {
-    const plan = {
+    const plan = withDeliveryEnvelope({
       integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
       slices: [{ id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
-    };
+    });
     assert.equal(validateSlicesPlan(plan, { requireIntegrationGate: true }).slices.length, 1);
     assert.throws(() => validateSlicesPlan({ ...plan, slices: [{ ...plan.slices[0], max_attempts: 4 }] }), /max_attempts: is not allowed/u);
     assert.throws(() => validateSlicesPlan({ ...plan, slices: [{ ...plan.slices[0], dominant_concern: "wide" }] }), /dominant_concern: is not allowed/u);
@@ -670,10 +703,20 @@ function commitSliceAttempt(fixture, attempt) {
 }
 
 function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "converging", classifications, scopeEffect = "in-lane", likelyPaths = ["slice.txt"], fixOwner = "slice" }) {
+  const reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  const familyEvidenceRef = `evidence/slice.family-attempt-${attempt}.json`;
+  const plan = JSON.parse(readFileSync(join(fixture.runDir, "plan", "slices.json"), "utf8"));
+  const family = plan.delivery_envelope.delivery_units[0].invariant_families[0];
+  const artifactId = plan.delivery_envelope.delivery_units[0].obligations[0].verification_artifact_id;
+  const checkedFamilyEvidence = writeVerificationArtifactReceipt({
+    runDir: fixture.runDir, runId: "run", plan, sliceId: "slice", attempt, reviewedCommit,
+    artifactId, evidenceRef: familyEvidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: `${family.description} passed` },
+  });
   return {
     subject: "slice",
     attempt,
-    reviewed_commit: gitOutput(fixture.repo, ["rev-parse", "HEAD"]),
+    reviewed_commit: reviewedCommit,
     verdict,
     convergence,
     remaining_fix_count: fixes.length,
@@ -689,6 +732,13 @@ function reviewRecord(fixture, attempt, { verdict, fixes = [], convergence = "co
         fix_owner: fixOwner,
       })),
     },
+    invariant_family_ledger: passingInvariantFamilyLedger({
+      plan,
+      sliceId: "slice",
+      reviewedCommit,
+      evidenceRef: familyEvidenceRef,
+      evidenceHash: checkedFamilyEvidence.hash,
+    }),
   };
 }
 
@@ -721,10 +771,10 @@ function createFixture(name) {
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   mkdirSync(join(runDir, "plan"), { recursive: true });
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
-  writeJson(join(runDir, "plan", "slices.json"), {
+  writeJson(join(runDir, "plan", "slices.json"), withDeliveryEnvelope({
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [{ id: "slice", stack: "backend", paths: ["slice.txt"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
-  });
+  }));
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
   writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
   writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted brief\n", "utf8");

@@ -11,6 +11,7 @@ import {
   parseSlicesPlanBytes,
   validateSlicesPlan,
 } from "../src/validate.js";
+import { withDeliveryEnvelope } from "./helpers/delivery-envelope-fixture.js";
 
 const FINAL_COMMAND = Object.freeze({ program: "npm", args: Object.freeze(["run", "check"]) });
 
@@ -136,7 +137,7 @@ describe("plan integration_gate command contract", () => {
 });
 
 function planWithCommands(requiredCommands) {
-  return { slices: [plannedSlice()], integration_gate: { required_commands: structuredClone(requiredCommands) } };
+  return withDeliveryEnvelope({ slices: [plannedSlice()], integration_gate: { required_commands: structuredClone(requiredCommands) } });
 }
 
 function plannedSlice() {

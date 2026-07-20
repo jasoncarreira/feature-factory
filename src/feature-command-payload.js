@@ -8,8 +8,9 @@ const DRIVER_MODES = new Set(["interactive", "headless", "autonomous"]);
 const DRIVER_KEYS = new Set(["mode", "ready", "pr_mode", "reviewer", "github_account", "run_id", "post_pr_ci"]);
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
-const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward"]);
+const CONTINUATION_KEYS = new Set(["kind", "schema_version", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_hash", "review_ref", "review_hash"]);
 const CONTINUATION_DRAFT_SPEC_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
@@ -83,6 +84,9 @@ export function decodeFeatureCommandPayload(argumentsText, options = {}) {
   const hasResume = payload.resume !== undefined && payload.resume !== null;
   const hasSteering = payload.steering !== undefined && payload.steering !== null;
   const hasContinuation = payload.continuation !== undefined && payload.continuation !== null;
+  if (["checkpoint", "checkpoint_reservation", "checkpoint_request"].some((key) => Object.hasOwn(payload, key))) {
+    return { ok: false, reason: "unsupported-checkpoint-route" };
+  }
   if (hasResume !== hasSteering) return { ok: false, reason: "incomplete-resume-route" };
   if (hasResume && hasContinuation) return { ok: false, reason: "ambiguous-route" };
   if (driver.run_id !== undefined && driver.run_id !== null && (hasResume || hasContinuation)) return { ok: false, reason: "invalid-driver-run-id-route" };
@@ -238,10 +242,20 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
 
   const planningReuse = continuation.planning_reuse;
   if (planningReuse !== undefined) {
-    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, CONTINUATION_PLANNING_REUSE_KEYS) || typeof planningReuse.eligible !== "boolean") {
+    const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash") && planningReuse?.eligible === true;
+    const allowedPlanningKeys = checkpointVariant ? CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS : CONTINUATION_PLANNING_REUSE_KEYS;
+    if (!plainObject(planningReuse) || !hasOnlyKeys(planningReuse, allowedPlanningKeys) || typeof planningReuse.eligible !== "boolean") {
       return { ok: false, reason: "invalid-continuation-planning-reuse" };
     }
-    if (planningReuse.eligible
+    if (checkpointVariant
+      && (planningReuse.plan_ref !== "plan/slices.json"
+        || planningReuse.plan_hash !== continuation.carry_forward?.plan_hash
+        || planningReuse.review_ref !== "reviews/work-decomposer.json"
+        || !SHA256_PATTERN.test(planningReuse.plan_hash || "")
+        || !SHA256_PATTERN.test(planningReuse.review_hash || ""))) {
+      return { ok: false, reason: "invalid-continuation-planning-reuse" };
+    }
+    if (!checkpointVariant && planningReuse.eligible
       && (!canonicalJsonRef(planningReuse.spec_review_ref, "reviews/")
         || planningReuse.child_spec_review_ref !== CONTINUATION_CHILD_SPEC_REVIEW_REF
         || planningReuse.spec_artifact_ref !== "artifacts/technical-brief.md"
@@ -283,7 +297,11 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
       branch: target.branch,
       worktree: target.worktree,
       status: "running",
-      ...(v2 ? { mode: driver.mode, github_account: driver.github_account ?? null, pr_mode: driver.pr_mode, max_parallel_slices: 3, max_retries: 3, post_pr: { schema_version: 1, policy, phase: policy.enabled ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null } } : {}),
+      ...(v2 ? {
+        mode: driver.mode, github_account: driver.github_account ?? null, pr_mode: driver.pr_mode, max_parallel_slices: 3, max_retries: 3,
+        ...(continuation.configuration?.review_tier === null || continuation.configuration?.review_tier === undefined ? {} : { review_tier: continuation.configuration.review_tier }),
+        post_pr: { schema_version: 1, policy, phase: policy.enabled ? "awaiting-pr" : "disabled", attempt: 0, observation: null, remediation: null, evidence_refs: [], continuation_review: null, terminal_fact: null, pr_operation: null },
+      } : {}),
       ...(draftSpecReuse === undefined ? {} : { max_retries: draftSpecReuse.max_retries }),
       gates: {},
       continuation,
@@ -366,6 +384,8 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
       ...(draftSpecReuse === undefined ? {} : { draft_spec_reuse: cloneJson(draftSpecReuse) }),
       ...(continuation.post_pr === undefined ? {} : { post_pr: cloneJson(continuation.post_pr) }),
       ...(continuation.configuration === undefined ? {} : { configuration: cloneJson(continuation.configuration) }),
+      ...(continuation.checkpoint_source_hash === undefined ? {} : { checkpoint_source_hash: continuation.checkpoint_source_hash }),
+      ...(continuation.configuration_hash === undefined ? {} : { configuration_hash: continuation.configuration_hash }),
       ...(carryForward.value === null ? {} : { carry_forward: carryForward.value }),
     },
   };
@@ -421,6 +441,15 @@ function validAcceptedAttemptHistory(row) {
 function normalizedPlanningReuse(planningReuse) {
   if (!planningReuse.eligible) {
     return { eligible: false, ...(nonEmptyString(planningReuse.reason) ? { reason: planningReuse.reason } : {}) };
+  }
+  if (Object.hasOwn(planningReuse, "plan_ref")) {
+    return {
+      eligible: true,
+      plan_ref: planningReuse.plan_ref,
+      plan_hash: planningReuse.plan_hash,
+      review_ref: planningReuse.review_ref,
+      review_hash: planningReuse.review_hash,
+    };
   }
   return {
     eligible: true,

@@ -1,11 +1,16 @@
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { COST_ATTRIBUTION_SCHEMA_VERSION, COST_ATTRIBUTION_STATUSES, COST_NUMERIC_FIELDS, MAX_COST_ATTRIBUTION_ENTRIES, USAGE_NUMERIC_FIELDS, hasTerminalControl, isSafeCostCurrency, sanitizePublicCostText } from "./cost-attribution.js";
 import { REDACTED_ENV_VALUE, isSensitiveEnvKey, isSensitiveEnvValue } from "./env-snapshot.js";
 import { PROCESS_EVIDENCE_FILE, processEvidenceProcessesDir, validateProcessEvidence } from "./process-evidence.js";
 import { validatePlanPath } from "./post-pr-ci.js";
 import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvidenceRef, resolveGateRef, resolveReviewRef, resolveSteeringRef } from "./refs.js";
+import { evaluateDeliveryEnvelopeAdmission } from "./delivery-envelope/admission-extension.js";
+import { evaluateInvariantFamilyReview } from "./delivery-envelope/review-extension.js";
+import { DeliveryContractValidationError, validateAdmissionExtensionResult, validateInvariantFamilyLedger, validateReviewExtensionResult } from "./delivery-envelope/extensions.js";
+import { CHECKPOINT_ROUTING_KIND, CHECKPOINT_ROUTING_TERMINAL_REASON, validateCheckpointRoutingManifest, validateReviewedCheckpointPlan } from "./delivery-envelope/checkpoint-routing.js";
 
 export const TERMINAL_RUN_STATUSES = Object.freeze(["completed", "blocked", "partial", "needs-human"]);
 export const HEARTBEAT_PHASES = Object.freeze([
@@ -65,8 +70,8 @@ export const POST_PR_TERMINAL_REASONS = Object.freeze({
 const POST_PR_PHASE_SET = new Set(POST_PR_PHASES);
 const POST_PR_ACTIVE_PHASES = new Set(POST_PR_PHASES.filter((phase) => !["disabled", "awaiting-pr", "succeeded", "blocked", "needs-human"].includes(phase)));
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/u;
-const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "special_builder_dispatch", "continuation", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
-const PLAN_KEYS = new Set(["slices", "integration_gate"]);
+const RUN_KEYS = new Set(["schema_version", "run_id", "mode", "status", "created_at", "updated_at", "heartbeat_at", "base_ref", "base_commit", "branch", "worktree", "github_account", "pr_mode", "pr_url", "max_parallel_slices", "max_retries", "review_tier", "debug_snapshot", "provenance", "merged_slice_repair", "special_builder_dispatch", "continuation", "checkpoint_source", "checkpoint_progress", "steering", "post_pr", "gates", "slices", "cost_attribution", "steps", "validator", "security_review", "terminal_result"]);
+const PLAN_KEYS = new Set(["slices", "integration_gate", "delivery_envelope"]);
 const PLANNED_SLICE_KEYS = new Set(["id", "stack", "paths", "depends_on", "acceptance", "test_plan"]);
 const INTEGRATION_GATE_KEYS = new Set(["required_commands"]);
 const INTEGRATION_GATE_COMMAND_KEYS = new Set(["program", "args"]);
@@ -84,11 +89,34 @@ const HANDOFF_RECEIPT_KEYS = new Set(["schema_version", "kind", "gate", "approva
 const STEP_KEYS = new Set(["agent", "status", "attempts", "artifact_ref", "review_ref", "evidence_ref", "acceptance", "inherited_acceptance", "execution_claim", "execution_claim_hash"]);
 const STEP_ACCEPTANCE_KEYS = new Set(["artifact_ref", "artifact_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_head_sha"]);
 const STEP_INHERITED_ACCEPTANCE_KEYS = new Set(["from_run_id", "parent_spec_review_ref", "artifact_hash", "review_hash"]);
+const CHECKPOINT_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy", "review_tier"]);
+const CHECKPOINT_SOURCE_KEYS = new Set(["schema_version", "kind", "parent_run_id", "manifest_ref", "manifest_hash", "checkpoint_id", "checkpoint_ordinal", "root_child_run_id", "source_plan_ref", "source_plan_hash", "source_review_ref", "source_review_hash", "source_review_attempt", "parent_review_identity_hash", "child_disposition_hash", "admission_probe_hash", "brief_scope_hash", "child_plan_hash", "acceptance_mapping_hash", "initial_base_ref", "initial_base_commit"]);
+const CHECKPOINT_CHILD_PUBLICATION_KEYS = new Set(["schema_version", "kind", "parent_run_id", "manifest_ref", "manifest_hash", "checkpoint_id", "checkpoint_ordinal", "child_run_id", "branch_ref", "worktree", "remote_main_ref", "base_commit", "predecessor_checkpoint_id", "predecessor_completed_run_id", "predecessor_merge_commit", "reserved_at"]);
+const CHECKPOINT_PROGRESS_KEYS = new Set(["schema_version", "kind", "manifest_ref", "manifest_hash", "status", "entries", "final_closure"]);
+const CHECKPOINT_PROGRESS_ENTRY_COMMON_KEYS = new Set(["state", "checkpoint_id", "ordinal", "root_child_run_id", "branch", "worktree", "base_ref", "base_commit", "predecessor_checkpoint_id", "predecessor_completed_run_id", "predecessor_merge_commit", "configuration", "publication_claim_ref", "publication_claim_oid", "reserved_at"]);
+const CHECKPOINT_PROGRESS_ENTRY_KEYS = Object.freeze({
+  reserved: new Set(CHECKPOINT_PROGRESS_ENTRY_COMMON_KEYS),
+  "child-published": new Set([...CHECKPOINT_PROGRESS_ENTRY_COMMON_KEYS, "child_run_hash", "child_plan_hash", "brief_scope_hash", "published_at"]),
+  launched: new Set([...CHECKPOINT_PROGRESS_ENTRY_COMMON_KEYS, "child_run_hash", "child_plan_hash", "brief_scope_hash", "published_at", "launched_at"]),
+  merged: new Set([...CHECKPOINT_PROGRESS_ENTRY_COMMON_KEYS, "child_run_hash", "child_plan_hash", "brief_scope_hash", "published_at", "launched_at", "completed_child_run_id", "completed_child_run_hash", "checkpoint_source_hash", "configuration_hash", "lineage", "pull_request", "remote_main", "merged_at"]),
+});
+const CHECKPOINT_PROGRESS_FINAL_CLOSURE_KEYS = new Set(["ref", "hash", "closed_at"]);
+const CHECKPOINT_LINEAGE_KEYS = new Set(["run_id", "run_hash", "parent_run_id", "continuation_claim_ref", "continuation_claim_oid"]);
+const CHECKPOINT_PULL_REQUEST_KEYS = new Set(["pr_url", "pr_number", "pr_node_id", "repository", "operation_id", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "merge_commit"]);
+const CHECKPOINT_REMOTE_MAIN_KEYS = new Set(["ref", "commit", "observed_at"]);
+const CHECKPOINT_CLOSURE_KEYS = new Set(["schema_version", "kind", "parent_run_id", "parent_run_hash", "manifest_ref", "manifest_hash", "source_plan_ref", "source_plan_hash", "source_review_ref", "source_review_hash", "source_review_attempt", "parent_review_identity_hash", "admission_probe_hash", "checkpoints", "remote_main", "closed_at"]);
+const CHECKPOINT_CLOSURE_ENTRY_KEYS = new Set(["checkpoint_id", "ordinal", "root_child_run_id", "child_plan_hash", "brief_scope_hash", "completed_child_run_id", "completed_child_run_hash", "checkpoint_source_hash", "configuration", "configuration_hash", "lineage", "pull_request", "merged_at"]);
 const TEST_EXECUTION_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "attempt", "plan_ref", "plan_hash", "head_sha", "receipt_ref", "claimed_at"]);
 const TEST_EXECUTION_CLAIM_COMPLETED_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
 const TEST_EXECUTION_CLAIM_UNKNOWN_KEYS = new Set([...TEST_EXECUTION_CLAIM_COMMON_KEYS, "failed_at", "reason"]);
 const TEST_EXECUTION_UNKNOWN_REASONS = new Set(["process-outcome-indeterminate", "authority-changed", "receipt-publication-indeterminate"]);
 const TEST_EXECUTION_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands"]);
+const VERIFICATION_ARTIFACT_RECEIPT_KEYS = new Set(["schema_version", "kind", "subject", "run_id", "slice_id", "attempt", "claim_nonce", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "probe", "started_at", "completed_at", "duration_ms", "status", "review_ready", "commands", "result"]);
+const VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS = new Set(["schema_version", "kind", "state", "nonce", "run_id", "slice_id", "attempt", "plan_ref", "plan_hash", "head_sha", "verification_artifact_id", "probe", "receipt_ref", "claimed_at"]);
+const VERIFICATION_ARTIFACT_CLAIM_COMPLETED_KEYS = new Set([...VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS, "completed_at", "status", "receipt_hash"]);
+const VERIFICATION_ARTIFACT_CLAIM_UNKNOWN_KEYS = new Set([...VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS, "failed_at", "reason", "status", "receipt_hash"]);
+const VERIFICATION_ARTIFACT_PROBE_KEYS = new Set(["type", "verification_artifact_id", "test_plan_index", "test_plan_entry", "program", "args"]);
+const VERIFICATION_ARTIFACT_RESULT_KEYS = new Set(["type", "outcome", "summary"]);
 const TEST_EXECUTION_COMMAND_RESULT_KEYS = new Set(["index", "program", "args", "outcome", "status", "exit_code", "signal", "error_code", "duration_ms", "stdout", "stderr"]);
 const TEST_EXECUTION_STREAM_KEYS = new Set(["captured_bytes", "sha256", "truncated"]);
 const TEST_EXECUTION_OUTCOMES = new Set(["exited", "signaled", "timeout", "output-limit", "launch-error"]);
@@ -126,7 +154,7 @@ const STEERING_FENCE_KEYS = new Set([...STEERING_FENCE_CONTROL_KEYS, ...PR_OPERA
 const POST_PR_OPERATION_KEYS = new Set(["operation_id", "repository", "created_at", "head_ref", "head_sha", "base_ref", "base_sha", "draft", "pr_url", "pr_number", "pr_node_id"]);
 const STEERING_ACTION_CLAIM_KEYS = new Set(["kind", "token", "generation", "claimed_at"]);
 const STEERING_LAST_ACTION_KEYS = new Set(["kind", "token", "generation", "outcome", "claimed_at", "resolved_at"]);
-const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward"]);
+const CONTINUATION_KEYS = new Set(["schema_version", "kind", "created_at", "operator_summary", "parent", "review", "target", "parent_artifacts", "parent_evidence", "parent_reviews", "planning_reuse", "draft_spec_reuse", "post_pr", "configuration", "carry_forward", "checkpoint_source_hash", "configuration_hash"]);
 const CONTINUATION_PARENT_KEYS = new Set(["run_id", "status", "run_ref", "run_hash", "branch", "commit", "worktree"]);
 const CONTINUATION_REVIEW_KEYS = new Set(["kind", "ref", "hash", "subject", "verdict", "summary", "required_fixes", "source"]);
 const CONTINUATION_REVIEW_KINDS = new Set(["validator", "security_review", "step", "slice", "post_pr"]);
@@ -134,10 +162,11 @@ const CONTINUATION_TARGET_KEYS = new Set(["run_id", "branch", "worktree", "base_
 const CONTINUATION_REF_HASH_KEYS = new Set(["kind", "ref", "hash"]);
 const CONTINUATION_ARTIFACT_KINDS = new Set(["artifact", "story", "research_map", "design_brief", "technical_brief", "test_report", "validation_report", "pr_body"]);
 const CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "reason", "spec_review_ref", "spec_review_hash", "spec_artifact_ref", "spec_artifact_hash", "child_spec_review_ref"]);
+const CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_hash", "review_ref", "review_hash"]);
 const CONTINUATION_DRAFT_REUSE_KEYS = new Set(["artifact_ref", "artifact_hash", "parent_step_status", "parent_step_attempts", "max_retries", "remaining_attempts"]);
 const CONTINUATION_CARRY_FORWARD_KEYS = new Set(["scope", "plan_ref", "plan_hash", "start_commit", "accepted_slices", "remaining_slice_ids"]);
 const CONTINUATION_CARRY_FORWARD_ACCEPTED_KEYS = new Set(["id", "declared_paths", "effective_paths", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit", "integration_conflict"]);
-const CONTINUATION_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy"]);
+const CONTINUATION_CONFIGURATION_KEYS = new Set(["mode", "github_account", "pr_mode", "max_parallel_slices", "max_retries", "post_pr_policy", "review_tier"]);
 
 export class ValidationError extends Error {
   constructor(errors) {
@@ -156,6 +185,10 @@ export function validateSliceReviewResult(review, { sliceId = "slice" } = {}) {
   const errors = [];
   const path = "review";
   if (!isRecord(review)) fail([{ path, message: "must be an object" }]);
+  appendDeliveryContractErrors(errors, () => validateInvariantFamilyLedger(review.invariant_family_ledger, {
+    reviewedCommit: review.reviewed_commit,
+  }));
+  appendDeliveryContractErrors(errors, () => validateReviewExtensionResult(evaluateInvariantFamilyReview({ sliceId, review })));
   if (!Array.isArray(review.required_fixes)) errors.push({ path: `${path}.required_fixes`, message: "must be an array" });
   const fixes = Array.isArray(review.required_fixes) ? review.required_fixes : [];
   const canonicalFixes = fixes.map((fix) => typeof fix === "string" ? fix.trim().normalize("NFC") : null);
@@ -230,6 +263,12 @@ export function sliceReviewTaskContext(review, options = {}) {
 export function validateSliceReviewFeasibility(review, plan, { sliceId = "slice" } = {}) {
   validateSliceReviewResult(review, { sliceId });
   validateSlicesPlan(plan, { enforceDependencyDepth: false });
+  try {
+    validateReviewExtensionResult(evaluateInvariantFamilyReview({ plan, sliceId, review }));
+  } catch (error) {
+    if (error instanceof DeliveryContractValidationError) fail(error.errors);
+    throw error;
+  }
   const byId = new Map(plan.slices.map((slice) => [slice.id, slice]));
   if (!byId.has(sliceId)) {
     fail([{ path: "review.subject", message: `reviewed slice '${sliceId}' must exist in the current plan` }]);
@@ -351,6 +390,17 @@ export function validateRun(run) {
   validateMergedSliceRepair(errors, run, "run.merged_slice_repair");
   validateSpecialBuilderDispatch(errors, run.special_builder_dispatch, "run.special_builder_dispatch");
   validateContinuation(errors, run, "run.continuation");
+  validateCheckpointSourceRecord(errors, run.checkpoint_source, "run.checkpoint_source");
+  validateCheckpointProgressRecord(errors, run.checkpoint_progress, "run.checkpoint_progress");
+  if (run.checkpoint_source != null && run.checkpoint_progress != null) errors.push({ path: "run", message: "checkpoint_source and checkpoint_progress are mutually exclusive child and parent records" });
+  if (run.checkpoint_progress != null) {
+    if (run.status !== "blocked" || run.terminal_result?.status !== "blocked" || run.terminal_result?.reason !== CHECKPOINT_ROUTING_TERMINAL_REASON) {
+      errors.push({ path: "run.checkpoint_progress", message: "is allowed only on the blocked checkpoint-routing parent" });
+    }
+    if (run.checkpoint_progress?.manifest_ref !== run.terminal_result?.artifacts?.checkpoint_routing) {
+      errors.push({ path: "run.checkpoint_progress.manifest_ref", message: "must match terminal_result.artifacts.checkpoint_routing" });
+    }
+  }
   validateSteering(errors, run.steering, "run.steering");
   validatePostPr(errors, run, "run.post_pr");
 
@@ -365,6 +415,296 @@ export function validateRun(run) {
 
   if (errors.length) fail(errors);
   return run;
+}
+
+export function validateCheckpointConfiguration(value) {
+  const errors = [];
+  validateCheckpointConfigurationRecord(errors, value, "checkpoint_configuration");
+  if (errors.length) fail(errors);
+  return value;
+}
+
+export function validateCheckpointSource(value) {
+  const errors = [];
+  validateCheckpointSourceRecord(errors, value, "checkpoint_source", { required: true });
+  if (errors.length) fail(errors);
+  return value;
+}
+
+export function validateCheckpointChildPublication(value) {
+  const errors = [];
+  validateCheckpointChildPublicationRecord(errors, value, "checkpoint_child_publication");
+  if (errors.length) fail(errors);
+  return value;
+}
+
+export function validateCheckpointProgress(value) {
+  const errors = [];
+  validateCheckpointProgressRecord(errors, value, "checkpoint_progress", { required: true });
+  if (errors.length) fail(errors);
+  return value;
+}
+
+export function validateDeliveryCheckpointFinalClosure(value) {
+  const errors = [];
+  validateDeliveryCheckpointFinalClosureRecord(errors, value, "checkpoint_final_closure");
+  if (errors.length) fail(errors);
+  return value;
+}
+
+function validateCheckpointConfigurationRecord(errors, value, path) {
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_CONFIGURATION_KEYS, path);
+  requiredEnum(errors, value, "mode", RUN_MODES, `${path}.mode`);
+  if (!Object.hasOwn(value, "github_account") || value.github_account !== null && !stringValue(value.github_account)) errors.push({ path: `${path}.github_account`, message: "must be a non-empty string or null" });
+  requiredEnum(errors, value, "pr_mode", PR_MODES, `${path}.pr_mode`);
+  boundedInteger(errors, value, "max_parallel_slices", 3, 3, `${path}.max_parallel_slices`);
+  boundedInteger(errors, value, "max_retries", 3, 3, `${path}.max_retries`);
+  validatePostPrPolicy(errors, value.post_pr_policy, `${path}.post_pr_policy`);
+  if (!Object.hasOwn(value, "review_tier") || value.review_tier !== null && !stringValue(value.review_tier)) errors.push({ path: `${path}.review_tier`, message: "must be a non-empty string or null" });
+}
+
+function validateCheckpointSourceRecord(errors, value, path, { required = false } = {}) {
+  if (value === undefined || value === null) { if (required) errors.push({ path, message: "must be an object" }); return; }
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_SOURCE_KEYS, path);
+  exactCheckpointRecordHeader(errors, value, "delivery-checkpoint-source", path);
+  for (const key of ["parent_run_id", "checkpoint_id", "root_child_run_id"]) requiredTerminalSafeString(errors, value, key, `${path}.${key}`);
+  boundedInteger(errors, value, "checkpoint_ordinal", 1, Number.MAX_SAFE_INTEGER, `${path}.checkpoint_ordinal`);
+  validateCheckpointIdOrdinal(errors, value.checkpoint_id, value.checkpoint_ordinal, `${path}.checkpoint_id`);
+  validateCheckpointManifestBinding(errors, value, path);
+  requiredString(errors, value, "source_plan_ref", `${path}.source_plan_ref`);
+  if (value.source_plan_ref !== PLAN_SLICES_REF) errors.push({ path: `${path}.source_plan_ref`, message: `must equal ${PLAN_SLICES_REF}` });
+  requiredHash(errors, value, "source_plan_hash", `${path}.source_plan_hash`);
+  requiredString(errors, value, "source_review_ref", `${path}.source_review_ref`);
+  validateDurableRef(errors, value.source_review_ref, "reviews", `${path}.source_review_ref`);
+  requiredHash(errors, value, "source_review_hash", `${path}.source_review_hash`);
+  boundedInteger(errors, value, "source_review_attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.source_review_attempt`);
+  for (const key of ["parent_review_identity_hash", "child_disposition_hash", "admission_probe_hash", "brief_scope_hash", "child_plan_hash", "acceptance_mapping_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
+  requiredString(errors, value, "initial_base_ref", `${path}.initial_base_ref`);
+  if (value.initial_base_ref !== "refs/remotes/origin/main") errors.push({ path: `${path}.initial_base_ref`, message: "must equal refs/remotes/origin/main" });
+  requiredFullGitSha(errors, value, "initial_base_commit", `${path}.initial_base_commit`);
+}
+
+function validateCheckpointChildPublicationRecord(errors, value, path) {
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_CHILD_PUBLICATION_KEYS, path);
+  exactCheckpointRecordHeader(errors, value, "delivery-checkpoint-child-publication", path);
+  for (const key of ["parent_run_id", "checkpoint_id", "child_run_id"]) requiredTerminalSafeString(errors, value, key, `${path}.${key}`);
+  boundedInteger(errors, value, "checkpoint_ordinal", 1, Number.MAX_SAFE_INTEGER, `${path}.checkpoint_ordinal`);
+  validateCheckpointIdOrdinal(errors, value.checkpoint_id, value.checkpoint_ordinal, `${path}.checkpoint_id`);
+  validateCheckpointManifestBinding(errors, value, path);
+  requiredString(errors, value, "branch_ref", `${path}.branch_ref`);
+  if (stringValue(value.child_run_id) && value.branch_ref !== `refs/heads/${value.child_run_id}`) errors.push({ path: `${path}.branch_ref`, message: "must be the exact child run branch ref" });
+  requiredString(errors, value, "worktree", `${path}.worktree`);
+  if (!isAbsolute(value.worktree ?? "")) errors.push({ path: `${path}.worktree`, message: "must be absolute" });
+  requiredString(errors, value, "remote_main_ref", `${path}.remote_main_ref`);
+  if (value.remote_main_ref !== "refs/heads/main") errors.push({ path: `${path}.remote_main_ref`, message: "must equal refs/heads/main" });
+  requiredFullGitSha(errors, value, "base_commit", `${path}.base_commit`);
+  validateCheckpointPredecessor(errors, value, path, "checkpoint_ordinal");
+  requiredTimestamp(errors, value, "reserved_at", `${path}.reserved_at`);
+}
+
+function validateCheckpointProgressRecord(errors, value, path, { required = false } = {}) {
+  if (value === undefined || value === null) { if (required) errors.push({ path, message: "must be an object" }); return; }
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_PROGRESS_KEYS, path);
+  exactCheckpointRecordHeader(errors, value, "delivery-checkpoint-progress", path);
+  validateCheckpointManifestBinding(errors, value, path);
+  requiredEnum(errors, value, "status", new Set(["active", "closed"]), `${path}.status`);
+  if (!Array.isArray(value.entries)) errors.push({ path: `${path}.entries`, message: "must be an array" });
+  else {
+    for (const [index, entry] of value.entries.entries()) validateCheckpointProgressEntry(errors, entry, `${path}.entries[${index}]`, index, value.entries);
+  }
+  if (value.final_closure === null) {
+    if (value.status === "closed") errors.push({ path: `${path}.final_closure`, message: "must be present when status is closed" });
+  } else validateCheckpointProgressFinalClosure(errors, value.final_closure, `${path}.final_closure`);
+  if (value.status === "active" && value.final_closure !== null) errors.push({ path: `${path}.final_closure`, message: "must be null while status is active" });
+  if (value.status === "closed" && Array.isArray(value.entries) && (value.entries.length === 0 || value.entries.some((entry) => entry?.state !== "merged"))) errors.push({ path: `${path}.entries`, message: "must be nonempty and entirely merged when status is closed" });
+}
+
+function validateCheckpointProgressEntry(errors, entry, path, index, entries) {
+  if (!isRecord(entry)) { errors.push({ path, message: "must be an object" }); return; }
+  const keys = CHECKPOINT_PROGRESS_ENTRY_KEYS[entry.state] ?? CHECKPOINT_PROGRESS_ENTRY_COMMON_KEYS;
+  allowedKeys(errors, entry, keys, path);
+  requiredEnum(errors, entry, "state", new Set(Object.keys(CHECKPOINT_PROGRESS_ENTRY_KEYS)), `${path}.state`);
+  for (const key of ["checkpoint_id", "root_child_run_id", "branch"]) requiredTerminalSafeString(errors, entry, key, `${path}.${key}`);
+  boundedInteger(errors, entry, "ordinal", 1, Number.MAX_SAFE_INTEGER, `${path}.ordinal`);
+  if (entry.ordinal !== index + 1) errors.push({ path: `${path}.ordinal`, message: "must be contiguous and equal its one-based entry position" });
+  validateCheckpointIdOrdinal(errors, entry.checkpoint_id, entry.ordinal, `${path}.checkpoint_id`);
+  if (stringValue(entry.root_child_run_id) && entry.branch !== entry.root_child_run_id) errors.push({ path: `${path}.branch`, message: "must equal root_child_run_id" });
+  requiredString(errors, entry, "worktree", `${path}.worktree`);
+  if (!isAbsolute(entry.worktree ?? "")) errors.push({ path: `${path}.worktree`, message: "must be absolute" });
+  requiredString(errors, entry, "base_ref", `${path}.base_ref`);
+  if (entry.base_ref !== "refs/remotes/origin/main") errors.push({ path: `${path}.base_ref`, message: "must equal refs/remotes/origin/main" });
+  requiredFullGitSha(errors, entry, "base_commit", `${path}.base_commit`);
+  validateCheckpointPredecessor(errors, entry, path, "ordinal", entries[index - 1]);
+  validateCheckpointConfigurationRecord(errors, entry.configuration, `${path}.configuration`);
+  requiredString(errors, entry, "publication_claim_ref", `${path}.publication_claim_ref`);
+  if (stringValue(entry.root_child_run_id)) {
+    const digest = createHash("sha256").update(entry.root_child_run_id, "utf8").digest("hex");
+    if (entry.publication_claim_ref !== `refs/opencode/checkpoint-publications/${digest}`) errors.push({ path: `${path}.publication_claim_ref`, message: "must be the exact child publication claim ref" });
+  }
+  requiredFullGitSha(errors, entry, "publication_claim_oid", `${path}.publication_claim_oid`);
+  requiredTimestamp(errors, entry, "reserved_at", `${path}.reserved_at`);
+  if (["child-published", "launched", "merged"].includes(entry.state)) {
+    for (const key of ["child_run_hash", "child_plan_hash", "brief_scope_hash"]) requiredHash(errors, entry, key, `${path}.${key}`);
+    requiredTimestamp(errors, entry, "published_at", `${path}.published_at`);
+    validateTimestampOrder(errors, entry.reserved_at, entry.published_at, `${path}.published_at`, "must not precede reserved_at");
+  }
+  if (["launched", "merged"].includes(entry.state)) {
+    requiredTimestamp(errors, entry, "launched_at", `${path}.launched_at`);
+    validateTimestampOrder(errors, entry.published_at, entry.launched_at, `${path}.launched_at`, "must not precede published_at");
+  }
+  if (entry.state === "merged") validateCheckpointMergedCompletion(errors, entry, path);
+  if (index < entries.length - 1 && entry.state !== "merged") errors.push({ path: `${path}.state`, message: "must be merged before a later checkpoint entry exists" });
+}
+
+function validateCheckpointMergedCompletion(errors, entry, path) {
+  for (const key of ["completed_child_run_id"]) requiredTerminalSafeString(errors, entry, key, `${path}.${key}`);
+  for (const key of ["completed_child_run_hash", "checkpoint_source_hash", "configuration_hash"]) requiredHash(errors, entry, key, `${path}.${key}`);
+  validateCheckpointLineage(errors, entry.lineage, `${path}.lineage`, entry.root_child_run_id, entry.completed_child_run_id);
+  validateCheckpointPullRequest(errors, entry.pull_request, `${path}.pull_request`, entry.completed_child_run_id);
+  validateCheckpointRemoteMain(errors, entry.remote_main, `${path}.remote_main`);
+  requiredTimestamp(errors, entry, "merged_at", `${path}.merged_at`);
+  validateTimestampOrder(errors, entry.launched_at, entry.merged_at, `${path}.merged_at`, "must not precede launched_at");
+  validateTimestampOrder(errors, entry.remote_main?.observed_at, entry.merged_at, `${path}.merged_at`, "must not precede remote_main.observed_at");
+}
+
+function validateCheckpointLineage(errors, lineage, path, rootRunId, completedRunId) {
+  if (!Array.isArray(lineage) || lineage.length === 0) { errors.push({ path, message: "must be a nonempty root-to-leaf array" }); return; }
+  const seen = new Set();
+  for (const [index, row] of lineage.entries()) {
+    const rowPath = `${path}[${index}]`;
+    if (!isRecord(row)) { errors.push({ path: rowPath, message: "must be an object" }); continue; }
+    allowedKeys(errors, row, CHECKPOINT_LINEAGE_KEYS, rowPath);
+    requiredTerminalSafeString(errors, row, "run_id", `${rowPath}.run_id`);
+    requiredHash(errors, row, "run_hash", `${rowPath}.run_hash`);
+    if (seen.has(row.run_id)) errors.push({ path: `${rowPath}.run_id`, message: "must be unique and acyclic" });
+    seen.add(row.run_id);
+    if (index === 0) {
+      if (row.run_id !== rootRunId) errors.push({ path: `${rowPath}.run_id`, message: "must equal root_child_run_id" });
+      for (const key of ["parent_run_id", "continuation_claim_ref", "continuation_claim_oid"]) if (row[key] !== null) errors.push({ path: `${rowPath}.${key}`, message: "must be null for the root lineage row" });
+    } else {
+      requiredString(errors, row, "parent_run_id", `${rowPath}.parent_run_id`);
+      if (row.parent_run_id !== lineage[index - 1]?.run_id) errors.push({ path: `${rowPath}.parent_run_id`, message: "must equal the prior lineage run_id" });
+      requiredString(errors, row, "continuation_claim_ref", `${rowPath}.continuation_claim_ref`);
+      if (stringValue(row.continuation_claim_ref) && !/^refs\/opencode\/continuation-targets\/[0-9a-f]{64}$/u.test(row.continuation_claim_ref)) errors.push({ path: `${rowPath}.continuation_claim_ref`, message: "must be a continuation target claim ref" });
+      requiredFullGitSha(errors, row, "continuation_claim_oid", `${rowPath}.continuation_claim_oid`);
+    }
+  }
+  if (lineage.at(-1)?.run_id !== completedRunId) errors.push({ path: `${path}[${lineage.length - 1}].run_id`, message: "must equal completed_child_run_id" });
+}
+
+function validateCheckpointPullRequest(errors, value, path, completedRunId) {
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_PULL_REQUEST_KEYS, path);
+  requiredString(errors, value, "pr_url", `${path}.pr_url`);
+  boundedInteger(errors, value, "pr_number", 1, Number.MAX_SAFE_INTEGER, `${path}.pr_number`);
+  requiredString(errors, value, "pr_node_id", `${path}.pr_node_id`);
+  requiredPrOperationIdentity(errors, value, path);
+  requiredFullGitSha(errors, value, "merge_commit", `${path}.merge_commit`);
+  if (value.base_ref !== "main") errors.push({ path: `${path}.base_ref`, message: "must equal main" });
+  if (stringValue(completedRunId) && value.head_ref !== completedRunId) errors.push({ path: `${path}.head_ref`, message: "must equal completed_child_run_id" });
+  try {
+    const parts = githubPrUrlParts(value.pr_url);
+    if (parts.number !== value.pr_number) errors.push({ path: `${path}.pr_number`, message: "must match pr_url pull request number" });
+    if (parts.repository !== value.repository) errors.push({ path: `${path}.repository`, message: "must match pr_url repository" });
+  } catch { errors.push({ path: `${path}.pr_url`, message: "must be a canonical GitHub pull request URL" }); }
+}
+
+function validateCheckpointRemoteMain(errors, value, path) {
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_REMOTE_MAIN_KEYS, path);
+  requiredString(errors, value, "ref", `${path}.ref`);
+  if (value.ref !== "refs/heads/main") errors.push({ path: `${path}.ref`, message: "must equal refs/heads/main" });
+  requiredFullGitSha(errors, value, "commit", `${path}.commit`);
+  requiredTimestamp(errors, value, "observed_at", `${path}.observed_at`);
+}
+
+function validateCheckpointProgressFinalClosure(errors, value, path) {
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object or null" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_PROGRESS_FINAL_CLOSURE_KEYS, path);
+  requiredString(errors, value, "ref", `${path}.ref`);
+  validateDurableRef(errors, value.ref, "artifacts", `${path}.ref`);
+  requiredHash(errors, value, "hash", `${path}.hash`);
+  requiredTimestamp(errors, value, "closed_at", `${path}.closed_at`);
+}
+
+function validateDeliveryCheckpointFinalClosureRecord(errors, value, path) {
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_CLOSURE_KEYS, path);
+  exactCheckpointRecordHeader(errors, value, "delivery-checkpoint-final-closure", path);
+  requiredTerminalSafeString(errors, value, "parent_run_id", `${path}.parent_run_id`);
+  requiredHash(errors, value, "parent_run_hash", `${path}.parent_run_hash`);
+  validateCheckpointManifestBinding(errors, value, path);
+  requiredString(errors, value, "source_plan_ref", `${path}.source_plan_ref`);
+  if (value.source_plan_ref !== PLAN_SLICES_REF) errors.push({ path: `${path}.source_plan_ref`, message: `must equal ${PLAN_SLICES_REF}` });
+  requiredHash(errors, value, "source_plan_hash", `${path}.source_plan_hash`);
+  requiredString(errors, value, "source_review_ref", `${path}.source_review_ref`);
+  validateDurableRef(errors, value.source_review_ref, "reviews", `${path}.source_review_ref`);
+  requiredHash(errors, value, "source_review_hash", `${path}.source_review_hash`);
+  boundedInteger(errors, value, "source_review_attempt", 1, Number.MAX_SAFE_INTEGER, `${path}.source_review_attempt`);
+  for (const key of ["parent_review_identity_hash", "admission_probe_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
+  if (!Array.isArray(value.checkpoints) || value.checkpoints.length === 0) errors.push({ path: `${path}.checkpoints`, message: "must be a nonempty array" });
+  else value.checkpoints.forEach((entry, index) => validateCheckpointClosureEntry(errors, entry, `${path}.checkpoints[${index}]`, index));
+  validateCheckpointRemoteMain(errors, value.remote_main, `${path}.remote_main`);
+  requiredTimestamp(errors, value, "closed_at", `${path}.closed_at`);
+  validateTimestampOrder(errors, value.remote_main?.observed_at, value.closed_at, `${path}.closed_at`, "must not precede remote_main.observed_at");
+}
+
+function validateCheckpointClosureEntry(errors, value, path, index) {
+  if (!isRecord(value)) { errors.push({ path, message: "must be an object" }); return; }
+  allowedKeys(errors, value, CHECKPOINT_CLOSURE_ENTRY_KEYS, path);
+  requiredTerminalSafeString(errors, value, "checkpoint_id", `${path}.checkpoint_id`);
+  boundedInteger(errors, value, "ordinal", 1, Number.MAX_SAFE_INTEGER, `${path}.ordinal`);
+  if (value.ordinal !== index + 1) errors.push({ path: `${path}.ordinal`, message: "must be contiguous and equal its one-based checkpoint position" });
+  validateCheckpointIdOrdinal(errors, value.checkpoint_id, value.ordinal, `${path}.checkpoint_id`);
+  for (const key of ["root_child_run_id", "completed_child_run_id"]) requiredTerminalSafeString(errors, value, key, `${path}.${key}`);
+  for (const key of ["child_plan_hash", "brief_scope_hash", "completed_child_run_hash", "checkpoint_source_hash", "configuration_hash"]) requiredHash(errors, value, key, `${path}.${key}`);
+  validateCheckpointConfigurationRecord(errors, value.configuration, `${path}.configuration`);
+  validateCheckpointLineage(errors, value.lineage, `${path}.lineage`, value.root_child_run_id, value.completed_child_run_id);
+  validateCheckpointPullRequest(errors, value.pull_request, `${path}.pull_request`, value.completed_child_run_id);
+  requiredTimestamp(errors, value, "merged_at", `${path}.merged_at`);
+}
+
+function exactCheckpointRecordHeader(errors, value, kind, path) {
+  requiredInteger(errors, value, "schema_version", `${path}.schema_version`);
+  if (value.schema_version !== 1) errors.push({ path: `${path}.schema_version`, message: "must equal 1" });
+  requiredEnum(errors, value, "kind", new Set([kind]), `${path}.kind`);
+}
+
+function validateCheckpointManifestBinding(errors, value, path) {
+  requiredString(errors, value, "manifest_ref", `${path}.manifest_ref`);
+  requiredHash(errors, value, "manifest_hash", `${path}.manifest_hash`);
+  if (!/^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u.test(value.manifest_ref ?? "")) errors.push({ path: `${path}.manifest_ref`, message: "must be a content-addressed checkpoint routing artifact ref" });
+  if (HASH_PATTERN.test(value.manifest_hash ?? "") && value.manifest_ref !== `artifacts/checkpoint-routing-${value.manifest_hash.slice("sha256:".length)}.json`) errors.push({ path: `${path}.manifest_ref`, message: "must match manifest_hash" });
+}
+
+function validateCheckpointIdOrdinal(errors, checkpointId, ordinal, path) {
+  if (Number.isInteger(ordinal) && ordinal > 0 && checkpointId !== `checkpoint-${String(ordinal).padStart(3, "0")}`) errors.push({ path, message: "must match its checkpoint ordinal" });
+}
+
+function validateCheckpointPredecessor(errors, value, path, ordinalKey, previousEntry) {
+  const ordinal = value[ordinalKey];
+  for (const key of ["predecessor_checkpoint_id", "predecessor_completed_run_id", "predecessor_merge_commit"]) if (!Object.hasOwn(value, key)) errors.push({ path: `${path}.${key}`, message: "is required" });
+  if (ordinal === 1) {
+    for (const key of ["predecessor_checkpoint_id", "predecessor_completed_run_id", "predecessor_merge_commit"]) if (value[key] !== null) errors.push({ path: `${path}.${key}`, message: "must be null for checkpoint ordinal 1" });
+  } else if (Number.isInteger(ordinal) && ordinal > 1) {
+    requiredString(errors, value, "predecessor_checkpoint_id", `${path}.predecessor_checkpoint_id`);
+    requiredString(errors, value, "predecessor_completed_run_id", `${path}.predecessor_completed_run_id`);
+    requiredFullGitSha(errors, value, "predecessor_merge_commit", `${path}.predecessor_merge_commit`);
+    if (value.predecessor_checkpoint_id !== `checkpoint-${String(ordinal - 1).padStart(3, "0")}`) errors.push({ path: `${path}.predecessor_checkpoint_id`, message: "must identify the immediately prior checkpoint" });
+    if (previousEntry) {
+      if (previousEntry.state !== "merged") errors.push({ path, message: "requires the immediately prior checkpoint to be merged" });
+      if (value.predecessor_completed_run_id !== previousEntry.completed_child_run_id) errors.push({ path: `${path}.predecessor_completed_run_id`, message: "must equal the prior merged completed_child_run_id" });
+      if (value.predecessor_merge_commit !== previousEntry.pull_request?.merge_commit) errors.push({ path: `${path}.predecessor_merge_commit`, message: "must equal the prior merged pull request commit" });
+    }
+  }
+}
+
+function validateTimestampOrder(errors, earlier, later, path, message) {
+  if (isIsoTimestamp(earlier) && isIsoTimestamp(later) && Date.parse(later) < Date.parse(earlier)) errors.push({ path, message });
 }
 
 export function validateCostAttributionEntries(entries, runId) {
@@ -388,8 +728,22 @@ export function validateSlicesPlan(plan, { enforceDependencyDepth = true, requir
   if (!Array.isArray(plan.slices)) errors.push({ path: "plan.slices", message: "must be an array" });
   else validatePlannedSlices(errors, plan.slices, "plan.slices", { enforceDependencyDepth });
   validateIntegrationGate(errors, plan.integration_gate, "plan.integration_gate", { required: requireIntegrationGate });
+  if (plan.delivery_envelope?.checkpoint_plan !== undefined) {
+    try { validateReviewedCheckpointPlan(plan); }
+    catch (error) { errors.push({ path: "plan.delivery_envelope.checkpoint_plan", message: error.message }); }
+  }
+  appendDeliveryContractErrors(errors, () => validateAdmissionExtensionResult(evaluateDeliveryEnvelopeAdmission({ plan })));
   if (errors.length) fail(errors);
   return plan;
+}
+
+function appendDeliveryContractErrors(errors, operation) {
+  try {
+    operation();
+  } catch (error) {
+    if (error instanceof DeliveryContractValidationError) errors.push(...error.errors);
+    else throw error;
+  }
 }
 
 export function parseSlicesPlanBytes(bytes, { label = PLAN_SLICES_REF, ...validationOptions } = {}) {
@@ -444,6 +798,117 @@ export function validateTestExecutionReceipt(receipt) {
     && Date.parse(receipt.completed_at) < Date.parse(receipt.started_at)) errors.push({ path: "receipt.completed_at", message: "must not precede started_at" });
   if (errors.length) fail(errors);
   return receipt;
+}
+
+export function validateVerificationArtifactExecutionReceipt(receipt) {
+  const errors = [];
+  if (!isRecord(receipt)) return fail([{ path: "receipt", message: "must be an object" }]);
+  allowedKeys(errors, receipt, VERIFICATION_ARTIFACT_RECEIPT_KEYS, "receipt");
+  requiredInteger(errors, receipt, "schema_version", "receipt.schema_version");
+  if (receipt.schema_version !== 1) errors.push({ path: "receipt.schema_version", message: "must equal 1" });
+  requiredString(errors, receipt, "kind", "receipt.kind");
+  if (receipt.kind !== "checked-verification-artifact-execution-receipt") errors.push({ path: "receipt.kind", message: "must equal checked-verification-artifact-execution-receipt" });
+  requiredString(errors, receipt, "subject", "receipt.subject");
+  requiredString(errors, receipt, "slice_id", "receipt.slice_id");
+  if (stringValue(receipt.subject) && stringValue(receipt.slice_id) && receipt.subject !== receipt.slice_id) errors.push({ path: "receipt.subject", message: "must equal receipt.slice_id" });
+  requiredString(errors, receipt, "run_id", "receipt.run_id");
+  boundedInteger(errors, receipt, "attempt", 1, Number.MAX_SAFE_INTEGER, "receipt.attempt");
+  requiredString(errors, receipt, "claim_nonce", "receipt.claim_nonce");
+  if (!isUuidV4(receipt.claim_nonce)) errors.push({ path: "receipt.claim_nonce", message: "must be a UUID v4" });
+  requiredString(errors, receipt, "plan_ref", "receipt.plan_ref");
+  if (receipt.plan_ref !== PLAN_SLICES_REF) errors.push({ path: "receipt.plan_ref", message: `must equal ${PLAN_SLICES_REF}` });
+  requiredHash(errors, receipt, "plan_hash", "receipt.plan_hash");
+  requiredFullGitSha(errors, receipt, "head_sha", "receipt.head_sha");
+  requiredString(errors, receipt, "verification_artifact_id", "receipt.verification_artifact_id");
+  requiredTimestamp(errors, receipt, "started_at", "receipt.started_at");
+  requiredTimestamp(errors, receipt, "completed_at", "receipt.completed_at");
+  boundedInteger(errors, receipt, "duration_ms", 0, Number.MAX_SAFE_INTEGER, "receipt.duration_ms");
+  requiredEnum(errors, receipt, "status", new Set(["pass", "fail", "skipped"]), "receipt.status");
+  if (typeof receipt.review_ready !== "boolean") errors.push({ path: "receipt.review_ready", message: "must be a boolean" });
+
+  validateVerificationArtifactProbe(errors, receipt.probe, receipt.verification_artifact_id, "receipt.probe");
+  if (!isRecord(receipt.result)) errors.push({ path: "receipt.result", message: "must be an object" });
+  else {
+    allowedKeys(errors, receipt.result, VERIFICATION_ARTIFACT_RESULT_KEYS, "receipt.result");
+    if (receipt.result.type !== "verification-result") errors.push({ path: "receipt.result.type", message: "must equal verification-result" });
+    requiredEnum(errors, receipt.result, "outcome", new Set(["pass", "fail", "skipped"]), "receipt.result.outcome");
+    requiredString(errors, receipt.result, "summary", "receipt.result.summary");
+    if (receipt.result.outcome !== receipt.status) errors.push({ path: "receipt.result.outcome", message: "must equal receipt.status" });
+  }
+  if (!Array.isArray(receipt.commands)) errors.push({ path: "receipt.commands", message: "must be an array" });
+  else if (receipt.status === "skipped") {
+    if (receipt.commands.length !== 0 || receipt.review_ready !== false) errors.push({ path: "receipt.commands", message: "skipped requires zero commands and review_ready false" });
+  } else {
+    if (receipt.commands.length !== 1) errors.push({ path: "receipt.commands", message: "pass or fail requires exactly one command result" });
+    else {
+      validateTestExecutionCommandResult(errors, receipt.commands[0], 0);
+      if (receipt.commands[0]?.program !== receipt.probe?.program) {
+        errors.push({ path: "receipt.commands[0].program", message: "must equal receipt.probe.program" });
+      }
+      if (JSON.stringify(receipt.commands[0]?.args) !== JSON.stringify(receipt.probe?.args)) {
+        errors.push({ path: "receipt.commands[0].args", message: "must equal receipt.probe.args" });
+      }
+    }
+    const passing = receipt.commands.length === 1 && receipt.commands[0]?.outcome === "exited" && receipt.commands[0]?.exit_code === 0 && receipt.commands[0]?.signal === null && receipt.commands[0]?.status === "pass";
+    if (receipt.status !== (passing ? "pass" : "fail")) errors.push({ path: "receipt.status", message: "must equal the observed command result status" });
+    if (receipt.review_ready !== passing) errors.push({ path: "receipt.review_ready", message: "must equal true exactly for an observed passing command" });
+  }
+  if (Number.isFinite(Date.parse(receipt.started_at || "")) && Number.isFinite(Date.parse(receipt.completed_at || ""))
+    && Date.parse(receipt.completed_at) < Date.parse(receipt.started_at)) errors.push({ path: "receipt.completed_at", message: "must not precede started_at" });
+  if (errors.length) fail(errors);
+  return receipt;
+}
+
+export function validateVerificationArtifactExecutionClaim(claim) {
+  const errors = [];
+  if (!isRecord(claim)) return fail([{ path: "claim", message: "must be an object" }]);
+  const keys = claim.state === "completed" ? VERIFICATION_ARTIFACT_CLAIM_COMPLETED_KEYS
+    : claim.state === "unknown" ? VERIFICATION_ARTIFACT_CLAIM_UNKNOWN_KEYS : VERIFICATION_ARTIFACT_CLAIM_COMMON_KEYS;
+  allowedKeys(errors, claim, keys, "claim");
+  requiredInteger(errors, claim, "schema_version", "claim.schema_version");
+  if (claim.schema_version !== 1) errors.push({ path: "claim.schema_version", message: "must equal 1" });
+  requiredEnum(errors, claim, "kind", new Set(["checked-verification-artifact-execution-claim"]), "claim.kind");
+  requiredEnum(errors, claim, "state", new Set(["active", "completed", "unknown"]), "claim.state");
+  requiredString(errors, claim, "nonce", "claim.nonce");
+  if (!isUuidV4(claim.nonce)) errors.push({ path: "claim.nonce", message: "must be a UUID v4" });
+  for (const key of ["run_id", "slice_id", "plan_ref", "verification_artifact_id", "receipt_ref"]) requiredString(errors, claim, key, `claim.${key}`);
+  if (typeof claim.receipt_ref === "string" && (!/^evidence\/[A-Za-z0-9._-]+\.json$/u.test(claim.receipt_ref) || claim.receipt_ref.includes(".."))) errors.push({ path: "claim.receipt_ref", message: "must be a safe evidence JSON ref" });
+  boundedInteger(errors, claim, "attempt", 1, Number.MAX_SAFE_INTEGER, "claim.attempt");
+  if (claim.plan_ref !== PLAN_SLICES_REF) errors.push({ path: "claim.plan_ref", message: `must equal ${PLAN_SLICES_REF}` });
+  requiredHash(errors, claim, "plan_hash", "claim.plan_hash");
+  requiredFullGitSha(errors, claim, "head_sha", "claim.head_sha");
+  requiredTimestamp(errors, claim, "claimed_at", "claim.claimed_at");
+  validateVerificationArtifactProbe(errors, claim.probe, claim.verification_artifact_id, "claim.probe");
+  if (claim.state === "completed") {
+    requiredTimestamp(errors, claim, "completed_at", "claim.completed_at");
+    requiredEnum(errors, claim, "status", new Set(["pass", "fail"]), "claim.status");
+    requiredHash(errors, claim, "receipt_hash", "claim.receipt_hash");
+  } else if (claim.state === "unknown") {
+    requiredTimestamp(errors, claim, "failed_at", "claim.failed_at");
+    requiredEnum(errors, claim, "reason", new Set(["process-outcome-indeterminate", "receipt-publication-indeterminate"]), "claim.reason");
+    const hasReceipt = claim.receipt_hash !== undefined || claim.status !== undefined;
+    if (hasReceipt) {
+      requiredHash(errors, claim, "receipt_hash", "claim.receipt_hash");
+      requiredEnum(errors, claim, "status", new Set(["pass", "fail"]), "claim.status");
+    }
+  }
+  if (errors.length) fail(errors);
+  return claim;
+}
+
+function validateVerificationArtifactProbe(errors, probe, artifactId, path) {
+  if (!isRecord(probe)) {
+    errors.push({ path, message: "must be an object" });
+    return;
+  }
+  allowedKeys(errors, probe, VERIFICATION_ARTIFACT_PROBE_KEYS, path);
+  if (probe.type !== "verification-artifact") errors.push({ path: `${path}.type`, message: "must equal verification-artifact" });
+  requiredString(errors, probe, "verification_artifact_id", `${path}.verification_artifact_id`);
+  if (probe.verification_artifact_id !== artifactId) errors.push({ path: `${path}.verification_artifact_id`, message: `must equal ${path.startsWith("receipt.") ? "receipt" : "claim"}.verification_artifact_id` });
+  boundedInteger(errors, probe, "test_plan_index", 0, Number.MAX_SAFE_INTEGER, `${path}.test_plan_index`);
+  requiredString(errors, probe, "test_plan_entry", `${path}.test_plan_entry`);
+  validateIntegrationProgram(errors, probe.program, `${path}.program`);
+  validateIntegrationArgs(errors, probe.args, `${path}.args`);
 }
 
 function validateTestExecutionCommandResult(errors, result, index) {
@@ -583,6 +1048,78 @@ export function runSlicesMatchPlan(run, plan) {
     if (!planDeps || planDeps.length !== deps.length || planDeps.some((dep, index) => dep !== deps[index])) return false;
   }
   return true;
+}
+
+export function validateRunSlicesPlanAuthority(runDir, run, plan) {
+  const validated = validateSlicesPlan(plan, { enforceDependencyDepth: false });
+  if (claimsCheckpointRoutingParent(runDir, run)) {
+    assertExactCheckpointRoutingParent(runDir, run, validated);
+    return validated;
+  }
+  return validateSlicesPlan(validated, { enforceDependencyDepth: !runSlicesMatchPlan(run, validated) });
+}
+
+export function claimsCheckpointRoutingParent(runDir, run) {
+  const artifacts = run?.terminal_result?.artifacts;
+  if (run?.terminal_result?.reason === CHECKPOINT_ROUTING_TERMINAL_REASON
+    || isRecord(artifacts) && Object.hasOwn(artifacts, "checkpoint_routing")) return true;
+  if (!isRecord(artifacts)) return false;
+  return Object.values(artifacts).some((ref) => {
+    if (!stringValue(ref)) return false;
+    try {
+      const artifact = resolveArtifactRef(runDir, ref);
+      return JSON.parse(readFileSync(artifact.path, "utf8"))?.kind === CHECKPOINT_ROUTING_KIND;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function assertExactCheckpointRoutingParent(runDir, run, plan) {
+  const terminal = run?.terminal_result;
+  const artifacts = terminal?.artifacts;
+  const artifactKeys = isRecord(artifacts) ? Object.keys(artifacts) : [];
+  const manifestRef = artifacts?.checkpoint_routing;
+  if (run?.status !== "blocked" || terminal?.status !== "blocked" || terminal?.run_id !== run.run_id
+    || terminal?.reason !== CHECKPOINT_ROUTING_TERMINAL_REASON || run.pr_url != null || terminal.pr_url !== null
+    || artifactKeys.length !== 1 || artifactKeys[0] !== "checkpoint_routing"
+    || !/^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u.test(manifestRef ?? "")
+    || !Array.isArray(run.slices) || run.slices.length !== 0) {
+    throw new Error("blocked checkpoint-routing parent terminal authority is not exact");
+  }
+  const planPath = join(resolve(runDir), PLAN_SLICES_REF);
+  if (!existsSync(planPath) || lstatSync(planPath).isSymbolicLink() || !lstatSync(planPath).isFile()) throw new Error("checkpoint-routing plan must be a regular file");
+  const planHash = hashFile(planPath);
+  const decompositionSteps = (Array.isArray(run.steps) ? run.steps : []).filter((step) => step?.agent === "work-decomposer");
+  const step = decompositionSteps.length === 1 ? decompositionSteps[0] : null;
+  if (!step || step.status !== "accepted" || step.artifact_ref !== PLAN_SLICES_REF || step.acceptance?.artifact_ref !== PLAN_SLICES_REF
+    || step.acceptance?.artifact_hash !== planHash || step.review_ref !== step.acceptance?.review_ref
+    || !stringValue(step.review_ref) || !stringValue(step.acceptance?.review_hash) || !Number.isInteger(step.attempts) || step.attempts < 1) {
+    throw new Error("checkpoint-routing decomposition authority is not exact");
+  }
+  const review = resolveReviewRef(runDir, step.review_ref);
+  if (hashFile(review.path) !== step.acceptance.review_hash) throw new Error("checkpoint-routing decomposition review hash is stale");
+  const reviewValue = JSON.parse(readFileSync(review.path, "utf8"));
+  const manifest = resolveArtifactRef(runDir, manifestRef);
+  const manifestHash = hashFile(manifest.path);
+  if (manifestRef !== `artifacts/checkpoint-routing-${manifestHash.slice("sha256:".length)}.json`) throw new Error("checkpoint-routing manifest content address is stale");
+  if (run.checkpoint_progress?.manifest_ref !== manifestRef || run.checkpoint_progress?.manifest_hash !== manifestHash) {
+    throw new Error("checkpoint-routing parent progress does not bind the exact manifest");
+  }
+  const admissionResult = evaluateDeliveryEnvelopeAdmission({ plan });
+  validateCheckpointRoutingManifest(JSON.parse(readFileSync(manifest.path, "utf8")), {
+    plan,
+    planHash,
+    admissionResult,
+    decompositionAuthority: {
+      plan_ref: PLAN_SLICES_REF,
+      plan_hash: planHash,
+      review_ref: step.review_ref,
+      review_hash: step.acceptance.review_hash,
+      attempt: step.attempts,
+      review: reviewValue,
+    },
+  });
 }
 
 function normalizeSliceGraph(slices) {
@@ -961,7 +1498,7 @@ function validateSlicesPlanFile(file, run) {
   try {
     const bytes = readFileSync(file);
     const compatibilityPlan = parseSlicesPlanBytes(bytes, { label: PLAN_SLICES_REF, enforceDependencyDepth: false });
-    validateSlicesPlan(compatibilityPlan, { enforceDependencyDepth: !runSlicesMatchPlan(run, compatibilityPlan) });
+    validateRunSlicesPlanAuthority(dirname(dirname(file)), run, compatibilityPlan);
     return { path: file, ok: true, errors: [] };
   } catch (error) {
     return { path: file, ok: false, errors: error instanceof ValidationError ? error.errors : [{ path: file, message: error.message }] };
@@ -1333,7 +1870,7 @@ function validateContinuation(errors, run, path) {
   validateContinuationRefHashArray(errors, continuation.parent_evidence, `${path}.parent_evidence`);
   validateContinuationRefHashArray(errors, continuation.parent_reviews, `${path}.parent_reviews`);
   validateContinuationSelectedReview(errors, continuation, path);
-  validateContinuationPlanningReuse(errors, continuation.planning_reuse, `${path}.planning_reuse`);
+  validateContinuationPlanningReuse(errors, continuation, `${path}.planning_reuse`);
   validateContinuationDraftSpecReuse(errors, run, continuation.draft_spec_reuse, `${path}.draft_spec_reuse`);
   if (continuation.planning_reuse?.eligible === true && continuation.draft_spec_reuse !== undefined) {
     errors.push({ path, message: "cannot combine accepted planning reuse with draft spec reuse" });
@@ -1347,6 +1884,9 @@ function validateContinuationConfiguration(errors, continuation, path) {
   const configuration = continuation.configuration;
   if (continuation.schema_version === 1) {
     if (configuration !== undefined) errors.push({ path, message: "is not allowed for schema_version 1" });
+    for (const key of ["checkpoint_source_hash", "configuration_hash"]) {
+      if (continuation[key] !== undefined) errors.push({ path: `${path.slice(0, -".configuration".length)}.${key}`, message: "is not allowed for schema_version 1" });
+    }
     return;
   }
   if (!isRecord(configuration)) { errors.push({ path, message: "is required for schema_version 2" }); return; }
@@ -1357,6 +1897,17 @@ function validateContinuationConfiguration(errors, continuation, path) {
   boundedInteger(errors, configuration, "max_parallel_slices", 3, 3, `${path}.max_parallel_slices`);
   boundedInteger(errors, configuration, "max_retries", 3, 3, `${path}.max_retries`);
   validatePostPrPolicy(errors, configuration.post_pr_policy, `${path}.post_pr_policy`);
+  if (Object.hasOwn(configuration, "review_tier") && configuration.review_tier !== null && !stringValue(configuration.review_tier)) {
+    errors.push({ path: `${path}.review_tier`, message: "must be null or a non-empty string" });
+  }
+  const hasCheckpointSourceHash = Object.hasOwn(continuation, "checkpoint_source_hash");
+  const hasConfigurationHash = Object.hasOwn(continuation, "configuration_hash");
+  if (hasCheckpointSourceHash !== hasConfigurationHash) errors.push({ path: path.slice(0, -".configuration".length), message: "checkpoint_source_hash and configuration_hash must be present together" });
+  if (hasCheckpointSourceHash) {
+    requiredHash(errors, continuation, "checkpoint_source_hash", `${path.slice(0, -".configuration".length)}.checkpoint_source_hash`);
+    requiredHash(errors, continuation, "configuration_hash", `${path.slice(0, -".configuration".length)}.configuration_hash`);
+    if (!Object.hasOwn(configuration, "review_tier")) errors.push({ path: `${path}.review_tier`, message: "is required for a checkpoint-bound continuation" });
+  }
 }
 
 function validateContinuationCarryForward(errors, run, continuation, path) {
@@ -1428,25 +1979,57 @@ function validateContinuationCarryForward(errors, run, continuation, path) {
       } else if (remainingIds.has(slice?.id) && carry.remaining_slice_ids[remainingIndex++] !== slice.id) errors.push({ path: "run.slices", message: "remaining carry-forward rows must remain in PLAN order" });
     }
   }
-  if (run.mode === undefined || !Object.hasOwn(run, "github_account") || run.pr_mode === undefined || run.max_parallel_slices !== 3 || run.max_retries !== 3 || run.review_tier !== undefined || !isRecord(run.post_pr)) {
-    errors.push({ path: "run", message: "schema-v2 carry-forward requires closed mode/pr configuration, limits of 3, and no review_tier" });
+  const checkpointBound = Object.hasOwn(continuation, "checkpoint_source_hash");
+  const expectedReviewTier = checkpointBound ? continuation.configuration?.review_tier : undefined;
+  const reviewTierMatches = expectedReviewTier === null ? !Object.hasOwn(run, "review_tier") : run.review_tier === expectedReviewTier;
+  if (run.mode === undefined || !Object.hasOwn(run, "github_account") || run.pr_mode === undefined || run.max_parallel_slices !== 3 || run.max_retries !== 3
+    || !reviewTierMatches || !isRecord(run.post_pr)) {
+    errors.push({ path: "run", message: "schema-v2 carry-forward requires its exact closed immutable configuration" });
   }
   const configuration = continuation.configuration;
   if (isRecord(configuration) && (run.mode !== configuration.mode || (run.github_account ?? null) !== configuration.github_account || run.pr_mode !== configuration.pr_mode
-    || run.max_parallel_slices !== configuration.max_parallel_slices || run.max_retries !== configuration.max_retries || JSON.stringify(run.post_pr?.policy) !== JSON.stringify(configuration.post_pr_policy))) {
+    || run.max_parallel_slices !== configuration.max_parallel_slices || run.max_retries !== configuration.max_retries || JSON.stringify(run.post_pr?.policy) !== JSON.stringify(configuration.post_pr_policy)
+    || !reviewTierMatches)) {
     errors.push({ path: "run", message: "must exactly match immutable schema-v2 continuation configuration" });
+  }
+  if (checkpointBound) {
+    if (run.checkpoint_source !== undefined && (!isRecord(run.checkpoint_source) || hashValue(run.checkpoint_source) !== continuation.checkpoint_source_hash)) {
+      errors.push({ path: "run.checkpoint_source", message: "must exactly match checkpoint-bound continuation authority" });
+    }
+    if (isRecord(run.checkpoint_source) && continuation.planning_reuse?.eligible === true
+      && (continuation.planning_reuse.plan_hash !== run.checkpoint_source.child_plan_hash
+        || continuation.planning_reuse.review_hash !== run.checkpoint_source.child_disposition_hash)) {
+      errors.push({ path: `${path.slice(0, -".carry_forward".length)}.planning_reuse`, message: "must exactly match checkpoint_source child plan and disposition hashes" });
+    }
+    if (hashValue(configuration) !== continuation.configuration_hash) {
+      errors.push({ path: `${path.slice(0, -".carry_forward".length)}.configuration_hash`, message: "must hash the exact immutable continuation configuration" });
+    }
+  } else if (run.checkpoint_source !== undefined) {
+    errors.push({ path: "run.checkpoint_source", message: "requires checkpoint-bound continuation hashes" });
   }
 }
 
-function validateContinuationPlanningReuse(errors, reuse, path) {
+function validateContinuationPlanningReuse(errors, continuation, path) {
+  const reuse = continuation.planning_reuse;
   if (reuse === undefined || reuse === null) return;
   if (!isRecord(reuse)) {
     errors.push({ path, message: "must be an object" });
     return;
   }
-  allowedKeys(errors, reuse, CONTINUATION_PLANNING_REUSE_KEYS, path);
+  const checkpointVariant = Object.hasOwn(continuation, "checkpoint_source_hash") && reuse.eligible === true;
+  allowedKeys(errors, reuse, checkpointVariant ? CHECKPOINT_CONTINUATION_PLANNING_REUSE_KEYS : CONTINUATION_PLANNING_REUSE_KEYS, path);
   if (typeof reuse.eligible !== "boolean") errors.push({ path: `${path}.eligible`, message: "must be a boolean" });
-  if (reuse.eligible === true) {
+  if (checkpointVariant) {
+    requiredString(errors, reuse, "plan_ref", `${path}.plan_ref`);
+    requiredHash(errors, reuse, "plan_hash", `${path}.plan_hash`);
+    requiredString(errors, reuse, "review_ref", `${path}.review_ref`);
+    requiredHash(errors, reuse, "review_hash", `${path}.review_hash`);
+    if (reuse.plan_ref !== "plan/slices.json") errors.push({ path: `${path}.plan_ref`, message: "must equal plan/slices.json" });
+    if (reuse.review_ref !== "reviews/work-decomposer.json") errors.push({ path: `${path}.review_ref`, message: "must equal reviews/work-decomposer.json" });
+    validateDurableRef(errors, reuse.plan_ref, "plan", `${path}.plan_ref`);
+    validateDurableRef(errors, reuse.review_ref, "reviews", `${path}.review_ref`);
+    if (reuse.plan_hash !== continuation.carry_forward?.plan_hash) errors.push({ path: `${path}.plan_hash`, message: "must equal carry_forward.plan_hash" });
+  } else if (reuse.eligible === true) {
     requiredString(errors, reuse, "spec_review_ref", `${path}.spec_review_ref`);
     requiredHash(errors, reuse, "spec_review_hash", `${path}.spec_review_hash`);
     requiredString(errors, reuse, "spec_artifact_ref", `${path}.spec_artifact_ref`);
@@ -2689,11 +3272,12 @@ function validateStepRelationships(errors, run, step, path) {
     if (!stringValue(step.artifact_ref)) errors.push({ path: `${path}.artifact_ref`, message: "is required when acceptance is present" });
   }
   if (run.continuation?.schema_version === 2 && step.agent === "test-verifier") {
-    if (!isRecord(acceptance)) errors.push({ path: `${path}.acceptance`, message: "is required for accepted schema-v2 test-verifier" });
+    const route = "schema-v2";
+    if (!isRecord(acceptance)) errors.push({ path: `${path}.acceptance`, message: `is required for accepted ${route} test-verifier` });
     else for (const key of ["artifact_ref", "artifact_hash", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_head_sha"]) {
-      if (acceptance[key] === undefined || acceptance[key] === null) errors.push({ path: `${path}.acceptance.${key}`, message: "is required for accepted schema-v2 test-verifier" });
+      if (acceptance[key] === undefined || acceptance[key] === null) errors.push({ path: `${path}.acceptance.${key}`, message: `is required for accepted ${route} test-verifier` });
     }
-    if (!isRecord(claim) || claim.state !== "completed" || claim.status !== "pass") errors.push({ path: `${path}.execution_claim`, message: "must be a completed passing checked execution claim for accepted schema-v2 test-verifier" });
+    if (!isRecord(claim) || claim.state !== "completed" || claim.status !== "pass") errors.push({ path: `${path}.execution_claim`, message: `must be a completed passing checked execution claim for accepted ${route} test-verifier` });
   }
   const inherited = step.inherited_acceptance;
   if (isRecord(inherited)) {
@@ -2782,6 +3366,18 @@ function validateTerminalResult(errors, run, path) {
   if (run.terminal_result.status && run.terminal_result.status !== run.status) errors.push({ path: `${path}.status`, message: `must match run.status '${run.status}'` });
   if (run.terminal_result.run_id && run.terminal_result.run_id !== run.run_id) errors.push({ path: `${path}.run_id`, message: "must match run.run_id" });
   if (["blocked", "partial", "needs-human"].includes(run.status) && !stringValue(run.terminal_result.reason)) errors.push({ path: `${path}.reason`, message: `is required for ${run.status}` });
+  if (run.terminal_result.reason === "oversized-plan-checkpoint-routing-required") {
+    const artifacts = run.terminal_result.artifacts;
+    const keys = isRecord(artifacts) ? Object.keys(artifacts) : [];
+    if (run.status !== "blocked" || run.terminal_result.status !== "blocked" || run.pr_url != null || run.terminal_result.pr_url !== null) {
+      errors.push({ path, message: "checkpoint routing requires an exact pre-PR blocked terminal result" });
+    }
+    if (keys.length !== 1 || keys[0] !== "checkpoint_routing"
+      || !/^artifacts\/checkpoint-routing-[0-9a-f]{64}\.json$/u.test(artifacts?.checkpoint_routing ?? "")) {
+      errors.push({ path: `${path}.artifacts`, message: "checkpoint routing requires exactly one content-addressed checkpoint_routing artifact" });
+    }
+    if (!isRecord(run.checkpoint_progress)) errors.push({ path: "run.checkpoint_progress", message: "is required for checkpoint routing" });
+  }
   if (run.terminal_result.status === "completed") validateCompletedTerminalPrTuple(errors, run, path);
 }
 

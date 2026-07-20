@@ -18,6 +18,11 @@ import {
   inspectApprovalHandoffReceipt,
   mutateRunJsonLocked,
   transitionCostUsage,
+  transitionCheckpointProgressChildPublished,
+  transitionCheckpointProgressClosed,
+  transitionCheckpointProgressLaunched,
+  transitionCheckpointProgressMerged,
+  transitionCheckpointProgressReserved,
   transitionGateDecision,
   transitionPanelVerdicts,
   transitionPrePrFenceEstablished,
@@ -45,6 +50,7 @@ import { MAX_COST_ATTRIBUTION_ENTRIES, recomputeCostAttribution } from "../src/c
 import { checkRunConsistency } from "../src/validate.js";
 import { hashFile } from "../src/refs.js";
 import { git } from "../src/git.js";
+import { deliveryEnvelopeForSlices, passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const NOW = "2026-07-08T12:00:00.000Z";
 const HASH = `sha256:${"a".repeat(64)}`;
@@ -733,6 +739,32 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("rejects a delivery-envelope merge when the APPROVE review lacks active ledger authority", async () => {
+    const fixture = createFixture("slice-merge-missing-ledger-authority");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      const prepared = prepareSliceMergeState(fixture);
+      const reviewPath = join(fixture.runDir, "reviews", "slice.json");
+      const review = readJson(reviewPath);
+      delete review.invariant_family_ledger;
+      writeJson(reviewPath, review);
+      const runPath = join(fixture.runDir, "run.json");
+      const run = readJson(runPath);
+      run.slices[0].review_hash = hashFile(reviewPath);
+      run.slices[0].attempt_reviews[0].review_hash = run.slices[0].review_hash;
+      writeJson(runPath, run);
+      const before = readFileSync(runPath, "utf8");
+
+      await assert.rejects(
+        transitionSliceMerged(fixture.runDir, "slice", { merge_commit: prepared.mergeCommit }),
+        /merge requires active approving invariant-family review authority: invariant-family-ledger-required/u,
+      );
+      assert.equal(readFileSync(runPath, "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("delegates textual integration conflicts and accepts only exact fresh integrated tests and panels", async () => {
     const fixture = createFixture("delegated-integration-conflict");
     try {
@@ -1309,6 +1341,26 @@ describe("simplified run-state transitions", () => {
     } finally { cleanup(fixture.repo); }
   });
 
+  it("treats checkpoint_source runs as ordinary lifecycle records without consulting parent claims or refs", async () => {
+    const fixture = createFixture("checkpoint-source-ordinary-writer");
+    try {
+      const run = readJson(join(fixture.runDir, "run.json"));
+      run.checkpoint_source = checkpointSource("missing-routing-parent", fixture.runId);
+      writeJson(join(fixture.runDir, "run.json"), run);
+
+      const transitioned = await transitionRunJson(fixture.runDir, (draft) => {
+        draft.review_tier = "strict";
+      }, {
+        gitFn() { throw new Error("ordinary writer consulted checkpoint Git authority"); },
+      });
+
+      assert.equal(transitioned.run.review_tier, "strict");
+      assert.deepEqual(transitioned.run.checkpoint_source, run.checkpoint_source);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects every later schema-v2 mutation after the parent branch moves", async () => {
     const fixture = createFixture("v2-parent-branch-drift");
     try {
@@ -1824,6 +1876,7 @@ describe("simplified run-state transitions", () => {
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: attemptOneHead,
         ownership_disclosure: [{ path: "extension/feature.txt", rationale: "The slice implementation requires the adjacent feature entry point." }] });
       writeJson(join(fixture.runDir, "reviews", "slice.attempt-1.json"), createV2SliceReviewRecord({
+        runDir: fixture.runDir, evidenceRef: "evidence/slice.attempt-1.json",
         subject: "slice", attempt: 1, reviewedCommit: attemptOneHead, verdict: "REJECT", requiredFixes: ["adjust implementation"],
         scopeEffect: "unowned-extension", likelyPaths: ["extension/feature.txt"],
       }));
@@ -1857,7 +1910,7 @@ describe("simplified run-state transitions", () => {
 
       writeJson(join(fixture.runDir, "evidence", "slice.attempt-2.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 2, head_sha: attemptTwoHead, previous_head: attemptOneHead,
         ownership_disclosure: [{ path: "extension/feature.txt", rationale: "The slice implementation requires the adjacent feature entry point." }] });
-      writeJson(join(fixture.runDir, "reviews", "slice.attempt-2.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 2, reviewedCommit: attemptTwoHead, ratifiedPaths: ["extension/feature.txt"] }));
+      writeJson(join(fixture.runDir, "reviews", "slice.attempt-2.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice.attempt-2.json", subject: "slice", attempt: 2, reviewedCommit: attemptTwoHead, ratifiedPaths: ["extension/feature.txt"] }));
       const untampered = readJson(join(fixture.runDir, "run.json"));
       const tamperedBaseline = structuredClone(untampered);
       tamperedBaseline.slices[0].attempt_reviews[0].diff_base_commit = attemptOneHead;
@@ -1996,10 +2049,10 @@ describe("simplified run-state transitions", () => {
         const projection = [{ id: "backend", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
         try {
           mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
-          writeJson(join(fixture.runDir, "plan", "slices.json"), {
+          writeJson(join(fixture.runDir, "plan", "slices.json"), withDeliveryEnvelope({
             integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
             slices: [{ id: "backend", stack: "backend", paths: [lane], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test"] }],
-          });
+          }));
           const run = { ...baseRun(fixture.runId), slices: route === "seed" ? [] : projection.map((slice) => ({ ...slice, declared_paths: ["src/**"], effective_paths: ["src/**"] })) };
           if (route === "accept") {
             mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
@@ -2047,10 +2100,10 @@ describe("simplified run-state transitions", () => {
 
   it("binds exact plan and review bytes when accepting work-decomposer", async () => {
     const fixture = createFixture("work-decomposer-plan-acceptance");
-    const plan = {
+    const plan = withDeliveryEnvelope({
       integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
       slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test"] }],
-    };
+    });
     try {
       mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
       mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
@@ -2081,6 +2134,150 @@ describe("simplified run-state transitions", () => {
         atomicWriteHooks: { beforeCommit: () => writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "REJECT" }) },
       }), (error) => error?.message === "protected file commit failed" && /review bytes changed/u.test(error?.cause?.message));
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeRace);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("requires active approving ledger authority and re-observes its evidence before review publication", async () => {
+    const fixture = createFixture("delivery-extension-publication");
+    const planPath = join(fixture.runDir, "plan", "slices.json");
+    const familyEvidencePath = join(fixture.runDir, "evidence", "slice-family.json");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      runGit(fixture.repo, ["checkout", "slice-branch"]);
+      const head = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+      writeJson(join(fixture.runDir, "run.json"), {
+        ...baseRun(fixture.runId), branch: "slice-branch", worktree: fixture.repo, slices: [],
+      });
+      const projection = [{ id: "slice", stack: "backend", depends_on: [], status: "pending", attempts: 0 }];
+      writeSeedPlan(fixture.runDir, projection);
+      const seeded = await transitionSlicesSeed(fixture.runDir, projection, { from: "plan/slices.json" });
+      assert.deepEqual(seeded.run.slices[0].declared_paths, ["slice.txt"]);
+
+      seedBuilderDispatchAuthority(fixture);
+      const acceptedRun = readJson(join(fixture.runDir, "run.json"));
+      acceptedRun.slices[0].declared_paths = ["src/**"];
+      acceptedRun.slices[0].effective_paths = ["src/**"];
+      writeJson(join(fixture.runDir, "run.json"), acceptedRun);
+      await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+      await closeBuilderDispatch(fixture, 1);
+      mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+      writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
+      const acceptedPlan = readJson(planPath);
+      const checkedFamilyEvidence = writeVerificationArtifactReceipt({
+        runDir: fixture.runDir, runId: fixture.runId, plan: acceptedPlan, sliceId: "slice", attempt: 1, reviewedCommit: head,
+        artifactId: "fixture-artifact-1", evidenceRef: "evidence/slice-family.json",
+        result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
+      });
+      const passingLedger = passingInvariantFamilyLedger({
+        plan: acceptedPlan,
+        sliceId: "slice",
+        reviewedCommit: head,
+        evidenceRef: "evidence/slice-family.json",
+        evidenceHash: checkedFamilyEvidence.hash,
+      });
+      const transition = () => transitionRunSlice(fixture.runDir, "slice", {
+        status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+      });
+      for (const [name, mutate, reason] of [
+        ["absent ledger", (review) => { delete review.invariant_family_ledger; }, /invariant-family-ledger-required/u],
+        ["missing family", (review) => { review.invariant_family_ledger.dispositions = []; }, /invariant-family-disposition-missing:fixture-family-1/u],
+        ["failed result", (review) => { review.invariant_family_ledger.dispositions[0].result.outcome = "fail"; }, /claimed result does not match/u],
+        ["skipped result", (review) => { review.invariant_family_ledger.dispositions[0].result.outcome = "skipped"; }, /claimed result does not match/u],
+        ["unresolved finding", (review) => { review.invariant_family_ledger.dispositions[0].unresolved_findings = ["still unresolved"]; }, /invariant-family-unresolved-findings:fixture-family-1/u],
+      ]) {
+        const review = createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head });
+        review.invariant_family_ledger = structuredClone(passingLedger);
+        mutate(review);
+        writeJson(join(fixture.runDir, "reviews", "slice.json"), review);
+        const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        await assert.rejects(transition(), reason, name);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before, name);
+      }
+
+      const review = createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head });
+      review.invariant_family_ledger = passingLedger;
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), review);
+      const beforeRace = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(transitionRunSlice(fixture.runDir, "slice", {
+        status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json",
+      }, {
+        atomicWriteHooks: { beforeCommit: () => writeJson(familyEvidencePath, { subject: "slice", family: "fixture-family-1", observed: false }) },
+      }), /invariant family ledger evidence hash is stale|commit failed/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeRace);
+
+      writeFileSync(familyEvidencePath, `${JSON.stringify(checkedFamilyEvidence.receipt, null, 2)}\n`);
+      const published = await transition();
+      assert.equal(published.slice.status, "review");
+      assert.equal(published.slice.review_hash, hashFile(join(fixture.runDir, "reviews", "slice.json")));
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects REJECT review publication without an invariant-family ledger and mutates nothing", async () => {
+    const fixture = createFixture("reject-publication-missing-ledger");
+    try {
+      const prepared = await prepareRejectReviewPublication(fixture);
+      delete prepared.review.invariant_family_ledger;
+      writeJson(prepared.reviewPath, prepared.review);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        publishPreparedSliceReview(fixture),
+        /publication requires complete current invariant-family review ledger: invariant-family-ledger-required/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("rejects REJECT review publication with a missing family disposition and mutates nothing", async () => {
+    const fixture = createFixture("reject-publication-missing-family");
+    try {
+      const prepared = await prepareRejectReviewPublication(fixture);
+      prepared.review.invariant_family_ledger.dispositions = [];
+      writeJson(prepared.reviewPath, prepared.review);
+      const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+
+      await assert.rejects(
+        publishPreparedSliceReview(fixture),
+        /publication requires complete current invariant-family review ledger: invariant-family-disposition-missing:fixture-family-1/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
+  it("publishes a complete failing REJECT ledger without granting merge authority", async () => {
+    const fixture = createFixture("reject-publication-complete-failing-ledger");
+    try {
+      const prepared = await prepareRejectReviewPublication(fixture);
+      const [disposition] = prepared.review.invariant_family_ledger.dispositions;
+      disposition.result = { type: "verification-result", outcome: "fail", summary: "The invariant failed" };
+      disposition.unresolved_findings = ["The invariant remains unresolved"];
+      const plan = readJson(join(fixture.runDir, "plan", "slices.json"));
+      const checked = writeVerificationArtifactReceipt({
+        runDir: fixture.runDir, runId: fixture.runId, plan, sliceId: "slice", attempt: 1,
+        reviewedCommit: prepared.review.reviewed_commit, artifactId: "fixture-artifact-1",
+        evidenceRef: disposition.evidence_ref, result: disposition.result,
+      });
+      disposition.evidence_hash = checked.hash;
+      writeJson(prepared.reviewPath, prepared.review);
+
+      const published = await publishPreparedSliceReview(fixture);
+      assert.equal(published.slice.status, "review");
+      assert.equal(published.slice.review_ref, "reviews/slice.json");
+      assert.equal(published.slice.review_hash, hashFile(prepared.reviewPath));
+      const beforeMerge = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+      await assert.rejects(
+        transitionSliceMerged(fixture.runDir, "slice", { merge_commit: "abc123" }),
+        /merge requires APPROVE review/u,
+      );
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeMerge);
     } finally {
       cleanup(fixture.repo);
     }
@@ -2126,10 +2323,10 @@ describe("simplified run-state transitions", () => {
     try {
       writeJson(join(fixture.runDir, "run.json"), { ...baseRun(fixture.runId), slices: [] });
       mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
-      writeJson(planPath, {
+      writeJson(planPath, withDeliveryEnvelope({
         integration_gate: { required_commands: [{ program: "node", args: ["--test", "test/acceptance.test.js"] }, { program: "npm", args: ["run", "check"] }] },
         slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test"] }],
-      });
+      }));
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
 
       await assert.rejects(
@@ -2137,10 +2334,10 @@ describe("simplified run-state transitions", () => {
           from: "plan/slices.json",
           atomicWriteHooks: {
             beforeCommit() {
-              writeJson(planPath, {
+              writeJson(planPath, withDeliveryEnvelope({
                 integration_gate: { required_commands: [{ program: "node", args: ["--test", "test/other.test.js"] }, { program: "npm", args: ["run", "check"] }] },
                 slices: [{ id: "backend", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["AC1"], test_plan: ["node --test"] }],
-              });
+              }));
             },
           },
         }),
@@ -2196,8 +2393,8 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(slice.runDir, "evidence"), { recursive: true });
       mkdirSync(join(slice.runDir, "reviews"), { recursive: true });
       const evidence = { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: sliceHead };
-      const review = createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: sliceHead });
       writeJson(join(slice.runDir, "evidence", "slice.json"), evidence);
+      const review = createV2SliceReviewRecord({ runDir: slice.runDir, evidenceRef: "evidence/slice.json", subject: "slice", attempt: 1, reviewedCommit: sliceHead });
       writeJson(join(slice.runDir, "reviews", "slice.json"), review);
       const before = readFileSync(join(slice.runDir, "run.json"), "utf8");
       for (const [name, mutate] of [
@@ -2278,7 +2475,7 @@ describe("simplified run-state transitions", () => {
         /must equal 2/u,
       );
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeV1Publication);
-      writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit: head, verdict: "REJECT", requiredFixes: ["fix the rejected slice"] }));
+      writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice-1.json", subject: "slice", attempt: 1, reviewedCommit: head, verdict: "REJECT", requiredFixes: ["fix the rejected slice"] }));
       await transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice-1.json", review_ref: "reviews/slice-1.json" });
       await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1 }), /advance exactly to attempt 2/u);
       const retry = await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 2 });
@@ -2286,7 +2483,7 @@ describe("simplified run-state transitions", () => {
       assert.equal(Object.hasOwn(retry.slice, "review_ref"), false);
       await closeBuilderDispatch(fixture, 2);
       writeJson(join(fixture.runDir, "evidence", "slice-2.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 2, head_sha: head });
-      writeJson(join(fixture.runDir, "reviews", "slice-2.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 2, reviewedCommit: head }));
+      writeJson(join(fixture.runDir, "reviews", "slice-2.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice-2.json", subject: "slice", attempt: 2, reviewedCommit: head }));
       await transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 2, evidence_ref: "evidence/slice-2.json", review_ref: "reviews/slice-2.json" });
       await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "" }), /blocked_reason/u);
       await assert.rejects(transitionRunSlice(fixture.runDir, "slice", { status: "blocked", blocked_reason: "blocked", review_ref: "reviews/other.json" }), /cannot create or change retained review_ref/u);
@@ -2314,6 +2511,7 @@ describe("simplified run-state transitions", () => {
       const planPath = join(fixture.runDir, "plan", "slices.json");
       const plan = readJson(planPath);
       plan.slices.push({ id: "sibling", stack: "backend", paths: ["test/**"], depends_on: [], acceptance: ["sibling works"], test_plan: ["test sibling"] });
+      plan.delivery_envelope = deliveryEnvelopeForSlices(plan.slices);
       writeJson(planPath, plan);
       const run = readJson(join(fixture.runDir, "run.json"));
       run.slices.push({ id: "sibling", stack: "backend", depends_on: [], declared_paths: ["test/**"], effective_paths: ["test/**"], status: "pending", attempts: 0 });
@@ -2325,6 +2523,8 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice-1.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: head });
       writeJson(join(fixture.runDir, "reviews", "slice-1.json"), createV2SliceReviewRecord({
+        runDir: fixture.runDir,
+        evidenceRef: "evidence/slice-1.json",
         subject: "slice",
         attempt: 1,
         reviewedCommit: head,
@@ -2388,7 +2588,7 @@ describe("simplified run-state transitions", () => {
           subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
           ownership_disclosure: [{ path: changedPath, rationale: `The ${name} fixture probes centralized privileged-path enforcement.` }],
         });
-        writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: [changedPath] }));
+        writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice.json", subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: [changedPath] }));
         const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
         await assert.rejects(
           transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" }),
@@ -2431,6 +2631,7 @@ describe("simplified run-state transitions", () => {
           const planPath = join(fixture.runDir, "plan", "slices.json");
           const plan = readJson(planPath);
           plan.slices.push({ id: "sibling", stack: "backend", paths: ["test/**"], depends_on: [], acceptance: ["sibling"], test_plan: ["sibling"] });
+          plan.delivery_envelope = deliveryEnvelopeForSlices(plan.slices);
           writeJson(planPath, plan);
           const run = readJson(join(fixture.runDir, "run.json"));
           run.slices.push({ id: "sibling", stack: "backend", depends_on: [], declared_paths: ["test/**"], effective_paths: ["test/**"], status: "pending", attempts: 0 });
@@ -2454,7 +2655,7 @@ describe("simplified run-state transitions", () => {
         mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
         writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
           ownership_disclosure: disclosedPaths.map((path) => ({ path, rationale: `The rejected ${name} path was observed and requires explicit ownership review.` })) });
-        writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: disclosedPaths }));
+        writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice.json", subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: disclosedPaths }));
         const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
         await assert.rejects(
           transitionRunSlice(fixture.runDir, "slice", { status: "review", attempts: 1, evidence_ref: "evidence/slice.json", review_ref: "reviews/slice.json" }),
@@ -2484,6 +2685,7 @@ describe("simplified run-state transitions", () => {
         { id: "sibling-a", stack: "backend", paths: ["docs/**"], depends_on: [], acceptance: ["a"], test_plan: ["a"] },
         { id: "sibling-b", stack: "backend", paths: ["docs/ambiguous.md"], depends_on: [], acceptance: ["b"], test_plan: ["b"] },
       );
+      plan.delivery_envelope = deliveryEnvelopeForSlices(plan.slices);
       writeJson(planPath, plan);
       const run = readJson(join(fixture.runDir, "run.json"));
       run.slices.push(
@@ -2504,7 +2706,7 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
         ownership_disclosure: [{ path: "docs/ambiguous.md", rationale: "The ambiguous documentation path was observed and requires explicit ownership review." }] });
-      writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: ["docs/ambiguous.md"] }));
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice.json", subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: ["docs/ambiguous.md"] }));
       const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
 
       await assert.rejects(
@@ -2539,7 +2741,7 @@ describe("simplified run-state transitions", () => {
       mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
       writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
         ownership_disclosure: [{ path: "extension/adjacent.txt", rationale: "The adjacent file is required to expose this slice behavior." }] });
-      writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: ["extension/adjacent.txt"] }));
+      writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice.json", subject: "slice", attempt: 1, reviewedCommit, ratifiedPaths: ["extension/adjacent.txt"] }));
       const beforeDisclosure = readFileSync(join(fixture.runDir, "run.json"), "utf8");
       writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit,
         ownership_disclosure: [{ path: "extension/adjacent.txt", rationale: " not normalized " }] });
@@ -2595,7 +2797,7 @@ describe("simplified run-state transitions", () => {
         const reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
         mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
         writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
-        writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ subject: "slice", attempt: 1, reviewedCommit }));
+        writeJson(join(fixture.runDir, "reviews", "slice.json"), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef: "evidence/slice.json", subject: "slice", attempt: 1, reviewedCommit }));
         const before = readFileSync(join(fixture.runDir, "run.json"), "utf8");
 
         await assert.rejects(
@@ -2655,6 +2857,13 @@ describe("simplified run-state transitions", () => {
       }), /requires APPROVE review|commit failed/u);
       assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
       writeJson(join(fixture.runDir, "reviews", "slice.json"), originalReview);
+      const familyEvidencePath = join(fixture.runDir, "evidence", "slice-family.json");
+      const originalFamilyEvidence = readFileSync(familyEvidencePath, "utf8");
+      await assert.rejects(transitionSliceMerged(fixture.runDir, "slice", { merge_commit: integrationHead }, {
+        atomicWriteHooks: { beforeCommit() { writeJson(familyEvidencePath, { subject: "slice", family: "fixture-family", status: "drifted" }); } },
+      }), /invariant family ledger evidence hash is stale|commit failed/u);
+      assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), before);
+      writeFileSync(familyEvidencePath, originalFamilyEvidence);
       const merged = await transitionSliceMerged(fixture.runDir, "slice", { merge_commit: integrationHead });
       assert.equal(merged.slice.status, "merged");
     } finally {
@@ -3640,6 +3849,133 @@ describe("simplified run-state transitions", () => {
       cleanup(fixture.repo);
     }
   });
+
+  describe("checkpoint routing parent progress", () => {
+    it("advances every exact state, replays idempotently, and keeps terminal authority immutable", async () => {
+      const fixture = createCheckpointProgressFixture("checkpoint-parent-progress");
+      try {
+        const terminal = structuredClone(readJson(join(fixture.runDir, "run.json")).terminal_result);
+        const planning = structuredClone(readJson(join(fixture.runDir, "run.json")).steps);
+        const transitions = [
+          [transitionCheckpointProgressReserved, checkpointProgressEntry("reserved", 1)],
+          [transitionCheckpointProgressChildPublished, checkpointProgressEntry("child-published", 1)],
+          [transitionCheckpointProgressLaunched, checkpointProgressEntry("launched", 1)],
+          [transitionCheckpointProgressMerged, checkpointProgressEntry("merged", 1)],
+          [transitionCheckpointProgressReserved, checkpointProgressEntry("reserved", 2)],
+          [transitionCheckpointProgressChildPublished, checkpointProgressEntry("child-published", 2)],
+          [transitionCheckpointProgressLaunched, checkpointProgressEntry("launched", 2)],
+          [transitionCheckpointProgressMerged, checkpointProgressEntry("merged", 2)],
+        ];
+
+        for (const [transition, entry] of transitions) {
+          const changed = await transition(fixture.runDir, entry, { now: "2026-07-19T12:10:00.000Z" });
+          assert.equal(changed.updated, true, entry.state);
+          const beforeReplay = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+          const replay = await transition(fixture.runDir, entry, { now: "2026-07-19T12:11:00.000Z" });
+          assert.equal(replay.updated, false, `${entry.state} replay`);
+          assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeReplay, `${entry.state} replay bytes`);
+          assert.deepEqual(replay.run.terminal_result, terminal);
+          assert.deepEqual(replay.run.steps, planning);
+        }
+
+        const closure = checkpointFinalClosureBinding();
+        const closed = await transitionCheckpointProgressClosed(fixture.runDir, closure, { now: "2026-07-19T12:12:00.000Z" });
+        assert.equal(closed.updated, true);
+        assert.equal(closed.checkpoint_progress.status, "closed");
+        assert.deepEqual(closed.checkpoint_progress.final_closure, closure);
+        assert.deepEqual(closed.run.terminal_result, terminal);
+        assert.deepEqual(closed.run.steps, planning);
+        const beforeReplay = readFileSync(join(fixture.runDir, "run.json"), "utf8");
+        const replay = await transitionCheckpointProgressClosed(fixture.runDir, closure);
+        assert.equal(replay.updated, false);
+        assert.equal(readFileSync(join(fixture.runDir, "run.json"), "utf8"), beforeReplay);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+
+    it("rejects skipped, reversed, conflicting, and noncontiguous progress", async () => {
+      const fixture = createCheckpointProgressFixture("checkpoint-parent-conflicts");
+      try {
+        await assert.rejects(
+          transitionCheckpointProgressChildPublished(fixture.runDir, checkpointProgressEntry("child-published", 1)),
+          /skip directly/u,
+        );
+        await assert.rejects(
+          transitionCheckpointProgressReserved(fixture.runDir, checkpointProgressEntry("reserved", 2)),
+          /contiguous after merged predecessors/u,
+        );
+        const reserved = checkpointProgressEntry("reserved", 1);
+        await transitionCheckpointProgressReserved(fixture.runDir, reserved);
+        const conflict = checkpointProgressEntry("child-published", 1);
+        conflict.base_commit = "f".repeat(40);
+        await assert.rejects(
+          transitionCheckpointProgressChildPublished(fixture.runDir, conflict),
+          /field 'base_commit' is immutable/u,
+        );
+        await transitionCheckpointProgressChildPublished(fixture.runDir, checkpointProgressEntry("child-published", 1));
+        await transitionCheckpointProgressLaunched(fixture.runDir, checkpointProgressEntry("launched", 1));
+        await assert.rejects(
+          transitionCheckpointProgressChildPublished(fixture.runDir, checkpointProgressEntry("child-published", 1)),
+          /cannot transition 'launched' -> 'child-published'/u,
+        );
+        const conflictingReplay = checkpointProgressEntry("launched", 1);
+        conflictingReplay.launched_at = "2026-07-19T12:02:01.000Z";
+        await assert.rejects(
+          transitionCheckpointProgressLaunched(fixture.runDir, conflictingReplay),
+          /replay conflicts/u,
+        );
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+
+    it("closes only after every manifest checkpoint is merged", async () => {
+      const fixture = createCheckpointProgressFixture("checkpoint-parent-close-eligibility");
+      try {
+        for (const state of ["reserved", "child-published", "launched", "merged"]) {
+          const transition = {
+            reserved: transitionCheckpointProgressReserved,
+            "child-published": transitionCheckpointProgressChildPublished,
+            launched: transitionCheckpointProgressLaunched,
+            merged: transitionCheckpointProgressMerged,
+          }[state];
+          await transition(fixture.runDir, checkpointProgressEntry(state, 1));
+        }
+        await assert.rejects(
+          transitionCheckpointProgressClosed(fixture.runDir, checkpointFinalClosureBinding()),
+          /every manifest checkpoint to be merged/u,
+        );
+        assert.equal(readJson(join(fixture.runDir, "run.json")).checkpoint_progress.status, "active");
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+
+    it("runs the race hook immediately before replacement and refuses stale parent authority", async () => {
+      const fixture = createCheckpointProgressFixture("checkpoint-parent-race");
+      try {
+        await assert.rejects(
+          transitionCheckpointProgressReserved(fixture.runDir, checkpointProgressEntry("reserved", 1), {
+            checkpointProgressHooks: {
+              beforeReplace() {
+                const run = readJson(join(fixture.runDir, "run.json"));
+                run.terminal_result.summary = "raced terminal authority";
+                writeJson(join(fixture.runDir, "run.json"), run);
+              },
+            },
+          }),
+          (error) => error?.message === "protected file commit failed"
+            && /parent authority changed before progress publication/u.test(error.cause?.message),
+        );
+        const raced = readJson(join(fixture.runDir, "run.json"));
+        assert.equal(raced.terminal_result.summary, "raced terminal authority");
+        assert.deepEqual(raced.checkpoint_progress.entries, []);
+      } finally {
+        cleanup(fixture.repo);
+      }
+    });
+  });
 });
 
 function deferredPromise() {
@@ -3675,14 +4011,162 @@ function createFixture(runId) {
   return { repo, runDir, runId };
 }
 
+function createCheckpointProgressFixture(runId) {
+  const fixture = createFixture(runId);
+  const manifest = {
+    schema_version: 1,
+    kind: "delivery-checkpoint-routing-manifest",
+    checkpoints: [1, 2].map((ordinal) => ({
+      id: `checkpoint-${String(ordinal).padStart(3, "0")}`,
+      ordinal,
+      child_plan_hash: HASH,
+      brief_scope_hash: HASH,
+    })),
+  };
+  const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
+  const manifestHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  const manifestRef = `artifacts/checkpoint-routing-${manifestHash.slice("sha256:".length)}.json`;
+  writeFileSync(join(fixture.runDir, manifestRef), bytes);
+  writeJson(join(fixture.runDir, "run.json"), {
+    schema_version: 1,
+    run_id: runId,
+    status: "blocked",
+    updated_at: "2026-07-19T12:00:00.000Z",
+    gates: {},
+    slices: [],
+    steps: [{ agent: "work-decomposer", status: "blocked", attempts: 0 }],
+    checkpoint_progress: {
+      schema_version: 1,
+      kind: "delivery-checkpoint-progress",
+      manifest_ref: manifestRef,
+      manifest_hash: manifestHash,
+      status: "active",
+      entries: [],
+      final_closure: null,
+    },
+    terminal_result: {
+      status: "blocked",
+      run_id: runId,
+      pr_url: null,
+      reason: "oversized-plan-checkpoint-routing-required",
+      summary: "Oversized plan routed to two checkpoints.",
+      artifacts: { checkpoint_routing: manifestRef },
+    },
+  });
+  return { ...fixture, manifestRef, manifestHash };
+}
+
+function checkpointProgressEntry(state, ordinal) {
+  const childRunId = `checkpoint-child-${ordinal}`;
+  const entry = {
+    state,
+    checkpoint_id: `checkpoint-${String(ordinal).padStart(3, "0")}`,
+    ordinal,
+    root_child_run_id: childRunId,
+    branch: childRunId,
+    worktree: `/tmp/${childRunId}`,
+    base_ref: "refs/remotes/origin/main",
+    base_commit: ordinal === 1 ? "a".repeat(40) : "c".repeat(40),
+    predecessor_checkpoint_id: ordinal === 1 ? null : `checkpoint-${String(ordinal - 1).padStart(3, "0")}`,
+    predecessor_completed_run_id: ordinal === 1 ? null : `checkpoint-child-${ordinal - 1}`,
+    predecessor_merge_commit: ordinal === 1 ? null : "c".repeat(40),
+    configuration: checkpointProgressConfiguration(),
+    publication_claim_ref: `refs/opencode/checkpoint-publications/${createHash("sha256").update(childRunId).digest("hex")}`,
+    publication_claim_oid: "a".repeat(40),
+    reserved_at: "2026-07-19T12:00:00.000Z",
+  };
+  if (state === "reserved") return entry;
+  Object.assign(entry, {
+    child_run_hash: HASH,
+    child_plan_hash: HASH,
+    brief_scope_hash: HASH,
+    published_at: "2026-07-19T12:01:00.000Z",
+  });
+  if (state === "child-published") return entry;
+  entry.launched_at = "2026-07-19T12:02:00.000Z";
+  if (state === "launched") return entry;
+  return Object.assign(entry, {
+    completed_child_run_id: childRunId,
+    completed_child_run_hash: HASH,
+    checkpoint_source_hash: HASH,
+    configuration_hash: HASH,
+    lineage: [{ run_id: childRunId, run_hash: HASH, parent_run_id: null, continuation_claim_ref: null, continuation_claim_oid: null }],
+    pull_request: {
+      pr_url: `https://github.com/acme/repo/pull/${ordinal}`,
+      pr_number: ordinal,
+      pr_node_id: `PR_checkpoint_${ordinal}`,
+      repository: "acme/repo",
+      operation_id: `ffpr-v1-${"d".repeat(64)}`,
+      head_ref: childRunId,
+      head_sha: "b".repeat(40),
+      base_ref: "main",
+      base_sha: "a".repeat(40),
+      draft: false,
+      merge_commit: "c".repeat(40),
+    },
+    remote_main: { ref: "refs/heads/main", commit: "c".repeat(40), observed_at: "2026-07-19T12:03:00.000Z" },
+    merged_at: "2026-07-19T12:04:00.000Z",
+  });
+}
+
+function checkpointProgressConfiguration() {
+  return {
+    mode: "interactive",
+    github_account: null,
+    pr_mode: "ready",
+    max_parallel_slices: 3,
+    max_retries: 3,
+    post_pr_policy: {
+      enabled: false,
+      wait_ms: 3_600_000,
+      initial_poll_ms: 30_000,
+      max_poll_ms: 120_000,
+      check_start_grace_ms: 300_000,
+      max_transient_errors: 12,
+      review: { required: false, reviewer_login: null, source: "none" },
+    },
+    review_tier: null,
+  };
+}
+
+function checkpointSource(parentRunId, rootChildRunId) {
+  return {
+    schema_version: 1,
+    kind: "delivery-checkpoint-source",
+    parent_run_id: parentRunId,
+    manifest_ref: `artifacts/checkpoint-routing-${"a".repeat(64)}.json`,
+    manifest_hash: HASH,
+    checkpoint_id: "checkpoint-001",
+    checkpoint_ordinal: 1,
+    root_child_run_id: rootChildRunId,
+    source_plan_ref: "plan/slices.json",
+    source_plan_hash: HASH,
+    source_review_ref: "reviews/work-decomposer.json",
+    source_review_hash: HASH,
+    source_review_attempt: 1,
+    parent_review_identity_hash: HASH,
+    child_disposition_hash: HASH,
+    admission_probe_hash: HASH,
+    brief_scope_hash: HASH,
+    child_plan_hash: HASH,
+    acceptance_mapping_hash: HASH,
+    initial_base_ref: "refs/remotes/origin/main",
+    initial_base_commit: "a".repeat(40),
+  };
+}
+
+function checkpointFinalClosureBinding() {
+  return { ref: "artifacts/checkpoint-final-closure.json", hash: HASH, closed_at: "2026-07-19T12:05:00.000Z" };
+}
+
 function seedBuilderDispatchAuthority(fixture) {
   mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
   mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
   writeFileSync(join(fixture.runDir, "artifacts", "technical-brief.md"), "accepted brief\n");
-  writeJson(join(fixture.runDir, "plan", "slices.json"), {
+  writeJson(join(fixture.runDir, "plan", "slices.json"), withDeliveryEnvelope({
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [{ id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
-  });
+  }));
   writeJson(join(fixture.runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
   writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
   const run = readJson(join(fixture.runDir, "run.json"));
@@ -3703,7 +4187,53 @@ function seedBuilderDispatchAuthority(fixture) {
   writeJson(join(fixture.runDir, "run.json"), run);
 }
 
-function createV2SliceReviewRecord({ scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice", ...input } = {}) {
+async function prepareRejectReviewPublication(fixture) {
+  initGitRepo(fixture.repo, ["slice-branch"]);
+  runGit(fixture.repo, ["checkout", "slice-branch"]);
+  const reviewedCommit = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+  seedBuilderDispatchAuthority(fixture);
+  await transitionRunSlice(fixture.runDir, "slice", { status: "running", attempts: 1, branch: "slice-branch", worktree: fixture.repo });
+  await closeBuilderDispatch(fixture, 1);
+  mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
+  mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
+  const evidenceRef = "evidence/slice.json";
+  const familyEvidenceRef = "evidence/slice.family.json";
+  const reviewPath = join(fixture.runDir, "reviews", "slice.json");
+  writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
+  const plan = readJson(join(fixture.runDir, "plan", "slices.json"));
+  const checkedFamilyEvidence = writeVerificationArtifactReceipt({
+    runDir: fixture.runDir, runId: fixture.runId, plan, sliceId: "slice", attempt: 1, reviewedCommit,
+    artifactId: "fixture-artifact-1", evidenceRef: familyEvidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
+  });
+  const review = createV2SliceReviewRecord({
+    subject: "slice",
+    verdict: "REJECT",
+    attempt: 1,
+    reviewedCommit,
+    requiredFixes: ["Repair the rejected invariant"],
+  });
+  review.invariant_family_ledger = passingInvariantFamilyLedger({
+    plan,
+    sliceId: "slice",
+    reviewedCommit,
+    evidenceRef: familyEvidenceRef,
+    evidenceHash: checkedFamilyEvidence.hash,
+  });
+  writeJson(reviewPath, review);
+  return { review, reviewPath };
+}
+
+function publishPreparedSliceReview(fixture) {
+  return transitionRunSlice(fixture.runDir, "slice", {
+    status: "review",
+    attempts: 1,
+    evidence_ref: "evidence/slice.json",
+    review_ref: "reviews/slice.json",
+  });
+}
+
+function createV2SliceReviewRecord({ runDir, evidenceRef, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = "slice", ...input } = {}) {
   const review = createSliceReviewRecord(input);
   review.remediation_context = {
     schema_version: 2,
@@ -3714,6 +4244,25 @@ function createV2SliceReviewRecord({ scopeEffect = "in-lane", likelyPaths = ["sr
       fix_owner: fixOwner,
     })),
   };
+  if (["APPROVE", "REJECT"].includes(review.verdict) && runDir && evidenceRef) {
+    const plan = readJson(join(runDir, "plan", "slices.json"));
+    const familyEvidenceRef = evidenceRef.replace(/\.json$/u, ".family.json");
+    const unit = plan.delivery_envelope.delivery_units.find((candidate) => candidate.slice_id === review.subject);
+    const family = unit.invariant_families[0];
+    const artifactId = unit.obligations.find((obligation) => obligation.invariant_family_id === family.id).verification_artifact_id;
+    const checkedFamilyEvidence = writeVerificationArtifactReceipt({
+      runDir, runId: readJson(join(runDir, "run.json")).run_id, plan, sliceId: review.subject,
+      attempt: review.attempt, reviewedCommit: review.reviewed_commit, artifactId, evidenceRef: familyEvidenceRef,
+      result: { type: "verification-result", outcome: "pass", summary: `${family.description} passed` },
+    });
+    review.invariant_family_ledger = passingInvariantFamilyLedger({
+      plan,
+      sliceId: review.subject,
+      reviewedCommit: review.reviewed_commit,
+      evidenceRef: familyEvidenceRef,
+      evidenceHash: checkedFamilyEvidence.hash,
+    });
+  }
   return review;
 }
 
@@ -3759,11 +4308,38 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
   runGit(sliceWorktree, ["add", "-A"]);
   runGit(sliceWorktree, ["commit", "-m", "reviewed slice"]);
   const reviewedCommit = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
+  const declaredPaths = conflictTopology ? ["rename-source.txt", reviewedPath] : [reviewedPath];
+  const plan = withDeliveryEnvelope({
+    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
+    slices: [
+      ...(priorIntegration ? [{ id: "prior", stack: "backend", paths: ["prior.txt"], depends_on: [], acceptance: ["prior"], test_plan: ["prior"] }] : []),
+      { id: "slice", stack: "backend", paths: declaredPaths, depends_on: [], acceptance: ["slice"], test_plan: ["slice"] },
+    ],
+  });
+  mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
+  writeJson(join(fixture.runDir, "plan", "slices.json"), plan);
+  writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE" });
   writeJson(join(fixture.runDir, "evidence", "slice.json"), { subject: "slice", status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
+  const family = plan.delivery_envelope.delivery_units.find((unit) => unit.slice_id === "slice").invariant_families[0];
+  const artifactId = plan.delivery_envelope.delivery_units.find((unit) => unit.slice_id === "slice").obligations[0].verification_artifact_id;
+  const checkedFamilyEvidence = writeVerificationArtifactReceipt({
+    runDir: fixture.runDir, runId: fixture.runId, plan, sliceId: "slice", attempt: 1, reviewedCommit,
+    artifactId, evidenceRef: "evidence/slice-family.json",
+    result: { type: "verification-result", outcome: "pass", summary: `${family.description} passed` },
+  });
+  const evidenceHash = hashFile(join(fixture.runDir, "evidence", "slice.json"));
   const requiredFixes = verdict === "REJECT" ? ["fix rejected slice"] : [];
   const review = createV2SliceReviewRecord({ subject, verdict, attempt: 1, reviewedCommit, requiredFixes });
+  if (verdict === "APPROVE") {
+    review.invariant_family_ledger = passingInvariantFamilyLedger({
+      plan,
+      sliceId: "slice",
+      reviewedCommit,
+      evidenceRef: "evidence/slice-family.json",
+      evidenceHash: checkedFamilyEvidence.hash,
+    });
+  }
   writeJson(join(fixture.runDir, "reviews", "slice.json"), review);
-  const evidenceHash = hashFile(join(fixture.runDir, "evidence", "slice.json"));
   const reviewHash = hashFile(join(fixture.runDir, "reviews", "slice.json"));
   const attemptReview = {
     attempt: 1,
@@ -3778,7 +4354,6 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
     convergence: review.convergence,
     remaining_fix_count: review.remaining_fix_count,
   };
-  const declaredPaths = conflictTopology ? ["rename-source.txt", reviewedPath] : [reviewedPath];
   const slices = [{
     id: "slice", stack: "backend", depends_on: [], declared_paths: declaredPaths, effective_paths: declaredPaths, status: "review", attempts: 1, branch: "slice-branch", worktree: sliceWorktree,
     evidence_ref: "evidence/slice.json", evidence_hash: evidenceHash,
@@ -3798,15 +4373,6 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
       attempt_reviews: [{ ...attemptReview }],
     });
   }
-  mkdirSync(join(fixture.runDir, "plan"), { recursive: true });
-  writeJson(join(fixture.runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE" });
-  writeJson(join(fixture.runDir, "plan", "slices.json"), {
-    integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
-    slices: [
-      ...(priorIntegration ? [{ id: "prior", stack: "backend", paths: ["prior.txt"], depends_on: [], acceptance: ["prior"], test_plan: ["prior"] }] : []),
-      { id: "slice", stack: "backend", paths: declaredPaths, depends_on: [], acceptance: ["slice"], test_plan: ["slice"] },
-    ],
-  });
   const claimStem = createHash("sha256").update(`${fixture.runId}\0slice\0${1}`, "utf8").digest("hex");
   const claimRef = `dispatch/${claimStem}.json`;
   const closureRef = `dispatch/${claimStem}.closed.json`;
@@ -3915,7 +4481,7 @@ function prepareAdditionalSliceConflict(fixture, { sliceId, branch, reviewedPath
   const evidenceRef = `evidence/${sliceId}.json`;
   const reviewRef = `reviews/${sliceId}.json`;
   writeJson(join(fixture.runDir, evidenceRef), { subject: sliceId, status: "pass", review_ready: true, attempt: 1, head_sha: reviewedCommit });
-  writeJson(join(fixture.runDir, reviewRef), createV2SliceReviewRecord({ subject: sliceId, attempt: 1, reviewedCommit }));
+  writeJson(join(fixture.runDir, reviewRef), createV2SliceReviewRecord({ runDir: fixture.runDir, evidenceRef, subject: sliceId, attempt: 1, reviewedCommit }));
   const evidenceHash = hashFile(join(fixture.runDir, evidenceRef));
   const reviewHash = hashFile(join(fixture.runDir, reviewRef));
   const claimStem = createHash("sha256").update(`${fixture.runId}\0${sliceId}\0${1}`, "utf8").digest("hex");
@@ -3960,8 +4526,32 @@ function seedPendingSlice(fixture, { sliceId, reviewedPath }) {
   const planPath = join(fixture.runDir, "plan", "slices.json");
   const plan = readJson(planPath);
   plan.slices.push({ id: sliceId, stack: "backend", paths: [reviewedPath], depends_on: ["slice"], acceptance: [sliceId], test_plan: [sliceId] });
+  plan.delivery_envelope = deliveryEnvelopeForSlices(plan.slices);
   writeJson(planPath, plan);
   const run = readJson(join(fixture.runDir, "run.json"));
+  for (const slice of run.slices.filter((candidate) => candidate.review_ref)) {
+    const reviewPath = join(fixture.runDir, slice.review_ref);
+    const review = readJson(reviewPath);
+    for (const disposition of review.invariant_family_ledger?.dispositions || []) {
+      const checked = writeVerificationArtifactReceipt({
+        runDir: fixture.runDir,
+        runId: fixture.runId,
+        plan,
+        sliceId: slice.id,
+        attempt: slice.attempts,
+        reviewedCommit: slice.reviewed_commit,
+        artifactId: disposition.verification_artifact_id,
+        evidenceRef: disposition.evidence_ref,
+        result: disposition.result,
+      });
+      disposition.evidence_hash = checked.hash;
+    }
+    writeJson(reviewPath, review);
+    slice.review_hash = hashFile(reviewPath);
+    for (const history of slice.attempt_reviews || []) {
+      if (history.review_ref === slice.review_ref) history.review_hash = slice.review_hash;
+    }
+  }
   run.slices.push({ id: sliceId, stack: "backend", depends_on: ["slice"], declared_paths: [reviewedPath], effective_paths: [reviewedPath], status: "pending", attempts: 0 });
   run.steps.find((step) => step.agent === "work-decomposer").acceptance.artifact_hash = hashFile(planPath);
   writeJson(join(fixture.runDir, "run.json"), run);
@@ -4274,10 +4864,10 @@ function makeSyntheticV2Run(runDir, input, { accepted = [], remaining = [] } = {
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted synthetic brief\n");
   writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", attempt: 1, verdict: "APPROVE" });
-  const plan = {
+  const plan = withDeliveryEnvelope({
     integration_gate: { required_commands: [{ program: "node", args: ["--test", "test/integration.test.js"] }, { program: "npm", args: ["run", "check"] }] },
     slices: run.slices.map((slice) => ({ id: slice.id, stack: slice.stack, paths: [`${slice.id}.txt`], depends_on: slice.depends_on, acceptance: [`${slice.id} accepted`], test_plan: [`test ${slice.id}`] })),
-  };
+  });
   writeJson(join(runDir, "plan", "slices.json"), plan);
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", attempt: 1, verdict: "APPROVE" });
   const briefHash = hashFile(join(runDir, "artifacts", "technical-brief.md"));
@@ -4474,7 +5064,7 @@ function writeJson(file, value) {
 
 function writeSeedPlan(runDir, projection) {
   mkdirSync(join(runDir, "plan"), { recursive: true });
-  writeJson(join(runDir, "plan", "slices.json"), {
+  writeJson(join(runDir, "plan", "slices.json"), withDeliveryEnvelope({
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: projection.map((slice) => ({
       id: slice.id,
@@ -4484,7 +5074,7 @@ function writeSeedPlan(runDir, projection) {
       acceptance: [`${slice.id} accepted`],
       test_plan: [`test ${slice.id}`],
     })),
-  });
+  }));
 }
 
 function cleanup(repo) {

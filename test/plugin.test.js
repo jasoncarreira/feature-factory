@@ -9,6 +9,7 @@ import { decodeFeatureCommandPayload, encodeFeatureCommandPayload, safePayloadVa
 import { transitionPanelVerdicts } from "../src/run-state.js";
 import { buildContinuation, cleanupRun, recoverDisruptedRun, resumeFactory } from "../src/factory.js";
 import { spawnSync } from "./helpers/git-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 
 const schemaDoc = readFileSync(new URL("../assets/skills/feature/SCHEMA.md", import.meta.url), "utf8");
 const skillDoc = readFileSync(new URL("../assets/skills/feature/SKILL.md", import.meta.url), "utf8");
@@ -413,6 +414,7 @@ describe("feature command payload parsing", () => {
     assert.match(text, /parse_status: valid/u);
     assert.match(text, /driver\.mode: autonomous/u);
     assert.match(text, /resume: \{"schema_version":1,"kind":"existing-run-resume","run_id":"steering-drain-boundaries"\}/u);
+    assert.doesNotMatch(text.slice(parsedStart, rawStart), /checkpoint(?:_reservation|_request)?:/u);
     assert.match(text.slice(rawStart), /ffpayload-v1:[A-Za-z0-9_-]+/u);
     assert.doesNotMatch(text.slice(rawStart), /resume steering-drain-boundaries/u);
   });
@@ -468,6 +470,9 @@ describe("feature command payload parsing", () => {
       [encodeFeatureCommandPayload({ operator_request: `resume ${runId}`, driver: { mode: "autonomous" }, resume, steering: { ...steering, pending: { garbage: true }, consume: { command: "other", args: [] } } }), "invalid-steering-pointer"],
       [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless" }, continuation: {} }), "invalid-continuation"],
       [encodeFeatureCommandPayload({ operator_request: "continue", driver: { mode: "headless", run_id: "new-run" }, continuation: {} }), "invalid-driver-run-id-route"],
+      [encodeFeatureCommandPayload({ operator_request: "start", driver: {}, checkpoint: {} }), "unsupported-checkpoint-route"],
+      [encodeFeatureCommandPayload({ operator_request: "start", driver: {}, checkpoint_reservation: {} }), "unsupported-checkpoint-route"],
+      [encodeFeatureCommandPayload({ operator_request: "start", driver: {}, checkpoint_request: {} }), "unsupported-checkpoint-route"],
     ];
 
     for (const [token, reason] of cases) assert.deepEqual(decodeFeatureCommandPayload(token), { ok: false, reason });
@@ -779,10 +784,10 @@ function createBuilderDispatchFixture() {
   mkdirSync(join(runDir, "evidence"), { recursive: true });
   mkdirSync(join(runDir, "reviews"), { recursive: true });
   mkdirSync(join(runDir, "artifacts"), { recursive: true });
-  writeJson(join(runDir, "plan", "slices.json"), {
+  writeJson(join(runDir, "plan", "slices.json"), withDeliveryEnvelope({
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
     slices: [{ id: "slice", stack: "backend", paths: ["src/**"], depends_on: [], acceptance: ["works"], test_plan: ["node --test"] }],
-  });
+  }));
   writeJson(join(runDir, "reviews", "work-decomposer.json"), { subject: "work-decomposer", verdict: "APPROVE", required_fixes: [] });
   writeJson(join(runDir, "reviews", "spec-writer.json"), { subject: "spec-writer", verdict: "APPROVE", required_fixes: [] });
   writeFileSync(join(runDir, "artifacts", "technical-brief.md"), "accepted brief\n", "utf8");
@@ -828,11 +833,18 @@ function createSpecialPanelDispatchFixture() {
   const evidenceRef = "evidence/slice.panel-ready.json";
   const reviewRef = "reviews/slice.panel-ready.json";
   writeJson(join(fixture.runDir, evidenceRef), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: fixture.head });
+  const evidenceHash = fileHash(join(fixture.runDir, evidenceRef));
+  const familyEvidenceRef = "evidence/slice.panel-family.json";
+  const familyEvidence = writeVerificationArtifactReceipt({
+    runDir: fixture.runDir, runId: run.run_id, plan, sliceId: "slice", attempt: 1, reviewedCommit: fixture.head,
+    artifactId: "fixture-artifact-1", evidenceRef: familyEvidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
+  });
   writeJson(join(fixture.runDir, reviewRef), {
     subject: "slice", attempt: 1, reviewed_commit: fixture.head, verdict: "APPROVE", convergence: "converging",
     remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] },
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: fixture.head, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
   });
-  const evidenceHash = fileHash(join(fixture.runDir, evidenceRef));
   const reviewHash = fileHash(join(fixture.runDir, reviewRef));
   run.slices = [{
     id: "slice", stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status: "merged", attempts: 1,

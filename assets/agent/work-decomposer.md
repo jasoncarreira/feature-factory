@@ -23,6 +23,8 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 ## Slice Rules
 
 - Every slice has `id`, `stack`, `paths`, `depends_on`, `acceptance`, and `test_plan`.
+- Every new plan has a complete `delivery_envelope` schema v1 with exactly one delivery unit in slice order for every slice. Each unit has nonempty `invariant_families`, `obligations`, and `verification_artifacts`; use globally unique lowercase kebab-case IDs.
+- Map every obligation to exactly one family and one verification artifact in its delivery unit. Every declared family and artifact must be mapped by at least one obligation, no two obligations may duplicate the same family/artifact mapping, and every artifact must bind its exact `test_plan_index` and `test_plan_entry` on that slice. Never leave mappings for a later agent to infer.
 - Every `paths` entry is either one exact repository-relative file path or one recursive directory lane ending in `/**`. A trailing slash alone and every other glob form are invalid; emit `src/server/api.js` or `src/server/api/**`, never `src/server/api/`, `src/server/*.js`, or `src/**/api.js`.
 - Every slice uses the same fixed three-attempt runtime limit. Do not emit `max_attempts`, `dominant_concern`, obligation-count eligibility, or any fourth-attempt policy; reviewed carry-forward is the only escape hatch after the bounded loop.
 - Every acceptance criterion maps to at least one slice.
@@ -36,10 +38,11 @@ Do not delegate or rediscover the codebase. Use the accepted brief and research 
 - Generated files have one owning slice.
 - **Per-slice width budget (primary constraint).** Each slice owns one dominant hard concern — a single locus of crash-recovery, concurrency, security-boundary, canonicalization/serialization, migration, or protocol-contract reasoning — plus its focused tests. Do not bundle multiple independent hard concerns into one slice. A large, heterogeneous acceptance list (a rough smell above ~6-8 criteria, not a hard line) is a signal to split along the concern seams, not to grow the slice. Width is the primary limit; prefer splitting over widening.
 - Prefer fewer coherent slices over many tiny slices — but never merge independent hard concerns to achieve that. When "fewer slices" and the width budget conflict, the width budget wins.
-- The longest dependency path may span at most four waves; a root slice is wave 1. Prefer three or fewer waves for a shorter critical path, but use a fourth wave when it is needed to keep each slice within the width budget.
+- The longest dependency path admitted as one ordinary child run may span at most four waves; a root slice is wave 1. Prefer three or fewer waves for a shorter critical path, but use a fourth wave when it is needed to keep each slice within the width budget. A deeper parent plan is valid and routes to checkpoints; it is not `REDESIGN-REQUIRED`. Keep the complete parent plan and add the explicit reviewed `delivery_envelope.checkpoint_plan`; runtime must never infer checkpoint scope or child plans.
 - Prefer combining tightly serialized work into fewer coherent slices for a shorter critical path, but never at the cost of the width budget: do not bundle independent hard concerns into one slice merely to avoid a wave. `max_parallel_slices` limits concurrency within a wave and does not relax the depth cap.
 - If the feature is indivisible, emit one slice and explain why.
-- **Redesign escalation (width and depth both bounded).** If the feature cannot be decomposed so that every slice stays within the width budget without exceeding four waves, do not emit a slice plan. Return a `REDESIGN-REQUIRED` result instead: name the concern seams that overflow and explain why they cannot be separated within four waves. Width and depth are both bounded — when they collide, the feature is too large for one run. Stop and ask for a smaller story or brief; never ship a god-slice and never exceed four waves.
+- **Deterministic admission route and probe order.** Always emit the complete plan and envelope. The admission policy routes `checkpoint` when any slice combines more than one invariant family with at least six total obligations, or when the dependency graph exceeds four waves; otherwise it routes `admit`. This is a deterministic machine decision, not model-authored redesign prose. File overlap alone is never an admission reason and must not affect the route. For `checkpoint`, emit closed `delivery-checkpoint-plan` data with the exact parent `acceptance_inventory`, policy-controlled `acceptance_mappings`, and explicit checkpoints in stable dependency/topological then declared family order. Each checkpoint contains exact `brief_scope`, nonempty `acceptance_ids`, and a complete one-slice ordinary `child_plan` that independently admits, has no nested checkpoint plan, starts with `depends_on:[]`, and copies the parent integration gate. Do not emit freeform admission reasons, a `decision` field, runnable requests, inferred scope, reviewer dispositions, or a `REDESIGN-REQUIRED` substitute. The exact order is: write the explicit checkpoint plan; let the orchestrator run the typed nonmutating admission probe; let work-reviewer return `APPROVE-CHECKPOINT` with exact child dispositions; only then may the parent accept and publish routing authority. The probe must run after the plan bytes are written and before work-reviewer review.
+- Inventory IDs are exactly `acceptance-NNNNNN` in parent slice then acceptance-index order and repeat exact source slice, zero-based index, and text. Every inventory row has one mapping: `single-owner` names one checkpoint and assignment; `shared-repeat` names at least two unique checkpoints and one ordered assignment per checkpoint. Checkpoint acceptance IDs and reverse mappings cover the inventory exactly. Every assignment names one checkpoint family and nonempty obligation, artifact, and exact test-entry sets whose union exactly covers that checkpoint scope; child acceptance is the assigned inventory text in inventory order.
 
 ## Hotspot Examples
 
@@ -88,7 +91,48 @@ Return exactly this structure:
       "acceptance": ["AC2"],
       "test_plan": ["npm test -- feature-screen.test"]
     }
-  ]
+  ],
+  "delivery_envelope": {
+    "schema_version": 1,
+    "delivery_units": [
+      {
+        "id": "be-api-unit",
+        "slice_id": "be-api",
+        "invariant_families": [
+          { "id": "api-contract", "description": "The API contract remains stable" }
+        ],
+        "obligations": [
+          {
+            "id": "api-response-obligation",
+            "description": "The API returns the accepted response",
+            "invariant_family_id": "api-contract",
+            "verification_artifact_id": "api-feature-test"
+          }
+        ],
+        "verification_artifacts": [
+          { "id": "api-feature-test", "test_plan_index": 0, "test_plan_entry": "npm test -- api.feature.test" }
+        ]
+      },
+      {
+        "id": "fe-screen-unit",
+        "slice_id": "fe-screen",
+        "invariant_families": [
+          { "id": "screen-contract", "description": "The screen consumes the accepted API contract" }
+        ],
+        "obligations": [
+          {
+            "id": "screen-render-obligation",
+            "description": "The screen renders the accepted feature state",
+            "invariant_family_id": "screen-contract",
+            "verification_artifact_id": "screen-feature-test"
+          }
+        ],
+        "verification_artifacts": [
+          { "id": "screen-feature-test", "test_plan_index": 0, "test_plan_entry": "npm test -- feature-screen.test" }
+        ]
+      }
+    ]
+  }
 }
 ```
 
@@ -111,18 +155,6 @@ Return exactly this structure:
 - <parallelism risk, giant slice, ambiguous dependency, generated code, migration, or none>
 ```
 
-The JSON must be valid and directly usable as `plan/slices.json`. `integration_gate` is required even for a one-slice plan. It is closed to `required_commands`; the ordered list has 1-32 closed `{program,args}` entries. `program` is trimmed, 1-255 UTF-8 bytes, and has no NUL/control characters. `args` has 0-64 strings per command, each at most 4096 UTF-8 bytes and without NUL; the JSON-encoded command list is at most 64 KiB. The human plan mirrors all entries, while the JSON list alone is execution authority.
+The JSON must be valid and directly usable as `plan/slices.json`. `integration_gate` and `delivery_envelope` are required even for a one-slice plan. `integration_gate` is closed to `required_commands`; the ordered list has 1-32 closed `{program,args}` entries. `program` is trimmed, 1-255 UTF-8 bytes, and has no NUL/control characters. `args` has 0-64 strings per command, each at most 4096 UTF-8 bytes and without NUL; the JSON-encoded command list is at most 64 KiB. The human plan mirrors all entries, while the JSON list alone is execution authority. `delivery_envelope.checkpoint_plan` is absent for `admit` and required for `checkpoint`; it is closed to `schema_version`, `kind`, `acceptance_inventory`, `acceptance_mappings`, and `checkpoints`. Every checkpoint is closed to `id`, `ordinal`, `prerequisite_checkpoint_id`, `acceptance_ids`, `brief_scope`, and `child_plan`.
 
-If the redesign escalation applies, emit no slice plan. Instead return exactly:
-
-```markdown
-## Decomposition result: REDESIGN-REQUIRED
-
-**Reason:** width-and-depth-conflict
-**Overflowing concern seams:**
-- <concern> — cannot separate within four waves because <specific dependency chain / shared file / ordering constraint>
-
-**Suggested resize:** <the smaller story or brief scope that would fit>
-```
-
-The orchestrator treats `REDESIGN-REQUIRED` as a Gate 2 failure and terminalizes `needs-human`.
+When the typed probe returns `checkpoint`, the parent plan is routing input only. Work-reviewer must return exact same-attempt `APPROVE-CHECKPOINT`, not plain `APPROVE`, with a self-independent `review_identity` and exactly one ordered reviewer-produced `checkpoint-child-decomposition-review` disposition with verdict `APPROVE` per probe checkpoint. Missing, duplicate, reordered, cross-bound, stale, rejecting, or extra dispositions invalidate checkpoint approval. The parent must not seed runnable slices or proceed to Gate 2, slice branches, worktrees, dispatch, implementation, panels, Gate 3, or a PR. Runtime validates and copies each exact reviewed scope, child plan, acceptance projection, hashes, and child disposition; it never synthesizes a child verdict or infers scope. Each checkpoint is a normal complete child feature run, published with immutable `checkpoint_source`, and follows the ordinary lifecycle with its own complete acceptance boundary, integration test-verifier, whole-story implementation-validator and security-reviewer panels, Gate 3, and one PR. Runs are strictly sequential; checkpoint N+1 starts only from `main` containing merged PR N. B1 carry-forward is allowed only to recover nonconvergence inside that same checkpoint and must copy the immutable source plus the full stored configuration; it cannot carry work across checkpoints or create a partial PR, shared train, or join.

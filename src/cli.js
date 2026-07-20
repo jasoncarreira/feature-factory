@@ -5,13 +5,13 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, cancelFactoryRun, cleanupRun, clearPrePrFence, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, recordCostUsage, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, startFactory, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
 import { collectEnv } from "./env-snapshot.js";
 import { readJsoncConfig } from "./config.js";
-import { readSlicesSeedPlan, transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSlicesSeed, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
+import { transitionPanelVerdicts, transitionPrCreated, transitionRecoverOrphan, transitionMergedSliceRepair, transitionRunSlice, transitionRunStep, transitionSliceMerged, transitionTerminalResult } from "./run-state.js";
 import { validateRun } from "./validate.js";
 import { isContainedPath } from "./utils.js";
 import { factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
@@ -21,7 +21,7 @@ import { serializeTerminalJson } from "./hardening/terminal-encoding.js";
 import { runCleanupSweepCommand } from "./cleanup-sweep-command.js";
 import { renderCleanupSweepReport } from "./cleanup-sweep-output.js";
 import { executeCleanupSweep, previewCleanupSweep } from "./cleanup-sweep.js";
-import { executeCheckedTestExecution } from "./test-execution.js";
+import { executeCheckedTestExecution, executeCheckedVerificationArtifact } from "./test-execution.js";
 
 const cliPath = fileURLToPath(import.meta.url);
 const root = dirname(dirname(cliPath));
@@ -53,6 +53,9 @@ Commands:
   install [--local]             Add this package to ~/.config/opencode/opencode.jsonc
   doctor [--local] [--profiles] [--telemetry] Check opencode/plugin/provider/tool prerequisites
   factory start [--repo PATH] [--run-id ID] [--gh-account ACCOUNT] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE] <prompt...>
+  factory checkpoint-start <parent-run-id> <checkpoint-id> --run-id <child-run-id> [start options]
+  factory checkpoint-record-merged <parent-run-id> <checkpoint-id> [--json]
+  factory checkpoint-close <parent-run-id> [--json]  Close the final checkpoint route after its canonical PR merge
   factory resume-check <run-id> [--json]  Recover/verify a disrupted resume without re-scaffolding
   factory continue <blocked-run-id> --review <review-ref> --run-id <new-run-id> [--carry-forward|--new-pr] [--post-pr-ci|--no-post-pr-ci] [--headless|--autonomous|--detached] [--draft|--ready|--no-draft] [--dry-run] [--parent-span-id ID] [--traceparent VALUE] [--tracestate VALUE]
   factory cancel <run-id> [--json]
@@ -76,12 +79,14 @@ Commands:
   factory validate [run-id]     Validate run.json and plan/slices.json
   factory recover <run-id> [--reason TEXT]  Mark orphaned/stale running run as needs-human
   factory test-execute <run-id> --json  Execute the exact accepted integration gate and publish its checked receipt
+  factory artifact-execute <run-id> <slice-id> <artifact-id> --json  Execute one exact envelope verification artifact and publish its checked receipt
   factory cleanup <run-id> [--dry-run] [--force] [--repo PATH] [--json]
   factory cleanup --all --dry-run [--repo PATH] [--json]
   factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> [--repo PATH] [--json]
   factory answer [--repo PATH] [--json] <run> <gate> <approve|stop|changes: ...>
   factory gate-decision <run> <gate> <pending|approved|changes_requested|stopped> [--artifact REF] [--question-ref REF] [--answer-ref REF|--answer TEXT] [--approval-source SOURCE] [--boundary-token TOKEN]
-  factory slices-seed <run-id> --from plan/slices.json
+  factory slices-probe <run-id> --from plan/slices.json [--json]
+  factory slices-seed <run-id> --from plan/slices.json [--boundary-token TOKEN]
   factory slice-status <run-id> <slice-id> <running|review|blocked> [--branch REF] [--worktree PATH] [--attempts N] [--evidence-ref REF] [--review-ref REF] [--reason TEXT]
   factory repair <run-id> <reported|repairing|review|merged|blocked> [--owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref REF] [--attempts N] [--review-ref REF --evidence-ref REF --commit SHA] [--merge-commit SHA --verification-ref REF] [--reason TEXT]
   factory step <run-id> <agent> <running|accepted|rejected|blocked> [--artifact-ref REF] [--evidence-ref REF] [--review-ref REF] [--attempts N]
@@ -188,6 +193,7 @@ async function factory(args, dependencies = {}) {
   const [sub, ...rest] = args;
   if (sub === "answer") return answer(rest);
   if (sub === "test-execute") return testExecute(rest, dependencies);
+  if (sub === "artifact-execute") return artifactExecute(rest, dependencies);
   if (sub === "cost-report") return costReport(rest);
   if (sub === "cleanup" && rest.some((argument) => argument === "--all" || argument === "--digest" || argument.startsWith("--all=") || argument.startsWith("--digest="))) return cleanupSweep(rest);
   const opts = { ...options(rest), ...(dependencies.factoryOptions || {}) };
@@ -198,6 +204,22 @@ async function factory(args, dependencies = {}) {
     print(result, opts);
     if (result && typeof result === "object" && result.ok === false) process.exitCode = 1;
     return;
+  }
+  if (sub === "checkpoint-start") {
+    if (positional.length !== 2) throw new Error("factory checkpoint-start requires exactly <parent-run-id> <checkpoint-id>");
+    const result = await startFactoryCheckpoint(positional[0], positional[1], opts);
+    print(result, opts);
+    if (result && typeof result === "object" && result.ok === false) process.exitCode = 1;
+    return;
+  }
+  if (sub === "checkpoint-record-merged") {
+    assertOnlyCommandOptions(rest, new Set(["--json", "--repo"]), "factory checkpoint-record-merged");
+    if (positional.length !== 2) throw new Error("factory checkpoint-record-merged requires exactly <parent-run-id> <checkpoint-id>");
+    return print(await recordFactoryCheckpointMerged(positional[0], positional[1], opts), opts);
+  }
+  if (sub === "checkpoint-close") {
+    if (positional.length !== 1) throw new Error("factory checkpoint-close requires exactly <parent-run-id>");
+    return print(await closeFactoryCheckpointRoute(positional[0], opts), opts);
   }
   if (sub === "resume-check") {
     if (positional.length !== 1) throw new Error("factory resume-check requires exactly one <run-id>");
@@ -240,6 +262,7 @@ async function factory(args, dependencies = {}) {
   if (sub === "provenance" && positional[0] === "review-dispatch") return provenanceReviewDispatch(rest);
   if (sub === "env" || sub === "provenance") return env(rest);
   if (sub === "gate-decision") return gateDecision(rest, dependencies);
+  if (sub === "slices-probe") return slicesProbe(rest);
   if (sub === "slices-seed") return slicesSeed(rest);
   if (sub === "slice-status") return sliceStatus(rest);
   if (sub === "repair") return repairStatus(rest);
@@ -285,6 +308,33 @@ async function testExecute(args, dependencies = {}) {
       ok: false,
       error: {
         code: typeof error?.code === "string" && error.code.length > 0 ? error.code : "TEST_EXECUTION_ERROR",
+        message: renderErrorForTerminal(error),
+      },
+    };
+    console.log(serializeTerminalJson(envelope, { space: 2 }));
+    process.exitCode = 1;
+    return envelope;
+  }
+}
+
+async function artifactExecute(args, dependencies = {}) {
+  try {
+    if (args.length !== 4 || args.filter((value) => value === "--json").length !== 1) {
+      throw staticCliError("factory artifact-execute requires exactly <run-id> <slice-id> <artifact-id> --json");
+    }
+    const [runId, sliceId, artifactId] = args.filter((value) => value !== "--json");
+    if (![runId, sliceId, artifactId].every((value) => stringValue(value) && !String(value).startsWith("--"))) {
+      throw staticCliError("factory artifact-execute requires exactly <run-id> <slice-id> <artifact-id> --json");
+    }
+    const result = await executeCheckedVerificationArtifact(resolveRunDir(runId), sliceId, artifactId, dependencies.artifactExecutionOptions || {});
+    console.log(serializeTerminalJson(result, { space: 2 }));
+    if (result.receipt?.status !== "pass") process.exitCode = 1;
+    return result;
+  } catch (error) {
+    const envelope = {
+      ok: false,
+      error: {
+        code: typeof error?.code === "string" && error.code.length > 0 ? error.code : "ARTIFACT_EXECUTION_ERROR",
         message: renderErrorForTerminal(error),
       },
     };
@@ -768,17 +818,22 @@ async function slicesSeed(args) {
   const [runId] = positional;
   if (!stringValue(runId) || positional.length !== 1) throw new Error("factory slices-seed requires exactly one <run-id>");
   const from = requiredOption(opts.from, "--from", "factory slices-seed");
-  const runDir = resolveRunDir(runId, opts);
   if (from !== "plan/slices.json") throw new Error("factory slices-seed --from must be exactly plan/slices.json");
-  const plan = readSlicesSeedPlan(runDir, from, opts);
-  const slices = plan.slices.map((slice) => ({
-    id: slice.id,
-    stack: slice.stack,
-    depends_on: Array.isArray(slice.depends_on) ? slice.depends_on : [],
-    status: "pending",
-    attempts: 0,
-  }));
-  return print(await transitionSlicesSeed(runDir, slices, opts), opts);
+  return print(await seedFactorySlices(runId, { ...opts, from }), opts);
+}
+
+async function slicesProbe(args) {
+  assertOnlyCommandOptions(args, new Set(["--from", "--repo", "--json"]), "factory slices-probe");
+  const opts = options(args);
+  const positional = positionals(args);
+  const [runId] = positional;
+  if (!stringValue(runId) || positional.length !== 1) throw new Error("factory slices-probe requires exactly one <run-id>");
+  const from = requiredOption(opts.from, "--from", "factory slices-probe");
+  if (from !== "plan/slices.json") throw new Error("factory slices-probe --from must be exactly plan/slices.json");
+  const result = probeFactorySlices(runId, { ...opts, from });
+  print(result, opts);
+  if (result.status === "invalid") process.exitCode = 1;
+  return result;
 }
 
 async function sliceStatus(args) {
@@ -886,8 +941,9 @@ async function prCreated(args) {
   }
   opts.fenceToken = requiredOption(opts.fenceToken, "--fence-token", "factory pr-created");
   const result = await transitionPrCreated(resolveRunDir(runId, opts), {}, opts);
-  print(result, opts);
-  if (result?.ok === false) process.exitCode = 1;
+  const completed = await attachCheckpointCompletionRecovery(result, result?.run, opts);
+  print(completed, opts);
+  if (completed?.ok === false) process.exitCode = 1;
 }
 
 async function sliceMerged(args) {

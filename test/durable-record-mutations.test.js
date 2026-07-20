@@ -8,6 +8,7 @@ import { execFileSync } from "./helpers/git-fixture.js";
 import { createReviewRecord } from "./helpers/review-record-fixture.js";
 import { publishSyntheticV2Parent } from "./helpers/v2-parent-fixture.js";
 import { createRunRecord } from "./helpers/run-record-fixture.js";
+import { passingInvariantFamilyLedger, withDeliveryEnvelope, writeVerificationArtifactReceipt } from "./helpers/delivery-envelope-fixture.js";
 import {
   DURABLE_AUTHORITY_CATALOG,
   DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST,
@@ -24,10 +25,12 @@ import {
   emitDurableRecordMutations,
   renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
-import { checkRunConsistency, validateRun, validateSlicesPlan, validateTestExecutionReceipt } from "../src/validate.js";
+import { checkRunConsistency, validateCheckpointChildPublication, validateCheckpointProgress, validateCheckpointSource, validateDeliveryCheckpointFinalClosure, validateRun, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
 import { cleanupRun, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
+import { evaluateInvariantFamilyReview } from "../src/delivery-envelope/review-extension.js";
+import { buildCheckpointRoutingManifest, validateCheckpointRoutingManifest, validateReviewedCheckpointPlan } from "../src/delivery-envelope/checkpoint-routing.js";
 import {
   assertContinuationAuthorityCurrent,
   assertNoUnresolvedSliceDispatches,
@@ -930,9 +933,21 @@ describe("finite durable-authority catalog", () => {
     duplicateDisposition.push(B0M4_EXACT_CASES[0]);
     assert.throws(() => exactB0m4DispositionMap(duplicateDisposition), /duplicate exact B0M\.4 case/u);
     assert.throws(() => exactB0m4DispositionMap([{ ...B0M4_EXACT_CASES[0], consumer: "" }]), /literal consumer|concrete consumer and rejector/u);
-    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 124);
-    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 125);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 147);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 148);
+    for (const id of [
+      "verification-artifact-claim-active", "verification-artifact-claim-completed-pass", "verification-artifact-claim-completed-fail",
+      "verification-artifact-claim-unknown-process", "verification-artifact-claim-unknown-receipt", "verification-artifact-execution-receipt-pass",
+      "verification-artifact-execution-receipt-fail", "checkpoint-reviewed-plan-v1", "checkpoint-admission-probe-valid",
+      "checkpoint-child-disposition-v1", "checkpoint-child-publication-v1", "checkpoint-source-v1",
+      "checkpoint-progress-reserved", "checkpoint-progress-child-published", "checkpoint-progress-launched",
+      "checkpoint-progress-merged", "checkpoint-progress-closed", "checkpoint-merged-completion-v1", "checkpoint-final-closure-v1",
+    ]) assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes(id), true, `${id} must be production-covered`);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("plan-v2-integration-gate"), true);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("plan-delivery-envelope-v1"), true);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("review-invariant-family-ledger-v1"), true);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("checkpoint-routing-artifact-v1"), true);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("terminal-result-blocked-checkpoint-routing"), true);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
     assert.deepEqual(
       DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records.map(({ id }) => id)).filter((id) => !DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes(id)),
@@ -1033,7 +1048,7 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 125);
+    assert.equal(recordCount, 148);
   });
 
   it("registers all B1R claim and receipt variants separately", () => {
@@ -1307,6 +1322,56 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
+  it("rejects every delivery-envelope and invariant-ledger mutation through production extension consumers", () => {
+    const envelopeRecord = findRecord(DURABLE_AUTHORITY_CATALOG, "plan-delivery-envelope-v1");
+    const envelopeBaseline = createDurableCatalogBaseline(envelopeRecord);
+    const envelopeCases = emitDurableRecordMutations(envelopeRecord.source, envelopeRecord.descriptor, envelopeRecord.externalSources);
+    for (const mutationCase of envelopeCases) {
+      const plan = structuredClone(envelopeBaseline.plan);
+      plan.delivery_envelope = mutationCase.record;
+      assert.throws(() => validateSlicesPlan(plan), undefined, mutationCase.name);
+    }
+
+    const ledgerRecord = findRecord(DURABLE_AUTHORITY_CATALOG, "review-invariant-family-ledger-v1");
+    const ledgerBaseline = createDurableCatalogBaseline(ledgerRecord);
+    const ledgerCases = emitDurableRecordMutations(ledgerRecord.source, ledgerRecord.descriptor, ledgerRecord.externalSources);
+    for (const mutationCase of ledgerCases) {
+      assert.throws(() => evaluateInvariantFamilyReview({
+        plan: JSON.parse(mutationCase.externalSources.plan.bytes),
+        sliceId: "backend",
+        review: { subject: "backend", attempt: 1, reviewed_commit: "b".repeat(40), verdict: "REJECT", invariant_family_ledger: mutationCase.record },
+        observeEvidence(ref) {
+          const external = mutationCase.externalSources.evidence;
+          return { ref, hash: `sha256:${createHash("sha256").update(external.bytes).digest("hex")}`, receipt: JSON.parse(external.bytes) };
+        },
+      }), undefined, mutationCase.name);
+    }
+    assert.equal(envelopeCases.length, 7);
+    assert.equal(ledgerCases.length, 10);
+  });
+
+  it("rejects every checkpoint-routing artifact mutation through reviewed source authority", () => {
+    const record = findRecord(DURABLE_AUTHORITY_CATALOG, "checkpoint-routing-artifact-v1");
+    for (const mutationCase of emitDurableRecordMutations(record.source, record.descriptor, record.externalSources)) {
+      assert.throws(() => {
+        const plan = JSON.parse(mutationCase.externalSources.plan.bytes);
+        const review = JSON.parse(mutationCase.externalSources.review.bytes);
+        const planHash = `sha256:${createHash("sha256").update(mutationCase.externalSources.plan.bytes).digest("hex")}`;
+        const reviewHash = `sha256:${createHash("sha256").update(mutationCase.externalSources.review.bytes).digest("hex")}`;
+        validateCheckpointRoutingManifest(mutationCase.record, {
+          plan,
+          planHash,
+          admissionResult: record.source.source.admission_result,
+          decompositionAuthority: {
+            plan_ref: "plan/slices.json", plan_hash: planHash,
+            review_ref: "reviews/work-decomposer.json", review_hash: reviewHash,
+            attempt: review.attempt, review,
+          },
+        });
+      }, undefined, mutationCase.name);
+    }
+  });
+
   it("rejects every accepted work-decomposer plan/review mutation through its deciding consumers", () => {
     const record = findRecord(DURABLE_AUTHORITY_CATALOG, "step-work-decomposer-accepted-plan");
     const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
@@ -1399,10 +1464,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 125 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 148 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 125);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 148);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -1547,18 +1612,18 @@ describe("finite durable-authority catalog", () => {
 
   it("reviews B1R claim/hash and receipt production consumers before manifest digest updates", () => {
     const expectedDigests = {
-      "test-execution-claim-active": ["c46fb9721a54c68a7f7106e28d167c2d2d5f4742ab3a86dd2a2d0c295d855148", "b6d6567744c4bd97eeb465ad8e952666fa30fa9d6286b254e5a939d753aa092c", "4a28465ee4bf8ae2aa775e59e6be0c399926cf34e6a485ef2d99c03d43abec87"],
-      "test-execution-claim-completed-pass": ["77d5df2e1a78d7919cdc550c2e7548089937432667622d8000d7e35a8acc3628", "9fc16b9dd1aab571972cdda772597bac746c0616afed92f3ea07a94ccd07d8ac", "a8976d1047f4915d9ef47f7367ce40b89bc381504987eccad0988d78f1719f07"],
-      "test-execution-claim-completed-fail": ["901ce70597b4b00a16bb33ca8a4f7e9b3a470b137f3f285c317dfdb4ecb38d10", "4734b1677957cd938100fbd864e3a10c5e6749006cf9b820d1bd7ccb054f9096", "232b87ab924b9b4a27c38165c4be79370a4fff2fe8bc1192476fa93b9c8c3040"],
-      "test-execution-claim-unknown-process-outcome-indeterminate": ["b03decd53b81a41e4a1e37551c75ea5f795190ebe6160625672256bc430f37c1", "f258ceb956f246c510c1c2f980f9d7aedf48584db4054c4aafb3eee6137eb0cf", "86eb7ef4a735925cb12b2e4685c3cdeb2d2b51cfb62a499704582f96e04e4127"],
-      "test-execution-claim-unknown-authority-changed": ["e00811f4e2fa8c9d8f070948b50d8f40281e52b1e6fca7fe2c99ca92c319e606", "5207c2d7203c285bc73c6835bb83561c5668a1b7e8e3f64165118d51fb511f73", "e1561c254d7767202c70d9d07ca056014ee2168918370303f2997ea0c6ab18d6"],
-      "test-execution-claim-unknown-receipt-publication-indeterminate": ["68ec6266a0135bcf5fb6e72e0546c31df5e08f729cdc44864c90506f931f5c02", "38757e7ff6ec3c1db8ee22cb20e6f5433aefd2f212dabd3895dcd9dd7fe5fe66", "c95c353de36a9719b74d9711f5dc92f19b432a2284ad2902b7cf1580f801d033"],
-      "test-execution-receipt-pass": ["bc3ff7d82ff7af8c1943ab4005f70b3d58e1e7d249f1d6d819d94862da0de9d5", "a8d12876a6459f798537d3afd2b5cf5561637fc7bba5271b4a61412fba233472", "51a2006fc63ead36b0728846d574ee8ad86f806555bebc89c60ba3d06f3eca15"],
-      "test-execution-receipt-failed-nonzero-exit": ["cec982375db591d524859a0b68a0b621b583511cd447c61139e8a5343c4f13a4", "7f2f98e92e13ffa75a3286e3094c344e58e498b97b8cfb69cdb976e2f97cc378", "56bb07696d55efdfcd054c84b1914ea7b8d674afc360c0318ae5c90054c046f6"],
-      "test-execution-receipt-failed-signal": ["098ab671186126021d108bd738029c75748e5daa6e74838f7ddf4df79498d0cc", "3ceff488cc59be6210291029b62a23ab62efb02ce934fe4526c6b38967e93f6b", "3caa57455fd8f7210f479d6004705dbdb6b47ce064a58b7834f8be5ec9e624ee"],
-      "test-execution-receipt-failed-launch-error": ["11fe1658bc1b0c4c29758109d41f7289ea50ab137ade91fba13a04e7c4760418", "535eda5b023fcbe5a0add7ce7e158f9ee6b71bc4aab4d118427a76360b31aecb", "1320ebcb723f155eb795d8f91caf528d7fed2fb3e93f02d91a815c89f6f63008"],
-      "test-execution-receipt-failed-timeout": ["aba412c7a4df3bcc573775c40a8bed3da7c94cf794f656e935da0d197d35d409", "145e09cc8ddf2cc6ad438bfd10eb060732ea5d2818e32f1f2d85bf747b80e755", "5d77cdf0868afcf860e9fd1ec0cd985d0b4d4c2a9603e1efeb55c94e37f24bf4"],
-      "test-execution-receipt-failed-output-limit": ["d0f033038f69b998693a6511b192ee39530c36d94a6854646d13f0180e3a664d", "5d67fdbbcb0e50d8597c747e30d41c3217b13c5f18f511e43d0914b05cfc2895", "9f258d14925eb587cbe96ddfb9c0a1c7f6144c9bca3d7f8a73a07fa638fa328c"],
+      "test-execution-claim-active": ["08430ac336f37dfbf7acc418c245c44feab2e896df6eac2a4ab76e2655a46e48", "b6d6567744c4bd97eeb465ad8e952666fa30fa9d6286b254e5a939d753aa092c", "53f417c63413d52035e9efc2a7c718e6727410bb98651df6a4d13cdd9c23d694"],
+      "test-execution-claim-completed-pass": ["07a86eb1a92150e6f8653c7fb94974cf1a28b737c82b6ee04805fd433ebe4348", "9fc16b9dd1aab571972cdda772597bac746c0616afed92f3ea07a94ccd07d8ac", "277fe2389d8992030069c248100f6325bf4e559ca8ee89a64e4b3bb5149e7cf5"],
+      "test-execution-claim-completed-fail": ["33c4adf669ce123b20d127a02d2807ebd252cd637ad240bba600f1620c85d88d", "4734b1677957cd938100fbd864e3a10c5e6749006cf9b820d1bd7ccb054f9096", "c03612048913c263b94d6ab8145ec2541e3c29cbeb1a350abe79ee4e675c56c3"],
+      "test-execution-claim-unknown-process-outcome-indeterminate": ["94b1ea8bb563fc79ff80e29cc41491dbc8b6b5466f0a915dfe9bb0f77e5622d1", "f258ceb956f246c510c1c2f980f9d7aedf48584db4054c4aafb3eee6137eb0cf", "18a5baee0e6c59a9f8df701b92a726fa26d2b1b7d540f9c28a4cd63e40ece410"],
+      "test-execution-claim-unknown-authority-changed": ["9e8ae6cf877ad3550a5e64561c1808f08699ef7a39db9a4161bce233a5c6a7a3", "5207c2d7203c285bc73c6835bb83561c5668a1b7e8e3f64165118d51fb511f73", "24a1ffcfad6130fcc6efd64bef8c34ae54c5d35e8941bdad00f9ab1b2e54165c"],
+      "test-execution-claim-unknown-receipt-publication-indeterminate": ["68059dd9f2e2f7043d4d8105ce470337266d3bbd754e124bd96de34b5ddcff77", "38757e7ff6ec3c1db8ee22cb20e6f5433aefd2f212dabd3895dcd9dd7fe5fe66", "757882f5a11fff7e508f0512ec2b244193fb8bdbfdbeeef94ec1cea4404078fd"],
+      "test-execution-receipt-pass": ["71b572bf189aa916a5687308bbe3f12770e64c68f8bec8677c7a168704df79e1", "a8d12876a6459f798537d3afd2b5cf5561637fc7bba5271b4a61412fba233472", "216e29ab03321e502e7f11f9d5f9fafba7a169a334b43f01d0a44239b932ea43"],
+      "test-execution-receipt-failed-nonzero-exit": ["12d2691d93a629f2e06ad82a5595ed6483a34c021a527fb63c38bf4048903a56", "7f2f98e92e13ffa75a3286e3094c344e58e498b97b8cfb69cdb976e2f97cc378", "b380f5786b134a4ab1d23b0b69c9456658c0bc4367f3178eae438b09e9426312"],
+      "test-execution-receipt-failed-signal": ["a1d10c7fcefced69d956914c522a0b4f0cc691118558988624904ecf50278bd6", "3ceff488cc59be6210291029b62a23ab62efb02ce934fe4526c6b38967e93f6b", "c913ae58c43a5afcec6b6d62500d7799574bad7c24f13d034fa6dc4017e14e85"],
+      "test-execution-receipt-failed-launch-error": ["3a72dd6fc46c9e72851a0c7606933b0ea466487336cdad389af5471a957be2b0", "535eda5b023fcbe5a0add7ce7e158f9ee6b71bc4aab4d118427a76360b31aecb", "b1cfd6df559733cba81588e3e66c0062fd92281e4e8eff3305d4a38e13e8846e"],
+      "test-execution-receipt-failed-timeout": ["5965d0f46e1ee946a18a6888abe2cc229b771b2bd4a79faf85d4d05bc9746bcc", "145e09cc8ddf2cc6ad438bfd10eb060732ea5d2818e32f1f2d85bf747b80e755", "b5ab34c8391d36072cb1992aa2e69043215e391d2215daa5a19eecbf7f8a729a"],
+      "test-execution-receipt-failed-output-limit": ["091ea91f8b1f6e56b31a71e085ec28c246738addcb5cf2dab841799db9fa5ee0", "5d67fdbbcb0e50d8597c747e30d41c3217b13c5f18f511e43d0914b05cfc2895", "63b89f33f3ebc6a7795136f0dd99eec4d0b5c6615ad4236a8b77bf341699f88e"],
     };
     for (const [id, digests] of Object.entries(expectedDigests)) {
       const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
@@ -1720,7 +1785,7 @@ describe("finite durable-authority catalog", () => {
   it("binds every catalog row's source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
-    assert.equal(canonicalIds.length, 125);
+    assert.equal(canonicalIds.length, 148);
     assert.deepEqual(canonicalIds, requiredIds);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
@@ -1827,6 +1892,20 @@ describe("finite durable-authority catalog", () => {
       observedConsumers.set(id, baseline.consumer);
       if (baseline.consumer === "validateSlicesPlan") {
         assert.equal(validateSlicesPlan(baseline.plan, { requireIntegrationGate: id === "plan-v2-integration-gate" }), baseline.plan, `${id} must pass the exported plan validator`);
+      } else if (baseline.consumer === "evaluateInvariantFamilyReview") {
+        assert.deepEqual(evaluateInvariantFamilyReview({
+          plan: baseline.plan,
+          sliceId: "backend",
+          review: { subject: "backend", attempt: 1, reviewed_commit: "b".repeat(40), verdict: "REJECT", invariant_family_ledger: baseline.ledger },
+          observeEvidence: (ref) => ({ ref, hash: baseline.ledger.dispositions[0].evidence_hash, receipt: JSON.parse(baseline.externalSources.evidence.bytes), claim: JSON.parse(baseline.externalSources.claim.bytes) }),
+        }), {
+          schema_version: 1,
+          extension: "invariant-family-review",
+          status: "active",
+          grants_b4_authority: false,
+          decision: "reject",
+          reasons: ["review-verdict-reject", "invariant-family-result-not-pass:backend-behavior", "invariant-family-unresolved-findings:backend-behavior"],
+        });
       } else if (baseline.consumer === "final-plan-descriptor-contract") {
         assert.deepEqual(Object.keys(baseline.descriptor), ["schema_version", "kind", "created_at", "run_id", "descriptor"]);
         assert.deepEqual(Object.keys(baseline.descriptor.descriptor), ["kind", "ref", "hash"]);
@@ -1835,14 +1914,79 @@ describe("finite durable-authority catalog", () => {
         assert.equal(baseline.descriptor.descriptor.hash, `sha256:${createHash("sha256").update(baseline.externalSources.plan.bytes).digest("hex")}`);
       } else if (baseline.consumer === "validateTestExecutionReceipt") {
         assert.equal(validateTestExecutionReceipt(baseline.receipt), baseline.receipt, `${id} must use the exported closed receipt validator`);
+      } else if (baseline.consumer === "validateCheckpointRoutingManifest") {
+        assert.equal(validateCheckpointRoutingManifest(baseline.manifest, baseline), baseline.manifest, `${id} must use the production checkpoint manifest validator`);
+      } else if (baseline.consumer === "validateReviewedCheckpointPlan") {
+        assert.equal(validateReviewedCheckpointPlan(baseline.plan).checkpointPlan, baseline.plan.delivery_envelope.checkpoint_plan);
+      } else if (baseline.consumer === "buildCheckpointRoutingManifest") {
+        assert.equal(buildCheckpointRoutingManifest({ ...baseline, admissionProbe: baseline.probe }).kind, "delivery-checkpoint-routing-manifest");
+      } else if (baseline.consumer === "validateCheckpointChildPublication") {
+        assert.equal(validateCheckpointChildPublication(baseline.publication), baseline.publication);
+      } else if (baseline.consumer === "validateCheckpointSource") {
+        assert.equal(validateCheckpointSource(baseline.checkpointSource), baseline.checkpointSource);
+      } else if (baseline.consumer === "validateCheckpointProgress") {
+        assert.equal(validateCheckpointProgress(baseline.progress), baseline.progress);
+      } else if (baseline.consumer === "validateDeliveryCheckpointFinalClosure") {
+        assert.equal(validateDeliveryCheckpointFinalClosure(baseline.closure), baseline.closure);
+      } else if (baseline.consumer === "validateVerificationArtifactExecutionClaim") {
+        assert.equal(validateVerificationArtifactExecutionClaim(baseline.claim), baseline.claim);
+      } else if (baseline.consumer === "validateVerificationArtifactExecutionReceipt") {
+        assert.equal(validateVerificationArtifactExecutionReceipt(baseline.receipt), baseline.receipt);
       } else {
         assert.match(baseline.consumer, /^validateRun(?:\/checkRunConsistency)?$/u);
         assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
       }
     }
-    assert.equal(observedConsumers.size, 125);
-    assert.deepEqual([...observedConsumers.keys()].slice(0, 124), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
+    assert.equal(observedConsumers.size, 148);
+    assert.deepEqual([...observedConsumers.keys()].slice(0, 147), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
     assert.equal(observedConsumers.get("final-plan-descriptor"), "final-plan-descriptor-contract", "future-only final.plan is a descriptor contract, not claimed as current validateRun input");
+  });
+
+  it("rejects every checkpoint and verification-artifact authority mutation through its production consumer", () => {
+    const ids = [
+      "checkpoint-reviewed-plan-v1", "checkpoint-admission-probe-valid", "checkpoint-child-disposition-v1",
+      "checkpoint-child-publication-v1", "checkpoint-source-v1", "checkpoint-progress-reserved",
+      "checkpoint-progress-child-published", "checkpoint-progress-launched", "checkpoint-progress-merged",
+      "checkpoint-progress-closed", "checkpoint-merged-completion-v1", "checkpoint-final-closure-v1",
+      "verification-artifact-claim-active", "verification-artifact-claim-completed-pass", "verification-artifact-claim-completed-fail",
+      "verification-artifact-claim-unknown-process", "verification-artifact-claim-unknown-receipt",
+      "verification-artifact-execution-receipt-pass", "verification-artifact-execution-receipt-fail",
+    ];
+    for (const id of ids) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const baseline = createDurableCatalogBaseline(record);
+      for (const mutationCase of emitDurableRecordMutations(record.source, record.descriptor, record.externalSources)) {
+        const invoke = baseline.consumer === "validateVerificationArtifactExecutionClaim"
+          ? () => validateVerificationArtifactExecutionClaim(mutationCase.record)
+          : baseline.consumer === "validateVerificationArtifactExecutionReceipt"
+            ? () => validateVerificationArtifactExecutionReceipt(mutationCase.record)
+            : baseline.consumer === "validateReviewedCheckpointPlan"
+              ? () => {
+                const plan = structuredClone(baseline.plan);
+                plan.delivery_envelope.checkpoint_plan = mutationCase.record;
+                return validateReviewedCheckpointPlan(plan);
+              }
+              : baseline.consumer === "buildCheckpointRoutingManifest"
+                ? () => {
+                  const authority = structuredClone(baseline.decompositionAuthority);
+                  let probe = authority.review.admission_probe;
+                  if (id === "checkpoint-admission-probe-valid") {
+                    probe = mutationCase.record;
+                    authority.review.admission_probe = mutationCase.record;
+                  } else authority.review.checkpoint_dispositions[0] = mutationCase.record;
+                  return buildCheckpointRoutingManifest({ ...baseline, admissionProbe: probe, decompositionAuthority: authority });
+                }
+                : baseline.consumer === "validateCheckpointChildPublication"
+                  ? () => validateCheckpointChildPublication(mutationCase.record)
+                  : baseline.consumer === "validateCheckpointSource"
+                    ? () => validateCheckpointSource(mutationCase.record)
+                    : baseline.consumer === "validateCheckpointProgress"
+                      ? () => validateCheckpointProgress(mutationCase.record)
+                      : () => validateDeliveryCheckpointFinalClosure(mutationCase.record);
+        if (id.startsWith("checkpoint-")) assert.throws(invoke, Error, mutationCase.name);
+        else assert.throws(invoke, validationErrorFor(mutationCase.name), mutationCase.name);
+      }
+    }
   });
 
   it("executes every nonconvergence terminal mutation through schema or exact sidecar consistency", () => {
@@ -1925,7 +2069,7 @@ describe("finite durable-authority catalog", () => {
       "steering-pr-fence",
       "pr-created-result",
     ];
-    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-")).slice(0, 40), expectedIds);
+    assert.deepEqual(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.filter((id) => !["plan-v2-integration-gate", "plan-delivery-envelope-v1", "review-invariant-family-ledger-v1", "checkpoint-routing-artifact-v1", "checkpoint-reviewed-plan-v1", "checkpoint-admission-probe-valid", "checkpoint-child-disposition-v1", "checkpoint-child-publication-v1", "checkpoint-source-v1", "checkpoint-progress-reserved", "checkpoint-progress-child-published", "checkpoint-progress-launched", "checkpoint-progress-merged", "checkpoint-progress-closed", "checkpoint-merged-completion-v1", "checkpoint-final-closure-v1", "terminal-result-blocked-checkpoint-routing", "step-work-decomposer-accepted-plan", "terminal-result-blocked-nonconvergence", "slice-blocked-ordinary"].includes(id) && !id.startsWith("test-execution-") && !id.startsWith("verification-artifact-")).slice(0, 40), expectedIds);
     assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.includes("final-plan-descriptor"), false);
     const continuationDispositions = exactB0m3ContinuationDispositionMap(B0M3_CONTINUATION_EXACT_CASES);
     const executedContinuationCases = [];
@@ -2667,10 +2811,10 @@ async function consumeSliceMutation(root, record, mutationCase, safeName) {
   if (record.id === "slice-pending") {
     const current = { ...structuredClone(record.source), branch: "progress-bound" };
     writeJson(join(runDir, "run.json"), createRunRecord({ run_id: "catalog-run", slices: [current] }));
-    writeJson(join(runDir, "plan", "slices.json"), {
+    writeJson(join(runDir, "plan", "slices.json"), withDeliveryEnvelope({
       integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
       slices: [{ id: record.source.id, stack: record.source.stack, paths: ["src/**"], depends_on: record.source.depends_on, acceptance: ["accepted"], test_plan: ["node --test"] }],
-    });
+    }));
     await assert.rejects(transitionSlicesSeed(runDir, [mutation], { from: "plan/slices.json" }), undefined, record.id);
     return "transitionSlicesSeed";
   }
@@ -2901,18 +3045,28 @@ async function createCheckedClaimMutationFixture(root, record, index) {
   writeJson(join(runDir, "reviews", "validator.json"), { subject: "parent", attempt: 1, verdict: "NO-GO" });
   writeJson(join(runDir, "reviews", "test-verifier.attempt-1.json"), { subject: "test-verifier", attempt: 1, verdict: "APPROVE", reviewed_head_sha: head, required_fixes: [] });
   writeJson(join(runDir, "evidence", "slice.json"), { subject: "slice", attempt: 1, status: "pass", review_ready: true, head_sha: head });
-  writeJson(join(runDir, "reviews", "slice.json"), { subject: "slice", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [], ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head });
-  const plan = {
+  const plan = withDeliveryEnvelope({
     slices: [{ id: "slice", stack: "backend", paths: ["README.md"], depends_on: [], acceptance: ["works"], test_plan: ["checked"] }],
     integration_gate: { required_commands: [{ program: "npm", args: ["run", "check"] }] },
-  };
+  });
   writeJson(join(runDir, "plan", "slices.json"), plan);
+  const sliceEvidenceHash = hashFileBytes(join(runDir, "evidence", "slice.json"));
+  const familyEvidenceRef = "evidence/slice.family.json";
+  const familyEvidence = writeVerificationArtifactReceipt({
+    runDir, runId, plan, sliceId: "slice", attempt: 1, reviewedCommit: head,
+    artifactId: "fixture-artifact-1", evidenceRef: familyEvidenceRef,
+    result: { type: "verification-result", outcome: "pass", summary: "Verify slice behavior passed" },
+  });
+  writeJson(join(runDir, "reviews", "slice.json"), {
+    subject: "slice", attempt: 1, verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0, required_fixes: [],
+    ownership_ratification: { schema_version: 1, paths: [] }, remediation_context: { schema_version: 2, fixes: [] }, reviewed_commit: head,
+    invariant_family_ledger: passingInvariantFamilyLedger({ plan, sliceId: "slice", reviewedCommit: head, evidenceRef: familyEvidenceRef, evidenceHash: familyEvidence.hash }),
+  });
   const briefHash = hashFileBytes(join(runDir, "artifacts", "technical-brief.md"));
   const specReviewHash = hashFileBytes(join(runDir, "reviews", "spec-writer.json"));
   const planHash = hashFileBytes(join(runDir, "plan", "slices.json"));
   const decompositionReviewHash = hashFileBytes(join(runDir, "reviews", "work-decomposer.json"));
   const validatorReviewHash = hashFileBytes(join(runDir, "reviews", "validator.json"));
-  const sliceEvidenceHash = hashFileBytes(join(runDir, "evidence", "slice.json"));
   const sliceReviewHash = hashFileBytes(join(runDir, "reviews", "slice.json"));
   const policy = { enabled: false, wait_ms: 3_600_000, initial_poll_ms: 30_000, max_poll_ms: 120_000, check_start_grace_ms: 300_000, max_transient_errors: 12, review: { required: false, reviewer_login: null, source: "none" } };
   const continuation = {
