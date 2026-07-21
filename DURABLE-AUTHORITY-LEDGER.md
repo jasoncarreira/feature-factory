@@ -176,6 +176,56 @@ The retained PR #79 failure, review, and verification hashes and all baseline,
 reviewed, and merge commit/tree identities are boundary controls, not duplicate proof
 ceremony. They must not be removed by a simplification pass.
 
+### B5 canonical integration-amendment successor
+
+B5 expands authority class 9 rather than creating a tenth class: the generic record
+protects the same merged-owner acceptance asset. The canonical successor retains one
+owner/consumer incident, a factory-owned failing execution binding, the observed
+baseline, a byte-identical pristine-pending consumer snapshot, append-only bounded
+attempts, exact special-dispatch claim/closure, fresh
+review ref/hash/commit/tree, Git-observed changed paths, staged integration
+commit/tree, factory-owned passing verification, and exact feature-ref/worktree
+publication. It reobserves accepted plan and owner/effective-path authority rather
+than persisting another whole-plan hash. The attempt record is the canonical
+replacement for legacy `repair_evidence_ref`/`repair_evidence_hash`; those fields
+remain unchanged in persisted legacy records.
+
+The successor states are separately cataloged as reported, building attempts 1/2,
+reviewed APPROVE/REJECT attempts 1/2, integrated, verified, merged, and blocked from
+reported/building/reviewed-approve/reviewed-reject/integrated/verified. Failure and
+verification claims/receipts, APPROVE/REJECT reviews, and dispatch binding/claim/
+closure are independent sidecar rows. Runtime callback selectors and withheld
+capabilities are not durable authority and remain excluded. Every generic row receives
+all twelve target-or-reasoned-exclusion dispositions from the finite mutation catalog.
+The fixed per-run report claim is the pre-manifest singleton tombstone: ordinary
+writers classify active, unknown, settled, unconsumed, consumed, and orphan states
+before mutation and never infer absence from a missing manifest. The canonical B5.1
+contract registers exactly 48 planned rows: 16 manifests, 12 execution claims, 12
+receipts, two reviews, four builder-dispatch rows, and two production reviewer-
+dispatch claim/closure rows. The reviewer rows are immutable class-9 provenance:
+the claim binds the checked fresh callback context before Task execution and the
+closure binds exact callback review bytes. Active claim, review without closure, and
+closed-unconsumed observations fence semantic work; only exact review consumption
+converts closed-unconsumed to immutable consumed provenance. Orphan/cross-bound
+observations reject, and callback replay verifies existing bytes without overwrite.
+Under B5.4 all 48 rows are active production catalog entries. Together with the
+preexisting catalog they produce exactly 196 total variants and 195 production-covered
+variants; `final-plan-descriptor` remains the sole future-only row.
+
+The existing durable slice variants now include optional immutable
+`authorized_baseline_commit` for checked post-amendment progress; this is a new
+consequential field in those rows, not a new catalog variant. Checked start derives it
+from the exact clean feature HEAD, and dispatch, history, ownership review, merge proof,
+and post-merge consistency all reobserve it and its exact path-set equality.
+
+New generic and legacy records never coexist. Persisted legacy records keep their
+original route. After the generic route passes every PR #79 adversarial category,
+new legacy report admission is retired only for pristine-pending baseline-substrate
+incidents covered by the generic route. Blocked, previously attempted, and branch-only
+consumers remain a disjoint narrowed legacy/recovery class; a generic tombstone never
+falls back to it. Any generic record makes v1/v2 continuation unsupported until a
+later design supplies explicit sidecar copying and first-parent proof semantics.
+
 ## External-effect ownership and idempotency controls
 
 These controls accompany the applicable class above; they do not create a tenth

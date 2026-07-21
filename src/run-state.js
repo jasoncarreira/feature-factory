@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { lstat, mkdir, open, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -11,7 +11,7 @@ import { githubPrUrlParts, hashFile, hashValue, resolveArtifactRef, resolveEvide
 import { createOwnershipIndex, normalizeRepositoryPath, validatePlanPath } from "./post-pr-ci.js";
 import { buildSteeringConflictTerminalResult, collectProtectedSteeringState } from "./steering-conflicts.js";
 import { canonicalGithubRepositoryFromOrigin, computePrOperationId, observePullRequestOperation } from "./github.js";
-import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
+import { PASSING_SECURITY_VERDICTS, PASSING_VALIDATOR_VERDICTS, POST_PR_TERMINAL_REASONS, assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, integrationAmendmentId, isCanonicalConcreteRepositoryPath, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateRunDir, validateSliceReviewFeasibility, validateSliceReviewResult, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "./validate.js";
 import { requireNonEmptyString, timestamp } from "./utils.js";
 import { checkWorktreeIdentity, deriveExpectedWorktreePath } from "./worktrees.js";
 import { directFactoryRoot } from "./factory-paths.js";
@@ -46,6 +46,8 @@ const STEERING_ACTION_KINDS = new Set(["dispatch", "remediation", "terminal", "p
 const POST_PR_HEARTBEAT_PHASES = new Set(["observing", "remediation-running", "revalidating"]);
 const POST_PR_TERMINAL_PHASE = Object.freeze({ completed: "succeeded", blocked: "blocked", "needs-human": "needs-human" });
 const MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY = Symbol("merged-slice-repair-transition-authority");
+const INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY = Symbol("integration-amendment-transition-authority");
+const INTEGRATION_AMENDMENT_DOWNSTREAM_MERGE_AUTHORITY = Symbol("integration-amendment-downstream-merge-authority");
 const SLICE_REVIEW_BINDING_KEYS = Object.freeze(["evidence_hash", "review_hash", "reviewed_commit"]);
 const SLICE_DISPATCH_BINDING_KEYS = Object.freeze(["dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"]);
 const VALIDATOR_BINDING_KEYS = Object.freeze(["report_hash", "review_hash", "reviewed_head_sha"]);
@@ -569,6 +571,7 @@ export async function transitionSteeringQueued(runDir, message, options = {}) {
   const text = requireNonEmptyString(message, "steering message");
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    observeIntegrationAmendmentWriterAuthority(runDir, current);
     assertNoPendingSpecialBuilderDispatches(runDir, current);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
@@ -850,6 +853,7 @@ export async function transitionSteeringBoundaryOpened(runDir, kind, options = {
   const boundaryKind = normalizeSteeringBoundaryKind(kind);
   return withRunJsonLock(runDir, async () => {
     const current = await readRunJson(runDir);
+    if (boundaryKind === "gate") observeIntegrationAmendmentWriterAuthority(runDir, current);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, options);
     assertExpectedCurrentHash(current, options.expectedCurrentHash);
     assertBoundaryClean(runDir, current, options, `boundary-open ${boundaryKind}`);
@@ -1298,8 +1302,14 @@ export async function transitionTerminalResult(runDir, terminalResult, options =
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft) => {
     assertNoUnreconciledTestExecution(draft);
     assertNoCurrentSliceNonconvergence(runDir, draft);
-    assertSteeringBoundaryClear(draft, "terminal");
-    consumeSteeringBoundary(draft, "terminal", options.boundaryToken);
+    if (draft.integration_amendment?.status === "blocked") {
+      if (draft.steering?.boundary || draft.steering?.action_claim || options.boundaryToken !== undefined) {
+        throw new Error("blocked integration amendment terminalization requires no competing steering boundary");
+      }
+    } else {
+      assertSteeringBoundaryClear(draft, "terminal");
+      consumeSteeringBoundary(draft, "terminal", options.boundaryToken);
+    }
     const next = { ...cloneJson(nextTerminalResult), run_id: draft.run_id, status: nextTerminalResult.status };
     draft.status = next.status;
     draft.terminal_result = next;
@@ -1454,6 +1464,7 @@ export async function completeCheckedTestExecution(runDir, expectedClaim, expect
 export async function claimCheckedVerificationArtifactExecution(runDir, sliceId, artifactId, options = {}) {
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
+    observeIntegrationAmendmentWriterAuthority(runDir, run);
     const authority = observeVerificationArtifactExecutionAuthority(runDir, run, sliceId, artifactId, options);
     const claimRef = verificationArtifactExecutionClaimRef(authority.receipt_ref);
     const claimResolved = resolveEvidenceRef(runDir, claimRef, { mustExist: false });
@@ -1958,6 +1969,7 @@ export function inspectContinuationRouteSchema(repoInput, runId, claimedSchema, 
   }
   if (!lstatSync(runFile).isFile()) throw routeSchemaError(options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch");
   const run = validateRun(parseJsonObjectFile(runFile, "continuation route run.json"));
+  if (run.integration_amendment != null) throw new Error("integration-amendment-continuation-unsupported");
   const persistedSchema = options.route === "resume" && run.continuation === undefined ? options.ordinaryResumeSchema ?? 1 : run.continuation?.schema_version;
   if (persistedSchema !== claimedSchema) throw routeSchemaError(options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch");
   if ((persistedSchema === 2) !== (claims.length === 1)) throw routeSchemaError(options.route === "resume" ? "resume-schema-route-mismatch" : "continuation-schema-route-mismatch");
@@ -2677,6 +2689,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
   let nextReviewAuthority = null;
   let priorDispatchAuthority = null;
   let reviewPlanAuthority = null;
+  let sliceStartAuthority = null;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, async (draft, { current }) => {
     const slices = Array.isArray(draft.slices) ? draft.slices : [];
     if (!collectionHasItem(slices, sliceId, "id")) throw new Error(`slice '${formatSelector(sliceId)}' not found`);
@@ -2726,6 +2739,10 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
           if (unmet.length) throw new Error(`slice '${priorSlice.id}' is not dependency-ready: ${unmet.join(", ")}`);
         }
         assertSliceTransition(runDir, priorSlice, slices[sliceIndex]);
+        if (priorSlice.status === "pending" && slices[sliceIndex].status === "running" && current.integration_amendment?.status === "merged") {
+          sliceStartAuthority = observeAuthorizedSliceStartAuthority(runDir, current, slices[sliceIndex], options);
+          slices[sliceIndex].authorized_baseline_commit = sliceStartAuthority.baseline_commit;
+        }
         if (priorSlice.status === "review") priorReviewAuthority = assertSliceReviewBindingCurrent(runDir, priorSlice.id, priorSlice);
         if (slices[sliceIndex].status === "review") {
           if (priorSlice.status === "review") throw new Error(`slice '${priorSlice.id}' review binding is write-once; return to running before publishing another review`);
@@ -2755,6 +2772,7 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
       if (priorReviewAuthority) assertSliceReviewAuthorityCurrent(runDir, prior.id, prior, priorReviewAuthority);
       if (nextReviewAuthority) assertSliceReviewPublicationAuthorityCurrent(runDir, next, slice.id, slice, nextReviewAuthority, reviewPlanAuthority, options);
       if (reviewPlanAuthority) assertAcceptedDecompositionAuthorityCurrent(runDir, next, reviewPlanAuthority);
+      if (sliceStartAuthority) assertAuthorizedSliceStartAuthorityCurrent(runDir, current, slice, sliceStartAuthority, options);
     },
   }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
@@ -2763,6 +2781,11 @@ export async function transitionRunSlice(runDir, sliceId, updater, options = {})
 export async function transitionSliceMerged(runDir, sliceId, input = {}, options = {}) {
   if (!stringValue(sliceId)) throw new Error("transitionSliceMerged requires a slice id");
   const request = normalizeSliceMergedInput(input);
+  const transitionOptions = {
+    ...options,
+    integrationAmendmentDownstreamMergeAuthority: INTEGRATION_AMENDMENT_DOWNSTREAM_MERGE_AUTHORITY,
+    integrationAmendmentPendingSliceMerge: { slice_id: sliceId, merge_commit: request.merge_commit },
+  };
   let sliceIndex = -1;
   let mergeAuthority = null;
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft) => {
@@ -2810,7 +2833,7 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
       delete draft.special_builder_dispatch;
     }
     draft.updated_at = updatedAt;
-  }, options, {
+  }, transitionOptions, {
     sliceTransition: true,
     consumeSpecialDispatch: true,
     beforeReplace: (next, current) => {
@@ -2823,6 +2846,34 @@ export async function transitionSliceMerged(runDir, sliceId, input = {}, options
     },
   }), options);
   return { ...result, slice_index: sliceIndex, slice: sliceIndex >= 0 ? result.run.slices?.[sliceIndex] ?? null : null };
+}
+
+function observeAuthorizedSliceStartAuthority(runDir, run, slice, options = {}) {
+  const feature = observeIntegrationHeadAuthority(run, { ...options, runDir }, "slice start baseline authority");
+  const branch = requireNonEmptyString(slice.branch, `slice '${slice.id}' start branch`);
+  const worktree = resolve(feature.repository, requireNonEmptyString(slice.worktree, `slice '${slice.id}' start worktree`));
+  const branchResult = authorityGit(options, feature.repository, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  const head = branchResult.ok ? branchResult.stdout.trim() : "";
+  const identity = checkWorktreeIdentity(feature.repository, worktree, { branch, head: feature.head });
+  const cleanliness = authorityGit(options, worktree, gitCleanlinessArgs());
+  if (head !== feature.head || !identity.ok || !cleanliness.ok || cleanliness.stdout !== "") {
+    throw new Error(`slice '${slice.id}' first attempt must start from an exact clean worktree at the authorized feature baseline`);
+  }
+  return {
+    baseline_commit: feature.head,
+    feature_branch: feature.branch,
+    feature_worktree: feature.worktree,
+    slice_branch: branch,
+    slice_worktree: worktree,
+  };
+}
+
+function assertAuthorizedSliceStartAuthorityCurrent(runDir, run, slice, expected, options = {}) {
+  const current = observeAuthorizedSliceStartAuthority(runDir, run, slice, options);
+  if (!sameJson(current, expected) || slice.authorized_baseline_commit !== expected.baseline_commit) {
+    throw new Error(`slice '${slice.id}' authorized feature baseline changed before start publication`);
+  }
+  return current;
 }
 
 export async function transitionSlicesSeed(runDir, slices, options = {}) {
@@ -2940,7 +2991,7 @@ function assertCheckpointRoutingPreImplementation(run) {
   if (testVerifierSteps.length > 1 || (testVerifierSteps.length === 1 && !sameJson(testVerifierSteps[0], standardPlaceholder))) {
     throw new Error("checkpoint routing permits only the repository-standard zero-attempt blocked test-verifier placeholder");
   }
-  if (run.validator != null || run.security_review != null || run.gates?.pre_pr != null || run.merged_slice_repair != null || run.special_builder_dispatch != null) {
+  if (run.validator != null || run.security_review != null || run.gates?.pre_pr != null || run.merged_slice_repair != null || run.integration_amendment != null || run.special_builder_dispatch != null) {
     throw new Error("checkpoint routing must occur before implementation, panel, or pre-PR state");
   }
 }
@@ -3420,6 +3471,7 @@ export function hasInFlightHeartbeatWork(run) {
   if (Array.isArray(run.steps) && run.steps.some((step) => HEARTBEAT_STEP_IN_FLIGHT_STATUSES.has(step?.status))) return true;
   if (Array.isArray(run.slices) && run.slices.some((slice) => HEARTBEAT_SLICE_IN_FLIGHT_STATUSES.has(slice?.status))) return true;
   if (["repairing", "review"].includes(run?.merged_slice_repair?.status)) return true;
+  if (["building", "reviewed", "integrated", "verified"].includes(run?.integration_amendment?.status)) return true;
   if (run?.status === "running" && run?.post_pr?.policy?.enabled === true && POST_PR_HEARTBEAT_PHASES.has(run.post_pr.phase)) return true;
   return false;
 }
@@ -3428,6 +3480,13 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   const current = await readRunJson(runDir);
   assertExpectedCurrentHash(current, options.expectedCurrentHash);
   assertRunJsonWriterAllowed(current, "run.json transition", { allowPrePrFence: hooks.prCreated === true });
+  const amendmentAuthority = observeIntegrationAmendmentWriterAuthority(runDir, current, {
+    dedicated: hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+    blockedTerminal: hooks.terminal === true,
+    action: hooks.integrationAmendmentAction,
+    integrationAmendmentDownstreamMergeAuthority: options.integrationAmendmentDownstreamMergeAuthority,
+    integrationAmendmentPendingSliceMerge: options.integrationAmendmentPendingSliceMerge,
+  });
   const v2AdmissionAuthority = assertV2LocalPublishedAuthority(runDir, current, options);
   const assertSpecialDispatches = hooks.consumeSpecialDispatch === true
     ? () => assertNoUnresolvedSpecialBuilderDispatches(runDir, current)
@@ -3454,6 +3513,7 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   assertGateDecisionTransitions(current, next, hooks);
   assertStepTransitions(current, next, hooks);
   assertTerminalTransition(current, next, hooks);
+  assertIntegrationAmendmentTransition(current, next, hooks);
   const terminalizing = current.status !== next.status && TERMINAL_RUN_STATUSES.has(next.status);
   if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
   const v2PublicationAuthority = assertV2LocalPublishedAuthority(runDir, next, options);
@@ -3461,17 +3521,31 @@ async function transitionRunJsonLocked(runDir, mutator, options = {}, hooks = {}
   if (typeof hooks.beforeWrite === "function") await hooks.beforeWrite(next, current);
   const postPrPublicationAuthority = hooks.postPr === true ? observePostPrPublicationAuthority(runDir, next, options) : null;
   const repairPublicationAuthority = hooks.mergedSliceRepair === MERGED_SLICE_REPAIR_TRANSITION_AUTHORITY ? observeRepairPublicationAuthority(runDir, next, options) : null;
-  const beforeReplace = hooks.beforeReplace || postPrPublicationAuthority || repairPublicationAuthority || v2PublicationAuthority || terminalizing || existsSync(join(runDir, "dispatch"))
+  const beforeReplace = hooks.beforeReplace || postPrPublicationAuthority || repairPublicationAuthority || v2PublicationAuthority || amendmentAuthority || terminalizing || existsSync(join(runDir, "dispatch"))
     ? async () => {
         if (hooks.beforeReplace) await hooks.beforeReplace(next, current);
         assertSpecialDispatches();
         if (v2PublicationAuthority) assertV2LocalPublishedAuthority(runDir, next, options, v2PublicationAuthority);
         if (postPrPublicationAuthority) assertPostPrPublicationAuthorityCurrent(runDir, next, options, postPrPublicationAuthority);
         if (repairPublicationAuthority) assertRepairPublicationAuthorityCurrent(runDir, next, options, repairPublicationAuthority);
+        assertIntegrationAmendmentWriterAuthorityCurrent(runDir, current, amendmentAuthority, {
+          dedicated: hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+          blockedTerminal: hooks.terminal === true,
+          action: hooks.integrationAmendmentAction,
+          integrationAmendmentDownstreamMergeAuthority: options.integrationAmendmentDownstreamMergeAuthority,
+          integrationAmendmentPendingSliceMerge: options.integrationAmendmentPendingSliceMerge,
+        });
         if (terminalizing) assertNoUnresolvedSliceDispatches(runDir, current);
       }
     : null;
-  await writeProtectedRunJson(runDir, next, hooks.consumeSpecialDispatch === true ? { ...options, allowPendingSpecialDispatch: true } : options, beforeReplace);
+  const protectedOptions = {
+    ...options,
+    ...(hooks.consumeSpecialDispatch === true ? { allowPendingSpecialDispatch: true } : {}),
+    ...(hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY ? { integrationAmendmentAuthority: INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY } : {}),
+    ...(hooks.integrationAmendmentAction ? { integrationAmendmentAction: hooks.integrationAmendmentAction } : {}),
+    ...(hooks.terminal === true && current.integration_amendment?.status === "blocked" ? { blockedAmendmentTerminal: true } : {}),
+  };
+  await writeProtectedRunJson(runDir, next, protectedOptions, beforeReplace);
   return { updated: true, status: next.status, run: next };
 }
 
@@ -3520,6 +3594,78 @@ function assertV2AuthorityExtends(actual, expected) {
   const merged = new Map(actual.merged.map((entry) => [entry.id, entry]));
   if (expected.merged.some((entry) => !sameJson(merged.get(entry.id), entry))) {
     throw new Error("schema-v2 local publication authority changed before mutation");
+  }
+}
+
+function observeIntegrationAmendmentWriterAuthority(runDir, run, options = {}) {
+  const inventory = inspectIntegrationAmendmentInventory(runDir, run);
+  const amendment = run.integration_amendment;
+  if (amendment?.status === "merged") assertIntegrationAmendmentConsistency(runDir, run, {
+    pending_slice_merge: options.integrationAmendmentDownstreamMergeAuthority === INTEGRATION_AMENDMENT_DOWNSTREAM_MERGE_AUTHORITY
+      ? options.integrationAmendmentPendingSliceMerge
+      : null,
+  });
+  const activeEffect = ["active", "unknown"].includes(inventory.verification_effect?.state);
+  const reviewState = inventory.review_effect?.classification || "absent";
+  const unresolvedReview = ["active-claim-only", "review-published-without-closure", "closed-unconsumed"].includes(reviewState);
+  if (options.dedicated !== true) {
+    if (["active-claim-only", "unknown-claim-optional-bound-receipt", "completed-nonzero-receipt-no-manifest"].includes(inventory.classification)) {
+      throw new Error(`run.json writer rejected: integration amendment authority is ${inventory.classification}`);
+    }
+    if (amendment && amendment.status !== "merged") {
+      if (!(options.blockedTerminal === true && amendment.status === "blocked" && !activeEffect && !unresolvedReview)) {
+        throw new Error(`run.json writer rejected: integration amendment is ${amendment.status}`);
+      }
+    }
+  } else if (["active-claim-only", "unknown-claim-optional-bound-receipt"].includes(inventory.classification) || activeEffect) {
+    throw new Error("integration amendment transition rejected: an execution effect is active or unknown");
+  } else if (options.reviewCallback !== true && unresolvedReview
+    && !(options.action === "review" && reviewState === "closed-unconsumed")) {
+    throw new Error(`integration amendment transition rejected: reviewer effect is ${reviewState}`);
+  } else if (options.action === "review" && !["closed-unconsumed", "consumed"].includes(reviewState)) {
+    throw new Error(`integration amendment review requires closed-unconsumed reviewer authority; observed ${reviewState}`);
+  }
+  return {
+    classification: inventory.classification,
+    verification_state: inventory.verification_effect?.state ?? null,
+    verification_claim_hash: inventory.verification_effect?.claim_hash ?? null,
+    verification_receipt_hash: inventory.verification_effect?.receipt_hash ?? null,
+    report_claim_hash: inventory.report_claim_hash ?? null,
+    report_receipt_hash: inventory.report_receipt_hash ?? null,
+    review_state: reviewState,
+    review_claim_hash: inventory.review_effect?.claim_hash ?? null,
+    review_hash: inventory.review_effect?.review_hash ?? null,
+    review_closure_hash: inventory.review_effect?.closure_hash ?? null,
+    amendment_hash: amendment ? hashValue(amendment) : null,
+  };
+}
+
+function assertIntegrationAmendmentWriterAuthorityCurrent(runDir, run, expected, options = {}) {
+  if (!expected) return;
+  const current = observeIntegrationAmendmentWriterAuthority(runDir, run, options);
+  if (!sameJson(current, expected)) throw new Error("integration amendment authority changed before protected run.json replacement");
+}
+
+function observeIntegrationAmendmentCoreAuthority(runDir, run, options = {}) {
+  const amendment = run.integration_amendment;
+  if (!amendment) throw new Error("integration amendment special dispatch requires a manifest");
+  const admission = observeIntegrationAmendmentAdmission(runDir, run, {
+    owner_slice_id: amendment.owner_slice_id,
+    consumer_slice_id: amendment.consumer_slice_id,
+    defect_path: amendment.defect_path,
+    verification_artifact_id: amendment.verification_artifact_id,
+  }, { ...options, repoRoot: resolve(runDir, "../../..") });
+  if (!sameJson(admission, amendment.admission)) throw new Error("integration amendment core admission authority is stale");
+  return { amendment_hash: hashValue(amendment), admission };
+}
+
+function assertIntegrationAmendmentTransition(current, next, hooks) {
+  const dedicated = hooks.integrationAmendment === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY;
+  if (!dedicated && !sameJson(current.integration_amendment, next.integration_amendment)) {
+    throw new Error("generic run writer cannot create, change, or remove integration amendment authority");
+  }
+  if (next.integration_amendment != null && next.merged_slice_repair != null) {
+    throw new Error("generic and legacy repair authority may never coexist");
   }
 }
 
@@ -3606,6 +3752,9 @@ function assertRunIdentityTransition(current, next) {
 }
 
 function assertScopedAuthorityTransitions(current, next, hooks = {}) {
+  if (hooks.integrationAmendment !== INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY && !sameJson(current.integration_amendment, next.integration_amendment)) {
+    throw new Error("run integration_amendment can only be changed by transitionIntegrationAmendment");
+  }
   if (!sameJson(current.special_builder_dispatch, next.special_builder_dispatch)) {
     if (hooks.consumeSpecialDispatch !== true || next.special_builder_dispatch !== undefined) {
       throw new Error("run special_builder_dispatch can only be changed by checked special Task dispatch transitions");
@@ -3640,20 +3789,44 @@ function assertScopedAuthorityTransitions(current, next, hooks = {}) {
 }
 
 async function writeProtectedRunJson(runDir, next, options = {}, beforeReplace = null) {
+  const currentAmendmentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+  const unboundAmendmentDispatch = options.allowUnboundIntegrationAmendmentDispatch === true
+    && options.integrationAmendmentAuthority === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY;
+  const amendmentAuthority = unboundAmendmentDispatch
+    ? observeIntegrationAmendmentCoreAuthority(runDir, currentAmendmentRun, options)
+    : observeIntegrationAmendmentWriterAuthority(runDir, currentAmendmentRun, {
+        dedicated: options.integrationAmendmentAuthority === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+        blockedTerminal: options.blockedAmendmentTerminal === true,
+        action: options.integrationAmendmentAction,
+        integrationAmendmentDownstreamMergeAuthority: options.integrationAmendmentDownstreamMergeAuthority,
+        integrationAmendmentPendingSliceMerge: options.integrationAmendmentPendingSliceMerge,
+      });
+  if (options.integrationAmendmentAuthority !== INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY && !sameJson(currentAmendmentRun.integration_amendment, next.integration_amendment)) {
+    throw new Error("generic run writer cannot create, change, or remove integration amendment authority");
+  }
   const assertSpecialDispatches = options.allowUnresolvedSpecialDispatch === true ? null : () => {
     const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
     if (options.allowPendingSpecialDispatch === true) assertNoUnresolvedSpecialBuilderDispatches(runDir, current);
     else assertNoPendingSpecialBuilderDispatches(runDir, current);
   };
   if (assertSpecialDispatches) assertSpecialDispatches();
-  const protectedBeforeReplace = beforeReplace || assertSpecialDispatches ? () => {
-    if (beforeReplace) {
-      const observed = beforeReplace();
-      if (observed && typeof observed.then === "function") return Promise.resolve(observed).then(() => {
-        assertSpecialDispatches?.();
+  const protectedBeforeReplace = beforeReplace || assertSpecialDispatches || amendmentAuthority ? async () => {
+    if (beforeReplace) await beforeReplace();
+    if (assertSpecialDispatches) assertSpecialDispatches();
+    if (unboundAmendmentDispatch) {
+      const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+      if (!sameJson(observeIntegrationAmendmentCoreAuthority(runDir, current, options), amendmentAuthority)) {
+        throw new Error("integration amendment core authority changed before special dispatch binding");
+      }
+    } else {
+      assertIntegrationAmendmentWriterAuthorityCurrent(runDir, currentAmendmentRun, amendmentAuthority, {
+        dedicated: options.integrationAmendmentAuthority === INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+        blockedTerminal: options.blockedAmendmentTerminal === true,
+        action: options.integrationAmendmentAction,
+        integrationAmendmentDownstreamMergeAuthority: options.integrationAmendmentDownstreamMergeAuthority,
+        integrationAmendmentPendingSliceMerge: options.integrationAmendmentPendingSliceMerge,
       });
     }
-    if (assertSpecialDispatches) assertSpecialDispatches();
   } : null;
   const fsOps = typeof protectedBeforeReplace === "function"
     ? {
@@ -5014,6 +5187,15 @@ function observeSliceMergeAuthority(runDir, run, sliceId, slice, mergeCommit, op
     ? observeClosedIntegrationConflictForSlice(runDir, run, sliceId, canonicalCommit, repository, options)
     : null;
   const proof = integrationConflict?.integration_proof || observeExactSliceMergeProof(repository, run, sliceId, canonicalCommit, reviewedCommit, options);
+  const coverage = integrationConflict
+    ? observeSliceMergePathCoverage(repository, sliceId, canonicalCommit, reviewedCommit, options)
+    : { merge_base: proof.merge_base, paths: proof.paths };
+  if (slice.authorized_baseline_commit !== undefined) {
+    if (coverage.merge_base !== slice.authorized_baseline_commit) throw new Error(`slice '${sliceId}' merge base must equal its authorized baseline`);
+    if (!sameStringSet(new Set(coverage.paths), new Set(ownership.changed_paths))) {
+      throw new Error(`slice '${sliceId}' merge path set must exactly equal its ownership-reviewed path set`);
+    }
+  }
   return {
     merge_commit: canonicalCommit,
     integration_branch: integrationBranch,
@@ -5191,16 +5373,41 @@ function assertSliceReviewPublicationAuthorityCurrent(runDir, run, sliceId, slic
   return current;
 }
 
+function assertSliceDispatchBaseline(run, slice, head) {
+  const baseline = slice.authorized_baseline_commit;
+  if (run.integration_amendment?.status === "merged" && !/^[0-9a-f]{40}$/u.test(baseline || "")) {
+    throw new Error(`slice '${slice.id}' checked dispatch requires its authorized feature baseline`);
+  }
+  if (baseline === undefined) return;
+  if (!/^[0-9a-f]{40}$/u.test(baseline)) throw new Error(`slice '${slice.id}' authorized feature baseline is invalid`);
+  const history = Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : [];
+  if (history[0] && history[0].diff_base_commit !== baseline) {
+    throw new Error(`slice '${slice.id}' first review baseline differs from its authorized feature baseline`);
+  }
+  if (slice.attempts === 1) {
+    if (history.length !== 0 || head !== baseline) throw new Error(`slice '${slice.id}' first dispatch head must equal its authorized feature baseline`);
+    return;
+  }
+  const previous = history.find((entry) => entry?.attempt === slice.attempts - 1);
+  if (!previous || head !== previous.reviewed_commit) {
+    throw new Error(`slice '${slice.id}' retry dispatch head must equal the immediately prior reviewed commit`);
+  }
+}
+
 function observeSliceOwnershipAuthority(runDir, run, sliceId, slice, review, evidence, gitAuthority, decomposition, options = {}) {
   const planned = decomposition?.plan?.slices?.find((candidate) => candidate?.id === sliceId);
   if (!planned || !sameJson(slice.declared_paths, planned.paths)) throw new Error(`slice '${sliceId}' declared_paths must equal the exact accepted plan paths`);
   const claim = observeSliceDispatchClaim(runDir, run.run_id, slice, slice.attempts, { requireRunBinding: true });
   if (!claim) throw new Error(`slice '${sliceId}' ownership review requires the exact checked dispatch baseline`);
   const history = Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : [];
-  const diffBaseCommit = history[0]?.diff_base_commit || claim.claim.head;
+  const diffBaseCommit = slice.authorized_baseline_commit || history[0]?.diff_base_commit || claim.claim.head;
   if (!/^[0-9a-f]{40}$/u.test(diffBaseCommit)) throw new Error(`slice '${sliceId}' first checked dispatch baseline is invalid`);
+  if (slice.authorized_baseline_commit !== undefined && claim.claim.attempt === 1 && claim.claim.head !== slice.authorized_baseline_commit) {
+    throw new Error(`slice '${sliceId}' first checked dispatch must equal its authorized baseline`);
+  }
   if (history.length > 0) {
     const first = history[0];
+    if (first.diff_base_commit !== diffBaseCommit) throw new Error(`slice '${sliceId}' stored diff baseline must equal its authorized baseline`);
     const boundFirst = { ...slice, attempts: first.attempt, dispatch_required: true, ...pickBinding(first, SLICE_DISPATCH_BINDING_KEYS) };
     const firstClaim = observeSliceDispatchClaim(runDir, run.run_id, boundFirst, first.attempt, { requireRunBinding: true });
     if (!firstClaim || firstClaim.claim.head !== diffBaseCommit) throw new Error(`slice '${sliceId}' stored diff baseline must equal the first checked dispatch commit`);
@@ -5364,6 +5571,7 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
   if (dirname(runDir) !== factoryRoot) throw new Error("slice builder Task dispatch run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
+    observeIntegrationAmendmentWriterAuthority(runDir, run);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     if (run.run_id !== request.run_id || run.status !== "running") throw new Error("slice builder Task dispatch requires the exact current running run");
     const slice = (run.slices || []).find((candidate) => candidate?.id === request.slice_id);
@@ -5379,6 +5587,7 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
     if (!identity.ok) throw new Error(`slice builder Task dispatch worktree identity is invalid: ${identity.reason}`);
     const cleanliness = git(worktree, gitCleanlinessArgs());
     if (!cleanliness.ok || cleanliness.stdout !== "") throw new Error("slice builder Task dispatch requires a clean current slice worktree");
+    assertSliceDispatchBaseline(run, slice, head);
 
     const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { requireIntegrationGate: true });
     const planBytes = decomposition.plan_bytes;
@@ -5451,6 +5660,7 @@ export async function prepareSliceBuilderTaskDispatch(repoInput, request, option
         branch: slice.branch,
         worktree: slice.worktree,
         head,
+        authorized_baseline_commit: slice.authorized_baseline_commit || null,
         contract: cloneJson(planned),
         ownership: {
           declared_paths: cloneJson(slice.declared_paths),
@@ -5530,7 +5740,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
   if (!isRecord(request)) throw new Error("special builder Task dispatch marker must be an object");
   const allowed = new Set(["run_id", "route", "agent"]);
   const extra = Object.keys(request).filter((key) => !allowed.has(key));
-  const routes = new Set(["merged-slice-repair", "panel-remediation", "post-pr-remediation", "integration-conflict"]);
+  const routes = new Set(["merged-slice-repair", "integration-amendment", "panel-remediation", "post-pr-remediation", "integration-conflict"]);
   if (extra.length || !stringValue(request.run_id) || !SAFE_TASK_DISPATCH_ID_PATTERN.test(request.run_id) || request.run_id.includes("..")
     || !routes.has(request.route) || !SLICE_BUILDER_AGENTS.has(request.agent)) {
     throw new Error("special builder Task dispatch marker requires safe run_id, recognized route, and backend-builder|frontend-builder agent");
@@ -5541,6 +5751,7 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
   if (dirname(runDir) !== factoryRoot) throw new Error("special builder Task dispatch run_id must identify one direct factory run");
   return withRunJsonLock(runDir, async () => {
     const run = await readRunJson(runDir);
+    observeIntegrationAmendmentWriterAuthority(runDir, run, { dedicated: request.route === "integration-amendment" });
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, { ...options, repoRoot: repository });
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     if (run.run_id !== request.run_id || run.status !== "running") throw new Error("special builder Task dispatch requires the exact current running run");
@@ -5565,6 +5776,12 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
         owner: cloneJson(owner),
         publication: observeRepairPublicationAuthority(runDir, run, { ...options, repoRoot: repository }),
       };
+    } else if (request.route === "integration-amendment") {
+      const observed = integrationAmendmentDispatchAuthority(runDir, run, request.agent, options);
+      branch = observed.attempt.branch_ref.slice("refs/heads/".length);
+      worktreeRef = observed.attempt.worktree;
+      instance = `${observed.amendment_id}:attempt-${observed.attempt.attempt}`;
+      authority = observed;
     } else if (request.route === "panel-remediation") {
       const allMerged = (run.slices || []).length > 0 && run.slices.every((slice) => slice?.status === "merged");
       const panelRejected = run.validator?.verdict === "NO-GO" || run.security_review?.verdict === "BLOCK";
@@ -5672,7 +5889,14 @@ export async function prepareSpecialBuilderTaskDispatch(repoInput, request, opti
         };
         await options.specialDispatchClaimAtomicWriteHooks?.afterCommit?.();
         assertClaimAuthority();
-        await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClaimAuthority);
+        await writeSemanticRunJson(runDir, validateRun(next), {
+          ...options,
+          allowUnresolvedSpecialDispatch: true,
+          ...(request.route === "integration-amendment" ? {
+            integrationAmendmentAuthority: INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+            allowUnboundIntegrationAmendmentDispatch: true,
+          } : {}),
+        }, v2Authority, assertClaimAuthority);
         context.dispatch_claim = { ref: claimRef, hash: claimHash, closure_ref: closureRef };
       } catch (error) {
         await removeOwnedFailedDispatchPublication(runDir, claimRef, publication, (current) => {
@@ -5745,9 +5969,16 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
       ...(conflictProof ? { owner_slice_id: observed.claim.effective_owner.slice_id, integration_proof: conflictProof } : {}),
     };
     const publication = await publishDispatchRecord(runDir, observed.claim.closure_ref, closure, {
-      hooks: options.specialDispatchClosureAtomicWriteHooks,
+      hooks: publicationBeforeCommitHooks(options.specialDispatchClosureAtomicWriteHooks),
+      beforeCommit: () => {
+        const currentRun = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+        if (!sameJson(currentRun, run)) throw new Error("special builder Task completion run authority changed before closure publication");
+        const currentClaim = observeSpecialDispatchClaim(runDir, observed.ref);
+        if (!sameJson(currentClaim, observed)) throw new Error("special builder Task completion claim changed before closure publication");
+      },
       allowExisting: true,
     });
+    await options.specialDispatchClosureAtomicWriteHooks?.afterCommit?.();
     const closed = observeClosedSpecialDispatch(runDir, observed);
     if (closed.completion_head !== completionHead) throw new Error("special builder Task completion conflicts with a closure for another HEAD");
     const next = cloneJson(run);
@@ -5766,7 +5997,14 @@ export async function completeSpecialBuilderTaskDispatch(repoInput, request, opt
       if (!sameJson(currentClosed, closed)) throw new Error("special builder Task completion closure changed before run binding");
     };
     try {
-      await writeSemanticRunJson(runDir, validateRun(next), { ...options, allowUnresolvedSpecialDispatch: true }, v2Authority, assertClosureAuthority);
+      await writeSemanticRunJson(runDir, validateRun(next), {
+        ...options,
+        allowUnresolvedSpecialDispatch: true,
+        ...(request.route === "integration-amendment" ? {
+          integrationAmendmentAuthority: INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+          allowUnboundIntegrationAmendmentDispatch: true,
+        } : {}),
+      }, v2Authority, assertClosureAuthority);
     } catch (error) {
       await removeOwnedFailedDispatchPublication(runDir, observed.claim.closure_ref, publication, (current) => {
         const binding = current.special_builder_dispatch;
@@ -5805,6 +6043,8 @@ function assertSpecialBuilderTaskDispatchContextCurrent(repository, runDir, expe
     const repair = currentRun.merged_slice_repair;
     const owner = currentRun.slices?.find((slice) => slice?.id === repair?.owner_slice_id);
     authority = { repair: cloneJson(repair), owner: cloneJson(owner), publication: observeRepairPublicationAuthority(runDir, currentRun, { ...options, repoRoot: repository }) };
+  } else if (context.route === "integration-amendment") {
+    authority = integrationAmendmentDispatchAuthority(runDir, currentRun, context.agent, options);
   } else if (context.route === "panel-remediation") {
     authority = {
       validator: cloneJson(currentRun.validator),
@@ -5829,6 +6069,13 @@ function specialBuilderContextFromClaim(repository, runDir, run, claim, options 
     if (publication?.git?.["feature-head"]) publication.git["feature-head"] = { ok: true, status: 0, stdout: `${claim.head}\n` };
     if (publication?.git?.cleanliness) publication.git.cleanliness = { ok: true, status: 0, stdout: "" };
     authority = { repair: cloneJson(repair), owner: cloneJson(owner), publication };
+  } else if (claim.route === "integration-amendment") {
+    authority = integrationAmendmentDispatchAuthority(runDir, run, claim.agent, options);
+    const expectedInstance = `${authority.amendment_id}:attempt-${authority.attempt.attempt}`;
+    if (claim.instance !== expectedInstance || claim.branch !== authority.attempt.branch_ref.slice("refs/heads/".length)
+      || resolve(claim.worktree) !== resolve(authority.attempt.worktree) || claim.head !== authority.attempt.build_base_commit) {
+      throw new Error("integration amendment dispatch claim authority is stale");
+    }
   } else if (claim.route === "panel-remediation") {
     authority = {
       validator: cloneJson(run.validator),
@@ -6546,7 +6793,8 @@ function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expect
   if (!sameJson(currentRun, expectedRun)) throw new Error("slice builder Task dispatch run authority changed before claim publication");
   const slice = (currentRun.slices || []).find((candidate) => candidate?.id === expectedContext.slice.id);
   if (!slice || slice.status !== "running" || slice.attempts !== expectedContext.slice.attempt || slice.branch !== expectedContext.slice.branch
-    || slice.worktree !== expectedContext.slice.worktree || slice.stack !== expectedContext.slice.stack) {
+    || slice.worktree !== expectedContext.slice.worktree || slice.stack !== expectedContext.slice.stack
+    || (slice.authorized_baseline_commit || null) !== expectedContext.slice.authorized_baseline_commit) {
     throw new Error("slice builder Task dispatch slice authority changed before claim publication");
   }
   const branch = git(repository, ["rev-parse", "--verify", `refs/heads/${slice.branch}^{commit}`]);
@@ -6557,6 +6805,7 @@ function assertSliceBuilderTaskDispatchContextCurrent(repository, runDir, expect
   if (head !== expectedContext.slice.head || !identity.ok || !cleanliness.ok || cleanliness.stdout !== "") {
     throw new Error("slice builder Task dispatch Git authority changed before claim publication");
   }
+  assertSliceDispatchBaseline(currentRun, slice, head);
 
   const decomposition = observeAcceptedDecompositionAuthority(runDir, currentRun, { requireIntegrationGate: true });
   if (decomposition.plan_hash !== expectedContext.plan.hash || decomposition.review_ref !== expectedContext.plan.review_ref
@@ -6655,6 +6904,9 @@ export function assertNoUnresolvedSliceDispatches(runDir, run) {
     const specialNames = new Set();
     for (const name of readdirSync(dispatchDir)) {
       if (name.endsWith(".special.json")) {
+        specialNames.add(name);
+        specialNames.add(`${name.slice(0, -5)}.closed.json`);
+      } else if (name.endsWith(".amendment-review.json")) {
         specialNames.add(name);
         specialNames.add(`${name.slice(0, -5)}.closed.json`);
       }
@@ -6790,6 +7042,14 @@ function observeSliceDispatchClaim(runDir, runId, slice, attempt, options = {}) 
     || !/^[0-9a-f]{40}$/u.test(claim.head || "") || !/^sha256:[0-9a-f]{64}$/u.test(claim.context_hash || "")
     || !/^sha256:[0-9a-f]{64}$/u.test(claim.completion_token_hash || "")
     || claim.closure_ref !== closureRef) throw new Error("slice builder dispatch claim identity is invalid");
+  if (slice.authorized_baseline_commit !== undefined) {
+    const expectedHead = attempt === 1
+      ? slice.authorized_baseline_commit
+      : slice.attempt_reviews?.find((entry) => entry?.attempt === attempt - 1)?.reviewed_commit;
+    if (!/^[0-9a-f]{40}$/u.test(expectedHead || "") || claim.head !== expectedHead) {
+      throw new Error("slice builder dispatch claim head differs from its authorized attempt baseline");
+    }
+  }
   const hash = sha256Bytes(bytes);
   if (options.requireRunBinding === true && (slice.dispatch_required !== true || slice.dispatch_claim_ref !== ref || slice.dispatch_claim_hash !== hash)) {
     throw new Error("slice builder dispatch claim is not bound by current run state");
@@ -6832,7 +7092,7 @@ function observeSpecialDispatchClaim(runDir, ref) {
   const expectedKeys = ["schema_version", "kind", "run_id", "route", "instance", "agent", "branch", "worktree", "head", "run_hash", "context_hash", "completion_token_hash", "claimed_at", "closure_ref", ...conflictKeys];
   if (!sameStringSet(new Set(Object.keys(claim)), new Set(expectedKeys))
     || claim.schema_version !== 1 || claim.kind !== "checked-special-builder-dispatch-claim"
-    || !stringValue(claim.run_id) || !["merged-slice-repair", "panel-remediation", "post-pr-remediation", "integration-conflict"].includes(claim.route)
+    || !stringValue(claim.run_id) || !["merged-slice-repair", "integration-amendment", "panel-remediation", "post-pr-remediation", "integration-conflict"].includes(claim.route)
     || !stringValue(claim.instance) || !SLICE_BUILDER_AGENTS.has(claim.agent) || !stringValue(claim.branch) || !stringValue(claim.worktree)
     || !/^[0-9a-f]{40}$/u.test(claim.head || "") || !/^sha256:[0-9a-f]{64}$/u.test(claim.run_hash || "")
     || !/^sha256:[0-9a-f]{64}$/u.test(claim.context_hash || "") || !/^sha256:[0-9a-f]{64}$/u.test(claim.completion_token_hash || "")
@@ -6892,6 +7152,10 @@ export function assertNoCurrentSliceNonconvergence(runDir, run) {
 }
 
 export function assertSliceAttemptHistoryCurrent(runDir, sliceId, slice) {
+  if (slice.authorized_baseline_commit !== undefined && slice.attempt_reviews?.[0]
+    && slice.attempt_reviews[0].diff_base_commit !== slice.authorized_baseline_commit) {
+    throw new Error(`slice '${sliceId}' first review baseline differs from its authorized baseline`);
+  }
   for (const entry of Array.isArray(slice.attempt_reviews) ? slice.attempt_reviews : []) {
     const observed = observeSliceReviewSidecars(runDir, sliceId, {
       ...slice,
@@ -6963,6 +7227,21 @@ function observeExactSliceMergeProof(repository, run, sliceId, mergeCommit, revi
     }
   }
   return proof;
+}
+
+function observeSliceMergePathCoverage(repository, sliceId, mergeCommit, reviewedCommit, options = {}) {
+  const parentsResult = authorityGit(options, repository, ["rev-list", "--parents", "-n", "1", mergeCommit]);
+  const parents = parentsResult.ok ? parentsResult.stdout.trim().split(/\s+/u) : [];
+  if (parents.length !== 3 || parents[0] !== mergeCommit || parents[2] !== reviewedCommit) {
+    throw new Error(`slice '${sliceId}' merge path coverage requires exact ordered parents`);
+  }
+  const basesResult = authorityGit(options, repository, ["merge-base", "--all", parents[1], reviewedCommit]);
+  const bases = basesResult.ok ? basesResult.stdout.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean) : [];
+  if (bases.length !== 1 || !/^[0-9a-f]{40}$/u.test(bases[0])) throw new Error(`slice '${sliceId}' merge path coverage requires one full merge base`);
+  const reviewedPaths = observeNoRenamePathSet(repository, bases[0], reviewedCommit, options, `slice '${sliceId}' ownership-reviewed diff`);
+  const mergedPaths = observeNoRenamePathSet(repository, parents[1], mergeCommit, options, `slice '${sliceId}' integrated diff`);
+  if (!sameStringSet(reviewedPaths, mergedPaths)) throw new Error(`slice '${sliceId}' integrated path set must equal its ownership-reviewed path set`);
+  return { merge_base: bases[0], paths: [...reviewedPaths].sort() };
 }
 
 // Shared B0MR proof used by continuation carry-forward. The ordinary merge
@@ -7040,6 +7319,12 @@ function assertSliceTransition(runDir, prior, next) {
   for (const key of ["branch", "worktree"]) {
     if (stringValue(prior[key]) && prior[key] !== next[key]) throw new Error(`slice ${key} is immutable once bound`);
     if (next[key] !== undefined && !stringValue(next[key])) throw new Error(`slice ${key} must be nonempty when bound`);
+  }
+  if (prior.authorized_baseline_commit !== undefined && prior.authorized_baseline_commit !== next.authorized_baseline_commit) {
+    throw new Error(`slice '${prior.id}' authorized_baseline_commit is immutable once bound`);
+  }
+  if (prior.authorized_baseline_commit === undefined && next.authorized_baseline_commit !== undefined) {
+    throw new Error(`slice '${prior.id}' authorized_baseline_commit is managed by checked start admission`);
   }
   if (next.status === "running" || next.status === "review" || prior.status !== "pending") {
     if (!Number.isInteger(next.attempts) || next.attempts < 1) throw new Error(`slice '${prior.id}' attempts must be positive once running`);
@@ -7172,6 +7457,915 @@ function normalizePendingSliceProjection(slices) {
 }
 
 // ---------------------------------------------------------------------------
+// Generic integration amendment state and the checked execution/Task authority
+// observers used by the factory-owned B5.3 effects.
+// ---------------------------------------------------------------------------
+
+const INTEGRATION_AMENDMENT_ACTIONS = new Set(["report", "build", "review", "integrate", "verify", "merge", "block"]);
+const INTEGRATION_AMENDMENT_DISPOSITIONS = Object.freeze(["accepted_contract", "public_contract", "persisted_contract", "product_scope", "security_boundary", "generated_ownership", "decomposition"]);
+const INTEGRATION_AMENDMENT_REVIEW_AGENT = "work-reviewer";
+const INTEGRATION_AMENDMENT_REVIEW_REPLAYABLE_ERROR = "INTEGRATION_AMENDMENT_REVIEW_REPLAYABLE_AMBIGUITY";
+
+export function isReplayableIntegrationAmendmentReviewCompletionError(error) {
+  return error?.code === INTEGRATION_AMENDMENT_REVIEW_REPLAYABLE_ERROR;
+}
+
+export async function prepareIntegrationAmendmentReviewTaskDispatch(repoInput, request, options = {}) {
+  const marker = normalizeIntegrationAmendmentReviewMarker(request);
+  const repository = repoRoot(repoInput);
+  const runDir = resolve(directFactoryRoot(repository), marker.run_id);
+  return withRunJsonLock(runDir, async () => {
+    const run = await readRunJson(runDir);
+    observeIntegrationAmendmentWriterAuthority(runDir, run, { dedicated: true });
+    const context = integrationAmendmentReviewContext(repository, runDir, run, marker, options);
+    if (existsSync(resolve(runDir, context.review_ref))) throw new Error("integration amendment review already exists before checked reviewer dispatch");
+    if (options.claimDispatch !== true) return context;
+    const completionToken = requireNonEmptyString(options.completionToken, "integration amendment reviewer completion token");
+    if (completionToken.length > 256) throw new Error("integration amendment reviewer completion token is too long");
+    const claimRef = integrationAmendmentReviewClaimRef(marker.run_id, marker.amendment_id, marker.attempt);
+    const closureRef = `${claimRef.slice(0, -5)}.closed.json`;
+    const claim = validateIntegrationAmendmentReviewDispatchClaim({
+      schema_version: 1,
+      kind: "checked-integration-amendment-review-dispatch-claim",
+      run_id: marker.run_id,
+      amendment_id: marker.amendment_id,
+      attempt: marker.attempt,
+      agent: INTEGRATION_AMENDMENT_REVIEW_AGENT,
+      baseline_commit: context.baseline_commit,
+      candidate_commit: context.candidate_commit,
+      candidate_tree: context.candidate_tree,
+      review_ref: context.review_ref,
+      context_hash: hashValue(context),
+      completion_token_hash: sha256Bytes(Buffer.from(completionToken, "utf8")),
+      claimed_at: timestamp(options.now),
+      closure_ref: closureRef,
+    }, { claim_ref: claimRef });
+    const assertCurrent = () => {
+      if (existsSync(resolve(runDir, context.review_ref))) throw new Error("integration amendment review appeared before checked reviewer dispatch publication");
+      assertIntegrationAmendmentReviewContextCurrent(repository, runDir, run, marker, context, options);
+    };
+    await publishDispatchRecord(runDir, claimRef, claim, {
+      hooks: publicationBeforeCommitHooks(options.amendmentReviewClaimAtomicWriteHooks),
+      beforeCommit: assertCurrent,
+      existsMessage: "integration amendment reviewer dispatch is already claimed for this attempt",
+    });
+    await options.amendmentReviewClaimAtomicWriteHooks?.afterCommit?.();
+    const observed = observeIntegrationAmendmentReviewClaim(runDir, claimRef);
+    if (!sameJson(observed.claim, claim)) throw new Error("integration amendment reviewer claim changed after publication");
+    context.dispatch_claim = { ref: observed.ref, hash: observed.hash, closure_ref: closureRef };
+    return context;
+  }, options);
+}
+
+export async function completeIntegrationAmendmentReviewTaskDispatch(repoInput, request, options = {}) {
+  if (!isRecord(request) || !stringValue(request.run_id) || !stringValue(request.amendment_id) || !Number.isInteger(request.attempt)
+    || request.agent !== INTEGRATION_AMENDMENT_REVIEW_AGENT || !stringValue(request.claim_ref) || !stringValue(request.claim_hash)
+    || !stringValue(request.completion_token) || typeof request.output !== "string") {
+    throw new Error("integration amendment reviewer completion requires exact marker, claim, capability, and synchronous output");
+  }
+  const marker = normalizeIntegrationAmendmentReviewMarker(request);
+  const repository = repoRoot(repoInput);
+  const runDir = resolve(directFactoryRoot(repository), marker.run_id);
+  return withRunJsonLock(runDir, async () => {
+    const run = await readRunJson(runDir);
+    observeIntegrationAmendmentWriterAuthority(runDir, run, { dedicated: true, reviewCallback: true });
+    const observed = observeIntegrationAmendmentReviewClaim(runDir, request.claim_ref);
+    if (observed.hash !== request.claim_hash || observed.claim.run_id !== marker.run_id || observed.claim.amendment_id !== marker.amendment_id
+      || observed.claim.attempt !== marker.attempt || observed.claim.agent !== marker.agent) throw new Error("integration amendment reviewer completion claim is stale or cross-bound");
+    if (sha256Bytes(Buffer.from(request.completion_token, "utf8")) !== observed.claim.completion_token_hash) throw new Error("integration amendment reviewer completion capability is invalid");
+    const context = integrationAmendmentReviewContext(repository, runDir, run, marker, options);
+    if (hashValue(context) !== observed.claim.context_hash || context.baseline_commit !== observed.claim.baseline_commit
+      || context.candidate_commit !== observed.claim.candidate_commit || context.candidate_tree !== observed.claim.candidate_tree
+      || context.review_ref !== observed.claim.review_ref) throw new Error("integration amendment reviewer context changed during dispatch");
+    const review = parseIntegrationAmendmentReviewCallback(request.output, context);
+    const reviewPath = resolve(runDir, context.review_ref);
+    let reviewPublication;
+    try {
+      reviewPublication = await publishDispatchRecord(runDir, context.review_ref, review, {
+        hooks: publicationBeforeCommitHooks(options.amendmentReviewPublicationAtomicWriteHooks),
+        beforeCommit: () => assertIntegrationAmendmentReviewContextCurrent(repository, runDir, run, marker, context, options),
+        allowExisting: true,
+      });
+      if (reviewPublication.created) await options.amendmentReviewPublicationAtomicWriteHooks?.afterCommit?.();
+    } catch (error) {
+      if (hasExactIntegrationAmendmentReviewPublication(runDir, reviewPath, review)) {
+        throw integrationAmendmentReviewReplayableError(error, "review");
+      }
+      throw error;
+    }
+    const publishedReview = validateIntegrationAmendmentReview(parseJsonObjectFile(reviewPath, "integration amendment checked review"));
+    if (!sameJson(publishedReview, review)) throw new Error("integration amendment checked review publication conflicts with preexisting bytes");
+    const reviewHash = hashFile(reviewPath);
+    const closure = validateIntegrationAmendmentReviewDispatchClosure({
+      schema_version: 1,
+      kind: "checked-integration-amendment-review-dispatch-closure",
+      claim_ref: observed.ref,
+      claim_hash: observed.hash,
+      run_id: marker.run_id,
+      amendment_id: marker.amendment_id,
+      attempt: marker.attempt,
+      agent: marker.agent,
+      context_hash: observed.claim.context_hash,
+      review_ref: context.review_ref,
+      review_hash: reviewHash,
+      completion_token: request.completion_token,
+      returned_at: review.reviewed_at,
+    }, {
+      claim_ref: observed.ref, claim_hash: observed.hash, run_id: marker.run_id, amendment_id: marker.amendment_id,
+      attempt: marker.attempt, agent: marker.agent, context_hash: observed.claim.context_hash,
+      review_ref: context.review_ref, review_hash: reviewHash, completion_token: request.completion_token,
+      completion_token_hash: observed.claim.completion_token_hash,
+    });
+    let closurePublication;
+    try {
+      closurePublication = await publishDispatchRecord(runDir, observed.claim.closure_ref, closure, {
+        hooks: publicationBeforeCommitHooks(options.amendmentReviewClosureAtomicWriteHooks),
+        beforeCommit: () => {
+          assertIntegrationAmendmentReviewContextCurrent(repository, runDir, run, marker, context, options);
+          if (hashFile(reviewPath) !== reviewHash) throw new Error("integration amendment review changed before callback closure publication");
+        },
+        allowExisting: true,
+      });
+      if (closurePublication.created) await options.amendmentReviewClosureAtomicWriteHooks?.afterCommit?.();
+    } catch (error) {
+      if (hasExactIntegrationAmendmentReviewClosure(runDir, observed, closure)) {
+        throw integrationAmendmentReviewReplayableError(error, "closure");
+      }
+      throw error;
+    }
+    const closed = observeClosedIntegrationAmendmentReview(runDir, observed);
+    if (!sameJson(closed.closure, closure)) throw new Error("integration amendment reviewer callback conflicts with an existing closure");
+    return { ...closed, review: publishedReview, replayed: !reviewPublication.created || !closurePublication.created };
+  }, options);
+}
+
+function hasExactIntegrationAmendmentReviewPublication(runDir, path, expected) {
+  try {
+    assertNoSymlinkPath(runDir, path, "integration amendment checked review");
+    const expectedBytes = Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, "utf8");
+    if (!readFileSync(path).equals(expectedBytes)) return false;
+    return sameJson(validateIntegrationAmendmentReview(parseJsonObjectFile(path, "integration amendment checked review")), expected);
+  } catch {
+    return false;
+  }
+}
+
+function hasExactIntegrationAmendmentReviewClosure(runDir, observed, expected) {
+  try {
+    const path = resolve(runDir, observed.claim.closure_ref);
+    assertNoSymlinkPath(runDir, path, "integration amendment reviewer closure");
+    const expectedBytes = Buffer.from(`${JSON.stringify(expected, null, 2)}\n`, "utf8");
+    if (!readFileSync(path).equals(expectedBytes)) return false;
+    return sameJson(observeClosedIntegrationAmendmentReview(runDir, observed).closure, expected);
+  } catch {
+    return false;
+  }
+}
+
+function integrationAmendmentReviewReplayableError(error, publication) {
+  const replayable = new Error(error?.message || `integration amendment reviewer ${publication} publication outcome is ambiguous`, { cause: error });
+  replayable.code = INTEGRATION_AMENDMENT_REVIEW_REPLAYABLE_ERROR;
+  replayable.publication = publication;
+  return replayable;
+}
+
+function normalizeIntegrationAmendmentReviewMarker(request) {
+  if (!isRecord(request)) throw new Error("integration amendment reviewer marker must be an object");
+  const allowed = new Set(["run_id", "amendment_id", "attempt", "agent", "claim_ref", "claim_hash", "completion_token", "output"]);
+  const extra = Object.keys(request).filter((key) => !allowed.has(key));
+  if (extra.length || !stringValue(request.run_id) || !SAFE_TASK_DISPATCH_ID_PATTERN.test(request.run_id) || request.run_id.includes("..")
+    || !/^[A-Za-z0-9_-]{43}$/u.test(request.amendment_id || "") || ![1, 2].includes(request.attempt) || request.agent !== INTEGRATION_AMENDMENT_REVIEW_AGENT) {
+    throw new Error("integration amendment reviewer marker requires exact run, amendment, attempt, and work-reviewer agent");
+  }
+  return { run_id: request.run_id, amendment_id: request.amendment_id, attempt: request.attempt, agent: request.agent };
+}
+
+function integrationAmendmentReviewContext(repository, runDir, run, marker, options = {}) {
+  const amendment = run.integration_amendment;
+  const attempt = amendment?.attempts?.at(-1);
+  if (run.run_id !== marker.run_id || amendment?.amendment_id !== marker.amendment_id || amendment.status !== "building"
+    || attempt?.state !== "building" || attempt.attempt !== marker.attempt) throw new Error("integration amendment reviewer authority is not current");
+  const binding = run.special_builder_dispatch;
+  const instance = `${amendment.amendment_id}:attempt-${attempt.attempt}`;
+  if (!binding || binding.route !== "integration-amendment" || binding.instance !== instance || !binding.closure_ref) {
+    throw new Error("integration amendment reviewer requires the exact closed builder dispatch");
+  }
+  const builderClaim = observeSpecialDispatchClaim(runDir, binding.claim_ref);
+  const builderClosure = observeClosedSpecialDispatch(runDir, builderClaim);
+  if (builderClaim.claim.route !== binding.route || builderClaim.claim.instance !== binding.instance || builderClaim.claim.agent !== binding.agent
+    || builderClaim.ref !== binding.claim_ref || builderClaim.hash !== binding.claim_hash || builderClosure.closure_ref !== binding.closure_ref
+    || builderClosure.closure_hash !== binding.closure_hash || builderClosure.completion_head !== binding.completion_head) {
+    throw new Error("integration amendment reviewer builder dispatch binding is stale");
+  }
+  const candidate = builderClosure.completion_head;
+  const gitAuthority = assertAmendmentAttemptWorktree(runDir, run, { ...attempt, reviewed_commit: candidate }, { ...options, repoRoot: repository }, true);
+  const changedPaths = [...observeNoRenamePathSet(repository, amendment.admission.baseline_commit, candidate, options, "integration amendment reviewer diff")].sort();
+  if (changedPaths.length === 0) throw new Error("integration amendment reviewer requires a nonempty observed change set");
+  assertIntegrationAmendmentChangedPathOwnership(run, amendment, changedPaths);
+  const failureReceiptPath = resolveEvidenceRef(runDir, amendment.failure_execution.receipt_ref).path;
+  const failureReceipt = validateIntegrationAmendmentExecutionReceipt(parseJsonObjectFile(failureReceiptPath, "integration amendment failure receipt"));
+  if (hashFile(failureReceiptPath) !== amendment.failure_execution.receipt_hash) throw new Error("integration amendment reviewer failure context is stale");
+  let prior_reject = null;
+  if (attempt.attempt === 2) {
+    const priorAttempt = amendment.attempts[0];
+    const priorReview = readBoundIntegrationAmendmentReview(runDir, run, priorAttempt);
+    if (priorReview.verdict !== "REJECT") throw new Error("integration amendment attempt 2 reviewer requires the exact prior REJECT");
+    prior_reject = { review_ref: priorAttempt.review_ref, review_hash: priorAttempt.review_hash, required_fixes: cloneJson(priorReview.required_fixes) };
+  }
+  return {
+    schema_version: 1,
+    kind: "checked-integration-amendment-review-task-dispatch",
+    agent: INTEGRATION_AMENDMENT_REVIEW_AGENT,
+    run_id: run.run_id,
+    amendment_id: amendment.amendment_id,
+    attempt: attempt.attempt,
+    build_base_commit: attempt.build_base_commit,
+    baseline_commit: amendment.admission.baseline_commit,
+    candidate_commit: candidate,
+    candidate_tree: gitAuthority.tree,
+    changed_paths: changedPaths,
+    ownership: (run.slices || []).map((slice) => ({ id: slice.id, stack: slice.stack, effective_paths: cloneJson(slice.effective_paths) })),
+    probe: cloneJson(amendment.admission.probe),
+    failure_context: { binding: cloneJson(amendment.failure_execution), receipt: cloneJson(failureReceipt) },
+    prior_reject,
+    review_ref: `reviews/integration-amendment-${amendment.amendment_id}.attempt-${attempt.attempt}.json`,
+  };
+}
+
+function assertIntegrationAmendmentReviewContextCurrent(repository, runDir, expectedRun, marker, context, options) {
+  const current = validateRun(JSON.parse(readFileSync(join(runDir, RUN_FILE), "utf8")));
+  if (!sameJson(current, expectedRun)) throw new Error("integration amendment reviewer run authority changed during callback");
+  const observed = integrationAmendmentReviewContext(repository, runDir, current, marker, options);
+  if (!sameJson(observed, context)) throw new Error("integration amendment reviewer context changed during callback");
+}
+
+function parseIntegrationAmendmentReviewCallback(output, context) {
+  let value;
+  try { value = JSON.parse(output.trim()); }
+  catch { throw new Error("integration amendment reviewer callback must be exactly one JSON object"); }
+  const review = validateIntegrationAmendmentReview(value);
+  if (review.subject !== `integration-amendment:${context.amendment_id}` || review.amendment_id !== context.amendment_id || review.attempt !== context.attempt
+    || review.build_base_commit !== context.build_base_commit || review.reviewed_commit !== context.candidate_commit
+    || review.reviewed_tree !== context.candidate_tree || !sameJson(review.changed_paths, context.changed_paths)) {
+    throw new Error("integration amendment reviewer callback is stale or cross-bound");
+  }
+  return review;
+}
+
+function integrationAmendmentReviewClaimRef(runId, amendmentId, attempt) {
+  const name = createHash("sha256").update(`${runId}\0integration-amendment-review\0${amendmentId}\0${attempt}`, "utf8").digest("hex");
+  return `dispatch/${name}.amendment-review.json`;
+}
+
+function observeIntegrationAmendmentReviewClaim(runDir, ref) {
+  if (!/^dispatch\/[0-9a-f]{64}\.amendment-review\.json$/u.test(ref || "")) throw new Error("integration amendment reviewer claim ref is invalid");
+  const path = resolve(runDir, ref);
+  assertNoSymlinkPath(runDir, path, "integration amendment reviewer claim");
+  const claim = validateIntegrationAmendmentReviewDispatchClaim(parseJsonObjectFile(path, "integration amendment reviewer claim"), { claim_ref: ref });
+  return { ref, path, hash: hashFile(path), claim };
+}
+
+function observeClosedIntegrationAmendmentReview(runDir, observed) {
+  const path = resolve(runDir, observed.claim.closure_ref);
+  assertNoSymlinkPath(runDir, path, "integration amendment reviewer closure");
+  const closure = validateIntegrationAmendmentReviewDispatchClosure(parseJsonObjectFile(path, "integration amendment reviewer closure"), {
+    claim_ref: observed.ref, claim_hash: observed.hash, run_id: observed.claim.run_id, amendment_id: observed.claim.amendment_id,
+    attempt: observed.claim.attempt, agent: observed.claim.agent, context_hash: observed.claim.context_hash,
+    review_ref: observed.claim.review_ref, completion_token_hash: observed.claim.completion_token_hash,
+  });
+  const reviewPath = resolveReviewRef(runDir, closure.review_ref).path;
+  if (hashFile(reviewPath) !== closure.review_hash) throw new Error("integration amendment reviewer closure review binding is stale");
+  return { closure_ref: observed.claim.closure_ref, closure_hash: hashFile(path), closure };
+}
+
+export async function transitionIntegrationAmendment(runDir, input = {}, options = {}) {
+  const request = normalizeIntegrationAmendmentRequest(input);
+  const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+    if (current.merged_slice_repair != null) throw new Error("generic and legacy repair authority may never coexist");
+    const stampedAt = timestamp(options.now);
+    if (request.action === "report") return transitionAmendmentReport(runDir, draft, current, request, stampedAt, options);
+    const amendment = current.integration_amendment;
+    if (!amendment) throw new Error("integration amendment must be reported before this action");
+    if (request.action === "merge" && amendment.status === "verified") assertIntegrationAmendmentConsistency(runDir, current);
+    else observeCurrentIntegrationAmendmentAuthority(runDir, current, options);
+    if (request.action === "build") transitionAmendmentBuild(runDir, draft, request, stampedAt, options);
+    else if (request.action === "review") transitionAmendmentReview(runDir, draft, stampedAt, options);
+    else if (request.action === "integrate") transitionAmendmentIntegrate(runDir, draft, stampedAt, options);
+    else if (request.action === "verify") transitionAmendmentVerify(runDir, draft, stampedAt, options);
+    else if (request.action === "merge") transitionAmendmentMerge(runDir, draft, stampedAt, options);
+    else transitionAmendmentBlock(runDir, draft, request.reason, stampedAt);
+  }, options, {
+    integrationAmendment: INTEGRATION_AMENDMENT_TRANSITION_AUTHORITY,
+    integrationAmendmentAction: request.action,
+    consumeSpecialDispatch: request.action === "review",
+    beforeReplace: (next) => observeCurrentIntegrationAmendmentAuthority(runDir, next, options),
+  }), options);
+  return { ...result, integration_amendment: result.run.integration_amendment ?? null };
+}
+
+function normalizeIntegrationAmendmentRequest(input) {
+  if (!isRecord(input)) throw new Error("integration amendment request must be an object");
+  const action = String(input.action || "").trim();
+  if (!INTEGRATION_AMENDMENT_ACTIONS.has(action)) throw new Error(`integration amendment action must be one of ${[...INTEGRATION_AMENDMENT_ACTIONS].join(", ")}`);
+  const allowed = action === "report" ? new Set(["action", "owner_slice_id", "consumer_slice_id", "defect_path", "verification_artifact_id"])
+    : action === "build" ? new Set(["action", "attempt"])
+      : action === "block" ? new Set(["action", "reason"])
+        : new Set(["action"]);
+  const extra = Object.keys(input).filter((key) => !allowed.has(key));
+  if (extra.length) throw new Error(`integration amendment ${action} does not accept caller authority field '${extra[0]}'`);
+  const request = { action };
+  if (action === "report") {
+    request.owner_slice_id = requireNonEmptyString(input.owner_slice_id, "amendment owner slice id");
+    request.consumer_slice_id = requireNonEmptyString(input.consumer_slice_id, "amendment consumer slice id");
+    request.defect_path = normalizeRepairDefectPath(input.defect_path);
+    request.verification_artifact_id = requireNonEmptyString(input.verification_artifact_id, "amendment verification artifact id");
+  }
+  if (action === "build") {
+    if (![1, 2].includes(input.attempt)) throw new Error("integration amendment build attempt must be exactly 1 or 2");
+    request.attempt = input.attempt;
+  }
+  if (action === "block") request.reason = requireNonEmptyString(input.reason, "amendment blocked reason");
+  return request;
+}
+
+function transitionAmendmentReport(runDir, draft, current, request, stampedAt, options) {
+  if (current.integration_amendment) {
+    const amendment = current.integration_amendment;
+    if (amendment.owner_slice_id === request.owner_slice_id && amendment.consumer_slice_id === request.consumer_slice_id
+      && amendment.defect_path === request.defect_path && amendment.verification_artifact_id === request.verification_artifact_id) return;
+    throw new Error("only one generic integration amendment is allowed per run");
+  }
+  const inventory = inspectIntegrationAmendmentInventory(runDir, current);
+  if (["completed-pass-receipt-no-manifest", "completed-diagnostic-receipt-no-manifest"].includes(inventory.classification)) return;
+  if (inventory.classification !== "completed-nonzero-receipt-no-manifest") throw new Error(`integration amendment report cannot consume ${inventory.classification}`);
+  const admission = observeIntegrationAmendmentAdmission(runDir, current, request, options, { initial: true });
+  const identity = { schema_version: 1, kind: "integration-amendment-identity", run_id: current.run_id, defect_path: request.defect_path, admission };
+  const amendmentId = integrationAmendmentId(identity);
+  const claim = inventory.report_claim;
+  const receipt = inventory.report_receipt;
+  if (claim.amendment_id !== amendmentId || !sameJson(claim.identity, identity) || claim.run_id !== current.run_id || !sameJson(claim.probe, admission.probe)
+    || claim.head_sha !== admission.baseline_commit || claim.tree_sha !== admission.baseline_tree || resolve(claim.cwd) !== resolve(admission.worktree)
+    || receipt.review_ready !== true || receipt.commands[0].outcome !== "exited" || receipt.commands[0].exit_code === 0) {
+    throw new Error("integration amendment report claim/receipt does not match the exact derived admission authority");
+  }
+  draft.integration_amendment = {
+    schema_version: 1,
+    kind: "integration-amendment",
+    amendment_id: amendmentId,
+    status: "reported",
+    owner_slice_id: request.owner_slice_id,
+    consumer_slice_id: request.consumer_slice_id,
+    defect_path: request.defect_path,
+    verification_artifact_id: request.verification_artifact_id,
+    admission,
+    failure_execution: {
+      claim_ref: "evidence/integration-amendment.report.claim.json",
+      claim_hash: inventory.report_claim_hash,
+      receipt_ref: claim.receipt_ref,
+      receipt_hash: inventory.report_receipt_hash,
+    },
+    max_attempts: 2,
+    attempts: [],
+    created_at: stampedAt,
+    updated_at: stampedAt,
+  };
+  draft.updated_at = stampedAt;
+}
+
+function observeIntegrationAmendmentAdmission(runDir, run, request, options = {}, mode = {}) {
+  if (run.status !== "running") throw new Error("integration amendment requires a running run");
+  if (run.continuation || run.checkpoint_source || run.checkpoint_progress) throw new Error("integration-amendment-continuation-unsupported");
+  if (mode.initial && run.merged_slice_repair != null) throw new Error("generic and legacy repair authority may never coexist");
+  const decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true, requireApprovingReview: true });
+  const owner = (run.slices || []).find((slice) => slice?.id === request.owner_slice_id);
+  const consumer = (run.slices || []).find((slice) => slice?.id === request.consumer_slice_id);
+  if (!owner || owner.status !== "merged") throw new Error("integration amendment owner must be a current merged slice");
+  if (!consumer || consumer.id === owner.id || !(consumer.depends_on || []).includes(owner.id)) throw new Error("integration amendment consumer must be a different direct dependent of the owner");
+  const consumerKeys = new Set(["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts"]);
+  if (consumer.status !== "pending" || consumer.attempts !== 0 || Object.keys(consumer).some((key) => !consumerKeys.has(key))) {
+    throw new Error("integration-amendment-consumer-not-pristine-pending");
+  }
+  if ((run.slices || []).some((slice) => ["running", "review"].includes(slice?.status))) throw new Error("integration amendment requires quiescent slice work");
+  const testVerifier = (run.steps || []).find((step) => step?.agent === "test-verifier");
+  if (testVerifier && (testVerifier.attempts !== 0 || !["running", "blocked"].includes(testVerifier.status)
+    || Object.keys(testVerifier).some((key) => !["agent", "status", "attempts"].includes(key)))) throw new Error("integration amendment requires an absent or pristine attempt-zero test-verifier");
+  if (run.validator != null || run.security_review != null || run.gates?.pre_pr != null || isRecord(run.steering?.pr_fence)
+    || stringValue(run.pr_url) || run.terminal_result != null || postPrAuthorityExists(run.post_pr)) throw new Error("integration amendment is excluded after panel, pre-PR, PR, or post-PR authority");
+  if (mode.initial) assertNoUnresolvedSliceDispatches(runDir, run);
+  assertSliceAttemptHistoryCurrent(runDir, owner.id, owner);
+  const currentOwnerAttempt = owner.attempt_reviews?.at(-1);
+  if (!["dispatch_claim_ref", "dispatch_claim_hash", "dispatch_closure_ref", "dispatch_closure_hash"].every((key) => stringValue(currentOwnerAttempt?.[key]))) {
+    throw new Error("integration amendment owner must retain complete current dispatch authority");
+  }
+  const ownerReview = parseJsonObjectFile(resolveReviewRef(runDir, owner.review_ref).path, "integration amendment owner review");
+  if (ownerReview.verdict !== "APPROVE" || (ownerReview.required_fixes || []).length !== 0
+    || (ownerReview.invariant_family_ledger?.dispositions || []).some((entry) => (entry.unresolved_findings || []).length > 0)) throw new Error("integration amendment owner must retain complete APPROVE authority with no unresolved finding");
+  const repository = resolveAuthorityRepository(runDir, run, options);
+  observeReviewedMergeProof(repository, owner.id, owner.merge_commit, owner.reviewed_commit, options);
+  const ownership = createOwnershipIndex((run.slices || []).map((slice) => ({ id: slice.id, stack: slice.stack, effective_paths: slice.effective_paths })));
+  const owners = ownership.owners(request.defect_path);
+  if (owners.length !== 1 || owners[0].id !== owner.id || isPrivilegedControlPlanePath(request.defect_path)) throw new Error("integration amendment defect path must have the merged owner as its sole non-privileged effective owner");
+  const unit = decomposition.plan.delivery_envelope?.delivery_units?.find((candidate) => candidate.slice_id === consumer.id);
+  const artifact = unit?.verification_artifacts?.find((candidate) => candidate.id === request.verification_artifact_id);
+  if (!unit || !artifact) throw new Error("integration amendment artifact must belong to the consumer current accepted delivery unit");
+  const command = parseVerificationCommand(artifact.test_plan_entry);
+  const integration = observeIntegrationHeadAuthority(run, { ...options, runDir }, "integration amendment baseline");
+  const baselineTree = authorityGit(options, repository, ["rev-parse", "--verify", `${integration.head}^{tree}`]);
+  if (!baselineTree.ok || !/^[0-9a-f]{40}$/u.test(baselineTree.stdout.trim())) throw new Error("integration amendment baseline tree cannot be observed");
+  const ownerSnapshot = pickExactObject(owner, ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "attempt_reviews", "evidence_ref", "evidence_hash", "review_ref", "review_hash", "reviewed_commit", "merge_commit"]);
+  const consumerSnapshot = pickExactObject(consumer, [...consumerKeys]);
+  return {
+    baseline_ref: `refs/heads/${run.branch}`,
+    baseline_commit: integration.head,
+    baseline_tree: baselineTree.stdout.trim(),
+    worktree: resolve(integration.worktree),
+    probe: {
+      schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: unit.id, consumer_slice_id: consumer.id,
+      verification_artifact_id: artifact.id, test_plan_index: artifact.test_plan_index, test_plan_entry: artifact.test_plan_entry,
+      program: command.program, args: command.args, substrate: "feature-baseline",
+    },
+    owner: ownerSnapshot,
+    consumer: consumerSnapshot,
+  };
+}
+
+function observeCurrentIntegrationAmendmentAuthority(runDir, run, options = {}) {
+  const amendment = run.integration_amendment;
+  if (!amendment) return inspectIntegrationAmendmentInventory(runDir, run);
+  if (amendment.status === "merged") {
+    assertIntegrationAmendmentConsistency(runDir, run);
+    return { merged: true, amendment_hash: hashValue(amendment) };
+  }
+  const request = {
+    owner_slice_id: amendment.owner_slice_id,
+    consumer_slice_id: amendment.consumer_slice_id,
+    defect_path: amendment.defect_path,
+    verification_artifact_id: amendment.verification_artifact_id,
+  };
+  const admission = observeIntegrationAmendmentAdmission(runDir, run, request, options);
+  if (!sameJson(admission, amendment.admission)) throw new Error("integration amendment accepted plan, owner, consumer, branch, or worktree authority is stale");
+  const inventory = inspectIntegrationAmendmentInventory(runDir, run);
+  if (inventory.classification !== "completed-nonzero-receipt-matching-manifest") throw new Error("integration amendment sidecar inventory is not exactly consumed");
+  return { admission, inventory };
+}
+
+export function observeIntegrationAmendmentExecutionAuthority(runDir, run, phase, input = {}, options = {}) {
+  if (!isRecord(run) || !["report", "verify"].includes(phase)) throw new Error("integration amendment execution phase is invalid");
+  if (phase === "report") {
+    const request = normalizeIntegrationAmendmentRequest({ ...input, action: "report" });
+    if (run.integration_amendment != null) throw new Error("integration amendment report execution requires no manifest");
+    const admission = observeIntegrationAmendmentAdmission(runDir, run, request, options, { initial: true });
+    const identity = { schema_version: 1, kind: "integration-amendment-identity", run_id: run.run_id, defect_path: request.defect_path, admission };
+    const amendmentId = integrationAmendmentId(identity);
+    return {
+      phase,
+      run_id: run.run_id,
+      amendment_id: amendmentId,
+      identity,
+      probe: cloneJson(admission.probe),
+      head_sha: admission.baseline_commit,
+      tree_sha: admission.baseline_tree,
+      cwd: resolve(admission.worktree),
+      claim_ref: "evidence/integration-amendment.report.claim.json",
+      receipt_ref: `evidence/integration-amendment-${amendmentId}.report.receipt.json`,
+      request,
+    };
+  }
+  const amendment = run.integration_amendment;
+  if (!amendment || !["integrated", "verified"].includes(amendment.status)) throw new Error("integration amendment verification execution requires integrated state");
+  const request = {
+    owner_slice_id: amendment.owner_slice_id,
+    consumer_slice_id: amendment.consumer_slice_id,
+    defect_path: amendment.defect_path,
+    verification_artifact_id: amendment.verification_artifact_id,
+  };
+  const admission = observeIntegrationAmendmentAdmission(runDir, run, request, options);
+  if (!sameJson(admission, amendment.admission)) throw new Error("integration amendment accepted authority changed before verification execution");
+  assertAmendmentIntegration(run, options);
+  const identity = { schema_version: 1, kind: "integration-amendment-identity", run_id: run.run_id, defect_path: amendment.defect_path, admission: cloneJson(amendment.admission) };
+  return {
+    phase,
+    run_id: run.run_id,
+    amendment_id: amendment.amendment_id,
+    identity,
+    probe: cloneJson(amendment.admission.probe),
+    head_sha: amendment.integration.commit,
+    tree_sha: amendment.integration.tree,
+    cwd: resolve(amendment.integration.worktree),
+    claim_ref: `evidence/integration-amendment-${amendment.amendment_id}.verify.claim.json`,
+    receipt_ref: `evidence/integration-amendment-${amendment.amendment_id}.verify.receipt.json`,
+  };
+}
+
+function integrationAmendmentDispatchAuthority(runDir, run, agent, options = {}) {
+  const amendment = run.integration_amendment;
+  const attempt = amendment?.attempts?.at(-1);
+  if (amendment?.status !== "building" || attempt?.state !== "building" || agent !== `${amendment.admission.owner.stack}-builder`) {
+    throw new Error("special integration amendment dispatch authority is not current");
+  }
+  const admission = observeIntegrationAmendmentAdmission(runDir, run, {
+    owner_slice_id: amendment.owner_slice_id,
+    consumer_slice_id: amendment.consumer_slice_id,
+    defect_path: amendment.defect_path,
+    verification_artifact_id: amendment.verification_artifact_id,
+  }, { ...options, repoRoot: resolve(runDir, "../../..") });
+  if (!sameJson(admission, amendment.admission)) throw new Error("integration amendment dispatch accepted authority is stale");
+  return {
+    amendment_id: amendment.amendment_id,
+    defect_path: amendment.defect_path,
+    verification_artifact_id: amendment.verification_artifact_id,
+    owner: cloneJson(amendment.admission.owner),
+    consumer: cloneJson(amendment.admission.consumer),
+    probe: cloneJson(amendment.admission.probe),
+    attempt: cloneJson(attempt),
+    path_policy: { effective_paths: cloneJson(amendment.admission.owner.effective_paths), expansion_allowed: false },
+  };
+}
+
+function transitionAmendmentBuild(runDir, draft, request, stampedAt, options) {
+  const amendment = draft.integration_amendment;
+  if (amendment.status === "building" && amendment.attempts.at(-1)?.attempt === request.attempt) {
+    assertAmendmentAttemptWorktree(runDir, draft, amendment.attempts.at(-1), options, false);
+    return;
+  }
+  if (request.attempt === 1) {
+    if (amendment.status !== "reported" || amendment.attempts.length !== 0) throw new Error("integration amendment attempt 1 starts only from reported");
+  } else {
+    if (amendment.status !== "reviewed" || amendment.attempts.length !== 1) throw new Error("integration amendment attempt 2 requires reviewed attempt 1");
+    const prior = readBoundIntegrationAmendmentReview(runDir, draft, amendment.attempts[0]);
+    if (prior.verdict !== "REJECT" || !INTEGRATION_AMENDMENT_DISPOSITIONS.every((key) => prior.dispositions[key] === "preserved")) throw new Error("integration amendment attempt 2 requires an all-preserved attempt-1 REJECT");
+  }
+  const repository = resolveAuthorityRepository(runDir, draft, options);
+  const buildBase = request.attempt === 1 ? amendment.admission.baseline_commit : amendment.attempts[0].reviewed_commit;
+  const shortBranch = `${draft.branch}--amend-${amendment.amendment_id}-a${request.attempt}`;
+  const branchRef = `refs/heads/${shortBranch}`;
+  const worktree = resolve(repository, ".opencode", "worktrees", shortBranch);
+  createOrReplayAmendmentBranch(repository, branchRef, buildBase, options);
+  createOrReplayAmendmentWorktree(repository, worktree, shortBranch, buildBase, options);
+  amendment.attempts.push({ attempt: request.attempt, state: "building", build_base_commit: buildBase, branch_ref: branchRef, worktree });
+  amendment.status = "building";
+  amendment.updated_at = stampedAt;
+  draft.updated_at = stampedAt;
+}
+
+function transitionAmendmentReview(runDir, draft, stampedAt, options) {
+  const amendment = draft.integration_amendment;
+  const attempt = amendment.attempts.at(-1);
+  if (amendment.status === "reviewed" && attempt?.state === "reviewed") {
+    readBoundIntegrationAmendmentReview(runDir, draft, attempt);
+    assertAmendmentAttemptWorktree(runDir, draft, attempt, options, true);
+    return;
+  }
+  if (amendment.status !== "building" || attempt?.state !== "building") throw new Error("integration amendment review requires a building attempt");
+  const binding = draft.special_builder_dispatch;
+  const expectedInstance = `${amendment.amendment_id}:attempt-${attempt.attempt}`;
+  if (!binding || binding.route !== "integration-amendment" || binding.instance !== expectedInstance || binding.agent !== `${amendment.admission.owner.stack}-builder`) throw new Error("integration amendment review requires the exact immutable dispatch fixture binding");
+  const observedClaim = observeSpecialDispatchClaim(runDir, binding.claim_ref);
+  const observedClosure = observeClosedSpecialDispatch(runDir, observedClaim);
+  if (observedClaim.hash !== binding.claim_hash || observedClaim.claim.run_id !== draft.run_id || observedClaim.claim.route !== "integration-amendment"
+    || observedClaim.claim.instance !== expectedInstance || observedClaim.claim.branch !== attempt.branch_ref.slice("refs/heads/".length)
+    || resolve(observedClaim.claim.worktree) !== resolve(attempt.worktree) || observedClaim.claim.head !== attempt.build_base_commit
+    || observedClaim.claim.run_hash !== specialDispatchAuthorityHash(draft)
+    || observedClosure.closure_ref !== binding.closure_ref || observedClosure.closure_hash !== binding.closure_hash || observedClosure.completion_head !== binding.completion_head) {
+    throw new Error("integration amendment dispatch fixture is stale or cross-bound");
+  }
+  const candidate = observedClosure.completion_head;
+  const gitAuthority = assertAmendmentAttemptWorktree(runDir, draft, { ...attempt, reviewed_commit: candidate }, options, true);
+  const tree = gitAuthority.tree;
+  const changedPaths = [...observeNoRenamePathSet(gitAuthority.repository, amendment.admission.baseline_commit, candidate, options, "integration amendment reviewed diff")].sort();
+  if (changedPaths.length === 0) throw new Error("integration amendment review requires a nonempty observed change set");
+  assertIntegrationAmendmentChangedPathOwnership(draft, amendment, changedPaths);
+  const reviewRef = `reviews/integration-amendment-${amendment.amendment_id}.attempt-${attempt.attempt}.json`;
+  const reviewPath = resolveReviewRef(runDir, reviewRef).path;
+  assertBoundIntegrationAmendmentReviewPublication(runDir, draft, amendment, attempt, reviewRef);
+  const review = validateIntegrationAmendmentReview(parseJsonObjectFile(reviewPath, "integration amendment review"));
+  if (review.subject !== `integration-amendment:${amendment.amendment_id}` || review.amendment_id !== amendment.amendment_id || review.attempt !== attempt.attempt
+    || review.build_base_commit !== attempt.build_base_commit || review.reviewed_commit !== candidate || review.reviewed_tree !== tree || !sameJson(review.changed_paths, changedPaths)) {
+    throw new Error("integration amendment review is stale or cross-bound");
+  }
+  Object.assign(attempt, {
+    state: "reviewed",
+    dispatch_claim_ref: observedClaim.ref,
+    dispatch_claim_hash: observedClaim.hash,
+    dispatch_closure_ref: observedClosure.closure_ref,
+    dispatch_closure_hash: observedClosure.closure_hash,
+    candidate_commit: candidate,
+    candidate_tree: tree,
+    changed_paths: changedPaths,
+    review_ref: reviewRef,
+    review_hash: hashFile(reviewPath),
+    reviewed_commit: candidate,
+    reviewed_tree: tree,
+  });
+  delete draft.special_builder_dispatch;
+  amendment.status = "reviewed";
+  amendment.updated_at = stampedAt;
+  draft.updated_at = stampedAt;
+}
+
+function transitionAmendmentIntegrate(runDir, draft, stampedAt, options) {
+  const amendment = draft.integration_amendment;
+  if (amendment.status === "integrated") { assertAmendmentIntegration(draft, options); return; }
+  if (amendment.status !== "reviewed") throw new Error("integration amendment integrate requires reviewed state");
+  const attempt = amendment.attempts.at(-1);
+  const review = readBoundIntegrationAmendmentReview(runDir, draft, attempt);
+  if (review.verdict !== "APPROVE") throw new Error("integration amendment integrate requires APPROVE review");
+  const repository = resolveAuthorityRepository(runDir, draft, options);
+  const ref = `refs/opencode/integration-amendments/${amendment.amendment_id}/staged`;
+  const worktree = resolve(repository, ".opencode", "worktrees", `${draft.branch}--amend-${amendment.amendment_id}-staged`);
+  let commit = resolveOptionalCommit(repository, ref, options);
+  if (!commit) {
+    options.integrationAmendmentHooks?.beforeStagingRef?.();
+    const created = git(repository, ["commit-tree", attempt.reviewed_tree, "-p", amendment.admission.baseline_commit, "-p", attempt.reviewed_commit, "-m", `integration amendment ${amendment.amendment_id}`], {
+      env: { GIT_AUTHOR_NAME: "feature-factory", GIT_AUTHOR_EMAIL: "feature-factory@localhost", GIT_COMMITTER_NAME: "feature-factory", GIT_COMMITTER_EMAIL: "feature-factory@localhost", GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z" },
+    });
+    if (!created.ok || !/^[0-9a-f]{40}$/u.test(created.stdout.trim())) throw new Error("integration amendment staging commit could not be created");
+    commit = created.stdout.trim();
+    const published = git(repository, ["update-ref", ref, commit, "0".repeat(40)]);
+    if (!published.ok) {
+      const replay = resolveOptionalCommit(repository, ref, options);
+      if (replay !== commit) throw new Error("integration amendment staging ref conflicts with existing authority");
+    }
+    options.integrationAmendmentHooks?.afterStagingRef?.();
+  }
+  createOrReplayDetachedAmendmentWorktree(repository, worktree, commit, options);
+  amendment.integration = { ref, worktree, commit, tree: attempt.reviewed_tree };
+  amendment.status = "integrated";
+  assertAmendmentIntegration(draft, options);
+  amendment.updated_at = stampedAt;
+  draft.updated_at = stampedAt;
+}
+
+function transitionAmendmentVerify(runDir, draft, stampedAt, options) {
+  const amendment = draft.integration_amendment;
+  if (amendment.status === "verified") { assertBoundAmendmentVerification(runDir, draft); return; }
+  if (amendment.status !== "integrated") throw new Error("integration amendment verify requires integrated state");
+  assertAmendmentIntegration(draft, options);
+  const binding = observeCompletedAmendmentExecution(runDir, draft, "verify");
+  if (binding.claim.state === "unknown" || binding.claim.state === "active") throw new Error("integration amendment verification remains active or unknown");
+  if (binding.receipt.status !== "pass" || binding.receipt.review_ready !== true) {
+    amendment.status = "blocked";
+    amendment.blocked = { origin: "integrated", reason: "verification-failed", blocked_at: stampedAt };
+  } else {
+    amendment.status = "verified";
+    amendment.verification = binding.binding;
+  }
+  amendment.updated_at = stampedAt;
+  draft.updated_at = stampedAt;
+}
+
+function transitionAmendmentMerge(runDir, draft, stampedAt, options) {
+  const amendment = draft.integration_amendment;
+  if (amendment.status === "merged") { assertPublishedAmendment(draft, options); return; }
+  if (amendment.status !== "verified") throw new Error("integration amendment merge requires verified state");
+  assertBoundAmendmentVerification(runDir, draft);
+  assertAmendmentIntegration(draft, options);
+  const repository = resolveAuthorityRepository(runDir, draft, options);
+  const featureRef = amendment.admission.baseline_ref;
+  const featureBranch = featureRef.slice("refs/heads/".length);
+  const baseline = amendment.admission.baseline_commit;
+  const integrated = amendment.integration.commit;
+  const refHead = resolveRequiredCommit(repository, featureRef, options, "integration amendment feature ref");
+  const snapshot = observeFeatureWorktreeSnapshot(repository, amendment.admission.worktree, featureBranch, amendment.admission.baseline_tree, amendment.integration.tree, refHead, baseline, integrated, options);
+  if (refHead === baseline && snapshot.case === "baseline") {
+    options.integrationAmendmentHooks?.beforeFeatureCas?.();
+    const updated = git(repository, ["update-ref", featureRef, integrated, baseline]);
+    if (!updated.ok) throw new Error("integration amendment feature ref CAS failed");
+    options.integrationAmendmentHooks?.afterFeatureCas?.();
+  } else if (!(refHead === integrated && ["integration", "pre-cas-baseline"].includes(snapshot.case))) {
+    throw new Error("integration amendment feature ref/worktree is outside the three recoverable publication cases");
+  }
+  const afterRef = resolveRequiredCommit(repository, featureRef, options, "integration amendment feature ref");
+  if (afterRef !== integrated) throw new Error("integration amendment feature ref does not equal staged integration");
+  const afterSnapshot = observeFeatureWorktreeSnapshot(repository, amendment.admission.worktree, featureBranch, amendment.admission.baseline_tree, amendment.integration.tree, afterRef, baseline, integrated, options);
+  if (afterSnapshot.case === "pre-cas-baseline") {
+    options.integrationAmendmentHooks?.beforeWorktreeReconcile?.();
+    const reset = git(amendment.admission.worktree, ["reset", "--hard", integrated]);
+    if (!reset.ok) throw new Error("integration amendment worktree reconciliation failed");
+    options.integrationAmendmentHooks?.afterWorktreeReconcile?.();
+  } else if (afterSnapshot.case !== "integration") throw new Error("integration amendment worktree cannot be reconciled safely");
+  amendment.publication = { branch_ref: featureRef, previous_commit: baseline, commit: integrated, published_at: stampedAt };
+  amendment.status = "merged";
+  assertPublishedAmendment(draft, options);
+  amendment.updated_at = stampedAt;
+  draft.updated_at = stampedAt;
+}
+
+function transitionAmendmentBlock(runDir, draft, reason, stampedAt) {
+  const amendment = draft.integration_amendment;
+  if (amendment.status === "blocked") {
+    if (amendment.blocked.reason === reason) return;
+    throw new Error("blocked integration amendment is terminal");
+  }
+  if (amendment.status === "merged") throw new Error("merged integration amendment is terminal");
+  const inventory = inspectIntegrationAmendmentInventory(runDir, draft);
+  if (["active", "unknown"].includes(inventory.verification_effect?.state) || draft.special_builder_dispatch) throw new Error("integration amendment cannot block while an effect is active, unknown, or unconsumed");
+  let origin = amendment.status;
+  if (origin === "reviewed") {
+    const review = readBoundIntegrationAmendmentReview(runDir, draft, amendment.attempts.at(-1));
+    origin = review.verdict === "APPROVE" ? "reviewed-approve" : "reviewed-reject";
+  }
+  amendment.status = "blocked";
+  amendment.blocked = { origin, reason, blocked_at: stampedAt };
+  amendment.updated_at = stampedAt;
+  draft.updated_at = stampedAt;
+}
+
+function pickExactObject(value, keys) {
+  return Object.fromEntries(keys.map((key) => [key, cloneJson(value[key])]));
+}
+
+function createOrReplayAmendmentBranch(repository, ref, commit, options) {
+  const existing = resolveOptionalCommit(repository, ref, options);
+  if (existing) {
+    if (existing !== commit) throw new Error(`integration amendment branch '${ref}' conflicts with another commit`);
+    return;
+  }
+  options.integrationAmendmentHooks?.beforeBuildBranch?.();
+  const created = git(repository, ["update-ref", ref, commit, "0".repeat(40)]);
+  if (!created.ok && resolveOptionalCommit(repository, ref, options) !== commit) throw new Error("integration amendment build branch could not be create-published");
+  options.integrationAmendmentHooks?.afterBuildBranch?.();
+}
+
+function createOrReplayAmendmentWorktree(repository, worktree, branch, head, options) {
+  if (!existsSync(worktree)) {
+    options.integrationAmendmentHooks?.beforeBuildWorktree?.();
+    const parent = dirname(worktree);
+    mkdirSync(parent, { recursive: true });
+    const added = git(repository, ["worktree", "add", worktree, branch]);
+    if (!added.ok && !existsSync(worktree)) throw new Error("integration amendment build worktree could not be created");
+    options.integrationAmendmentHooks?.afterBuildWorktree?.();
+  }
+  const identity = checkWorktreeIdentity(repository, worktree, { branch, head });
+  const clean = authorityGit(options, worktree, gitCleanlinessArgs());
+  if (!identity.ok || !clean.ok || clean.stdout !== "") throw new Error("integration amendment build worktree is stale, foreign, or dirty");
+}
+
+function createOrReplayDetachedAmendmentWorktree(repository, worktree, head, options) {
+  if (!existsSync(worktree)) {
+    const parent = dirname(worktree);
+    mkdirSync(parent, { recursive: true });
+    options.integrationAmendmentHooks?.beforeStagingWorktree?.();
+    const added = git(repository, ["worktree", "add", "--detach", worktree, head]);
+    if (!added.ok && !existsSync(worktree)) throw new Error("integration amendment staging worktree could not be created");
+    options.integrationAmendmentHooks?.afterStagingWorktree?.();
+  }
+  const identity = checkWorktreeIdentity(repository, worktree, { head });
+  const symbolic = authorityGit(options, worktree, ["symbolic-ref", "--quiet", "HEAD"]);
+  const clean = authorityGit(options, worktree, gitCleanlinessArgs());
+  if (!identity.ok || symbolic.ok || !clean.ok || clean.stdout !== "") throw new Error("integration amendment staging worktree is stale, foreign, attached, or dirty");
+}
+
+function resolveOptionalCommit(repository, ref, options) {
+  const result = authorityGit(options, repository, ["rev-parse", "--verify", `${ref}^{commit}`]);
+  if (!result.ok) return null;
+  if (!/^[0-9a-f]{40}$/u.test(result.stdout.trim())) throw new Error(`integration amendment ref '${ref}' does not resolve to one full commit`);
+  return result.stdout.trim();
+}
+
+function resolveRequiredCommit(repository, ref, options, label) {
+  const commit = resolveOptionalCommit(repository, ref, options);
+  if (!commit) throw new Error(`${label} does not resolve`);
+  return commit;
+}
+
+function assertAmendmentAttemptWorktree(runDir, run, attempt, options, reviewed) {
+  const repository = resolveAuthorityRepository(runDir, run, options);
+  const branch = attempt.branch_ref.slice("refs/heads/".length);
+  const head = resolveRequiredCommit(repository, attempt.branch_ref, options, "integration amendment build branch");
+  const expectedHead = reviewed ? attempt.reviewed_commit : attempt.build_base_commit;
+  const identity = checkWorktreeIdentity(repository, attempt.worktree, { branch, head: expectedHead });
+  const clean = authorityGit(options, attempt.worktree, gitCleanlinessArgs());
+  if (head !== expectedHead || !identity.ok || !clean.ok || clean.stdout !== "") throw new Error("integration amendment attempt branch/worktree authority is stale or dirty");
+  const tree = authorityGit(options, repository, ["rev-parse", "--verify", `${head}^{tree}`]);
+  if (!tree.ok || !/^[0-9a-f]{40}$/u.test(tree.stdout.trim())) throw new Error("integration amendment attempt tree cannot be observed");
+  return { repository, head, tree: tree.stdout.trim() };
+}
+
+function readBoundIntegrationAmendmentReview(runDir, run, attempt) {
+  const amendment = run.integration_amendment;
+  const expectedRef = `reviews/integration-amendment-${amendment.amendment_id}.attempt-${attempt.attempt}.json`;
+  if (attempt.review_ref !== expectedRef) throw new Error("integration amendment review ref is stale");
+  assertBoundIntegrationAmendmentReviewPublication(runDir, run, amendment, attempt, expectedRef);
+  const path = resolveReviewRef(runDir, expectedRef).path;
+  if (hashFile(path) !== attempt.review_hash) throw new Error("integration amendment review bytes changed after binding");
+  const review = validateIntegrationAmendmentReview(parseJsonObjectFile(path, "integration amendment review"));
+  if (review.subject !== `integration-amendment:${amendment.amendment_id}` || review.amendment_id !== amendment.amendment_id
+    || review.attempt !== attempt.attempt || review.build_base_commit !== attempt.build_base_commit || review.reviewed_commit !== attempt.reviewed_commit
+    || review.reviewed_tree !== attempt.reviewed_tree || !sameJson(review.changed_paths, attempt.changed_paths)) throw new Error("integration amendment review binding is stale or cross-bound");
+  assertIntegrationAmendmentChangedPathOwnership(run, amendment, attempt.changed_paths);
+  return review;
+}
+
+function assertBoundIntegrationAmendmentReviewPublication(runDir, run, amendment, attempt, reviewRef) {
+  const claimRef = integrationAmendmentReviewClaimRef(run.run_id, amendment.amendment_id, attempt.attempt);
+  const observed = observeIntegrationAmendmentReviewClaim(runDir, claimRef);
+  const closed = observeClosedIntegrationAmendmentReview(runDir, observed);
+  if (observed.claim.run_id !== run.run_id || observed.claim.amendment_id !== amendment.amendment_id || observed.claim.attempt !== attempt.attempt
+    || observed.claim.baseline_commit !== amendment.admission.baseline_commit || observed.claim.candidate_commit !== (attempt.candidate_commit || run.special_builder_dispatch?.completion_head)
+    || observed.claim.candidate_tree !== (attempt.candidate_tree || resolveAttemptCandidateTree(runDir, run, attempt)) || observed.claim.review_ref !== reviewRef
+    || closed.closure.review_ref !== reviewRef || attempt.review_hash && closed.closure.review_hash !== attempt.review_hash) {
+    throw new Error("integration amendment review publication provenance is stale or cross-bound");
+  }
+}
+
+function resolveAttemptCandidateTree(runDir, run, attempt) {
+  const repository = resolveAuthorityRepository(runDir, run, { repoRoot: resolve(runDir, "../../..") });
+  const candidate = run.special_builder_dispatch?.completion_head;
+  const tree = candidate && git(repository, ["rev-parse", "--verify", `${candidate}^{tree}`]);
+  return tree?.ok ? tree.stdout.trim() : "";
+}
+
+function assertIntegrationAmendmentChangedPathOwnership(run, amendment, changedPaths) {
+  const ownership = createOwnershipIndex((run.slices || []).map((slice) => ({ id: slice.id, stack: slice.stack, effective_paths: slice.effective_paths })));
+  for (const path of changedPaths) {
+    const owners = ownership.owners(path);
+    if (owners.length !== 1 || owners[0].id !== amendment.owner_slice_id || isPrivilegedControlPlanePath(path)) {
+      throw new Error(`integration amendment changed path '${path}' is not solely owned by admitted owner '${amendment.owner_slice_id}'`);
+    }
+  }
+}
+
+function assertAmendmentIntegration(run, options) {
+  const amendment = run.integration_amendment;
+  const integration = amendment.integration;
+  const attempt = amendment.attempts.at(-1);
+  const repository = resolveAuthorityRepository(null, run, options);
+  if (resolveRequiredCommit(repository, integration.ref, options, "integration amendment staging ref") !== integration.commit) throw new Error("integration amendment staging ref is stale");
+  const parents = authorityGit(options, repository, ["rev-list", "--parents", "-n", "1", integration.commit]);
+  const values = parents.ok ? parents.stdout.trim().split(/\s+/u) : [];
+  if (values.length !== 3 || values[1] !== amendment.admission.baseline_commit || values[2] !== attempt.reviewed_commit) throw new Error("integration amendment staging commit must have exact ordered baseline/reviewed parents");
+  const bases = authorityGit(options, repository, ["merge-base", "--all", amendment.admission.baseline_commit, attempt.reviewed_commit]);
+  if (!bases.ok || bases.stdout.trim() !== amendment.admission.baseline_commit) throw new Error("integration amendment reviewed tree must have the unique admission baseline merge base");
+  const tree = authorityGit(options, repository, ["rev-parse", "--verify", `${integration.commit}^{tree}`]);
+  if (!tree.ok || tree.stdout.trim() !== attempt.reviewed_tree || integration.tree !== attempt.reviewed_tree) throw new Error("integration amendment staged tree differs from reviewed tree");
+  const reviewedPaths = observeNoRenamePathSet(repository, amendment.admission.baseline_commit, attempt.reviewed_commit, options, "integration amendment reviewed diff");
+  const integratedPaths = observeNoRenamePathSet(repository, amendment.admission.baseline_commit, integration.commit, options, "integration amendment staged diff");
+  if (!sameStringSet(reviewedPaths, integratedPaths)) throw new Error("integration amendment staged changed paths differ from reviewed paths");
+  assertIntegrationAmendmentChangedPathOwnership(run, amendment, [...reviewedPaths]);
+  for (const path of reviewedPaths) {
+    const literal = `:(literal)${path}`;
+    const reviewedEntry = authorityGit(options, repository, ["ls-tree", "-z", attempt.reviewed_commit, "--", literal]);
+    const integratedEntry = authorityGit(options, repository, ["ls-tree", "-z", integration.commit, "--", literal]);
+    if (!reviewedEntry.ok || !integratedEntry.ok || reviewedEntry.stdout !== integratedEntry.stdout) throw new Error(`integration amendment staged path '${path}' differs from reviewed identity`);
+  }
+  createOrReplayDetachedAmendmentWorktree(repository, integration.worktree, integration.commit, options);
+  const feature = resolveRequiredCommit(repository, amendment.admission.baseline_ref, options, "integration amendment feature ref");
+  const allowedFeatureHeads = amendment.status === "verified" ? [amendment.admission.baseline_commit, integration.commit]
+    : amendment.status === "merged" ? [integration.commit]
+      : [amendment.admission.baseline_commit];
+  if (!allowedFeatureHeads.includes(feature)) throw new Error("integration amendment feature ref is stale");
+}
+
+function observeCompletedAmendmentExecution(runDir, run, phase) {
+  const amendment = run.integration_amendment;
+  const claimRef = `evidence/integration-amendment-${amendment.amendment_id}.${phase}.claim.json`;
+  const receiptRef = `evidence/integration-amendment-${amendment.amendment_id}.${phase}.receipt.json`;
+  const claimPath = resolveEvidenceRef(runDir, claimRef).path;
+  const receiptPath = resolveEvidenceRef(runDir, receiptRef).path;
+  const claim = validateIntegrationAmendmentExecutionClaim(parseJsonObjectFile(claimPath, "integration amendment execution claim"));
+  const receipt = validateIntegrationAmendmentExecutionReceipt(parseJsonObjectFile(receiptPath, "integration amendment execution receipt"));
+  const receiptHash = hashFile(receiptPath);
+  if (claim.phase !== phase || claim.state !== "completed" || claim.receipt_ref !== receiptRef || claim.receipt_hash !== receiptHash || claim.status !== receipt.status
+    || receipt.claim_nonce !== claim.nonce || claim.run_id !== run.run_id || claim.amendment_id !== amendment.amendment_id
+    || !sameJson(claim.probe, amendment.admission.probe) || !sameJson(receipt.probe, amendment.admission.probe)
+    || claim.head_sha !== amendment.integration.commit || receipt.head_sha !== amendment.integration.commit
+    || claim.tree_sha !== amendment.integration.tree || receipt.tree_sha !== amendment.integration.tree
+    || resolve(claim.cwd) !== resolve(amendment.integration.worktree) || resolve(receipt.cwd) !== resolve(amendment.integration.worktree)) throw new Error("integration amendment execution claim/receipt is stale or cross-bound");
+  return { claim, receipt, binding: { claim_ref: claimRef, claim_hash: hashFile(claimPath), receipt_ref: receiptRef, receipt_hash: receiptHash } };
+}
+
+function assertBoundAmendmentVerification(runDir, run) {
+  const observed = observeCompletedAmendmentExecution(runDir, run, "verify");
+  if (observed.claim.status !== "pass" || observed.receipt.review_ready !== true || !sameJson(observed.binding, run.integration_amendment.verification)) throw new Error("integration amendment passing verification binding is stale");
+}
+
+function observeFeatureWorktreeSnapshot(repository, worktree, featureBranch, baselineTree, integrationTree, featureHead, baselineCommit, integrationCommit, options) {
+  const identity = checkWorktreeIdentity(repository, worktree, { branch: featureBranch, head: featureHead });
+  const index = authorityGit(options, worktree, ["write-tree"]);
+  const files = authorityGit(options, worktree, ["diff-files", "--quiet"]);
+  const untracked = authorityGit(options, worktree, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  const merge = authorityGit(options, worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+  const rebase = existsSync(join(worktree, ".git", "rebase-merge")) || existsSync(join(worktree, ".git", "rebase-apply"));
+  if (!identity.ok || !index.ok || !files.ok || !untracked.ok || untracked.stdout !== "" || merge.ok || rebase) return { case: "foreign-or-dirty" };
+  if (index.stdout.trim() === integrationTree && featureHead === integrationCommit) return { case: "integration" };
+  if (index.stdout.trim() === baselineTree && featureHead === baselineCommit) return { case: "baseline" };
+  if (index.stdout.trim() === baselineTree && featureHead === integrationCommit) return { case: "pre-cas-baseline" };
+  return { case: "foreign-or-dirty" };
+}
+
+function assertPublishedAmendment(run, options) {
+  const amendment = run.integration_amendment;
+  const repository = resolveAuthorityRepository(null, run, options);
+  assertIntegrationAmendmentChangedPathOwnership(run, amendment, amendment.attempts.at(-1).changed_paths);
+  if (resolveRequiredCommit(repository, amendment.publication.branch_ref, options, "integration amendment publication ref") !== amendment.integration.commit) throw new Error("integration amendment publication ref is stale");
+  const featureHead = resolveRequiredCommit(repository, amendment.publication.branch_ref, options, "integration amendment publication ref");
+  const featureBranch = amendment.admission.baseline_ref.slice("refs/heads/".length);
+  const snapshot = observeFeatureWorktreeSnapshot(repository, amendment.admission.worktree, featureBranch, amendment.admission.baseline_tree, amendment.integration.tree, featureHead, amendment.admission.baseline_commit, amendment.integration.commit, options);
+  if (snapshot.case !== "integration") throw new Error("integration amendment published worktree is stale or dirty");
+}
+
+// ---------------------------------------------------------------------------
 // Merged-sibling repair: a bounded, first-class owner route for an integration
 // defect that a consumer slice exposes in an ALREADY MERGED dependency before
 // the post-merge integration gate. The merged slice's durable history stays
@@ -7186,6 +8380,10 @@ const MERGED_SLICE_REPAIR_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/u;
 export async function transitionMergedSliceRepair(runDir, input = {}, options = {}) {
   const request = normalizeMergedSliceRepairInput(input);
   const result = await withRunJsonLock(runDir, async () => transitionRunJsonLocked(runDir, (draft, { current }) => {
+    if (request.status === "reported" && current.merged_slice_repair == null) {
+      const inventory = inspectIntegrationAmendmentInventory(runDir, current);
+      if (inventory.classification !== "all-absent") throw new Error("legacy repair admission rejects an existing generic amendment tombstone");
+    }
     const nextRepair = nextMergedSliceRepair(runDir, draft, draft.merged_slice_repair, request, options);
     if (request.status === "review" && current.merged_slice_repair?.status === "repairing") {
       consumeSpecialBuilderDispatch(runDir, current, draft, "merged-slice-repair", nextRepair.reviewed_commit);
@@ -7244,6 +8442,8 @@ export function activeMergedSliceRepair(run) {
 // is terminalized through the checked terminal transition, so a failed repair
 // can never be bypassed by simply continuing the run.
 export function mergedSliceRepairFence(run) {
+  const amendment = run?.integration_amendment;
+  if (amendment && typeof amendment === "object" && !Array.isArray(amendment) && amendment.status !== "merged") return amendment;
   const repair = run?.merged_slice_repair;
   if (!repair || typeof repair !== "object" || Array.isArray(repair)) return null;
   return repair.status !== "merged" ? repair : null;
@@ -7301,7 +8501,7 @@ function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
     throw new Error(`merged-slice repair is terminal ('${current.status}'); a further defect requires a recovery run`);
   }
   const stampedAt = timestamp(options.now);
-  if (request.status === "reported") return reportedMergedSliceRepair(runDir, run, current, request, stampedAt);
+  if (request.status === "reported") return reportedMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   if (!current) throw new Error("merged-slice repair must be reported before any other transition");
   if (request.status === "repairing") return repairingMergedSliceRepair(runDir, run, current, request, stampedAt, options);
   if (request.status === "review") return reviewMergedSliceRepair(runDir, run, current, request, stampedAt, options);
@@ -7309,7 +8509,7 @@ function nextMergedSliceRepair(runDir, run, current, request, options = {}) {
   return { ...current, status: "blocked", reason: request.reason, updated_at: stampedAt };
 }
 
-function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
+function reportedMergedSliceRepair(runDir, run, current, request, stampedAt, options = {}) {
   if (current) throw new Error("only one merged-slice repair incident is allowed per run");
   assertRepairAdmissionWindow(run);
   const slices = Array.isArray(run.slices) ? run.slices : [];
@@ -7338,6 +8538,7 @@ function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
   if (evidenceJson.status !== "fail") {
     throw new Error("repair reproduction evidence must record an observed failing consumer run (status \"fail\")");
   }
+  rejectGenericEligibleLegacyRepairAdmission(runDir, run, request, options);
   return {
     schema_version: 1,
     plan_hash: planHash,
@@ -7352,6 +8553,33 @@ function reportedMergedSliceRepair(runDir, run, current, request, stampedAt) {
     created_at: stampedAt,
     updated_at: stampedAt,
   };
+}
+
+function rejectGenericEligibleLegacyRepairAdmission(runDir, run, request, options = {}) {
+  const consumer = (run.slices || []).find((slice) => slice?.id === request.consumer_slice_id);
+  const consumerKeys = new Set(["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts"]);
+  if (consumer?.status !== "pending" || consumer.attempts !== 0 || Object.keys(consumer).some((key) => !consumerKeys.has(key))) return;
+  let decomposition;
+  try {
+    decomposition = observeAcceptedDecompositionAuthority(runDir, run, { ...options, requireIntegrationGate: true, requireApprovingReview: true });
+  } catch {
+    return;
+  }
+  const artifacts = decomposition.plan.delivery_envelope?.delivery_units
+    ?.find((unit) => unit.slice_id === consumer.id)?.verification_artifacts || [];
+  for (const artifact of artifacts) {
+    try {
+      observeIntegrationAmendmentAdmission(runDir, run, {
+        owner_slice_id: request.owner_slice_id,
+        consumer_slice_id: request.consumer_slice_id,
+        defect_path: request.defect_path,
+        verification_artifact_id: artifact.id,
+      }, options, { initial: true });
+    } catch {
+      continue;
+    }
+    throw new Error(`legacy merged-slice repair report is retired for this generic-eligible incident; use factory amendment ${run.run_id} report --owner-slice ${request.owner_slice_id} --consumer-slice ${request.consumer_slice_id} --defect-path ${request.defect_path} --artifact-id ${artifact.id} --json`);
+  }
 }
 
 function repairingMergedSliceRepair(runDir, run, current, request, stampedAt, options = {}) {

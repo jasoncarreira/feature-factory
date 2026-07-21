@@ -15,6 +15,27 @@ const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const RUN_ID = "cli-write-surface";
 
 describe("cli write surface", () => {
+  it("exposes only the strict integration amendment grammar", () => {
+    const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-amendment-grammar-"));
+    try {
+      initGitRepo(repo);
+      for (const args of [
+        ["factory", "amendment", RUN_ID, "report", "--owner-slice", "owner", "--consumer-slice", "consumer", "--defect-path", "src/a.js", "--artifact-id", "a"],
+        ["factory", "amendment", RUN_ID, "report", "--owner-slice", "owner", "--consumer-slice", "consumer", "--defect-path", "src/a.js", "--artifact-id", "a", "--commit", "a".repeat(40), "--json"],
+        ["factory", "amendment", RUN_ID, "build", "--attempt", "3", "--json"],
+        ["factory", "amendment", RUN_ID, "review", "--review-ref", "reviews/caller.json", "--json"],
+        ["factory", "amendment", RUN_ID, "integrate", "--repo", repo, "--json"],
+        ["factory", "amendment", RUN_ID, "verify", "--head-sha", "a".repeat(40), "--json"],
+        ["factory", "amendment", RUN_ID, "merge", "--merge-commit", "a".repeat(40), "--json"],
+        ["factory", "amendment", RUN_ID, "block", "--reason", "stopped"],
+      ]) {
+        const proc = spawnSync(process.execPath, [CLI, ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+        assert.equal(proc.status, 1, args.join(" "));
+        assert.match(proc.stderr, /factory amendment|unknown option/u, args.join(" "));
+      }
+    } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+
   it("exposes only the exact JSON checked-test execution grammar", () => {
     const repo = mkdtempSync(join(tmpdir(), "feature-factory-cli-test-execute-grammar-"));
     try {

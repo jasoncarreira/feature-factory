@@ -739,6 +739,30 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("rejects a merge whose Git path proof includes commits hidden from ownership review", async () => {
+    const fixture = createFixture("slice-merge-hidden-predispatch-poison");
+    try {
+      initGitRepo(fixture.repo, ["slice-branch"]);
+      const prepared = prepareSliceMergeState(fixture, {
+        reviewedPath: "src/consumer.js",
+        preDispatchPath: "src/owner.js",
+      });
+      const beforeRun = readFileSync(join(fixture.runDir, "run.json"));
+      const beforeHead = gitOutput(fixture.repo, ["rev-parse", "HEAD"]);
+
+      await assert.rejects(
+        transitionSliceMerged(fixture.runDir, "slice", { merge_commit: prepared.mergeCommit }),
+        /merge base must equal its authorized baseline|merge path set must exactly equal its ownership-reviewed path set/u,
+      );
+
+      assert.deepEqual(readFileSync(join(fixture.runDir, "run.json")), beforeRun);
+      assert.equal(gitOutput(fixture.repo, ["rev-parse", "HEAD"]), beforeHead);
+      assert.equal(readJson(join(fixture.runDir, "run.json")).slices[0].status, "review");
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("rejects a delivery-envelope merge when the APPROVE review lacks active ledger authority", async () => {
     const fixture = createFixture("slice-merge-missing-ledger-authority");
     try {
@@ -4284,7 +4308,7 @@ async function closeBuilderDispatch(fixture, attempt, taskWork = () => {}) {
   return context;
 }
 
-function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice", writeReview = true, priorIntegration = false, reviewedPath = "slice.txt", integrationConflict = false, conflictTopology = null } = {}) {
+function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice", writeReview = true, priorIntegration = false, reviewedPath = "slice.txt", preDispatchPath = null, integrationConflict = false, conflictTopology = null } = {}) {
   mkdirSync(join(fixture.runDir, "evidence"), { recursive: true });
   mkdirSync(join(fixture.runDir, "reviews"), { recursive: true });
   if (conflictTopology) {
@@ -4296,6 +4320,12 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
   const sliceWorktree = join(fixture.repo, ".opencode", "worktrees", "slice");
   mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
   runGit(fixture.repo, ["worktree", "add", sliceWorktree, "slice-branch"]);
+  if (preDispatchPath) {
+    mkdirSync(join(sliceWorktree, ...preDispatchPath.split("/").slice(0, -1)), { recursive: true });
+    writeFileSync(join(sliceWorktree, preDispatchPath), "caller-controlled pre-dispatch poison\n");
+    runGit(sliceWorktree, ["add", preDispatchPath]);
+    runGit(sliceWorktree, ["commit", "-m", "caller-controlled pre-dispatch poison"]);
+  }
   const diffBaseCommit = gitOutput(sliceWorktree, ["rev-parse", "HEAD"]);
   if (conflictTopology) {
     runGit(sliceWorktree, ["mv", "rename-source.txt", reviewedPath]);
@@ -4356,6 +4386,7 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
   };
   const slices = [{
     id: "slice", stack: "backend", depends_on: [], declared_paths: declaredPaths, effective_paths: declaredPaths, status: "review", attempts: 1, branch: "slice-branch", worktree: sliceWorktree,
+    ...(preDispatchPath ? { authorized_baseline_commit: diffBaseCommit } : {}),
     evidence_ref: "evidence/slice.json", evidence_hash: evidenceHash,
     review_ref: "reviews/slice.json", review_hash: reviewHash, reviewed_commit: reviewedCommit,
     attempt_reviews: [attemptReview],

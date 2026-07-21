@@ -3,9 +3,9 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
-import { parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
+import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
 import { diagnoseRunDir, diagnoseRunObject } from "./factory-diagnostics.js";
 import { createTwoRefsAtomicallyNoReplace, git, repoRoot } from "./git.js";
@@ -27,6 +27,8 @@ import { verificationArtifactExecutionClaimRef } from "./verification-artifact-r
 import { canonicalGithubRepositoryFromOrigin, observePullRequestOperation } from "./github.js";
 import { reconcileCheckpointPublication } from "./checkpoint-publication.js";
 import { assertCheckpointCleanupEligible, assertCheckpointRemoteMainAdvanced, buildCheckpointFinalClosure, buildCheckpointMergedCompletion, resolveCheckpointCompletionLineage, verifyRecordedCheckpointMerges } from "./checkpoint-completion.js";
+import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
+import { checkedExecutionEnvironment, executeCheckedCommand } from "./test-execution.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -1040,6 +1042,7 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   if (readResult.error) return syntheticDisruptedTerminal(target.runId, target.runDir, target.runFile, readResult.error, opts);
 
   const run = readResult.run;
+  assertFactoryAmendmentOrdinaryAuthority(target.runDir, run, "recovery");
   await assertRunClaimRoute(repo, run, opts);
   assertNoPendingSpecialBuilderDispatches(target.runDir, run);
   if (run.continuation?.schema_version === 2) assertCarryForwardResumeAuthority(repo, target.runDir, run, opts);
@@ -1087,6 +1090,7 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   const current = checkExistingRecoveryWorktree(repo, worktree.path, run.branch);
   if (current.status === "healthy") {
     await opts.recoveryHooks?.beforePostPrReconcile?.({ runDir: target.runDir, run });
+    assertFactoryAmendmentOrdinaryAuthority(target.runDir, readRunFile(target.runFile), "recovery reconciliation");
     assertRecoveryV2Authority(repo, target.runDir, run, opts);
     const reconciliation = await reconcilePostPrCrash(target.runDir, { ...opts, cwd: repo });
     const reconciledRun = readRunFile(target.runFile);
@@ -1106,7 +1110,10 @@ export async function recoverDisruptedRun(runId, opts = {}) {
   }
 
   await opts.recoveryHooks?.beforeWorktreeAdd?.({ runDir: target.runDir, run, worktree: worktree.path });
-  const addResult = addRecoveryWorktree(repo, worktree.path, run.branch, () => assertRecoveryV2Authority(repo, target.runDir, run, opts));
+  const addResult = addRecoveryWorktree(repo, worktree.path, run.branch, () => {
+    assertFactoryAmendmentOrdinaryAuthority(target.runDir, readRunFile(target.runFile), "recovery worktree creation");
+    assertRecoveryV2Authority(repo, target.runDir, run, opts);
+  });
   if (!addResult.ok) {
     return persistRecoveryTerminal(target.runDir, run, "blocked", addResult.reason, opts);
   }
@@ -1439,6 +1446,7 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
   return withRunJsonLock(runDir, async () => {
     const runPath = join(runDir, "run.json");
     const current = readRunFile(runPath);
+    assertFactoryAmendmentOrdinaryAuthority(runDir, current, "recovery terminalization");
     if (TERMINAL_STATUSES.has(current.status)) return recoveryEnvelope(current, {
       ok: false,
       durable: true,
@@ -1454,6 +1462,7 @@ async function persistRecoveryTerminal(runDir, priorRun, statusValue, reason, op
     if (current.steering?.action_claim) throw new Error("recovery terminalization rejected: action start acknowledgement is pending");
     if (current.steering?.pr_fence) throw new Error("recovery terminalization rejected: active pre-PR fence");
     await opts.recoveryHooks?.beforeTerminalWrite?.({ runDir, run: current });
+    assertFactoryAmendmentOrdinaryAuthority(runDir, readRunFile(runPath), "recovery terminalization");
     assertRecoveryV2Authority(factoryRepoFromRunDir(runDir), runDir, current, opts);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, current, { ...opts, repoRoot: factoryRepoFromRunDir(runDir) });
     bestEffortStopHeartbeatForTerminal(runDir, opts);
@@ -2635,6 +2644,374 @@ export function probeFactorySlices(runId, opts = {}) {
   return probeSlicesPlanAdmission(runDir, opts);
 }
 
+function observeFactoryAmendmentAuthority(runDir, run) {
+  const inventory = inspectIntegrationAmendmentInventory(runDir, run);
+  const amendment = run.integration_amendment;
+  if (amendment?.status === "merged") assertIntegrationAmendmentConsistency(runDir, run);
+  return { inventory, amendment };
+}
+
+function assertFactoryAmendmentOrdinaryAuthority(runDir, run, operation) {
+  const { inventory, amendment } = observeFactoryAmendmentAuthority(runDir, run);
+  if (inventory.classification === "all-absent"
+    || ["completed-pass-receipt-no-manifest", "completed-diagnostic-receipt-no-manifest"].includes(inventory.classification)
+    || amendment?.status === "merged") return inventory;
+  throw new Error(`${operation} rejected: integration amendment authority is ${amendment?.status || inventory.classification}`);
+}
+
+function assertFactoryAmendmentContinuationAbsent(runDir, run) {
+  let inventory;
+  try {
+    ({ inventory } = observeFactoryAmendmentAuthority(runDir, run));
+  } catch (error) {
+    if (/integration amendment review directory must be a regular directory/u.test(error.message)) {
+      throw new Error("continuation parent requires a reviews/ directory without symlinks", { cause: error });
+    }
+    throw error;
+  }
+  if (inventory.classification !== "all-absent") throw new Error("integration-amendment-continuation-unsupported");
+}
+
+function assertFactoryAmendmentCleanupAuthority(runDir, run) {
+  const { inventory, amendment } = observeFactoryAmendmentAuthority(runDir, run);
+  if (inventory.classification === "all-absent" || amendment?.status === "merged") return;
+  throw new Error(`cleanup rejected: integration amendment authority is ${amendment?.status || inventory.classification}`);
+}
+
+export async function executeIntegrationAmendment(runDirInput, request, opts = {}) {
+  const runDir = resolve(runDirInput);
+  if (!request || !["report", "verify"].includes(request.action)) {
+    return transitionIntegrationAmendment(runDir, request, opts);
+  }
+  const phase = request.action;
+  const claimed = await claimIntegrationAmendmentExecution(runDir, phase, request, opts);
+  let execution = claimed;
+  if (!claimed.replayed) {
+    await opts.integrationAmendmentExecutionHooks?.afterClaim?.({ claim: cloneJson(claimed.claim), authority: cloneJson(claimed.authority) });
+    const startedMs = amendmentClockMs(opts);
+    const startedAt = amendmentClockIso(opts);
+    let result;
+    try {
+      result = await executeCheckedCommand(
+        { program: claimed.authority.probe.program, args: claimed.authority.probe.args },
+        0,
+        claimed.authority.cwd,
+        checkedExecutionEnvironment(opts.env ?? process.env),
+        opts,
+      );
+      await opts.integrationAmendmentExecutionHooks?.afterProcess?.({ claim: cloneJson(claimed.claim), authority: cloneJson(claimed.authority), result: cloneJson(result) });
+    } catch (error) {
+      await markIntegrationAmendmentExecutionUnknown(runDir, claimed.claim, "process-outcome-indeterminate", opts);
+      throw amendmentExecutionError(`integration amendment ${phase} process outcome is indeterminate: ${error.message}`);
+    }
+    const completedMs = amendmentClockMs(opts);
+    const completedAt = amendmentClockIso(opts);
+    const status = result.outcome === "exited" && result.exit_code === 0 && result.signal === null ? "pass" : "fail";
+    const receipt = validateIntegrationAmendmentExecutionReceipt({
+      schema_version: 1,
+      kind: "integration-amendment-execution-receipt",
+      phase,
+      subject: claimed.claim.subject,
+      run_id: claimed.claim.run_id,
+      amendment_id: claimed.claim.amendment_id,
+      claim_nonce: claimed.claim.nonce,
+      probe: cloneJson(claimed.claim.probe),
+      head_sha: claimed.claim.head_sha,
+      tree_sha: claimed.claim.tree_sha,
+      cwd: claimed.claim.cwd,
+      started_at: startedAt,
+      completed_at: completedAt,
+      duration_ms: Math.max(0, completedMs - startedMs),
+      status,
+      review_ready: phase === "verify" ? status === "pass" : result.outcome === "exited" && result.exit_code !== 0,
+      commands: [result],
+    });
+    execution = await completeIntegrationAmendmentExecution(runDir, claimed.claim, claimed.authority, receipt, opts);
+  }
+
+  if (phase === "report") {
+    const receipt = execution.receipt;
+    if (receipt.status === "pass") return amendmentExecutionEnvelope(execution, "not-reproduced", null);
+    if (receipt.review_ready !== true) return amendmentExecutionEnvelope(execution, "diagnostic", null);
+    const transitioned = await transitionIntegrationAmendment(runDir, request, opts);
+    return amendmentExecutionEnvelope(execution, transitioned.integration_amendment?.status || "reported", transitioned);
+  }
+
+  const current = readRunFile(join(runDir, "run.json"));
+  if (current.integration_amendment?.status === "blocked" && current.integration_amendment.blocked?.origin === "integrated") {
+    return amendmentExecutionEnvelope(execution, "blocked", { run: current, integration_amendment: current.integration_amendment, updated: false });
+  }
+  const transitioned = await transitionIntegrationAmendment(runDir, { action: "verify" }, opts);
+  return amendmentExecutionEnvelope(execution, transitioned.integration_amendment.status, transitioned);
+}
+
+async function claimIntegrationAmendmentExecution(runDir, phase, request, opts) {
+  return withRunJsonLock(runDir, async () => {
+    const runPath = join(runDir, "run.json");
+    const run = readRunFile(runPath);
+    const inventory = inspectIntegrationAmendmentInventory(runDir, run);
+    if (phase === "report" && inventory.classification !== "all-absent") {
+      if (["active-claim-only", "unknown-claim-optional-bound-receipt"].includes(inventory.classification)) {
+        throw amendmentExecutionError(`integration amendment report execution is ${inventory.classification}`);
+      }
+      const authority = reportReplayAuthority(inventory, request);
+      return { replayed: true, authority, claim: inventory.report_claim, receipt: inventory.report_receipt };
+    }
+    if (phase === "verify" && inventory.verification_effect) {
+      if (["active", "unknown"].includes(inventory.verification_effect.state)) {
+        throw amendmentExecutionError(`integration amendment verification execution is ${inventory.verification_effect.state}`);
+      }
+      return {
+        replayed: true,
+        authority: executionAuthorityFromClaim(inventory.verification_effect.claim),
+        claim: inventory.verification_effect.claim,
+        receipt: inventory.verification_effect.receipt,
+      };
+    }
+    const authority = observeIntegrationAmendmentExecutionAuthority(runDir, run, phase, request, { ...opts, repoRoot: opts.repoRoot || factoryRepoFromRunDir(runDir) });
+    const claim = validateIntegrationAmendmentExecutionClaim({
+      schema_version: 1,
+      kind: "integration-amendment-execution-claim",
+      phase,
+      subject: `integration-amendment:${authority.amendment_id}:${phase}`,
+      state: "active",
+      nonce: opts.nonce || randomUUID(),
+      amendment_id: authority.amendment_id,
+      identity: cloneJson(authority.identity),
+      run_id: authority.run_id,
+      probe: cloneJson(authority.probe),
+      head_sha: authority.head_sha,
+      tree_sha: authority.tree_sha,
+      cwd: authority.cwd,
+      receipt_ref: authority.receipt_ref,
+      claimed_at: amendmentClockIso(opts),
+    });
+    const receiptPath = resolve(runDir, authority.receipt_ref);
+    if (existsSync(receiptPath)) throw amendmentExecutionError("integration amendment execution receipt exists without its claim");
+    await writeProtectedJsonAtomic(runDir, authority.claim_ref, claim, {
+      commit: "create-only",
+      hooks: {
+        ...opts.integrationAmendmentClaimAtomicWriteHooks,
+        beforeCommit: async () => {
+          await opts.integrationAmendmentClaimAtomicWriteHooks?.beforeCommit?.();
+          const current = readRunFile(runPath);
+          if (!sameJsonValue(current, run) || existsSync(receiptPath)) throw new Error("integration amendment authority changed before claim publication");
+          const observed = observeIntegrationAmendmentExecutionAuthority(runDir, current, phase, request, { ...opts, repoRoot: opts.repoRoot || factoryRepoFromRunDir(runDir) });
+          assertSameAmendmentExecutionAuthority(observed, authority);
+        },
+      },
+    });
+    return { replayed: false, authority, claim, receipt: null };
+  }, opts);
+}
+
+async function completeIntegrationAmendmentExecution(runDir, expectedClaim, expectedAuthority, receipt, opts) {
+  return withRunJsonLock(runDir, async () => {
+    const runPath = join(runDir, "run.json");
+    const run = readRunFile(runPath);
+    assertExactAmendmentExecutionClaim(runDir, expectedClaim);
+    let currentAuthority;
+    try {
+      currentAuthority = observeIntegrationAmendmentExecutionAuthority(runDir, run, expectedClaim.phase, expectedAuthority.request || {}, { ...opts, repoRoot: opts.repoRoot || factoryRepoFromRunDir(runDir) });
+      assertSameAmendmentExecutionAuthority(currentAuthority, expectedAuthority);
+    } catch (error) {
+      await persistIntegrationAmendmentUnknownLocked(runDir, expectedClaim, "authority-changed", opts);
+      throw amendmentExecutionError(`integration amendment execution authority changed after process close: ${error.message}`);
+    }
+    assertAmendmentReceiptMatchesClaim(receipt, expectedClaim);
+    try {
+      await writeProtectedJsonAtomic(runDir, expectedClaim.receipt_ref, receipt, {
+        commit: "create-only",
+        hooks: {
+          ...opts.integrationAmendmentReceiptAtomicWriteHooks,
+          beforeCommit: async () => {
+            await opts.integrationAmendmentReceiptAtomicWriteHooks?.beforeCommit?.();
+            try {
+              assertExactAmendmentExecutionClaim(runDir, expectedClaim);
+              const current = readRunFile(runPath);
+              const observed = observeIntegrationAmendmentExecutionAuthority(runDir, current, expectedClaim.phase, expectedAuthority.request || {}, { ...opts, repoRoot: opts.repoRoot || factoryRepoFromRunDir(runDir) });
+              assertSameAmendmentExecutionAuthority(observed, expectedAuthority);
+            } catch (error) {
+              error.integrationAmendmentAuthorityChanged = true;
+              throw error;
+            }
+          },
+        },
+      });
+    } catch (error) {
+      const authorityChanged = amendmentAuthorityChangedError(error);
+      await persistIntegrationAmendmentUnknownLocked(runDir, expectedClaim, authorityChanged ? "authority-changed" : "receipt-publication-indeterminate", opts);
+      throw amendmentExecutionError(authorityChanged
+        ? `integration amendment authority changed before receipt publication: ${error.message}`
+        : `integration amendment receipt publication is indeterminate: ${error.message}`);
+    }
+    const receiptHash = sha256File(resolve(runDir, expectedClaim.receipt_ref));
+    try {
+      await opts.integrationAmendmentExecutionHooks?.afterReceipt?.({ claim: cloneJson(expectedClaim), authority: cloneJson(expectedAuthority), receipt: cloneJson(receipt), receipt_hash: receiptHash });
+      const current = readRunFile(runPath);
+      const observed = observeIntegrationAmendmentExecutionAuthority(runDir, current, expectedClaim.phase, expectedAuthority.request || {}, { ...opts, repoRoot: opts.repoRoot || factoryRepoFromRunDir(runDir) });
+      assertSameAmendmentExecutionAuthority(observed, expectedAuthority);
+    } catch (error) {
+      await persistIntegrationAmendmentUnknownLocked(runDir, expectedClaim, "authority-changed", opts);
+      throw amendmentExecutionError(`integration amendment authority changed after receipt publication: ${error.message}`);
+    }
+    const completed = validateIntegrationAmendmentExecutionClaim({
+      ...cloneJson(expectedClaim),
+      state: "completed",
+      completed_at: receipt.completed_at,
+      status: receipt.status,
+      receipt_hash: receiptHash,
+    });
+    try {
+      await writeProtectedJsonAtomic(runDir, expectedAuthority.claim_ref, completed, { hooks: {
+        ...opts.integrationAmendmentCompletedClaimAtomicWriteHooks,
+        beforeCommit: async () => {
+          await opts.integrationAmendmentCompletedClaimAtomicWriteHooks?.beforeCommit?.();
+          assertExactAmendmentExecutionClaim(runDir, expectedClaim);
+          const exactReceipt = validateIntegrationAmendmentExecutionReceipt(JSON.parse(readFileSync(resolve(runDir, expectedClaim.receipt_ref), "utf8")));
+          if (!sameJsonValue(exactReceipt, receipt) || sha256File(resolve(runDir, expectedClaim.receipt_ref)) !== receiptHash) throw new Error("integration amendment receipt changed before claim closure");
+        },
+      } });
+      await opts.integrationAmendmentCompletedClaimAtomicWriteHooks?.afterCommit?.();
+    } catch (error) {
+      const observed = readIntegrationAmendmentExecutionClaimIfExact(runDir, expectedAuthority.claim_ref, completed);
+      if (observed) throw amendmentExecutionError(`integration amendment claim closure published but completion acknowledgement is indeterminate: ${error.message}`);
+      await persistIntegrationAmendmentUnknownLocked(runDir, expectedClaim, "receipt-publication-indeterminate", opts);
+      throw amendmentExecutionError(`integration amendment claim closure is indeterminate: ${error.message}`);
+    }
+    return { replayed: false, authority: currentAuthority, claim: completed, receipt, receipt_hash: receiptHash };
+  }, opts);
+}
+
+function readIntegrationAmendmentExecutionClaimIfExact(runDir, ref, expected) {
+  try {
+    const value = validateIntegrationAmendmentExecutionClaim(JSON.parse(readFileSync(resolve(runDir, ref), "utf8")));
+    return sameJsonValue(value, expected) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function markIntegrationAmendmentExecutionUnknown(runDir, expectedClaim, reason, opts) {
+  return withRunJsonLock(runDir, () => persistIntegrationAmendmentUnknownLocked(runDir, expectedClaim, reason, opts), opts);
+}
+
+async function persistIntegrationAmendmentUnknownLocked(runDir, expectedClaim, reason, opts) {
+  assertExactAmendmentExecutionClaim(runDir, expectedClaim);
+  const receiptPath = resolve(runDir, expectedClaim.receipt_ref);
+  let receiptStatus = null;
+  let receiptHash = null;
+  if (existsSync(receiptPath)) {
+    const receipt = validateIntegrationAmendmentExecutionReceipt(JSON.parse(readFileSync(receiptPath, "utf8")));
+    assertAmendmentReceiptMatchesClaim(receipt, expectedClaim);
+    receiptStatus = receipt.status;
+    receiptHash = sha256File(receiptPath);
+  }
+  const unknown = validateIntegrationAmendmentExecutionClaim({
+    ...cloneJson(expectedClaim),
+    state: "unknown",
+    failed_at: amendmentClockIso(opts),
+    reason,
+    receipt_status: receiptStatus,
+    receipt_hash: receiptHash,
+  });
+  await writeProtectedJsonAtomic(runDir, executionClaimRef(expectedClaim), unknown, { hooks: { beforeCommit: () => assertExactAmendmentExecutionClaim(runDir, expectedClaim) } });
+  return unknown;
+}
+
+function reportReplayAuthority(inventory, request) {
+  const claim = inventory.report_claim;
+  const expected = {
+    owner_slice_id: request.owner_slice_id,
+    consumer_slice_id: request.consumer_slice_id,
+    defect_path: request.defect_path,
+    verification_artifact_id: request.verification_artifact_id,
+  };
+  const identity = claim.identity;
+  if (identity.defect_path !== expected.defect_path || identity.admission.owner.id !== expected.owner_slice_id
+    || identity.admission.consumer.id !== expected.consumer_slice_id || identity.admission.probe.verification_artifact_id !== expected.verification_artifact_id) {
+    throw amendmentExecutionError("fixed integration amendment report claim belongs to different selectors");
+  }
+  return { ...executionAuthorityFromClaim(claim), request: { action: "report", ...expected } };
+}
+
+function executionAuthorityFromClaim(claim) {
+  return {
+    phase: claim.phase,
+    run_id: claim.run_id,
+    amendment_id: claim.amendment_id,
+    identity: cloneJson(claim.identity),
+    probe: cloneJson(claim.probe),
+    head_sha: claim.head_sha,
+    tree_sha: claim.tree_sha,
+    cwd: resolve(claim.cwd),
+    claim_ref: executionClaimRef(claim),
+    receipt_ref: claim.receipt_ref,
+  };
+}
+
+function executionClaimRef(claim) {
+  return claim.phase === "report" ? "evidence/integration-amendment.report.claim.json" : `evidence/integration-amendment-${claim.amendment_id}.verify.claim.json`;
+}
+
+function assertExactAmendmentExecutionClaim(runDir, expected) {
+  const ref = executionClaimRef(expected);
+  const claim = validateIntegrationAmendmentExecutionClaim(JSON.parse(readFileSync(resolve(runDir, ref), "utf8")));
+  if (claim.state !== "active" || !sameJsonValue(claim, expected)) throw amendmentExecutionError("integration amendment active execution claim changed or is missing");
+  return claim;
+}
+
+function assertSameAmendmentExecutionAuthority(actual, expected) {
+  const projection = (value) => Object.fromEntries(["phase", "run_id", "amendment_id", "identity", "probe", "head_sha", "tree_sha", "cwd", "claim_ref", "receipt_ref"].map((key) => [key, value[key]]));
+  if (!sameJsonValue(projection(actual), projection(expected))) throw new Error("integration amendment execution authority changed");
+}
+
+function assertAmendmentReceiptMatchesClaim(receipt, claim) {
+  for (const key of ["phase", "subject", "run_id", "amendment_id", "probe", "head_sha", "tree_sha", "cwd"]) {
+    if (!sameJsonValue(receipt[key], claim[key])) throw new Error(`integration amendment receipt ${key} is stale`);
+  }
+  if (receipt.claim_nonce !== claim.nonce || receipt.commands.length !== 1 || receipt.commands[0].program !== claim.probe.program
+    || !sameJsonValue(receipt.commands[0].args, claim.probe.args)) throw new Error("integration amendment receipt command or nonce is stale");
+}
+
+function amendmentExecutionEnvelope(execution, statusValue, transition) {
+  return {
+    ...(transition || {}),
+    ok: statusValue === "reported" || statusValue === "verified" || statusValue === "not-reproduced",
+    run_id: execution.claim.run_id,
+    amendment_id: execution.claim.amendment_id,
+    phase: execution.claim.phase,
+    status: statusValue,
+    outcome: execution.receipt.commands[0].outcome,
+    receipt_ref: execution.claim.receipt_ref,
+    receipt_hash: execution.claim.receipt_hash,
+    replayed: execution.replayed,
+  };
+}
+
+function amendmentClockMs(opts) {
+  const value = typeof opts.nowMs === "function" ? opts.nowMs() : Date.now();
+  if (!Number.isFinite(value)) throw new Error("integration amendment execution clock is invalid");
+  return Math.trunc(value);
+}
+
+function amendmentClockIso(opts) {
+  const value = typeof opts.isoNow === "function" ? opts.isoNow() : timestamp(opts.now);
+  if (!stringValue(value) || !Number.isFinite(Date.parse(value))) throw new Error("integration amendment execution timestamp is invalid");
+  return value;
+}
+
+function amendmentExecutionError(message) {
+  const error = new Error(message);
+  error.code = "INTEGRATION_AMENDMENT_OPERATOR_RECONCILIATION_REQUIRED";
+  return error;
+}
+
+function amendmentAuthorityChangedError(error) {
+  for (let current = error; current; current = current.cause) if (current.integrationAmendmentAuthorityChanged === true) return true;
+  return false;
+}
+
 export function heartbeatStatus(runId, opts = {}) {
   const file = heartbeatPath(resolveHeartbeatRunDir(runId, opts));
   if (!existsSync(file)) return null;
@@ -2668,6 +3045,7 @@ export async function startHeartbeat(runId, config = {}, opts = {}) {
 
   await withRunJsonLock(runDir, async () => {
     const run = readRunFile(join(runDir, "run.json"));
+    assertFactoryAmendmentOrdinaryAuthority(runDir, run, "heartbeat start");
     assertNoPendingSpecialBuilderDispatches(runDir, run);
     assertHeartbeatStartable(run);
     const v2Authority = assertV2LocalPublishedAuthority(runDir, run, opts);
@@ -2732,6 +3110,8 @@ export async function stopHeartbeatInRunDir(runDir, opts = {}) {
   let stopped = null;
 
   await withRunJsonLock(runDir, async () => {
+    const run = readRunFile(join(runDir, "run.json"));
+    assertFactoryAmendmentOrdinaryAuthority(runDir, run, "heartbeat stop");
     const current = tryReadHeartbeatFile(heartbeatFile);
     if (current.error) throw new Error(`invalid heartbeat at ${heartbeatFile}: ${current.error}`);
     if (!current.value) {
@@ -2749,6 +3129,7 @@ export async function stopHeartbeatInRunDir(runDir, opts = {}) {
       if (ownership === "live") (opts.signalFn || process.kill)(heartbeat.pid, "SIGTERM");
     }
     stopped = validateHeartbeatState({ ...heartbeat, pid: null, last_tick_at: stoppedAt });
+    assertFactoryAmendmentOrdinaryAuthority(runDir, readRunFile(join(runDir, "run.json")), "heartbeat stop");
     writeHeartbeatFile(heartbeatFile, stopped);
   });
 
@@ -3008,6 +3389,7 @@ export async function cleanupRun(runId, opts = {}) {
 
 async function cleanupRunUnderLock(runDir, repo, opts) {
     const run = readRunFile(join(runDir, "run.json"));
+    assertFactoryAmendmentCleanupAuthority(runDir, run);
     assertCheckpointCleanupForbidden(run, opts.checkpointCleanupAuthorized === true);
     assertCheckpointRoutingParentCleanupClosed(run);
     assertNoUnreconciledTestExecution(run);
@@ -3063,12 +3445,22 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
     throw new Error(`cleanup run directory must be inside .opencode/factory: ${runDir}`);
   }
   const durableRun = readRunFile(join(runDir, "run.json"));
+  assertFactoryAmendmentCleanupAuthority(runDir, durableRun);
   assertCheckpointCleanupForbidden(durableRun, opts.checkpointCleanupAuthorized === true);
   assertCheckpointRoutingParentCleanupClosed(durableRun);
   assertNoUnreconciledTestExecution(durableRun);
   assertNoPendingSpecialBuilderDispatches(runDir, durableRun);
   const targets = collectCleanupTargets(run);
-  if (opts.mode !== "single-run") return cleanupSweepTargetsLocked(repo, runDir, targets, opts);
+  if (opts.mode !== "single-run") {
+    const upstreamAuthority = opts.assertMutationAuthorized;
+    return cleanupSweepTargetsLocked(repo, runDir, targets, {
+      ...opts,
+      assertMutationAuthorized: () => {
+        upstreamAuthority?.();
+        assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+      },
+    });
+  }
 
   const result = {
     run_id: run.run_id,
@@ -3083,15 +3475,27 @@ export function cleanupRunLocked(runDir, run, opts = {}) {
   };
 
   for (const worktree of targets.worktrees) {
+    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    opts.cleanupHooks?.beforeWorktreeRemove?.({ runDir, worktree: { ...worktree } });
+    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     removeWorktree(repo, worktree, result, opts);
   }
   for (const branch of targets.branches) {
+    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    opts.cleanupHooks?.beforeBranchDelete?.({ runDir, branch });
+    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     deleteBranch(repo, branch, result, opts);
   }
 
   if (!opts.dryRun) {
+    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
+    assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
+    opts.cleanupHooks?.beforeRunDirectoryRemove?.({ runDir });
+    assertFactoryAmendmentCleanupAuthority(runDir, readRunFile(join(runDir, "run.json")));
     assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(join(runDir, "run.json")));
     rmSync(runDir, { recursive: true, force: true });
   }
@@ -3641,6 +4045,7 @@ function buildContinuationCandidate(parentRunId, opts = {}) {
   const parentRunFile = join(parentRunDir, "run.json");
   lstatRequiredNoSymlinks(repo, parentRunFile, "parent run.json", "parent run.json must not contain symlinks");
   const parentRun = readRunFile(parentRunFile);
+  assertFactoryAmendmentContinuationAbsent(parentRunDir, parentRun);
   assertOrdinaryContinuationParent(parentRun);
   assertNoUnresolvedSliceDispatches(parentRunDir, parentRun);
   assertNoPendingSpecialBuilderDispatches(parentRunDir, parentRun);
@@ -3785,6 +4190,7 @@ export function assertContinuationBindingsCurrent(repo, parentRunDir, continuati
   if (continuation.parent?.run_ref !== expectedParentRef) throw new Error("continuation parent run_ref no longer identifies the selected parent");
   if (sha256File(parentFile) !== continuation.parent.run_hash) throw new Error("continuation parent run.json changed since payload build");
   const parentRun = readRunFile(parentFile);
+  assertFactoryAmendmentContinuationAbsent(parentRoot, parentRun);
   assertNoUnresolvedSliceDispatches(parentRoot, parentRun);
   assertNoPendingSpecialBuilderDispatches(parentRoot, parentRun);
   for (const [key, actual] of [
@@ -3959,6 +4365,8 @@ function allocateCarryForwardResources(repo, continuation, options = {}) {
 }
 
 function acquireContinuationTargetReservation(repo, continuation) {
+  const parentRunDir = resolve(repo, dirname(continuation.parent.run_ref));
+  assertFactoryAmendmentContinuationAbsent(parentRunDir, readRunFile(join(parentRunDir, "run.json")));
   const runId = continuation.target.run_id;
   const claims = observePermanentContinuationClaims(repo, runId);
   if (continuation.schema_version === 1 && claims.length > 0) throw new Error(`continuation target '${runId}' has schema-v2 claim authority`);
@@ -3977,10 +4385,12 @@ function acquireContinuationTargetReservation(repo, continuation) {
     authority_hash: hashValue(continuation),
   };
   const bytes = canonicalJsonBytes(reservation);
+  assertFactoryAmendmentContinuationAbsent(parentRunDir, readRunFile(join(parentRunDir, "run.json")));
   const written = git(repo, ["hash-object", "-w", "--stdin"], { input: bytes });
   const oid = written.stdout.trim();
   if (!written.ok || !FULL_COMMIT_PATTERN.test(oid)) throw new Error("continuation target reservation blob could not be written");
   const ref = `refs/opencode/continuation-targets/${createHash("sha256").update(runId, "utf8").digest("hex")}`;
+  assertFactoryAmendmentContinuationAbsent(parentRunDir, readRunFile(join(parentRunDir, "run.json")));
   const created = git(repo, ["update-ref", ref, oid, "0".repeat(40)]);
   if (created.ok) return { ref, oid, ...reservation, replayed: false };
   const observed = observeContinuationTargetReservation(repo, runId);
@@ -5645,6 +6055,8 @@ function buildResumePayload(run, opts) {
 }
 
 async function assertRunClaimRoute(repo, run, opts = {}) {
+  const runDir = resolveRunDir(run.run_id, { ...opts, cwd: repo });
+  assertFactoryAmendmentOrdinaryAuthority(runDir, run, "resume or launch");
   const schema = run.continuation?.schema_version === 2 ? 2 : 1;
   inspectContinuationRouteSchema(repo, run.run_id, schema, {
     route: "resume",
@@ -5711,6 +6123,8 @@ function resumeEligibility(runDir, run, opts = {}) {
   if (run.steering?.pr_fence) reasons.push("pre-pr-fence-active");
   try { assertNoPendingSpecialBuilderDispatches(runDir, run); }
   catch { reasons.push("special-builder-dispatch-pending"); }
+  try { assertFactoryAmendmentOrdinaryAuthority(runDir, run, "resume"); }
+  catch { reasons.push("integration-amendment-fenced"); }
   return {
     eligible: reasons.length === 0,
     reasons: [...new Set(reasons)],
@@ -6011,6 +6425,7 @@ async function heartbeatTick(runtime, lockOptions = {}) {
       }
 
       const run = runResult.value;
+      assertFactoryAmendmentOrdinaryAuthority(runtime.runDir, run, "heartbeat tick");
       assertNoPendingSpecialBuilderDispatches(runtime.runDir, run);
       const v2Authority = assertV2LocalPublishedAuthority(runtime.runDir, run, lockOptions);
       if (run.steering?.pr_fence) return { continue: false, reason: "pre-pr-fence-active" };
@@ -6135,6 +6550,7 @@ function assertHeartbeatMutationAuthority(runDir, expectedRun, options, v2Author
   const current = readRunFile(join(runDir, "run.json"));
   if (JSON.stringify(current) !== JSON.stringify(expectedRun)) throw new Error("heartbeat run authority changed during sidecar publication");
   if (v2Authority) assertV2LocalPublishedAuthority(runDir, current, options, v2Authority);
+  assertFactoryAmendmentOrdinaryAuthority(runDir, current, "heartbeat publication");
   assertNoPendingSpecialBuilderDispatches(runDir, current);
 }
 
@@ -7054,11 +7470,14 @@ function writeJsonAtomic(file, value, options = {}) {
 
 function writeSemanticRunJsonAtomic(runDir, file, value, options = {}, expected = null, beforeReplace = null) {
   const assertSpecialDispatch = () => assertNoPendingSpecialBuilderDispatches(runDir, readRunFile(file));
+  const assertAmendment = () => assertFactoryAmendmentOrdinaryAuthority(runDir, readRunFile(file), "factory semantic writer");
+  assertAmendment();
   assertSpecialDispatch();
   const authority = assertV2LocalPublishedAuthority(runDir, value, options, expected);
   writeJsonAtomic(file, value, {
     beforeReplace: () => {
       beforeReplace?.();
+      assertAmendment();
       assertSpecialDispatch();
       if (authority) assertV2LocalPublishedAuthority(runDir, value, options, authority);
     },

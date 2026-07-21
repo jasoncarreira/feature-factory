@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
+import { abortSteeringAction, acknowledgeSteering, acknowledgeSteeringActionStart, adoptContinuation, assertHeartbeatStartable, attachCheckpointCompletionRecovery, cancelFactoryRun, cleanupRun, clearPrePrFence, closeFactoryCheckpointRoute, consumeSteering, continueFactory, crossSteeringBoundary, establishPrePrFence, executeIntegrationAmendment, heartbeatStatus, listRuns, openSteeringBoundary, persistFactoryRunCreatedEnv, persistFactoryRunResumeEnv, postPrObserve, postPrRemediation, probeFactorySlices, recordCostUsage, recordFactoryCheckpointMerged, recordReviewDispatchProvenance, recordSteeringConflict, recoverDisruptedRun, resumeFactory, seedFactorySlices, startFactory, startFactoryCheckpoint, startHeartbeat, status, stopHeartbeat, transitionGateDecisionAndHandoff, validateState, watchRun, writeGateAnswer, writeSteering } from "./factory.js";
 import { formatCostAttributionSummary, sanitizePublicCostText } from "./cost-attribution.js";
 import { buildCostReport, formatCostReport } from "./cost-report.js";
 import { runDoctor } from "./doctor.js";
@@ -80,6 +80,10 @@ Commands:
   factory recover <run-id> [--reason TEXT]  Mark orphaned/stale running run as needs-human
   factory test-execute <run-id> --json  Execute the exact accepted integration gate and publish its checked receipt
   factory artifact-execute <run-id> <slice-id> <artifact-id> --json  Execute one exact envelope verification artifact and publish its checked receipt
+  factory amendment <run-id> report --owner-slice ID --consumer-slice ID --defect-path PATH --artifact-id ID --json
+  factory amendment <run-id> build --attempt 1|2 --json
+  factory amendment <run-id> <review|integrate|verify|merge> --json
+  factory amendment <run-id> block --reason TEXT --json
   factory cleanup <run-id> [--dry-run] [--force] [--repo PATH] [--json]
   factory cleanup --all --dry-run [--repo PATH] [--json]
   factory cleanup --all --digest ff-cleanup-v1.<repository-sha256>.<envelope-sha256> [--repo PATH] [--json]
@@ -88,7 +92,7 @@ Commands:
   factory slices-probe <run-id> --from plan/slices.json [--json]
   factory slices-seed <run-id> --from plan/slices.json [--boundary-token TOKEN]
   factory slice-status <run-id> <slice-id> <running|review|blocked> [--branch REF] [--worktree PATH] [--attempts N] [--evidence-ref REF] [--review-ref REF] [--reason TEXT]
-  factory repair <run-id> <reported|repairing|review|merged|blocked> [--owner-slice ID --consumer-slice ID --defect-path PATH --evidence-ref REF] [--attempts N] [--review-ref REF --evidence-ref REF --commit SHA] [--merge-commit SHA --verification-ref REF] [--reason TEXT]
+  factory repair <run-id> <reported|repairing|review|merged|blocked> [retained legacy: blocked, previously-attempted, or branch-only consumer]
   factory step <run-id> <agent> <running|accepted|rejected|blocked> [--artifact-ref REF] [--evidence-ref REF] [--review-ref REF] [--attempts N]
   factory verdicts <run-id> --validator GO|GO-WITH-NITS|NO-GO --report artifacts/validation-report.md --security PASS|BLOCK --review-ref reviews/security-reviewer.json
   factory terminal <run-id> <blocked|partial|needs-human> --reason TEXT --boundary-token TOKEN
@@ -194,6 +198,7 @@ async function factory(args, dependencies = {}) {
   if (sub === "answer") return answer(rest);
   if (sub === "test-execute") return testExecute(rest, dependencies);
   if (sub === "artifact-execute") return artifactExecute(rest, dependencies);
+  if (sub === "amendment") return amendment(rest, dependencies);
   if (sub === "cost-report") return costReport(rest);
   if (sub === "cleanup" && rest.some((argument) => argument === "--all" || argument === "--digest" || argument.startsWith("--all=") || argument.startsWith("--digest="))) return cleanupSweep(rest);
   const opts = { ...options(rest), ...(dependencies.factoryOptions || {}) };
@@ -342,6 +347,35 @@ async function artifactExecute(args, dependencies = {}) {
     process.exitCode = 1;
     return envelope;
   }
+}
+
+async function amendment(args, dependencies = {}) {
+  const [runId, action] = args;
+  if (!stringValue(runId) || String(runId).startsWith("--") || !stringValue(action)) throw staticCliError("factory amendment requires <run-id> <action> with the exact documented --json grammar");
+  let request;
+  if (action === "report") {
+    if (args.length !== 11 || args[2] !== "--owner-slice" || args[4] !== "--consumer-slice" || args[6] !== "--defect-path" || args[8] !== "--artifact-id" || args[10] !== "--json"
+      || ![args[3], args[5], args[7], args[9]].every((value) => stringValue(value) && !value.startsWith("--"))) {
+      throw staticCliError("factory amendment report requires exactly <run-id> report --owner-slice ID --consumer-slice ID --defect-path PATH --artifact-id ID --json");
+    }
+    request = { action, owner_slice_id: args[3], consumer_slice_id: args[5], defect_path: args[7], verification_artifact_id: args[9] };
+  } else if (action === "build") {
+    if (args.length !== 5 || args[2] !== "--attempt" || !["1", "2"].includes(args[3]) || args[4] !== "--json") {
+      throw staticCliError("factory amendment build requires exactly <run-id> build --attempt 1|2 --json");
+    }
+    request = { action, attempt: Number(args[3]) };
+  } else if (["review", "integrate", "verify", "merge"].includes(action)) {
+    if (args.length !== 3 || args[2] !== "--json") throw staticCliError(`factory amendment ${action} requires exactly <run-id> ${action} --json`);
+    request = { action };
+  } else if (action === "block") {
+    if (args.length !== 5 || args[2] !== "--reason" || !stringValue(args[3]) || args[3].startsWith("--") || args[4] !== "--json") {
+      throw staticCliError("factory amendment block requires exactly <run-id> block --reason TEXT --json");
+    }
+    request = { action, reason: args[3] };
+  } else throw staticCliError(`unknown factory amendment action: ${action}`);
+  const result = await executeIntegrationAmendment(resolveRunDir(runId), request, dependencies.amendmentOptions || {});
+  console.log(serializeTerminalJson(result, { space: 2 }));
+  return result;
 }
 
 async function cleanupSweep(args) {

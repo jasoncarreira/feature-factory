@@ -175,6 +175,54 @@ export const DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS = Object.freeze([
   "repair-blocked-from-reported",
   "repair-blocked-from-repairing",
   "repair-blocked-from-review",
+  "amendment-reported",
+  "amendment-building-attempt-1",
+  "amendment-building-attempt-2",
+  "amendment-reviewed-approve-attempt-1",
+  "amendment-reviewed-reject-attempt-1",
+  "amendment-reviewed-approve-attempt-2",
+  "amendment-reviewed-reject-attempt-2",
+  "amendment-integrated",
+  "amendment-verified",
+  "amendment-merged",
+  "amendment-blocked-from-reported",
+  "amendment-blocked-from-building",
+  "amendment-blocked-from-reviewed-approve",
+  "amendment-blocked-from-reviewed-reject",
+  "amendment-blocked-from-integrated",
+  "amendment-blocked-from-verified",
+  "amendment-report-claim-active",
+  "amendment-report-claim-completed-pass",
+  "amendment-report-claim-completed-fail",
+  "amendment-report-claim-unknown-process-outcome-indeterminate",
+  "amendment-report-claim-unknown-authority-changed",
+  "amendment-report-claim-unknown-receipt-publication-indeterminate",
+  "amendment-verify-claim-active",
+  "amendment-verify-claim-completed-pass",
+  "amendment-verify-claim-completed-fail",
+  "amendment-verify-claim-unknown-process-outcome-indeterminate",
+  "amendment-verify-claim-unknown-authority-changed",
+  "amendment-verify-claim-unknown-receipt-publication-indeterminate",
+  "amendment-report-receipt-pass",
+  "amendment-report-receipt-nonzero-exit",
+  "amendment-report-receipt-signal",
+  "amendment-report-receipt-launch-error",
+  "amendment-report-receipt-timeout",
+  "amendment-report-receipt-output-limit",
+  "amendment-verify-receipt-pass",
+  "amendment-verify-receipt-nonzero-exit",
+  "amendment-verify-receipt-signal",
+  "amendment-verify-receipt-launch-error",
+  "amendment-verify-receipt-timeout",
+  "amendment-verify-receipt-output-limit",
+  "amendment-review-approve",
+  "amendment-review-reject",
+  "amendment-dispatch-binding-active",
+  "amendment-dispatch-binding-closed",
+  "amendment-dispatch-claim",
+  "amendment-dispatch-closure",
+  "amendment-review-dispatch-claim",
+  "amendment-review-dispatch-closure",
 ]);
 
 const AUTHORITY_CLASSES = Object.freeze([
@@ -562,6 +610,125 @@ const REPAIR_EXTERNAL = Object.freeze({
   reviewReject: { ref: "reviews/repair-attempt-1-reject.json", bytes: `{"subject":"repair:owner","verdict":"REJECT","required_fixes":["correct owner record"],"attempt":1,"commit":"${SHA_B}"}\n` },
   verification: { ref: "evidence/repair-verification.json", bytes: `{"subject":"consumer","status":"pass","command":"node --test test/consumer.test.js","head":"${SHA_C}"}\n` },
 });
+const AMENDMENT_REVIEW_ID = "A".repeat(43);
+const AMENDMENT_REVIEW_CLAIM_REF = `dispatch/${"d".repeat(64)}.amendment-review.json`;
+const AMENDMENT_REVIEW_CLOSURE_REF = `dispatch/${"d".repeat(64)}.amendment-review.closed.json`;
+const AMENDMENT_REVIEW_REF = `reviews/integration-amendment-${AMENDMENT_REVIEW_ID}.attempt-1.json`;
+const AMENDMENT_REVIEW_TOKEN = "catalog-review-capability";
+const AMENDMENT_REVIEW_CLAIM = Object.freeze({
+  schema_version: 1,
+  kind: "checked-integration-amendment-review-dispatch-claim",
+  run_id: "catalog-run",
+  amendment_id: AMENDMENT_REVIEW_ID,
+  attempt: 1,
+  agent: "work-reviewer",
+  baseline_commit: SHA_A,
+  candidate_commit: SHA_B,
+  candidate_tree: SHA_C,
+  review_ref: AMENDMENT_REVIEW_REF,
+  context_hash: HASH_A,
+  completion_token_hash: hashBytes(AMENDMENT_REVIEW_TOKEN),
+  claimed_at: NOW,
+  closure_ref: AMENDMENT_REVIEW_CLOSURE_REF,
+});
+const AMENDMENT_REVIEW_CLOSURE = Object.freeze({
+  schema_version: 1,
+  kind: "checked-integration-amendment-review-dispatch-closure",
+  claim_ref: AMENDMENT_REVIEW_CLAIM_REF,
+  claim_hash: HASH_B,
+  run_id: "catalog-run",
+  amendment_id: AMENDMENT_REVIEW_ID,
+  attempt: 1,
+  agent: "work-reviewer",
+  context_hash: HASH_A,
+  review_ref: AMENDMENT_REVIEW_REF,
+  review_hash: HASH_C,
+  completion_token: AMENDMENT_REVIEW_TOKEN,
+  returned_at: NOW,
+});
+
+const AMENDMENT_MANIFEST_VARIANTS = Object.freeze([
+  ["amendment-reported", "reported"],
+  ["amendment-building-attempt-1", "building-1"],
+  ["amendment-building-attempt-2", "building-2"],
+  ["amendment-reviewed-approve-attempt-1", "reviewed-approve-1"],
+  ["amendment-reviewed-reject-attempt-1", "reviewed-reject-1"],
+  ["amendment-reviewed-approve-attempt-2", "reviewed-approve-2"],
+  ["amendment-reviewed-reject-attempt-2", "reviewed-reject-2"],
+  ["amendment-integrated", "integrated"],
+  ["amendment-verified", "verified"],
+  ["amendment-merged", "merged"],
+  ["amendment-blocked-from-reported", "blocked-reported"],
+  ["amendment-blocked-from-building", "blocked-building"],
+  ["amendment-blocked-from-reviewed-approve", "blocked-reviewed-approve"],
+  ["amendment-blocked-from-reviewed-reject", "blocked-reviewed-reject"],
+  ["amendment-blocked-from-integrated", "blocked-integrated"],
+  ["amendment-blocked-from-verified", "blocked-verified"],
+]);
+const AMENDMENT_CLAIM_VARIANTS = Object.freeze(["report", "verify"].flatMap((phase) => [
+  [`amendment-${phase}-claim-active`, phase, "active", null],
+  [`amendment-${phase}-claim-completed-pass`, phase, "completed", "pass"],
+  [`amendment-${phase}-claim-completed-fail`, phase, "completed", "fail"],
+  [`amendment-${phase}-claim-unknown-process-outcome-indeterminate`, phase, "unknown", "process-outcome-indeterminate"],
+  [`amendment-${phase}-claim-unknown-authority-changed`, phase, "unknown", "authority-changed"],
+  [`amendment-${phase}-claim-unknown-receipt-publication-indeterminate`, phase, "unknown", "receipt-publication-indeterminate"],
+]));
+const AMENDMENT_RECEIPT_VARIANTS = Object.freeze(["report", "verify"].flatMap((phase) => [
+  "pass", "nonzero-exit", "signal", "launch-error", "timeout", "output-limit",
+].map((outcome) => [`amendment-${phase}-receipt-${outcome}`, phase, outcome])));
+
+const AMENDMENT_CATALOG = buildAmendmentCatalogFixtures();
+
+// These literals are accepted only after reviewing renderDurableAuthorityOracleReviewSnapshot
+// output for each row. Keeping the three digests adjacent makes that review auditable.
+const AMENDMENT_ORACLE_DIGESTS = Object.freeze([
+  ["amendment-reported", "72f84e95c47764a35789f1f3d361a227b92294f04b11df8f900af720a988862a", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "6ae28d9dea4ff336430d6dd415ce40856efa890daf898f9d1bd9e33ef62a7eb0"],
+  ["amendment-building-attempt-1", "b971922162c98ecee24dcf8da20eef96f5bcf18efc342c728abf860ab520105c", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "3b8157f11c0d5117bb131f7c60cb12bdca547a67b0b37363b8fb592e587a52c1"],
+  ["amendment-building-attempt-2", "44ab119d2bb2cd82e015e77d93b7d05ae032c8e14bbee30e2da0322eb4d900d4", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "8c9ad2ca160070c7960ebf2f98e48617a01613c91cca36323388f6fe18ccb793"],
+  ["amendment-reviewed-approve-attempt-1", "df43b894f5e890396203432be9b4ff6b1afee64d2be960a48f63dad3eeb919da", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "25fbd305cf7a05233378487596088f8d9f625792f3c63324b5d2e7eef94476b3"],
+  ["amendment-reviewed-reject-attempt-1", "d94c48d8763985953e316975d40ef429060861d6b0baba6a90fb0d53fa27e05a", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "d510357f89c7170a8ab2aaedab453c88acdd17c8ce1c73df19de339f24178872"],
+  ["amendment-reviewed-approve-attempt-2", "40755dfde68ccb4dc910a9c6777203e6c845b566fb04cfb81dc6c5581d9200e6", "bafa5d6e8793b5ac5bfe5c41a7cbd0c5be5e98c56bc37df50b62eeea59984e3d", "97be0f7b4f81bf3d3148c21ebcdd3e7c166acba099ab871636a5cc441db38289"],
+  ["amendment-reviewed-reject-attempt-2", "0d50e07c3deb2062406e25b7b829e56f40eb583df685f6825fdc1f9a0a16c0b2", "bafa5d6e8793b5ac5bfe5c41a7cbd0c5be5e98c56bc37df50b62eeea59984e3d", "1572fd3c6a746a2a4b67bb32ff4206dba2a13a9a05a25943537afa276821005c"],
+  ["amendment-integrated", "dc3151614c752462c15a8a855f275e6637319935a3d1f39094a1d3c5b6758270", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "a41b47b8b8ea67c398c6f88ca9f43c35e3710868f7777de52a5df08ac5c0b5a0"],
+  ["amendment-verified", "96cf3ae5b8ae4eea0c01d4a0a15264e6d2b83b450e2d48db7b7fa4862a740d03", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "c54a542fa86d003447ef220e8ffa61cb50497bbab00e9a0601f560af5fce6527"],
+  ["amendment-merged", "fb8402a85b8548c673f477e7f2da9f6b8086f04d2a6de060fe071328e022bf1f", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "607a3364dbacd053084c9d5f15a3a66b9b1d0867d3028e17b1f7a719fe91e0c6"],
+  ["amendment-blocked-from-reported", "4d74be9ba37312399b3ca6f68c6cd7956a7a5f6e2e0550193a43ac910495f57c", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "5344efefaa2443c0baee1c1591c1b8b3f70520d2a22b2856c11f355dce48b91b"],
+  ["amendment-blocked-from-building", "02626cd74aab2adedb11bec6848671dfee54e2e88a4afea658becdddeacf87a6", "51a4f80c2dc278c38fb6a93b1035e3b00c23e2e78cbf0eedf93e046de4ad4e65", "eae61a8e84be05fda49bf8384d5f2332e8ca6a813ddd18f529b169407dcc831c"],
+  ["amendment-blocked-from-reviewed-approve", "e186a313c4af3c6041d707d4afa481e345bf4ca1f17e4827885220bd7e0eae7c", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "ec1fd6e84d1f437b7fd6533b54bc1617fb11769de8489b01b13396534c1f85ec"],
+  ["amendment-blocked-from-reviewed-reject", "4f5b56910591673cdfca1d9ab66c69bb8fc6a589766ea6c46f817812b4dbf859", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "87f4d38d86c2ea4d61b7fd54bb67fc0f2712fb4c98ff47b6487b49aa8a2fad4a"],
+  ["amendment-blocked-from-integrated", "d2bf4da74798f635a260fbd31192fdcc68ae5320b58e617a6d810e8c6d47befa", "a9c814eba867db0b4cd8a6eba471f9be82ece9c771ebf4e755ebd96f2b7f9359", "0afbd0dbbf1980033796bc0c08ed95ae32a1a3ba8a134199ea7c5d41d5c8d683"],
+  ["amendment-blocked-from-verified", "0f81a493ec366301d0144ff8ff142ea17a0f1bedd32e128c39b73659d06c7e03", "e21dbda8b174ec99e9c987082320d56304f358d441483c23ddfaae91534a8904", "449ae2afd9630de96bf89880566a2e032bf1f3bd7d71967ba8e7834a1fdf41a8"],
+  ["amendment-report-claim-active", "67ba8d12568fe57d7a1a178ead8c127ffcb87a7558b3e8c3c57fc1ea920265ad", "f7591d94dcc72d7c550873c4d559bf9f5567840a6397505b3c2c5acd93973e63", "9c4e617948b080f9d6a2bb0100bef3f0462279c14f877f79bf9db43fc3ec468b"],
+  ["amendment-report-claim-completed-pass", "98ddb247c43471a159aff3a3e6310bfa2d422b4fc03a1e8380647ee5cd038c52", "8640d1ba3e74b68bf4336d592484bafa68bf5feec0bb0e4347d7a5de0265f69c", "2a50235d71524991e6c88edb3895e712490c23a244e8f522f915949437cd7a23"],
+  ["amendment-report-claim-completed-fail", "301f6524204a2b7e97157018d961467eeef89a0159bc34c1e55582c84bfe7564", "8640d1ba3e74b68bf4336d592484bafa68bf5feec0bb0e4347d7a5de0265f69c", "f4fb04644c6c39c61c252ed6a78d1dd534527d94f7d8f2ad648316807f8ca286"],
+  ["amendment-report-claim-unknown-process-outcome-indeterminate", "c53a1bae3840087d6a81f1f23e9f1f08710a744ba8b43cfd41fb727917e5b628", "d13c737aec1cc55239c2e2eeca59401bf76b861b3e689e7ba6c03bd6eee8dc33", "ae8146715fe1da149b149f87dbfa7ac4a549ace7da6ea88a2f563008f5dd9c6a"],
+  ["amendment-report-claim-unknown-authority-changed", "1cd048f123e335c9e393b15e74053da033488a67952eda71a341c61cce73990b", "78524e5a41d6d47973a5c290dd20ff15884018f10b8715b48c22dc547f025d93", "661e12140eb0843e0001540f3078133a3b36134268382203c25fb3ccfc6dfa26"],
+  ["amendment-report-claim-unknown-receipt-publication-indeterminate", "9cf85a6d3d36d0fc6e8f2ed55fd4aa787899b15b6b1fd7a3732a7f371ede183c", "bb4dc5d868455e2fe488cb0331ff4c494e1af84a7dd1c33a6603f7b02418db37", "1aae057ab7f50841ace47f8a44ed905e32de1914b7e0552d4706da489f65b9f6"],
+  ["amendment-verify-claim-active", "d79504a00c81b0fcb19cd9faf4fc97b3b8d66a6164014bc802152e9453fdc56c", "ecec94c733ceb29d0ab34163c161d566704415493f33e54b189b310b67227b18", "727e750837ad68384bc0f13df7f0f52ac3027dc2e4c9d740a4b57f4ef54c7e97"],
+  ["amendment-verify-claim-completed-pass", "e99fbaff732ef2c1be79dfeaf3bd6b9604dbc2cd1e831ecdf575328ce18a8e68", "7e21eeb2ead2098769e0e49ac10a2c42f946284bbe8a6811533841a6e5c45fe3", "a21d9643336475b79902d346d6667da4b2ad95ace182279371bd10b5404b33d2"],
+  ["amendment-verify-claim-completed-fail", "dd0bddc9dd6688c89edfaf1c8fb0f6ff4838f4efdee9e5da27c9563db45f9107", "7e21eeb2ead2098769e0e49ac10a2c42f946284bbe8a6811533841a6e5c45fe3", "e37518b27a8a0bc2ec218e84813f9b8f8d453e2162ace1af7876cbeac44f027a"],
+  ["amendment-verify-claim-unknown-process-outcome-indeterminate", "a8ddefb49e4db25b32b34b0760af85a0cfe3b06a26a21abf1bcccffe4c880d57", "1c53cea6b9f2d2425005c924b6d22589c438ae4f1957ddb1be9352dd5abc3087", "599b43a20c6586c45119e0002a2d661920ffe338e6495b863e3d75bdd0f8b157"],
+  ["amendment-verify-claim-unknown-authority-changed", "52677a42a3ddcf79c474d6f3b9d74b9ad1e65ef1529785ccee0f07e65f3ff6eb", "f09bbb85cde78ab2f9a5923da939e2e9a894ba6ebae05c26aec06b22a526920d", "fb6c192cfeb6978a5fdde5d0cf83e59738bb760e24c73a7fbd3d3c0af628039f"],
+  ["amendment-verify-claim-unknown-receipt-publication-indeterminate", "1e65159599c7c6ab46872f3ebbbb66f49f1a92ef2a4aa68610926794914dd72b", "082b741f9c64a4a2e62c5f3ae71cda135cb007ade705a47ff78a3c496f48c9be", "b0e5fcd0396a4bce8534e0b9b36f64ceb30eac20e4fdcd0a7e1f9cfb3d6cf33d"],
+  ["amendment-report-receipt-pass", "c9b065e6f8d2108e39084d5b674378ea2741840b1f769e1f9ed91586a3711307", "550c02cdc9722e545633c183da80eab0a420dc1adc1d1a964f2f79cb41ccf26f", "e8b9d70f580fd9eb0358cef0056f830e025019a9936cf58c6b3ee46d104ab56f"],
+  ["amendment-report-receipt-nonzero-exit", "35ebcc1ffcb133271e08fe7bbc18a27aeb6f40b8ba6a38534dfeda147803c1a3", "20258fa0daadb0c989c08f63fd2f5a057d5b10a1fa0931e45a687845cc887cd3", "07ecc0819b74a29022d9e8ed62e2095d376b8098ce36a83ddf865743ccd5e5e2"],
+  ["amendment-report-receipt-signal", "9ec5596bd2f0cac71254c900a137d0cec955381a675bf36275653a057c9dbc6f", "ef340366dc25784d964873a90a23152f21c1455891b253528938051c84971f4f", "569e799feaaef716d9963fe143bff61c4b8a91f23e11482d9490f43a39a41eaf"],
+  ["amendment-report-receipt-launch-error", "b802a5d7baa86da5c1e2cbb358c40bd8424e018dd017ac3251252b687d241420", "df64bc870f176e07107870ae30b7820800bb4e1d6fffdeb0350f125da585bd49", "41fccbbd1e1887ca27eb5b78914dfde2e9d51aa639259b2e79e9f40d26aa28bd"],
+  ["amendment-report-receipt-timeout", "3eaf4e1011d39660c00c418f1c9d1dab355eaf7419b95657319634f80abd1654", "16b575e226578e0c0b5ed3c67a506d116c16f84a77b1563e0bb4a513971c8178", "1a89890e764faaedde6982cffd8505eaf6be2ce3a99c974609014bb59a1d5697"],
+  ["amendment-report-receipt-output-limit", "ca313ab065685d857d2d2c845bbd4122bd9633cb4e29cd751d74683d16c271c4", "a2f2a0722d164b97d0fd0ed545bc503e88227e68975565774c78f2ddfd52fbb7", "e20f3b32c90c13df7624d489f90f436b231cbc2965acf695bab7f1f49c5ac5fd"],
+  ["amendment-verify-receipt-pass", "9b10519aeb3c9f8ad6cbd7b4b6e450a8f7af0db0baf3f192e13435fe07d8ea25", "19c6ea360800631b124bf581debae778fbc7c1ef60e0ebb226e5fba4850bdc3b", "17e0df5f43e3a4eda55ab7c40368823e7caae86f080f615a87d777e1633ce319"],
+  ["amendment-verify-receipt-nonzero-exit", "955fc09f2a17ad19f71bbfe836cf7f69364a870b5e11face5c9a037f8198c934", "7fc5de859af42f3dfe9cf24eacb45806b1ef489b72267656619b14e72f239685", "c69302e259a72b827ac45a521bc20b84d76e88659930056a04b0c8f55a0a1d57"],
+  ["amendment-verify-receipt-signal", "7965d31baae268be4f18a4fda7d09abd9d2124afad00762ae7e6d6c8e8b9ae92", "d9eca6bd7e7c25bd5b344103eb6cd6e7786075b1f874196bd01c24d7a4f1a0ea", "7645f67745b9ea112bd996d6b6b9234eda2bc74d1b886260c1db9ae696d3710e"],
+  ["amendment-verify-receipt-launch-error", "2b0609680456bbb0717f1a2ddabeaa1859cc5491e40b2d2ad2acd9d27a3da34b", "ec875584a48c3624edaf6ce7653a3c0de04e34d9e228fd85c5c4db390663a8f1", "3689789ed88eac0be0508347128d89ba3cb5ba4683d394ba48835458be76be23"],
+  ["amendment-verify-receipt-timeout", "ef567c3bc02a366caa225ed01b7a188e0df729ff772263089246d93ee35b9448", "5f9eb8570773d3636f2c453b9bd5fda151ab9c44f2707e4d68ecfe76db37ca1e", "4125631cec61f680ebc926a01b313de2b6e4ee91831ada63640c34a145465d2a"],
+  ["amendment-verify-receipt-output-limit", "f3ad7294f7a0090ae7d21144d97015cc8104078e0aa57b3ee32cf2154fe1aff8", "ebace15d1efb94794690b9375ab8d04b97136ee6e98fd4f6f0c59f4a7ec9e88d", "1d768291c7f603e7e10b3a6356b52b724220f2bed4beaecfe7a6f175c4747a9e"],
+  ["amendment-review-approve", "184ac9dca646ef0c118591823f201941cd8cb10605f6273240229ea5461304e3", "3a1b3cf38797f0efbe5c338d877217f9b51a7647b8d9adf6f30c5d42aa4c1521", "312a5f71b91b4457320d38b9eacc359eb89370fda4a1582b32fda1241753d752"],
+  ["amendment-review-reject", "64db18d741af8b12e109500b88e1fd0d1c7d7899f2709b09f315a5cf6eb11049", "c1b9c3a012c3c7ea17883e50e754622149a3b3e3489e51433f2375a6a2484d2e", "c866a01be3f3422d177913db89f696c23de5254affaaa016fef99ee116ce8042"],
+  ["amendment-dispatch-binding-active", "63e6fa1048d2bd22f7d171423f8d4d7d67aa1e24a3be6aeec9861f8dc0695809", "1b61945953cf69a384c86fa91094d57265507cdf29854f4730959579970dfce0", "42afa37d066616d841604ad72906ee39bed51e4cb3c613f855ab775118d72088"],
+  ["amendment-dispatch-binding-closed", "837f459b358032633d7ea61b11fd5802db7ab6b68d4843431c397aa233f0668f", "a5ab37a3e402a9f0d55fc780d97d7dbc29a45f6561bee7447762f225ab9d8868", "a113431bf0133932306125059a8d4c4207aa27da491c2103149639b263c5b8b9"],
+  ["amendment-dispatch-claim", "0af89dbed2e1ed6de891cb824682b81f359917a9dd31d672db4ce0d226920791", "b5efc2ee8d3b9c3c38918686b8923ec9e937dbed48568baafdf731bbbfc69bde", "44ffe630cd4cf4092b7014eb5f68ab871d90f39a95704a4ac521246666906177"],
+  ["amendment-dispatch-closure", "9dacf9a9b67c28a8bc9382bd1d7cd2869609455c44b56d63043a3601d9a57c19", "f1cd4bf2fc19d8e52edc4acaa5005f839e9fd529a8197fb347edcace6380ece2", "89b35d1f2a40896b358c2753e9a140845957cf2e24be65dae73ef9daf6851221"],
+]);
 
 export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
   "plan-slices-graph": [
@@ -729,6 +896,54 @@ export const DURABLE_AUTHORITY_REQUIRED_RECORD_IDS = deepFreeze({
     "repair-blocked-from-reported",
     "repair-blocked-from-repairing",
     "repair-blocked-from-review",
+    "amendment-reported",
+    "amendment-building-attempt-1",
+    "amendment-building-attempt-2",
+    "amendment-reviewed-approve-attempt-1",
+    "amendment-reviewed-reject-attempt-1",
+    "amendment-reviewed-approve-attempt-2",
+    "amendment-reviewed-reject-attempt-2",
+    "amendment-integrated",
+    "amendment-verified",
+    "amendment-merged",
+    "amendment-blocked-from-reported",
+    "amendment-blocked-from-building",
+    "amendment-blocked-from-reviewed-approve",
+    "amendment-blocked-from-reviewed-reject",
+    "amendment-blocked-from-integrated",
+    "amendment-blocked-from-verified",
+    "amendment-report-claim-active",
+    "amendment-report-claim-completed-pass",
+    "amendment-report-claim-completed-fail",
+    "amendment-report-claim-unknown-process-outcome-indeterminate",
+    "amendment-report-claim-unknown-authority-changed",
+    "amendment-report-claim-unknown-receipt-publication-indeterminate",
+    "amendment-verify-claim-active",
+    "amendment-verify-claim-completed-pass",
+    "amendment-verify-claim-completed-fail",
+    "amendment-verify-claim-unknown-process-outcome-indeterminate",
+    "amendment-verify-claim-unknown-authority-changed",
+    "amendment-verify-claim-unknown-receipt-publication-indeterminate",
+    "amendment-report-receipt-pass",
+    "amendment-report-receipt-nonzero-exit",
+    "amendment-report-receipt-signal",
+    "amendment-report-receipt-launch-error",
+    "amendment-report-receipt-timeout",
+    "amendment-report-receipt-output-limit",
+    "amendment-verify-receipt-pass",
+    "amendment-verify-receipt-nonzero-exit",
+    "amendment-verify-receipt-signal",
+    "amendment-verify-receipt-launch-error",
+    "amendment-verify-receipt-timeout",
+    "amendment-verify-receipt-output-limit",
+    "amendment-review-approve",
+    "amendment-review-reject",
+    "amendment-dispatch-binding-active",
+    "amendment-dispatch-binding-closed",
+    "amendment-dispatch-claim",
+    "amendment-dispatch-closure",
+    "amendment-review-dispatch-claim",
+    "amendment-review-dispatch-closure",
   ],
 });
 
@@ -885,6 +1100,54 @@ const EXPLICIT_EXCLUDED_FAMILY_CODES = deepFreeze({
   "repair-blocked-from-reported": "k",
   "repair-blocked-from-repairing": "k",
   "repair-blocked-from-review": "k",
+  "amendment-reported": "",
+  "amendment-building-attempt-1": "",
+  "amendment-building-attempt-2": "",
+  "amendment-reviewed-approve-attempt-1": "",
+  "amendment-reviewed-reject-attempt-1": "",
+  "amendment-reviewed-approve-attempt-2": "",
+  "amendment-reviewed-reject-attempt-2": "",
+  "amendment-integrated": "",
+  "amendment-verified": "",
+  "amendment-merged": "",
+  "amendment-blocked-from-reported": "",
+  "amendment-blocked-from-building": "",
+  "amendment-blocked-from-reviewed-approve": "",
+  "amendment-blocked-from-reviewed-reject": "",
+  "amendment-blocked-from-integrated": "",
+  "amendment-blocked-from-verified": "",
+  "amendment-report-claim-active": "hb",
+  "amendment-report-claim-completed-pass": "",
+  "amendment-report-claim-completed-fail": "",
+  "amendment-report-claim-unknown-process-outcome-indeterminate": "b",
+  "amendment-report-claim-unknown-authority-changed": "b",
+  "amendment-report-claim-unknown-receipt-publication-indeterminate": "b",
+  "amendment-verify-claim-active": "hb",
+  "amendment-verify-claim-completed-pass": "",
+  "amendment-verify-claim-completed-fail": "",
+  "amendment-verify-claim-unknown-process-outcome-indeterminate": "b",
+  "amendment-verify-claim-unknown-authority-changed": "b",
+  "amendment-verify-claim-unknown-receipt-publication-indeterminate": "b",
+  "amendment-report-receipt-pass": "rhb",
+  "amendment-report-receipt-nonzero-exit": "rhb",
+  "amendment-report-receipt-signal": "rhb",
+  "amendment-report-receipt-launch-error": "rhb",
+  "amendment-report-receipt-timeout": "rhb",
+  "amendment-report-receipt-output-limit": "rhb",
+  "amendment-verify-receipt-pass": "rhb",
+  "amendment-verify-receipt-nonzero-exit": "rhb",
+  "amendment-verify-receipt-signal": "rhb",
+  "amendment-verify-receipt-launch-error": "rhb",
+  "amendment-verify-receipt-timeout": "rhb",
+  "amendment-verify-receipt-output-limit": "rhb",
+  "amendment-review-approve": "rhb",
+  "amendment-review-reject": "rhb",
+  "amendment-dispatch-binding-active": "t",
+  "amendment-dispatch-binding-closed": "t",
+  "amendment-dispatch-claim": "b",
+  "amendment-dispatch-closure": "",
+  "amendment-review-dispatch-claim": "b",
+  "amendment-review-dispatch-closure": "",
 });
 
 // Hashes are independent, immutable exact-value snapshots over writer, all readers, named tests,
@@ -939,8 +1202,8 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-timeout", "5965d0f46e1ee946a18a6888abe2cc229b771b2bd4a79faf85d4d05bc9746bcc"],
   ["test-execution-receipt-failed-output-limit", "091ea91f8b1f6e56b31a71e085ec28c246738addcb5cf2dab841799db9fa5ee0"],
   ["slice-pending", "8d4bbec759c17fb00ead204f403603e1185b430f21f0306f9bb240f7f79d4ec1"],
-  ["slice-running", "af31fa943d166746d48207286fbc9dea216127b8120f77378949b166de73ea40"],
-  ["slice-review", "cd4b857d8325ae2b3df6ca965b17efb3af46dec393f0de2fdf939c79c0e9a5a4"],
+  ["slice-running", "9144cf9afff4ee300711b783015cb338985c1bee73e42b5596ba53ad89bf1a64"],
+  ["slice-review", "31ee1398f017b2b3582a57fe89207c2cd525f2d1a727413eb423ecc9129cf198"],
   ["review-invariant-family-ledger-v1", "a12af40d7f3010b6650891769239049f3a1c7da1f4e066b1139c67feed4f22db"],
   ["verification-artifact-claim-active", "90ef74da538c20ea12d27f7eca2d98462444bbbe44feb01eef03ce94f0cfd22a"],
   ["verification-artifact-claim-completed-pass", "5d12d5fc7c6593f5c16270eaf1487d60c41b0240b1ce0f389bed7624d3f53b2d"],
@@ -949,9 +1212,9 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["verification-artifact-claim-unknown-receipt", "8923106490d25f0d3d4f4e461ba1ef370c8ac47d53844aabd5d50c9857e9c18b"],
   ["verification-artifact-execution-receipt-pass", "501cbf3c84c9264108289c4f8222a5523179f725875531c028d9c19ecad896fe"],
   ["verification-artifact-execution-receipt-fail", "11fee9930a501c2bddfe56a40eb539fe13559aaaad4e22712f8525a0cc043bcb"],
-  ["slice-merged", "a0d8d809d6ef828beabe7a72cea680e665718ab60d6ba01ccd2aea21ab3e78f5"],
-  ["slice-blocked-ordinary", "078fbc6eada3adc4a22f4a55b1667a003d84172ba772035c6746cb256dd9e0d5"],
-  ["slice-blocked", "3ed8237beaad32f43ae5cad5a787fd5d148df9931a1baf42f95944516d2e7b00"],
+  ["slice-merged", "62a09eb29bc9d54e60cf7cbfff28b61d88a0ab7ca965ebea1034c876ebff83f4"],
+  ["slice-blocked-ordinary", "418be098f27cb3ab81e543de6fb174d894667a67fb6cc838f532001213442a09"],
+  ["slice-blocked", "444dc0846d2323bbb5b4efad25247c5e10a03db0f6fc255828903fdab77e0408"],
   ["validator-verdict-binding", "ce1205fb84feece303f45e9841916d68fe26431d3117636aecc4b0cdccc79e14"],
   ["security-verdict-binding", "81cbb46158b44646aabf50e0152b80d5ed6dc423826337bf45fe6be7c24e5995"],
   ["steering-boundary", "efff0777e2943f002136ce1a38aad484c5d7ab7143e07eb5b93e2475c497ca55"],
@@ -1038,6 +1301,9 @@ export const DURABLE_AUTHORITY_METADATA_MANIFEST = deepFreeze([
   ["repair-blocked-from-reported", "b1e49fae077e3e1bee835e9a5d4ff54e7bd9043709bb21f664743154b31fc64f"],
   ["repair-blocked-from-repairing", "d48498b89f41b36ea13d860498363524d6a699c6594926e58515d46acd710a87"],
   ["repair-blocked-from-review", "f6e0a9dc4a891ca6b77cc2ec6d76a4feaa0bae72739a01d84ff608e70ee56c93"],
+  ...AMENDMENT_ORACLE_DIGESTS.map(([id, metadata]) => [id, metadata]),
+  ["amendment-review-dispatch-claim", "917f82b7c79d76eec77d19e00021a16aaccd6a0990b157eb8c2439e0239a4b64"],
+  ["amendment-review-dispatch-closure", "c1fa91187cea6bbb6c8b8d0684f5f81060c55c10b8b59f2480fcdf707f9be915"],
 ]);
 const DURABLE_AUTHORITY_METADATA_BY_ID = new Map(DURABLE_AUTHORITY_METADATA_MANIFEST);
 
@@ -1094,8 +1360,8 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-timeout", "145e09cc8ddf2cc6ad438bfd10eb060732ea5d2818e32f1f2d85bf747b80e755"],
   ["test-execution-receipt-failed-output-limit", "5d67fdbbcb0e50d8597c747e30d41c3217b13c5f18f511e43d0914b05cfc2895"],
   ["slice-pending", "63b63efe898da669ae80a855536c52a7f00a0009a0465a2ec6cee66477b11f50"],
-  ["slice-running", "beab1f224a3723cf005fb260d8d79a7f53b5083458b165cc5bcc98ffc40c5645"],
-  ["slice-review", "f3032a106a15dda6324ea24d196196f8629cd57d1fc53a5e1e9f1f8c528d6b51"],
+  ["slice-running", "fc42986c22298a35eab703ba8490a9607de4e6a1a1b40259ed8f8ed67f38bb6c"],
+  ["slice-review", "be1f4758931acd95be6370f8ec72768c98075115ec366cb61593b8af3c2b7b27"],
   ["review-invariant-family-ledger-v1", "c63d47a42fc7e6f72beb10013c9c9fbb6c3288c94961d93a2962838d11bffe7b"],
   ["verification-artifact-claim-active", "b5fd7830a00455f012fd9952e7467f43fd7c08f6ed6fa1b4bc4cc6c6dddc8d73"],
   ["verification-artifact-claim-completed-pass", "e293a8272cf22526036b7e175c127c034748b91596e62c30a288d8537d48be19"],
@@ -1104,9 +1370,9 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["verification-artifact-claim-unknown-receipt", "d4dc5df0dd8af5699ea698cec80767f893c4da1ca2a7a28249e2133bb68bb6af"],
   ["verification-artifact-execution-receipt-pass", "eb56cc7de822f9a1eb8dae7dc42f1e5aaa335250947fdbc8c9a0e6e53e2cf01a"],
   ["verification-artifact-execution-receipt-fail", "66186bd360945295d591cc8f2bd012485062b297553b9f3d2244dcf15675be5c"],
-  ["slice-merged", "a36bfb5c4e168c8015eae87263ca562eba651051261c41d03441a1b87bf23e3e"],
-  ["slice-blocked-ordinary", "bc27e546fad0fae0b3d3408199d29e0d1e492fdcc074f42d6707cde54f3cd0c3"],
-  ["slice-blocked", "c566d2365a70e36e1616952e990317196ab85647c672afb731af20e402d1ceba"],
+  ["slice-merged", "bc067a305523a09268e8c43146d24453d63478eafcc908ba1f42f6ae7c1ec9bd"],
+  ["slice-blocked-ordinary", "e1f9cdbd982cc83b739cf310cde2c86e0412f8d52c41d8bea5f286bf9c6257a5"],
+  ["slice-blocked", "8ab00ecb2e88b1f556ec26e9c1b482fc9baa4c678630c8af14c9e8dd9f881ec4"],
   ["validator-verdict-binding", "d5663f22b888f878625141430a2602863730f8ab122a815359dd545d876b49cb"],
   ["security-verdict-binding", "88c89ebb14e5f14121dc022da8f0c73dc1e5e9639d570337edcfb09cef5c17d7"],
   ["steering-boundary", "7842e29ee7d10b4465db99127739e4b602479aff47b848a5c7bb9d2e30ecf732"],
@@ -1193,6 +1459,9 @@ export const DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST = deepFreeze([
   ["repair-blocked-from-reported", "05835c182adf9d4372c39f6d0cc82cdac19b21017c928ded54047e7ea9eceea0"],
   ["repair-blocked-from-repairing", "79ff873a4b30a77b303fc29658b2ec1dc1cd86ad35bed9092f087c6b572e44ee"],
   ["repair-blocked-from-review", "ffacf779eacdf96ec9e9deaf94f350f386b02946f910a321ee7ce82eccad117b"],
+  ...AMENDMENT_ORACLE_DIGESTS.map(([id, , descriptor]) => [id, descriptor]),
+  ["amendment-review-dispatch-claim", "b6fb871bb80fe23f8810e53c2a1a3053a1537d3d138f9d0dffb2e1f2875bfb7a"],
+  ["amendment-review-dispatch-closure", "3eea5e9b4d020f60782edced5bab1e92c1130f5b5022e77d646f61aa7a8f0cda"],
 ]);
 const DURABLE_AUTHORITY_DESCRIPTOR_BY_ID = new Map(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST);
 
@@ -1253,8 +1522,8 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["test-execution-receipt-failed-timeout", "b5ab34c8391d36072cb1992aa2e69043215e391d2215daa5a19eecbf7f8a729a"],
   ["test-execution-receipt-failed-output-limit", "63b89f33f3ebc6a7795136f0dd99eec4d0b5c6615ad4236a8b77bf341699f88e"],
   ["slice-pending", "0f66b96672a90c960a5cff760325c7e63a9a69dd95f19207406de97959afa113"],
-  ["slice-running", "5c91f74e38cddbf6278e3ad48aa2e74392e3120b7680e747299cf315126ffc26"],
-  ["slice-review", "c7128941b5660901d7c20c9f79a2f8676dc8bf22632fb32bf8e466b4215d5495"],
+  ["slice-running", "ccf77d9effc8e1ea2f3e668ea0c2f323c875fb14dfbafc120fb65d5c956c5d4c"],
+  ["slice-review", "476e15a3d85cca54a6de25390f2b257193d6b4c6cecba3d61f6b9d1fba857473"],
   ["review-invariant-family-ledger-v1", "a60883d9ddac368dec467214c17c39a2f855b60ca2d69838a5c8f09e58c99c8a"],
   ["verification-artifact-claim-active", "e64df439ff98307ad58a5b12a2dbf8d485684aeb230c9a55d69f458160e22d7b"],
   ["verification-artifact-claim-completed-pass", "8575174cfc4a4e8b84071db0136aa0dbf9be7f771fbc1911ef7cdd791eb335f5"],
@@ -1263,9 +1532,9 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["verification-artifact-claim-unknown-receipt", "1d12d4c61007d202cf0a083b4cf006e97a04afd5a5eedf32bf965efeb3ead91b"],
   ["verification-artifact-execution-receipt-pass", "c50cefb3c0c86b0ffa28a2ae05203d8662554b0480b22a83a23ec8131d3d0451"],
   ["verification-artifact-execution-receipt-fail", "9bfcdaba7778238809bcd51fa148b7360516cd3730606cc4f3eeebd993a8d852"],
-  ["slice-merged", "bd160bb8e7d790ece4a840382ab5de8457b84962097642fdb9ff9b073d82d1b5"],
-  ["slice-blocked-ordinary", "4d26b4b40fbd88131264c5dcf4186f8cc75aab6ef3344948ee5c97b681119756"],
-  ["slice-blocked", "a43f8ee90d231336f11e9b72353c662d64dbd5ea2cba5bd9af828980f50628bc"],
+  ["slice-merged", "cbbcd6ae81fdaaec991b8772046a8a531793de57b39f509161eddbb1be7d4eb5"],
+  ["slice-blocked-ordinary", "426ad8598809921d61f100574ad347696798402bef54b0fb99c6f5bc61020794"],
+  ["slice-blocked", "c1965daf56e03ea648cfa05f0c4fe6447d158b3318d06d9110182f0b267fcf68"],
   ["validator-verdict-binding", "22c22e8e118609a58e29101a6f6a89dacc8ddfddcc92974c810fe4b51cc5fdc9"],
   ["security-verdict-binding", "56e34d4427dc76cb46caee5a002856e4e97ef2dc870543fc489a750e384e6d99"],
   ["steering-boundary", "b3477a6967254d04f869b97b8d15d00ddb952673f00807ebec41f05afdbdacfc"],
@@ -1352,6 +1621,9 @@ export const DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST = deepFreeze([
   ["repair-blocked-from-reported", "9f706c75ff6e2cbd90a898406aa9be9c8258ee0e533adaea3c5675e9a9faf6ca"],
   ["repair-blocked-from-repairing", "fc79c812079bd9acf7b60aacb304ef47e0dd12b4f531e801191dead4ccefe66a"],
   ["repair-blocked-from-review", "3caeb87996031485b92a1b6a0b0167608ece7fe0f0f62760cbfa7ba055e121a0"],
+  ...AMENDMENT_ORACLE_DIGESTS.map(([id, , , source]) => [id, source]),
+  ["amendment-review-dispatch-claim", "b51371578cccf189480241170f4628364442be7d76a077c925ffdce322b7516c"],
+  ["amendment-review-dispatch-closure", "e687f0960cdffa32397c72b098352e7e8f07d9ee11b87dac75af0e953bdfbb1b"],
 ]);
 const DURABLE_AUTHORITY_CANONICAL_SOURCE_BY_ID = new Map(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST);
 
@@ -1836,6 +2108,17 @@ const RECORDS = [
     observations: [repairObservation("review-verdict", "review", ["verdict"], "REJECT", "transitionMergedSliceRepair blocked retention from review"), repairReobservation("blocked-origin", "review", "transitionMergedSliceRepair blocked retention from review")],
     record: { ...repairReviewFields(REPAIR_EXTERNAL.reviewReject), reason: "review rejected" }, sidecars: ["plan", "original-evidence", "repair-evidence", "review"], reviewExternal: REPAIR_EXTERNAL.reviewReject,
   }),
+  ...AMENDMENT_MANIFEST_VARIANTS.map(([id, variant]) => amendmentManifestEntry(id, variant)),
+  ...AMENDMENT_CLAIM_VARIANTS.map(([id, phase, state, outcome]) => amendmentExecutionClaimEntry(id, phase, state, outcome)),
+  ...AMENDMENT_RECEIPT_VARIANTS.map(([id, phase, outcome]) => amendmentExecutionReceiptEntry(id, phase, outcome)),
+  amendmentReviewEntry("amendment-review-approve", "APPROVE"),
+  amendmentReviewEntry("amendment-review-reject", "REJECT"),
+  amendmentBuilderDispatchEntry("amendment-dispatch-binding-active", "binding-active"),
+  amendmentBuilderDispatchEntry("amendment-dispatch-binding-closed", "binding-closed"),
+  amendmentBuilderDispatchEntry("amendment-dispatch-claim", "claim"),
+  amendmentBuilderDispatchEntry("amendment-dispatch-closure", "closure"),
+  amendmentReviewProvenanceEntry("amendment-review-dispatch-claim", "claim"),
+  amendmentReviewProvenanceEntry("amendment-review-dispatch-closure", "closure"),
 ];
 
 const mutableCatalog = AUTHORITY_CLASSES.map(([id, name]) => ({
@@ -2317,12 +2600,13 @@ function sliceEntry(id, variant) {
   if (variant !== "pending") {
     source.branch = "feature--backend";
     source.worktree = "/tmp/backend";
+    source.authorized_baseline_commit = SHA_B;
     source.dispatch_required = true;
     source.dispatch_claim_ref = SLICE_DISPATCH_EXTERNAL.claim.ref;
     source.dispatch_claim_hash = hashBytes(SLICE_DISPATCH_EXTERNAL.claim.bytes);
     externalSources = { claim: SLICE_DISPATCH_EXTERNAL.claim };
     sidecars.push(externalSidecar("claim", ["dispatch_claim_ref"], ["dispatch_claim_hash"]));
-    targets.push(...externalSidecarTargets("claim", ["dispatch_claim_ref"], ["dispatch_claim_hash"]));
+    targets.push(...externalSidecarTargets("claim", ["dispatch_claim_ref"], ["dispatch_claim_hash"]), stale(["authorized_baseline_commit"], SHA_A, "stale authorized feature baseline"));
     observations.push({ name: "dispatch-claim-head", source: "claim", path: ["head"], expected: SHA_B, consumer: "checked slice dispatch and terminal/continuation unresolved-dispatch guard" });
     targets.push(ref(["worktree"]));
   }
@@ -2975,6 +3259,37 @@ export function createDurableCatalogBaseline(record) {
     return { consumer: "validateRun/checkRunConsistency", ...createPostPrCatalogBaseline(record) };
   }
   if (record.authorityClassId === "pr79-merged-slice-repair") {
+    if (AMENDMENT_MANIFEST_VARIANTS.some(([id]) => id === record.id)) {
+      return structuredClone({ consumer: "validateIntegrationAmendment", amendment: record.source, externalSources: record.externalSources ?? {} });
+    }
+    if (AMENDMENT_CLAIM_VARIANTS.some(([id]) => id === record.id)) {
+      return structuredClone({ consumer: "validateIntegrationAmendmentExecutionClaim", claim: record.source, externalSources: record.externalSources ?? {} });
+    }
+    if (AMENDMENT_RECEIPT_VARIANTS.some(([id]) => id === record.id)) {
+      return structuredClone({ consumer: "validateIntegrationAmendmentExecutionReceipt", receipt: record.source, externalSources: {} });
+    }
+    if (["amendment-review-approve", "amendment-review-reject"].includes(record.id)) {
+      return structuredClone({ consumer: "validateIntegrationAmendmentReview", review: record.source, externalSources: {} });
+    }
+    if (["amendment-dispatch-binding-active", "amendment-dispatch-binding-closed"].includes(record.id)) {
+      return structuredClone({ consumer: "validateRun", run: { schema_version: 1, run_id: "catalog-run", status: "running", gates: {}, slices: [], steps: [], special_builder_dispatch: record.source }, externalSources: record.externalSources ?? {} });
+    }
+    if (record.id === "amendment-dispatch-claim") {
+      return structuredClone({ consumer: "prepare/completeSpecialBuilderTaskDispatch", claim: record.source, externalSources: {} });
+    }
+    if (record.id === "amendment-dispatch-closure") {
+      return structuredClone({ consumer: "prepare/completeSpecialBuilderTaskDispatch", closure: record.source, externalSources: record.externalSources ?? {} });
+    }
+    if (record.id === "amendment-review-dispatch-claim") {
+      return structuredClone({ consumer: "validateIntegrationAmendmentReviewDispatchClaim", claim: record.source, expected: {
+        claim_ref: AMENDMENT_REVIEW_CLAIM_REF, ...AMENDMENT_REVIEW_CLAIM,
+      }, externalSources: {} });
+    }
+    if (record.id === "amendment-review-dispatch-closure") {
+      return structuredClone({ consumer: "validateIntegrationAmendmentReviewDispatchClosure", closure: record.source, expected: {
+        ...AMENDMENT_REVIEW_CLOSURE, completion_token_hash: AMENDMENT_REVIEW_CLAIM.completion_token_hash,
+      }, externalSources: {} });
+    }
     return { consumer: "validateRun/checkRunConsistency", ...createRepairCatalogBaseline(record) };
   }
   if (record.authorityClassId === "continuation-planning-draft-reuse") {
@@ -3362,6 +3677,311 @@ function exactFacts(source) {
   return facts;
 }
 
+function buildAmendmentCatalogFixtures() {
+  const ownerEvidence = externalJson("evidence/catalog-amendment-owner.json", { subject: "owner", attempt: 1, status: "pass", review_ready: true, head_sha: SHA_B });
+  const ownerReview = externalJson("reviews/catalog-amendment-owner.json", { subject: "owner", attempt: 1, verdict: "APPROVE", reviewed_commit: SHA_B, required_fixes: [] });
+  const ownerAttemptReview = {
+    attempt: 1, evidence_ref: ownerEvidence.ref, evidence_hash: hashBytes(ownerEvidence.bytes), review_ref: ownerReview.ref,
+    review_hash: hashBytes(ownerReview.bytes), reviewed_commit: SHA_B, diff_base_commit: SHA_A, ratified_paths: [], verdict: "APPROVE",
+    convergence: "converging", remaining_fix_count: 0,
+  };
+  const admission = {
+    baseline_ref: "refs/heads/catalog-feature", baseline_commit: SHA_A, baseline_tree: SHA_B, worktree: "/tmp/catalog-feature",
+    probe: { schema_version: 1, kind: "integration-amendment-probe", delivery_unit_id: "consumer-unit", consumer_slice_id: "consumer", verification_artifact_id: "consumer-tests", test_plan_index: 0, test_plan_entry: "node --test test/consumer.test.js", program: "node", args: ["--test", "test/consumer.test.js"], substrate: "feature-baseline" },
+    owner: { id: "owner", stack: "backend", depends_on: [], declared_paths: ["src/owner/**"], effective_paths: ["src/owner/**"], status: "merged", attempts: 1, attempt_reviews: [ownerAttemptReview], evidence_ref: ownerEvidence.ref, evidence_hash: ownerAttemptReview.evidence_hash, review_ref: ownerReview.ref, review_hash: ownerAttemptReview.review_hash, reviewed_commit: SHA_B, merge_commit: SHA_A },
+    consumer: { id: "consumer", stack: "backend", depends_on: ["owner"], declared_paths: ["src/consumer/**"], effective_paths: ["src/consumer/**"], status: "pending", attempts: 0 },
+  };
+  const identity = { schema_version: 1, kind: "integration-amendment-identity", run_id: "catalog-run", defect_path: "src/owner/api.js", admission };
+  const amendmentId = createHash("sha256").update(canonicalJson(identity), "utf8").digest("base64url");
+  const receipts = Object.fromEntries(AMENDMENT_RECEIPT_VARIANTS.map(([, phase, outcome]) => [`${phase}:${outcome}`, amendmentExecutionReceipt(phase, outcome, amendmentId, admission.probe)]));
+  const reportReceipt = receipts["report:nonzero-exit"];
+  const reportReceiptExternal = externalJson(`evidence/integration-amendment-${amendmentId}.report.receipt.json`, reportReceipt);
+  const reportClaim = amendmentExecutionClaim("report", "completed", "fail", amendmentId, identity, admission.probe, reportReceiptExternal);
+  const reportClaimExternal = externalJson("evidence/integration-amendment.report.claim.json", reportClaim);
+  const verificationReceipt = receipts["verify:pass"];
+  const verificationReceiptExternal = externalJson(`evidence/integration-amendment-${amendmentId}.verify.receipt.json`, verificationReceipt);
+  const verificationClaim = amendmentExecutionClaim("verify", "completed", "pass", amendmentId, identity, admission.probe, verificationReceiptExternal, { head_sha: SHA_C, tree_sha: SHA_C, cwd: `/tmp/catalog-feature/.opencode/worktrees/catalog-feature--amend-${amendmentId}-staged` });
+  const verificationClaimExternal = externalJson(`evidence/integration-amendment-${amendmentId}.verify.claim.json`, verificationClaim);
+  const commonExternal = { "owner-evidence": ownerEvidence, "owner-review": ownerReview, "report-claim": reportClaimExternal, "report-receipt": reportReceiptExternal };
+  const base = {
+    schema_version: 1, kind: "integration-amendment", amendment_id: amendmentId, status: "reported", owner_slice_id: "owner", consumer_slice_id: "consumer",
+    defect_path: "src/owner/api.js", verification_artifact_id: "consumer-tests", admission,
+    failure_execution: { claim_ref: reportClaimExternal.ref, claim_hash: hashBytes(reportClaimExternal.bytes), receipt_ref: reportReceiptExternal.ref, receipt_hash: hashBytes(reportReceiptExternal.bytes) },
+    max_attempts: 2, attempts: [], created_at: NOW, updated_at: NOW,
+  };
+  const attempts = {
+    building1: amendmentBuildingAttempt(amendmentId, 1, SHA_A),
+  };
+  const reviewed1Approve = amendmentReviewedAttempt(amendmentId, 1, SHA_A, "APPROVE");
+  const reviewed1Reject = amendmentReviewedAttempt(amendmentId, 1, SHA_A, "REJECT");
+  attempts.building2 = amendmentBuildingAttempt(amendmentId, 2, reviewed1Reject.attempt.reviewed_commit);
+  const reviewed2Approve = amendmentReviewedAttempt(amendmentId, 2, reviewed1Reject.attempt.reviewed_commit, "APPROVE");
+  const reviewed2Reject = amendmentReviewedAttempt(amendmentId, 2, reviewed1Reject.attempt.reviewed_commit, "REJECT");
+  const integrated = { ref: `refs/opencode/integration-amendments/${amendmentId}/staged`, worktree: `/tmp/catalog-feature/.opencode/worktrees/catalog-feature--amend-${amendmentId}-staged`, commit: SHA_C, tree: reviewed1Approve.attempt.reviewed_tree };
+  const verification = { claim_ref: verificationClaimExternal.ref, claim_hash: hashBytes(verificationClaimExternal.bytes), receipt_ref: verificationReceiptExternal.ref, receipt_hash: hashBytes(verificationReceiptExternal.bytes) };
+  const blocked = (source, origin) => ({ ...source, status: "blocked", blocked: { origin, reason: "catalog amendment stopped", blocked_at: NOW } });
+  const reviewedSource = (reviewed) => ({ ...base, status: "reviewed", attempts: reviewed.attempts || [reviewed.attempt] });
+  const manifestVariants = {
+    reported: base,
+    "building-1": { ...base, status: "building", attempts: [attempts.building1] },
+    "building-2": { ...base, status: "building", attempts: [reviewed1Reject.attempt, attempts.building2] },
+    "reviewed-approve-1": reviewedSource(reviewed1Approve),
+    "reviewed-reject-1": reviewedSource(reviewed1Reject),
+    "reviewed-approve-2": reviewedSource({ attempts: [reviewed1Reject.attempt, reviewed2Approve.attempt] }),
+    "reviewed-reject-2": reviewedSource({ attempts: [reviewed1Reject.attempt, reviewed2Reject.attempt] }),
+    integrated: { ...reviewedSource(reviewed1Approve), status: "integrated", integration: integrated },
+    verified: { ...reviewedSource(reviewed1Approve), status: "verified", integration: integrated, verification },
+    merged: { ...reviewedSource(reviewed1Approve), status: "merged", integration: integrated, verification, publication: { branch_ref: admission.baseline_ref, previous_commit: admission.baseline_commit, commit: integrated.commit, published_at: NOW } },
+  };
+  manifestVariants["blocked-reported"] = blocked(base, "reported");
+  manifestVariants["blocked-building"] = blocked(manifestVariants["building-1"], "building");
+  manifestVariants["blocked-reviewed-approve"] = blocked(manifestVariants["reviewed-approve-1"], "reviewed-approve");
+  manifestVariants["blocked-reviewed-reject"] = blocked(manifestVariants["reviewed-reject-1"], "reviewed-reject");
+  manifestVariants["blocked-integrated"] = blocked(manifestVariants.integrated, "integrated");
+  manifestVariants["blocked-verified"] = blocked(manifestVariants.verified, "verified");
+
+  const externalForVariant = (variant) => {
+    if (["building-2", "reviewed-reject-1", "blocked-reviewed-reject"].includes(variant)) return reviewed1Reject.external;
+    if (["reviewed-approve-2"].includes(variant)) return { ...reviewed1Reject.external, ...reviewed2Approve.external };
+    if (["reviewed-reject-2"].includes(variant)) return { ...reviewed1Reject.external, ...reviewed2Reject.external };
+    if (["reviewed-approve-1", "integrated", "verified", "merged", "blocked-reviewed-approve", "blocked-integrated", "blocked-verified"].includes(variant)) return reviewed1Approve.external;
+    return {};
+  };
+  const manifests = Object.fromEntries(AMENDMENT_MANIFEST_VARIANTS.map(([id, variant]) => [id, {
+    source: structuredClone(manifestVariants[variant]),
+    externalSources: structuredClone({ ...commonExternal, ...externalForVariant(variant), ...(variant === "verified" || variant === "merged" || variant === "blocked-verified" ? { "verify-claim": verificationClaimExternal, "verify-receipt": verificationReceiptExternal } : {}) }),
+  }]));
+  const claims = Object.fromEntries(AMENDMENT_CLAIM_VARIANTS.map(([id, phase, state, outcome]) => {
+    const receiptOutcome = outcome === "pass" ? "pass" : "nonzero-exit";
+    const receipt = receipts[`${phase}:${receiptOutcome}`];
+    const receiptExternal = externalJson(`evidence/integration-amendment-${amendmentId}.${phase}.receipt.json`, receipt);
+    return [id, { source: amendmentExecutionClaim(phase, state, outcome, amendmentId, identity, admission.probe, receiptExternal), externalSources: state === "completed" ? { receipt: receiptExternal } : {} }];
+  }));
+  const receiptRows = Object.fromEntries(AMENDMENT_RECEIPT_VARIANTS.map(([id, phase, outcome]) => [id, { source: receipts[`${phase}:${outcome}`], externalSources: {} }]));
+  const reviews = Object.fromEntries([["amendment-review-approve", amendmentReview(amendmentId, 1, "APPROVE")], ["amendment-review-reject", amendmentReview(amendmentId, 1, "REJECT")]]);
+  const dispatch = amendmentBuilderDispatch(amendmentId, 1);
+  return { amendmentId, identity, admission, manifests, claims, receipts: receiptRows, reviews, dispatch };
+}
+
+function amendmentExecutionReceipt(phase, outcome, amendmentId, probe) {
+  const values = {
+    pass: { outcome: "exited", status: "pass", exit_code: 0, signal: null, error_code: null },
+    "nonzero-exit": { outcome: "exited", status: "fail", exit_code: 1, signal: null, error_code: null },
+    signal: { outcome: "signaled", status: "fail", exit_code: null, signal: "SIGTERM", error_code: null },
+    "launch-error": { outcome: "launch-error", status: "fail", exit_code: null, signal: null, error_code: "spawn-failed" },
+    timeout: { outcome: "timeout", status: "fail", exit_code: null, signal: "SIGKILL", error_code: null },
+    "output-limit": { outcome: "output-limit", status: "fail", exit_code: null, signal: "SIGKILL", error_code: null },
+  }[outcome];
+  const head = phase === "report" ? SHA_A : SHA_C;
+  const cwd = phase === "report" ? "/tmp/catalog-feature" : `/tmp/catalog-feature/.opencode/worktrees/catalog-feature--amend-${amendmentId}-staged`;
+  const stdout = emptyCommandStream();
+  if (outcome === "output-limit") Object.assign(stdout, { captured_bytes: 1, sha256: hashBytes("x"), truncated: true });
+  return {
+    schema_version: 1, kind: "integration-amendment-execution-receipt", phase, subject: `integration-amendment:${amendmentId}:${phase}`, run_id: "catalog-run", amendment_id: amendmentId,
+    claim_nonce: `${phase}-catalog-nonce`, probe: structuredClone(probe), head_sha: head, tree_sha: phase === "report" ? SHA_B : SHA_C, cwd,
+    started_at: NOW, completed_at: NOW, duration_ms: 1, status: values.status, review_ready: phase === "report" ? outcome === "nonzero-exit" : outcome === "pass",
+    commands: [{ index: 0, program: probe.program, args: structuredClone(probe.args), ...values, duration_ms: 1, stdout, stderr: emptyCommandStream() }],
+  };
+}
+
+function amendmentExecutionClaim(phase, state, outcome, amendmentId, identity, probe, receiptExternal, overrides = {}) {
+  const source = {
+    schema_version: 1, kind: "integration-amendment-execution-claim", phase, subject: `integration-amendment:${amendmentId}:${phase}`, state,
+    nonce: `${phase}-catalog-nonce`, amendment_id: amendmentId, identity: structuredClone(identity), run_id: "catalog-run", probe: structuredClone(probe),
+    head_sha: phase === "report" ? SHA_A : SHA_C, tree_sha: phase === "report" ? SHA_B : SHA_C,
+    cwd: phase === "report" ? "/tmp/catalog-feature" : `/tmp/catalog-feature/.opencode/worktrees/catalog-feature--amend-${amendmentId}-staged`,
+    receipt_ref: receiptExternal.ref, claimed_at: NOW, ...overrides,
+  };
+  if (state === "completed") Object.assign(source, { completed_at: NOW, status: outcome, receipt_hash: hashBytes(receiptExternal.bytes) });
+  if (state === "unknown") Object.assign(source, { failed_at: NOW, reason: outcome, receipt_status: null, receipt_hash: null });
+  return source;
+}
+
+function amendmentBuildingAttempt(amendmentId, attempt, base) {
+  return { attempt, state: "building", build_base_commit: base, branch_ref: `refs/heads/catalog-feature--amend-${amendmentId}-a${attempt}`, worktree: `/tmp/catalog-feature/.opencode/worktrees/catalog-feature--amend-${amendmentId}-a${attempt}` };
+}
+
+function amendmentReviewedAttempt(amendmentId, attempt, base, verdict) {
+  const building = amendmentBuildingAttempt(amendmentId, attempt, base);
+  const dispatch = amendmentBuilderDispatch(amendmentId, attempt);
+  const review = amendmentReview(amendmentId, attempt, verdict);
+  const reviewExternal = externalJson(`reviews/integration-amendment-${amendmentId}.attempt-${attempt}.json`, review);
+  return {
+    attempt: { ...building, state: "reviewed", dispatch_claim_ref: dispatch.claimExternal.ref, dispatch_claim_hash: hashBytes(dispatch.claimExternal.bytes), dispatch_closure_ref: dispatch.closureExternal.ref, dispatch_closure_hash: hashBytes(dispatch.closureExternal.bytes), candidate_commit: SHA_C, candidate_tree: SHA_C, changed_paths: ["src/owner/api.js"], review_ref: reviewExternal.ref, review_hash: hashBytes(reviewExternal.bytes), reviewed_commit: SHA_C, reviewed_tree: SHA_C },
+    external: { [`dispatch-claim-${attempt}-${verdict.toLowerCase()}`]: dispatch.claimExternal, [`dispatch-closure-${attempt}-${verdict.toLowerCase()}`]: dispatch.closureExternal, [`review-${attempt}-${verdict.toLowerCase()}`]: reviewExternal },
+  };
+}
+
+function amendmentReview(amendmentId, attempt, verdict) {
+  return { schema_version: 1, kind: "integration-amendment-review", subject: `integration-amendment:${amendmentId}`, amendment_id: amendmentId, attempt, build_base_commit: attempt === 1 ? SHA_A : SHA_C, reviewed_commit: SHA_C, reviewed_tree: SHA_C, changed_paths: ["src/owner/api.js"], dispositions: Object.fromEntries(["accepted_contract", "public_contract", "persisted_contract", "product_scope", "security_boundary", "generated_ownership", "decomposition"].map((key) => [key, "preserved"])), verdict, required_fixes: verdict === "APPROVE" ? [] : ["correct the owner implementation"], reviewed_at: NOW };
+}
+
+function amendmentBuilderDispatch(amendmentId, attempt) {
+  const instance = `${amendmentId}:attempt-${attempt}`;
+  const claimRef = `dispatch/${String(attempt).repeat(64)}.special.json`;
+  const closureRef = `${claimRef.slice(0, -5)}.closed.json`;
+  const token = `catalog-amendment-builder-${attempt}`;
+  const claim = { schema_version: 1, kind: "checked-special-builder-dispatch-claim", run_id: "catalog-run", route: "integration-amendment", instance, agent: "backend-builder", branch: `catalog-feature--amend-${amendmentId}-a${attempt}`, worktree: `/tmp/catalog-feature/.opencode/worktrees/catalog-feature--amend-${amendmentId}-a${attempt}`, head: attempt === 1 ? SHA_A : SHA_C, run_hash: HASH_A, context_hash: HASH_B, completion_token_hash: hashBytes(token), claimed_at: NOW, closure_ref: closureRef };
+  const claimExternal = externalJson(claimRef, claim);
+  const closure = { schema_version: 1, kind: "checked-special-builder-dispatch-closure", claim_ref: claimRef, claim_hash: hashBytes(claimExternal.bytes), run_id: claim.run_id, route: claim.route, instance, agent: claim.agent, branch: claim.branch, worktree: claim.worktree, head: claim.head, completion_head: SHA_C, run_hash: claim.run_hash, context_hash: claim.context_hash, completion_token: token, returned_at: NOW };
+  const closureExternal = externalJson(closureRef, closure);
+  return { claim, closure, claimExternal, closureExternal, activeBinding: { schema_version: 1, route: "integration-amendment", instance, agent: "backend-builder", claim_ref: claimRef, claim_hash: hashBytes(claimExternal.bytes) }, closedBinding: { schema_version: 1, route: "integration-amendment", instance, agent: "backend-builder", claim_ref: claimRef, claim_hash: hashBytes(claimExternal.bytes), closure_ref: closureRef, closure_hash: hashBytes(closureExternal.bytes), completion_head: SHA_C } };
+}
+
+function externalJson(ref, value) {
+  return { ref, bytes: `${JSON.stringify(value, null, 2)}\n` };
+}
+
+function emptyCommandStream() {
+  return { captured_bytes: 0, sha256: hashBytes(""), truncated: false };
+}
+
+function amendmentManifestEntry(id, variant) {
+  const fixture = AMENDMENT_CATALOG.manifests[id];
+  const source = structuredClone(fixture.source);
+  const externalSources = structuredClone(fixture.externalSources);
+  const sidecars = [
+    amendmentNamedSidecar(externalSources, "owner-evidence", ["admission", "owner", "evidence_ref"], ["admission", "owner", "evidence_hash"]),
+    amendmentNamedSidecar(externalSources, "owner-review", ["admission", "owner", "review_ref"], ["admission", "owner", "review_hash"]),
+    amendmentNamedSidecar(externalSources, "report-claim", ["failure_execution", "claim_ref"], ["failure_execution", "claim_hash"]),
+    amendmentNamedSidecar(externalSources, "report-receipt", ["failure_execution", "receipt_ref"], ["failure_execution", "receipt_hash"]),
+  ];
+  for (const [index, attempt] of source.attempts.entries()) {
+    if (attempt.state !== "reviewed") continue;
+    sidecars.push(
+      amendmentRefSidecar(externalSources, `attempt-${index + 1}-dispatch-claim`, ["attempts", index, "dispatch_claim_ref"], ["attempts", index, "dispatch_claim_hash"], attempt.dispatch_claim_ref),
+      amendmentRefSidecar(externalSources, `attempt-${index + 1}-dispatch-closure`, ["attempts", index, "dispatch_closure_ref"], ["attempts", index, "dispatch_closure_hash"], attempt.dispatch_closure_ref),
+      amendmentRefSidecar(externalSources, `attempt-${index + 1}-review`, ["attempts", index, "review_ref"], ["attempts", index, "review_hash"], attempt.review_ref),
+    );
+  }
+  if (source.verification) sidecars.push(
+    amendmentNamedSidecar(externalSources, "verify-claim", ["verification", "claim_ref"], ["verification", "claim_hash"]),
+    amendmentNamedSidecar(externalSources, "verify-receipt", ["verification", "receipt_ref"], ["verification", "receipt_hash"]),
+  );
+  return recordEntry({
+    authorityClassId: "pr79-merged-slice-repair", id, record: "run.json.integration_amendment", variant,
+    writer: `transitionIntegrationAmendment ${variant} checked transition`,
+    readers: ["validateIntegrationAmendment", "inspectIntegrationAmendmentInventory", "assertIntegrationAmendmentConsistency", "successor transition and merged downstream writer guard"],
+    tests: [`test/durable-record-mutations.test.js: ${id} production mutation matrix`, "test/integration-amendment.test.js: closed manifest variants and lifecycle"],
+    source, canonicalPath: ["integration_amendment"], externalSources, facts: exactFacts(source), sidecars,
+    requiredPath: ["status"], typePath: ["attempts"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-amendment"), time(["updated_at"]), ...sidecars.flatMap((binding) => externalSidecarTargets(binding.name, binding.refPath, binding.hashPath)), drift([], "failure_execution", "report_execution"), stale(["admission", "baseline_commit"], SHA_C), cross(["consumer_slice_id"], "owner")],
+  });
+}
+
+function amendmentExecutionClaimEntry(id, phase, state, outcome) {
+  const fixture = AMENDMENT_CATALOG.claims[id];
+  const source = structuredClone(fixture.source);
+  const externalSources = structuredClone(fixture.externalSources);
+  const sidecars = state === "completed" ? [externalSidecar("receipt", ["receipt_ref"], ["receipt_hash"])] : [];
+  return recordEntry({
+    authorityClassId: "pr79-merged-slice-repair", id, record: phase === "report" ? "evidence/integration-amendment.report.claim.json" : "evidence/integration-amendment-<A>.verify.claim.json", variant: `${phase}:${state}${outcome ? `:${outcome}` : ""}`,
+    writer: `executeIntegrationAmendment ${phase} create-only claim and terminal claim transition`,
+    readers: ["validateIntegrationAmendmentExecutionClaim", "inspectIntegrationAmendmentInventory", "executeIntegrationAmendment exact replay", "transitionIntegrationAmendment execution consumer"],
+    tests: [`test/durable-record-mutations.test.js: ${id} production mutation matrix`, "test/integration-amendment.test.js: execution claim lifecycle"],
+    source, canonicalPath: ["evidence", id], externalSources, facts: exactFacts(source), sidecars,
+    requiredPath: ["state"], typePath: ["nonce"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-claim"), time([state === "completed" ? "completed_at" : state === "unknown" ? "failed_at" : "claimed_at"]), ...(sidecars.length ? sidecars.flatMap((binding) => externalSidecarTargets(binding.name, binding.refPath, binding.hashPath)) : [ref(["receipt_ref"]), ...(state === "unknown" ? [hash(["receipt_hash"])] : [])]), drift([], "phase", "execution_phase"), stale(["head_sha"], phase === "report" ? SHA_C : SHA_A), cross(["run_id"], "other-run")],
+  });
+}
+
+function amendmentExecutionReceiptEntry(id, phase, outcome) {
+  const source = structuredClone(AMENDMENT_CATALOG.receipts[id].source);
+  return recordEntry({
+    authorityClassId: "pr79-merged-slice-repair", id, record: `evidence/integration-amendment-<A>.${phase}.receipt.json`, variant: `${phase}:${outcome}`,
+    writer: `executeIntegrationAmendment ${phase} create-only execution receipt publication`,
+    readers: ["validateIntegrationAmendmentExecutionReceipt", "inspectIntegrationAmendmentInventory claim/receipt pairing", "executeIntegrationAmendment exact replay", "assertIntegrationAmendmentConsistency"],
+    tests: [`test/durable-record-mutations.test.js: ${id} production mutation matrix`, "test/integration-amendment.test.js: execution receipt outcomes"],
+    source, canonicalPath: ["evidence", id], facts: exactFacts(source), requiredPath: ["status"], typePath: ["duration_ms"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-receipt"), time(["completed_at"]), drift([], "commands", "results"), stale(["head_sha"], SHA_B), cross(["run_id"], "other-run")],
+  });
+}
+
+function amendmentReviewEntry(id, verdict) {
+  const source = structuredClone(AMENDMENT_CATALOG.reviews[id]);
+  return recordEntry({
+    authorityClassId: "pr79-merged-slice-repair", id, record: "reviews/integration-amendment-<A>.attempt-<N>.json", variant: verdict,
+    writer: "completeIntegrationAmendmentReviewTaskDispatch create-only checked review publication",
+    readers: ["validateIntegrationAmendmentReview", "inspectIntegrationAmendmentInventory", "transitionIntegrationAmendment review and retry consumers", "assertIntegrationAmendmentConsistency"],
+    tests: [`test/durable-record-mutations.test.js: ${id} production mutation matrix`, "test/integration-amendment.test.js: checked review publication"],
+    source, canonicalPath: ["reviews", id], facts: exactFacts(source), requiredPath: ["verdict"], typePath: ["attempt"],
+    targets: [schema(["schema_version"]), kind(["kind"], "other-review"), time(["reviewed_at"]), drift([], "required_fixes", "fixes"), stale(["build_base_commit"], SHA_C), cross(["amendment_id"], "B".repeat(43))],
+  });
+}
+
+function amendmentBuilderDispatchEntry(id, variant) {
+  const dispatch = AMENDMENT_CATALOG.dispatch;
+  const binding = variant === "binding-active" || variant === "binding-closed";
+  const closed = variant === "binding-closed";
+  const closure = variant === "closure";
+  const source = structuredClone(binding ? (closed ? dispatch.closedBinding : dispatch.activeBinding) : closure ? dispatch.closure : dispatch.claim);
+  const externalSources = binding
+    ? { claim: structuredClone(dispatch.claimExternal), ...(closed ? { closure: structuredClone(dispatch.closureExternal) } : {}) }
+    : closure ? { claim: structuredClone(dispatch.claimExternal) } : {};
+  const sidecars = binding
+    ? [externalSidecar("claim", ["claim_ref"], ["claim_hash"]), ...(closed ? [externalSidecar("closure", ["closure_ref"], ["closure_hash"])] : [])]
+    : closure ? [externalSidecar("claim", ["claim_ref"], ["claim_hash"])] : [];
+  return recordEntry({
+    authorityClassId: "pr79-merged-slice-repair", id,
+    record: binding ? "run.json.special_builder_dispatch" : closure ? "dispatch/<sha256>.special.closed.json" : "dispatch/<sha256>.special.json", variant,
+    writer: binding ? (closed ? "completeSpecialBuilderTaskDispatch checked closure binding" : "prepareSpecialBuilderTaskDispatch checked active binding") : closure ? "completeSpecialBuilderTaskDispatch create-only closure publication" : "prepareSpecialBuilderTaskDispatch create-only claim publication",
+    readers: binding ? ["validateSpecialBuilderDispatch through validateRun", "assertIntegrationAmendmentDispatchBinding", "unresolved special-dispatch writer fence", "transitionIntegrationAmendment review consumer"] : ["prepare/completeSpecialBuilderTaskDispatch", "assertIntegrationAmendmentDispatchBinding", "inspectIntegrationAmendmentInventory", "checked review transition"],
+    tests: [`test/durable-record-mutations.test.js: ${id} production mutation matrix`, "test/integration-amendment.test.js: checked special builder dispatch"],
+    source, canonicalPath: binding ? ["special_builder_dispatch"] : ["dispatch", id], externalSources, facts: exactFacts(source), sidecars,
+    requiredPath: [binding ? "route" : "kind"], typePath: [binding ? "instance" : "schema_version"],
+    targets: [schema(["schema_version"]), kind([binding ? "route" : "kind"], "other-dispatch"), ...(binding ? [] : [time([closure ? "returned_at" : "claimed_at"])]), ...(binding || closure ? sidecars.flatMap((sidecar) => externalSidecarTargets(sidecar.name, sidecar.refPath, sidecar.hashPath)) : [ref(["closure_ref"]), hash(["completion_token_hash"])]), drift([], "instance", "dispatch_instance"), stale([binding ? "agent" : "head"], binding ? "frontend-builder" : SHA_C), cross([binding ? "instance" : "run_id"], binding ? `${AMENDMENT_CATALOG.amendmentId}:attempt-2` : "other-run")],
+  });
+}
+
+function amendmentNamedSidecar(externalSources, name, refPath, hashPath) {
+  if (!externalSources[name]) throw new TypeError(`missing amendment catalog sidecar ${name}`);
+  return externalSidecar(name, refPath, hashPath);
+}
+
+function amendmentRefSidecar(externalSources, name, refPath, hashPath, ref) {
+  const sourceName = Object.keys(externalSources).find((key) => externalSources[key].ref === ref);
+  if (!sourceName) throw new TypeError(`missing amendment catalog sidecar ${ref}`);
+  externalSources[name] = externalSources[sourceName];
+  if (sourceName !== name) delete externalSources[sourceName];
+  return externalSidecar(name, refPath, hashPath);
+}
+
+function amendmentReviewProvenanceEntry(id, variant) {
+  const claim = variant === "claim";
+  const source = structuredClone(claim ? AMENDMENT_REVIEW_CLAIM : AMENDMENT_REVIEW_CLOSURE);
+  const targets = claim
+    ? [
+        schema(["schema_version"]), kind(["kind"]), time(["claimed_at"]), ref(["review_ref"]), hash(["context_hash"]),
+        drift([], "review_ref", "review_path"), stale(["candidate_commit"], SHA_C), cross(["run_id"], "other-run"),
+      ]
+    : [
+        schema(["schema_version"]), kind(["kind"]), time(["returned_at"]), ref(["claim_ref"]), hash(["claim_hash"]),
+        bytes(["completion_token"], "completion capability"), drift([], "review_ref", "review_path"),
+        stale(["context_hash"], HASH_B), cross(["run_id"], "other-run"),
+      ];
+  return recordEntry({
+    authorityClassId: "pr79-merged-slice-repair",
+    id,
+    record: claim ? "dispatch/<sha256>.amendment-review.json" : "dispatch/<sha256>.amendment-review.closed.json",
+    variant,
+    writer: claim ? "prepareIntegrationAmendmentReviewTaskDispatch create-only claim publication" : "completeIntegrationAmendmentReviewTaskDispatch create-only closure publication",
+    readers: claim
+      ? ["validateIntegrationAmendmentReviewDispatchClaim", "inspectIntegrationAmendmentInventory reviewer-effect classifier", "completeIntegrationAmendmentReviewTaskDispatch", "transitionIntegrationAmendment review consumer"]
+      : ["validateIntegrationAmendmentReviewDispatchClosure", "inspectIntegrationAmendmentInventory reviewer-effect classifier", "completeIntegrationAmendmentReviewTaskDispatch replay", "transitionIntegrationAmendment review consumer", "assertIntegrationAmendmentConsistency downstream revalidation"],
+    tests: [`test/durable-record-mutations.test.js: ${id} mutation matrix`, "test/durable-record-mutations.test.js: amendment reviewer provenance production mutation matrix", "test/integration-amendment.test.js: reviewer effect lifecycle and replay"],
+    source,
+    canonicalPath: ["dispatch", claim ? "amendment-review-claim" : "amendment-review-closure"],
+    requiredPath: [claim ? "closure_ref" : "review_hash"],
+    typePath: ["attempt"],
+    facts: exactFacts(source),
+    observations: [
+      repairReobservation("reviewer-effect-states", ["absent", "active-claim-only", "review-published-without-closure", "closed-unconsumed", "consumed", "orphan-or-cross-bound"], "inspectIntegrationAmendmentInventory"),
+      repairReobservation("compatibility", "immutable create-only sidecar; no run schema bump and no overwrite/backfill", "completeIntegrationAmendmentReviewTaskDispatch and downstream consistency"),
+    ],
+    targets,
+  });
+}
+
 function repairEntry(id, status, attempts, options) {
   const source = {
     schema_version: 1,
@@ -3525,7 +4145,7 @@ function validateCanonicalCoreRecord(record, path) {
 function rejectSyntheticCanonicalKeys(record, path) {
   const forbidden = new Set(["sidecar_bytes"]);
   if (record.authorityClassId === "post-pr-nested-records") forbidden.add("run_status");
-  if (record.authorityClassId === "pr79-merged-slice-repair") {
+  if (record.id.startsWith("repair-")) {
     for (const key of ["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"]) forbidden.add(key);
   }
   if (record.authorityClassId === "slices-review-evidence-bindings") {

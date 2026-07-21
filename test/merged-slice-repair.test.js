@@ -17,6 +17,50 @@ const RUN_ID = "repair-run";
 const FEATURE_BRANCH = "repair-feature";
 
 describe("merged-sibling repair", () => {
+  it("preserves persisted legacy progression and terminal records after the generic cutover", async () => {
+    const progressing = createFixture();
+    try {
+      await report(progressing);
+      assert.equal(readRun(progressing).merged_slice_repair.status, "reported");
+      assert.doesNotThrow(() => validateRun(readRun(progressing)));
+      await transitionMergedSliceRepair(progressing.runDir, { status: "repairing", attempts: 1 });
+      assert.equal(readRun(progressing).merged_slice_repair.status, "repairing");
+      const head = await commitRepairFix(progressing);
+      recordReview(progressing, "migration-approve", { verdict: "APPROVE", required_fixes: [], attempt: 1, commit: head });
+      await review(progressing, "migration-approve", head);
+      assert.equal(readRun(progressing).merged_slice_repair.status, "review");
+      writeJson(join(progressing.runDir, "evidence", "verification-pass.json"), { subject: "consumer", status: "pass" });
+      await merge(progressing, { merge_commit: head });
+      assert.equal(readRun(progressing).merged_slice_repair.status, "merged");
+      assert.doesNotThrow(() => validateRun(readRun(progressing)));
+    } finally { cleanup(progressing); }
+
+    const blocked = createFixture();
+    try {
+      await report(blocked);
+      await transitionMergedSliceRepair(blocked.runDir, { status: "blocked", reason: "persisted legacy stop" });
+      assert.equal(readRun(blocked).merged_slice_repair.status, "blocked");
+      assert.doesNotThrow(() => validateRun(readRun(blocked)));
+    } finally { cleanup(blocked); }
+  });
+
+  it("retains new legacy admission for blocked, previously attempted, and branch-only consumers", async () => {
+    for (const [name, mutate] of [
+      ["blocked", (consumer) => { consumer.status = "blocked"; consumer.attempts = 1; consumer.blocked_reason = "owner defect"; }],
+      ["previously-attempted", (consumer) => { consumer.status = "blocked"; consumer.attempts = 2; consumer.blocked_reason = "attempted consumer exposed owner defect"; }],
+      ["branch-only", (consumer, fixture) => { consumer.status = "running"; consumer.attempts = 1; consumer.branch = FEATURE_BRANCH; consumer.worktree = fixture.repo; }],
+    ]) {
+      const fixture = createFixture();
+      try {
+        const run = readRun(fixture);
+        mutate(run.slices.find((slice) => slice.id === "consumer"), fixture);
+        writeJson(join(fixture.runDir, "run.json"), run);
+        const result = await report(fixture);
+        assert.equal(result.merged_slice_repair.status, "reported", name);
+      } finally { cleanup(fixture); }
+    }
+  });
+
   it("reports a repair only for a merged direct dependency with observed failing in-lane evidence", async () => {
     const fixture = createFixture();
     try {
