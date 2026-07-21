@@ -748,8 +748,8 @@ Goals:
 - Avoid duplicating generic opencode telemetry that native opencode or `@devtheops/opencode-plugin-otel` already provides.
 - Make each factory run appear as one Agent Timeline conversation.
 - Show agent swim lanes for `feature-factory`, story/spec/decomposition agents, builders, reviewers, validators, and security review.
-- Show tool calls and downstream factory operations with enough metadata to debug failures.
-- Correlate local durable artifacts with spans through stable refs and hashes, not raw large payloads.
+- Show tool calls and downstream factory operations with bounded metadata sufficient to debug failures.
+- Correlate spans through canonical run, slice, session, and call identifiers without exporting artifact refs, hashes, or content.
 - Keep telemetry optional and safe by default.
 
 Non-goals for the first implementation:
@@ -763,6 +763,31 @@ Non-goals for the first implementation:
 - No opencode core fork as a prerequisite for the first useful version. If native opencode span enrichment is needed later, design it as an upstream contribution.
 
 ### Native OpenCode Interop
+
+#### B6.1 supported correlation contract
+
+The supported plugin seam is the public OpenCode **1.18.3** hook API, verified by direct hook-shaped calls in `test/plugin.test.js`:
+
+- `event({event})` observes `session.created`, `session.updated`, and `session.deleted` through `event.properties.info.id` and optional `parentID`. `session.status`, `session.idle`, and `session.compacted` expose `event.properties.sessionID`. Parentage is best-effort because only those public event fields are used.
+- `tool.execute.before/after` observes a Task hook's `input.sessionID` and `input.callID`; their ordered pair, not either value alone, identifies one hook invocation. Structured Task arguments expose the target agent and existing checked marker transport, but correlation identity never comes from parsing a prompt, message, tool argument/result, review, evidence body, or arbitrary model output.
+- These hooks expose no native span handle and no supported API for mutating or enriching native OpenCode/AI SDK spans. B6.2 may emit only adjacent feature-factory-owned spans through the existing `withSpan()` API. It must not claim that native spans were changed.
+
+`createSessionCorrelationProbe()` is the B6.1 non-emitting feasibility probe. Each explicitly telemetry-enabled plugin instance owns a process-local in-memory map capped at 256 sessions and 512 active Task calls; disabled instances keep no map. It retains only terminal-safe IDs, observed parentage, a closed lifecycle event, target agent, and before/after state. Oldest entries are evicted; deleting or evicting a session removes its calls and clears child references to that parent. Restart begins empty. The probe writes no files, exports nothing, creates no span, and cannot affect durable workflow transitions. Probe failures are ignored.
+
+Runtime builder conversation reuse remains the existing ephemeral authority check, but `task_id` is not telemetry identity. Raw `task_id` is never stored in the correlation map, persisted, attached to spans/events, or exported. The fresh/reuse telemetry value is the bounded enum `fresh|reuse` only.
+
+The canonical B6 attribute names reserved for B6.2 are:
+
+- `feature_factory.run_id`, `feature_factory.slice_id`, and `feature_factory.attempt`;
+- `feature_factory.verdict` and `feature_factory.convergence`;
+- `feature_factory.session_id` and, only when observed, `feature_factory.parent_session_id`;
+- `feature_factory.call_id` plus `feature_factory.call_relationship` (`task-hook` or `parent-session`); the composite `session_id` + `call_id` is the Task-hook key and parent session alone does not prove which concurrent call created a child;
+- `feature_factory.target_agent`, `feature_factory.route`, `feature_factory.lane`, and `feature_factory.task_context` (`fresh|reuse`);
+- `feature_factory.span_event` (`session-created|session-updated|session-deleted|session-status|session-idle|session-compacted|task-before|task-after`) and `feature_factory.span_operation` (`observe-session|execute-task`), always set explicitly rather than inferred from text.
+
+Do not emit dotted or duplicate compatibility aliases for these canonical names. Identifier values are ASCII `[A-Za-z0-9][A-Za-z0-9._:-]*`, at most 128 UTF-8 bytes; invalid values are omitted. Enum values are closed at each instrumentation site to at most 32 printable lowercase ASCII tokens per field, each at most 32 bytes; unknown values are omitted rather than exported as arbitrary strings. `attempt` is a bounded integer from checked factory state. No B6 span attribute or event may contain prompts, messages, tool arguments/results, reviews, evidence, raw paths, refs, hashes, URLs, secrets, `traceparent`, `tracestate`, or arbitrary model output. String attributes outside identifiers/enums are not part of this contract; a future extension requires an explicit contract and a maximum of 256 UTF-8 bytes.
+
+W3C linkage is supplied only by active OpenTelemetry context and standard propagation into the process that calls `withSpan()`. The public event/tool hooks expose neither native OpenCode span context nor a context-extraction handle, so B6.1 makes no extraction or native parentage claim. Telemetry must be explicitly enabled, is best-effort, and must never change durable workflow behavior, callback authority, errors, or results. B6.1 emits no production spans; emission belongs to B6.2.
 
 Feature-factory telemetry should compose with three possible operator setups:
 
@@ -778,7 +803,7 @@ Native AI SDK spans are valuable but insufficient for the Agent Timeline by them
 
 ### Conversation And Span Model
 
-Use `run.run_id` as `gen_ai.conversation.id` once a run exists. Before run creation is observable, use a generated `feature_factory.execution_id` or `sessionID` as a temporary correlation key and attach the eventual `run_id` when it is known.
+Use checked `run.run_id` as `gen_ai.conversation.id` once a run exists. Before run creation is observable, use only the public terminal-safe `sessionID` as runtime correlation; never infer or backfill run identity from prompt or output text.
 
 Every feature-factory GenAI span should include:
 
@@ -790,35 +815,33 @@ Every feature-factory GenAI span should include:
 - `feature_factory.review_tier`: optional display-only review tier label when known.
 - `feature_factory.status`: current run/slice/gate status when relevant.
 
-Native opencode spans may only carry generic attributes such as `session.id` or AI SDK span names. For phase 1, it is acceptable if those spans live in the same trace but do not independently satisfy Agent Timeline grouping, as long as feature-factory emits adjacent/parent spans with `gen_ai.conversation.id` and stable artifact refs. Phase 2 should pursue native span enrichment if Honeycomb Agent Timeline requires every model/tool span to carry the conversation id.
+Native opencode spans may carry only generic attributes such as `session.id` or AI SDK span names. B6 factory-owned spans may be adjacent in the same trace and carry the canonical bounded correlation fields, but they never carry artifact/review/evidence refs or content hashes and do not enrich native spans. Native enrichment remains unsupported unless a later verified public API and test seam explicitly supersede this contract.
 
 Prefer additional package-scoped attributes for factory-specific concepts instead of overloading GenAI attributes:
 
-- `feature_factory.gate.name`
-- `feature_factory.gate.status`
-- `feature_factory.slice.id`
-- `feature_factory.slice.stack`
-- `feature_factory.slice.attempt`
-- `feature_factory.step.agent`
-- `feature_factory.artifact.ref`
-- `feature_factory.review.ref`
-- `feature_factory.evidence.ref`
-- `feature_factory.pr.url`
-- `feature_factory.terminal.status`
-- `feature_factory.terminal.reason_type`
+- `feature_factory.gate_name`
+- `feature_factory.gate_status`
+- `feature_factory.slice_id`
+- `feature_factory.slice_stack`
+- `feature_factory.attempt`
+- `feature_factory.step_agent`
+- `feature_factory.verdict`
+- `feature_factory.convergence`
+- `feature_factory.terminal_status`
+- `feature_factory.terminal_reason_type`
 
-Avoid absolute local paths by default. When a path is needed, prefer repo-relative refs already present in durable artifacts. If an absolute path is operationally useful, put it behind an explicit `includePaths` option.
+B6 correlation spans exclude raw paths and durable refs entirely. Operators can use local durable state separately after identifying the bounded run/slice IDs.
 
 ### Span Taxonomy
 
 | Span name | Source | Required attributes | Notes |
 |---|---|---|---|
-| `factory.start` | `src/factory.js` `startFactory()` | `feature_factory.mode`, `feature_factory.repo`, `feature_factory.execution_id` | Root CLI/control-plane span for `feature-factory factory start`. |
+| `factory.start` | `src/factory.js` `startFactory()` | `feature_factory.mode`, `feature_factory.run_id` when checked | Root CLI/control-plane span for `feature-factory factory start`. |
 | `invoke_agent feature-factory` | plugin `command.execute.before` and CLI launch | `gen_ai.agent.name=feature-factory`, `gen_ai.operation.name=invoke_agent` | Correlates `/feature` command admission with the factory run. |
-| `invoke_agent <agent>` | opencode task/tool hooks when visible | caller `gen_ai.agent.name`, `feature_factory.target_agent.name` | Shows multi-agent handoffs. The caller emits the handoff span. |
+| `invoke_agent <agent>` | opencode task/tool hooks when visible | caller `gen_ai.agent.name`, `feature_factory.target_agent` | Shows multi-agent handoffs. The caller emits the handoff span. |
 | `chat <model>` | native opencode AI SDK OTel, plus feature-factory bridge spans when needed | `gen_ai.operation.name=chat`, `gen_ai.request.model` | Native spans may be named `ai.streamText` / `ai.streamText.doStream`; feature-factory should not duplicate payload capture. |
-| `execute_tool <tool>` | native opencode AI SDK OTel or plugin events | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id` | Native spans may be named `ai.toolCall`; feature-factory adds run/slice/gate context when available. |
-| `factory.gate <gate>` | `transitionGateDecision()` / CLI gate commands | gate attributes and answer source | Do not attach raw gate answers unless content capture is explicitly enabled. |
+| `execute_tool <tool>` | native opencode AI SDK OTel or feature-factory-owned adjacent spans | `feature_factory.session_id`, `feature_factory.call_id`, `feature_factory.span_event`, `feature_factory.span_operation` | The hook pair identifies only its composite invocation and cannot mutate a native `ai.toolCall` span. |
+| `factory.gate <gate>` | `transitionGateDecision()` / CLI gate commands | gate attributes and bounded answer-source enum | Never attach a raw gate answer, regardless of any general or native content-capture setting. |
 | `factory.step <agent>` | `transitionRunStep()` | step agent/status/attempt | Records spec/decomposition/test/validation/security phase transitions. |
 | `factory.slice <slice>` | slice state transitions | slice id/stack/status/attempt | Records builder/reviewer/remediation progress. |
 | `factory.validate` | `validateState()` | validation ok/error counts | Includes authority validation failures as span errors. |
@@ -827,9 +850,13 @@ Avoid absolute local paths by default. When a path is needed, prefer repo-relati
 
 Use OpenTelemetry error status and `error.type` on failed spans. This is required for Agent Timeline failure filtering.
 
-### Content Capture And Redaction
+### B6 Factory-Owned Content Exclusion
 
-Default content policy:
+B6 factory-owned correlation spans and span events are always metadata-only. They never contain artifact, review, or evidence refs; content hashes; raw gate answers; prompts or messages; tool arguments or results; review or evidence bodies; raw paths or URLs; secrets; propagation headers; arbitrary model output; or any other captured content. General feature-factory content-capture options and native OpenCode/AI SDK settings cannot widen this policy.
+
+### Native And General Telemetry Caveat
+
+Existing general telemetry configuration has default-off content flags:
 
 - `captureMessages: false`
 - `captureToolArguments: false`
@@ -837,23 +864,21 @@ Default content policy:
 - `captureReviews: false`
 - `captureEvidence: false`
 
-Important native-opencode caveat: AI SDK telemetry may capture full prompt and tool payload data outside feature-factory's own redaction path. `doctor --telemetry` should warn when native opencode OTel is enabled and the current opencode/AI SDK setup is known or suspected to record inputs/outputs. Production use should require one of:
+These flags apply only to older non-B6 telemetry features. Native OpenCode/AI SDK telemetry is separately owned upstream and may capture full prompt and tool payload data outside feature-factory's redaction path. `doctor --telemetry` should warn when native opencode OTel is enabled and the current opencode/AI SDK setup is known or suspected to record inputs/outputs. Production use should require one of:
 
 - upstream opencode/AI SDK settings that disable prompt/output recording;
 - an OpenTelemetry Collector redaction processor;
 - a trusted non-production telemetry environment;
 - or feature-factory telemetry only, without native AI SDK content spans.
 
-When content capture is explicitly enabled, redact before setting span attributes or events. Reuse or share the same token-shaped redaction rules as diagnostic environment redaction so telemetry cannot leak values like `ghp_*`, `github_pat_*`, `gho_*`, `sk-proj_*`, `sk-*`, `xoxb_*`, bearer tokens, SSH keys, or high-entropy credential-shaped strings.
+Other non-B6 telemetry features that explicitly capture content must redact before setting attributes or events. Native or general content capture does not alter the B6 factory-owned exclusion above.
 
-All captured content should be capped before export:
+For non-B6 telemetry only, captured content should be capped before export:
 
 - default max string attribute bytes: `4096`;
 - default max array entries: `20`;
 - default max object depth: `4`;
 - replace truncated content with a marker and byte count.
-
-Telemetry should record artifact refs and content hashes by default, not artifact bodies.
 
 ### Configuration
 
@@ -940,7 +965,7 @@ Trace-context launch flags are non-authoritative runtime config for process corr
 2. Implemented: `feature-factory doctor --telemetry` detects native opencode OTel config, sanitized OTLP env vars, companion telemetry plugins, package instrumentation loadability, no-default telemetry state, and risky native/feature-factory prompt or content capture.
 3. Implemented: `factory start`, `factory resume`, and `factory continue` accept `--parent-span-id`, `--traceparent`, and `--tracestate`; they preserve operator-provided OTel env and map validated W3C trace context into spawned `opencode run` runtime env. `feature_factory.execution_id` remains a follow-up if/when root spans need it.
 4. Implemented: package smoke covers published install/import behavior with no OTel env configured; docs contract tests cover the telemetry readiness and trace-context contract.
-5. Follow-up: instrument feature-factory plugin hooks in `src/plugin.js`: `command.execute.before`, `chat.message`, `chat.params`, `tool.execute.before`, `tool.execute.after`, and `event` where useful. Prefer adding run/gate/slice attributes and bridge spans over duplicating generic model/tool payload spans.
+5. Implemented B6.1 feasibility only: `src/plugin.js` observes bounded process-local session parentage through `event` and Task invocation lifecycle through `tool.execute.before/after`; it emits no span. B6.2 owns factory span emission and may use only the supported correlation contract above.
 6. Follow-up: instrument durable state transition helpers in `src/run-state.js` so spans/events are emitted when opencode-run node scripts update gates, steps, slices, PR-created/opened state, validation, or terminal results.
 7. Follow-up: instrument CLI/control-plane boundaries in `src/factory.js`: start, detached start, validate, cleanup, gate answer, heartbeat start/stop/tick. If no SDK is initialized in the CLI process, these spans may be no-op; trace/context propagation into opencode is already present.
 8. Follow-up: add in-memory span-exporter tests covering enabled spans, tool span lifecycle, run-id correlation, and error status once real feature-factory spans exist. Disabled mode, redaction, loadability, trace-context validation, and package smoke behavior are already covered.
@@ -950,6 +975,7 @@ Trace-context launch flags are non-authoritative runtime config for process corr
 ### Known Limitations And Open Questions
 
 - Native opencode OTel may provide AI SDK spans without Agent Timeline `gen_ai.*` attributes. We may need bridge spans or an upstream opencode contribution to enrich native spans.
+- OpenCode 1.18.3 public plugin hooks expose no native span/context handle. Factory-owned adjacent spans cannot prove or perform native span enrichment.
 - Native AI SDK spans may include full prompts/tool payloads outside feature-factory redaction. This requires upstream controls or collector redaction before production use.
 - Full feature-factory span taxonomy, bridge spans, transition spans, root CLI spans, exporter ownership, and Honeycomb Agent Timeline validation are follow-up work after the readiness/propagation milestone.
 - Plugin-only tool spans may miss failed tool executions if opencode does not call `tool.execute.after` on failure. If this matters, add or consume an opencode hook that fires in `finally` with error metadata.

@@ -12,7 +12,7 @@ import { createTwoRefsAtomicallyNoReplace, git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity, createOrRecoverWorktree, deriveExpectedWorktreePath, parseWorktreeListPorcelain } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
-import { prepareTelemetryEnv } from "./telemetry.js";
+import { prepareTelemetryEnv, startB6Span } from "./telemetry.js";
 import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, inspectProcessIdentity, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
 import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
@@ -152,8 +152,22 @@ const HANDOFF_ROWS = Object.freeze({
 });
 
 export async function startFactory(args, opts = {}) {
+  const span = startFactoryLifecycleSpan("start", opts);
+  const telemetry = { span, repo: null, candidateRunId: null, expectedContinuation: null };
+  try {
+    const result = await startFactoryImplementation(args, opts, telemetry);
+    completeFactoryLifecycleSpan(telemetry, result);
+    return result;
+  } catch (error) {
+    failFactoryLifecycleSpan(span);
+    throw error;
+  }
+}
+
+async function startFactoryImplementation(args, opts = {}, telemetry) {
   if (!args.length) throw new Error("factory start requires a feature prompt");
   const repo = repoRoot(opts.cwd || process.cwd());
+  telemetry.repo = repo;
   const resumeRunId = resumePromptRunId(args, opts);
   if (resumeRunId) assertPostPrCliOptions(opts, { command: "factory start resume", resume: true });
   const requestedRunId = normalizeRequestedStartRunId(opts.runId);
@@ -163,6 +177,7 @@ export async function startFactory(args, opts = {}) {
   const detachedRunId = opts.detached && !resumeRunId
     ? requestedRunId || allocateDetachedStartRunId(repo, opts)
     : null;
+  telemetry.candidateRunId = detachedRunId || requestedRunId;
   let resumedRun = null;
   let resumedRunDir = null;
   if (resumeRunId) {
@@ -171,6 +186,7 @@ export async function startFactory(args, opts = {}) {
       const ownershipRead = readDurableRecoveryRun(repo, ownershipTarget.runDir, ownershipTarget.runFile);
       if (!ownershipRead.error) {
         assertResumeConfiguration(ownershipRead.run, opts);
+        setFactoryRunIdentity(telemetry.span, ownershipRead.run.run_id);
         const ownership = await existingRunOwnershipOutcome(ownershipTarget.runDir, ownershipRead.run, { ...opts, repo });
         if (ownership) return ownership;
       }
@@ -185,6 +201,7 @@ export async function startFactory(args, opts = {}) {
     resumedRunDir = preflight.run_dir;
     resumedRun = readRunFile(preflight.run_file || join(resumedRunDir, "run.json"));
     assertResumeConfiguration(resumedRun, opts);
+    setFactoryRunIdentity(telemetry.span, resumedRun.run_id);
   }
   const launchEnv = factoryLaunchEnv(opts);
   seedRepoSkill(repo);
@@ -1510,9 +1527,25 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 }
 
 export function continueFactory(parentRunId, opts = {}) {
+  const span = startFactoryLifecycleSpan("continue", opts);
+  const telemetry = { span, repo: null, candidateRunId: null, expectedContinuation: null };
+  try {
+    const result = continueFactoryImplementation(parentRunId, opts, telemetry);
+    observeFactoryLifecycleResult(telemetry, result);
+    return result;
+  } catch (error) {
+    failFactoryLifecycleSpan(span);
+    throw error;
+  }
+}
+
+function continueFactoryImplementation(parentRunId, opts = {}, telemetry) {
   const repo = repoRoot(opts.cwd || process.cwd());
+  telemetry.repo = repo;
   const allocationReplay = opts.carryForward === true && !opts.dryRun;
   const { continuation, carryForwardConfig } = buildContinuationCandidate(parentRunId, { ...opts, cwd: repo, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
+  telemetry.candidateRunId = continuation.target.run_id;
+  telemetry.expectedContinuation = continuation;
   assertPostPrCliOptions(opts, { command: "factory continue" });
   const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
   if (!opts.dryRun) acquireContinuationTargetReservation(repo, continuation);
@@ -1570,14 +1603,29 @@ function assertOrdinaryContinuationParent(parent) {
 }
 
 export async function resumeFactory(runId, opts = {}) {
+  const span = startFactoryLifecycleSpan("resume", opts);
+  const telemetry = { span, repo: null, candidateRunId: null, expectedContinuation: null };
+  try {
+    const result = await resumeFactoryImplementation(runId, opts, telemetry);
+    completeFactoryLifecycleSpan(telemetry, result);
+    return result;
+  } catch (error) {
+    failFactoryLifecycleSpan(span);
+    throw error;
+  }
+}
+
+async function resumeFactoryImplementation(runId, opts = {}, telemetry) {
   assertPostPrCliOptions(opts, { command: "factory resume", resume: true });
   const repo = repoRoot(opts.cwd || process.cwd());
+  telemetry.repo = repo;
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const beforeRecovery = readRunFile(join(runDir, "run.json"));
   await assertRunClaimRoute(repo, beforeRecovery, opts);
   if (hasClosedPostPrRecoveryDispatch(beforeRecovery)) assertNoUnresolvedSpecialBuilderDispatches(runDir, beforeRecovery);
   else assertNoPendingSpecialBuilderDispatches(runDir, beforeRecovery);
   assertResumeConfiguration(beforeRecovery, opts);
+  setFactoryRunIdentity(telemetry.span, beforeRecovery.run_id);
   if (beforeRecovery.continuation?.schema_version === 2) {
     const checked = assertCarryForwardResumeAuthority(repo, runDir, beforeRecovery, opts);
     if (TERMINAL_STATUSES.has(checked.status)) return { status: checked.status, run_id: checked.run_id, terminal_result: checked.terminal_result, launched: false };
@@ -1613,6 +1661,63 @@ export async function resumeFactory(runId, opts = {}) {
       : (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env }),
     launchEnv,
   });
+}
+
+function startFactoryLifecycleSpan(operation, opts) {
+  try {
+    return startB6Span(`feature_factory.factory.${operation}`, {
+      "feature_factory.mode": opts.autonomous === true ? "autonomous" : opts.headless === true || opts.detached === true ? "headless" : "interactive",
+      "gen_ai.agent.name": "feature-factory",
+      "gen_ai.operation.name": "invoke_agent",
+    }, {
+      telemetry: opts.telemetry,
+      env: opts.env ?? process.env,
+      importer: opts.telemetry?.importer,
+      context: opts.telemetry?.context,
+    });
+  } catch {
+    return startB6Span("", {}, { env: {} });
+  }
+}
+
+function observeFactoryLifecycleResult(telemetry, result) {
+  if (result && typeof result.then === "function") {
+    result.then(
+      (value) => completeFactoryLifecycleSpan(telemetry, value),
+      () => failFactoryLifecycleSpan(telemetry.span),
+    );
+    return;
+  }
+  completeFactoryLifecycleSpan(telemetry, result);
+}
+
+function completeFactoryLifecycleSpan(telemetry, result) {
+  if (result?.status !== "dry-run") attachObservedFactoryRunIdentity(telemetry);
+  const status = result?.terminal_result?.status || result?.status;
+  telemetry.span.setAttributes({ "feature_factory.status": status });
+  telemetry.span.end();
+}
+
+function failFactoryLifecycleSpan(span) {
+  span.setAttributes({ "feature_factory.status": "failed" });
+  span.fail();
+  span.end();
+}
+
+function attachObservedFactoryRunIdentity({ span, repo, candidateRunId, expectedContinuation }) {
+  if (!repo || !candidateRunId) return;
+  try {
+    const run = readRunFile(join(directFactoryRoot(repo), candidateRunId, "run.json"));
+    if (run.run_id === candidateRunId && (!expectedContinuation || sameJsonValue(run.continuation, expectedContinuation))) {
+      setFactoryRunIdentity(span, run.run_id);
+    }
+  } catch {
+    // Candidate identity is not telemetry authority until a valid durable run exists.
+  }
+}
+
+function setFactoryRunIdentity(span, runId) {
+  span.setAttributes({ "feature_factory.run_id": runId, "gen_ai.conversation.id": runId });
 }
 
 function assertCarryForwardResumeAuthority(repo, runDir, run, options = {}) {

@@ -150,6 +150,159 @@ describe("factory trace-context propagation", () => {
   });
 });
 
+describe("B6.2 factory lifecycle spans", () => {
+  it("attaches a requested new-run identity only after successful durable observation", async () => {
+    const fixture = createLaunchFixture("start-b6-span");
+    const fake = fakeB6Otel();
+    try {
+      await withLaunchEnv(fixture, { OPENCODE_CREATE_RUN_ID: "checked-run" }, () => startFactory(["hostile prompt github_pat_123456789012345678901234567890"], {
+        cwd: fixture.repo, runId: "checked-run", traceparent, telemetry: { enabled: true, importer: fake.importer },
+      }));
+      await flushB6Telemetry();
+
+      assert.equal(fake.spans.length, 1);
+      assert.deepEqual(fake.spans[0].attributes, {
+        "feature_factory.mode": "interactive",
+        "gen_ai.agent.name": "feature-factory",
+        "gen_ai.operation.name": "invoke_agent",
+        "feature_factory.run_id": "checked-run",
+        "gen_ai.conversation.id": "checked-run",
+      });
+      assert.equal(fake.spans[0].name, "feature_factory.factory.start");
+      assert.equal(fake.spans[0].context, fake.activeContext);
+      assert.equal(fake.spans[0].ended, true);
+      assert.doesNotMatch(JSON.stringify(fake.spans), /hostile prompt|github_pat|traceparent|00f067|repo|path|url|pid/u);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("does not claim requested or allocated new-run identity before durable creation, including failures", async () => {
+    const requested = createLaunchFixture("requested-failure");
+    const allocated = createLaunchFixture("allocated-detached");
+    const fake = fakeB6Otel();
+    let detachedPid;
+    try {
+      await assert.rejects(startFactory(["failed"], {
+        cwd: requested.repo,
+        runId: "requested-but-unproven",
+        traceparent: "invalid",
+        telemetry: { enabled: true, importer: fake.importer },
+      }), /invalid trace context/u);
+      await withLaunchEnv(allocated, { OPENCODE_KEEPALIVE: "1" }, async () => {
+        const result = await startFactory(["allocated"], {
+          cwd: allocated.repo,
+          detached: true,
+          createRunId: () => "allocated-before-creation",
+          telemetry: { enabled: true, importer: fake.importer },
+        });
+        detachedPid = result.pid;
+      });
+      await flushB6Telemetry();
+      assert.equal(fake.spans.length, 2);
+      assert.equal(fake.spans.every((span) => span.attributes["feature_factory.run_id"] === undefined), true);
+      assert.equal(fake.spans[0].attributes["error.type"], "workflow_error");
+      assert.deepEqual(fake.spans[0].exceptions, []);
+      assert.doesNotMatch(JSON.stringify(fake.spans), /requested-but-unproven|allocated-before-creation|prompt output|private|refs\/heads|user:pass|TRACEPARENT/u);
+    } finally {
+      if (detachedPid) {
+        try { process.kill(detachedPid, "SIGTERM"); } catch { /* already exited */ }
+        try { await waitForProcessExit(detachedPid); } catch { /* best-effort cleanup */ }
+      }
+      cleanup(requested.root);
+      cleanup(allocated.root);
+    }
+  });
+
+  it("attaches continuation identity only after successful checked durable child publication", async () => {
+    const dry = createContinueLaunchFixture("continue-dry-parent");
+    const failed = createContinueLaunchFixture("continue-failed-parent");
+    const success = createContinueLaunchFixture("continue-success-parent");
+    const fake = fakeB6Otel();
+    try {
+      const dryResult = continueFactory(dry.runId, {
+        cwd: dry.repo, review: "reviewer.json", runId: "dry-child", dryRun: true,
+        telemetry: { enabled: true, importer: fake.importer },
+      });
+      assert.equal(dryResult.status, "dry-run");
+      assert.throws(() => continueFactory(failed.runId, {
+        cwd: failed.repo, review: "reviewer.json", runId: "failed-child",
+        traceparent: "invalid",
+        telemetry: { enabled: true, importer: fake.importer },
+      }), /invalid trace context/u);
+      const continued = await withLaunchEnv(success, {
+        OPENCODE_CREATE_RUN_ID: "durable-child",
+      }, () => continueFactory(success.runId, {
+        cwd: success.repo, review: "reviewer.json", runId: "durable-child", telemetry: { enabled: true, importer: fake.importer },
+      }));
+      assert.equal(continued, undefined);
+      await flushB6Telemetry();
+      const spans = fake.spans.filter((span) => span.name === "feature_factory.factory.continue");
+      assert.equal(spans.length, 3);
+      assert.equal(spans[0].attributes["feature_factory.run_id"], undefined);
+      assert.equal(spans[1].attributes["feature_factory.run_id"], undefined);
+      assert.equal(spans[2].attributes["feature_factory.run_id"], "durable-child");
+      assert.equal(spans[2].attributes["gen_ai.conversation.id"], "durable-child");
+    } finally {
+      cleanup(dry.root);
+      cleanup(failed.root);
+      cleanup(success.root);
+    }
+  });
+
+  it("attaches checked existing identity for direct resume and start-resume", async () => {
+    const direct = createResumeLaunchFixture("direct-resume-run");
+    const startResume = createResumeLaunchFixture("start-resume-run");
+    const fake = fakeB6Otel();
+    try {
+      const resumed = await withLaunchEnv(direct, {}, () => resumeFactory(direct.runId, {
+        cwd: direct.repo,
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      assert.equal(resumed, undefined);
+      const startResumed = await withLaunchEnv(startResume, {}, () => startFactory(["resume", startResume.runId], {
+        cwd: startResume.repo,
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      assert.equal(startResumed.run_id, startResume.runId);
+      assert.equal(startResumed.status, "blocked");
+      await flushB6Telemetry();
+
+      const resumeSpan = fake.spans.find((span) => span.name === "feature_factory.factory.resume");
+      const startSpan = fake.spans.find((span) => span.name === "feature_factory.factory.start");
+      assert.equal(resumeSpan.attributes["feature_factory.run_id"], direct.runId);
+      assert.equal(startSpan.attributes["feature_factory.run_id"], startResume.runId);
+      assert.equal(resumeSpan.ended && startSpan.ended, true);
+    } finally {
+      cleanup(direct.root);
+      cleanup(startResume.root);
+    }
+  });
+
+  it("does not emit by default and isolates lifecycle telemetry failures", async () => {
+    const disabled = createLaunchFixture("disabled-b6-span");
+    const broken = createLaunchFixture("broken-b6-span");
+    const fake = fakeB6Otel();
+    try {
+      const disabledResult = await withLaunchEnv(disabled, {}, () => startFactory(["disabled"], {
+        cwd: disabled.repo,
+        telemetry: { importer: fake.importer },
+      }));
+      const brokenResult = await withLaunchEnv(broken, {}, () => startFactory(["broken telemetry"], {
+        cwd: broken.repo,
+        telemetry: { enabled: true, importer: async () => { throw new Error("telemetry-only failure"); } },
+      }));
+      assert.equal(disabledResult, undefined);
+      assert.equal(brokenResult, undefined);
+      await flushB6Telemetry();
+      assert.equal(fake.spans.length, 0);
+    } finally {
+      cleanup(disabled.root);
+      cleanup(broken.root);
+    }
+  });
+});
+
 function createLaunchFixture(name) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `factory-telemetry-${name}-`)));
   const repo = join(root, "repo");
@@ -204,7 +357,8 @@ function createFakeOpencode(root) {
   mkdirSync(bin);
   const script = join(bin, "opencode");
   writeFileSync(script, `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 const keys = [
   "OTEL_EXPORTER_OTLP_ENDPOINT",
   "TRACEPARENT",
@@ -215,6 +369,18 @@ const keys = [
 ];
 const env = Object.fromEntries(keys.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]))
 writeFileSync(process.env.OPENCODE_CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(2), env }, null, 2) + "\\n", "utf8");
+if (process.env.OPENCODE_CREATE_RUN_ID) {
+  const repo = process.argv[process.argv.indexOf("--dir") + 1];
+  const runId = process.env.OPENCODE_CREATE_RUN_ID;
+  const runDir = join(repo, ".opencode", "factory", runId);
+  const worktree = join(repo, ".opencode", "worktrees", runId);
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  const rawPayload = process.argv.at(-1);
+  const payload = rawPayload?.startsWith("ffpayload-v1:") ? JSON.parse(Buffer.from(rawPayload.slice("ffpayload-v1:".length), "base64url").toString("utf8")) : null;
+  const continuation = payload?.continuation;
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: runId, status: "running", branch: runId, worktree, gates: {}, slices: [], ...(continuation ? { continuation } : {}) }, null, 2) + "\\n", "utf8");
+}
 if (process.env.OPENCODE_KEEPALIVE === "1") setInterval(() => {}, 1000);
 `, "utf8");
   chmodSync(script, 0o755);
@@ -225,6 +391,7 @@ async function withLaunchEnv(fixture, env, fn) {
   const keys = new Set([
     "PATH",
     "OPENCODE_CAPTURE_PATH",
+    "OPENCODE_CREATE_RUN_ID",
     ...Object.keys(env),
     "TRACEPARENT",
     "TRACESTATE",
@@ -297,4 +464,39 @@ function writeJson(file, value) {
 
 function cleanup(path) {
   rmSync(path, { recursive: true, force: true });
+}
+
+function fakeB6Otel() {
+  const spans = [];
+  const activeContext = { trace: "factory-active-context" };
+  const api = {
+    context: { active: () => activeContext },
+    trace: {
+      getTracer: () => ({
+        startActiveSpan(name, options, context, callback) {
+          const span = {
+            name,
+            context,
+            attributes: { ...(options?.attributes || {}) },
+            exceptions: [],
+            statuses: [],
+            ended: false,
+            setAttribute(key, value) { this.attributes[key] = value; },
+            addEvent() {},
+            recordException(error) { this.exceptions.push(error); },
+            setStatus(status) { this.statuses.push(status); },
+            end() { this.ended = true; },
+          };
+          spans.push(span);
+          return callback(span);
+        },
+      }),
+    },
+  };
+  return { spans, activeContext, importer: async () => api };
+}
+
+async function flushB6Telemetry() {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
 }

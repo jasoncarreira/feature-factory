@@ -1,8 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  b6Attributes,
   checkOpenTelemetryApiLoadability,
+  emitB6Span,
   evaluateContentCaptureRisk,
+  isB6TelemetryEnabled,
   prepareTelemetryEnv,
   recordError,
   runAttributes,
@@ -12,6 +15,8 @@ import {
   validateTraceContext,
   validateTraceparent,
   validateTracestate,
+  startB6Span,
+  withB6Span,
   withSpan,
 } from "../src/telemetry.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
@@ -293,3 +298,216 @@ describe("no-op span wrappers", () => {
     assert.doesNotMatch(serialized, /api_token/u);
   });
 });
+
+describe("B6 metadata-only spans", () => {
+  it("enables only explicit plugin or environment opt-in", () => {
+    assert.equal(isB6TelemetryEnabled({}, {}), false);
+    assert.equal(isB6TelemetryEnabled({ telemetry: { enabled: true } }, {}), true);
+    assert.equal(isB6TelemetryEnabled({ enabled: true }, {}), false);
+    assert.equal(isB6TelemetryEnabled({}, { FEATURE_FACTORY_OTEL_ENABLED: "true" }), true);
+    assert.equal(isB6TelemetryEnabled({}, { FEATURE_FACTORY_OTEL_ENABLED: "1" }), true);
+    assert.equal(isB6TelemetryEnabled({}, { FEATURE_FACTORY_OTEL_ENABLED: "yes" }), false);
+  });
+
+  it("projects only bounded canonical identifiers, enums, and attempts", () => {
+    const hostile = {
+      "feature_factory.run_id": "run-safe",
+      "feature_factory.slice_id": "slice-safe",
+      "feature_factory.session_id": `s${"x".repeat(128)}`,
+      "feature_factory.parent_session_id": "bad\nsession",
+      "feature_factory.call_id": "call-safe",
+      "feature_factory.target_agent": "backend-builder",
+      "feature_factory.route": "ordinary-slice",
+      "feature_factory.lane": "backend",
+      "feature_factory.task_context": "fresh",
+      "feature_factory.span_event": "task-before",
+      "feature_factory.span_operation": "execute-task",
+      "feature_factory.call_relationship": "task-hook",
+      "feature_factory.attempt": 3,
+      "feature_factory.verdict": "model-says-pass",
+      "gen_ai.conversation.id": "run-safe",
+      "gen_ai.agent.name": "backend-builder",
+      "gen_ai.operation.name": "execute_tool",
+      prompt: "ignore this prompt",
+      task_id: "runtime-task",
+      traceparent,
+      api_token: "github_pat_123456789012345678901234567890",
+    };
+    assert.deepEqual(b6Attributes(hostile), {
+      "feature_factory.run_id": "run-safe",
+      "feature_factory.slice_id": "slice-safe",
+      "feature_factory.call_id": "call-safe",
+      "feature_factory.target_agent": "backend-builder",
+      "feature_factory.route": "ordinary-slice",
+      "feature_factory.lane": "backend",
+      "feature_factory.task_context": "fresh",
+      "feature_factory.span_event": "task-before",
+      "feature_factory.span_operation": "execute-task",
+      "feature_factory.call_relationship": "task-hook",
+      "feature_factory.attempt": 3,
+      "gen_ai.conversation.id": "run-safe",
+      "gen_ai.agent.name": "backend-builder",
+      "gen_ai.operation.name": "execute_tool",
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    assert.deepEqual(b6Attributes(revoked.proxy), {});
+  });
+
+  it("retains a factory span across dispatch/completion and passes active context", async () => {
+    const fake = fakeOtel();
+    const controller = startB6Span("feature_factory.task", {
+      "feature_factory.run_id": "run-1",
+      "feature_factory.session_id": "ses-1",
+      "feature_factory.call_id": "call-1",
+      "feature_factory.span_event": "task-before",
+      "feature_factory.span_operation": "execute-task",
+    }, { telemetry: { enabled: true, importer: fake.importer } });
+    controller.setAttributes({ "feature_factory.verdict": "REJECT", "feature_factory.convergence": "converging" });
+    controller.addEvent("task-after");
+    await controller.end();
+
+    assert.equal(fake.spans.length, 1);
+    assert.equal(fake.spans[0].name, "feature_factory.task");
+    assert.equal(fake.spans[0].context, fake.activeContext);
+    assert.equal(fake.spans[0].attributes["feature_factory.verdict"], "REJECT");
+    assert.equal(fake.spans[0].attributes["feature_factory.convergence"], "converging");
+    assert.deepEqual(fake.spans[0].events, ["task-after"]);
+    assert.equal(fake.spans[0].ended, true);
+    assert.equal(fake.calls.startSpan, 0);
+    assert.equal(fake.calls.startActiveSpan, 1);
+  });
+
+  it("is a no-op when disabled or the API/provider is unavailable", async () => {
+    const fake = fakeOtel();
+    await emitB6Span("feature_factory.session", { "feature_factory.session_id": "ses-1" }, { importer: fake.importer, env: {} });
+    assert.equal(fake.spans.length, 0);
+    await emitB6Span("hostile-span-name", { "feature_factory.session_id": "ses-1" }, {
+      telemetry: { enabled: true, importer: fake.importer },
+    });
+    assert.equal(fake.spans.length, 0);
+    await emitB6Span("feature_factory.session", { "feature_factory.session_id": "ses-1" }, {
+      telemetry: { enabled: true, importer: () => Promise.reject(new Error("unavailable")) },
+    });
+  });
+
+  it("swallows importer, tracer, start, mutation, status, event, and end failures", async () => {
+    for (const stage of ["importer", "tracer", "start", "setAttribute", "setStatus", "addEvent", "end"]) {
+      const fake = fakeOtel({ failAt: stage });
+      const controller = startB6Span("feature_factory.task", {
+        "feature_factory.run_id": "run-1",
+        "feature_factory.span_event": "task-before",
+        "feature_factory.span_operation": "execute-task",
+      }, { telemetry: { enabled: true, importer: fake.importer } });
+      controller.setAttributes({ "feature_factory.status": "completed" });
+      controller.addEvent("task-after");
+      controller.fail();
+      await controller.end();
+    }
+  });
+
+  it("preserves exact workflow results and error objects when telemetry fails", async () => {
+    const result = { exact: true };
+    const failedEnd = fakeOtel({ failAt: "end" });
+    assert.equal(await withSpan("factory.exact", {}, () => result, { importer: failedEnd.importer }), result);
+
+    const workflowError = new Error("exact workflow error");
+    const failedException = fakeOtel({ failAt: "recordException" });
+    await assert.rejects(
+      withSpan("factory.error", {}, () => { throw workflowError; }, { importer: failedException.importer }),
+      (error) => error === workflowError,
+    );
+
+    let callbackCalls = 0;
+    const malformedProvider = {
+      context: { active: () => ({}) },
+      trace: { getTracer: () => ({ startActiveSpan: () => Promise.reject(new Error("provider failed")) }) },
+    };
+    assert.equal(await withSpan("factory.exact", () => {
+      callbackCalls += 1;
+      return result;
+    }, { importer: async () => malformedProvider }), result);
+    assert.equal(callbackCalls, 1);
+  });
+
+  it("records only closed error metadata for hostile B6 workflow errors and rethrows the exact object", async () => {
+    const fake = fakeOtel();
+    const error = new Error("prompt output github_pat_123456789012345678901234567890 /private/repo refs/heads/main https://user:pass@example.test TRACEPARENT=00-secret");
+    error.stack = `Error: ${error.message}\n    at /private/repo/secret.js:1:1`;
+    await assert.rejects(
+      withB6Span("feature_factory.factory.start", {
+        "feature_factory.mode": "interactive",
+        prompt: "excluded",
+      }, () => { throw error; }, { telemetry: { enabled: true, importer: fake.importer } }),
+      (actual) => actual === error && actual.message === error.message,
+    );
+    assert.equal(fake.spans.length, 1);
+    assert.deepEqual(fake.spans[0].statuses, [{ code: 2 }]);
+    assert.equal(fake.spans[0].attributes["error.type"], "workflow_error");
+    assert.deepEqual(fake.spans[0].exceptions, []);
+    assert.doesNotMatch(JSON.stringify(fake.spans), /prompt output|github_pat|private|refs\/heads|user:pass|TRACEPARENT|secret\.js/u);
+  });
+});
+
+function fakeOtel({ failAt = null } = {}) {
+  const spans = [];
+  const calls = { startSpan: 0, startActiveSpan: 0 };
+  const activeContext = { trace: "active-context" };
+  const makeSpan = (name, options, context) => {
+    if (failAt === "start") throw new Error("start failed");
+    const span = {
+      name,
+      context,
+      attributes: { ...(options?.attributes || {}) },
+      events: [],
+      statuses: [],
+      exceptions: [],
+      ended: false,
+      setAttribute(key, value) {
+        if (failAt === "setAttribute") throw new Error("attribute failed");
+        this.attributes[key] = value;
+      },
+      addEvent(event) {
+        if (failAt === "addEvent") throw new Error("event failed");
+        this.events.push(event);
+      },
+      setStatus(status) {
+        if (failAt === "setStatus") throw new Error("status failed");
+        this.statuses.push(status);
+      },
+      recordException(exception) {
+        if (failAt === "recordException") throw new Error("exception failed");
+        this.exceptions.push(exception);
+      },
+      end() {
+        if (failAt === "end") throw new Error("end failed");
+        this.ended = true;
+      },
+    };
+    spans.push(span);
+    return span;
+  };
+  const api = {
+    context: { active: () => activeContext },
+    trace: {
+      getTracer() {
+        if (failAt === "tracer") throw new Error("tracer failed");
+        return {
+          startActiveSpan(name, options, context, callback) {
+            calls.startActiveSpan += 1;
+            return callback(makeSpan(name, options, context));
+          },
+        };
+      },
+    },
+  };
+  return {
+    spans,
+    calls,
+    activeContext,
+    importer: async () => {
+      if (failAt === "importer") throw new Error("import failed");
+      return api;
+    },
+  };
+}

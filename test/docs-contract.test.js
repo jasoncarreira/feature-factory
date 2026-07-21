@@ -2512,6 +2512,71 @@ describe("effective-content provenance docs contract", () => {
 });
 
 describe("telemetry readiness docs contract", () => {
+  it("defines the OpenCode 1.18.3 B6.1 correlation seam without claiming native enrichment", () => {
+    for (const [name, text] of Object.entries({ SPEC, SCHEMA })) {
+      assert.match(text, /OpenCode \*\*1\.18\.3\*\*/i, `${name} must pin the verified OpenCode version`);
+      assert.match(text, /event\(\{event\}\)[\s\S]*session\.created[\s\S]*session\.updated[\s\S]*session\.deleted/i, `${name} must document public session events`);
+      assert.match(text, /session\.status[\s\S]*session\.idle[\s\S]*session\.compacted/i, `${name} must document session-ID lifecycle events`);
+      assert.match(text, /tool\.execute\.before\/after[\s\S]*sessionID[\s\S]*callID/i, `${name} must document the Task hook composite key`);
+      assert.match(text, /no native span handle/i, `${name} must deny a native span handle`);
+      assert.match(text, /cannot mutate or enrich|cannot mutate native|no supported API for mutating or enriching/i, `${name} must deny native span enrichment`);
+      assert.match(text, /factory-owned spans[\s\S]*withSpan\(\)/i, `${name} must reserve adjacent spans for withSpan`);
+      assert.match(text, /B6\.1[^.]*no production span emission|B6\.1 emits no production spans|B6\.1 performs no production span emission/i, `${name} must keep emission out of B6.1`);
+    }
+  });
+
+  it("defines bounded non-durable correlation identity and the canonical B6 taxonomy", () => {
+    const fields = [
+      "run_id", "slice_id", "attempt", "verdict", "convergence", "session_id", "parent_session_id", "call_id",
+      "call_relationship", "target_agent", "route", "lane", "task_context", "span_event", "span_operation",
+    ];
+    const formerDottedAliases = [
+      "feature_factory.gate.name",
+      "feature_factory.gate.status",
+      "feature_factory.slice.id",
+      "feature_factory.slice.stack",
+      "feature_factory.slice.attempt",
+      "feature_factory.step.agent",
+      "feature_factory.artifact.ref",
+      "feature_factory.review.ref",
+      "feature_factory.evidence.ref",
+      "feature_factory.pr.url",
+      "feature_factory.terminal.status",
+      "feature_factory.terminal.reason_type",
+      "feature_factory.target_agent.name",
+    ];
+    for (const [name, text] of Object.entries({ SPEC, SCHEMA })) {
+      assert.match(text, /process-local[\s\S]*256 sessions[\s\S]*512 active (?:Task )?calls/i, `${name} must bound in-memory state`);
+      assert.match(text, /delet(?:ing|ion).*session|Session deletion\/eviction/i, `${name} must clean deleted sessions`);
+      assert.match(text, /Restart (?:begins|starts) empty|Restart starts empty/i, `${name} must deny durability`);
+      assert.match(text, /session_id[^\n]*\+[^\n]*call_id|sessionID[^\n]*plus[^\n]*callID/i, `${name} must define the composite call key`);
+      assert.match(text, /task_id[\s\S]*never[\s\S]*(?:telemetry identity|persisted|exported)/i, `${name} must exclude raw task_id`);
+      assert.match(text, /fresh\|reuse/i, `${name} must bound task context`);
+      assert.match(text, /128 UTF-8 bytes/i, `${name} must bound identifiers`);
+      assert.match(text, /at most 32[\s\S]*ASCII tokens/i, `${name} must bound enum cardinality`);
+      for (const field of fields) assert.match(text, literalPattern(`feature_factory.${field}`), `${name} missing canonical ${field}`);
+      for (const alias of formerDottedAliases) assert.doesNotMatch(text, literalPattern(alias), `${name} must not retain former alias ${alias}`);
+    }
+  });
+
+  it("keeps B6 metadata content-free, opt-in, best-effort, and linked only by standard OTel context", () => {
+    for (const [name, text] of Object.entries({ SPEC, SCHEMA })) {
+      for (const excluded of ["prompts", "messages", "tool arguments/results", "reviews", "evidence", "raw paths", "refs", "hashes", "URLs", "secrets", "traceparent", "tracestate", "arbitrary model output"]) {
+        assert.match(text, literalPattern(excluded), `${name} must exclude ${excluded}`);
+      }
+      assert.match(text, /active OpenTelemetry context[\s\S]*standard propagation/i, `${name} must use standard W3C/OTel linkage`);
+      assert.match(text, /hooks? (?:expose|exposes) neither native OpenCode span context nor a context-extraction handle|event\/tool hooks do not expose native context/i, `${name} must deny unsupported hook extraction`);
+      assert.match(text, /explicitly enabled/i, `${name} must keep telemetry opt-in`);
+      assert.match(text, /best-effort/i, `${name} must make telemetry best effort`);
+      assert.match(text, /never change|never affect/i, `${name} must protect workflow behavior`);
+    }
+    for (const [name, text] of Object.entries({ SPEC, SCHEMA })) {
+      assert.match(text, /B6 factory-owned[\s\S]*(?:never contain|categorically exclude)[\s\S]*artifact, review, (?:or|and) evidence refs[\s\S]*content hashes[\s\S]*raw gate answers/i, `${name} must prohibit all B6 authority/content refs`);
+      assert.match(text, /General feature-factory[\s\S]*native OpenCode\/AI SDK[\s\S]*(?:cannot widen|does not alter)/i, `${name} must keep general/native capture from widening B6`);
+    }
+    assert.doesNotMatch(SPEC, /stable artifact refs|raw gate answers unless|record artifact refs and content hashes by default/i);
+  });
+
   it("documents doctor --telemetry readiness categories", () => {
     for (const [name, text] of documentEntries({ README, SPEC })) {
       assert.match(text, /feature-factory doctor --telemetry/i, `${name} must document doctor --telemetry`);

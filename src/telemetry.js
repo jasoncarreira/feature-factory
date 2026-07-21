@@ -24,6 +24,39 @@ const OTLP_HEADERS_PATTERN = /^OTEL_EXPORTER_OTLP(?:_[A-Z0-9_]+)?_HEADERS$/u;
 const MAX_TRACESTATE_LENGTH = 512;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 const SAFE_ATTRIBUTE_ARRAY_TYPES = new Set(["string", "number", "boolean"]);
+const B6_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
+const B6_MAX_IDENTIFIER_BYTES = 128;
+const B6_MAX_RETAINED_SPAN_MS = 300_000;
+const B6_SPAN_NAMES = new Set([
+  "feature_factory.session",
+  "feature_factory.task",
+  "feature_factory.factory.start",
+  "feature_factory.factory.continue",
+  "feature_factory.factory.resume",
+]);
+const B6_IDENTIFIER_ATTRIBUTES = new Set([
+  "feature_factory.run_id",
+  "feature_factory.slice_id",
+  "feature_factory.session_id",
+  "feature_factory.parent_session_id",
+  "feature_factory.call_id",
+  "gen_ai.conversation.id",
+]);
+const B6_ENUM_ATTRIBUTES = new Map([
+  ["feature_factory.target_agent", new Set(["feature-factory", "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer", "work-decomposer", "backend-builder", "frontend-builder", "test-verifier", "work-reviewer", "implementation-validator", "security-reviewer"])],
+  ["feature_factory.route", new Set(["ordinary-slice", "merged-slice-repair", "integration-amendment", "integration-amendment-review", "panel-remediation", "post-pr-remediation", "integration-conflict"])],
+  ["feature_factory.lane", new Set(["backend", "frontend", "reviewer"])],
+  ["feature_factory.task_context", new Set(["fresh", "reuse"])],
+  ["feature_factory.call_relationship", new Set(["task-hook", "parent-session"])],
+  ["feature_factory.span_event", new Set(["session-created", "session-updated", "session-deleted", "session-status", "session-idle", "session-compacted", "task-before", "task-after"])],
+  ["feature_factory.span_operation", new Set(["observe-session", "execute-task"])],
+  ["feature_factory.mode", new Set(["interactive", "headless", "autonomous"])],
+  ["feature_factory.status", new Set(["started", "dry-run", "completed", "blocked", "partial", "needs-human", "recovery-required", "already-running", "failed"])],
+  ["feature_factory.verdict", new Set(["APPROVE", "REJECT", "GO", "GO-WITH-NITS", "NO-GO", "PASS", "BLOCK", "APPROVE-CHECKPOINT", "REDESIGN-REQUIRED"])],
+  ["feature_factory.convergence", new Set(["converging", "nonconvergent"])],
+  ["gen_ai.agent.name", new Set(["feature-factory", "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer", "work-decomposer", "backend-builder", "frontend-builder", "test-verifier", "work-reviewer", "implementation-validator", "security-reviewer"])],
+  ["gen_ai.operation.name", new Set(["invoke_agent", "execute_tool"])],
+]);
 // @opentelemetry/api SpanStatusCode.ERROR is the stable enum value 2. Inlined so
 // this module never needs a static import of an optional runtime dependency.
 const SPAN_STATUS_ERROR = 2;
@@ -48,6 +81,7 @@ async function loadOtelApi(importer) {
 }
 function noopSpan() {
   return {
+    addEvent() {},
     recordException() {},
     setStatus() {},
     setAttribute() {},
@@ -250,36 +284,222 @@ export function prepareTelemetryEnv(baseEnv = process.env, traceContext = {}) {
 export async function withSpan(name, attributesOrCallback = {}, callbackOrOptions, maybeOptions = {}) {
   const callback = typeof attributesOrCallback === "function" ? attributesOrCallback : callbackOrOptions;
   if (typeof callback !== "function") throw new Error("withSpan requires a callback");
-  const attributes = typeof attributesOrCallback === "function" ? {} : runAttributes(attributesOrCallback);
   const options = typeof attributesOrCallback === "function" ? (callbackOrOptions || {}) : maybeOptions;
-
-  const api = await loadOtelApi(options.importer);
-  if (!api) {
-    // @opentelemetry/api is not installed: run the work without emitting a span
-    // rather than crashing. Telemetry is strictly optional at runtime.
-    return callback(noopSpan());
+  let attributes = {};
+  try {
+    attributes = typeof attributesOrCallback === "function"
+      ? {}
+      : options.attributeMode === "metadata-only" ? b6Attributes(attributesOrCallback) : runAttributes(attributesOrCallback);
+  } catch {
+    attributes = {};
   }
 
-  const tracer = api.trace.getTracer(options.tracerName || TELEMETRY_TRACER_NAME);
-  return tracer.startActiveSpan(String(name), { attributes }, options.context || api.context.active(), async (span) => {
-    try {
-      return await callback(span);
-    } catch (error) {
-      recordError(span, error);
-      throw error;
-    } finally {
-      span.end();
-    }
-  });
+  let api;
+  try { api = await loadOtelApi(options.importer); } catch { api = null; }
+  if (!api) return callback(noopSpan());
+
+  let tracer;
+  let activeContext;
+  try {
+    tracer = api.trace?.getTracer?.(options.tracerName || TELEMETRY_TRACER_NAME);
+    activeContext = options.context ?? api.context?.active?.();
+  } catch {
+    return callback(noopSpan());
+  }
+  if (!tracer || typeof tracer.startActiveSpan !== "function") return callback(noopSpan());
+
+  let workflowStarted = false;
+  let workflowPromise;
+  const runWorkflow = (span = noopSpan()) => {
+    if (workflowStarted) return workflowPromise;
+    workflowStarted = true;
+    workflowPromise = (async () => {
+      try {
+        return await callback(span);
+      } catch (error) {
+        if (options.errorMode === "metadata-only") recordMetadataOnlyError(span);
+        else recordError(span, error);
+        throw error;
+      } finally {
+        try { span.end?.(); } catch { /* telemetry-only */ }
+      }
+    })();
+    return workflowPromise;
+  };
+  try {
+    const providerResult = tracer.startActiveSpan(String(name), { attributes }, activeContext, runWorkflow);
+    Promise.resolve(providerResult).catch(() => undefined);
+  } catch {
+    // A provider may throw before or after synchronously invoking the callback.
+  }
+  if (!workflowStarted) return runWorkflow();
+  return workflowPromise;
 }
 
 export function recordError(span, error) {
   if (!span || !error) return;
   const message = error instanceof Error ? error.message : String(error);
   const type = error instanceof Error && error.name ? error.name : typeof error;
-  span.recordException?.(sanitizeException(error));
-  span.setStatus?.({ code: SPAN_STATUS_ERROR, message: sanitizeDiagnosticMessage(message) });
-  span.setAttribute?.("error.type", sanitizeDiagnosticMessage(type));
+  try { span.recordException?.(sanitizeException(error)); } catch { /* telemetry-only */ }
+  try { span.setStatus?.({ code: SPAN_STATUS_ERROR, message: sanitizeDiagnosticMessage(message) }); } catch { /* telemetry-only */ }
+  try { span.setAttribute?.("error.type", sanitizeDiagnosticMessage(type)); } catch { /* telemetry-only */ }
+}
+
+function recordMetadataOnlyError(span) {
+  try { span.setStatus?.({ code: SPAN_STATUS_ERROR }); } catch { /* telemetry-only */ }
+  try { span.setAttribute?.("error.type", "workflow_error"); } catch { /* telemetry-only */ }
+}
+
+export function isB6TelemetryEnabled(options = {}, env = process.env) {
+  try {
+    const value = typeof env?.FEATURE_FACTORY_OTEL_ENABLED === "string" ? env.FEATURE_FACTORY_OTEL_ENABLED.trim().toLowerCase() : "";
+    return options?.telemetry?.enabled === true || value === "true" || value === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function b6Attributes(input = {}) {
+  const output = {};
+  try {
+    if (!plainObject(input)) return output;
+    for (const [key, value] of Object.entries(input)) {
+      if (B6_IDENTIFIER_ATTRIBUTES.has(key)) {
+        const identifier = b6Identifier(value);
+        if (identifier) output[key] = identifier;
+        continue;
+      }
+      const values = B6_ENUM_ATTRIBUTES.get(key);
+      if (values?.has(value)) {
+        output[key] = value;
+        continue;
+      }
+      if (key === "feature_factory.attempt" && Number.isSafeInteger(value) && value >= 1 && value <= 3) {
+        output[key] = value;
+      }
+    }
+  } catch {
+    return {};
+  }
+  return output;
+}
+
+export function startB6Span(name, attributes = {}, options = {}) {
+  try {
+    if (!isB6TelemetryEnabled(options, options.env ?? process.env)) return inertB6Span();
+    if (!B6_SPAN_NAMES.has(name)) return inertB6Span();
+  } catch {
+    return inertB6Span();
+  }
+
+  let ended = false;
+  let releaseLifetime;
+  let resolveFacade;
+  const lifetime = new Promise((resolve) => { releaseLifetime = resolve; });
+  const facadeReady = new Promise((resolve) => { resolveFacade = resolve; });
+  const execution = withB6Span(name, attributes, async (facade) => {
+    resolveFacade(facade);
+    await lifetime;
+  }, options).catch(() => undefined);
+  let operationChain = Promise.resolve();
+  let resolveTimeout;
+  const timeout = new Promise((resolve) => { resolveTimeout = resolve; });
+  const timer = setTimeout(() => {
+    ended = true;
+    resolveFacade(inertB6Facade());
+    releaseLifetime();
+    resolveTimeout();
+  }, B6_MAX_RETAINED_SPAN_MS);
+  timer.unref?.();
+  void execution.finally(() => clearTimeout(timer)).catch(() => undefined);
+
+  const queue = (operation) => {
+    operationChain = operationChain.then(async () => {
+      const facade = await facadeReady;
+      try { operation(facade); } catch { /* telemetry-only */ }
+    }, () => undefined);
+    return operationChain;
+  };
+  const controller = {
+    setAttributes(more) {
+      if (ended) return;
+      const projected = b6Attributes(more);
+      queue((facade) => facade.setAttributes(projected));
+    },
+    addEvent(event) {
+      if (ended) return;
+      if (!B6_ENUM_ATTRIBUTES.get("feature_factory.span_event").has(event)) return;
+      queue((facade) => facade.addEvent(event));
+    },
+    fail() {
+      if (ended) return;
+      queue((facade) => facade.fail());
+    },
+    end(more) {
+      if (ended) return controller.done;
+      if (more) controller.setAttributes(more);
+      ended = true;
+      const completion = operationChain.then(() => releaseLifetime(), () => releaseLifetime()).then(() => execution, () => undefined);
+      controller.done = Promise.race([completion, timeout]).then(() => undefined, () => undefined);
+      return controller.done;
+    },
+    done: Promise.race([execution, timeout]).then(() => undefined, () => undefined),
+  };
+  return controller;
+}
+
+export function emitB6Span(name, attributes = {}, options = {}) {
+  try {
+    if (!isB6TelemetryEnabled(options, options.env ?? process.env) || !B6_SPAN_NAMES.has(name)) return Promise.resolve();
+    return withB6Span(name, attributes, () => undefined, options).then(() => undefined, () => undefined);
+  } catch {
+    return Promise.resolve();
+  }
+}
+
+export function withB6Span(name, attributes, callback, options = {}) {
+  if (typeof callback !== "function") return Promise.reject(new Error("withB6Span requires a callback"));
+  try {
+    if (!isB6TelemetryEnabled(options, options.env ?? process.env) || !B6_SPAN_NAMES.has(name)) return Promise.resolve().then(() => callback(inertB6Facade()));
+    return withSpan(name, b6Attributes(attributes), (span) => callback(b6Facade(span)), {
+      importer: options.importer ?? options.telemetry?.importer,
+      tracerName: options.tracerName,
+      context: options.context ?? options.telemetry?.context,
+      errorMode: "metadata-only",
+      attributeMode: "metadata-only",
+    });
+  } catch {
+    return Promise.resolve().then(() => callback(inertB6Facade()));
+  }
+}
+
+function inertB6Span() {
+  const done = Promise.resolve();
+  return Object.freeze({ setAttributes() {}, addEvent() {}, fail() {}, end() { return done; }, done });
+}
+
+function inertB6Facade() {
+  return Object.freeze({ setAttributes() {}, addEvent() {}, fail() {} });
+}
+
+function b6Facade(span) {
+  return Object.freeze({
+    setAttributes(more) {
+      for (const [key, value] of Object.entries(b6Attributes(more))) {
+        try { span.setAttribute?.(key, value); } catch { /* telemetry-only */ }
+      }
+    },
+    addEvent(event) {
+      if (!B6_ENUM_ATTRIBUTES.get("feature_factory.span_event").has(event)) return;
+      try { span.addEvent?.(event); } catch { /* telemetry-only */ }
+    },
+    fail() { recordMetadataOnlyError(span); },
+  });
+}
+
+function b6Identifier(value) {
+  if (typeof value !== "string" || !B6_IDENTIFIER_PATTERN.test(value) || isSensitiveEnvValue(value)) return null;
+  return Buffer.byteLength(value, "utf8") <= B6_MAX_IDENTIFIER_BYTES ? value : null;
 }
 
 export function runAttributes(input = {}) {
