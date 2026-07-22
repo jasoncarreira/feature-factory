@@ -367,8 +367,8 @@ function normalizeContinuation(continuation, operatorRequest, repo, driver) {
         subject: review.subject,
         summary: review.summary ?? null,
         required_fixes: Array.isArray(review.required_fixes) ? [...review.required_fixes] : [],
-        ...(review.source === undefined ? {} : { source: review.source }),
         ...(review.verdict === undefined ? {} : { verdict: review.verdict }),
+        ...(review.source === undefined ? {} : { source: review.source }),
       },
       target: {
         run_id: target.run_id,

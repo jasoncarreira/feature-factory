@@ -25,7 +25,7 @@ import {
   emitDurableRecordMutations,
   renderDurableAuthorityOracleReviewSnapshot,
 } from "./helpers/durable-record-mutations.js";
-import { checkRunConsistency, validateCheckpointChildPublication, validateCheckpointProgress, validateCheckpointSource, validateDeliveryCheckpointFinalClosure, validateRun, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
+import { checkRunConsistency, validateCheckpointChildPublication, validateCheckpointProgress, validateCheckpointSource, validateDeliveryCheckpointFinalClosure, validateIntegrationAmendment, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateIntegrationAmendmentReview, validateIntegrationAmendmentReviewDispatchClaim, validateIntegrationAmendmentReviewDispatchClosure, validateRun, validateSlicesPlan, validateTestExecutionReceipt, validateVerificationArtifactExecutionClaim, validateVerificationArtifactExecutionReceipt } from "../src/validate.js";
 import { cleanupRun, continueFactory, seedContinuationPlanningArtifacts } from "../src/factory.js";
 import { executeCheckedTestExecution } from "../src/test-execution.js";
 import { hashValue } from "../src/refs.js";
@@ -933,8 +933,8 @@ describe("finite durable-authority catalog", () => {
     duplicateDisposition.push(B0M4_EXACT_CASES[0]);
     assert.throws(() => exactB0m4DispositionMap(duplicateDisposition), /duplicate exact B0M\.4 case/u);
     assert.throws(() => exactB0m4DispositionMap([{ ...B0M4_EXACT_CASES[0], consumer: "" }]), /literal consumer|concrete consumer and rejector/u);
-    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 147);
-    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 148);
+    assert.equal(DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS.length, 195);
+    assert.equal(DURABLE_AUTHORITY_CATALOG.flatMap(({ records }) => records).length, 196);
     for (const id of [
       "verification-artifact-claim-active", "verification-artifact-claim-completed-pass", "verification-artifact-claim-completed-fail",
       "verification-artifact-claim-unknown-process", "verification-artifact-claim-unknown-receipt", "verification-artifact-execution-receipt-pass",
@@ -1048,7 +1048,36 @@ describe("finite durable-authority catalog", () => {
         }
       }
     }
-    assert.equal(recordCount, 148);
+    assert.equal(recordCount, 196);
+  });
+
+  it("executes every amendment reviewer claim and closure mutation through production validators", () => {
+    const ids = ["amendment-review-dispatch-claim", "amendment-review-dispatch-closure"];
+    const executed = new Set();
+    for (const id of ids) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const baseline = createDurableCatalogBaseline(record);
+      const validate = id.endsWith("claim")
+        ? (value) => validateIntegrationAmendmentReviewDispatchClaim(value, baseline.expected)
+        : (value) => validateIntegrationAmendmentReviewDispatchClosure(value, baseline.expected);
+      const canonical = id.endsWith("claim") ? baseline.claim : baseline.closure;
+      assert.equal(validate(canonical), canonical, `${id} canonical production row`);
+      const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
+      for (const mutationCase of cases) {
+        assert.throws(() => validate(mutationCase.record), undefined, mutationCase.name);
+        executed.add(mutationCase.name);
+      }
+      for (const family of DURABLE_MUTATION_FAMILIES) {
+        const targeted = cases.some((mutationCase) => mutationCase.family === family);
+        const excluded = typeof record.descriptor.exclusions[family] === "string" && record.descriptor.exclusions[family].trim().length > 0;
+        assert.notEqual(targeted, excluded, `${id} must deliberately target or exclude ${family}`);
+      }
+    }
+    const generated = ids.flatMap((id) => {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      return emitDurableRecordMutations(record.source, record.descriptor, record.externalSources).map(({ name }) => name);
+    });
+    assert.deepEqual([...executed].sort(), generated.sort());
   });
 
   it("registers all B1R claim and receipt variants separately", () => {
@@ -1464,10 +1493,10 @@ describe("finite durable-authority catalog", () => {
     }
   });
 
-  it("uses an independent closed descriptor oracle for all 148 exact target/exclusion definitions", () => {
+  it("uses an independent closed descriptor oracle for all 196 exact target/exclusion definitions", () => {
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
     assert.deepEqual(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.map(([id]) => id), requiredIds);
-    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 148);
+    assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.length, 196);
     assert.equal(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
     assert.doesNotMatch(helperSource, /RECORDS\.map\(\(record\).*descriptor/u, "descriptor expectations must not be produced from catalog records");
@@ -1496,6 +1525,29 @@ describe("finite durable-authority catalog", () => {
     assert.equal(oldReview.metadata.writer, record.writer, "old readable snapshot must remain independently reviewable");
     assert.equal(oldReview.descriptor.targets.find(({ family }) => family === "wrong-kind").value, "unknown-graph");
     assert.equal(oldReview.canonicalSource.source.descriptor.kind, "slices-graph");
+  });
+
+  it("reviews all 46 activated amendment catalog values before accepting their literal digests", () => {
+    const ids = DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"].filter((id) => id.startsWith("amendment-") && !id.startsWith("amendment-review-dispatch-"));
+    assert.equal(ids.length, 46);
+    for (const id of ids) {
+      const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
+      const review = JSON.parse(renderDurableAuthorityOracleReviewSnapshot(record));
+      assert.equal(review.canonicalSource.id, id);
+      assert.equal(review.canonicalSource.authorityClassId, "pr79-merged-slice-repair");
+      assert.deepEqual(review.canonicalSource.source, record.source);
+      assert.equal(review.metadata.writer, record.writer);
+      assert.deepEqual(review.metadata.readers, record.readers);
+      assert.deepEqual(review.descriptor.targets, record.descriptor.targets);
+      for (const family of DURABLE_MUTATION_FAMILIES) {
+        const targeted = review.descriptor.targets.some((target) => target.family === family);
+        const excluded = Object.hasOwn(review.descriptor.exclusions, family);
+        assert.notEqual(targeted, excluded, `${id}:${family} readable target-or-exclusion decision`);
+      }
+      assert.match(DURABLE_AUTHORITY_METADATA_MANIFEST.find(([row]) => row === id)[1], /^[0-9a-f]{64}$/u);
+      assert.match(DURABLE_AUTHORITY_DESCRIPTOR_MANIFEST.find(([row]) => row === id)[1], /^[0-9a-f]{64}$/u);
+      assert.match(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.find(([row]) => row === id)[1], /^[0-9a-f]{64}$/u);
+    }
   });
 
   it("proves the reviewed plan descriptor manifest update changed only the stale dependency identity target", () => {
@@ -1545,10 +1597,10 @@ describe("finite durable-authority catalog", () => {
     };
     const expectedDigests = {
       "terminal-result-blocked-nonconvergence": ["d97091392350f02165c01705c4aa4ba2f92e5727325622c9eade4d5cdc0021f6", "484c993240b44861d7d71c96e40fcf4008241b506d9b8f08105352beec069b1b", "55003f673d92a1b474b02aafdc90b72853ce9f376934878d49307509fe122233"],
-      "slice-running": ["af31fa943d166746d48207286fbc9dea216127b8120f77378949b166de73ea40", "beab1f224a3723cf005fb260d8d79a7f53b5083458b165cc5bcc98ffc40c5645", "5c91f74e38cddbf6278e3ad48aa2e74392e3120b7680e747299cf315126ffc26"],
-      "slice-review": ["cd4b857d8325ae2b3df6ca965b17efb3af46dec393f0de2fdf939c79c0e9a5a4", "f3032a106a15dda6324ea24d196196f8629cd57d1fc53a5e1e9f1f8c528d6b51", "c7128941b5660901d7c20c9f79a2f8676dc8bf22632fb32bf8e466b4215d5495"],
-      "slice-merged": ["a0d8d809d6ef828beabe7a72cea680e665718ab60d6ba01ccd2aea21ab3e78f5", "a36bfb5c4e168c8015eae87263ca562eba651051261c41d03441a1b87bf23e3e", "bd160bb8e7d790ece4a840382ab5de8457b84962097642fdb9ff9b073d82d1b5"],
-      "slice-blocked": ["3ed8237beaad32f43ae5cad5a787fd5d148df9931a1baf42f95944516d2e7b00", "c566d2365a70e36e1616952e990317196ab85647c672afb731af20e402d1ceba", "a43f8ee90d231336f11e9b72353c662d64dbd5ea2cba5bd9af828980f50628bc"],
+      "slice-running": ["9144cf9afff4ee300711b783015cb338985c1bee73e42b5596ba53ad89bf1a64", "fc42986c22298a35eab703ba8490a9607de4e6a1a1b40259ed8f8ed67f38bb6c", "ccf77d9effc8e1ea2f3e668ea0c2f323c875fb14dfbafc120fb65d5c956c5d4c"],
+      "slice-review": ["31ee1398f017b2b3582a57fe89207c2cd525f2d1a727413eb423ecc9129cf198", "be1f4758931acd95be6370f8ec72768c98075115ec366cb61593b8af3c2b7b27", "476e15a3d85cca54a6de25390f2b257193d6b4c6cecba3d61f6b9d1fba857473"],
+      "slice-merged": ["62a09eb29bc9d54e60cf7cbfff28b61d88a0ab7ca965ebea1034c876ebff83f4", "bc067a305523a09268e8c43146d24453d63478eafcc908ba1f42f6ae7c1ec9bd", "cbbcd6ae81fdaaec991b8772046a8a531793de57b39f509161eddbb1be7d4eb5"],
+      "slice-blocked": ["444dc0846d2323bbb5b4efad25247c5e10a03db0f6fc255828903fdab77e0408", "8ab00ecb2e88b1f556ec26e9c1b482fc9baa4c678630c8af14c9e8dd9f881ec4", "c1965daf56e03ea648cfa05f0c4fe6447d158b3318d06d9110182f0b267fcf68"],
     };
     for (const [id, digests] of Object.entries(expectedDigests)) {
       const current = findRecord(DURABLE_AUTHORITY_CATALOG, id);
@@ -1785,7 +1837,7 @@ describe("finite durable-authority catalog", () => {
   it("binds every catalog row's source identity, placement, facts, and external bytes with an independent manifest", () => {
     const canonicalIds = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.map(([id]) => id);
     const requiredIds = Object.values(DURABLE_AUTHORITY_REQUIRED_RECORD_IDS).flat();
-    assert.equal(canonicalIds.length, 148);
+    assert.equal(canonicalIds.length, 196);
     assert.deepEqual(canonicalIds, requiredIds);
     assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.every(([, digest]) => /^[0-9a-f]{64}$/u.test(digest)), true);
     const helperSource = readFileSync(new URL("./helpers/durable-record-mutations.js", import.meta.url), "utf8");
@@ -1932,13 +1984,29 @@ describe("finite durable-authority catalog", () => {
         assert.equal(validateVerificationArtifactExecutionClaim(baseline.claim), baseline.claim);
       } else if (baseline.consumer === "validateVerificationArtifactExecutionReceipt") {
         assert.equal(validateVerificationArtifactExecutionReceipt(baseline.receipt), baseline.receipt);
+      } else if (baseline.consumer === "validateIntegrationAmendmentReviewDispatchClaim") {
+        assert.equal(validateIntegrationAmendmentReviewDispatchClaim(baseline.claim, baseline.expected), baseline.claim);
+      } else if (baseline.consumer === "validateIntegrationAmendmentReviewDispatchClosure") {
+        assert.equal(validateIntegrationAmendmentReviewDispatchClosure(baseline.closure, baseline.expected), baseline.closure);
+      } else if (baseline.consumer === "validateIntegrationAmendment") {
+        assert.equal(validateIntegrationAmendment(baseline.amendment), baseline.amendment);
+      } else if (baseline.consumer === "validateIntegrationAmendmentExecutionClaim") {
+        assert.equal(validateIntegrationAmendmentExecutionClaim(baseline.claim), baseline.claim);
+      } else if (baseline.consumer === "validateIntegrationAmendmentExecutionReceipt") {
+        assert.equal(validateIntegrationAmendmentExecutionReceipt(baseline.receipt), baseline.receipt);
+      } else if (baseline.consumer === "validateIntegrationAmendmentReview") {
+        assert.equal(validateIntegrationAmendmentReview(baseline.review), baseline.review);
+      } else if (baseline.consumer === "prepare/completeSpecialBuilderTaskDispatch") {
+        const sidecar = baseline.claim || baseline.closure;
+        assert.equal(sidecar.route, "integration-amendment");
+        assert.match(sidecar.kind, /^checked-special-builder-dispatch-(?:claim|closure)$/u);
       } else {
         assert.match(baseline.consumer, /^validateRun(?:\/checkRunConsistency)?$/u);
         assert.equal(validateRun(baseline.run), baseline.run, `${id} must use an actual validateRun-compatible persisted shape`);
       }
     }
-    assert.equal(observedConsumers.size, 148);
-    assert.deepEqual([...observedConsumers.keys()].slice(0, 147), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
+    assert.equal(observedConsumers.size, 196);
+    assert.deepEqual([...observedConsumers.keys()].slice(0, 195), DURABLE_AUTHORITY_PRODUCTION_COVERED_RECORD_IDS);
     assert.equal(observedConsumers.get("final-plan-descriptor"), "final-plan-descriptor-contract", "future-only final.plan is a descriptor contract, not claimed as current validateRun input");
   });
 
@@ -2197,9 +2265,11 @@ describe("finite durable-authority catalog", () => {
     assert.deepEqual(slices.map(({ source }) => source.status), ["pending", "running", "review", "merged", "blocked", "blocked"]);
     for (const { source } of slices) for (const key of ["review_binding", "sidecar_bytes"]) assert.equal(Object.hasOwn(source, key), false);
     assert.equal(Object.hasOwn(slices[0].source, "dispatch_required"), false);
+    assert.equal(Object.hasOwn(slices[0].source, "authorized_baseline_commit"), false);
     assert.equal(Object.hasOwn(slices[1].source, "attempt_reviews"), false);
     for (const source of slices.slice(1).map(({ source }) => source)) {
       assert.equal(source.dispatch_required, true);
+      assert.match(source.authorized_baseline_commit, /^[0-9a-f]{40}$/u);
       assert.match(source.dispatch_claim_ref, /^dispatch\/[0-9a-f]{64}\.json$/u);
       assert.match(source.dispatch_claim_hash, /^sha256:[0-9a-f]{64}$/u);
     }
@@ -2209,9 +2279,9 @@ describe("finite durable-authority catalog", () => {
       assert.match(source.dispatch_closure_ref, /^dispatch\/[0-9a-f]{64}\.closed\.json$/u);
       assert.match(source.dispatch_closure_hash, /^sha256:[0-9a-f]{64}$/u);
     }
-    assert.deepEqual(Object.keys(slices[2].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "evidence_hash", "review_hash", "reviewed_commit"]);
-    assert.deepEqual(Object.keys(slices[3].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "evidence_hash", "review_hash", "reviewed_commit", "merge_commit", "updated_at"]);
-    assert.deepEqual(Object.keys(slices[4].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "blocked_reason"]);
+    assert.deepEqual(Object.keys(slices[2].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "authorized_baseline_commit", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "evidence_hash", "review_hash", "reviewed_commit"]);
+    assert.deepEqual(Object.keys(slices[3].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "authorized_baseline_commit", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "evidence_hash", "review_hash", "reviewed_commit", "merge_commit", "updated_at"]);
+    assert.deepEqual(Object.keys(slices[4].source), ["id", "stack", "depends_on", "declared_paths", "effective_paths", "status", "attempts", "branch", "worktree", "authorized_baseline_commit", "dispatch_required", "dispatch_claim_ref", "dispatch_claim_hash", "attempt_reviews", "dispatch_closure_ref", "dispatch_closure_hash", "evidence_ref", "review_ref", "blocked_reason"]);
     assert.deepEqual(Object.keys(slices[5].source), Object.keys(slices[4].source));
 
     assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "validator-verdict-binding").source), ["verdict", "report", "review_ref", "report_hash", "review_hash", "reviewed_head_sha"]);
@@ -2504,12 +2574,14 @@ describe("finite durable-authority catalog", () => {
 
   it("registers all PR79 repair states as canonical persisted sources with external authority facts", () => {
     const repairClass = DURABLE_AUTHORITY_CATALOG.find(({ id }) => id === "pr79-merged-slice-repair");
-    assert.deepEqual(repairClass.records.map(({ id }) => id), ["repair-reported", "repair-repairing", "repair-review-approve", "repair-review-reject", "repair-merged", "repair-blocked-from-reported", "repair-blocked-from-repairing", "repair-blocked-from-review"]);
-    assert.deepEqual(repairClass.records.map(({ variant }) => variant), ["reported", "repairing", "review:APPROVE", "review:REJECT", "merged", "blocked-from-reported", "blocked-from-repairing", "blocked-from-review"]);
-    assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.slice(-8).every(([id], index) => id === repairClass.records[index].id), true);
-    assert.deepEqual(repairClass.records.map(({ canonicalPath }) => canonicalPath), Array.from({ length: 8 }, () => ["merged_slice_repair"]));
-    assert.deepEqual(repairClass.records.map(({ source }) => source.status), ["reported", "repairing", "review", "review", "merged", "blocked", "blocked", "blocked"]);
-    assert.deepEqual(repairClass.records.map(({ source }) => source.attempts), [0, 1, 1, 1, 1, 0, 1, 1]);
+    const repairRecords = repairClass.records.filter(({ id }) => id.startsWith("repair-"));
+    assert.deepEqual(repairRecords.map(({ id }) => id), ["repair-reported", "repair-repairing", "repair-review-approve", "repair-review-reject", "repair-merged", "repair-blocked-from-reported", "repair-blocked-from-repairing", "repair-blocked-from-review"]);
+    assert.deepEqual(repairRecords.map(({ variant }) => variant), ["reported", "repairing", "review:APPROVE", "review:REJECT", "merged", "blocked-from-reported", "blocked-from-repairing", "blocked-from-review"]);
+    const repairStart = DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.findIndex(([id]) => id === "repair-reported");
+    assert.equal(DURABLE_AUTHORITY_CANONICAL_SOURCE_MANIFEST.slice(repairStart, repairStart + 8).every(([id], index) => id === repairRecords[index].id), true);
+    assert.deepEqual(repairRecords.map(({ canonicalPath }) => canonicalPath), Array.from({ length: 8 }, () => ["merged_slice_repair"]));
+    assert.deepEqual(repairRecords.map(({ source }) => source.status), ["reported", "repairing", "review", "review", "merged", "blocked", "blocked", "blocked"]);
+    assert.deepEqual(repairRecords.map(({ source }) => source.attempts), [0, 1, 1, 1, 1, 0, 1, 1]);
     const requiredReportedKeys = ["schema_version", "plan_hash", "owner_slice_id", "consumer_slice_id", "defect_path", "evidence_ref", "evidence_hash", "status", "attempts", "max_attempts", "created_at", "updated_at"];
     assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-reported").source), requiredReportedKeys);
     assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-repairing").source).sort(), [...requiredReportedKeys, "baseline_commit", "branch", "worktree"].sort());
@@ -2520,7 +2592,7 @@ describe("finite durable-authority catalog", () => {
     assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-reported").source).sort(), [...requiredReportedKeys, "reason"].sort());
     assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-repairing").source).sort(), [...requiredReportedKeys, "baseline_commit", "branch", "worktree", "reason"].sort());
     assert.deepEqual(Object.keys(findRecord(DURABLE_AUTHORITY_CATALOG, "repair-blocked-from-review").source).sort(), [...requiredReportedKeys, "baseline_commit", "reviewed_commit", "review_ref", "review_hash", "repair_evidence_ref", "repair_evidence_hash", "reason"].sort());
-    for (const { source } of repairClass.records) {
+    for (const { source } of repairRecords) {
       assert.equal(source.schema_version, 1);
       assert.equal(source.max_attempts, 2);
       assert.equal(source.owner_slice_id, "owner");
@@ -2546,7 +2618,7 @@ describe("finite durable-authority catalog", () => {
   it("places every canonical PR79 repair source in a validator- and consistency-accepted run with separate fixture files", () => {
     const root = mkdtempSync(join(tmpdir(), "repair-catalog-"));
     try {
-      for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"]) {
+      for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"].filter((recordId) => recordId.startsWith("repair-"))) {
         const record = findRecord(DURABLE_AUTHORITY_CATALOG, id);
         const fixture = createRepairCatalogBaseline(record);
         assert.equal(validateRun(fixture.run), fixture.run, `${id} must use the production persisted schema`);
@@ -2594,7 +2666,7 @@ describe("finite durable-authority catalog", () => {
       ["external bytes", (record) => { record.externalSources["original-evidence"].bytes += "tampered"; }],
       ...["plan_ref", "owner_snapshot", "quiescent", "review_verdict", "reviewed_tree", "merge_tree", "sidecar_bytes", "blocked_from"].map((key) => [`synthetic ${key}`, (record) => { record.source[key] = true; }]),
     ];
-    for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"]) {
+    for (const id of DURABLE_AUTHORITY_REQUIRED_RECORD_IDS["pr79-merged-slice-repair"].filter((recordId) => recordId.startsWith("repair-"))) {
       for (const [label, mutate] of mutations) {
         const catalog = structuredClone(DURABLE_AUTHORITY_CATALOG);
         mutate(findRecord(catalog, id));
@@ -2704,7 +2776,8 @@ describe("per-record durable authority mutation matrices", () => {
   for (const authorityClass of DURABLE_AUTHORITY_CATALOG) {
     for (const record of authorityClass.records) {
       it(`${record.id} mutation matrix`, () => {
-        assert.equal(record.tests[0], `test/durable-record-mutations.test.js: ${record.id} mutation matrix`);
+        const productionAmendment = record.id.startsWith("amendment-") && !record.id.startsWith("amendment-review-dispatch-");
+        assert.equal(record.tests[0], `test/durable-record-mutations.test.js: ${record.id}${productionAmendment ? " production" : ""} mutation matrix`);
         if (record.id.startsWith("test-execution-claim-")) {
           assert.equal(record.tests.includes("test/durable-record-mutations.test.js: executes every generated checked execution claim mutation through production consumers"), true);
           assert.equal(record.tests.includes("test/durable-record-mutations.test.js: rejects checked claim cross-bindings at panel, gate, fence, and PR consumers"), record.id === "test-execution-claim-completed-pass");
@@ -2716,6 +2789,12 @@ describe("per-record durable authority mutation matrices", () => {
             "test/durable-record-mutations.test.js: slice-blocked-ordinary mutation matrix",
             "test/durable-record-mutations.test.js: executes every ordinary blocked-slice mutation through production authority consumers",
           ]);
+        } else if (record.id.startsWith("amendment-review-dispatch-")) {
+          assert.equal(record.tests.length, 3);
+          assert.equal(record.tests.includes("test/durable-record-mutations.test.js: amendment reviewer provenance production mutation matrix"), true);
+          assert.equal(record.tests.includes("test/integration-amendment.test.js: reviewer effect lifecycle and replay"), true);
+        } else if (productionAmendment) {
+          assert.equal(record.tests.length, 2);
         } else assert.equal(record.tests.length, 1);
         const sourceBefore = structuredClone(record.source);
         const cases = emitDurableRecordMutations(record.source, record.descriptor, record.externalSources);
@@ -2746,6 +2825,7 @@ async function consumeSliceMutation(root, record, mutationCase, safeName) {
     const sliceWorktree = join(repo, ".opencode", "worktrees", "backend");
     mkdirSync(join(repo, ".opencode", "worktrees"), { recursive: true });
     fixtureGit(repo, ["worktree", "add", sliceWorktree, "feature--backend"]);
+    const sliceBaseline = fixtureGit(sliceWorktree, ["rev-parse", "HEAD"]).trim();
     writeFileSync(join(sliceWorktree, "backend.txt"), "reviewed backend\n");
     fixtureGit(sliceWorktree, ["add", "backend.txt"]);
     fixtureGit(sliceWorktree, ["commit", "-q", "-m", "reviewed backend"]);
@@ -2759,7 +2839,11 @@ async function consumeSliceMutation(root, record, mutationCase, safeName) {
       }]));
       if (adapted.claim && adapted.closure) {
         try {
+          const claim = JSON.parse(adapted.claim.bytes);
+          claim.head = sliceBaseline;
+          adapted.claim.bytes = `${JSON.stringify(claim, null, 2)}\n`;
           const closure = JSON.parse(adapted.closure.bytes);
+          closure.head = sliceBaseline;
           closure.claim_hash = `sha256:${createHash("sha256").update(adapted.claim.bytes).digest("hex")}`;
           adapted.closure.bytes = `${JSON.stringify(closure, null, 2)}\n`;
         } catch {
@@ -2777,6 +2861,7 @@ async function consumeSliceMutation(root, record, mutationCase, safeName) {
     const current = structuredClone(record.source);
     current.worktree = sliceWorktree;
     current.reviewed_commit = reviewedHead;
+    current.authorized_baseline_commit = sliceBaseline;
     current.evidence_hash = expectedEvidenceHash;
     current.review_hash = expectedReviewHash;
     current.dispatch_claim_hash = expectedClaimHash;
@@ -2786,6 +2871,7 @@ async function consumeSliceMutation(root, record, mutationCase, safeName) {
       evidence_hash: expectedEvidenceHash,
       review_hash: expectedReviewHash,
       reviewed_commit: reviewedHead,
+      diff_base_commit: sliceBaseline,
     }));
     let mergeCommit = null;
     if (record.id === "slice-merged") {

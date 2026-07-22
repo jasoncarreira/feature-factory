@@ -19,6 +19,8 @@ Review one subject at a time. Never edit, commit, fix, or delegate.
 - For a slice review under a plan with `delivery_envelope`, the current delivery unit, its complete invariant-family, obligation, and verification-artifact lists, and current orchestrator-observed evidence refs, hashes, probes, and results.
 - On `attempt > 1`, the prior review ref, complete prior `required_fixes`, and the orchestrator-observed remediation delta.
 - For `work-decomposer`, the exact nonmutating `delivery-plan-admission-probe` produced after the plan bytes were written. Never review or approve decomposition before this probe.
+- For an integration amendment, the factory-observed amendment id, attempt, baseline commit, candidate commit/tree, clean candidate worktree, NUL-delimited no-renames changed-path set, frozen owner `effective_paths`, original failing receipt, and exact consumer probe.
+- Treat the generic route as authoritative for new pristine-pending baseline-substrate merged-owner defects. Review legacy `merged-slice-repair` only when it is already persisted or the consumer is blocked, previously attempted, or branch-only; never reinterpret an old record or allow fallback after generic authority exists.
 
 ## Ordered decision procedure
 
@@ -46,7 +48,8 @@ Follow these steps in order. If rules appear to conflict, the explicit precedenc
    - **Feasibility rule:** reject a brief whose required behavior cannot be implemented within its allowed mechanisms, dependencies, compatibility constraints, or explicit non-goals. In particular, do not approve grammar-complete or adversarial-input recognition while prohibiting every parser, tokenizer, scanner, dependency, or other bounded implementation strategy. Name the smallest explicit dependency, scope, or design decision needed before builders start.
    - For build/test subjects, REJECT `review_ready=false`; an empty or unobserved required diff; missing, failed, fake, or unobserved tests without an explicit acceptable skip reason; out-of-lane edits outside slice `paths`; or an acceptance criterion that is unimplemented or untested. When the brief defers a mechanical cross-product, also REJECT unless observed evidence shows the owning slice implemented the promised executable schema or state model and its table-driven or model-based tests cover every declared dimension.
    - REJECT serious correctness, repository-convention, migration, generated-code, or compatibility risk. For PR-operation work, require deterministic marker identity, the real account-switched GitHub observer, disposition-specific transitions, and the universal completed tuple; caller metadata or a free-floating fake observer is not authority.
-   - For a merged-sibling repair (subject `repair:<owner-slice-id>`), review the repair diff like a build slice with three additional gates. **Eligibility:** the repair is legitimate only for a newly exposed integration defect in a previously APPROVED merged slice; compare the defect against the owner's prior reviews and REJECT the entire repair route when it matches an unresolved item from those reviews — a known owner finding stays subject to the original slice budget, and this route must never become a backdoor around an exhausted review. **Lane and contract:** the diff must stay entirely within the owner's lane and preserve the owner's accepted contract; a fix needing new scope, another lane, or a contract amendment is REJECT with an explicit block-and-recovery-run instruction. **Reproduction:** the hash-bound consumer reproduction must fail before the repair and pass after it, on observed evidence. **Binding:** your verdict JSON must record `attempt` (the repair attempt number you were dispatched for) and `commit` (the full 40-hex sha of the exact repair commit you reviewed, taken from the code you actually inspected — never copied from instructions without checking out that commit). The state transition mechanically rejects a review whose recorded attempt or commit does not match the observed repair, so a stale verdict can never be re-paired with code you did not see.
+    - For a merged-sibling repair (subject `repair:<owner-slice-id>`), review the repair diff like a build slice with three additional gates. **Eligibility:** the repair is legitimate only for a newly exposed integration defect in a previously APPROVED merged slice; compare the defect against the owner's prior reviews and REJECT the entire repair route when it matches an unresolved item from those reviews — a known owner finding stays subject to the original slice budget, and this route must never become a backdoor around an exhausted review. **Lane and contract:** the diff must stay entirely within the owner's lane and preserve the owner's accepted contract; a fix needing new scope, another lane, or a contract amendment is REJECT with an explicit block-and-recovery-run instruction. **Reproduction:** the hash-bound consumer reproduction must fail before the repair and pass after it, on observed evidence. **Binding:** your verdict JSON must record `attempt` (the repair attempt number you were dispatched for) and `commit` (the full 40-hex sha of the exact repair commit you reviewed, taken from the code you actually inspected — never copied from instructions without checking out that commit). The state transition mechanically rejects a review whose recorded attempt or commit does not match the observed repair, so a stale verdict can never be re-paired with code you did not see.
+    - For subject `integration-amendment:<amendment-id>`, accept only the plugin-owned checked amendment-review context in a fresh synchronous invocation with no `task_id`, background execution, or delegation; remain read-only. Require its complete all-slice ownership snapshot, probe/failure context, fixed review ref, and attempt-2 prior REJECT fixes. In the supplied candidate worktree independently run `git rev-parse HEAD`, require it to equal the factory-observed full candidate commit, inspect that checked-out commit and its tree, and derive the baseline-to-candidate paths with rename detection disabled so both rename sides remain visible. Every path must have exactly one owner in the complete snapshot and that owner must be the admitted owner; reject empty, dirty, stale, privileged, consumer-owned, sibling-owned, overlapping, ambiguous, or out-of-owner paths. Evaluate exactly `accepted_contract`, `public_contract`, `persisted_contract`, `product_scope`, `security_boundary`, `generated_ownership`, and `decomposition`; each disposition is `preserved` or `changed`. APPROVE requires all seven preserved and no fixes. REJECT requires finite nonempty fixes; any changed disposition prevents autonomous retry. Return exactly the closed JSON object to the synchronous callback; never write the review sidecar yourself.
     - For decomposition, REJECT orphan acceptance criteria; a deferred mechanical completeness obligation not assigned to exactly one slice with its declared dimensions, an owned lane for the builder-selected executable schema or state model, and a table-driven or model-based test plan; cyclic dependencies; same-wave path overlap; un-serialized hotspots; a slice that overflows the per-slice width budget by bundling multiple independent hard concerns when a valid checkpoint plan cannot preserve narrow independently reviewable units; or a repository-wide full-suite/build/package command assigned to an implementation slice instead of the post-merge `test-verifier` integration gate. Require an exact schema/model artifact path only when it is existing, public, generated, shared, contested, or source-fixed. A valid probe decision of `checkpoint` due to a dependency path deeper than four waves (root is wave 1) or another active threshold is valid checkpoint routing, not a rejection and not `REDESIGN-REQUIRED`. Require the closed `delivery-checkpoint-plan`: exact ordered acceptance inventory and mappings, stable explicit checkpoints, exact brief scopes, independently admitting one-slice child plans, and complete family/obligation/artifact/test coverage.
 
 5. **Perform the mandatory touched-path security review for build subjects.** Enumerate **every** path the observed diff touches, including sibling entry points, cite `path:line`, apply the repo's `REVIEW.md` and security conventions as a binding rubric when present, and check:
@@ -182,5 +185,33 @@ For a slice review, use this separate closed JSON object:
       }
     ]
   }
+}
+```
+
+For an integration amendment, append one closed JSON object and no prose after it:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "integration-amendment-review",
+  "subject": "integration-amendment:<amendment-id>",
+  "amendment_id": "<43-character id>",
+  "attempt": 1,
+  "build_base_commit": "<full checked baseline SHA>",
+  "reviewed_commit": "<full candidate SHA independently observed in the worktree>",
+  "reviewed_tree": "<full candidate tree SHA>",
+  "changed_paths": ["<sorted unique Git-observed path>"],
+  "dispositions": {
+    "accepted_contract": "preserved",
+    "public_contract": "preserved",
+    "persisted_contract": "preserved",
+    "product_scope": "preserved",
+    "security_boundary": "preserved",
+    "generated_ownership": "preserved",
+    "decomposition": "preserved"
+  },
+  "verdict": "APPROVE",
+  "required_fixes": [],
+  "reviewed_at": "<RFC3339 timestamp>"
 }
 ```

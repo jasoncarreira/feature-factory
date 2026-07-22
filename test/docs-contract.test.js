@@ -319,7 +319,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(writerMatrix, /authority class, id, record, variant, canonical (?:persisted )?source path and exact shape/i);
     assert.match(writerMatrix, /path-plus-expected-value authority facts/i);
     assert.match(writerMatrix, /source deletion\/substitution[\s\S]*record(?: or |\/)variant relocation[\s\S]*fact deletion\/relocation\/value contradiction[\s\S]*synthetic keys/i);
-    assert.match(schemaCatalog, /current canonical-source manifest has 148 variants[\s\S]*147 production-covered rows[\s\S]*`final-plan-descriptor`/i);
+    assert.match(schemaCatalog, /current canonical-source manifest has 196 variants[\s\S]*195 production-covered rows[\s\S]*`final-plan-descriptor`/i);
     for (const id of [
       "test-execution-claim-active", "test-execution-claim-completed-pass", "test-execution-claim-completed-fail",
       "test-execution-claim-unknown-process-outcome-indeterminate", "test-execution-claim-unknown-authority-changed",
@@ -536,7 +536,7 @@ describe("class-wide planning prompt contract", () => {
     const integrate = markdownSection(SKILL, "Step 5 - Integrate And Validate");
 
     assert.match(schemaCatalog, /B0MR\.1 additionally gives production-consumer coverage to exactly `slice-review`, `slice-merged`, `validator-verdict-binding`, and `security-verdict-binding`/i);
-    assert.match(schemaCatalog, /current canonical-source manifest has 148 variants/i);
+    assert.match(schemaCatalog, /current canonical-source manifest has 196 variants/i);
 
     for (const text of [README, SPEC, SCHEMA]) {
       assert.match(text, /`?evidence_hash`?.*`?review_hash`?.*`?reviewed_commit`?/is);
@@ -587,7 +587,7 @@ describe("class-wide planning prompt contract", () => {
     assert.match(contract, /only complete checked absence.*clear/i);
     assert.match(contract, /legacy-pr-fence-operation-identity-missing.*retain/is);
     assert.match(contract, /\{pr_url,pr_number,pr_node_id,repository,operation_id,head_ref,head_sha,base_ref,base_sha,draft\}/i);
-    assert.match(SCHEMA, /current canonical-source manifest has 148 variants[\s\S]*147 production-covered rows[\s\S]*`final-plan-descriptor`/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 196 variants[\s\S]*195 production-covered rows[\s\S]*`final-plan-descriptor`/i);
     assert.match(SCHEMA, /`steering-pr-fence`/i);
     assert.match(WORK_REVIEWER_PROMPT, /deterministic marker identity.*account-switched GitHub observer/is);
     assert.match(IMPLEMENTATION_VALIDATOR_PROMPT, /deterministic operation identity.*account-switched observer/is);
@@ -1292,7 +1292,7 @@ describe("test-verifier integration gate contract", () => {
     assert.match(contract, /exact run-relative[\s\S]*plan\/slices\.json[\s\S]*(?:regular non-symlink|non-symlink)[\s\S]*(?:fatal UTF-8|fatally decodes UTF-8)/i);
     assert.match(contract, /work-decomposer[\s\S]*accepted[\s\S]*artifact_ref(?::|.*)\s*[`"]?plan\/slices\.json[\s\S]*review_ref[\s\S]*(?:artifact_hash|exact plan)[\s\S]*(?:review_hash|review bytes)/i);
     assert.match(contract, /after (?:observing|target).*target.*(?:absence|observation)[\s\S]*immediately before[\s\S]*(?:no-replace|no-overwrite|atomic).*move/i);
-    assert.match(SCHEMA, /current canonical-source manifest has 148 variants[\s\S]*147 production-covered rows/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 196 variants[\s\S]*195 production-covered rows/i);
     assert.match(SCHEMA, /`plan-v2-integration-gate`/i);
     assert.match(SCHEMA, /`step-work-decomposer-accepted-plan`/i);
     assert.match(SCHEMA, /sole future row `final-plan-descriptor`/i);
@@ -1383,7 +1383,7 @@ describe("test-verifier integration gate contract", () => {
     assert.match(contract, /clear[\s\S]*replace[\s\S]*terminaliz[\s\S]*retry[\s\S]*advance/i);
     assert.doesNotMatch(contract, /only `?factory recover[^\n]*test-execution-reconciliation/i);
     assert.match(contract, /completed passing[\s\S]*artifacts\/test-report\.md[\s\S]*independent[\s\S]*APPROVE[\s\S]*(?:same attempt|same-attempt)[\s\S]*(?:same HEAD|same-HEAD)/i);
-    assert.match(SCHEMA, /current canonical-source manifest has 148 variants[\s\S]*terminal-result-blocked-nonconvergence[\s\S]*checked-dispatch authority/i);
+    assert.match(SCHEMA, /current canonical-source manifest has 196 variants[\s\S]*terminal-result-blocked-nonconvergence[\s\S]*checked-dispatch authority/i);
   });
 });
 
@@ -2118,6 +2118,66 @@ describe("remediation context reuse docs contract", () => {
   });
 
 });
+
+  describe("delegated generic integration amendment docs contract", () => {
+  it("keeps orchestration ordered and excludes caller process or Git authority", () => {
+    assert.match(SKILL, /### Generic Integration Amendment/u);
+    for (const fragment of [
+      /factory amendment <run-id> report --owner-slice <owner> --consumer-slice <consumer> --defect-path <path> --artifact-id <consumer-artifact>/u,
+      /create-publishes the fixed claim before spawn/u,
+      /FEATURE_FACTORY_SPECIAL_BUILDER_DISPATCH \{"run_id":"<run-id>","route":"integration-amendment","agent":"<owner-stack>-builder"\}/u,
+      /fresh `work-reviewer` with no `task_id`/u,
+      /FEATURE_FACTORY_INTEGRATION_AMENDMENT_REVIEW \{"run_id":"<run-id>","amendment_id":"<amendment-id>","attempt":<N>,"agent":"work-reviewer"\}/u,
+      /factory amendment <run-id> integrate/u,
+      /factory amendment <run-id> verify/u,
+      /Do not automatically run `merge`/u,
+    ]) assert.match(SKILL, fragment);
+    assert.match(SKILL, /Do not run the command yourself or supply command text, result, ref, hash, HEAD, cwd, worktree, or outcome/u);
+    assert.match(SKILL, /orchestrator must not edit, stage, commit, switch, or repair/u);
+    assert.match(SKILL, /checked immutable reviewer claim\/closure is the narrowly scoped nonsemantic amendment-review provenance path/u);
+    assert.match(SCHEMA, /complete all-slice ownership snapshot[\s\S]*same-session\/same-call\/same-agent callback[\s\S]*never replaces bytes/u);
+    assert.match(SCHEMA, /exact 48[\s\S]*reviewer-dispatch variants/u);
+    assert.match(SCHEMA, /active-claim-only[\s\S]*review-published-without-closure[\s\S]*closed-unconsumed[\s\S]*consumed/u);
+  });
+
+    it("confines builders and requires an exact fresh seven-disposition review", () => {
+    for (const prompt of [BACKEND_BUILDER_PROMPT, FRONTEND_BUILDER_PROMPT]) {
+      assert.match(prompt, /For `integration-amendment`/u);
+      assert.match(prompt, /authority\.path_policy\.effective_paths/u);
+      assert.match(prompt, /Do not expand ownership, edit the pending consumer, or alter factory control-plane files/u);
+      assert.match(prompt, /Do not invoke Task or delegate recursively/u);
+      assert.match(prompt, /new clean descendant commit/u);
+    }
+    assert.match(WORK_REVIEWER_PROMPT, /subject `integration-amendment:<amendment-id>`/u);
+    assert.match(WORK_REVIEWER_PROMPT, /independently run `git rev-parse HEAD`/u);
+    assert.match(WORK_REVIEWER_PROMPT, /derive the baseline-to-candidate paths with rename detection disabled/u);
+    assert.match(WORK_REVIEWER_PROMPT, /Every path must have exactly one owner in the complete snapshot/u);
+    for (const disposition of ["accepted_contract", "public_contract", "persisted_contract", "product_scope", "security_boundary", "generated_ownership", "decomposition"]) {
+      assert.match(WORK_REVIEWER_PROMPT, new RegExp(`"${disposition}": "preserved"`, "u"));
+    }
+    });
+
+    it("documents the implemented generic cutover and retained legacy compatibility", () => {
+      for (const text of [README, SKILL, SCHEMA]) {
+        assert.match(text, /pristine attempt-zero pending|pristine-pending/i);
+        assert.match(text, /blocked, previously attempted, or branch-only/i);
+        assert.match(text, /persisted legacy|already-persisted legacy|existing legacy/i);
+      }
+      assert.match(README, /new generic-eligible legacy report rejects before publication/i);
+      assert.match(SKILL, /never fall back after any generic claim, settled tombstone, unknown outcome, or manifest exists/i);
+      assert.match(SCHEMA, /implemented B5 class-9 migration/i);
+      assert.match(CLI, /retained legacy: blocked, previously-attempted, or branch-only consumer/i);
+    });
+
+    it("binds post-amendment slice dispatch and merge coverage to the checked feature baseline", () => {
+      for (const text of [README, SPEC, SKILL, SCHEMA, CONTINUATION_SCOPE_DESIGN]) {
+        assert.match(text, /authorized_baseline_commit/u);
+      }
+      assert.match(SKILL, /ahead or substituted branch rejects before state publication/u);
+      assert.match(SCHEMA, /exact Git merge base[\s\S]*ownership-reviewed path set[\s\S]*integrated path set/u);
+      assert.match(CONTINUATION_SCOPE_DESIGN, /First dispatch and every[\s\S]*diff_base_commit[\s\S]*retries start only at the immediately prior[\s\S]*reviewed commit/u);
+    });
+  });
 
 describe("interrupt steer resume docs contract", () => {
   it("documents run-scoped process evidence and SIGTERM-only fail-closed cancellation", () => {

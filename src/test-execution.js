@@ -26,7 +26,7 @@ export async function executeCheckedTestExecution(runDir, options = {}) {
   const results = [];
   try {
     for (const [index, command] of claimed.authority.commands.entries()) {
-      results.push(await executeCommand(command, index, claimed.authority.worktree, env, options));
+      results.push(await executeCheckedCommand(command, index, claimed.authority.worktree, env, options));
     }
   } catch (error) {
     await markCheckedTestExecutionUnknown(runDir, claimed.claim, "process-outcome-indeterminate", options);
@@ -67,7 +67,7 @@ export async function executeCheckedVerificationArtifact(runDir, sliceId, artifa
   const command = { program: claimed.authority.probe.program, args: claimed.authority.probe.args };
   let result;
   try {
-    result = await executeCommand(command, 0, claimed.authority.worktree, checkedExecutionEnvironment(options.env ?? process.env), options);
+    result = await executeCheckedCommand(command, 0, claimed.authority.worktree, checkedExecutionEnvironment(options.env ?? process.env), options);
     if (typeof options.afterArtifactProcess === "function") await options.afterArtifactProcess({ claim: claimed.claim, authority: claimed.authority, result });
   } catch (error) {
     await markCheckedVerificationArtifactExecutionUnknown(runDir, claimed.claim, claimed.authority, "process-outcome-indeterminate", options);
@@ -122,7 +122,7 @@ export function checkedExecutionEnvironment(source) {
   return env;
 }
 
-async function executeCommand(command, index, cwd, env, options) {
+export async function executeCheckedCommand(command, index, cwd, env, options = {}) {
   const started = nowMs(options);
   const stdout = streamCapture();
   const stderr = streamCapture();
