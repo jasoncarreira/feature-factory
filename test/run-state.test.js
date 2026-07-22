@@ -1329,20 +1329,33 @@ describe("simplified run-state transitions", () => {
   });
 
   it("canonicalizes origin-tracking base refs for PR authority", async () => {
-    const fixture = createFixture("pr-origin-tracking-base");
-    try {
-      writeReadyPrRun(fixture);
-      const runPath = join(fixture.runDir, "run.json");
-      const run = readJson(runPath);
-      run.base_ref = "refs/remotes/origin/main";
-      writeJson(runPath, run);
+    for (const [index, baseRef] of ["refs/remotes/origin/main", "origin/main", "main"].entries()) {
+      const fixture = createFixture(`pr-origin-tracking-base-${index}`);
+      try {
+        writeReadyPrRun(fixture);
+        const runPath = join(fixture.runDir, "run.json");
+        const run = readJson(runPath);
+        run.base_ref = baseRef;
+        writeJson(runPath, run);
+        const probes = [];
+        const options = preparePrTestOptions(fixture.runDir);
+        const gitFn = options.gitFn;
+        options.gitFn = (cwd, args) => {
+          if (args[0] === "ls-remote") probes.push(args[3]);
+          return gitFn(cwd, args);
+        };
 
-      const fenced = await transitionPrePrFenceEstablished(fixture.runDir, preparePrTestOptions(fixture.runDir));
+        const fenced = await transitionPrePrFenceEstablished(fixture.runDir, options);
 
-      assert.equal(fenced.fence.base_ref, "main");
-      assert.equal(fenced.fence.base_sha, run.base_commit);
-    } finally {
-      cleanup(fixture.repo);
+        assert.equal(fenced.fence.base_ref, "main", baseRef);
+        assert.equal(fenced.fence.base_sha, run.base_commit, baseRef);
+        assert.deepEqual(probes, [
+          "refs/heads/feature-branch", "refs/heads/main",
+          "refs/heads/feature-branch", "refs/heads/main",
+        ], baseRef);
+      } finally {
+        cleanup(fixture.repo);
+      }
     }
   });
 

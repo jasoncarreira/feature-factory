@@ -9090,8 +9090,10 @@ function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR o
 
 function localPrBaseRef(run) {
   const ref = requireNonEmptyString(run.base_ref, "run.base_ref");
-  const originPrefix = "refs/remotes/origin/";
-  return ref.startsWith(originPrefix) ? ref.slice(originPrefix.length) : ref;
+  for (const originPrefix of ["refs/remotes/origin/", "origin/"]) {
+    if (ref.startsWith(originPrefix)) return ref.slice(originPrefix.length);
+  }
+  return ref;
 }
 
 function observeExactRemoteHead(options, repository, ref, label) {
