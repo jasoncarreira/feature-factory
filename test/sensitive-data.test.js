@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   REDACTED_KEY,
   REDACTED_VALUE,
@@ -10,6 +11,7 @@ import {
   scrubSensitiveData,
   scrubSensitiveString,
 } from "../src/hardening/sensitive-data.js";
+import { startB6Span } from "../src/telemetry.js";
 
 describe("sensitive-data policy", () => {
   it("redacts only flattened Basic credential values across supported variants", () => {
@@ -376,5 +378,67 @@ describe("descriptor and proxy failures", () => {
     assert.equal(Object.hasOwn(result, "api_token"), false);
     assert.equal(descriptorCalls, 2);
     assert.doesNotMatch(JSON.stringify(result), /source-secret-value|source get trap/u);
+  });
+});
+
+describe("B6 emitted span sensitive-data boundary", () => {
+  it("exports only the exact metadata allowlist under hostile keys and values", async () => {
+    const spans = [];
+    const api = {
+      context: { active: () => ({ trace: "active" }) },
+      trace: {
+        getTracer: () => ({
+          startActiveSpan(name, options, context, callback) {
+            const span = {
+              name,
+              attributes: { ...(options?.attributes || {}) },
+              setAttribute(key, value) { this.attributes[key] = value; },
+              addEvent() {},
+              setStatus() {},
+              end() {},
+            };
+            spans.push(span);
+            return callback(span);
+          },
+        }),
+      },
+    };
+    const hostileKey = "github_pat_123456789012345678901234567890";
+    const controller = startB6Span("feature_factory.task", {
+      "feature_factory.run_id": "safe-run",
+      "feature_factory.slice_id": "safe-slice",
+      "feature_factory.session_id": "safe-session",
+      "feature_factory.call_id": "ghp_123456789012345678901234567890",
+      "feature_factory.target_agent": "backend-builder",
+      "feature_factory.span_event": "task-before",
+      "feature_factory.span_operation": "execute-task",
+      "gen_ai.conversation.id": "safe-run",
+      prompt: `read ${hostileKey}`,
+      messages: [{ content: hostileKey }],
+      tool_arguments: { token: hostileKey },
+      tool_result: hostileKey,
+      review_ref: "reviews/secret.json",
+      evidence_hash: "sha256:abcdef",
+      raw_path: "/private/secret",
+      url: "https://user:pass@example.test",
+      traceparent: "00-secret",
+      tracestate: "vendor=secret",
+      task_id: "task-secret",
+      [hostileKey]: "value",
+    }, { telemetry: { enabled: true, importer: async () => api } });
+    await controller.end();
+
+    assert.deepEqual(spans[0].attributes, {
+      "feature_factory.run_id": "safe-run",
+      "feature_factory.slice_id": "safe-slice",
+      "feature_factory.session_id": `ffid:${createHash("sha256").update("safe-session", "utf8").digest("hex").slice(0, 32)}`,
+      "feature_factory.call_id": `ffid:${createHash("sha256").update("ghp_123456789012345678901234567890", "utf8").digest("hex").slice(0, 32)}`,
+      "feature_factory.target_agent": "backend-builder",
+      "feature_factory.span_event": "task-before",
+      "feature_factory.span_operation": "execute-task",
+      "gen_ai.conversation.id": "safe-run",
+    });
+    const serialized = JSON.stringify(spans);
+    assert.doesNotMatch(serialized, /github_pat|prompt|messages|tool_|review|evidence|private|user:pass|traceparent|tracestate|task_id|task-secret/u);
   });
 });

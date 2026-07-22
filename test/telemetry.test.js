@@ -1,8 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
+  b6Attributes,
   checkOpenTelemetryApiLoadability,
+  emitB6Span,
   evaluateContentCaptureRisk,
+  isB6TelemetryEnabled,
   prepareTelemetryEnv,
   recordError,
   runAttributes,
@@ -12,6 +16,8 @@ import {
   validateTraceContext,
   validateTraceparent,
   validateTracestate,
+  startB6Span,
+  withB6Span,
   withSpan,
 } from "../src/telemetry.js";
 import { REDACTED_ENV_VALUE } from "../src/env-snapshot.js";
@@ -293,3 +299,320 @@ describe("no-op span wrappers", () => {
     assert.doesNotMatch(serialized, /api_token/u);
   });
 });
+
+describe("B6 metadata-only spans", () => {
+  it("enables only explicit plugin or environment opt-in", () => {
+    assert.equal(isB6TelemetryEnabled({}, {}), false);
+    assert.equal(isB6TelemetryEnabled({ telemetry: { enabled: true } }, {}), true);
+    assert.equal(isB6TelemetryEnabled({ enabled: true }, {}), false);
+    assert.equal(isB6TelemetryEnabled({}, { FEATURE_FACTORY_OTEL_ENABLED: "true" }), true);
+    assert.equal(isB6TelemetryEnabled({}, { FEATURE_FACTORY_OTEL_ENABLED: "1" }), true);
+    assert.equal(isB6TelemetryEnabled({}, { FEATURE_FACTORY_OTEL_ENABLED: "yes" }), false);
+  });
+
+  it("projects only bounded canonical identifiers, enums, and attempts", () => {
+    const hostile = {
+      "feature_factory.run_id": "run-safe",
+      "feature_factory.slice_id": "slice-safe",
+      "feature_factory.session_id": `s${"x".repeat(128)}`,
+      "feature_factory.parent_session_id": "bad\nsession",
+      "feature_factory.call_id": "call-safe",
+      "feature_factory.target_agent": "backend-builder",
+      "feature_factory.route": "ordinary-slice",
+      "feature_factory.lane": "backend",
+      "feature_factory.task_context": "fresh",
+      "feature_factory.span_event": "task-before",
+      "feature_factory.span_operation": "execute-task",
+      "feature_factory.call_relationship": "task-hook",
+      "feature_factory.attempt": 3,
+      "feature_factory.verdict": "model-says-pass",
+      "gen_ai.conversation.id": "run-safe",
+      "gen_ai.agent.name": "backend-builder",
+      "gen_ai.operation.name": "execute_tool",
+      prompt: "ignore this prompt",
+      task_id: "runtime-task",
+      traceparent,
+      api_token: "github_pat_123456789012345678901234567890",
+    };
+    assert.deepEqual(b6Attributes(hostile), {
+      "feature_factory.run_id": "run-safe",
+      "feature_factory.slice_id": "slice-safe",
+      "feature_factory.call_id": telemetryIdentifier("call-safe"),
+      "feature_factory.target_agent": "backend-builder",
+      "feature_factory.route": "ordinary-slice",
+      "feature_factory.lane": "backend",
+      "feature_factory.task_context": "fresh",
+      "feature_factory.span_event": "task-before",
+      "feature_factory.span_operation": "execute-task",
+      "feature_factory.call_relationship": "task-hook",
+      "feature_factory.attempt": 3,
+      "gen_ai.conversation.id": "run-safe",
+      "gen_ai.agent.name": "backend-builder",
+      "gen_ai.operation.name": "execute_tool",
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    assert.deepEqual(b6Attributes(revoked.proxy), {});
+  });
+
+  it("pseudonymizes entropy-classified identifiers without exposing credential shapes", () => {
+    const runId = "b6-final-square-completed-correlated-v4-20260722";
+    const attributes = b6Attributes({
+      "feature_factory.run_id": runId,
+      "gen_ai.conversation.id": runId,
+      "feature_factory.slice_id": `s${"x".repeat(127)}`,
+      "feature_factory.session_id": `s${"x".repeat(128)}`,
+      "feature_factory.call_id": "github_pat_123456789012345678901234567890",
+      "feature_factory.parent_session_id": "secret-session",
+    });
+    assert.match(attributes["feature_factory.run_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.equal(attributes["gen_ai.conversation.id"], attributes["feature_factory.run_id"]);
+    assert.equal(attributes["feature_factory.slice_id"], `s${"x".repeat(127)}`);
+    assert.equal(attributes["feature_factory.session_id"], undefined);
+    assert.match(attributes["feature_factory.call_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.match(attributes["feature_factory.parent_session_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.doesNotMatch(JSON.stringify(attributes), /b6-final|github_pat|secret-session/u);
+  });
+
+  it("pseudonymizes high-entropy workflow and opaque correlation identifiers", () => {
+    const credential = "Ab3Zk91Qv7Lm2Np8Rx4Tc6Wy0Df5Gh9Js1Ku3Mv7Px2Qa8Bc";
+    const attributes = b6Attributes({
+      "feature_factory.run_id": credential,
+      "gen_ai.conversation.id": credential,
+      "feature_factory.session_id": credential,
+      "feature_factory.call_id": credential,
+    });
+    assert.match(attributes["feature_factory.run_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.equal(attributes["gen_ai.conversation.id"], attributes["feature_factory.run_id"]);
+    assert.match(attributes["feature_factory.session_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.equal(attributes["feature_factory.call_id"], attributes["feature_factory.session_id"]);
+    assert.doesNotMatch(JSON.stringify(attributes), new RegExp(credential, "u"));
+
+    const groupedCredential = "a1b2c3d4e5f6g7h8-i9j0k1l2m3n4o5p6-q7r8s9t0u1v2w3x4";
+    const grouped = b6Attributes({ "feature_factory.run_id": groupedCredential, "feature_factory.slice_id": groupedCredential });
+    assert.match(grouped["feature_factory.run_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.equal(grouped["feature_factory.slice_id"], grouped["feature_factory.run_id"]);
+    assert.doesNotMatch(JSON.stringify(grouped), new RegExp(groupedCredential, "u"));
+
+    const source = "Ab3Zk1Qv7Lm2Np8Rx4Tc6Wy0Df5Gh9";
+    for (const length of [20, 27, 31]) {
+      const shortCredential = `${source.slice(0, length - 1)}:`;
+      assert.equal(shortCredential.length, length);
+      const short = b6Attributes({
+        "feature_factory.run_id": shortCredential,
+        "feature_factory.slice_id": shortCredential,
+        "feature_factory.session_id": "short-session",
+        "feature_factory.call_id": "short-call",
+      });
+      assert.equal(short["feature_factory.run_id"], telemetryIdentifier(shortCredential));
+      assert.equal(short["feature_factory.slice_id"], short["feature_factory.run_id"]);
+      assert.equal(short["feature_factory.session_id"], telemetryIdentifier("short-session"));
+      assert.equal(short["feature_factory.call_id"], telemetryIdentifier("short-call"));
+      assert.doesNotMatch(JSON.stringify(short), new RegExp(shortCredential, "u"));
+    }
+  });
+
+  it("extracts supplied W3C trace context as the parent of factory spans", async () => {
+    const fake = fakeOtel();
+    await withB6Span("feature_factory.factory.start", { "feature_factory.mode": "headless" }, () => undefined, {
+      telemetry: { enabled: true, importer: fake.importer },
+      env: {
+        FEATURE_FACTORY_TRACEPARENT: "00-11111111111111111111111111111111-2222222222222222-01",
+        FEATURE_FACTORY_TRACESTATE: "vendor=value",
+      },
+    });
+    assert.deepEqual(fake.spans[0].context, {
+      parent: fake.activeContext,
+      spanContext: {
+        traceId: "11111111111111111111111111111111",
+        spanId: "2222222222222222",
+        traceFlags: 1,
+        isRemote: true,
+        traceState: { value: "vendor=value" },
+      },
+    });
+  });
+
+  it("preserves uppercase workflow verdicts while rejecting uppercase non-verdict enums", () => {
+    assert.deepEqual(b6Attributes({
+      "feature_factory.verdict": "GO-WITH-NITS",
+      "feature_factory.target_agent": "BACKEND-BUILDER",
+      "feature_factory.route": "ORDINARY-SLICE",
+      "feature_factory.lane": "BACKEND",
+      "feature_factory.task_context": "FRESH",
+      "feature_factory.call_relationship": "TASK-HOOK",
+      "feature_factory.span_event": "TASK-BEFORE",
+      "feature_factory.span_operation": "EXECUTE-TASK",
+      "feature_factory.mode": "HEADLESS",
+      "feature_factory.status": "COMPLETED",
+      "feature_factory.convergence": "CONVERGING",
+      "gen_ai.agent.name": "BACKEND-BUILDER",
+      "gen_ai.operation.name": "EXECUTE_TOOL",
+    }), {
+      "feature_factory.verdict": "GO-WITH-NITS",
+    });
+  });
+
+  it("retains a factory span across dispatch/completion and passes active context", async () => {
+    const fake = fakeOtel();
+    const controller = startB6Span("feature_factory.task", {
+      "feature_factory.run_id": "run-1",
+      "feature_factory.session_id": "ses-1",
+      "feature_factory.call_id": "call-1",
+      "feature_factory.span_event": "task-before",
+      "feature_factory.span_operation": "execute-task",
+    }, { telemetry: { enabled: true, importer: fake.importer } });
+    controller.setAttributes({ "feature_factory.verdict": "REJECT", "feature_factory.convergence": "converging" });
+    controller.addEvent("task-after");
+    await controller.end();
+
+    assert.equal(fake.spans.length, 1);
+    assert.equal(fake.spans[0].name, "feature_factory.task");
+    assert.equal(fake.spans[0].context, fake.activeContext);
+    assert.equal(fake.spans[0].attributes["feature_factory.verdict"], "REJECT");
+    assert.equal(fake.spans[0].attributes["feature_factory.convergence"], "converging");
+    assert.deepEqual(fake.spans[0].events, ["task-after"]);
+    assert.equal(fake.spans[0].ended, true);
+    assert.equal(fake.calls.startSpan, 0);
+    assert.equal(fake.calls.startActiveSpan, 1);
+  });
+
+  it("is a no-op when disabled or the API/provider is unavailable", async () => {
+    const fake = fakeOtel();
+    await emitB6Span("feature_factory.session", { "feature_factory.session_id": "ses-1" }, { importer: fake.importer, env: {} });
+    assert.equal(fake.spans.length, 0);
+    await emitB6Span("hostile-span-name", { "feature_factory.session_id": "ses-1" }, {
+      telemetry: { enabled: true, importer: fake.importer },
+    });
+    assert.equal(fake.spans.length, 0);
+    await emitB6Span("feature_factory.session", { "feature_factory.session_id": "ses-1" }, {
+      telemetry: { enabled: true, importer: () => Promise.reject(new Error("unavailable")) },
+    });
+  });
+
+  it("swallows importer, tracer, start, mutation, status, event, and end failures", async () => {
+    for (const stage of ["importer", "tracer", "start", "setAttribute", "setStatus", "addEvent", "end"]) {
+      const fake = fakeOtel({ failAt: stage });
+      const controller = startB6Span("feature_factory.task", {
+        "feature_factory.run_id": "run-1",
+        "feature_factory.span_event": "task-before",
+        "feature_factory.span_operation": "execute-task",
+      }, { telemetry: { enabled: true, importer: fake.importer } });
+      controller.setAttributes({ "feature_factory.status": "completed" });
+      controller.addEvent("task-after");
+      controller.fail();
+      await controller.end();
+    }
+  });
+
+  it("preserves exact workflow results and error objects when telemetry fails", async () => {
+    const result = { exact: true };
+    const failedEnd = fakeOtel({ failAt: "end" });
+    assert.equal(await withSpan("factory.exact", {}, () => result, { importer: failedEnd.importer }), result);
+
+    const workflowError = new Error("exact workflow error");
+    const failedException = fakeOtel({ failAt: "recordException" });
+    await assert.rejects(
+      withSpan("factory.error", {}, () => { throw workflowError; }, { importer: failedException.importer }),
+      (error) => error === workflowError,
+    );
+
+    let callbackCalls = 0;
+    const malformedProvider = {
+      context: { active: () => ({}) },
+      trace: { getTracer: () => ({ startActiveSpan: () => Promise.reject(new Error("provider failed")) }) },
+    };
+    assert.equal(await withSpan("factory.exact", () => {
+      callbackCalls += 1;
+      return result;
+    }, { importer: async () => malformedProvider }), result);
+    assert.equal(callbackCalls, 1);
+  });
+
+  it("records only closed error metadata for hostile B6 workflow errors and rethrows the exact object", async () => {
+    const fake = fakeOtel();
+    const error = new Error("prompt output github_pat_123456789012345678901234567890 /private/repo refs/heads/main https://user:pass@example.test TRACEPARENT=00-secret");
+    error.stack = `Error: ${error.message}\n    at /private/repo/secret.js:1:1`;
+    await assert.rejects(
+      withB6Span("feature_factory.factory.start", {
+        "feature_factory.mode": "interactive",
+        prompt: "excluded",
+      }, () => { throw error; }, { telemetry: { enabled: true, importer: fake.importer } }),
+      (actual) => actual === error && actual.message === error.message,
+    );
+    assert.equal(fake.spans.length, 1);
+    assert.deepEqual(fake.spans[0].statuses, [{ code: 2 }]);
+    assert.equal(fake.spans[0].attributes["error.type"], "workflow_error");
+    assert.deepEqual(fake.spans[0].exceptions, []);
+    assert.doesNotMatch(JSON.stringify(fake.spans), /prompt output|github_pat|private|refs\/heads|user:pass|TRACEPARENT|secret\.js/u);
+  });
+});
+
+function telemetryIdentifier(value) {
+  return `ffid:${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32)}`;
+}
+
+function fakeOtel({ failAt = null } = {}) {
+  const spans = [];
+  const calls = { startSpan: 0, startActiveSpan: 0 };
+  const activeContext = { trace: "active-context" };
+  const makeSpan = (name, options, context) => {
+    if (failAt === "start") throw new Error("start failed");
+    const span = {
+      name,
+      context,
+      attributes: { ...(options?.attributes || {}) },
+      events: [],
+      statuses: [],
+      exceptions: [],
+      ended: false,
+      setAttribute(key, value) {
+        if (failAt === "setAttribute") throw new Error("attribute failed");
+        this.attributes[key] = value;
+      },
+      addEvent(event) {
+        if (failAt === "addEvent") throw new Error("event failed");
+        this.events.push(event);
+      },
+      setStatus(status) {
+        if (failAt === "setStatus") throw new Error("status failed");
+        this.statuses.push(status);
+      },
+      recordException(exception) {
+        if (failAt === "recordException") throw new Error("exception failed");
+        this.exceptions.push(exception);
+      },
+      end() {
+        if (failAt === "end") throw new Error("end failed");
+        this.ended = true;
+      },
+    };
+    spans.push(span);
+    return span;
+  };
+  const api = {
+    context: { active: () => activeContext },
+    createTraceState: (value) => ({ value }),
+    trace: {
+      setSpanContext: (context, spanContext) => ({ parent: context, spanContext }),
+      getTracer() {
+        if (failAt === "tracer") throw new Error("tracer failed");
+        return {
+          startActiveSpan(name, options, context, callback) {
+            calls.startActiveSpan += 1;
+            return callback(makeSpan(name, options, context));
+          },
+        };
+      },
+    },
+  };
+  return {
+    spans,
+    calls,
+    activeContext,
+    importer: async () => {
+      if (failAt === "importer") throw new Error("import failed");
+      return api;
+    },
+  };
+}

@@ -248,6 +248,72 @@ launching runs from `origin/main`.
    non-merged branch), timestamps, `debug_snapshot` schema, and `pre_pr` artifact naming —
    to remove the cross-version drift.
 
+## Operational telemetry
+
+The Honeycomb [`Feature Factory Run Lineage` board](https://ui.honeycomb.io/muninnai/environments/test/board/nfB5emsHh37)
+indexes the B6 metadata-only analyses:
+
+- [run activity and latency](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/4ZSf5dXmRei);
+- [slice and attempt latency](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/pV95gS4DLcz);
+- [verdict trajectory](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/5595HS3rHKe);
+- [lane, amendment route, and fresh/reused task routing](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/6LspCCnVBkb);
+- [observed parent/child sessions](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/dzTi3Y6iH8n);
+- [completed and blocked lifecycle outcomes](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/neHQoa1R8pV).
+
+Manual verification on 2026-07-22 used the production B6 span API and companion
+exporter. The [completed-run query](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/rEAGcofN2SL)
+resolves `b6-final-square-completed-correlated-v11-20260722` to five exact
+`feature_factory.task` spans: one `backend-builder` attempt for `be-square-contract`, two
+`work-reviewer` tasks, `implementation-validator`, and `security-reviewer`. The run was an
+adopted schema-v2 full-plan carry-forward, passed its checked integration gate, completed,
+and created [PR #4](https://github.com/jasoncarreira/opencode-feature-factory-b6-dogfood/pull/4).
+The [blocked-run query](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/3mKsmzem5WF)
+resolves `b6-final-square-completed-correlated-v6-20260722` to its
+`be-square-helper` builder attempt and four reviewer tasks before checked integration
+execution stopped the run. Both queries filter on the exact `feature_factory.run_id`; every
+result carries the same `gen_ai.conversation.id`, so neither result depends on prompt
+parsing or a durable `task_id`.
+
+The six detailed analyses also include explicit `b6-canary-completed` and
+`b6-canary-blocked` telemetry canaries to exercise reviewer verdict/convergence,
+fresh/reuse routing, lifecycle outcome, and parent/child session fields that the genuine
+runs did not all emit. Live reviewer Tasks exposed that OpenCode can separate command and
+Task hooks across plugin instances and that the long-lived server retains already-imported
+file-plugin code. B6 shares only launch-claim- or durable-dispatch-verified identity across
+those instances for the exact repository/session or an observed child session; encoded
+payload and environment run IDs remain candidates, and prompts never supply telemetry
+identity. The completed and blocked queries above verify that builder and reviewer
+tasks now retain the canonical run ID while excluding content and secrets. The connected
+Honeycomb MCP can run and retrieve queries but does not expose saved-query or board-panel
+mutation. The public board therefore stores query-run permalinks in a text panel rather than
+saved query panels; no alert or SLO was created.
+
+Final current-build verification on 2026-07-22 supplemented those genuine-run results with
+two explicit production-API canaries from the exact remediated B6 source. These are manual
+instrumentation checks, not new durable factory executions or PR claims. The
+[completed canary](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/yEbWrnahDgp)
+resolves pseudonymized run `ffid:2fd925d510ab546f2aa04cb298016fe7` to exactly four task
+spans: `backend-builder` for `be-square-contract`, `work-reviewer` `APPROVE`,
+`implementation-validator` `GO`, and `security-reviewer` `PASS`. The
+[blocked canary](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/Nwf6XVUy2e)
+resolves `ffid:2ae8852fa1e5cb2ef5cb3ce71184d4f3` to the corresponding builder,
+`REJECT`, `NO-GO`, and `BLOCK` activity. In both results the exact pseudonymized
+`gen_ai.conversation.id` equals `feature_factory.run_id`; session, parent-session, and call
+identifiers are distinct stable `ffid:` values rather than raw opaque IDs.
+
+The [current lifecycle and carry-forward query](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/ddEZpFnnxjN)
+distinguishes the completed `feature_factory.factory.continue` span with
+`feature_factory.continuation_kind=full-plan-carry-forward` from the blocked
+`feature_factory.factory.start` span. The
+[continuation-aware routing query](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/H4QU64CXfzL)
+groups the same current-build evidence by run, span name, lane, route, fresh/reused task
+context, and continuation kind. The
+[parent/child query](https://ui.honeycomb.io/muninnai/environments/test/datasets/opencode/result/dZovt78amgM)
+shows one root and one linked child session for each canary without exposing either raw
+session ID. Together these current-build queries verify the final pseudonymization and
+carry-forward fields that predated the historical genuine-run query set; they do not replace
+the historical run/PR evidence above.
+
 ## Appendix — method
 
 - 15 run manifests + heartbeats read from `.opencode/factory/*/`.

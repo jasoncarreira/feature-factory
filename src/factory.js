@@ -12,7 +12,7 @@ import { createTwoRefsAtomicallyNoReplace, git, repoRoot } from "./git.js";
 import { checkWorktreeIdentity, createOrRecoverWorktree, deriveExpectedWorktreePath, parseWorktreeListPorcelain } from "./worktrees.js";
 import { isContainedPath, physicalPath, timestamp } from "./utils.js";
 import { directFactoryRoot, factoryRepoFromRunDir, factoryRootsForLookup } from "./factory-paths.js";
-import { prepareTelemetryEnv } from "./telemetry.js";
+import { prepareTelemetryEnv, startB6Span } from "./telemetry.js";
 import { LAUNCH_CLAIM_REF, PROCESS_EVIDENCE_FILE, acquireLaunchClaim, acquireLaunchFence, assertDetachedProcessEvidenceWritable, cancelProcessFromEvidence, inspectLaunchClaim, inspectProcessEvidence, inspectProcessIdentity, readProcessEvidence, releaseLaunchClaim, releaseLaunchFence, transitionLaunchClaimPhase } from "./process-evidence.js";
 import { encodeFeatureCommandPayload } from "./feature-command-payload.js";
 import { createSanitizedLineWriter } from "./hardening/line-output.js";
@@ -152,8 +152,22 @@ const HANDOFF_ROWS = Object.freeze({
 });
 
 export async function startFactory(args, opts = {}) {
+  const span = startFactoryLifecycleSpan("start", opts);
+  const telemetry = { span, repo: null, candidateRunId: null, expectedContinuation: null };
+  try {
+    const result = await startFactoryImplementation(args, opts, telemetry);
+    completeFactoryLifecycleSpan(telemetry, result);
+    return result;
+  } catch (error) {
+    failFactoryLifecycleSpan(span);
+    throw error;
+  }
+}
+
+async function startFactoryImplementation(args, opts = {}, telemetry) {
   if (!args.length) throw new Error("factory start requires a feature prompt");
   const repo = repoRoot(opts.cwd || process.cwd());
+  telemetry.repo = repo;
   const resumeRunId = resumePromptRunId(args, opts);
   if (resumeRunId) assertPostPrCliOptions(opts, { command: "factory start resume", resume: true });
   const requestedRunId = normalizeRequestedStartRunId(opts.runId);
@@ -163,6 +177,7 @@ export async function startFactory(args, opts = {}) {
   const detachedRunId = opts.detached && !resumeRunId
     ? requestedRunId || allocateDetachedStartRunId(repo, opts)
     : null;
+  telemetry.candidateRunId = detachedRunId || requestedRunId;
   let resumedRun = null;
   let resumedRunDir = null;
   if (resumeRunId) {
@@ -171,6 +186,7 @@ export async function startFactory(args, opts = {}) {
       const ownershipRead = readDurableRecoveryRun(repo, ownershipTarget.runDir, ownershipTarget.runFile);
       if (!ownershipRead.error) {
         assertResumeConfiguration(ownershipRead.run, opts);
+        setFactoryRunIdentity(telemetry.span, ownershipRead.run.run_id);
         const ownership = await existingRunOwnershipOutcome(ownershipTarget.runDir, ownershipRead.run, { ...opts, repo });
         if (ownership) return ownership;
       }
@@ -185,8 +201,9 @@ export async function startFactory(args, opts = {}) {
     resumedRunDir = preflight.run_dir;
     resumedRun = readRunFile(preflight.run_file || join(resumedRunDir, "run.json"));
     assertResumeConfiguration(resumedRun, opts);
+    setFactoryRunIdentity(telemetry.span, resumedRun.run_id);
   }
-  const launchEnv = factoryLaunchEnv(opts);
+  const launchEnv = factoryLaunchEnv(opts, resumedRun?.run_id || detachedRunId || requestedRunId);
   seedRepoSkill(repo);
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (opts.model) commandArgs.push("--model", opts.model);
@@ -194,9 +211,11 @@ export async function startFactory(args, opts = {}) {
     ? encodeFeatureCommandPayload(buildResumePayload(resumedRun, { ...opts, repo }))
     : formatPrompt(args.join(" "), { ...opts, repo, requestedRunId: detachedRunId || requestedRunId }));
   if (resumedRun) {
+    telemetry.candidateRunId = resumedRun.run_id;
     return coordinateOrdinaryExistingRunLaunch(resumedRunDir, resumedRun, {
       ...opts,
       repo,
+      launchEnv,
       launchKind: opts.detached ? "start-resume-detached" : "start-resume-foreground",
       launch: ({ env, executionId }) => opts.detached
         ? (opts.detachedLaunchFn || startDetached)(repo, commandArgs, { ...detachedProcessOptions(repo, { ...opts, runId: resumedRun.run_id, runDir: resumedRunDir, executionId }), env })
@@ -1510,9 +1529,25 @@ function bestEffortStopHeartbeatForTerminal(runDir, opts = {}) {
 }
 
 export function continueFactory(parentRunId, opts = {}) {
+  const span = startFactoryLifecycleSpan("continue", opts);
+  const telemetry = { span, repo: null, candidateRunId: null, expectedContinuation: null };
+  try {
+    const result = continueFactoryImplementation(parentRunId, opts, telemetry);
+    observeFactoryLifecycleResult(telemetry, result);
+    return result;
+  } catch (error) {
+    failFactoryLifecycleSpan(span);
+    throw error;
+  }
+}
+
+function continueFactoryImplementation(parentRunId, opts = {}, telemetry) {
   const repo = repoRoot(opts.cwd || process.cwd());
+  telemetry.repo = repo;
   const allocationReplay = opts.carryForward === true && !opts.dryRun;
   const { continuation, carryForwardConfig } = buildContinuationCandidate(parentRunId, { ...opts, cwd: repo, ...(allocationReplay ? { [CARRY_FORWARD_ALLOCATION_REPLAY]: true } : {}) });
+  telemetry.candidateRunId = continuation.target.run_id;
+  telemetry.expectedContinuation = continuation;
   assertPostPrCliOptions(opts, { command: "factory continue" });
   const parentRunDir = resolveRunDir(continuation.parent.run_id, { ...opts, cwd: repo });
   if (!opts.dryRun) acquireContinuationTargetReservation(repo, continuation);
@@ -1544,7 +1579,7 @@ export function continueFactory(parentRunId, opts = {}) {
   }
   const prompt = `Continue blocked feature-factory run '${continuation.parent.run_id}' as '${continuation.target.run_id}' using review '${continuation.review.ref}'.`;
   const payload = featureCommandPayload(prompt, { ...opts, repo, continuation });
-  const launchEnv = factoryLaunchEnv(opts);
+  const launchEnv = factoryLaunchEnv(opts, continuation.target.run_id);
   if (opts.dryRun) return { status: "dry-run", payload, seed_plan: continuationSeedPlan(continuation) };
 
   assertContinuationBindingsCurrent(repo, parentRunDir, continuation, { targetPublished: false });
@@ -1570,14 +1605,30 @@ function assertOrdinaryContinuationParent(parent) {
 }
 
 export async function resumeFactory(runId, opts = {}) {
+  const span = startFactoryLifecycleSpan("resume", opts);
+  const telemetry = { span, repo: null, candidateRunId: null, expectedContinuation: null };
+  try {
+    const result = await resumeFactoryImplementation(runId, opts, telemetry);
+    completeFactoryLifecycleSpan(telemetry, result);
+    return result;
+  } catch (error) {
+    failFactoryLifecycleSpan(span);
+    throw error;
+  }
+}
+
+async function resumeFactoryImplementation(runId, opts = {}, telemetry) {
   assertPostPrCliOptions(opts, { command: "factory resume", resume: true });
   const repo = repoRoot(opts.cwd || process.cwd());
+  telemetry.repo = repo;
   const runDir = resolveRunDir(runId, { ...opts, cwd: repo });
   const beforeRecovery = readRunFile(join(runDir, "run.json"));
+  telemetry.candidateRunId = beforeRecovery.run_id;
   await assertRunClaimRoute(repo, beforeRecovery, opts);
   if (hasClosedPostPrRecoveryDispatch(beforeRecovery)) assertNoUnresolvedSpecialBuilderDispatches(runDir, beforeRecovery);
   else assertNoPendingSpecialBuilderDispatches(runDir, beforeRecovery);
   assertResumeConfiguration(beforeRecovery, opts);
+  setFactoryRunIdentity(telemetry.span, beforeRecovery.run_id);
   if (beforeRecovery.continuation?.schema_version === 2) {
     const checked = assertCarryForwardResumeAuthority(repo, runDir, beforeRecovery, opts);
     if (TERMINAL_STATUSES.has(checked.status)) return { status: checked.status, run_id: checked.run_id, terminal_result: checked.terminal_result, launched: false };
@@ -1597,7 +1648,7 @@ export async function resumeFactory(runId, opts = {}) {
   const eligibility = resumeEligibility(runDir, run, { ...opts, cwd: repo, repoRoot: repo });
   if (!eligibility.eligible) throw new Error(`resume ineligible: ${eligibility.reasons.join(", ")}`);
   const payload = buildResumePayload(run, { ...opts, repo });
-  const launchEnv = factoryLaunchEnv(opts);
+  const launchEnv = factoryLaunchEnv(opts, run.run_id);
   if (opts.dryRun) return { status: "dry-run", eligible: true, eligibility, payload };
 
   seedRepoSkill(repo);
@@ -1613,6 +1664,76 @@ export async function resumeFactory(runId, opts = {}) {
       : (opts.foregroundLaunchFn || runForegroundFactory)(repo, commandArgs, { ...opts, env }),
     launchEnv,
   });
+}
+
+function startFactoryLifecycleSpan(operation, opts) {
+  try {
+    let env = opts.env ?? process.env;
+    try {
+      env = prepareTelemetryEnv(env, {
+        parentSpanId: opts.parentSpanId,
+        traceparent: opts.traceparent,
+        tracestate: opts.tracestate,
+      });
+    } catch { /* workflow validation records the failure on the unparented lifecycle span */ }
+    return startB6Span(`feature_factory.factory.${operation}`, {
+      "feature_factory.mode": opts.autonomous === true ? "autonomous" : opts.headless === true || opts.detached === true ? "headless" : "interactive",
+      "feature_factory.continuation_kind": operation === "continue"
+        ? opts.carryForward ? "full-plan-carry-forward" : opts.newPr ? "new-pr" : "narrow-remediation"
+        : undefined,
+      "gen_ai.agent.name": "feature-factory",
+      "gen_ai.operation.name": "invoke_agent",
+    }, {
+      telemetry: opts.telemetry,
+      env,
+      importer: opts.telemetry?.importer,
+      context: opts.telemetry?.context,
+    });
+  } catch {
+    return startB6Span("", {}, { env: {} });
+  }
+}
+
+function observeFactoryLifecycleResult(telemetry, result) {
+  if (result && typeof result.then === "function") {
+    result.then(
+      (value) => completeFactoryLifecycleSpan(telemetry, value),
+      () => failFactoryLifecycleSpan(telemetry.span),
+    );
+    return;
+  }
+  completeFactoryLifecycleSpan(telemetry, result);
+}
+
+function completeFactoryLifecycleSpan(telemetry, result) {
+  const observedRun = result?.status === "dry-run" ? null : attachObservedFactoryRunIdentity(telemetry);
+  const status = result?.terminal_result?.status || result?.status || observedRun?.terminal_result?.status || observedRun?.status;
+  telemetry.span.setAttributes({ "feature_factory.status": status });
+  telemetry.span.end();
+}
+
+function failFactoryLifecycleSpan(span) {
+  span.setAttributes({ "feature_factory.status": "failed" });
+  span.fail();
+  span.end();
+}
+
+function attachObservedFactoryRunIdentity({ span, repo, candidateRunId, expectedContinuation }) {
+  if (!repo || !candidateRunId) return null;
+  try {
+    const run = readRunFile(join(directFactoryRoot(repo), candidateRunId, "run.json"));
+    if (run.run_id === candidateRunId && (!expectedContinuation || sameJsonValue(run.continuation, expectedContinuation))) {
+      setFactoryRunIdentity(span, run.run_id);
+      return run;
+    }
+  } catch {
+    // Candidate identity is not telemetry authority until a valid durable run exists.
+  }
+  return null;
+}
+
+function setFactoryRunIdentity(span, runId) {
+  span.setAttributes({ "feature_factory.run_id": runId, "gen_ai.conversation.id": runId });
 }
 
 function assertCarryForwardResumeAuthority(repo, runDir, run, options = {}) {
@@ -1870,7 +1991,7 @@ export async function handoffApprovedInteractiveRun(runDir, runInput, gateName, 
     launchAttempted = true;
     started = await launch(opts.repo, commandArgs, {
       ...detachedProcessOptions(opts.repo, { ...opts, runId, runDir, executionId: claim.claim.execution_id }),
-      env: factoryLaunchEnv(opts),
+      env: factoryLaunchEnv(opts, runId),
     });
   } catch (error) {
     let preservedClaim = launchAttempted;
@@ -4439,7 +4560,7 @@ async function publishAndLaunchCarryForward(repo, parentRunDir, continuation, co
   const commandArgs = ["run", "--dir", repo, "--command", "feature", "--agent", "feature-factory"];
   if (options.model) commandArgs.push("--model", options.model);
   commandArgs.push(encodeFeatureCommandPayload(payload));
-  const launchEnv = factoryLaunchEnv(options);
+  const launchEnv = factoryLaunchEnv(options, continuation.target.run_id);
   assertPublishedCarryForwardRun(repo, continuation, { ...options, driver: payload.driver, expectedConfiguration: configuration });
   const launched = await coordinateExistingRunLaunch(childRunDir, run, {
     ...options,
@@ -5727,13 +5848,16 @@ function awaitDetachedReadiness(supervisor, init) {
   });
 }
 
-function factoryLaunchEnv(opts = {}) {
+function factoryLaunchEnv(opts = {}, runId = null) {
   try {
-    return prepareTelemetryEnv(process.env, {
+    const env = prepareTelemetryEnv(process.env, {
       parentSpanId: opts.parentSpanId,
       traceparent: opts.traceparent,
       tracestate: opts.tracestate,
     });
+    delete env.FEATURE_FACTORY_RUN_ID;
+    if (stringValue(runId)) env.FEATURE_FACTORY_RUN_ID = String(runId).trim();
+    return env;
   } catch (error) {
     throw new Error(`invalid trace context: ${error.message}`);
   }

@@ -14,7 +14,7 @@ describe("factory trace-context propagation", () => {
     const fixture = createLaunchFixture("start-no-default-env");
     try {
       await withLaunchEnv(fixture, { OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io" }, async () => {
-        await startFactory(["build telemetry"], { cwd: fixture.repo });
+        await startFactory(["build telemetry"], { cwd: fixture.repo, runId: "start-no-default-env" });
       });
 
       const launched = readJson(fixture.captureFile);
@@ -24,6 +24,7 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_TRACESTATE, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, undefined);
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, "start-no-default-env");
     } finally {
       cleanup(fixture.root);
     }
@@ -34,7 +35,7 @@ describe("factory trace-context propagation", () => {
     let detachedPid;
     try {
       await withLaunchEnv(fixture, { OPENCODE_KEEPALIVE: "1" }, async () => {
-        const result = await startFactory(["build detached telemetry"], { cwd: fixture.repo, detached: true, traceparent, tracestate: "vendor=value" });
+        const result = await startFactory(["build detached telemetry"], { cwd: fixture.repo, runId: "start-detached-traceparent", detached: true, traceparent, tracestate: "vendor=value" });
         assert.equal(result.status, "started");
         detachedPid = result.pid;
         await waitForFile(fixture.captureFile);
@@ -46,6 +47,7 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_TRACESTATE, "vendor=value");
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, "start-detached-traceparent");
       process.kill(detachedPid, "SIGTERM");
       await waitForProcessExit(detachedPid);
       detachedPid = null;
@@ -62,11 +64,12 @@ describe("factory trace-context propagation", () => {
     const fixture = createLaunchFixture("start-parent-span");
     try {
       await withLaunchEnv(fixture, {}, async () => {
-        await startFactory(["build parent span telemetry"], { cwd: fixture.repo, parentSpanId: "00F067AA0BA902B7" });
+        await startFactory(["build parent span telemetry"], { cwd: fixture.repo, runId: "start-parent-span", parentSpanId: "00F067AA0BA902B7" });
       });
 
       const launched = readJson(fixture.captureFile);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, "start-parent-span");
       assert.equal(launched.env.TRACEPARENT, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
     } finally {
@@ -83,6 +86,7 @@ describe("factory trace-context propagation", () => {
 
       const launched = readJson(fixture.captureFile);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, fixture.runId);
       assert.equal(launched.env.TRACEPARENT, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
       const decoded = decodeFeatureCommandPayload(launched.argv.at(-1), { repo: fixture.repo });
@@ -93,6 +97,39 @@ describe("factory trace-context propagation", () => {
       const upgraded = structuredClone(decoded.payload);
       upgraded.resume.schema_version = 2;
       assert.deepEqual(decodeFeatureCommandPayload(encodeFeatureCommandPayload(upgraded), { repo: fixture.repo }), { ok: false, reason: "resume-schema-route-mismatch" });
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("propagates the checked run identity through factory start resume", async () => {
+    const fixture = createResumeLaunchFixture("start-resume-run-id");
+    try {
+      await withLaunchEnv(fixture, { FEATURE_FACTORY_RUN_ID: "stale-inherited-run" }, async () => {
+        await startFactory(["resume", fixture.runId], {
+          cwd: fixture.repo,
+          recoverDisruptedRunFn: async () => ({ ok: true, run_dir: fixture.runDir, run_file: join(fixture.runDir, "run.json") }),
+        });
+      });
+
+      const launched = readJson(fixture.captureFile);
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, fixture.runId);
+      const decoded = decodeFeatureCommandPayload(launched.argv.at(-1), { repo: fixture.repo });
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
+      assert.equal(decoded.payload.resume.run_id, fixture.runId);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("clears an inherited run identity for an unnamed new start", async () => {
+    const fixture = createLaunchFixture("start-clears-stale-run-id");
+    try {
+      await withLaunchEnv(fixture, { FEATURE_FACTORY_RUN_ID: "stale-inherited-run" }, async () => {
+        await startFactory(["build unnamed telemetry"], { cwd: fixture.repo });
+      });
+
+      assert.equal(readJson(fixture.captureFile).env.FEATURE_FACTORY_RUN_ID, undefined);
     } finally {
       cleanup(fixture.root);
     }
@@ -119,6 +156,7 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, "continue-traceparent-next");
       const launchedRepo = launched.argv[launched.argv.indexOf("--dir") + 1];
       const decoded = decodeFeatureCommandPayload(launched.argv.at(-1), { repo: launchedRepo });
       assert.equal(decoded.ok, true, JSON.stringify(decoded));
@@ -146,6 +184,198 @@ describe("factory trace-context propagation", () => {
       assert.equal(existsSync(join(fixture.repo, ".opencode", "skills", "feature", "SKILL.md")), false);
     } finally {
       cleanup(fixture.root);
+    }
+  });
+});
+
+describe("B6.2 factory lifecycle spans", () => {
+  it("attaches a requested new-run identity only after successful durable observation", async () => {
+    const fixture = createLaunchFixture("start-b6-span");
+    const fake = fakeB6Otel();
+    try {
+      await withLaunchEnv(fixture, { OPENCODE_CREATE_RUN_ID: "checked-run" }, () => startFactory(["hostile prompt github_pat_123456789012345678901234567890"], {
+        cwd: fixture.repo, runId: "checked-run", traceparent, telemetry: { enabled: true, importer: fake.importer },
+      }));
+      await flushB6Telemetry();
+
+      assert.equal(fake.spans.length, 1);
+      assert.deepEqual(fake.spans[0].attributes, {
+        "feature_factory.mode": "interactive",
+        "gen_ai.agent.name": "feature-factory",
+        "gen_ai.operation.name": "invoke_agent",
+        "feature_factory.run_id": "checked-run",
+        "gen_ai.conversation.id": "checked-run",
+      });
+      assert.equal(fake.spans[0].name, "feature_factory.factory.start");
+      assert.equal(fake.spans[0].context, fake.activeContext);
+      assert.equal(fake.spans[0].ended, true);
+      assert.doesNotMatch(JSON.stringify(fake.spans), /hostile prompt|github_pat|traceparent|00f067|repo|path|url|pid/u);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("uses the observed durable terminal outcome when foreground execution returns no result", async () => {
+    const fixture = createLaunchFixture("start-b6-terminal-status");
+    const fake = fakeB6Otel();
+    try {
+      await withLaunchEnv(fixture, {
+        OPENCODE_CREATE_RUN_ID: "checked-blocked-run",
+        OPENCODE_CREATE_RUN_STATUS: "blocked",
+      }, () => startFactory(["blocked foreground run"], {
+        cwd: fixture.repo,
+        runId: "checked-blocked-run",
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      await flushB6Telemetry();
+
+      assert.equal(fake.spans[0].attributes["feature_factory.run_id"], "checked-blocked-run");
+      assert.equal(fake.spans[0].attributes["feature_factory.status"], "blocked");
+      assert.equal(fake.spans[0].ended, true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("does not claim requested or allocated new-run identity before durable creation, including failures", async () => {
+    const requested = createLaunchFixture("requested-failure");
+    const allocated = createLaunchFixture("allocated-detached");
+    const fake = fakeB6Otel();
+    let detachedPid;
+    try {
+      await assert.rejects(startFactory(["failed"], {
+        cwd: requested.repo,
+        runId: "requested-but-unproven",
+        traceparent: "invalid",
+        telemetry: { enabled: true, importer: fake.importer },
+      }), /invalid trace context/u);
+      await withLaunchEnv(allocated, { OPENCODE_KEEPALIVE: "1" }, async () => {
+        const result = await startFactory(["allocated"], {
+          cwd: allocated.repo,
+          detached: true,
+          createRunId: () => "allocated-before-creation",
+          telemetry: { enabled: true, importer: fake.importer },
+        });
+        detachedPid = result.pid;
+      });
+      await flushB6Telemetry();
+      assert.equal(fake.spans.length, 2);
+      assert.equal(fake.spans.every((span) => span.attributes["feature_factory.run_id"] === undefined), true);
+      assert.equal(fake.spans[0].attributes["error.type"], "workflow_error");
+      assert.deepEqual(fake.spans[0].exceptions, []);
+      assert.doesNotMatch(JSON.stringify(fake.spans), /requested-but-unproven|allocated-before-creation|prompt output|private|refs\/heads|user:pass|TRACEPARENT/u);
+    } finally {
+      if (detachedPid) {
+        try { process.kill(detachedPid, "SIGTERM"); } catch { /* already exited */ }
+        try { await waitForProcessExit(detachedPid); } catch { /* best-effort cleanup */ }
+      }
+      cleanup(requested.root);
+      cleanup(allocated.root);
+    }
+  });
+
+  it("attaches continuation identity only after successful checked durable child publication", async () => {
+    const dry = createContinueLaunchFixture("continue-dry-parent");
+    const failed = createContinueLaunchFixture("continue-failed-parent");
+    const success = createContinueLaunchFixture("continue-success-parent");
+    const fake = fakeB6Otel();
+    try {
+      const dryResult = continueFactory(dry.runId, {
+        cwd: dry.repo, review: "reviewer.json", runId: "dry-child", dryRun: true,
+        telemetry: { enabled: true, importer: fake.importer },
+      });
+      assert.equal(dryResult.status, "dry-run");
+      assert.throws(() => continueFactory(failed.runId, {
+        cwd: failed.repo, review: "reviewer.json", runId: "failed-child",
+        traceparent: "invalid",
+        telemetry: { enabled: true, importer: fake.importer },
+      }), /invalid trace context/u);
+      assert.throws(() => continueFactory("missing-carry-parent", {
+        cwd: failed.repo, carryForward: true,
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      assert.throws(() => continueFactory("missing-new-pr-parent", {
+        cwd: failed.repo, newPr: true,
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      const continued = await withLaunchEnv(success, {
+        OPENCODE_CREATE_RUN_ID: "durable-child",
+      }, () => continueFactory(success.runId, {
+        cwd: success.repo, review: "reviewer.json", runId: "durable-child", telemetry: { enabled: true, importer: fake.importer },
+      }));
+      assert.equal(continued, undefined);
+      await flushB6Telemetry();
+      const spans = fake.spans.filter((span) => span.name === "feature_factory.factory.continue");
+      assert.equal(spans.length, 5);
+      assert.deepEqual(spans.map((span) => span.attributes["feature_factory.continuation_kind"]), [
+        "narrow-remediation",
+        "narrow-remediation",
+        "full-plan-carry-forward",
+        "new-pr",
+        "narrow-remediation",
+      ]);
+      assert.equal(spans[0].attributes["feature_factory.run_id"], undefined);
+      assert.equal(spans[1].attributes["feature_factory.run_id"], undefined);
+      assert.equal(spans[2].attributes["feature_factory.run_id"], undefined);
+      assert.equal(spans[3].attributes["feature_factory.run_id"], undefined);
+      assert.equal(spans[4].attributes["feature_factory.run_id"], "durable-child");
+      assert.equal(spans[4].attributes["gen_ai.conversation.id"], "durable-child");
+    } finally {
+      cleanup(dry.root);
+      cleanup(failed.root);
+      cleanup(success.root);
+    }
+  });
+
+  it("attaches checked existing identity for direct resume and start-resume", async () => {
+    const direct = createResumeLaunchFixture("direct-resume-run");
+    const startResume = createResumeLaunchFixture("start-resume-run");
+    const fake = fakeB6Otel();
+    try {
+      const resumed = await withLaunchEnv(direct, {}, () => resumeFactory(direct.runId, {
+        cwd: direct.repo,
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      assert.equal(resumed, undefined);
+      const startResumed = await withLaunchEnv(startResume, {}, () => startFactory(["resume", startResume.runId], {
+        cwd: startResume.repo,
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      assert.equal(startResumed.run_id, startResume.runId);
+      assert.equal(startResumed.status, "blocked");
+      await flushB6Telemetry();
+
+      const resumeSpan = fake.spans.find((span) => span.name === "feature_factory.factory.resume");
+      const startSpan = fake.spans.find((span) => span.name === "feature_factory.factory.start");
+      assert.equal(resumeSpan.attributes["feature_factory.run_id"], direct.runId);
+      assert.equal(startSpan.attributes["feature_factory.run_id"], startResume.runId);
+      assert.equal(resumeSpan.ended && startSpan.ended, true);
+    } finally {
+      cleanup(direct.root);
+      cleanup(startResume.root);
+    }
+  });
+
+  it("does not emit by default and isolates lifecycle telemetry failures", async () => {
+    const disabled = createLaunchFixture("disabled-b6-span");
+    const broken = createLaunchFixture("broken-b6-span");
+    const fake = fakeB6Otel();
+    try {
+      const disabledResult = await withLaunchEnv(disabled, {}, () => startFactory(["disabled"], {
+        cwd: disabled.repo,
+        telemetry: { importer: fake.importer },
+      }));
+      const brokenResult = await withLaunchEnv(broken, {}, () => startFactory(["broken telemetry"], {
+        cwd: broken.repo,
+        telemetry: { enabled: true, importer: async () => { throw new Error("telemetry-only failure"); } },
+      }));
+      assert.equal(disabledResult, undefined);
+      assert.equal(brokenResult, undefined);
+      await flushB6Telemetry();
+      assert.equal(fake.spans.length, 0);
+    } finally {
+      cleanup(disabled.root);
+      cleanup(broken.root);
     }
   });
 });
@@ -204,7 +434,8 @@ function createFakeOpencode(root) {
   mkdirSync(bin);
   const script = join(bin, "opencode");
   writeFileSync(script, `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 const keys = [
   "OTEL_EXPORTER_OTLP_ENDPOINT",
   "TRACEPARENT",
@@ -212,9 +443,24 @@ const keys = [
   "FEATURE_FACTORY_TRACEPARENT",
   "FEATURE_FACTORY_TRACESTATE",
   "FEATURE_FACTORY_PARENT_SPAN_ID",
+  "FEATURE_FACTORY_RUN_ID",
 ];
 const env = Object.fromEntries(keys.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]))
 writeFileSync(process.env.OPENCODE_CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(2), env }, null, 2) + "\\n", "utf8");
+if (process.env.OPENCODE_CREATE_RUN_ID) {
+  const repo = process.argv[process.argv.indexOf("--dir") + 1];
+  const runId = process.env.OPENCODE_CREATE_RUN_ID;
+  const runDir = join(repo, ".opencode", "factory", runId);
+  const worktree = join(repo, ".opencode", "worktrees", runId);
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  const rawPayload = process.argv.at(-1);
+  const payload = rawPayload?.startsWith("ffpayload-v1:") ? JSON.parse(Buffer.from(rawPayload.slice("ffpayload-v1:".length), "base64url").toString("utf8")) : null;
+  const continuation = payload?.continuation;
+  const status = process.env.OPENCODE_CREATE_RUN_STATUS || "running";
+  const terminal = status === "blocked" ? { terminal_result: { status, run_id: runId, pr_url: null, reason: "test-blocked", summary: null, artifacts: {} } } : {};
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: runId, status, branch: runId, worktree, gates: {}, slices: [], ...(continuation ? { continuation } : {}), ...terminal }, null, 2) + "\\n", "utf8");
+}
 if (process.env.OPENCODE_KEEPALIVE === "1") setInterval(() => {}, 1000);
 `, "utf8");
   chmodSync(script, 0o755);
@@ -225,16 +471,18 @@ async function withLaunchEnv(fixture, env, fn) {
   const keys = new Set([
     "PATH",
     "OPENCODE_CAPTURE_PATH",
+    "OPENCODE_CREATE_RUN_ID",
     ...Object.keys(env),
     "TRACEPARENT",
     "TRACESTATE",
     "FEATURE_FACTORY_TRACEPARENT",
     "FEATURE_FACTORY_TRACESTATE",
     "FEATURE_FACTORY_PARENT_SPAN_ID",
+    "FEATURE_FACTORY_RUN_ID",
   ]);
   const previous = new Map([...keys].map((key) => [key, process.env[key]]));
   try {
-    for (const key of ["TRACEPARENT", "TRACESTATE", "FEATURE_FACTORY_TRACEPARENT", "FEATURE_FACTORY_TRACESTATE", "FEATURE_FACTORY_PARENT_SPAN_ID"]) {
+    for (const key of ["TRACEPARENT", "TRACESTATE", "FEATURE_FACTORY_TRACEPARENT", "FEATURE_FACTORY_TRACESTATE", "FEATURE_FACTORY_PARENT_SPAN_ID", "FEATURE_FACTORY_RUN_ID"]) {
       delete process.env[key];
     }
     process.env.PATH = `${fixture.bin}:${process.env.PATH}`;
@@ -297,4 +545,39 @@ function writeJson(file, value) {
 
 function cleanup(path) {
   rmSync(path, { recursive: true, force: true });
+}
+
+function fakeB6Otel() {
+  const spans = [];
+  const activeContext = { trace: "factory-active-context" };
+  const api = {
+    context: { active: () => activeContext },
+    trace: {
+      getTracer: () => ({
+        startActiveSpan(name, options, context, callback) {
+          const span = {
+            name,
+            context,
+            attributes: { ...(options?.attributes || {}) },
+            exceptions: [],
+            statuses: [],
+            ended: false,
+            setAttribute(key, value) { this.attributes[key] = value; },
+            addEvent() {},
+            recordException(error) { this.exceptions.push(error); },
+            setStatus(status) { this.statuses.push(status); },
+            end() { this.ended = true; },
+          };
+          spans.push(span);
+          return callback(span);
+        },
+      }),
+    },
+  };
+  return { spans, activeContext, importer: async () => api };
+}
+
+async function flushB6Telemetry() {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
 }
