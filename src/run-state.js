@@ -1767,15 +1767,21 @@ export function assertContinuationAuthorityCurrent(runDir, run, options = {}) {
   if (reviewSource.hash && selectedReview.hash !== reviewSource.hash) throw new Error("continuation selected terminal review differs from its exact source binding");
   const selectedSubject = String(selectedReview.value.subject || "").trim();
   if (!reviewSource.subjects.has(selectedSubject)) throw new Error("continuation selected review subject is cross-bound");
+  const selectedVerdict = stringValue(selectedReview.value.verdict) ? String(selectedReview.value.verdict).trim() : null;
+  const selectedSummary = stringValue(selectedReview.value.summary)
+    ? String(selectedReview.value.summary).trim()
+    : selectedVerdict && APPROVING_CONTINUATION_REVIEW_VERDICTS.has(selectedVerdict.toUpperCase())
+      ? `Review recorded ${selectedVerdict} for ${selectedSubject}.`
+      : null;
   const currentReview = {
     kind: reviewSource.kind,
     ref: selectedReview.ref,
     hash: selectedReview.hash,
     subject: selectedSubject,
-    summary: stringValue(selectedReview.value.summary) ? String(selectedReview.value.summary).trim() : null,
+    summary: selectedSummary,
     required_fixes: Array.isArray(selectedReview.value.required_fixes) ? selectedReview.value.required_fixes.filter(stringValue).map((value) => String(value).trim()) : [],
   };
-  if (stringValue(selectedReview.value.verdict)) currentReview.verdict = String(selectedReview.value.verdict).trim();
+  if (selectedVerdict) currentReview.verdict = selectedVerdict;
   if (stringValue(reviewSource.source)) currentReview.source = reviewSource.source;
   if (!sameJson(currentReview, continuation.review)) throw new Error("continuation selected review identity is stale or cross-bound");
   const expectedSummary = `Continue blocked run '${parentRun.run_id}' from ${continuation.review.ref}.`;
@@ -9083,7 +9089,9 @@ function observePrOperationGitAuthority(runDir, run, options = {}, label = "PR o
 }
 
 function localPrBaseRef(run) {
-  return requireNonEmptyString(run.base_ref, "run.base_ref");
+  const ref = requireNonEmptyString(run.base_ref, "run.base_ref");
+  const originPrefix = "refs/remotes/origin/";
+  return ref.startsWith(originPrefix) ? ref.slice(originPrefix.length) : ref;
 }
 
 function observeExactRemoteHead(options, repository, ref, label) {

@@ -1328,6 +1328,24 @@ describe("simplified run-state transitions", () => {
     }
   });
 
+  it("canonicalizes origin-tracking base refs for PR authority", async () => {
+    const fixture = createFixture("pr-origin-tracking-base");
+    try {
+      writeReadyPrRun(fixture);
+      const runPath = join(fixture.runDir, "run.json");
+      const run = readJson(runPath);
+      run.base_ref = "refs/remotes/origin/main";
+      writeJson(runPath, run);
+
+      const fenced = await transitionPrePrFenceEstablished(fixture.runDir, preparePrTestOptions(fixture.runDir));
+
+      assert.equal(fenced.fence.base_ref, "main");
+      assert.equal(fenced.fence.base_sha, run.base_commit);
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("reproduces mutable schema-v2 planning and publication configuration through ordinary writers", async () => {
     const fixture = createFixture("v2-immutable-publication");
     try {

@@ -149,6 +149,29 @@ describe("factory continue", () => {
     }
   });
 
+  it("derives continuation context from an approving review without prose", async () => {
+    const fixture = createFixture("approved-review", {
+      review: createReviewRecord({ subject: "approved-review" }),
+      spec: { status: "accepted", verdict: "APPROVE" },
+    });
+    try {
+      const result = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "approved-review-next", dryRun: true });
+
+      assert.equal(result.payload.continuation.review.verdict, "APPROVE");
+      assert.equal(result.payload.continuation.review.summary, "Review recorded APPROVE for approved-review.");
+      assert.deepEqual(result.payload.continuation.review.required_fixes, []);
+      assert.doesNotThrow(() => validateRun(childRunFromPayload(result.payload.continuation)));
+
+      const adoptResult = continueFactory(fixture.runId, { cwd: fixture.repo, review: "reviewer.json", runId: "approved-review-adopt-next", dryRun: true });
+      seedContinuationPlanningArtifacts(fixture.repo, fixture.runDir, adoptResult.payload.continuation);
+      const childRunDir = join(fixture.repo, ".opencode", "factory", "approved-review-adopt-next");
+      writeJson(join(childRunDir, "run.json"), childRunFromPayload(adoptResult.payload.continuation));
+      await assert.doesNotReject(transitionContinuationAdoption(childRunDir, { repoRoot: gitStdout(fixture.repo, ["rev-parse", "--show-toplevel"]) }));
+    } finally {
+      cleanup(fixture.repo);
+    }
+  });
+
   it("hashes only documented parent artifact refs", () => {
     const fixture = createFixture("known-artifacts-only");
     try {
@@ -1995,6 +2018,7 @@ describe("continuation planning-artifact reuse", () => {
     const childRunId = "allocation-happy-next";
     const transactions = [];
     try {
+      writeJson(join(fixture.runDir, "reviews", "reviewer.json"), createReviewRecord({ subject: fixture.runId, verdict: "APPROVE", required_fixes: [], summary: "needs continuation" }));
       let launched;
       const result = await continueFactory(fixture.runId, {
         cwd: fixture.repo,

@@ -5037,7 +5037,11 @@ function validateContinuationReview(review, ref, source, parentRunDir) {
     throw new Error(`review '${ref}' subject must match parent ${source.kind} source`);
   }
   validateContinuationReviewRefs(review, parentRunDir, ref);
-  const summary = stringValue(review.summary) ? String(review.summary).trim() : null;
+  const verdict = stringValue(review.verdict) ? String(review.verdict).trim() : null;
+  const approvingVerdict = verdict && APPROVING_REVIEW_VERDICTS.has(verdict.toUpperCase());
+  const summary = stringValue(review.summary)
+    ? String(review.summary).trim()
+    : approvingVerdict ? `Review recorded ${verdict} for ${subject}.` : null;
   const requiredFixes = normalizeRequiredFixes(review.required_fixes);
   const hasSummary = summary !== null;
   const hasRequiredFixes = requiredFixes.length > 0;
@@ -5049,7 +5053,7 @@ function validateContinuationReview(review, ref, source, parentRunDir) {
     summary,
     required_fixes: requiredFixes,
   };
-  if (stringValue(review.verdict)) result.verdict = String(review.verdict).trim();
+  if (verdict) result.verdict = verdict;
   if (stringValue(source.source)) result.source = source.source;
   return result;
 }
@@ -5129,7 +5133,7 @@ function normalizeRequiredFixes(value) {
 // work-reviewer emits `APPROVE | REJECT`; accept the common approving synonyms so
 // the gate is not brittle to a slightly different recorded verdict, but a REJECT
 // (or any non-approving verdict) is never treated as acceptance.
-const APPROVING_SPEC_VERDICTS = new Set(["APPROVE", "APPROVED", "ACCEPT", "ACCEPTED", "GO", "PASS"]);
+const APPROVING_REVIEW_VERDICTS = new Set(["APPROVE", "APPROVED", "ACCEPT", "ACCEPTED", "GO", "PASS"]);
 const CHILD_SPEC_REVIEW_REF = "reviews/spec-writer.json";
 const SHA256_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/iu;
 
@@ -5207,7 +5211,7 @@ function continuationPlanningReuse(parentRun, parentRunDir) {
   const subject = String(review?.subject || "").trim();
   if (subject !== "spec-writer") return { eligible: false, reason: `spec-writer review subject '${subject || "(none)"}' is not spec-writer` };
   const verdict = String(review?.verdict || "").trim().toUpperCase();
-  if (!APPROVING_SPEC_VERDICTS.has(verdict)) {
+  if (!APPROVING_REVIEW_VERDICTS.has(verdict)) {
     return { eligible: false, reason: `spec-writer review verdict '${verdict || "(none)"}' is not approving; brief is amendment input only` };
   }
   return {
