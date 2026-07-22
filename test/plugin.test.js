@@ -756,6 +756,43 @@ describe("OpenCode 1.18.3 session correlation probe", () => {
     assert.deepEqual(probe.snapshot().calls.map(({ sessionID, callID }) => [sessionID, callID]), [["ses-two", "call-shared"]]);
   });
 
+  it("binds validated command run identity to the session and observed children", () => {
+    const probe = createSessionCorrelationProbe();
+    assert.equal(probe.bindSessionRun("bad\nsession", "run"), null);
+    assert.equal(probe.bindSessionRun("ses-parent", "bad run"), null);
+    assert.equal(probe.bindSessionRun("ses-parent", "run-one").runID, "run-one");
+    probe.event({ event: { type: "session.created", properties: { info: { id: "ses-child", parentID: "ses-parent" } } } });
+    assert.equal(probe.snapshot().sessions.find((session) => session.sessionID === "ses-child").runID, "run-one");
+    assert.equal(probe.observeToolBefore({ tool: "task", sessionID: "ses-child", callID: "call" }, "work-reviewer").runID, "run-one");
+    const removed = probe.event({ event: { type: "session.deleted", properties: { info: { id: "ses-parent" } } } });
+    assert.equal(removed.runID, "run-one");
+    assert.equal(probe.snapshot().sessions.find((session) => session.sessionID === "ses-child").runID, "run-one");
+    assert.equal(probe.bindSessionRun("ses-child", null).runID, undefined);
+  });
+
+  it("never binds launch identity from session lifecycle events alone", () => {
+    const probe = createSessionCorrelationProbe({ rootRunID: "run-from-launch" });
+    probe.event({ event: { type: "session.status", properties: { sessionID: "ses-unknown", status: { type: "busy" } } } });
+    probe.event({ event: { type: "session.created", properties: { info: { id: "ses-root" } } } });
+    probe.event({ event: { type: "session.created", properties: { info: { id: "ses-child", parentID: "ses-root" } } } });
+    probe.event({ event: { type: "session.created", properties: { info: { id: "ses-orphan", parentID: "ses-missing" } } } });
+
+    assert.equal(probe.snapshot().sessions.find((session) => session.sessionID === "ses-unknown").runID, undefined);
+    assert.equal(probe.snapshot().sessions.find((session) => session.sessionID === "ses-root").runID, undefined);
+    assert.equal(probe.snapshot().sessions.find((session) => session.sessionID === "ses-child").runID, undefined);
+    assert.equal(probe.snapshot().sessions.find((session) => session.sessionID === "ses-orphan").runID, undefined);
+    assert.equal(probe.observeToolBefore({ tool: "task", sessionID: "ses-late-root", callID: "call" }, "work-reviewer").runID, undefined);
+  });
+
+  it("binds commands only to an exact validated session", () => {
+    const probe = createSessionCorrelationProbe();
+    assert.equal(probe.bindCommandRun(undefined, "run-sessionless"), null);
+    assert.equal(probe.observeToolBefore({ tool: "task", sessionID: "ses-unbound", callID: "call-one" }, "work-reviewer").runID, undefined);
+    assert.equal(probe.bindCommandRun("ses-command", "run-bound").runID, "run-bound");
+    assert.equal(probe.observeToolBefore({ tool: "task", sessionID: "ses-command", callID: "call-two" }, "security-reviewer").runID, "run-bound");
+    assert.equal(probe.observeToolBefore({ tool: "task", sessionID: "ses-other", callID: "call-three" }, "security-reviewer").runID, undefined);
+  });
+
   it("ends replaced correlation handles instead of leaking them", () => {
     const ended = [];
     const probe = createSessionCorrelationProbe({ onCallRemoved: (call, reason) => ended.push({ call, reason }) });
@@ -874,9 +911,9 @@ describe("B6.2 factory-owned plugin spans", () => {
       const span = execution.span;
       assert.equal(execution.beforeAttributes["feature_factory.span_event"], "task-before");
       assert.deepEqual(span.attributes, {
-        "feature_factory.session_id": "review-session",
-        "feature_factory.parent_session_id": "review-parent",
-        "feature_factory.call_id": "review-call",
+        "feature_factory.session_id": telemetryIdentifier("review-session"),
+        "feature_factory.parent_session_id": telemetryIdentifier("review-parent"),
+        "feature_factory.call_id": telemetryIdentifier("review-call"),
         "feature_factory.run_id": fixture.runId,
         "feature_factory.attempt": 1,
         "feature_factory.route": "integration-amendment-review",
@@ -956,9 +993,12 @@ describe("B6.2 factory-owned plugin spans", () => {
 
   it("emits all six session lifecycle values with observed parentage and active context", async () => {
     const fake = fakeB6Otel();
-    const instance = await plugin({}, { telemetry: { enabled: true, importer: fake.importer } });
+    const instance = await plugin({}, verifiedLaunchOptions(fake, "run-session"));
+    await bindVerifiedFeatureCommand(instance, "run-session", "ses-parent");
+    instance.event({ event: { type: "session.created", properties: { info: { id: "ses-parent" } } } });
     for (const event of [
       { type: "session.created", properties: { info: { id: "ses-child", parentID: "ses-parent" } } },
+      { type: "session.updated", properties: { info: { id: "ses-child" } } },
       { type: "session.updated", properties: { info: { id: "ses-child" } } },
       { type: "session.status", properties: { sessionID: "ses-child", status: { type: "busy", prompt: "excluded" } } },
       { type: "session.idle", properties: { sessionID: "ses-child" } },
@@ -967,13 +1007,684 @@ describe("B6.2 factory-owned plugin spans", () => {
     ]) instance.event({ event });
     await flushB6Telemetry();
 
-    assert.deepEqual(fake.spans.map((span) => span.attributes["feature_factory.span_event"]), [
+    const childSpans = fake.spans.filter((span) => span.attributes["feature_factory.session_id"] === telemetryIdentifier("ses-child"));
+    assert.deepEqual(childSpans.map((span) => span.attributes["feature_factory.span_event"]), [
       "session-created", "session-updated", "session-status", "session-idle", "session-compacted", "session-deleted",
     ]);
-    assert.equal(fake.spans.every((span) => span.name === "feature_factory.session" && span.context === fake.activeContext && span.ended), true);
-    assert.equal(fake.spans[0].attributes["feature_factory.parent_session_id"], "ses-parent");
-    assert.equal(fake.spans[1].attributes["feature_factory.parent_session_id"], "ses-parent");
+    assert.equal(childSpans.every((span) => span.name === "feature_factory.session" && span.context === fake.activeContext && span.ended), true);
+    assert.equal(childSpans[0].attributes["feature_factory.parent_session_id"], telemetryIdentifier("ses-parent"));
+    assert.equal(childSpans[1].attributes["feature_factory.parent_session_id"], telemetryIdentifier("ses-parent"));
     assert.doesNotMatch(JSON.stringify(fake.spans), /prompt|excluded|title|traceparent|task_id/u);
+  });
+
+  it("correlates every fresh reviewer Task from validated command session identity", async () => {
+    const fake = fakeB6Otel();
+    const instance = await plugin({}, verifiedLaunchOptions(fake, "run-reviewed"));
+    const cfg = {};
+    instance.config(cfg);
+    instance.event({ event: { type: "session.created", properties: { info: { id: "ses-orchestrator", parentID: "ses-parent" } } } });
+    const command = encodeFeatureCommandPayload({
+      operator_request: "implement telemetry",
+      driver: { mode: "autonomous", run_id: "run-reviewed" },
+    });
+    const commandOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+    await instance["command.execute.before"]({ command: "feature", sessionID: "ses-orchestrator", arguments: command }, commandOutput);
+
+    const results = [
+      "## Review: slice\n\n**Verdict:** APPROVE\n**Convergence:** converging\n",
+      "## Validation report\n\n**Verdict:** GO\n**Attempt:** 1\n",
+      "## Security review\n\n**Verdict:** PASS\n",
+    ];
+    for (const [index, agent] of ["work-reviewer", "implementation-validator", "security-reviewer"].entries()) {
+      const identity = { tool: "task", sessionID: "ses-orchestrator", callID: `call-review-${index}` };
+      const task = { args: { subagent_type: agent, prompt: `hostile prompt ${index} https://secret.invalid/review` } };
+      await instance["tool.execute.before"](identity, task);
+      await instance["tool.execute.after"]({ ...identity, args: task.args }, { output: results[index], metadata: {} });
+    }
+    const unbound = { tool: "task", sessionID: "ses-unbound", callID: "call-unbound" };
+    const unboundTask = { args: { subagent_type: "work-reviewer", prompt: "unbound prompt" } };
+    await instance["tool.execute.before"](unbound, unboundTask);
+    await instance["tool.execute.after"]({ ...unbound, args: unboundTask.args }, { output: "unbound output", metadata: {} });
+    await flushB6Telemetry();
+
+    const spans = fake.spans.filter((span) => span.name === "feature_factory.task");
+    assert.deepEqual(spans.map((span) => span.attributes["feature_factory.target_agent"]), [
+      "work-reviewer", "implementation-validator", "security-reviewer",
+    ]);
+    for (const span of spans) {
+      assert.equal(span.attributes["feature_factory.run_id"], "run-reviewed");
+      assert.equal(span.attributes["feature_factory.session_id"], telemetryIdentifier("ses-orchestrator"));
+      assert.equal(span.attributes["feature_factory.parent_session_id"], telemetryIdentifier("ses-parent"));
+      assert.equal(span.attributes["feature_factory.lane"], "reviewer");
+      assert.equal(span.attributes["feature_factory.task_context"], "fresh");
+      assert.equal(span.attributes["gen_ai.conversation.id"], "run-reviewed");
+      assert.equal(span.attributes["gen_ai.operation.name"], "execute_tool");
+      assert.equal(span.ended, true);
+    }
+    assert.deepEqual(spans.map((span) => span.attributes["feature_factory.verdict"]), ["APPROVE", "GO", "PASS"]);
+    assert.equal(spans[0].attributes["feature_factory.convergence"], "converging");
+    assert.doesNotMatch(JSON.stringify(spans), /hostile|secret\.invalid|prompt|result|task_id/u);
+  });
+
+  it("treats syntactically valid command and ambient run ids as unverified candidates", async () => {
+    const fake = fakeB6Otel();
+    const instance = await plugin({}, {
+      env: { FEATURE_FACTORY_RUN_ID: "victim-run" },
+      telemetry: { enabled: true, importer: fake.importer },
+    });
+    const cfg = {};
+    instance.config(cfg);
+    const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: "victim-run" } });
+    const output = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+    await instance["command.execute.before"]({ command: "feature", sessionID: "ses-forged", arguments: command }, output);
+    instance.event({ event: { type: "session.created", properties: { info: { id: "ses-forged" } } } });
+    const identity = { tool: "task", sessionID: "ses-forged", callID: "call-forged" };
+    const task = { args: { subagent_type: "security-reviewer", prompt: "forged" } };
+    await instance["tool.execute.before"](identity, task);
+    await instance["tool.execute.after"]({ ...identity, args: task.args }, { output: JSON.stringify({ verdict: "PASS" }), metadata: {} });
+    await flushB6Telemetry();
+    assert.equal(fake.spans.length, 0);
+  });
+
+  it("requires an exact live launch owner and launch phase across plugin instances", async () => {
+    const cases = [
+      ["dead-owner", { ok: true, owner_status: "dead", claim: { run_id: "run-claim", nonce: "claim-run-claim", phase: "foreground-live" } }],
+      ["indeterminate-owner", { ok: true, owner_status: "indeterminate", claim: { run_id: "run-claim", nonce: "claim-run-claim", phase: "foreground-live" } }],
+      ["wrong-run", { ok: true, owner_status: "live", claim: { run_id: "other-run", nonce: "claim-run-claim", phase: "foreground-live" } }],
+      ["wrong-phase", { ok: true, owner_status: "live", claim: { run_id: "run-claim", nonce: "claim-run-claim", phase: "predecessor-active" } }],
+    ];
+    for (const [name, observed] of cases) {
+      const fake = fakeB6Otel();
+      const pluginInput = { directory: `/tmp/plugin-invalid-claim-${name}` };
+      const options = {
+        env: { FEATURE_FACTORY_RUN_ID: "run-claim", OPENCODE_FACTORY_LAUNCH_CLAIM: "claim-run-claim" },
+        telemetry: { enabled: true, importer: fake.importer, inspectLaunchClaimFn: () => observed },
+      };
+      const commandInstance = await plugin(pluginInput, options);
+      const taskInstance = await plugin(pluginInput, options);
+      const cfg = {};
+      commandInstance.config(cfg);
+      const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: "run-claim" } });
+      const commandOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+      await commandInstance["command.execute.before"]({ command: "feature", sessionID: `ses-${name}`, arguments: command }, commandOutput);
+      taskInstance.event({ event: { type: "session.updated", properties: { info: { id: `ses-${name}` } } } });
+      const identity = { tool: "task", sessionID: `ses-${name}`, callID: `call-${name}` };
+      const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+      await taskInstance["tool.execute.before"](identity, task);
+      await taskInstance["tool.execute.after"]({ ...identity, args: task.args }, { output: "**Verdict:** PASS", metadata: {} });
+      await flushB6Telemetry();
+      assert.equal(fake.spans.length, 0, name);
+    }
+  });
+
+  it("revalidates launch authority per command and binds one claim to one session", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-launch-revalidation" };
+    let live = true;
+    let inspections = 0;
+    const options = verifiedLaunchOptions(fake, "run-launch-revalidation");
+    options.telemetry.inspectLaunchClaimFn = () => {
+      inspections += 1;
+      return {
+        ok: true,
+        owner_status: live ? "live" : "dead",
+        claim: { run_id: "run-launch-revalidation", nonce: "claim-run-launch-revalidation", phase: "foreground-live" },
+      };
+    };
+    const first = await plugin(pluginInput, options);
+    const second = await plugin({ directory: "/tmp/plugin-launch-revalidation/." }, options);
+    await bindVerifiedFeatureCommand(first, "run-launch-revalidation", "ses-launch-authorized");
+    const authorizedIdentity = { tool: "task", sessionID: "ses-launch-authorized", callID: "call-launch-initial" };
+    const authorizedTask = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+    await first["tool.execute.before"](authorizedIdentity, authorizedTask);
+    await first["tool.execute.after"]({ ...authorizedIdentity, args: authorizedTask.args }, { output: "**Verdict:** PASS", metadata: {} });
+    await bindVerifiedFeatureCommand(second, "run-launch-revalidation", "ses-launch-replayed");
+    live = false;
+    await bindVerifiedFeatureCommand(first, "run-launch-revalidation", "ses-launch-authorized");
+
+    for (const sessionID of ["ses-launch-authorized", "ses-launch-replayed"]) {
+      const identity = { tool: "task", sessionID, callID: `call-${sessionID}` };
+      const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+      await first["tool.execute.before"](identity, task);
+      await first["tool.execute.after"]({ ...identity, args: task.args }, { output: "**Verdict:** PASS", metadata: {} });
+    }
+    await flushB6Telemetry();
+
+    assert.equal(inspections, 3);
+    assert.equal(fake.spans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-launch-initial")), true);
+    assert.equal(fake.spans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-ses-launch-authorized")), false);
+    assert.equal(fake.spans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-ses-launch-replayed")), false);
+  });
+
+  it("keeps an invalid-command tombstone revoked across later root session events", async () => {
+    const fake = fakeB6Otel();
+    const instance = await plugin({ directory: "/tmp/plugin-revoked-root" }, verifiedLaunchOptions(fake, "run-revoked"));
+    const cfg = {};
+    instance.config(cfg);
+    const output = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", "plain request") }] };
+    await instance["command.execute.before"]({ command: "feature", sessionID: "ses-revoked", arguments: "plain request" }, output);
+    instance.event({ event: { type: "session.updated", properties: { info: { id: "ses-revoked" } } } });
+    await flushB6Telemetry();
+    assert.equal(fake.spans.length, 0);
+  });
+
+  it("keeps cross-instance revocation closed through session deletion and bridge eviction", async () => {
+    for (const removal of ["deletion", "eviction"]) {
+      const fake = fakeB6Otel();
+      const pluginInput = { directory: `/tmp/plugin-revocation-${removal}` };
+      const commandInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-revoked-shared"));
+      const eventInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-revoked-shared"));
+      await bindVerifiedFeatureCommand(eventInstance, "run-revoked-shared", "ses-revoked-shared");
+      eventInstance.event({ event: { type: "session.created", properties: { info: { id: "ses-revoked-shared" } } } });
+
+      const cfg = {};
+      commandInstance.config(cfg);
+      const invalidOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", "plain request") }] };
+      await commandInstance["command.execute.before"]({ command: "feature", sessionID: "ses-revoked-shared", arguments: "plain request" }, invalidOutput);
+      if (removal === "deletion") {
+        eventInstance.event({ event: { type: "session.deleted", properties: { info: { id: "ses-revoked-shared" } } } });
+      } else {
+        for (let index = 0; index < 256; index += 1) {
+          const candidate = encodeFeatureCommandPayload({ operator_request: "other", driver: { mode: "autonomous", run_id: `run-evict-${index}` } });
+          const output = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", candidate) }] };
+          await commandInstance["command.execute.before"]({ command: "feature", sessionID: `ses-evict-${index}`, arguments: candidate }, output);
+        }
+      }
+      eventInstance.event({ event: { type: "session.updated", properties: { info: { id: "ses-revoked-shared" } } } });
+      const identity = { tool: "task", sessionID: "ses-revoked-shared", callID: `call-${removal}` };
+      const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+      await eventInstance["tool.execute.before"](identity, task);
+      await eventInstance["tool.execute.after"]({ ...identity, args: task.args }, { output: "**Verdict:** PASS", metadata: {} });
+      await flushB6Telemetry();
+
+      const spans = fake.spans.filter((span) => span.attributes["feature_factory.session_id"] === telemetryIdentifier("ses-revoked-shared"));
+      assert.deepEqual(spans.map((span) => span.attributes["feature_factory.span_event"]), ["session-created"], removal);
+      assert.equal(fake.spans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier(`call-${removal}`)), false, removal);
+    }
+  });
+
+  it("fails a retained reviewer span closed when revocation precedes direct Task-after", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-revocation-direct-after" };
+    const commandInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-after-revoke"));
+    const taskInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-after-revoke"));
+    await bindVerifiedFeatureCommand(commandInstance, "run-after-revoke", "ses-after-revoke");
+    const identity = { tool: "task", sessionID: "ses-after-revoke", callID: "call-after-revoke" };
+    const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+    await taskInstance["tool.execute.before"](identity, task);
+
+    const cfg = {};
+    commandInstance.config(cfg);
+    const invalidOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", "plain request") }] };
+    await commandInstance["command.execute.before"]({ command: "feature", sessionID: "ses-after-revoke", arguments: "plain request" }, invalidOutput);
+    await taskInstance["tool.execute.after"]({ ...identity, args: task.args }, { output: "**Verdict:** PASS", metadata: {} });
+    await flushB6Telemetry();
+
+    const span = fake.spans.find((candidate) => candidate.attributes["feature_factory.call_id"] === telemetryIdentifier("call-after-revoke"));
+    assert.equal(span.ended, true);
+    assert.deepEqual(span.statuses, [{ code: 2 }]);
+    assert.equal(span.attributes["feature_factory.verdict"], undefined);
+    assert.deepEqual(span.events, []);
+  });
+
+  it("fails same-instance retained reviewer spans closed on revocation and bridge eviction", async () => {
+    for (const invalidation of ["revocation", "eviction"]) {
+      const fake = fakeB6Otel();
+      const instance = await plugin({ directory: `/tmp/plugin-same-instance-${invalidation}` }, verifiedLaunchOptions(fake, `run-same-${invalidation}`));
+      const sessionID = `ses-same-${invalidation}`;
+      await bindVerifiedFeatureCommand(instance, `run-same-${invalidation}`, sessionID);
+      const identity = { tool: "task", sessionID, callID: `call-same-${invalidation}` };
+      const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+      await instance["tool.execute.before"](identity, task);
+
+      const cfg = {};
+      instance.config(cfg);
+      const count = invalidation === "eviction" ? 256 : 1;
+      for (let index = 0; index < count; index += 1) {
+        const candidate = invalidation === "eviction"
+          ? encodeFeatureCommandPayload({ operator_request: "other", driver: { mode: "autonomous", run_id: `run-same-evict-${index}` } })
+          : "plain request";
+        const output = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", candidate) }] };
+        await instance["command.execute.before"]({ command: "feature", sessionID: invalidation === "eviction" ? `ses-same-evict-${index}` : sessionID, arguments: candidate }, output);
+      }
+      await instance["tool.execute.after"]({ ...identity, args: task.args }, { output: "**Verdict:** PASS", metadata: {} });
+      await flushB6Telemetry();
+
+      const span = fake.spans.find((candidate) => candidate.attributes["feature_factory.call_id"] === telemetryIdentifier(`call-same-${invalidation}`));
+      assert.equal(span.ended, true, invalidation);
+      assert.deepEqual(span.statuses, [{ code: 2 }], invalidation);
+      assert.equal(span.attributes["feature_factory.verdict"], undefined, invalidation);
+      assert.deepEqual(span.events, [], invalidation);
+    }
+  });
+
+  it("fails a retained reviewer span closed when its session is reparented to a conflicting run", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-reparent-conflict" };
+    const runOne = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-reparent-one"));
+    const runTwo = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-reparent-two"));
+    const taskInstance = await plugin(pluginInput, { telemetry: { enabled: true, importer: fake.importer } });
+    await bindVerifiedFeatureCommand(runOne, "run-reparent-one", "ses-reparent-one");
+    await bindVerifiedFeatureCommand(runTwo, "run-reparent-two", "ses-reparent-two");
+    taskInstance.event({ event: { type: "session.created", properties: { info: { id: "ses-reparent-child", parentID: "ses-reparent-one" } } } });
+
+    const identity = { tool: "task", sessionID: "ses-reparent-child", callID: "call-reparent-conflict" };
+    const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+    await taskInstance["tool.execute.before"](identity, task);
+    taskInstance.event({ event: { type: "session.updated", properties: { info: { id: "ses-reparent-child", parentID: "ses-reparent-two" } } } });
+    await taskInstance["tool.execute.after"]({ ...identity, args: task.args }, { output: "**Verdict:** PASS", metadata: {} });
+    await flushB6Telemetry();
+
+    const span = fake.spans.find((candidate) => candidate.attributes["feature_factory.call_id"] === telemetryIdentifier(identity.callID));
+    assert.equal(span.ended, true);
+    assert.deepEqual(span.statuses, [{ code: 2 }]);
+    assert.equal(span.attributes["feature_factory.verdict"], undefined);
+    assert.deepEqual(span.events, []);
+  });
+
+  it("preserves a retained reviewer span when another session receives an unverified command", async () => {
+    const fake = fakeB6Otel();
+    const instance = await plugin({ directory: "/tmp/plugin-unrelated-command" }, verifiedLaunchOptions(fake, "run-unrelated-command"));
+    await bindVerifiedFeatureCommand(instance, "run-unrelated-command", "ses-valid-review");
+    const identity = { tool: "task", sessionID: "ses-valid-review", callID: "call-valid-review" };
+    const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+    await instance["tool.execute.before"](identity, task);
+
+    const cfg = {};
+    instance.config(cfg);
+    const invalidOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", "plain request") }] };
+    await instance["command.execute.before"]({ command: "feature", sessionID: "ses-unrelated-command", arguments: "plain request" }, invalidOutput);
+    await instance["tool.execute.after"]({ ...identity, args: task.args }, { output: "**Verdict:** PASS", metadata: {} });
+    await flushB6Telemetry();
+
+    const span = fake.spans.find((candidate) => candidate.attributes["feature_factory.call_id"] === telemetryIdentifier(identity.callID));
+    assert.equal(span.ended, true);
+    assert.deepEqual(span.statuses, []);
+    assert.equal(span.attributes["feature_factory.verdict"], "PASS");
+    assert.deepEqual(span.events, ["task-after"]);
+  });
+
+  it("does not replay a restored lifecycle marker for an unsupported event", async () => {
+    const fixture = createBuilderDispatchFixture();
+    const fake = fakeB6Otel();
+    try {
+      const instance = await plugin({ directory: fixture.repo }, { telemetry: { enabled: true, importer: fake.importer } });
+      instance.event({ event: { type: "session.created", properties: { info: { id: "ses-unsupported-child", parentID: "ses-unsupported-parent" } } } });
+      const identity = { tool: "task", sessionID: "ses-unsupported-child", callID: "call-unsupported-builder" };
+      const task = { args: { subagent_type: "backend-builder", prompt: builderPrompt(1) } };
+      await instance["tool.execute.before"](identity, task);
+      instance.event({ event: { type: "message.updated", properties: { sessionID: "ses-unsupported-child" } } });
+      await instance["tool.execute.after"]({ ...identity, args: task.args }, { output: "opaque", metadata: {} });
+      await flushB6Telemetry();
+
+      const childEvents = fake.spans
+        .filter((span) => span.name === "feature_factory.session" && span.attributes["feature_factory.session_id"] === telemetryIdentifier("ses-unsupported-child"))
+        .map((span) => span.attributes["feature_factory.span_event"]);
+      assert.deepEqual(childEvents, []);
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("deduplicates lifecycle events across an identical verified rebinding", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-rebind-dedup" };
+    const instance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-rebind-dedup"));
+    const sibling = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-rebind-dedup"));
+    await bindVerifiedFeatureCommand(instance, "run-rebind-dedup", "ses-rebind-dedup");
+    instance.event({ event: { type: "session.updated", properties: { info: { id: "ses-rebind-dedup" } } } });
+    sibling.event({ event: { type: "session.updated", properties: { info: { id: "ses-rebind-dedup" } } } });
+    await bindVerifiedFeatureCommand(instance, "run-rebind-dedup", "ses-rebind-dedup");
+    instance.event({ event: { type: "session.updated", properties: { info: { id: "ses-rebind-dedup" } } } });
+    await flushB6Telemetry();
+
+    const events = fake.spans
+      .filter((span) => span.attributes["feature_factory.session_id"] === telemetryIdentifier("ses-rebind-dedup"))
+      .map((span) => span.attributes["feature_factory.span_event"]);
+    assert.deepEqual(events, ["session-updated"]);
+  });
+
+  it("invalidates sibling local correlation when a verified bridge is deleted", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-verified-deletion" };
+    const deletingInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-verified-deletion"));
+    const siblingInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-verified-deletion"));
+    await bindVerifiedFeatureCommand(deletingInstance, "run-verified-deletion", "ses-verified-deletion");
+    siblingInstance.event({ event: { type: "session.created", properties: { info: { id: "ses-verified-deletion" } } } });
+    deletingInstance.event({ event: { type: "session.deleted", properties: { info: { id: "ses-verified-deletion" } } } });
+    siblingInstance.event({ event: { type: "session.deleted", properties: { info: { id: "ses-verified-deletion" } } } });
+    await flushB6Telemetry();
+
+    const spans = fake.spans.filter((span) => span.attributes["feature_factory.session_id"] === telemetryIdentifier("ses-verified-deletion"));
+    assert.deepEqual(spans.map((span) => span.attributes["feature_factory.span_event"]), ["session-created", "session-deleted"]);
+  });
+
+  it("requires one unique reviewer field outside Markdown fences", async () => {
+    const fake = fakeB6Otel();
+    const instance = await plugin({}, verifiedLaunchOptions(fake, "run-review-labels"));
+    await bindVerifiedFeatureCommand(instance, "run-review-labels", "ses-review-labels");
+    const outputs = [
+      "~~~markdown\n**Verdict:** PASS\n~~~\n",
+      "**Verdict:** PASS\n**Verdict:** UNKNOWN\n",
+      "````markdown\n```\n**Verdict:** PASS\n````\n",
+      "```markdown\n    ```\n**Verdict:** PASS\n",
+    ];
+    for (const [index, output] of outputs.entries()) {
+      const identity = { tool: "task", sessionID: "ses-review-labels", callID: `call-review-label-${index}` };
+      const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+      await instance["tool.execute.before"](identity, task);
+      await instance["tool.execute.after"]({ ...identity, args: task.args }, { output, metadata: {} });
+    }
+    await flushB6Telemetry();
+    const spans = fake.spans.filter((span) => span.name === "feature_factory.task");
+    assert.equal(spans.length, 4);
+    assert.equal(spans.every((span) => span.attributes["feature_factory.verdict"] === undefined), true);
+  });
+
+  it("promotes an exact durable review-dispatch prompt without launch claim authority", async () => {
+    const fixture = createBuilderDispatchFixture();
+    const fake = fakeB6Otel();
+    const prompt = "review the exact checked square slice";
+    try {
+      const run = JSON.parse(readFileSync(join(fixture.runDir, "run.json"), "utf8"));
+      run.provenance = {
+        review_dispatches: [{
+          dispatch: {
+            agent: "work-reviewer",
+            subject: "slice",
+            attempt: 1,
+            prompt_hash: `sha256:${createHash("sha256").update(prompt).digest("hex")}`,
+            prompt_bytes: Buffer.byteLength(prompt),
+          },
+        }],
+      };
+      writeJson(join(fixture.runDir, "run.json"), run);
+      const instance = await plugin({ directory: fixture.repo }, { telemetry: { enabled: true, importer: fake.importer } });
+      const cfg = {};
+      instance.config(cfg);
+      const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: "run" } });
+      const commandOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+      await instance["command.execute.before"]({ command: "feature", sessionID: "ses-durable", arguments: command }, commandOutput);
+      const identity = { tool: "task", sessionID: "ses-durable", callID: "call-durable" };
+      const task = { args: { subagent_type: "work-reviewer", prompt } };
+      await instance["tool.execute.before"](identity, task);
+      await instance["tool.execute.after"]({ ...identity, args: task.args }, {
+        output: "## Review: slice\n\n**Verdict:** APPROVE\n**Convergence:** converging\n",
+        metadata: {},
+      });
+      await flushB6Telemetry();
+      const span = fake.spans.find((candidate) => candidate.name === "feature_factory.task");
+      assert.equal(span.attributes["feature_factory.run_id"], "run");
+      assert.equal(span.attributes["feature_factory.slice_id"], "slice");
+      assert.equal(span.attributes["feature_factory.attempt"], 1);
+      assert.equal(span.attributes["feature_factory.verdict"], "APPROVE");
+      assert.equal(span.attributes["feature_factory.convergence"], "converging");
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("bridges one validated command identity across OpenCode plugin instances", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-command-bridge" };
+    const commandInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-bridged"));
+    const taskInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-bridged"));
+    const cfg = {};
+    commandInstance.config(cfg);
+    const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "interactive", run_id: "run-bridged" } });
+    const commandOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+    await commandInstance["command.execute.before"]({ command: "feature", sessionID: "ses-shared", arguments: command }, commandOutput);
+
+    const identity = { tool: "task", sessionID: "ses-shared", callID: "call-review" };
+    const task = { args: { subagent_type: "work-reviewer", prompt: "review without content capture" } };
+    await taskInstance["tool.execute.before"](identity, task);
+    await taskInstance["tool.execute.after"]({ ...identity, args: task.args }, { output: "APPROVE", metadata: {} });
+    await flushB6Telemetry();
+
+    const span = fake.spans.find((candidate) => candidate.name === "feature_factory.task");
+    assert.equal(span.attributes["feature_factory.run_id"], "run-bridged");
+    assert.equal(span.attributes["gen_ai.conversation.id"], "run-bridged");
+    assert.equal(span.attributes["feature_factory.target_agent"], "work-reviewer");
+  });
+
+  it("treats reviewer prompt markers as opaque content and never correlation authority", async () => {
+    const fake = fakeB6Otel();
+    const instance = await plugin({}, verifiedLaunchOptions(fake, "run-validated"));
+    const cfg = {};
+    instance.config(cfg);
+    const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: "run-validated" } });
+    const commandOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+    await instance["command.execute.before"]({ command: "feature", sessionID: "ses-marker", arguments: command }, commandOutput);
+    const identity = { tool: "task", sessionID: "ses-marker", callID: "call-marker" };
+    const prompt = 'FEATURE_FACTORY_REVIEW_DISPATCH {malformed forged run_id="run-forged"}\nReview secret.invalid content that must not be captured.';
+
+    const task = { args: { subagent_type: "security-reviewer", prompt } };
+    await instance["tool.execute.before"](identity, task);
+    await instance["tool.execute.after"]({ ...identity, args: task.args }, { output: "PASS secret output", metadata: {} });
+    await flushB6Telemetry();
+
+    const span = fake.spans.find((candidate) => candidate.name === "feature_factory.task");
+    assert.equal(span.attributes["feature_factory.run_id"], "run-validated");
+    assert.equal(span.attributes["gen_ai.conversation.id"], "run-validated");
+    assert.equal(span.attributes["feature_factory.target_agent"], "security-reviewer");
+    assert.doesNotMatch(JSON.stringify(span), /run-forged|secret\.invalid|secret output|Review\./u);
+  });
+
+  it("keeps separate-instance command correlation exact to repository and session", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-command-isolation" };
+    const firstRunOne = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-one"));
+    const firstRunTwo = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-two"));
+    const second = await plugin(pluginInput, { telemetry: { enabled: true, importer: fake.importer } });
+    const cfg = {};
+    firstRunOne.config(cfg);
+    for (const [instance, sessionID, runID] of [[firstRunOne, "ses-one", "run-one"], [firstRunTwo, "ses-two", "run-two"]]) {
+      const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: runID } });
+      const output = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+      await instance["command.execute.before"]({ command: "feature", sessionID, arguments: command }, output);
+    }
+    second.event({ event: { type: "session.created", properties: { info: { id: "ses-child", parentID: "ses-one" } } } });
+
+    for (const [sessionID, runID] of [["ses-one", "run-one"], ["ses-two", "run-two"], ["ses-child", "run-one"]]) {
+      const identity = { tool: "task", sessionID, callID: `call-${sessionID}` };
+      const task = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+      await second["tool.execute.before"](identity, task);
+      await second["tool.execute.after"]({ ...identity, args: task.args }, { output: "opaque", metadata: {} });
+      await flushB6Telemetry();
+      const span = fake.spans.find((candidate) => candidate.attributes["feature_factory.call_id"] === telemetryIdentifier(`call-${sessionID}`));
+      assert.equal(span.attributes["feature_factory.run_id"], runID);
+    }
+
+    second.event({ event: { type: "session.updated", properties: { info: { id: "ses-child", parentID: "ses-two" } } } });
+    const conflicted = { tool: "task", sessionID: "ses-child", callID: "call-conflicted" };
+    const conflictedTask = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+    await second["tool.execute.before"](conflicted, conflictedTask);
+    await second["tool.execute.after"]({ ...conflicted, args: conflictedTask.args }, { output: "opaque", metadata: {} });
+
+    const unrelated = { tool: "task", sessionID: "ses-unrelated", callID: "call-unrelated" };
+    const unrelatedTask = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+    await second["tool.execute.before"](unrelated, unrelatedTask);
+    await second["tool.execute.after"]({ ...unrelated, args: unrelatedTask.args }, { output: "opaque", metadata: {} });
+    await flushB6Telemetry();
+    assert.equal(fake.spans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-conflicted")), false);
+    assert.equal(fake.spans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-unrelated")), false);
+  });
+
+  it("clears stale run correlation at every feature command without validated identity", async () => {
+    for (const [name, argumentsText] of [
+      ["invalid", "ffpayload-v1:invalid"],
+      ["unencoded", "plain request"],
+      ["runless", encodeFeatureCommandPayload({ operator_request: "interactive request", driver: { mode: "interactive" } })],
+    ]) {
+      const fake = fakeB6Otel();
+      const instance = await plugin({}, { telemetry: { enabled: true, importer: fake.importer } });
+      const cfg = {};
+      instance.config(cfg);
+      const valid = encodeFeatureCommandPayload({ operator_request: "first", driver: { mode: "autonomous", run_id: "run-stale" } });
+      const validOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", valid) }] };
+      await instance["command.execute.before"]({ command: "feature", sessionID: "ses-shared", arguments: valid }, validOutput);
+      const output = { parts: [{ type: "text", text: `command\n\nUNTRUSTED_OPERATOR_PAYLOAD_START\n${argumentsText}` }] };
+      await instance["command.execute.before"]({ command: "feature", sessionID: "ses-shared", arguments: argumentsText }, output);
+      const identity = { tool: "task", sessionID: "ses-shared", callID: `call-${name}` };
+      const task = { args: { subagent_type: "implementation-validator", prompt: "ignored" } };
+      await instance["tool.execute.before"](identity, task);
+      await instance["tool.execute.after"]({ ...identity, args: task.args }, { output: "ignored", metadata: {} });
+      await flushB6Telemetry();
+      assert.equal(fake.spans.some((span) => span.name === "feature_factory.task"), false, name);
+    }
+  });
+
+  it("propagates command invalidation across plugin instances", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-command-invalidation" };
+    const commandInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-stale"));
+    const taskInstance = await plugin(pluginInput, { telemetry: { enabled: true, importer: fake.importer } });
+    const cfg = {};
+    commandInstance.config(cfg);
+    const sessionID = "ses-invalidation";
+    const valid = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: "run-stale" } });
+    const validOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", valid) }] };
+    await commandInstance["command.execute.before"]({ command: "feature", sessionID, arguments: valid }, validOutput);
+
+    const firstIdentity = { tool: "task", sessionID, callID: "call-before-clear" };
+    const firstTask = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+    await taskInstance["tool.execute.before"](firstIdentity, firstTask);
+    await taskInstance["tool.execute.after"]({ ...firstIdentity, args: firstTask.args }, { output: "opaque", metadata: {} });
+
+    const invalidOutput = { parts: [{ type: "text", text: "command\n\nUNTRUSTED_OPERATOR_PAYLOAD_START\nplain request" }] };
+    await commandInstance["command.execute.before"]({ command: "feature", sessionID, arguments: "plain request" }, invalidOutput);
+    for (let index = 0; index < 256; index += 1) {
+      const replacement = encodeFeatureCommandPayload({ operator_request: "other", driver: { mode: "autonomous", run_id: `run-capacity-${index}` } });
+      const replacementOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", replacement) }] };
+      await commandInstance["command.execute.before"]({ command: "feature", sessionID: `ses-capacity-${index}`, arguments: replacement }, replacementOutput);
+    }
+    const secondIdentity = { tool: "task", sessionID, callID: "call-after-clear" };
+    const secondTask = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+    await taskInstance["tool.execute.before"](secondIdentity, secondTask);
+    await taskInstance["tool.execute.after"]({ ...secondIdentity, args: secondTask.args }, { output: "opaque", metadata: {} });
+    await flushB6Telemetry();
+
+    const taskSpans = fake.spans.filter((span) => span.name === "feature_factory.task");
+    assert.equal(taskSpans.length, 1);
+    assert.equal(taskSpans[0].attributes["feature_factory.call_id"], telemetryIdentifier("call-before-clear"));
+    assert.equal(taskSpans[0].attributes["feature_factory.run_id"], "run-stale");
+  });
+
+  it("fails closed when repository capacity evicts a cross-instance binding", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-repository-eviction-origin" };
+    const commandInstance = await plugin(pluginInput, verifiedLaunchOptions(fake, "run-repository-evicted"));
+    const taskInstance = await plugin(pluginInput, { telemetry: { enabled: true, importer: fake.importer } });
+    const cfg = {};
+    commandInstance.config(cfg);
+    const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: "run-repository-evicted" } });
+    const commandOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+    await commandInstance["command.execute.before"]({ command: "feature", sessionID: "ses-repository-evicted", arguments: command }, commandOutput);
+    const firstIdentity = { tool: "task", sessionID: "ses-repository-evicted", callID: "call-repository-before" };
+    const firstTask = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+    await taskInstance["tool.execute.before"](firstIdentity, firstTask);
+    await taskInstance["tool.execute.after"]({ ...firstIdentity, args: firstTask.args }, { output: "opaque", metadata: {} });
+
+    for (let index = 0; index < 32; index += 1) {
+      const other = await plugin({ directory: `/tmp/plugin-repository-eviction-${index}` }, { telemetry: { enabled: true, importer: fake.importer } });
+      const otherCfg = {};
+      other.config(otherCfg);
+      const otherCommand = encodeFeatureCommandPayload({ operator_request: "other", driver: { mode: "autonomous", run_id: `run-repository-${index}` } });
+      const otherOutput = { parts: [{ type: "text", text: otherCfg.command.feature.template.replaceAll("$ARGUMENTS", otherCommand) }] };
+      await other["command.execute.before"]({ command: "feature", sessionID: `ses-repository-${index}`, arguments: otherCommand }, otherOutput);
+    }
+
+    const secondIdentity = { tool: "task", sessionID: "ses-repository-evicted", callID: "call-repository-after" };
+    const secondTask = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+    await taskInstance["tool.execute.before"](secondIdentity, secondTask);
+    await taskInstance["tool.execute.after"]({ ...secondIdentity, args: secondTask.args }, { output: "opaque", metadata: {} });
+    await flushB6Telemetry();
+    const taskSpans = fake.spans.filter((span) => span.name === "feature_factory.task");
+    assert.equal(taskSpans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-repository-before")), true);
+    assert.equal(taskSpans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-repository-after")), false);
+  });
+
+  it("does not publish command correlation from a telemetry-disabled instance", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-disabled-command-correlation" };
+    const disabled = await plugin(pluginInput);
+    const enabled = await plugin(pluginInput, { telemetry: { enabled: true, importer: fake.importer } });
+    const cfg = {};
+    disabled.config(cfg);
+    const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: "run-disabled" } });
+    const commandOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+    await disabled["command.execute.before"]({ command: "feature", sessionID: "ses-disabled", arguments: command }, commandOutput);
+
+    const identity = { tool: "task", sessionID: "ses-disabled", callID: "call-disabled" };
+    const task = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+    await enabled["tool.execute.before"](identity, task);
+    await enabled["tool.execute.after"]({ ...identity, args: task.args }, { output: "opaque", metadata: {} });
+    await flushB6Telemetry();
+    assert.equal(fake.spans.some((span) => span.name === "feature_factory.task"), false);
+  });
+
+  it("removes the cross-instance command binding when a correlated session is evicted", async () => {
+    const fake = fakeB6Otel();
+    const pluginInput = { directory: "/tmp/plugin-command-eviction" };
+    const commandInstance = await plugin(pluginInput, { telemetry: { enabled: true, importer: fake.importer } });
+    const taskInstance = await plugin(pluginInput, { telemetry: { enabled: true, importer: fake.importer } });
+    const cfg = {};
+    commandInstance.config(cfg);
+    const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: "run-evicted" } });
+    const commandOutput = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+    await commandInstance["command.execute.before"]({ command: "feature", sessionID: "ses-evicted", arguments: command }, commandOutput);
+    taskInstance.event({ event: { type: "session.created", properties: { info: { id: "ses-evicted" } } } });
+    for (let index = 0; index < 256; index += 1) {
+      taskInstance.event({ event: { type: "session.created", properties: { info: { id: `ses-capacity-${index}` } } } });
+    }
+
+    const identity = { tool: "task", sessionID: "ses-evicted", callID: "call-after-eviction" };
+    const task = { args: { subagent_type: "work-reviewer", prompt: "opaque" } };
+    await taskInstance["tool.execute.before"](identity, task);
+    await taskInstance["tool.execute.after"]({ ...identity, args: task.args }, { output: "opaque", metadata: {} });
+    await flushB6Telemetry();
+    assert.equal(fake.spans.some((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-after-eviction")), false);
+  });
+
+  it("promotes checked durable builder identity for later reviewers", async () => {
+    const fixture = createBuilderDispatchFixture();
+    const fake = fakeB6Otel();
+    try {
+      const instance = await plugin({ directory: fixture.repo }, { telemetry: { enabled: true, importer: fake.importer } });
+      const builderIdentity = { tool: "task", sessionID: "ses-promoted", callID: "call-builder" };
+      const builderTask = { args: { subagent_type: "backend-builder", prompt: builderPrompt(1) } };
+      await instance["tool.execute.before"](builderIdentity, builderTask);
+      await instance["tool.execute.after"]({ ...builderIdentity, args: builderTask.args }, { output: "opaque", metadata: {} });
+
+      const reviewerIdentity = { tool: "task", sessionID: "ses-promoted", callID: "call-reviewer" };
+      const reviewerTask = { args: { subagent_type: "implementation-validator", prompt: "opaque" } };
+      await instance["tool.execute.before"](reviewerIdentity, reviewerTask);
+      await instance["tool.execute.after"]({ ...reviewerIdentity, args: reviewerTask.args }, { output: "opaque", metadata: {} });
+      await flushB6Telemetry();
+
+      const reviewerSpan = fake.spans.find((span) => span.attributes["feature_factory.call_id"] === telemetryIdentifier("call-reviewer"));
+      assert.equal(reviewerSpan.attributes["feature_factory.run_id"], "run");
+      assert.equal(reviewerSpan.attributes["feature_factory.target_agent"], "implementation-validator");
+    } finally {
+      rmSync(fixture.repo, { recursive: true, force: true });
+    }
+  });
+
+  it("correlates an observed launch root and child through enabled plugin wiring", async () => {
+    const fake = fakeB6Otel();
+    const instance = await plugin({ directory: "/tmp/plugin-launch-root" }, verifiedLaunchOptions(fake, "run-launched"));
+    await bindVerifiedFeatureCommand(instance, "run-launched", "ses-launch-root");
+    instance.event({ event: { type: "session.created", properties: { info: { id: "ses-launch-root" } } } });
+    instance.event({ event: { type: "session.created", properties: { info: { id: "ses-launch-child", parentID: "ses-launch-root" } } } });
+    const identity = { tool: "task", sessionID: "ses-launch-child", callID: "call-launch-child" };
+    const task = { args: { subagent_type: "security-reviewer", prompt: "opaque" } };
+    await instance["tool.execute.before"](identity, task);
+    await instance["tool.execute.after"]({ ...identity, args: task.args }, { output: "opaque", metadata: {} });
+    await flushB6Telemetry();
+
+    const span = fake.spans.find((candidate) => candidate.attributes["feature_factory.call_id"] === telemetryIdentifier("call-launch-child"));
+    assert.equal(span.attributes["feature_factory.run_id"], "run-launched");
+    assert.equal(span.attributes["feature_factory.parent_session_id"], telemetryIdentifier("ses-launch-root"));
   });
 
   it("retains ordinary checked Task spans through completion and emits authoritative prior review fields", async () => {
@@ -1002,9 +1713,9 @@ describe("B6.2 factory-owned plugin spans", () => {
       const spans = fake.spans.filter((span) => span.name === "feature_factory.task");
       assert.equal(spans.length, 2);
       assert.deepEqual(spans[0].attributes, {
-        "feature_factory.session_id": "ses-child",
-        "feature_factory.parent_session_id": "ses-parent",
-        "feature_factory.call_id": "call-first",
+        "feature_factory.session_id": telemetryIdentifier("ses-child"),
+        "feature_factory.parent_session_id": telemetryIdentifier("ses-parent"),
+        "feature_factory.call_id": telemetryIdentifier("call-first"),
         "feature_factory.run_id": "run",
         "feature_factory.slice_id": "slice",
         "feature_factory.attempt": 1,
@@ -1088,6 +1799,47 @@ describe("B6.2 factory-owned plugin spans", () => {
       } finally {
         rmSync(fixture.repo, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("removes abandoned reviewer telemetry entries on session deletion and eviction", async () => {
+    for (const removal of ["deletion", "eviction"]) {
+      const fake = fakeB6Otel();
+      const instance = await plugin({}, verifiedLaunchOptions(fake, `run-${removal}`));
+      const cfg = {};
+      instance.config(cfg);
+      const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: `run-${removal}` } });
+      const bind = async () => {
+        const output = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+        await instance["command.execute.before"]({ command: "feature", sessionID: "ses-review", arguments: command }, output);
+      };
+      await bind();
+      const identity = { tool: "task", sessionID: "ses-review", callID: "call-review" };
+      const first = { args: { subagent_type: "work-reviewer", prompt: "first excluded" } };
+      await instance["tool.execute.before"](identity, first);
+      await flushB6Telemetry();
+      const firstSpan = fake.spans.find((span) => span.name === "feature_factory.task");
+      assert.equal(firstSpan.ended, false, removal);
+
+      if (removal === "deletion") {
+        instance.event({ event: { type: "session.deleted", properties: { info: { id: "ses-review" } } } });
+      } else {
+        for (let index = 0; index < 256; index += 1) {
+          instance.event({ event: { type: "session.created", properties: { info: { id: `ses-review-${index}` } } } });
+        }
+      }
+      await flushB6Telemetry();
+      assert.equal(firstSpan.ended, true, removal);
+      assert.deepEqual(firstSpan.statuses, [{ code: 2 }], removal);
+
+      await bind();
+      const second = { args: { subagent_type: "work-reviewer", prompt: "second excluded" } };
+      await instance["tool.execute.before"](identity, second);
+      await instance["tool.execute.after"]({ ...identity, args: second.args }, { output: "excluded", metadata: {} });
+      await flushB6Telemetry();
+      const taskSpans = fake.spans.filter((span) => span.name === "feature_factory.task");
+      assert.equal(taskSpans.length, 2, `${removal} must release the composite callback key`);
+      assert.equal(taskSpans[1].ended, true, removal);
     }
   });
 });
@@ -1474,6 +2226,37 @@ function fakeB6Otel({ failAt = null } = {}) {
     },
   };
   return { spans, activeContext, importer: async () => api };
+}
+
+function verifiedLaunchOptions(fake, runID) {
+  const token = `claim-${runID}`;
+  return {
+    env: {
+      FEATURE_FACTORY_RUN_ID: runID,
+      OPENCODE_FACTORY_LAUNCH_CLAIM: token,
+    },
+    telemetry: {
+      enabled: true,
+      importer: fake.importer,
+      inspectLaunchClaimFn: () => ({
+        ok: true,
+        owner_status: "live",
+        claim: { run_id: runID, nonce: token, phase: "foreground-live" },
+      }),
+    },
+  };
+}
+
+function telemetryIdentifier(value) {
+  return `ffid:${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32)}`;
+}
+
+async function bindVerifiedFeatureCommand(instance, runID, sessionID) {
+  const cfg = {};
+  instance.config(cfg);
+  const command = encodeFeatureCommandPayload({ operator_request: "review", driver: { mode: "autonomous", run_id: runID } });
+  const output = { parts: [{ type: "text", text: cfg.command.feature.template.replaceAll("$ARGUMENTS", command) }] };
+  await instance["command.execute.before"]({ command: "feature", sessionID, arguments: command }, output);
 }
 
 async function flushB6Telemetry() {

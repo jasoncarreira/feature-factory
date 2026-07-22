@@ -2518,6 +2518,8 @@ describe("telemetry readiness docs contract", () => {
       assert.match(text, /event\(\{event\}\)[\s\S]*session\.created[\s\S]*session\.updated[\s\S]*session\.deleted/i, `${name} must document public session events`);
       assert.match(text, /session\.status[\s\S]*session\.idle[\s\S]*session\.compacted/i, `${name} must document session-ID lifecycle events`);
       assert.match(text, /tool\.execute\.before\/after[\s\S]*sessionID[\s\S]*callID/i, `${name} must document the Task hook composite key`);
+      assert.match(text, /command\.execute\.before[\s\S]*(?:run id|driver\.run_id)[\s\S]*untrusted (?:correlation )?candidate[\s\S]*(?:nonce-bearing live launch claim|durable builder|durable dispatch)/i, `${name} must keep parsed run ids candidate-only`);
+      assert.match(text, /invalid (?:or|and) unencoded feature commands?[\s\S]{0,100}clear(?:s|ing)? (?:their )?exact (?:command-)?session binding|invalid (?:or|and) unencoded commands? bind nothing/i, `${name} must reject unvalidated run binding`);
       assert.match(text, /no native span handle/i, `${name} must deny a native span handle`);
       assert.match(text, /cannot mutate or enrich|cannot mutate native|no supported API for mutating or enriching/i, `${name} must deny native span enrichment`);
       assert.match(text, /factory-owned spans[\s\S]*withSpan\(\)/i, `${name} must reserve adjacent spans for withSpan`);
@@ -2528,7 +2530,7 @@ describe("telemetry readiness docs contract", () => {
   it("defines bounded non-durable correlation identity and the canonical B6 taxonomy", () => {
     const fields = [
       "run_id", "slice_id", "attempt", "verdict", "convergence", "session_id", "parent_session_id", "call_id",
-      "call_relationship", "target_agent", "route", "lane", "task_context", "span_event", "span_operation",
+      "call_relationship", "target_agent", "route", "lane", "task_context", "continuation_kind", "span_event", "span_operation",
     ];
     const formerDottedAliases = [
       "feature_factory.gate.name",
@@ -2553,7 +2555,10 @@ describe("telemetry readiness docs contract", () => {
       assert.match(text, /task_id[\s\S]*never[\s\S]*(?:telemetry identity|persisted|exported)/i, `${name} must exclude raw task_id`);
       assert.match(text, /fresh\|reuse/i, `${name} must bound task context`);
       assert.match(text, /128 UTF-8 bytes/i, `${name} must bound identifiers`);
+      assert.match(text, /credential-shaped or high entropy[\s\S]*SHA-256 pseudonyms[\s\S]*workflow[\s\S]*session\/call identifier/i, `${name} must protect high-entropy identifiers`);
       assert.match(text, /at most 32[\s\S]*ASCII tokens/i, `${name} must bound enum cardinality`);
+      assert.match(text, /verdicts retain their canonical uppercase ASCII spellings[\s\S]*APPROVE[\s\S]*REJECT[\s\S]*GO-WITH-NITS[\s\S]*NO-GO[\s\S]*REDESIGN-REQUIRED/i, `${name} must preserve canonical workflow verdicts`);
+      assert.match(text, /every other enum token is lowercase ASCII/i, `${name} must keep non-verdict enums lowercase`);
       for (const field of fields) assert.match(text, literalPattern(`feature_factory.${field}`), `${name} missing canonical ${field}`);
       for (const alias of formerDottedAliases) assert.doesNotMatch(text, literalPattern(alias), `${name} must not retain former alias ${alias}`);
     }
@@ -2564,8 +2569,8 @@ describe("telemetry readiness docs contract", () => {
       for (const excluded of ["prompts", "messages", "tool arguments/results", "reviews", "evidence", "raw paths", "refs", "hashes", "URLs", "secrets", "traceparent", "tracestate", "arbitrary model output"]) {
         assert.match(text, literalPattern(excluded), `${name} must exclude ${excluded}`);
       }
-      assert.match(text, /active OpenTelemetry context[\s\S]*standard propagation/i, `${name} must use standard W3C/OTel linkage`);
-      assert.match(text, /hooks? (?:expose|exposes) neither native OpenCode span context nor a context-extraction handle|event\/tool hooks do not expose native context/i, `${name} must deny unsupported hook extraction`);
+      assert.match(text, /active OpenTelemetry context[\s\S]*(?:FEATURE_FACTORY_TRACEPARENT|standard propagation)[\s\S]*(?:remote parent|parent context)/i, `${name} must use standard W3C/OTel linkage`);
+      assert.match(text, /hooks? (?:expose|exposes) neither native OpenCode span context|event\/tool hooks do not expose native context/i, `${name} must deny unsupported hook extraction`);
       assert.match(text, /explicitly enabled/i, `${name} must keep telemetry opt-in`);
       assert.match(text, /best-effort/i, `${name} must make telemetry best effort`);
       assert.match(text, /never change|never affect/i, `${name} must protect workflow behavior`);

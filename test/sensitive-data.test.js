@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   REDACTED_KEY,
   REDACTED_VALUE,
@@ -430,7 +431,8 @@ describe("B6 emitted span sensitive-data boundary", () => {
     assert.deepEqual(spans[0].attributes, {
       "feature_factory.run_id": "safe-run",
       "feature_factory.slice_id": "safe-slice",
-      "feature_factory.session_id": "safe-session",
+      "feature_factory.session_id": `ffid:${createHash("sha256").update("safe-session", "utf8").digest("hex").slice(0, 32)}`,
+      "feature_factory.call_id": `ffid:${createHash("sha256").update("ghp_123456789012345678901234567890", "utf8").digest("hex").slice(0, 32)}`,
       "feature_factory.target_agent": "backend-builder",
       "feature_factory.span_event": "task-before",
       "feature_factory.span_operation": "execute-task",

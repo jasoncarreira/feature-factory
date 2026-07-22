@@ -14,7 +14,7 @@ describe("factory trace-context propagation", () => {
     const fixture = createLaunchFixture("start-no-default-env");
     try {
       await withLaunchEnv(fixture, { OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io" }, async () => {
-        await startFactory(["build telemetry"], { cwd: fixture.repo });
+        await startFactory(["build telemetry"], { cwd: fixture.repo, runId: "start-no-default-env" });
       });
 
       const launched = readJson(fixture.captureFile);
@@ -24,6 +24,7 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_TRACESTATE, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, undefined);
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, "start-no-default-env");
     } finally {
       cleanup(fixture.root);
     }
@@ -34,7 +35,7 @@ describe("factory trace-context propagation", () => {
     let detachedPid;
     try {
       await withLaunchEnv(fixture, { OPENCODE_KEEPALIVE: "1" }, async () => {
-        const result = await startFactory(["build detached telemetry"], { cwd: fixture.repo, detached: true, traceparent, tracestate: "vendor=value" });
+        const result = await startFactory(["build detached telemetry"], { cwd: fixture.repo, runId: "start-detached-traceparent", detached: true, traceparent, tracestate: "vendor=value" });
         assert.equal(result.status, "started");
         detachedPid = result.pid;
         await waitForFile(fixture.captureFile);
@@ -46,6 +47,7 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_TRACESTATE, "vendor=value");
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, "start-detached-traceparent");
       process.kill(detachedPid, "SIGTERM");
       await waitForProcessExit(detachedPid);
       detachedPid = null;
@@ -62,11 +64,12 @@ describe("factory trace-context propagation", () => {
     const fixture = createLaunchFixture("start-parent-span");
     try {
       await withLaunchEnv(fixture, {}, async () => {
-        await startFactory(["build parent span telemetry"], { cwd: fixture.repo, parentSpanId: "00F067AA0BA902B7" });
+        await startFactory(["build parent span telemetry"], { cwd: fixture.repo, runId: "start-parent-span", parentSpanId: "00F067AA0BA902B7" });
       });
 
       const launched = readJson(fixture.captureFile);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, "start-parent-span");
       assert.equal(launched.env.TRACEPARENT, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
     } finally {
@@ -83,6 +86,7 @@ describe("factory trace-context propagation", () => {
 
       const launched = readJson(fixture.captureFile);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, fixture.runId);
       assert.equal(launched.env.TRACEPARENT, undefined);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, undefined);
       const decoded = decodeFeatureCommandPayload(launched.argv.at(-1), { repo: fixture.repo });
@@ -93,6 +97,39 @@ describe("factory trace-context propagation", () => {
       const upgraded = structuredClone(decoded.payload);
       upgraded.resume.schema_version = 2;
       assert.deepEqual(decodeFeatureCommandPayload(encodeFeatureCommandPayload(upgraded), { repo: fixture.repo }), { ok: false, reason: "resume-schema-route-mismatch" });
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("propagates the checked run identity through factory start resume", async () => {
+    const fixture = createResumeLaunchFixture("start-resume-run-id");
+    try {
+      await withLaunchEnv(fixture, { FEATURE_FACTORY_RUN_ID: "stale-inherited-run" }, async () => {
+        await startFactory(["resume", fixture.runId], {
+          cwd: fixture.repo,
+          recoverDisruptedRunFn: async () => ({ ok: true, run_dir: fixture.runDir, run_file: join(fixture.runDir, "run.json") }),
+        });
+      });
+
+      const launched = readJson(fixture.captureFile);
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, fixture.runId);
+      const decoded = decodeFeatureCommandPayload(launched.argv.at(-1), { repo: fixture.repo });
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
+      assert.equal(decoded.payload.resume.run_id, fixture.runId);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("clears an inherited run identity for an unnamed new start", async () => {
+    const fixture = createLaunchFixture("start-clears-stale-run-id");
+    try {
+      await withLaunchEnv(fixture, { FEATURE_FACTORY_RUN_ID: "stale-inherited-run" }, async () => {
+        await startFactory(["build unnamed telemetry"], { cwd: fixture.repo });
+      });
+
+      assert.equal(readJson(fixture.captureFile).env.FEATURE_FACTORY_RUN_ID, undefined);
     } finally {
       cleanup(fixture.root);
     }
@@ -119,6 +156,7 @@ describe("factory trace-context propagation", () => {
       assert.equal(launched.env.TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_TRACEPARENT, traceparent);
       assert.equal(launched.env.FEATURE_FACTORY_PARENT_SPAN_ID, "00f067aa0ba902b7");
+      assert.equal(launched.env.FEATURE_FACTORY_RUN_ID, "continue-traceparent-next");
       const launchedRepo = launched.argv[launched.argv.indexOf("--dir") + 1];
       const decoded = decodeFeatureCommandPayload(launched.argv.at(-1), { repo: launchedRepo });
       assert.equal(decoded.ok, true, JSON.stringify(decoded));
@@ -177,6 +215,28 @@ describe("B6.2 factory lifecycle spans", () => {
     }
   });
 
+  it("uses the observed durable terminal outcome when foreground execution returns no result", async () => {
+    const fixture = createLaunchFixture("start-b6-terminal-status");
+    const fake = fakeB6Otel();
+    try {
+      await withLaunchEnv(fixture, {
+        OPENCODE_CREATE_RUN_ID: "checked-blocked-run",
+        OPENCODE_CREATE_RUN_STATUS: "blocked",
+      }, () => startFactory(["blocked foreground run"], {
+        cwd: fixture.repo,
+        runId: "checked-blocked-run",
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      await flushB6Telemetry();
+
+      assert.equal(fake.spans[0].attributes["feature_factory.run_id"], "checked-blocked-run");
+      assert.equal(fake.spans[0].attributes["feature_factory.status"], "blocked");
+      assert.equal(fake.spans[0].ended, true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
   it("does not claim requested or allocated new-run identity before durable creation, including failures", async () => {
     const requested = createLaunchFixture("requested-failure");
     const allocated = createLaunchFixture("allocated-detached");
@@ -230,6 +290,14 @@ describe("B6.2 factory lifecycle spans", () => {
         traceparent: "invalid",
         telemetry: { enabled: true, importer: fake.importer },
       }), /invalid trace context/u);
+      assert.throws(() => continueFactory("missing-carry-parent", {
+        cwd: failed.repo, carryForward: true,
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
+      assert.throws(() => continueFactory("missing-new-pr-parent", {
+        cwd: failed.repo, newPr: true,
+        telemetry: { enabled: true, importer: fake.importer },
+      }));
       const continued = await withLaunchEnv(success, {
         OPENCODE_CREATE_RUN_ID: "durable-child",
       }, () => continueFactory(success.runId, {
@@ -238,11 +306,20 @@ describe("B6.2 factory lifecycle spans", () => {
       assert.equal(continued, undefined);
       await flushB6Telemetry();
       const spans = fake.spans.filter((span) => span.name === "feature_factory.factory.continue");
-      assert.equal(spans.length, 3);
+      assert.equal(spans.length, 5);
+      assert.deepEqual(spans.map((span) => span.attributes["feature_factory.continuation_kind"]), [
+        "narrow-remediation",
+        "narrow-remediation",
+        "full-plan-carry-forward",
+        "new-pr",
+        "narrow-remediation",
+      ]);
       assert.equal(spans[0].attributes["feature_factory.run_id"], undefined);
       assert.equal(spans[1].attributes["feature_factory.run_id"], undefined);
-      assert.equal(spans[2].attributes["feature_factory.run_id"], "durable-child");
-      assert.equal(spans[2].attributes["gen_ai.conversation.id"], "durable-child");
+      assert.equal(spans[2].attributes["feature_factory.run_id"], undefined);
+      assert.equal(spans[3].attributes["feature_factory.run_id"], undefined);
+      assert.equal(spans[4].attributes["feature_factory.run_id"], "durable-child");
+      assert.equal(spans[4].attributes["gen_ai.conversation.id"], "durable-child");
     } finally {
       cleanup(dry.root);
       cleanup(failed.root);
@@ -366,6 +443,7 @@ const keys = [
   "FEATURE_FACTORY_TRACEPARENT",
   "FEATURE_FACTORY_TRACESTATE",
   "FEATURE_FACTORY_PARENT_SPAN_ID",
+  "FEATURE_FACTORY_RUN_ID",
 ];
 const env = Object.fromEntries(keys.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]))
 writeFileSync(process.env.OPENCODE_CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(2), env }, null, 2) + "\\n", "utf8");
@@ -379,7 +457,9 @@ if (process.env.OPENCODE_CREATE_RUN_ID) {
   const rawPayload = process.argv.at(-1);
   const payload = rawPayload?.startsWith("ffpayload-v1:") ? JSON.parse(Buffer.from(rawPayload.slice("ffpayload-v1:".length), "base64url").toString("utf8")) : null;
   const continuation = payload?.continuation;
-  writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: runId, status: "running", branch: runId, worktree, gates: {}, slices: [], ...(continuation ? { continuation } : {}) }, null, 2) + "\\n", "utf8");
+  const status = process.env.OPENCODE_CREATE_RUN_STATUS || "running";
+  const terminal = status === "blocked" ? { terminal_result: { status, run_id: runId, pr_url: null, reason: "test-blocked", summary: null, artifacts: {} } } : {};
+  writeFileSync(join(runDir, "run.json"), JSON.stringify({ schema_version: 1, run_id: runId, status, branch: runId, worktree, gates: {}, slices: [], ...(continuation ? { continuation } : {}), ...terminal }, null, 2) + "\\n", "utf8");
 }
 if (process.env.OPENCODE_KEEPALIVE === "1") setInterval(() => {}, 1000);
 `, "utf8");
@@ -398,10 +478,11 @@ async function withLaunchEnv(fixture, env, fn) {
     "FEATURE_FACTORY_TRACEPARENT",
     "FEATURE_FACTORY_TRACESTATE",
     "FEATURE_FACTORY_PARENT_SPAN_ID",
+    "FEATURE_FACTORY_RUN_ID",
   ]);
   const previous = new Map([...keys].map((key) => [key, process.env[key]]));
   try {
-    for (const key of ["TRACEPARENT", "TRACESTATE", "FEATURE_FACTORY_TRACEPARENT", "FEATURE_FACTORY_TRACESTATE", "FEATURE_FACTORY_PARENT_SPAN_ID"]) {
+    for (const key of ["TRACEPARENT", "TRACESTATE", "FEATURE_FACTORY_TRACEPARENT", "FEATURE_FACTORY_TRACESTATE", "FEATURE_FACTORY_PARENT_SPAN_ID", "FEATURE_FACTORY_RUN_ID"]) {
       delete process.env[key];
     }
     process.env.PATH = `${fixture.bin}:${process.env.PATH}`;

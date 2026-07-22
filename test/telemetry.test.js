@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   b6Attributes,
   checkOpenTelemetryApiLoadability,
@@ -336,7 +337,7 @@ describe("B6 metadata-only spans", () => {
     assert.deepEqual(b6Attributes(hostile), {
       "feature_factory.run_id": "run-safe",
       "feature_factory.slice_id": "slice-safe",
-      "feature_factory.call_id": "call-safe",
+      "feature_factory.call_id": telemetryIdentifier("call-safe"),
       "feature_factory.target_agent": "backend-builder",
       "feature_factory.route": "ordinary-slice",
       "feature_factory.lane": "backend",
@@ -352,6 +353,104 @@ describe("B6 metadata-only spans", () => {
     const revoked = Proxy.revocable({}, {});
     revoked.revoke();
     assert.deepEqual(b6Attributes(revoked.proxy), {});
+  });
+
+  it("pseudonymizes entropy-classified identifiers without exposing credential shapes", () => {
+    const runId = "b6-final-square-completed-correlated-v4-20260722";
+    const attributes = b6Attributes({
+      "feature_factory.run_id": runId,
+      "gen_ai.conversation.id": runId,
+      "feature_factory.slice_id": `s${"x".repeat(127)}`,
+      "feature_factory.session_id": `s${"x".repeat(128)}`,
+      "feature_factory.call_id": "github_pat_123456789012345678901234567890",
+      "feature_factory.parent_session_id": "secret-session",
+    });
+    assert.match(attributes["feature_factory.run_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.equal(attributes["gen_ai.conversation.id"], attributes["feature_factory.run_id"]);
+    assert.equal(attributes["feature_factory.slice_id"], `s${"x".repeat(127)}`);
+    assert.equal(attributes["feature_factory.session_id"], undefined);
+    assert.match(attributes["feature_factory.call_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.match(attributes["feature_factory.parent_session_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.doesNotMatch(JSON.stringify(attributes), /b6-final|github_pat|secret-session/u);
+  });
+
+  it("pseudonymizes high-entropy workflow and opaque correlation identifiers", () => {
+    const credential = "Ab3Zk91Qv7Lm2Np8Rx4Tc6Wy0Df5Gh9Js1Ku3Mv7Px2Qa8Bc";
+    const attributes = b6Attributes({
+      "feature_factory.run_id": credential,
+      "gen_ai.conversation.id": credential,
+      "feature_factory.session_id": credential,
+      "feature_factory.call_id": credential,
+    });
+    assert.match(attributes["feature_factory.run_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.equal(attributes["gen_ai.conversation.id"], attributes["feature_factory.run_id"]);
+    assert.match(attributes["feature_factory.session_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.equal(attributes["feature_factory.call_id"], attributes["feature_factory.session_id"]);
+    assert.doesNotMatch(JSON.stringify(attributes), new RegExp(credential, "u"));
+
+    const groupedCredential = "a1b2c3d4e5f6g7h8-i9j0k1l2m3n4o5p6-q7r8s9t0u1v2w3x4";
+    const grouped = b6Attributes({ "feature_factory.run_id": groupedCredential, "feature_factory.slice_id": groupedCredential });
+    assert.match(grouped["feature_factory.run_id"], /^ffid:[0-9a-f]{32}$/u);
+    assert.equal(grouped["feature_factory.slice_id"], grouped["feature_factory.run_id"]);
+    assert.doesNotMatch(JSON.stringify(grouped), new RegExp(groupedCredential, "u"));
+
+    const source = "Ab3Zk1Qv7Lm2Np8Rx4Tc6Wy0Df5Gh9";
+    for (const length of [20, 27, 31]) {
+      const shortCredential = `${source.slice(0, length - 1)}:`;
+      assert.equal(shortCredential.length, length);
+      const short = b6Attributes({
+        "feature_factory.run_id": shortCredential,
+        "feature_factory.slice_id": shortCredential,
+        "feature_factory.session_id": "short-session",
+        "feature_factory.call_id": "short-call",
+      });
+      assert.equal(short["feature_factory.run_id"], telemetryIdentifier(shortCredential));
+      assert.equal(short["feature_factory.slice_id"], short["feature_factory.run_id"]);
+      assert.equal(short["feature_factory.session_id"], telemetryIdentifier("short-session"));
+      assert.equal(short["feature_factory.call_id"], telemetryIdentifier("short-call"));
+      assert.doesNotMatch(JSON.stringify(short), new RegExp(shortCredential, "u"));
+    }
+  });
+
+  it("extracts supplied W3C trace context as the parent of factory spans", async () => {
+    const fake = fakeOtel();
+    await withB6Span("feature_factory.factory.start", { "feature_factory.mode": "headless" }, () => undefined, {
+      telemetry: { enabled: true, importer: fake.importer },
+      env: {
+        FEATURE_FACTORY_TRACEPARENT: "00-11111111111111111111111111111111-2222222222222222-01",
+        FEATURE_FACTORY_TRACESTATE: "vendor=value",
+      },
+    });
+    assert.deepEqual(fake.spans[0].context, {
+      parent: fake.activeContext,
+      spanContext: {
+        traceId: "11111111111111111111111111111111",
+        spanId: "2222222222222222",
+        traceFlags: 1,
+        isRemote: true,
+        traceState: { value: "vendor=value" },
+      },
+    });
+  });
+
+  it("preserves uppercase workflow verdicts while rejecting uppercase non-verdict enums", () => {
+    assert.deepEqual(b6Attributes({
+      "feature_factory.verdict": "GO-WITH-NITS",
+      "feature_factory.target_agent": "BACKEND-BUILDER",
+      "feature_factory.route": "ORDINARY-SLICE",
+      "feature_factory.lane": "BACKEND",
+      "feature_factory.task_context": "FRESH",
+      "feature_factory.call_relationship": "TASK-HOOK",
+      "feature_factory.span_event": "TASK-BEFORE",
+      "feature_factory.span_operation": "EXECUTE-TASK",
+      "feature_factory.mode": "HEADLESS",
+      "feature_factory.status": "COMPLETED",
+      "feature_factory.convergence": "CONVERGING",
+      "gen_ai.agent.name": "BACKEND-BUILDER",
+      "gen_ai.operation.name": "EXECUTE_TOOL",
+    }), {
+      "feature_factory.verdict": "GO-WITH-NITS",
+    });
   });
 
   it("retains a factory span across dispatch/completion and passes active context", async () => {
@@ -449,6 +548,10 @@ describe("B6 metadata-only spans", () => {
   });
 });
 
+function telemetryIdentifier(value) {
+  return `ffid:${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32)}`;
+}
+
 function fakeOtel({ failAt = null } = {}) {
   const spans = [];
   const calls = { startSpan: 0, startActiveSpan: 0 };
@@ -489,7 +592,9 @@ function fakeOtel({ failAt = null } = {}) {
   };
   const api = {
     context: { active: () => activeContext },
+    createTraceState: (value) => ({ value }),
     trace: {
+      setSpanContext: (context, spanContext) => ({ parent: context, spanContext }),
       getTracer() {
         if (failAt === "tracer") throw new Error("tracer failed");
         return {

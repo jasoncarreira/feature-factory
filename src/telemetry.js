@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   REDACTED_ENV_VALUE,
   isSecretShapedEnvKey,
@@ -26,7 +27,7 @@ const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 const SAFE_ATTRIBUTE_ARRAY_TYPES = new Set(["string", "number", "boolean"]);
 const B6_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const B6_MAX_IDENTIFIER_BYTES = 128;
-const B6_MAX_RETAINED_SPAN_MS = 300_000;
+const B6_MAX_RETAINED_SPAN_MS = 3_600_000;
 const B6_SPAN_NAMES = new Set([
   "feature_factory.session",
   "feature_factory.task",
@@ -42,6 +43,11 @@ const B6_IDENTIFIER_ATTRIBUTES = new Set([
   "feature_factory.call_id",
   "gen_ai.conversation.id",
 ]);
+const B6_OPAQUE_IDENTIFIER_ATTRIBUTES = new Set([
+  "feature_factory.session_id",
+  "feature_factory.parent_session_id",
+  "feature_factory.call_id",
+]);
 const B6_ENUM_ATTRIBUTES = new Map([
   ["feature_factory.target_agent", new Set(["feature-factory", "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer", "work-decomposer", "backend-builder", "frontend-builder", "test-verifier", "work-reviewer", "implementation-validator", "security-reviewer"])],
   ["feature_factory.route", new Set(["ordinary-slice", "merged-slice-repair", "integration-amendment", "integration-amendment-review", "panel-remediation", "post-pr-remediation", "integration-conflict"])],
@@ -54,6 +60,7 @@ const B6_ENUM_ATTRIBUTES = new Map([
   ["feature_factory.status", new Set(["started", "dry-run", "completed", "blocked", "partial", "needs-human", "recovery-required", "already-running", "failed"])],
   ["feature_factory.verdict", new Set(["APPROVE", "REJECT", "GO", "GO-WITH-NITS", "NO-GO", "PASS", "BLOCK", "APPROVE-CHECKPOINT", "REDESIGN-REQUIRED"])],
   ["feature_factory.convergence", new Set(["converging", "nonconvergent"])],
+  ["feature_factory.continuation_kind", new Set(["narrow-remediation", "full-plan-carry-forward", "new-pr"])],
   ["gen_ai.agent.name", new Set(["feature-factory", "story-reader", "story-writer", "codebase-researcher", "design-interpreter", "spec-writer", "work-decomposer", "backend-builder", "frontend-builder", "test-verifier", "work-reviewer", "implementation-validator", "security-reviewer"])],
   ["gen_ai.operation.name", new Set(["invoke_agent", "execute_tool"])],
 ]);
@@ -281,6 +288,30 @@ export function prepareTelemetryEnv(baseEnv = process.env, traceContext = {}) {
   return env;
 }
 
+function activeParentContext(api, env) {
+  const fallback = api.context?.active?.();
+  try {
+    const traceparent = env?.[FEATURE_FACTORY_TRACEPARENT] ?? env?.TRACEPARENT;
+    if (!traceparent) return fallback;
+    const parsed = validateTraceContext({
+      traceparent,
+      tracestate: env?.[FEATURE_FACTORY_TRACESTATE] ?? env?.TRACESTATE,
+    });
+    if (!parsed.ok || typeof api.trace?.setSpanContext !== "function") return fallback;
+    const spanContext = {
+      traceId: parsed.traceId,
+      spanId: parsed.traceparentSpanId,
+      traceFlags: Number.parseInt(parsed.traceFlags, 16),
+      isRemote: true,
+      ...(parsed.tracestate && typeof api.createTraceState === "function"
+        ? { traceState: api.createTraceState(parsed.tracestate) } : {}),
+    };
+    return api.trace.setSpanContext(fallback, spanContext);
+  } catch {
+    return fallback;
+  }
+}
+
 export async function withSpan(name, attributesOrCallback = {}, callbackOrOptions, maybeOptions = {}) {
   const callback = typeof attributesOrCallback === "function" ? attributesOrCallback : callbackOrOptions;
   if (typeof callback !== "function") throw new Error("withSpan requires a callback");
@@ -302,7 +333,7 @@ export async function withSpan(name, attributesOrCallback = {}, callbackOrOption
   let activeContext;
   try {
     tracer = api.trace?.getTracer?.(options.tracerName || TELEMETRY_TRACER_NAME);
-    activeContext = options.context ?? api.context?.active?.();
+    activeContext = options.context ?? activeParentContext(api, options.env ?? process.env);
   } catch {
     return callback(noopSpan());
   }
@@ -365,7 +396,7 @@ export function b6Attributes(input = {}) {
     if (!plainObject(input)) return output;
     for (const [key, value] of Object.entries(input)) {
       if (B6_IDENTIFIER_ATTRIBUTES.has(key)) {
-        const identifier = b6Identifier(value);
+        const identifier = b6Identifier(key, value);
         if (identifier) output[key] = identifier;
         continue;
       }
@@ -423,8 +454,7 @@ export function startB6Span(name, attributes = {}, options = {}) {
   const controller = {
     setAttributes(more) {
       if (ended) return;
-      const projected = b6Attributes(more);
-      queue((facade) => facade.setAttributes(projected));
+      queue((facade) => facade.setAttributes(more));
     },
     addEvent(event) {
       if (ended) return;
@@ -461,10 +491,11 @@ export function withB6Span(name, attributes, callback, options = {}) {
   if (typeof callback !== "function") return Promise.reject(new Error("withB6Span requires a callback"));
   try {
     if (!isB6TelemetryEnabled(options, options.env ?? process.env) || !B6_SPAN_NAMES.has(name)) return Promise.resolve().then(() => callback(inertB6Facade()));
-    return withSpan(name, b6Attributes(attributes), (span) => callback(b6Facade(span)), {
+    return withSpan(name, attributes, (span) => callback(b6Facade(span)), {
       importer: options.importer ?? options.telemetry?.importer,
       tracerName: options.tracerName,
       context: options.context ?? options.telemetry?.context,
+      env: options.env ?? process.env,
       errorMode: "metadata-only",
       attributeMode: "metadata-only",
     });
@@ -497,9 +528,26 @@ function b6Facade(span) {
   });
 }
 
-function b6Identifier(value) {
-  if (typeof value !== "string" || !B6_IDENTIFIER_PATTERN.test(value) || isSensitiveEnvValue(value)) return null;
-  return Buffer.byteLength(value, "utf8") <= B6_MAX_IDENTIFIER_BYTES ? value : null;
+function b6Identifier(key, value) {
+  if (typeof value !== "string" || !B6_IDENTIFIER_PATTERN.test(value)) return null;
+  if (Buffer.byteLength(value, "utf8") > B6_MAX_IDENTIFIER_BYTES) return null;
+  if (!B6_OPAQUE_IDENTIFIER_ATTRIBUTES.has(key) && !isSensitiveEnvValue(value) && !shortHighEntropyToken(value)) return value;
+  return pseudonymizedIdentifier(value);
+}
+
+function shortHighEntropyToken(value) {
+  if (value.length < 20 || !/^[A-Za-z0-9._~+/:=-]+$/u.test(value)) return false;
+  const counts = new Map();
+  for (const char of value) counts.set(char, (counts.get(char) ?? 0) + 1);
+  const entropy = [...counts.values()].reduce((total, count) => {
+    const probability = count / value.length;
+    return total - probability * Math.log2(probability);
+  }, 0);
+  return entropy >= 3.5;
+}
+
+function pseudonymizedIdentifier(value) {
+  return `ffid:${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32)}`;
 }
 
 export function runAttributes(input = {}) {
