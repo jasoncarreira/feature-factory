@@ -2,7 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { git } from "./git.js";
-import { physicalPath, requireNonEmptyString } from "./utils.js";
+import { assertContainedPath, physicalPath, requireNonEmptyString } from "./utils.js";
+
+const FULL_COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
+const IN_PROGRESS_GIT_PATHS = Object.freeze([
+  "MERGE_HEAD",
+  "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
+  "REBASE_HEAD",
+  "rebase-merge",
+  "rebase-apply",
+  "sequencer",
+  "BISECT_LOG",
+]);
 
 export function parseWorktreeListPorcelain(stdout) {
   const entries = [];
@@ -41,6 +53,63 @@ export function checkWorktreeIdentity(repo, worktree, expected = {}, options = {
     return { ok: false, reason: `head-mismatch:${entry.head || "missing"}`, worktree: physicalWorktree, entry };
   }
   return { ok: true, worktree: physicalWorktree, entry };
+}
+
+/**
+ * Observe the exact registered integration worktree identity used by a checked
+ * transition. Unlike the lightweight identity predicate above, this rejects
+ * dirty state, in-progress Git operations, duplicate registrations, and any
+ * path outside the repository's factory-owned worktree root.
+ */
+export function observeRegisteredWorktree(repo, worktree, expected = {}, options = {}) {
+  const repository = physicalPath(repo, "repository", { mustExist: true });
+  const worktreeRoot = physicalPath(options.worktreeRoot || join(repository, ".opencode", "worktrees"), "worktree root", { mustExist: true });
+  const target = physicalPath(worktree, "worktree", { mustExist: true });
+  assertContainedPath(repository, worktreeRoot, "worktree root", { allowEqual: false });
+  assertContainedPath(worktreeRoot, target, "registered worktree", { allowEqual: false });
+
+  const branch = requireNonEmptyString(expected.branch, "expected worktree branch");
+  const head = requireNonEmptyString(expected.head, "expected worktree head");
+  if (!FULL_COMMIT_PATTERN.test(head)) throw new Error("expected worktree head must be a full lowercase commit id");
+  const validBranch = git(repository, ["check-ref-format", "--branch", branch], options);
+  if (!validBranch.ok) throw new Error("expected worktree branch is invalid");
+
+  const listed = git(repository, ["worktree", "list", "--porcelain"], options);
+  if (!listed.ok) throw new Error(`registered worktree list failed: ${(listed.stderr || listed.stdout || "unknown Git error").trim()}`);
+  const matches = parseWorktreeListPorcelain(listed.stdout).filter((entry) => physicalPath(entry.path) === target);
+  if (matches.length !== 1) throw new Error("worktree must have exactly one physical registration");
+  const entry = matches[0];
+  if (entry.bare || entry.detached || entry.branch !== branch) throw new Error("registered worktree is not attached to the expected branch");
+  if (entry.head !== head) throw new Error("registered worktree HEAD does not equal the expected commit");
+
+  const symbolicHead = git(target, ["symbolic-ref", "--quiet", "HEAD"], options);
+  if (!symbolicHead.ok || symbolicHead.stdout.trim() !== `refs/heads/${branch}`) {
+    throw new Error("worktree HEAD is not attached to the expected branch");
+  }
+  const branchHead = resolveWorktreeCommit(target, `refs/heads/${branch}`, "worktree branch", options);
+  const worktreeHead = resolveWorktreeCommit(target, "HEAD", "worktree HEAD", options);
+  if (branchHead !== head || worktreeHead !== head || branchHead !== worktreeHead) {
+    throw new Error("registered branch and worktree HEAD do not equal the expected commit");
+  }
+
+  const status = git(target, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], options);
+  if (!status.ok) throw new Error(`worktree cleanliness could not be observed: ${(status.stderr || status.stdout || "unknown Git error").trim()}`);
+  if (status.stdout !== "") throw new Error("registered worktree is dirty");
+
+  for (const operationPath of IN_PROGRESS_GIT_PATHS) {
+    const resolvedPath = git(target, ["rev-parse", "--path-format=absolute", "--git-path", operationPath], options);
+    const path = resolvedPath.stdout.trim();
+    if (!resolvedPath.ok || !isAbsolute(path)) throw new Error("worktree Git operation state could not be observed");
+    if (existsSync(path)) throw new Error(`registered worktree has an in-progress Git operation: ${operationPath}`);
+  }
+
+  return Object.freeze({
+    repository,
+    worktree: target,
+    worktree_root: worktreeRoot,
+    branch,
+    head,
+  });
 }
 
 export function createOrRecoverWorktree(repo, worktree, expected = {}, options = {}) {
@@ -119,6 +188,13 @@ export function deriveExpectedWorktreePath(repo, branch) {
 
 function shortHash(value) {
   return createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
+
+function resolveWorktreeCommit(worktree, ref, label, options) {
+  const resolved = git(worktree, ["rev-parse", "--verify", `${ref}^{commit}`], options);
+  const oid = resolved.stdout.trim();
+  if (!resolved.ok || !FULL_COMMIT_PATTERN.test(oid)) throw new Error(`${label} did not resolve to one full commit`);
+  return oid;
 }
 
 function inspectTarget(target) {

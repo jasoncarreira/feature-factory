@@ -1,10 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { spawnSync } from "./helpers/git-fixture.js";
-import { createOrRecoverWorktree, deriveExpectedWorktreePath } from "../src/worktrees.js";
+import { createOrRecoverWorktree, deriveExpectedWorktreePath, observeRegisteredWorktree } from "../src/worktrees.js";
 
 describe("worktree path derivation", () => {
   it("adds a stable hash suffix when branch slugs collide", () => {
@@ -215,6 +215,58 @@ describe("safe continuation worktree creation and recovery", () => {
   });
 });
 
+describe("registered worktree observation", () => {
+  it("returns the exact clean attached branch and physical worktree identity", () => {
+    const fixture = createGitFixture("observed");
+    const target = join(fixture.repo, ".opencode", "worktrees", "observed");
+    try {
+      git(fixture.repo, ["worktree", "add", target, "child"]);
+
+      const observed = observeRegisteredWorktree(fixture.repo, target, { branch: "child", head: fixture.head });
+
+      assert.equal(observed.worktree, realpathSync.native(target));
+      assert.equal(observed.worktree_root, realpathSync.native(join(fixture.repo, ".opencode", "worktrees")));
+      assert.equal(observed.branch, "child");
+      assert.equal(observed.head, fixture.head);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("rejects dirty, detached, wrong-branch, wrong-HEAD, outside-root, duplicate, and in-progress worktrees", () => {
+    for (const mode of ["dirty", "detached", "wrong-branch", "wrong-head", "outside", "duplicate", "operation"]) {
+      const fixture = createGitFixture(`observe-${mode}`);
+      const target = mode === "outside"
+        ? join(fixture.repo, "outside-worktree")
+        : join(fixture.repo, ".opencode", "worktrees", mode);
+      try {
+        if (mode === "outside") mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+        if (mode === "detached") git(fixture.repo, ["worktree", "add", "--detach", target, fixture.head]);
+        else git(fixture.repo, ["worktree", "add", target, mode === "wrong-branch" ? "foreign" : "child"]);
+        if (mode === "dirty") writeFileSync(join(target, "dirty.txt"), "dirty\n");
+        if (mode === "operation") {
+          const mergeHead = gitOutput(target, ["rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"]);
+          writeFileSync(mergeHead, `${fixture.head}\n`);
+        }
+        const options = mode === "duplicate" ? { spawnSync: duplicateWorktreeListing(target) } : {};
+        const expectedError = {
+          dirty: /dirty/u,
+          detached: /not attached/u,
+          "wrong-branch": /not attached/u,
+          "wrong-head": /does not equal the expected commit/u,
+          outside: /must stay under/u,
+          duplicate: /exactly one physical registration/u,
+          operation: /in-progress Git operation/u,
+        }[mode];
+
+        assert.throws(
+          () => observeRegisteredWorktree(fixture.repo, target, { branch: "child", head: mode === "wrong-head" ? "f".repeat(40) : fixture.head }, options),
+          expectedError,
+          mode,
+        );
+      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+    }
+  });
+});
+
 function createGitFixture(name) {
   const repo = mkdtempSync(join(tmpdir(), `factory-worktree-${name}-`));
   git(repo, ["init", "-b", "main"]);
@@ -242,4 +294,15 @@ function reservationFiles(repo) {
   const root = join(repo, ".opencode", "worktrees");
   if (!existsSync(root)) return [];
   return readdirSync(root).filter((name) => name.includes("continuation-reservation"));
+}
+
+function duplicateWorktreeListing(target) {
+  return (file, args, options) => {
+    const proc = spawnSync(file, args, options);
+    if (args[0] !== "worktree" || args[1] !== "list" || proc.status !== 0) return proc;
+    const blocks = proc.stdout.trimEnd().split("\n\n");
+    const targetBlock = blocks.find((block) => block.includes("\nbranch refs/heads/child"));
+    assert.ok(targetBlock, `missing child worktree block for ${target}`);
+    return { ...proc, stdout: `${proc.stdout.trimEnd()}\n\n${targetBlock}\n` };
+  };
 }
