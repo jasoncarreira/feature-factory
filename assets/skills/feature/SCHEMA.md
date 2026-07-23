@@ -129,6 +129,26 @@ Optional top-level `run.json.provenance` has `schema_version: 1`, `created`, `la
 
 Provenance stores hashes and byte counts, never raw dynamic prompts, dirty path lists, credentials, or trace context. It is diagnostic and non-authoritative. Configured model/variant is distinct from the actual provider-selected model: `actual` is null and `actual_source` is `unavailable` unless trustworthy OpenCode runtime metadata supplies it. Creation and resume are recorded by `factory env record-created|record-resume`; every review dispatch is stamped immediately before Task with `factory provenance review-dispatch <run-id> --agent AGENT --subject SUBJECT --attempts N --hash sha256:<hash> --prompt-bytes N --json`.
 
+## Checked Active-Run Base Advancement
+
+The dedicated active-run operation is:
+
+```sh
+feature-factory factory base-advance <run-id> --json
+```
+
+It is a JSON-only command and the same closed operation is exported as `advanceFactoryRunBase(runId, { cwd })` from `opencode-feature-factory/cli`. Normalize the primitive run-ID string with one ECMAScript trim and require the concatenation of `^[A-Za-z0-9]` and `(?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`; additionally reject `.`, `..`, embedded `..`, `.lock` suffixes, separators, explicit paths, and drive/UNC forms. Accept `--json` before or after the one ID. Reject every extra positional and caller-supplied repo, ref/SHA, remote, branch, worktree, force, reset, rebase, merge, outcome, or recovery input. Return exactly one closed JSON document: success exits 0; `BASE_ADVANCE_*` usage and operational failures exit 1 with terminal-safe diagnostics.
+
+Admission requires one valid direct-root ordinary pre-PR run with `status: "running"`, no continuation/checkpoint authority, terminal result, PR/fence, active post-PR state, merged or blocked slice, panel, live heartbeat/process/launch owner, pending steering boundary/action, active checked-test claim, unresolved dispatch, special-builder claim, amendment, or repair. The recorded integration branch and unique registered physical worktree are clean, operation-free, attached to the recorded branch, and exactly at `base_commit`. Missing, unknown, malformed, changed, unavailable, ambiguous, orphaned, or cross-bound evidence rejects.
+
+Lock order is fixed: acquire `run-json.lock`, then the existing external launch fence with transient `owner_kind: base-advance`, and hold both through final verification and exact fence release. This excludes concurrent normal resume. Derive repository, origin, branch, worktree, and base only from validated durable state; freshly fetch and confirm exact `refs/heads/main` from one canonical GitHub `origin`; prove the recorded base is an ancestor; re-observe a stable target; and use only `git merge --ff-only` in the registered integration worktree. Reset, rebase, merge commits, local/tracking-main updates, worktree recreation, candidate movement, and caller Git authority are forbidden.
+
+Publication may change only top-level `base_commit` and `updated_at`. Every other manifest value and all non-`run.json` durable bytes, candidate refs/commits/worktrees/index/files, dispatch bindings, and historical baselines remain equal. `already-current` has `updated:false` and `replayed:true`, performs no manifest write or integration movement, and still performs bounded fresh-origin observation plus launch-fence acquisition/release.
+
+Crash classification is exact: old manifest/branch/worktree retries before Git movement; Git-advanced/unbound may bind only when branch and worktree equal the same freshly observed target and non-Git eligibility is unchanged; bound/current replays without movement. Every split, dirty, detached, moved-target, ambiguous, or unknown identity fails closed without reset or repair.
+
+This transition is neither fresh initialization/rebaseline nor blocked continuation. `factory start` creates a new current-main run with fresh planning, gates, tests, and reviews. `factory continue` creates a new child only from a terminal `blocked` parent under checked continuation authority. `factory base-advance` preserves the identity, scope, planning, candidates, and history of the same eligible active run; it does not resume or dispatch the run and does not rewrite candidate history.
+
 ## CLI State Write Surface
 
 After the initial manifest bootstrap, do not edit `run.json` directly. Every semantic state write uses the `feature-factory factory ...` CLI, which takes `run-json.lock/`, validates the next state, and commits atomically. The CLI invokes the checked transition helpers internally, including `transitionGateDecision` for protected gate decisions and `transitionPrCreated` for completed PR state.
@@ -154,6 +174,7 @@ The CLI validates the requested id as a bare safe factory run id, rejects resume
 Required semantic `run.json` write commands:
 
 ```sh
+feature-factory factory base-advance <run-id> --json
 feature-factory factory env record-created <run-id> --json
 feature-factory factory env record-resume <run-id> --json
 feature-factory factory provenance review-dispatch <run-id> --agent AGENT --subject SUBJECT --attempts N --hash sha256:<hash> --prompt-bytes N --json
