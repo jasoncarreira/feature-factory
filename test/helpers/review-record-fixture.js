@@ -7,7 +7,7 @@ export function createReviewRecord(overrides = {}) {
   };
 }
 
-export function createSliceReviewRecord({ subject = "fixture-subject", attempt = 1, reviewedCommit, verdict = "APPROVE", requiredFixes = [], convergence = "converging", fixClassifications, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = subject, ratifiedPaths = [] } = {}) {
+export function createSliceReviewRecord({ subject = "fixture-subject", attempt = 1, reviewedCommit, verdict = "APPROVE", requiredFixes = [], convergence = "converging", lateDiscoveryStrike = false, fixClassifications, scopeEffect = "in-lane", likelyPaths = ["src/fix.js"], fixOwner = subject, ratifiedPaths = [] } = {}) {
   const classifications = fixClassifications || requiredFixes.map(() => convergence === "nonconvergent" ? "nonconvergent" : "narrow-correction");
   return createReviewRecord({
     subject,
@@ -15,6 +15,7 @@ export function createSliceReviewRecord({ subject = "fixture-subject", attempt =
     reviewed_commit: reviewedCommit,
     verdict,
     convergence,
+    late_discovery_strike: lateDiscoveryStrike,
     remaining_fix_count: requiredFixes.length,
     required_fixes: requiredFixes,
     ownership_ratification: { schema_version: 1, paths: [...ratifiedPaths] },
@@ -31,7 +32,7 @@ export function createSliceReviewRecord({ subject = "fixture-subject", attempt =
   });
 }
 
-export function createSliceAttemptReview({ attempt = 1, evidenceRef, evidenceHash, reviewRef, reviewHash, reviewedCommit, diffBaseCommit = reviewedCommit, ratifiedPaths = [], verdict = "APPROVE", convergence = "converging", remainingFixCount = verdict === "APPROVE" ? 0 : 1 } = {}) {
+export function createSliceAttemptReview({ attempt = 1, evidenceRef, evidenceHash, reviewRef, reviewHash, reviewedCommit, diffBaseCommit = reviewedCommit, ratifiedPaths = [], verdict = "APPROVE", convergence = "converging", lateDiscoveryStrike = false, remainingFixCount = verdict === "APPROVE" ? 0 : 1 } = {}) {
   return {
     attempt,
     evidence_ref: evidenceRef,
@@ -43,6 +44,7 @@ export function createSliceAttemptReview({ attempt = 1, evidenceRef, evidenceHas
     ratified_paths: [...ratifiedPaths],
     verdict,
     convergence,
+    late_discovery_strike: lateDiscoveryStrike,
     remaining_fix_count: remainingFixCount,
   };
 }

@@ -2389,6 +2389,19 @@ async function advanceMergedAmendmentConsumer(fixture, { assertCurrentDispatchTa
     status: "review", attempts: 1, evidence_ref: evidenceRef, review_ref: reviewRef,
   }, { mustExist: true, now: NOW });
   assert.equal(checkRunConsistency(fixture.runDir, readRun(fixture)).ok, true, "merged amendment accepts checked consumer review");
+  if (assertCurrentDispatchTamper) {
+    const runPath = join(fixture.runDir, "run.json");
+    const runBytes = readFileSync(runPath);
+    const run = readRun(fixture);
+    delete run.slices.find((slice) => slice.id === "consumer").attempt_reviews[0].late_discovery_strike;
+    writeJson(runPath, run);
+    const consistency = checkRunConsistency(fixture.runDir, readRun(fixture));
+    assert.equal(consistency.checks.find((check) => check.name === "run.schema")?.ok, true, "marker omission remains legacy-schema compatible");
+    const authority = consistency.checks.find((check) => check.name === "run.integration_amendment.authority");
+    assert.equal(authority?.ok, false, "merged amendment rejects a strike marker that differs from the review sidecar");
+    assert.match(authority.errors.map((error) => error.message).join("\n"), /consumer attempt 1 review authority is stale/u);
+    writeFileSync(runPath, runBytes);
+  }
 
   git(fixture.featureWorktree, ["merge", "--no-ff", branch, "-m", "merge consumer integration"]);
   const mergeCommit = git(fixture.featureWorktree, ["rev-parse", "HEAD"]).trim();

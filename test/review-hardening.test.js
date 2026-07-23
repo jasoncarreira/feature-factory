@@ -140,6 +140,25 @@ describe("slice remediation task context", () => {
     assert.throws(() => validateSliceReviewResult(classifiedReview(["narrow-correction"], { convergence: "nonconvergent" })), /classify nonconvergent exactly when review convergence is nonconvergent/u);
   });
 
+  it("validates the optional persisted late-discovery strike shape", () => {
+    const strike = classifiedReview(["narrow-correction"]);
+    strike.late_discovery_strike = true;
+    assert.equal(validateSliceReviewResult(strike).late_discovery_strike, true);
+
+    const wrongType = classifiedReview(["narrow-correction"]);
+    wrongType.late_discovery_strike = "true";
+    assert.throws(() => validateSliceReviewResult(wrongType), /late_discovery_strike.*boolean/u);
+
+    const terminalStrike = classifiedReview(["nonconvergent"], { convergence: "nonconvergent" });
+    terminalStrike.late_discovery_strike = true;
+    assert.throws(() => validateSliceReviewResult(terminalStrike), /one-strike review must remain converging/u);
+
+    const approvingStrike = classifiedReview([]);
+    approvingStrike.verdict = "APPROVE";
+    approvingStrike.late_discovery_strike = true;
+    assert.throws(() => validateSliceReviewResult(approvingStrike), /may be true only for REJECT/u);
+  });
+
   it("rejects schema-v1 and unstructured slice reviews for validation, task context, and feasibility", () => {
     const schemaV1 = classifiedReview(["narrow-correction"], { schemaVersion: 1 });
     const unstructured = classifiedReview(["narrow-correction"]);

@@ -583,6 +583,12 @@ Merge approved slices into the feature worktree one at a time with a normal no-f
 
 Legacy slice review/merged rows reject without mutation. Review publication and merge require complete current bindings and exact append-only history through the current attempt; there is no replay upgrade, synthetic backfill, or unclassified history variant. Partial successor tuples reject, successor merged rows are immutable, and legacy completed runs remain read-only.
 
+### Slice Review One-Strike Policy
+
+Every newly emitted slice review carries boolean `late_discovery_strike`. Set it false for APPROVE and ordinary REJECT reviews. When attempt 2 discovers the first consequential category that the reviewer should have reported on attempt 1, set it true, keep the review converging, and classify fixes by their actual remediation shape. The checked publisher permits that strike only once and only while normal attempt 3 remains. Existing persisted sidecars without the field remain read-compatible and are never backfilled.
+
+The strike changes only premature slice-review nonconvergence. A first attempt-2 reviewer miss receives normal attempt 3 instead of terminalizing. If attempt 3 is still REJECT, it must be `nonconvergent` and follows the existing checked carry-forward route; there is no attempt 4. Spec, decomposition, and test-verifier nonconvergence rules are unchanged, and ownership, contract-change, sibling-owner, security, and feasibility routing still fail closed before slice retry.
+
 ### Generic Integration Amendment
 
 Use this route for every baseline-substrate failure in a pristine attempt-zero pending consumer that directly depends on one already merged APPROVE owner. The defect path and every resulting changed path must remain inside that owner's frozen `effective_paths`; the route cannot amend accepted/public/persisted contracts, product scope, security boundaries, generated ownership, decomposition, or the consumer. `factory repair` accepts new reports only for the disjoint blocked, previously attempted, or branch-only consumer classes and continues every already-persisted legacy record unchanged. A generic-eligible legacy report rejects before side effects and names this route; never fall back after any generic claim, settled tombstone, unknown outcome, or manifest exists.

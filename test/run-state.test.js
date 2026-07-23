@@ -4048,7 +4048,7 @@ function writeModernReviewedSlice(runDir, id, { status = "review", mergeCommit, 
   writeJson(join(runDir, reviewRef), createV2SliceReviewRecord({ subject: id, attempt: 1, reviewedCommit }));
   const evidenceHash = hashFile(join(runDir, evidenceRef));
   const reviewHash = hashFile(join(runDir, reviewRef));
-  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0 };
+  const history = { attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash, reviewed_commit: reviewedCommit, diff_base_commit: reviewedCommit, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0 };
   return {
     id, stack: "backend", depends_on: [], declared_paths: ["src/**"], effective_paths: ["src/**"], status, attempts: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
     reviewed_commit: reviewedCommit, attempt_reviews: [history], ...(status === "merged" ? { merge_commit: mergeCommit ?? reviewedCommit } : {}),
@@ -4413,6 +4413,7 @@ function prepareSliceMergeState(fixture, { verdict = "APPROVE", subject = "slice
     ratified_paths: [],
     verdict,
     convergence: review.convergence,
+    late_discovery_strike: review.late_discovery_strike,
     remaining_fix_count: review.remaining_fix_count,
   };
   const slices = [{
@@ -4564,7 +4565,7 @@ function prepareAdditionalSliceConflict(fixture, { sliceId, branch, reviewedPath
   const closureHash = hashFile(join(fixture.runDir, closureRef));
   const attemptReview = {
     attempt: 1, evidence_ref: evidenceRef, evidence_hash: evidenceHash, review_ref: reviewRef, review_hash: reviewHash,
-    reviewed_commit: reviewedCommit, diff_base_commit: baseline, ratified_paths: [], verdict: "APPROVE", convergence: "converging", remaining_fix_count: 0,
+    reviewed_commit: reviewedCommit, diff_base_commit: baseline, ratified_paths: [], verdict: "APPROVE", convergence: "converging", late_discovery_strike: false, remaining_fix_count: 0,
     dispatch_claim_ref: claimRef, dispatch_claim_hash: claimHash, dispatch_closure_ref: closureRef, dispatch_closure_hash: closureHash,
   };
   const planPath = join(fixture.runDir, "plan", "slices.json");
@@ -4788,6 +4789,7 @@ function writeReadyPrRun(fixture, overrides = {}) {
     ratified_paths: [],
     verdict: "APPROVE",
     convergence: "converging",
+    late_discovery_strike: false,
     remaining_fix_count: 0,
   }];
   const sanitizedOverrides = { ...overrides };

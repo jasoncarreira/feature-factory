@@ -443,6 +443,10 @@ The exclusive v2 claim hashes closed parent identity as recursively lexicographi
 
 After B1.3 allocation, B1.4 stages a complete child outside run discovery, validates it, rechecks every authority immediately before one no-overwrite atomic directory publication, and only afterward creates the payload, seeds the skill, and launches. The child uses root schema 1 plus continuation schema 2, a closed persisted mode/account/PR/post-PR configuration, exact inherited planning/spec acceptance, the byte-identical full plan, PLAN-ordered immutable merged rows and authority-free pending rows, fresh gates/steering/panels, and no inherited outcomes. Fresh execution skips planning/bootstrap and starts dependency-ready remaining work; fresh test-verifier, validator, security, and whole-story pre-PR authority run only after all full-plan rows merge. Exact replay preserves progressed or terminal children and never rewrites adopted rows.
 
+#### Slice review one-strike policy
+
+New slice reviews receive one review-process strike before terminal nonconvergence. A consequential first-pass category discovered on attempt 2 is hash-bound as `late_discovery_strike: true`, remains converging, and consumes normal attempt 3; it never creates attempt 4. A rejected final attempt takes the existing checked nonconvergence carry-forward route. Persisted older sidecars without the marker remain readable.
+
 ### Choosing continuation, rebaseline, or recovery
 
 Blocked work does not always belong in `factory continue`. Choose the restart pattern from the authority that is still valid:

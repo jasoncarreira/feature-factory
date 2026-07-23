@@ -56,6 +56,7 @@ describe("B4.4 work-reviewer prompt", () => {
       "reviewed_commit",
       "verdict",
       "convergence",
+      "late_discovery_strike",
       "remaining_fix_count",
       "required_fixes",
       "ownership_ratification",
