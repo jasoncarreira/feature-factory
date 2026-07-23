@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants as FS_CONSTANTS, existsSync, lstat
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync as defaultSpawnSync } from "node:child_process";
-import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
+import { assertNoCurrentSliceNonconvergence, assertNoPendingSpecialBuilderDispatches, assertNoUnreconciledTestExecution, assertNoUnresolvedSliceDispatches, assertNoUnresolvedSpecialBuilderDispatches, assertPanelReviewBindingsCurrent, assertPublishedCarryForwardRun, assertRunJsonWriterAllowed, assertSliceAttemptHistoryCurrent, assertSliceReviewBindingCurrent, assertV2LocalPublishedAuthority, hashRunState, hasInFlightHeartbeatWork, inspectApprovalHandoffReceipt, inspectContinuationRouteSchema, mergedSliceRepairFence, observeAcceptedDecompositionAuthority, observeCarryForwardAuthority, observeContinuationTargetReservation, observeIntegrationAmendmentExecutionAuthority, observePermanentContinuationClaims, observeReviewedMergeProof, probeSlicesPlanAdmission, readSlicesSeedPlan, resolveGateAnswerTarget, transitionCheckpointProgressChildPublished, transitionCheckpointProgressClosed, transitionCheckpointProgressLaunched, transitionCheckpointProgressMerged, transitionCheckpointProgressReserved, transitionContinuationAdoption, transitionCostUsage, transitionGateDecision, transitionIntegrationAmendment, transitionLegacyPrFenceNeedsHuman, transitionPostPrFailure, transitionPostPrState, transitionPostPrTerminal, transitionPrePrFenceCleared, transitionPrePrFenceEstablished, transitionRunBaseAdvance, transitionRunStep, transitionSlicesSeed, transitionSteeringAcknowledged, transitionSteeringActionAborted, transitionSteeringActionClosed, transitionSteeringActionStarted, transitionSteeringBoundaryCrossed, transitionSteeringBoundaryOpened, transitionSteeringConflict, transitionSteeringConsumed, transitionSteeringQueued, withRunJsonLock } from "./run-state.js";
 import { publicCostAttributionSummary } from "./cost-attribution.js";
 import { assertIntegrationAmendmentConsistency, inspectIntegrationAmendmentInventory, parseSlicesPlanBytes, pendingProtectedGate, postPrConsistencyChecks, steeringConsistencyChecks, validateCheckpointChildPublication, validateCheckpointConfiguration, validateHeartbeatState, validateIntegrationAmendmentExecutionClaim, validateIntegrationAmendmentExecutionReceipt, validateRun, validateRunDir, validateSlicesPlan } from "./validate.js";
 import { collectEffectiveProvenance, collectRunDebugSnapshot } from "./env-snapshot.js";
@@ -29,6 +29,7 @@ import { reconcileCheckpointPublication } from "./checkpoint-publication.js";
 import { assertCheckpointCleanupEligible, assertCheckpointRemoteMainAdvanced, buildCheckpointFinalClosure, buildCheckpointMergedCompletion, resolveCheckpointCompletionLineage, verifyRecordedCheckpointMerges } from "./checkpoint-completion.js";
 import { writeProtectedJsonAtomic } from "./hardening/atomic-write.js";
 import { checkedExecutionEnvironment, executeCheckedCommand } from "./test-execution.js";
+import { BASE_ADVANCE_ERROR_CODES } from "./base-advance/state-model.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const TERMINAL_STATUSES = new Set(["completed", "blocked", "partial", "needs-human"]);
@@ -53,6 +54,8 @@ const CHECKPOINT_PLANNING_REUSE_KEYS = new Set(["eligible", "plan_ref", "plan_ha
 const CARRY_FORWARD_MODES = new Set(["interactive", "headless", "autonomous"]);
 const CARRY_FORWARD_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const FULL_COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
+const BASE_ADVANCE_OPERATION = "active-run-base-advance";
+const BASE_ADVANCE_PUBLIC_ERROR_CODES = new Set(Object.values(BASE_ADVANCE_ERROR_CODES));
 const CONTINUATION_PARENT_ARTIFACT_REFS = [
   { kind: "story", ref: "artifacts/story.md" },
   { kind: "research_map", ref: "artifacts/research-map.md" },
@@ -1048,6 +1051,120 @@ function exactRemoteRefOid(result, ref) {
 
 function assertRegularFile(path, label) {
   if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) throw new Error(`${label} must be a regular non-symlink file`);
+}
+
+export async function advanceFactoryRunBase(runId, options = {}) {
+  const envelopeRunId = baseAdvanceEnvelopeRunId(runId);
+  try {
+    const normalizedRunId = normalizeBaseAdvanceRunId(runId);
+    const { cwd } = readBaseAdvanceApiOptions(options);
+    const target = resolveDirectBaseAdvanceRun(normalizedRunId, cwd);
+    return await transitionRunBaseAdvance(target.runDir, { repoRoot: target.repo });
+  } catch (error) {
+    return {
+      ok: false,
+      operation: BASE_ADVANCE_OPERATION,
+      run_id: envelopeRunId,
+      error: {
+        code: baseAdvancePublicErrorCode(error),
+        message: renderErrorForTerminal(error),
+      },
+    };
+  }
+}
+
+function normalizeBaseAdvanceRunId(value) {
+  const runId = baseAdvanceEnvelopeRunId(value);
+  if (runId === null) {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.usage, "factory base-advance requires one safe bare run id");
+  }
+  return runId;
+}
+
+function baseAdvanceEnvelopeRunId(value) {
+  if (typeof value !== "string") return null;
+  const runId = value.trim();
+  if (!SAFE_RUN_ID_PATTERN.test(runId) || runId === "." || runId === ".." || runId.includes("..") || runId.endsWith(".lock")) return null;
+  return runId;
+}
+
+function readBaseAdvanceApiOptions(options) {
+  try {
+    if (options === null || typeof options !== "object" || Object.getPrototypeOf(options) !== Object.prototype) {
+      throw new Error("invalid options");
+    }
+    const keys = Reflect.ownKeys(options);
+    if (keys.some((key) => key !== "cwd")) throw new Error("invalid options");
+    const descriptor = Reflect.getOwnPropertyDescriptor(options, "cwd");
+    if (descriptor === undefined) return { cwd: process.cwd() };
+    if (!Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "string" || descriptor.value.trim() === "") {
+      throw new Error("invalid options");
+    }
+    return { cwd: descriptor.value };
+  } catch {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.usage,
+      "factory base-advance options must be a plain closed object containing only optional cwd");
+  }
+}
+
+function resolveDirectBaseAdvanceRun(runId, cwd) {
+  let repo;
+  let factory;
+  let runDir;
+  let runFile;
+  try {
+    repo = resolve(repoRoot(cwd));
+    factory = resolve(directFactoryRoot(repo));
+    runDir = resolve(factory, runId);
+    runFile = join(runDir, "run.json");
+    if (dirname(runDir) !== factory) throw new Error("run is not an immediate child");
+    const factoryEntry = lstatSync(factory);
+    const runEntry = lstatSync(runDir);
+    const runFileEntry = lstatSync(runFile);
+    if (factoryEntry.isSymbolicLink() || !factoryEntry.isDirectory()
+      || runEntry.isSymbolicLink() || !runEntry.isDirectory()
+      || runFileEntry.isSymbolicLink() || !runFileEntry.isFile()) {
+      throw new Error("unsafe run identity");
+    }
+    const physicalFactory = realpathSync(factory);
+    const physicalRunDir = realpathSync(runDir);
+    if (dirname(physicalRunDir) !== physicalFactory) throw new Error("run is not a physical immediate child");
+  } catch {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.runInvalid,
+      "factory base-advance run could not be resolved safely");
+  }
+
+  let run;
+  try {
+    run = readRunFile(runFile);
+  } catch {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.runInvalid,
+      "factory base-advance run could not be resolved safely");
+  }
+  if (run.run_id !== runId) {
+    throw baseAdvanceApiFailure(BASE_ADVANCE_ERROR_CODES.runInvalid,
+      "factory base-advance durable run identity does not match the requested run");
+  }
+  return { repo, runDir };
+}
+
+function baseAdvanceApiFailure(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function baseAdvancePublicErrorCode(error) {
+  try {
+    const descriptor = error !== null && (typeof error === "object" || typeof error === "function")
+      ? Reflect.getOwnPropertyDescriptor(error, "code")
+      : undefined;
+    return descriptor && Object.hasOwn(descriptor, "value") && BASE_ADVANCE_PUBLIC_ERROR_CODES.has(descriptor.value)
+      ? descriptor.value
+      : BASE_ADVANCE_ERROR_CODES.failed;
+  } catch {
+    return BASE_ADVANCE_ERROR_CODES.failed;
+  }
 }
 
 export async function recoverDisruptedRun(runId, opts = {}) {
