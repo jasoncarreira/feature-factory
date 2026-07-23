@@ -1,10 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { spawnSync } from "./helpers/git-fixture.js";
-import { createOrRecoverWorktree, deriveExpectedWorktreePath } from "../src/worktrees.js";
+import { createOrRecoverWorktree, deriveExpectedWorktreePath, observeRegisteredWorktree } from "../src/worktrees.js";
 
 describe("worktree path derivation", () => {
   it("adds a stable hash suffix when branch slugs collide", () => {
@@ -215,6 +215,134 @@ describe("safe continuation worktree creation and recovery", () => {
   });
 });
 
+describe("registered worktree observation", () => {
+  it("returns the exact clean attached branch and physical worktree identity", () => {
+    const fixture = createGitFixture("observed");
+    const target = join(fixture.repo, ".opencode", "worktrees", "observed");
+    try {
+      git(fixture.repo, ["worktree", "add", target, "child"]);
+
+      const observed = observeRegisteredWorktree(fixture.repo, target, { branch: "child", head: fixture.head });
+
+      assert.equal(observed.worktree, realpathSync.native(target));
+      assert.equal(observed.worktree_root, realpathSync.native(join(fixture.repo, ".opencode", "worktrees")));
+      assert.equal(observed.branch, "child");
+      assert.equal(observed.head, fixture.head);
+    } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+  });
+
+  it("rejects alternate roots and symlink-substituted authority paths", () => {
+    for (const mode of ["alternate-root", "symlink-opencode", "symlink-root", "symlink-worktree"]) {
+      const fixture = createGitFixture(`authority-${mode}`);
+      try {
+        let target;
+        let options = {};
+        if (mode === "alternate-root") {
+          const alternateRoot = join(fixture.repo, "alternate-worktrees");
+          target = join(alternateRoot, "child");
+          mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+          git(fixture.repo, ["worktree", "add", target, "child"]);
+          options = { worktreeRoot: alternateRoot };
+        } else if (mode === "symlink-opencode") {
+          const actualOpencode = join(fixture.repo, "actual-opencode");
+          target = join(actualOpencode, "worktrees", "child");
+          mkdirSync(join(actualOpencode, "worktrees"), { recursive: true });
+          git(fixture.repo, ["worktree", "add", target, "child"]);
+          symlinkSync(actualOpencode, join(fixture.repo, ".opencode"), "dir");
+          target = join(fixture.repo, ".opencode", "worktrees", "child");
+        } else if (mode === "symlink-root") {
+          const actualRoot = join(fixture.repo, "actual-worktrees");
+          const opencode = join(fixture.repo, ".opencode");
+          target = join(actualRoot, "child");
+          mkdirSync(actualRoot, { recursive: true });
+          mkdirSync(opencode);
+          git(fixture.repo, ["worktree", "add", target, "child"]);
+          symlinkSync(actualRoot, join(opencode, "worktrees"), "dir");
+          target = join(opencode, "worktrees", "child");
+        } else {
+          const root = join(fixture.repo, ".opencode", "worktrees");
+          const actual = join(root, "actual");
+          target = join(root, "alias");
+          git(fixture.repo, ["worktree", "add", actual, "child"]);
+          symlinkSync(actual, target, "dir");
+        }
+
+        assert.throws(
+          () => observeRegisteredWorktree(fixture.repo, target, { branch: "child", head: fixture.head }, options),
+          /must stay under|real directory|symlink substitution|requested path/u,
+          mode,
+        );
+      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+    }
+  });
+
+  it("rejects dirty, detached, wrong-branch, wrong-HEAD, outside-root, duplicate, and every in-progress marker", () => {
+    const operationModes = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply", "sequencer", "BISECT_LOG"];
+    for (const mode of ["dirty-untracked", "dirty-tracked", "detached", "wrong-branch", "wrong-head", "outside", "duplicate", ...operationModes]) {
+      const fixture = createGitFixture(`observe-${mode}`);
+      const target = mode === "outside"
+        ? join(fixture.repo, "outside-worktree")
+        : join(fixture.repo, ".opencode", "worktrees", mode);
+      try {
+        if (mode === "outside") mkdirSync(join(fixture.repo, ".opencode", "worktrees"), { recursive: true });
+        if (mode === "detached") git(fixture.repo, ["worktree", "add", "--detach", target, fixture.head]);
+        else git(fixture.repo, ["worktree", "add", target, mode === "wrong-branch" ? "foreign" : "child"]);
+        if (mode === "dirty-untracked") writeFileSync(join(target, "dirty.txt"), "dirty\n");
+        if (mode === "dirty-tracked") writeFileSync(join(target, "README.md"), "modified\n");
+        if (operationModes.includes(mode)) {
+          const operationPath = gitOutput(target, ["rev-parse", "--path-format=absolute", "--git-path", mode]);
+          if (["rebase-merge", "rebase-apply", "sequencer"].includes(mode)) mkdirSync(operationPath);
+          else writeFileSync(operationPath, `${fixture.head}\n`);
+        }
+        const options = mode === "duplicate" ? { spawnSync: duplicateWorktreeListing(target) } : {};
+        const expectedError = {
+          "dirty-untracked": /dirty/u,
+          "dirty-tracked": /dirty/u,
+          detached: /not attached/u,
+          "wrong-branch": /not attached/u,
+          "wrong-head": /does not equal the expected commit/u,
+          outside: /must stay under/u,
+          duplicate: /exactly one registration/u,
+        }[mode] || /in-progress Git operation/u;
+
+        assert.throws(
+          () => observeRegisteredWorktree(fixture.repo, target, { branch: "child", head: mode === "wrong-head" ? "f".repeat(40) : fixture.head }, options),
+          expectedError,
+          mode,
+        );
+      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+    }
+  });
+
+  it("fails closed when cleanliness, Git-path, or marker inspection cannot be observed", () => {
+    for (const mode of ["status", "git-path", "marker-inspection"]) {
+      const fixture = createGitFixture(`observation-failure-${mode}`);
+      const target = join(fixture.repo, ".opencode", "worktrees", mode);
+      try {
+        git(fixture.repo, ["worktree", "add", target, "child"]);
+        const options = mode === "marker-inspection"
+          ? {
+              lstatSync(path) {
+                if (path.endsWith("MERGE_HEAD")) {
+                  const error = new Error("injected marker failure");
+                  error.code = "EACCES";
+                  throw error;
+                }
+                return lstatSync(path);
+              },
+            }
+          : { spawnSync: failWorktreeObservation(mode) };
+
+        assert.throws(
+          () => observeRegisteredWorktree(fixture.repo, target, { branch: "child", head: fixture.head }, options),
+          mode === "status" ? /cleanliness could not be observed/u : /Git operation state could not be observed/u,
+          mode,
+        );
+      } finally { rmSync(fixture.repo, { recursive: true, force: true }); }
+    }
+  });
+});
+
 function createGitFixture(name) {
   const repo = mkdtempSync(join(tmpdir(), `factory-worktree-${name}-`));
   git(repo, ["init", "-b", "main"]);
@@ -242,4 +370,27 @@ function reservationFiles(repo) {
   const root = join(repo, ".opencode", "worktrees");
   if (!existsSync(root)) return [];
   return readdirSync(root).filter((name) => name.includes("continuation-reservation"));
+}
+
+function duplicateWorktreeListing(target) {
+  return (file, args, options) => {
+    const proc = spawnSync(file, args, options);
+    if (args[0] !== "worktree" || args[1] !== "list" || proc.status !== 0) return proc;
+    const blocks = proc.stdout.trimEnd().split("\n\n");
+    const targetBlock = blocks.find((block) => block.includes("\nbranch refs/heads/child"));
+    assert.ok(targetBlock, `missing child worktree block for ${target}`);
+    return { ...proc, stdout: `${proc.stdout.trimEnd()}\n\n${targetBlock}\n` };
+  };
+}
+
+function failWorktreeObservation(mode) {
+  return (file, args, options) => {
+    if (mode === "status" && args[0] === "status") {
+      return { status: 128, stdout: "", stderr: "injected status failure" };
+    }
+    if (mode === "git-path" && args[0] === "rev-parse" && args.includes("--git-path")) {
+      return { status: 128, stdout: "", stderr: "injected git-path failure" };
+    }
+    return spawnSync(file, args, options);
+  };
 }
