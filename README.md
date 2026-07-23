@@ -401,6 +401,26 @@ feature-factory factory start --repo /path/to/repo --autonomous "APP-123 add the
 
 `factory start --dry-run` is unsupported. It is rejected before opencode launch, skill seeding, factory or worktree creation, process-state creation, detached logging, `.git/info/exclude` changes, or any other repository side effect in foreground, headless, autonomous, and detached modes. Dry-run support on commands such as `factory resume` and `factory cleanup` is command-specific and does not make start dry-run valid.
 
+### Checked Active-Run Base Advancement
+
+Advance one eligible ordinary active pre-PR run to a freshly observed canonical `origin/main` without resuming it:
+
+```sh
+feature-factory factory base-advance <run-id> --json
+```
+
+This automation surface is JSON-only. It requires exactly one safe bare run ID; the CLI and `advanceFactoryRunBase(runId, { cwd })` export from `opencode-feature-factory/cli` trim that primitive string exactly once and accept only the concatenation of `^[A-Za-z0-9]` and `(?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`, additionally rejecting `.`, `..`, `..` anywhere, `.lock` suffixes, path separators, explicit paths, and drive/UNC forms. `--json` may precede or follow the ID. Extra positionals and every caller-supplied repo, ref, SHA, remote, branch, worktree, force, reset, rebase, merge, outcome, or recovery option are rejected. Success exits 0 with one closed JSON document; usage and operational failures exit 1 with one closed, terminal-safe JSON error document and no raw Git diagnostics.
+
+Eligibility is deliberately narrow and fail-closed: the selected direct-root run must be a valid ordinary `running` run with no continuation/checkpoint authority, terminal result, PR/PR fence, post-PR activity, merged or blocked slice, validator/security panel, live heartbeat/process/launch owner, pending steering boundary/action, active checked-test claim, unresolved dispatch, special-builder claim, amendment, or repair. Its integration branch and uniquely registered physical worktree must be clean, attached to the recorded branch, free of in-progress Git operations, and exactly equal to the recorded `base_commit`. Unknown, malformed, changed, unavailable, ambiguous, orphaned, or cross-bound evidence is ineligible.
+
+The operation always acquires `run-json.lock` first and then the existing external launch fence with transient `owner_kind: base-advance`; normal resume cannot launch concurrently. While holding both, it derives all Git identity from validated durable state, freshly fetches and confirms exact `refs/heads/main` from the one canonical GitHub `origin`, requires the recorded base to be an ancestor, rechecks that target, and uses only `git merge --ff-only` in the registered integration worktree. It never resets, rebases, creates a merge commit, updates local `main` or `refs/remotes/origin/main`, recreates a worktree, or advances/rebases candidate branches and worktrees.
+
+On a real advancement, only `run.json.base_commit` and `run.json.updated_at` may change. Every other manifest value and every artifact, plan, gate, evidence, review, sidecar, dispatch binding, candidate ref/commit/worktree/index/file, and historical baseline remain preserved. An `already-current` replay performs no manifest write or integration movement, but still performs the bounded fresh-origin observation and transient launch-fence lifecycle.
+
+Crash recovery has three deterministic states: interruption before Git movement retries from the old eligible identity; Git advanced but manifest unbound may bind only when branch/worktree still equal the same freshly observed target and all non-Git eligibility remains unchanged; an already bound current identity replays without movement. Split, dirty, detached, moved-target, ambiguous, or otherwise unknown state fails closed without reset or repair.
+
+This is not fresh-run initialization or rebaseline: `factory start` creates a new run on current `main` and obtains fresh planning, gates, tests, and reviews. It is also not blocked-run continuation: `factory continue` creates a new child only from a terminal `blocked` parent under its reviewed continuation contract. `factory base-advance` keeps the same eligible active run and checked planning/candidates, does not resume or dispatch it, and does not change accepted scope or candidate history.
+
 Check or recover a disrupted resume before launching opencode:
 
 ```sh
