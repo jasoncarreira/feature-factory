@@ -278,6 +278,14 @@ export function evaluateBaseAdvanceState(observation) {
     if (rule.disposition === "reject") return rejectedResult(dimensionName, variant, rule.code);
   }
 
+  if (!isValidCrashAncestryPair(observation.ancestry, observation.crash_point)) {
+    return rejectedResult(
+      "crash_point",
+      observation.crash_point,
+      BASE_ADVANCE_ERROR_CODES.gitStateInvalid,
+    );
+  }
+
   const crash = BASE_ADVANCE_STATE_MODEL.crash_point[observation.crash_point];
   return {
     eligible: true,
@@ -288,6 +296,12 @@ export function evaluateBaseAdvanceState(observation) {
     updated: crash.updated,
     replayed: crash.replayed,
   };
+}
+
+function isValidCrashAncestryPair(ancestry, crashPoint) {
+  return (ancestry === "ancestor"
+      && (crashPoint === "old-eligible" || crashPoint === "git-advanced-unbound"))
+    || (ancestry === "equal" && crashPoint === "bound-current");
 }
 
 function dimension(variants) {

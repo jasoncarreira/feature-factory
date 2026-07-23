@@ -99,6 +99,23 @@ const EXPECTED_MODEL = Object.freeze({
 });
 
 describe("active-run base-advance eligibility state model", () => {
+  it("pins every stable public error code to its documented literal", () => {
+    assert.deepEqual(BASE_ADVANCE_ERROR_CODES, {
+      usage: "BASE_ADVANCE_USAGE",
+      runInvalid: "BASE_ADVANCE_RUN_INVALID",
+      ineligible: "BASE_ADVANCE_INELIGIBLE",
+      lockContended: "BASE_ADVANCE_LOCK_CONTENDED",
+      originUnavailable: "BASE_ADVANCE_ORIGIN_UNAVAILABLE",
+      originAmbiguous: "BASE_ADVANCE_ORIGIN_AMBIGUOUS",
+      nonFastForward: "BASE_ADVANCE_NON_FAST_FORWARD",
+      gitStateInvalid: "BASE_ADVANCE_GIT_STATE_INVALID",
+      targetMoved: "BASE_ADVANCE_TARGET_MOVED",
+      publishFailed: "BASE_ADVANCE_PUBLISH_FAILED",
+      tempRefCleanupFailed: "BASE_ADVANCE_TEMP_REF_CLEANUP_FAILED",
+      failed: "BASE_ADVANCE_FAILED",
+    });
+  });
+
   it("accepts the exact ordinary running pre-PR old-base state", () => {
     assert.deepEqual(evaluateBaseAdvanceState(eligibleBaseAdvanceState()), allowedResult(
       "fast-forward-and-bind",
@@ -119,10 +136,14 @@ describe("active-run base-advance eligibility state model", () => {
 
       for (const [variant, expectedRule] of Object.entries(expectedDimension)) {
         assert.deepEqual(BASE_ADVANCE_STATE_MODEL[dimensionName][variant], expectedRule, `${dimensionName}:${variant}:rule`);
-        const actual = evaluateBaseAdvanceState(eligibleBaseAdvanceState({ [dimensionName]: variant }));
+        const actual = evaluateBaseAdvanceState(eligibleBaseAdvanceState(
+          compatibleOverrides(dimensionName, variant),
+        ));
         const expected = expectedRule.disposition === "reject"
           ? rejectedResult(dimensionName, variant, expectedRule.code)
-          : dimensionName === "crash_point"
+          : dimensionName === "ancestry" && variant === "equal"
+            ? allowedResult("replay", "already-current", false, true)
+            : dimensionName === "crash_point"
             ? allowedResult(expectedRule.action, expectedRule.success_disposition, expectedRule.updated, expectedRule.replayed)
             : allowedResult("fast-forward-and-bind", "advanced", true, false);
         assert.deepEqual(actual, expected, `${dimensionName}:${variant}:evaluation`);
@@ -137,8 +158,27 @@ describe("active-run base-advance eligibility state model", () => {
       rejectedResult("slices", "blocked", CODES.ineligible));
     assert.deepEqual(evaluateBaseAdvanceState(eligibleBaseAdvanceState({ crash_point: "git-advanced-unbound" })),
       allowedResult("bind", "advanced", true, false));
-    assert.deepEqual(evaluateBaseAdvanceState(eligibleBaseAdvanceState({ crash_point: "bound-current" })),
+    assert.deepEqual(evaluateBaseAdvanceState(eligibleBaseAdvanceState({ ancestry: "equal", crash_point: "bound-current" })),
       allowedResult("replay", "already-current", false, true));
+  });
+
+  it("accepts only the three canonical ancestry and crash-point pairs", () => {
+    const cases = [
+      ["ancestor", "old-eligible", allowedResult("fast-forward-and-bind", "advanced", true, false)],
+      ["ancestor", "git-advanced-unbound", allowedResult("bind", "advanced", true, false)],
+      ["ancestor", "bound-current", rejectedResult("crash_point", "bound-current", "BASE_ADVANCE_GIT_STATE_INVALID")],
+      ["equal", "old-eligible", rejectedResult("crash_point", "old-eligible", "BASE_ADVANCE_GIT_STATE_INVALID")],
+      ["equal", "git-advanced-unbound", rejectedResult("crash_point", "git-advanced-unbound", "BASE_ADVANCE_GIT_STATE_INVALID")],
+      ["equal", "bound-current", allowedResult("replay", "already-current", false, true)],
+    ];
+
+    for (const [ancestry, crashPoint, expected] of cases) {
+      assert.deepEqual(
+        evaluateBaseAdvanceState(eligibleBaseAdvanceState({ ancestry, crash_point: crashPoint })),
+        expected,
+        `${ancestry}:${crashPoint}`,
+      );
+    }
   });
 
   it("fails closed for missing, unknown, extra, and non-record observations", () => {
@@ -162,6 +202,16 @@ describe("active-run base-advance eligibility state model", () => {
     })), rejectedResult("run_status", "blocked", CODES.ineligible));
   });
 });
+
+function compatibleOverrides(dimensionName, variant) {
+  if (dimensionName === "ancestry" && variant === "equal") {
+    return { ancestry: variant, crash_point: "bound-current" };
+  }
+  if (dimensionName === "crash_point" && variant === "bound-current") {
+    return { ancestry: "equal", crash_point: variant };
+  }
+  return { [dimensionName]: variant };
+}
 
 function rules(allowed, rejectedByCode = {}) {
   const result = {};
