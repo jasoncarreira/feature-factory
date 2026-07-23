@@ -62,9 +62,19 @@ export function checkWorktreeIdentity(repo, worktree, expected = {}, options = {
  * path outside the repository's factory-owned worktree root.
  */
 export function observeRegisteredWorktree(repo, worktree, expected = {}, options = {}) {
+  const repositoryInput = resolve(requireNonEmptyString(repo, "repository"));
   const repository = physicalPath(repo, "repository", { mustExist: true });
-  const worktreeRoot = physicalPath(options.worktreeRoot || join(repository, ".opencode", "worktrees"), "worktree root", { mustExist: true });
-  const target = physicalPath(worktree, "worktree", { mustExist: true });
+  const opencodeRoot = join(repository, ".opencode");
+  const requestedRoot = join(opencodeRoot, "worktrees");
+  const requestedTarget = resolve(requireNonEmptyString(worktree, "worktree"));
+  const lexicalRoot = join(repositoryInput, ".opencode", "worktrees");
+  requireUnsubstitutedDirectory(opencodeRoot, ".opencode root");
+  requireUnsubstitutedDirectory(requestedRoot, "worktree root");
+  requireUnsubstitutedDirectory(requestedTarget, "registered worktree");
+  const worktreeRoot = physicalPath(requestedRoot, "worktree root", { mustExist: true });
+  const target = physicalPath(requestedTarget, "worktree", { mustExist: true });
+  const canonicalRequestedTarget = resolve(worktreeRoot, relative(lexicalRoot, requestedTarget));
+  if (worktreeRoot !== requestedRoot || target !== canonicalRequestedTarget) throw new Error("registered worktree path must not use symlink substitution");
   assertContainedPath(repository, worktreeRoot, "worktree root", { allowEqual: false });
   assertContainedPath(worktreeRoot, target, "registered worktree", { allowEqual: false });
 
@@ -76,9 +86,11 @@ export function observeRegisteredWorktree(repo, worktree, expected = {}, options
 
   const listed = git(repository, ["worktree", "list", "--porcelain"], options);
   if (!listed.ok) throw new Error(`registered worktree list failed: ${(listed.stderr || listed.stdout || "unknown Git error").trim()}`);
-  const matches = parseWorktreeListPorcelain(listed.stdout).filter((entry) => physicalPath(entry.path) === target);
-  if (matches.length !== 1) throw new Error("worktree must have exactly one physical registration");
-  const entry = matches[0];
+  const aliases = parseWorktreeListPorcelain(listed.stdout).filter((entry) => registeredPathAliasesTarget(entry.path, target));
+  if (aliases.length !== 1 || ![requestedTarget, target].includes(resolve(aliases[0].path))) {
+    throw new Error("worktree must have exactly one registration at the requested path");
+  }
+  const entry = aliases[0];
   if (entry.bare || entry.detached || entry.branch !== branch) throw new Error("registered worktree is not attached to the expected branch");
   if (entry.head !== head) throw new Error("registered worktree HEAD does not equal the expected commit");
 
@@ -100,7 +112,7 @@ export function observeRegisteredWorktree(repo, worktree, expected = {}, options
     const resolvedPath = git(target, ["rev-parse", "--path-format=absolute", "--git-path", operationPath], options);
     const path = resolvedPath.stdout.trim();
     if (!resolvedPath.ok || !isAbsolute(path)) throw new Error("worktree Git operation state could not be observed");
-    if (existsSync(path)) throw new Error(`registered worktree has an in-progress Git operation: ${operationPath}`);
+    if (operationMarkerExists(path, options)) throw new Error(`registered worktree has an in-progress Git operation: ${operationPath}`);
   }
 
   return Object.freeze({
@@ -195,6 +207,35 @@ function resolveWorktreeCommit(worktree, ref, label, options) {
   const oid = resolved.stdout.trim();
   if (!resolved.ok || !FULL_COMMIT_PATTERN.test(oid)) throw new Error(`${label} did not resolve to one full commit`);
   return oid;
+}
+
+function requireUnsubstitutedDirectory(path, label) {
+  let entry;
+  try {
+    entry = lstatSync(path);
+  } catch {
+    throw new Error(`${label} is unavailable`);
+  }
+  if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error(`${label} must be a real directory`);
+}
+
+function registeredPathAliasesTarget(path, target) {
+  try {
+    return physicalPath(path, "registered worktree path", { mustExist: true }) === target;
+  } catch {
+    return false;
+  }
+}
+
+function operationMarkerExists(path, options) {
+  const inspect = typeof options.lstatSync === "function" ? options.lstatSync : lstatSync;
+  try {
+    inspect(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw new Error("worktree Git operation state could not be observed");
+  }
 }
 
 function inspectTarget(target) {
