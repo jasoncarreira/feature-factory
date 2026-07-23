@@ -14,7 +14,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "./helpers/git-fixture.js";
 import {
+  BASE_ADVANCE_LAUNCH_FENCE_OWNER_KIND,
   PROCESS_EVIDENCE_FILE,
   PROCESS_EVIDENCE_KIND,
   PROCESS_EVIDENCE_SCHEMA_VERSION,
@@ -36,6 +39,7 @@ import {
 
 const NOW = "2026-07-10T10:00:00.000Z";
 const PID = 4242;
+const BASE_ADVANCE_HELPER = fileURLToPath(new URL("./helpers/base-advance-launch/acquire-and-exit.js", import.meta.url));
 
 describe("process evidence hardening migration", { concurrency: false }, () => {
   it("moves a run-owned launch claim through checked phases and cleans only its exact token", () => {
@@ -172,6 +176,113 @@ describe("process evidence hardening migration", { concurrency: false }, () => {
       assert.equal(releaseLaunchClaim(fixture.runDir, acquired.token, opts), true);
     } finally {
       cleanup(fixture.root);
+    }
+  });
+
+  it("acquires and exactly releases a base-advance fence without altering the run-local launch claim", () => {
+    const fixture = createFixture("base-advance-fence");
+    const claimDir = join(fixture.runDir, "process-launch.lock");
+    const claimPath = join(claimDir, "owner.json");
+    try {
+      mkdirSync(claimDir);
+      writeFileSync(claimPath, "existing launch claim bytes\n", "utf8");
+      const before = readFileSync(claimPath);
+      const fence = acquireLaunchFence(fixture.runDir, BASE_ADVANCE_LAUNCH_FENCE_OWNER_KIND, baseAdvanceOptions(fixture.runDir));
+      const owner = JSON.parse(readFileSync(fence.owner_path, "utf8"));
+
+      assert.equal(fence.acquired, true);
+      assert.equal(fence.owner_kind, "base-advance");
+      assert.deepEqual(Object.keys(owner), ["schema_version", "kind", "run_path_hash", "owner_kind", "nonce", "pid", "hostname", "acquired_at", "identity"]);
+      assert.equal(owner.owner_kind, "base-advance");
+      assert.deepEqual(owner.identity, {
+        inspector: "node-process",
+        start_marker: "linux-procfs:333",
+        command_name: "node",
+        cwd: fixture.runDir,
+      });
+      assert.equal(releaseLaunchFence({ ...fence, nonce: "wrong-base-advance-token" }), false);
+      assert.deepEqual(readFileSync(claimPath), before);
+      assert.equal(releaseLaunchFence(fence), true);
+      assert.deepEqual(readFileSync(claimPath), before);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("reclaims an exact local base-advance owner only after its process is definitively dead", () => {
+    const fixture = createFixture("base-advance-dead-owner");
+    const host = "base-advance-helper-host";
+    try {
+      const child = spawnSync(process.execPath, [BASE_ADVANCE_HELPER, fixture.runDir, host], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      });
+      assert.equal(child.status, 0, child.stderr);
+      const abandoned = JSON.parse(child.stdout);
+      assert.equal(abandoned.owner_kind, "base-advance");
+      assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false);
+
+      const replacement = acquireLaunchFence(fixture.runDir, "launch", { hostname: host });
+      assert.equal(replacement.acquired, true);
+      assert.equal(replacement.path, abandoned.path);
+      assert.equal(replacement.owner_kind, "launch");
+      assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false);
+      assert.equal(releaseLaunchFence(replacement), true);
+    } finally {
+      cleanup(fixture.root);
+    }
+  });
+
+  it("keeps every non-exact or non-dead base-advance owner contended", () => {
+    const cases = [
+      { name: "live", contender: (fixture) => baseAdvanceOptions(fixture.runDir) },
+      { name: "foreign", mutate: (owner) => ({ ...owner, hostname: "foreign-host" }), contender: () => ({ hostname: "test-host" }) },
+      { name: "ownerless", removeOwner: true, contender: () => ({ hostname: "test-host" }) },
+      { name: "malformed", malformed: true, contender: () => ({ hostname: "test-host" }) },
+      {
+        name: "changed",
+        mutate: deadBaseAdvanceOwner,
+        contender: (_fixture, ownerPath) => {
+          let probes = 0;
+          return {
+            hostname: "test-host",
+            livenessProbe: () => {
+              probes += 1;
+              if (probes === 2) writeFileSync(ownerPath, `${JSON.stringify({ changed: true })}\n`, "utf8");
+              return { status: "absent" };
+            },
+          };
+        },
+      },
+      {
+        name: "mismatched",
+        contender: (fixture) => baseAdvanceOptions(fixture.runDir, { marker: "334" }),
+      },
+      {
+        name: "indeterminate",
+        contender: (fixture) => baseAdvanceOptions(fixture.runDir, { liveness: "indeterminate" }),
+      },
+    ];
+
+    for (const item of cases) {
+      const fixture = createFixture(`base-advance-${item.name}`);
+      try {
+        const fence = acquireLaunchFence(fixture.runDir, "base-advance", baseAdvanceOptions(fixture.runDir));
+        const ownerPath = fence.owner_path;
+        const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
+        assert.equal(fence.acquired, true, item.name);
+        if (item.removeOwner) rmSync(ownerPath);
+        else if (item.malformed) writeFileSync(ownerPath, "malformed owner\n", "utf8");
+        else if (item.mutate) writeFileSync(ownerPath, `${JSON.stringify(item.mutate(owner), null, 2)}\n`, "utf8");
+
+        const contender = acquireLaunchFence(fixture.runDir, "cleanup", item.contender(fixture, ownerPath));
+        assert.equal(contender.acquired, false, item.name);
+        assert.equal(contender.path, fence.path, item.name);
+        assert.equal(existsSync(fence.path), true, item.name);
+        assert.equal(existsSync(join(fixture.runDir, "process-launch.lock")), false, item.name);
+      } finally {
+        cleanup(fixture.root);
+      }
     }
   });
 
@@ -673,6 +784,23 @@ function processOptions(cwd, { livenessProbe = () => ({ status: "live" }), marke
     livenessProbe,
     procReadFile: (path) => path.endsWith("/stat") ? linuxStat(PID, marker()) : "/usr/local/bin/opencode\n",
     procReadlink: () => cwd,
+  };
+}
+
+function baseAdvanceOptions(cwd, { liveness = "live", marker = "333" } = {}) {
+  return {
+    hostname: "test-host",
+    platform: "linux",
+    livenessProbe: () => ({ status: liveness }),
+    procReadFile: (path) => path.endsWith("/stat") ? linuxStat(process.pid, marker) : "node\n",
+    procReadlink: () => cwd,
+  };
+}
+
+function deadBaseAdvanceOwner(owner) {
+  return {
+    ...owner,
+    pid: 999_999_999,
   };
 }
 
